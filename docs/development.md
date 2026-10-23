@@ -18,6 +18,7 @@ The root `package.json` declares the workspaces `packages/*` and `apps/*`.
 | `packages/core` | `@varanda/core` | The protocol library and the node session. Runs on Node and on Bare (`#fs`, `#path` and `#process` resolve through the package `imports`, with the `bare` condition for Bare). |
 | `apps/cli` | `varanda` | The CLI, the seeder, the demo and `varanda-serve`. |
 | `apps/app` | `@varanda/app` | The Expo / React Native app and its Bare worklet. |
+| `packages/web-member` | `@varanda/web-member` | Private spike: a browser-held member (Hypercore 10) replicating through the seeder. Not shipped. |
 
 `bin/varanda.js` and `bin/varanda-serve.js` at the root forward to `apps/cli/bin/`.
 
@@ -56,6 +57,7 @@ One workspace:
 ```sh
 npm test -w packages/rpc
 npm test -w packages/core
+npm test -w packages/web-member
 npm test -w apps/cli
 ```
 
@@ -119,6 +121,21 @@ npm run ios                          # expo run:ios
 Status: prebuild and `npx expo export --platform android` were checked, and bare-link produces the `.so` addons for arm64-v8a and x86_64. No native Android run is verified (no SDK or Java on the Mac used). `npm run android` is `expo run:android`; an emulator run must still confirm that the addons are picked up.
 
 Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. None of this was built here (no Java on the Mac used). See "Residual risks" in [ios-gate.md](ios-gate.md).
+
+## Browser member spike (packages/web-member)
+
+A spike of a member whose key lives in the browser. It is private and not shipped; the results are in [verification.md](verification.md) section 8. Its Node tests need Node 20.19 or newer (`engines` in its package.json): the browser crypto shim loads `@noble/curves` 2.x, which is ESM-only, through `require()`. From the repo root, with a local DHT and a certified seeder already set up (see section 8 for the setup):
+
+```sh
+node bin/varanda.js seed --data <seeder> --ws-port 8789 \
+  --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1     # WebSocket entry, 127.0.0.1 only, off unless --ws-port
+node packages/web-member/scripts/build.js              # esbuild: member bundle and relay bundle
+node packages/web-member/scripts/serve-spike.js --port 8790   # http://127.0.0.1:8790/
+node packages/web-member/scripts/dht-relay.js --port 8791 --host 127.0.0.1 \
+  --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1     # optional: the relay evaluation
+```
+
+`npm test -w packages/web-member` runs the CI tests; `spike/relay-eval.test.js` is manual.
 
 ## Site and brand assets
 

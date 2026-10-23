@@ -305,3 +305,199 @@ The dataset was the one from the web run, reused: the local DHT on `127.0.0.1:49
 - The Android native run (no SDK or Java on this Mac). Only the Android JS export was checked.
 - The iOS gate (`EXPO_PUBLIC_VARANDA_GATE_URL`). The App.js gate branch is unchanged.
 - VoiceOver itself, and real devices.
+
+## 8. Browser member spike (2026-10-23)
+
+### Summary
+
+- Proven: a member whose key lives only in the browser (Hypercore 10, IndexedDB) replicates its diary through the seeder, and a CLI member (Hypercore 11) downloads it and verifies the seeder.
+- Call: GO for the seeder path (G1 and G2 passed). The relay (G3) is technically proven but not production-ready.
+- Main blocker found and fixed: `sodium-javascript` 0.8.0 lacks two functions the Noise handshake needs, so the browser could not connect. A small, differentially tested shim fixes it.
+- Relay verdict: `@hyperswarm/dht-relay` 0.4.3 works in noncustodial mode only with an adapter on the relay side, and has a second defect that crashes the relay. The default custodial mode sends the secret key to the relay and is unacceptable.
+- The spike is a private workspace (`@varanda/web-member`); nothing here ships to users yet.
+
+### Machine and versions
+
+macOS (Darwin 24.6.0), Node v24.22.1, npm 11.19.1. Browser: the Chromium-based built-in browser of the Claude desktop app.
+
+| Library | Version |
+|---|---|
+| hypercore (`packages/web-member`, nested) | 10.38.2 |
+| hypercore (root, seeder, CLI) | 11.39.0 |
+| corestore | 7.15.0 |
+| @hyperswarm/secret-stream | 6.9.2 |
+| protomux | 3.13.0 |
+| @hyperswarm/dht-relay | 0.4.3 |
+| hyperdht | 6.34.1 |
+| sodium-javascript | 0.8.0 (plus the shim, with @noble/curves 2.4.0) |
+| esbuild | 0.28.2 |
+| random-access-storage | 3.0.2 |
+
+### What was built
+
+- `packages/core/lib/admission.js`: the admission channel moved verbatim out of `net.js` (re-exported, exports unchanged, 25 keys). It reads the muxer from `socket.noiseStream.userData`, so it needs no hypercore, hyperdht or hyperswarm. A `browser` import condition in `packages/core/package.json` maps fs/path to throwing stubs. Test: `packages/core/test/browser-safe.test.js`.
+- `Seeder#acceptStream(rawStream, { handshakeTimeoutMs = 10000 })` in `packages/core/lib/seeder.js`: a Noise responder keyed with `seeder-key.json` (members verify it as for swarm seeders); shares `MAX_CONNECTIONS` with swarm sockets; 10 s absolute handshake deadline; refused before ready; `close()` destroys these first. A frame guard sits in front of the responder: the two handshake frames are at most 1024 bytes each, every later frame at most 8 MiB + 64 KiB; violations drop the peer with reason `frame-limit`. Measured: handshake frames of 32 and 64 bytes; the largest legitimate later frame was 16,477 bytes. Tests: `apps/cli/test/seeder-stream.test.js` (7 tests).
+- `varanda seed --ws-port <n> [--ws-host <ip>]` (`VARANDA_WS_PORT`, `VARANDA_WS_HOST`): off by default, `127.0.0.1` by default, path `/seeder`, header timeout 4 s, never logs a client address. No Origin allow-list: announce is unauthenticated by design (protocol.md), and the Noise handshake plus the seeder certificate authenticate the endpoint. Code: `apps/cli/lib/seed-ws.js`. Tests: `apps/cli/test/seed-ws.test.js` (8 tests).
+- `packages/web-member`: `lib/member.js` (Hypercore 10 member), `lib/storage.js` (memory), `lib/idb-storage.js` (IndexedDB, whole-file rewrite), `lib/ws-stream.js`, `lib/seeder-link.js`, `lib/relay-link.js` (noncustodial relay client), `lib/sodium-browser.js` (the shim), `scripts/build.js`, `scripts/serve-spike.js`, `scripts/dht-relay.js`, `web/` (spike page, pt-BR), `test/` (CI) and `spike/relay-eval.test.js` (manual).
+
+### G1: automated (CI), PASS
+
+Test file: `packages/web-member/test/g1-seeder-ws.test.js` (30 asserts). An in-process Seeder (Hypercore 11) accepts a WebSocket through `Seeder#acceptStream`. A Hypercore 10 member with a fresh key pair and a certificate signed by `assoc init`'s association connects (seeder key pinned, certificate verified), is admitted, and posts "poste do navegador (spike)"; the seeder's copy has length 2. After the writer closes, the CLI binary (Hypercore 11) runs id create, assoc certify, cert add, follow, `sync --once` and `feed`: peer role seeder verified true, downloaded length 2, the post is in the feed. Negative case: a certificate from another association is rejected with `untrusted-association` and never admitted. `seed list` shows the key with length 2. Timings: connect to admitted 29-30 ms, connect to have 2 33-34 ms; the file takes about 1.6 s.
+
+Compat-key finding (`packages/web-member/test/seeder-link.test.js`): Hypercore 10.38.2 defaults (`DIARY_OPTIONS = {}`) are compat mode: `core.key === keyPair.publicKey`, manifest version 1 default signer, and the json encoding stores exactly the `JSON.stringify` bytes that Hypercore 11 reads back. Hypercore 11 still verifies compat cores (`node_modules/hypercore/lib/verifier.js:44-54, 67-78`). The member certificate's `member` is that key.
+
+### G2: Chromium, PASS (after the crypto shim)
+
+Commands (all on 127.0.0.1, no public DHT):
+
+```sh
+node apps/cli/scripts/local-dht.js --port 49800
+# assoc init, seed key, assoc certify-seeder, seed cert add
+#   (association a11730fc..., seeder e900d8ba...)
+node bin/varanda.js seed --data <seeder> --ws-port 8789 \
+  --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1 --json
+#   prints {"event":"ws","host":"127.0.0.1","port":8789}, then ready
+node packages/web-member/scripts/build.js
+node packages/web-member/scripts/serve-spike.js --port 8790
+# open http://127.0.0.1:8790/
+```
+
+**First attempt failed** with "Noise handshake failed": the client closed the WebSocket before it opened. Root cause, reproduced in Node by mapping sodium-native to sodium-javascript: sodium-javascript 0.8.0 (the latest published, 2022) lacks `crypto_scalarmult_ed25519_BYTES` and `crypto_scalarmult_ed25519_noclamp`, which noise-curve-ed 2.1.0 needs for every Noise XX handshake. Block signing worked (storage and append worked), Noise did not. An audit of every sodium symbol used by both bundles found exactly these two missing.
+
+**The shim** (user-approved): `packages/web-member/lib/sodium-browser.js` adds only those two on top of sodium-javascript, using the @noble/curves 2.4.0 ed25519 implementation and mirroring libsodium's contract byte for byte: canonical and on-curve decoding, the small-order blacklist, libsodium's main-subgroup check (which also accepts order-2L points, exactly like libsodium), no clamping, bit 255 cleared, and failure throws "failed to derive shared secret" like sodium-native 5.2.0. It is mapped only in the browser bundles, through an esbuild plugin. Differential tests against sodium-native (`packages/web-member/test/sodium-browser.test.js`, 7 tests, 193 asserts): 2048 random and 6 fixed valid cases are byte-for-byte equal; 260 order-2L points; 16 small-order, 7 non-canonical, 64 off-curve, 192 mixed-order and 5 zero/identity scalars all fail on both; 512 random pairs agree; a full Noise XX through the `@hyperswarm/secret-stream` shim to native passes in both roles. The shim is not constant-time (JS BigInt).
+
+**Second attempt passed.** Page log:
+
+- Key `d538bd1a...` created (the secret is only in IndexedDB `varanda-spike`/`identity`), diary opened.
+- The member certificate issued by `assoc certify --member d538bd1a...` was pasted and written to block 0; the post "ola do navegador (web spike)" is block 1.
+- Page reloaded: "chave encontrada" and "diário aberto (2 blocos)", read back from IndexedDB.
+- "conectar ao semeador": "conectado; chave Noise do semeador e900d8ba...", "semeador verificado", "admitido", "have: o semeador tem 2 blocos".
+- A post after the reload, "segundo post depois de recarregar (web spike)" (block 2, which proves the signing key persisted): "have: o semeador tem 3 blocos".
+
+Seeder log: peer member, admitted d538bd1a... 0, have 2, have 3. A CLI member (id create, assoc certify, cert add, `follow --author d538bd1a...`, `sync --once --timeout-ms 30000`) exited 0 in about 0.65 s with:
+
+```
+{"event":"peer","role":"seeder",...,"verified":true}
+{"event":"downloaded","key":"d538bd1a...","length":3}
+{"ok":true,"peers":1,"seeders":1,...}
+```
+
+`feed` lists both browser posts. Console: no errors on the passing run. At 390 px wide there is no horizontal overflow (scrollWidth 390), localStorage is empty and no secret appears in the URL.
+
+Bundle sizes (esbuild 0.28.2, minified IIFE): member bundle 505,039 bytes (148,968 gzip), against 430,462 (121,646 gzip) before the shim; relay bundle 373,939 bytes (110,986 gzip). Shims and aliases: the `events` package (3.3.0) for random-access-storage and hypercore 10; `random-access-file`, `crypto`, `worker_threads`, `fs`, `path`, `os` and `node:*` map to a throwing stub (never used at runtime).
+
+CSP note: the spike page needs `'wasm-unsafe-eval'` in `script-src`, because sha512-wasm, sha256-wasm and blake2b-wasm compile WebAssembly at load (this allows WebAssembly compilation only, not eval). The later Caddy CSP must include it, or alias those packages to their JS fallbacks.
+
+### G3: dht-relay, PASS in Node and in Chromium, with two upstream defects
+
+**Node** (`packages/web-member/spike/relay-eval.test.js`), 7 runs: a Hypercore 10 member that reaches the DHT only through the relay, over a WebSocket, joins `topicFor(association)`; a Hypercore 11 follower (`runSync --once`, `writeFollows`, no seeder) connects directly (peer role member), the handshake hash is present, and it downloads 2 blocks.
+
+```
+RELAY_EVAL {"ok":true,"ms":173-196,"custody":"noncustodial","reason":""}
+```
+
+**Chromium:** the seeder was stopped; `node packages/web-member/scripts/dht-relay.js --port 8791 --host 127.0.0.1 --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1` ran. The page published a third post locally ("terceiro post, so pelo relay (web spike)", block 3, held only by the browser) and clicked "entrar pela DHT (relay)": "[relay] conectando ao relay (noncustodial)...", "[relay] anunciado no tópico da associação; procurando pares...". The CLI member's `sync --once` printed `{"event":"peer","role":"member","peerKey":"d538bd1a..."}`, `{"event":"downloaded","key":"d538bd1a...","length":4}` and `{"ok":true,"peers":1,"seeders":0,...}`; `feed` shows all three browser posts.
+
+**Upstream defects in `@hyperswarm/dht-relay` 0.4.3** (its README says "experimental... Do not use it in production"):
+
+1. Noncustodial announce and listen are broken with hyperdht 6.34.1. dht-relay's SigneeProxy (`lib/signee-proxy.js:20`) expects `signAnnounce(target, token, peerId, { peer: relayAddresses })`; hyperdht 6.34.1 passes an `ann` object whose peer is `{ publicKey, relayAddresses }` (hyperdht `index.js:478-489`, `lib/announcer.js:239-250`). The result is "uint must be positive" in the relay's `array(ipv4Address)` codec, nothing is announced, and the lookup measured NO-GO (`PEER_NOT_FOUND`). The package's default mode (custodial) works. The spike's relay script carries a small compatibility adapter that reshapes `ann` on the relay side; the client stays noncustodial.
+2. The relay process crashes when an incoming relayed connection errors. `lib/server-proxy.js:92` (`onError`) sends `destroy { alias, error }` without `paired: true`, so the encoder reads `remoteAlias` (undefined) and throws "uint must be positive" synchronously inside an `'error'` handler: an uncaught exception that drops every session. Seen in the Chromium run right after the CLI follower finished its sync (the data had already been delivered). Not fixed in this PR: the relay script is spike-only and runs only when started by hand.
+
+**Why custodial mode is unacceptable:** it sends the secret key to the relay, which contradicts "the key stays on the device".
+
+### Review findings fixed in this PR
+
+Cross-vendor review (GPT) found, and this PR fixed:
+
+- A pre-auth 16 MiB frame allocation on the seeder's external path.
+- A 16 KiB pre-connect budget that refused valid members (coalesced channel opens).
+- Half-open refused upgrades exhausting connection slots.
+- A WebSocket `maxPayload` smaller than legitimate batches.
+- A header timeout enforced only every 30 s.
+- Closed WebSockets holding a slot until the deadline.
+- An unverified `have` resolving `waitServed`.
+- Concurrent `setCert` calls writing two certificates.
+- Reopen returning the wrong key pair.
+- A certificate that stayed mutable after verification.
+- No admission deadline.
+- A relay crash on a duplicate public key (now `KEYPAIR_ALREADY_USED` is caught and only that session is refused).
+- Announcements never renewed (now every 5 min; records expire after 20 min, hyperdht `index.js:614`).
+- Timers still running after close.
+
+The Grok review lane completed one of four attempts (the review of the web-member seeder link): one attempt failed to sign in and two hit the lane's turn limit, so the other reviews were cross-vendor with GPT only.
+
+### Security audit (before the push)
+
+Scope: the production code, scripts, spike page, manifests and lockfile of this change (30 files; tests and docs were read only for context). Auditors: Claude (brief-based), Claude's built-in security review, GPT (gpt-6-astra) and Grok (grok-4.7); every finding was checked against the code before it counted. OpenAI's Codex Security scanner was not run: one scan can use up the ChatGPT plan's quota on its own, and the GPT lane was still needed to review the fixes.
+
+Verified findings, after merging duplicates and an upgrade-only triage (five were raised to high):
+
+| Severity | Finding | Found by | Outcome |
+|---|---|---|---|
+| high | `seed --ws-port`: no `Host` / `Origin` check, so any web page in a browser on the seeder host could open `/seeder`, replicate the (network-public) diaries and hold the connection cap that WebSocket clients shared with swarm peers | Claude, Grok, built-in review | fixed: `Host` check (421), `Origin` allow-list for browser clients (403; loopback origins by default, Origin-less clients accepted), WebSocket clients capped at half the connection limit |
+| high | spike dht-relay: silent WebSocket clients held every slot (the relay protocol's failsafe arms only after a ping/pong), no `Host` / `Origin` check, `--host` accepted any address | GPT, verifier | fixed: loopback-only `--host`, `Host` / `Origin` checks, a first-message deadline (10 s) and an idle deadline (45 s) |
+| high | relay page: the diary's signing key was also the Noise and DHT key (cross-protocol reuse, non-constant-time DH with attacker-chosen points) | Claude, verifier | fixed: an ephemeral key pair per relay session |
+| high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; design below) |
+| high | the browser member replicated its diary before the seeder's certificate was verified | Grok | fixed: replication starts only after a verified seeder hello (tests with an impostor endpoint) |
+| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | deferred to the hardening PR: a frame-completion deadline that body bytes do not refresh, and a lower frame limit until the peer has an admitted diary |
+| high (re-audit) | the page hook's facade still let a page script reach the key pair through `replicate()` with its own muxer, contrary to its comment | Claude (re-audit) | same impact as the accepted key-at-rest risk (a same-origin script can read the key from IndexedDB): the comment now says the hook is not a security boundary; the hook goes away in PR 4, when the relay entry joins the page bundle |
+| low (re-audit) | an external socket that sends a hello and goes silent kept a WebSocket slot for good | Claude (re-audit) | fixed: a 30 s inactivity deadline on external sockets after the handshake (live peers send keep-alives every 5 s) |
+| medium (re-audit) | upstream dht-relay defect 2 above (`lib/server-proxy.js:91-93` sends `destroy` without `paired`, the encoder throws inside an `'error'` listener): any DHT peer that fails a relayed handshake stops the relay process; the script's `unhandledRejection` net does not catch a synchronous throw | Grok (re-audit) | deferred with the relay decision to the hardening PR (same reason as the next row) |
+| medium (re-audit) | a third upstream dht-relay 0.4.3 defect: a duplicate `noiseReply` calls a cleared callback (`lib/handshake-proxy.js:63` sets `_onNoiseReply = null`, `lib/node-proxy.js:320` calls it again), and the uncaught `TypeError` stops the relay process | GPT (re-audit) | deferred with the relay decision to the hardening PR (patch, fork or drop dht-relay): the relay is a spike script, loopback-only, started by hand, never deployed |
+
+The built-in review's single candidate (the missing `Origin` check) was discarded by its own false-positive filter on confidentiality grounds (diaries are public within the network, as on the swarm path) and kept by the brief-based audit for the availability and cross-site reachability it creates; it is the first row above.
+
+### Limits and open risks
+
+Deferred, not fixed in this PR:
+
+- Two tabs on the same diary can overwrite each other's posts (the IndexedDB adapter rewrites whole files, with no cross-tab writer lock). Deferred to the key and backup PR (cross-tab Web Lock).
+- The browser key is stored unencrypted in IndexedDB, by the page and inside Hypercore 10's own header; there is no export or backup yet (clearing site data loses the identity). Accepted for this spike (a loopback-only page, not distributed) and deferred to PR 4 with the passkey design below.
+- The IndexedDB adapter rewrites whole files: fine for a spike, not for multi-MB diaries.
+- `member.post()` does not enforce the diary quota (100,000 blocks / 64 MiB); the seeder would reject and purge on `quota`. The real browser session must enforce it.
+- `ws-stream` drops buffered bytes on `end()` or `destroy()` before the socket opens.
+- Relay page: "apagar tudo" does not leave the relay swarm, and the relay path does not announce to seeders (only direct member to member).
+- A handshaken client can hold a declared frame of up to `MAX_EXTERNAL_FRAME` open without sending its body (no frame-completion deadline yet).
+- Seeder WebSocket entry: a peer that completes a Noise handshake can make the seeder allocate up to about 8 MiB per frame (swarm sockets keep secret-stream's own 16 MiB behaviour); a concurrent swarm accept and `acceptStream` can both pass the cap (no lock); the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR.
+- The shim's scalar multiplication is not constant-time; it mirrors libsodium's subgroup check, which accepts order-2L points (as libsodium itself does).
+- dht-relay 0.4.3: the two upstream defects above, plus a third found by the security audit (a duplicate `noiseReply` stops the relay process); experimental; custodial mode leaks the secret key.
+- A hosted PWA keeps the key on the device only as long as the served JavaScript is honest (whoever serves the page can change it).
+- Hypercore 10 is the LTS line (wire-forward-compatible per the hypercore README) but receives fewer updates than 11.
+
+### Go/no-go and estimates per later PR
+
+**GO for the seeder path.** G1 and G2 passed; the browser-held key never leaves the device; the seeder admits and serves a Hypercore 10 diary to Hypercore 11 members. **The relay is not production-ready** with dht-relay 0.4.3 (two defects, one needing an adapter, one crashing the relay). That decision belongs to the hardening PR: fix upstream or fork, or keep the seeder-only path for the pilot.
+
+The estimates below are rough, not measured (person-days with agent assistance):
+
+| PR | Scope | Size |
+|---|---|---|
+| 2 | Browser node session behind `packages/rpc`, and `apps/app` web client using it instead of `varanda-serve` (dominated by porting the 15 RPC handlers onto Hypercore 10 and the browser storage, plus quotas and feeds) | medium, 3-5 d |
+| 3 | PWA manifest, service worker, icons | small, 1-2 d |
+| 4 | The key at rest protected with a passkey (WebAuthn PRF, design below), export and import of the wrapped key, a passphrase fallback, cross-tab lock | medium, 3-5 d |
+| 5 | Caddy (automatic TLS) and compose serving the PWA and `wss:///seeder` on one origin, CSP with `'wasm-unsafe-eval'` | small, 1-2 d, plus the user's DNS and hosting steps |
+| 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision | medium, 3-5 d |
+
+### Next: the key at rest with a passkey (PR 4 design, decided 2026-10-23)
+
+Decision: the member's key is protected at rest with a passkey through the WebAuthn PRF extension, so "Entrar com Google" means a passkey kept in the Google Password Manager (or iCloud Keychain, or a security key), not a Google sign-in (OIDC). An OIDC login proves who the person is but hands the page no secret, so encrypting with it would need a server that releases a wrapping key after the login: that server (and its operator) could then open the key and would learn which Google account belongs to which member. With the passkey, no server holds anything and Google never sees the key.
+
+Design (to implement and verify in PR 4):
+
+- **Enrolment.** `navigator.credentials.create()` with a discoverable credential (`residentKey: 'required'`), `userVerification: 'required'`, `user.id` = 16 random bytes (never an email or a Google identifier), `rp.id` = the PWA's domain (set by the hosting PR), and the `prf` extension with `eval.first` = a fixed salt (SHA-256 of `varanda/key-wrap/v1`). Some authenticators report `prf.enabled` at creation and return the PRF result only on `get()`, so enrolment ends with one `get()`.
+- **Key derivation.** The 32-byte PRF output goes through HKDF-SHA-256 (a random 32-byte salt stored with the blob, info `varanda/diary-key-wrap/v1`) into a non-extractable AES-GCM-256 `CryptoKey`; the PRF output is never stored.
+- **Wrapping.** The 64-byte Ed25519 secret key is encrypted with AES-GCM (random 96-bit IV) and stored in IndexedDB as `{ v: 1, credentialId, hkdfSalt, iv, ciphertext, publicKey }`. The plaintext key exists only in memory after an unlock.
+- **Unlock.** On opening, `navigator.credentials.get()` with `allowCredentials: [credentialId]`, `userVerification: 'required'` and the same PRF salt (biometrics or PIN), then HKDF, then decrypt; the key stays in memory until the page closes.
+- **Hypercore's own copy.** Hypercore 10 also persists the key pair in its header file. PR 4 must remove that copy: either a storage wrapper that encrypts the `header` file (or every file) with the same key, or opening the core in a way that keeps the secret key only in memory. The choice is measured in PR 4.
+- **Recovery and other devices.** The passkey syncs through its provider, and the PRF output is deterministic per credential, so the same passkey unlocks the same wrapped blob on another device. The blob is exported and imported as a file or QR code (safe to keep anywhere, since it is encrypted). Losing both the passkey and every copy of the plaintext key loses the identity; this must be said plainly in the UI.
+- **Fallback.** Where PRF is unavailable, a passphrase with a slow KDF (PBKDF2-SHA-256 with an iteration count from current OWASP guidance, or Argon2id through WASM; the numbers are to be checked when PR 4 is written).
+- **What it protects against.** The key read from disk or from a copied browser profile, and other pages sharing the origin when the page is locked. **Not** against JavaScript served by the PWA's own origin while the key is unlocked (the hosted-PWA trust limit above), nor against a compromised device.
+- **To verify in PR 4.** Browser and provider support for PRF (my understanding, not verified here: Chrome with Google Password Manager passkeys, and Safari 18 with iCloud Keychain, support it; Firefox and Windows Hello are uncertain); the exact `rp.id` once the domain exists; the UX of first enrolment and of a lost passkey.
+
+### Not verified
+
+- The public DHT (everything ran on a local DHT bound to 127.0.0.1).
+- Real TLS and Caddy (plain `ws://` on loopback only).
+- Android and iOS Safari, and Firefox (only the Chromium-based built-in browser was used).
+- Long-running sessions, and multi-MB diaries.
+- Node 20 locally (Node v24.22.1 only; CI covers 20 and 24).

@@ -13,3 +13,4 @@ apps/app/android/.gradle/
 apps/app/android/app/build/
 apps/app/assets/worklet/
 *.bundle
+packages/web-member/dist/

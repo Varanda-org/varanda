@@ -19,10 +19,15 @@ function url (host, port) {
   return 'http://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + port
 }
 
+function wsUrl (host, port) {
+  return 'ws://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + port + '/seeder'
+}
+
 function eventLine (event) {
   switch (event.event) {
     case 'ready': return 'seed ready'
     case 'health': return 'health ' + safe(url(event.host, event.port))
+    case 'ws': return 'ws ' + safe(wsUrl(event.host, event.port))
     case 'peer': return 'peer ' + safe(event.role) + ' ' + short(event.peerKey)
     case 'admitted': return 'admitted ' + safe(event.key) + ' ' + safe(event.length)
     case 'rejected': return 'rejected ' + safe(event.key) + ' ' + safe(event.reason)
@@ -38,6 +43,17 @@ async function listenHealth (flags, seeder) {
   } catch (err) {
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
     throw new Error('não foi possível abrir o endpoint de saúde (' + safe(err.code || err.message) + ')')
+  }
+}
+
+async function listenWs (flags, seeder) {
+  // Loaded only with --ws-port: without it the ws module is never touched.
+  const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
+  try {
+    return await startSeedWs({ host: flags.wsHost || WS_HOST, port: flags.wsPort, seeder })
+  } catch (err) {
+    if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
+    throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')
   }
 }
 
@@ -60,19 +76,25 @@ async function runSeeder (flags) {
     process.once('SIGINT', onSignal)
     process.once('SIGTERM', onSignal)
   })
-  // The health endpoint listens before start(), so a busy port fails before
+  // The health and WebSocket endpoints listen before start(), so a busy port fails before
   // the data dir or the network is touched; it answers 503 until ready.
   let health = null
+  let ws = null
   try {
     if (flags.healthPort !== null) {
       health = await listenHealth(flags, seeder)
       log({ event: 'health', host: health.host, port: health.port })
+    }
+    if (flags.wsPort !== null) {
+      ws = await listenWs(flags, seeder)
+      log({ event: 'ws', host: ws.host, port: ws.port })
     }
     await seeder.start()
   } catch (err) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (health) await health.close()
+    if (ws) await ws.close()
     throw err
   }
   try {
@@ -83,6 +105,7 @@ async function runSeeder (flags) {
     process.off('SIGTERM', onSignal)
     await seeder.close()
     if (health) await health.close()
+    if (ws) await ws.close()
   }
   return seeder.fatal ? 1 : 0
 }
