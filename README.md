@@ -39,6 +39,15 @@ Guia completo em [CONTRIBUTING.md](CONTRIBUTING.md).
 - No PR, referencie a issue com `Closes #n`.
 - Vulnerabilidades: siga [SECURITY.md](SECURITY.md); não abra issue pública com detalhes sensíveis.
 
+## Licença
+
+O código deste repositório é distribuído sob a [PolyForm Noncommercial 1.0.0](LICENSE) (SPDX `PolyForm-Noncommercial-1.0.0`); o licenciante é Rodrigo Serviuc Pavezi.
+Usar, copiar e modificar o código é permitido para fins não comerciais, nos termos da licença.
+Usos comerciais não abrangidos pela licença dependem de autorização prévia do licenciante.
+É código-fonte disponível, não código aberto segundo a definição da Open Source Initiative (OSI).
+Ao abrir um PR, quem contribui concede ao licenciante uma licença para distribuir a contribuição sob quaisquer termos, sem CLA.
+Os detalhes, e os trechos de terceiros que continuam sob a MIT, estão na seção [Licença](CONTRIBUTING.md#licença) de CONTRIBUTING.md.
+
 ## Instalação
 
 Na raiz deste repositório:
