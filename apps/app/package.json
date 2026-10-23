@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Varanda: aplicativo iOS, Android e web",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "expo start",
