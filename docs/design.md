@@ -43,23 +43,23 @@ Nenhum componente tem todos os dados: os celulares guardam e trocam as publicaç
 flowchart TB
   classDef planned stroke-dasharray: 5 5
 
-  subgraph fora["Fora do Brasil - apoio, não o feed social"]
+  subgraph fora["Fora do Brasil — apoio, não o feed social"]
     direction LR
-    LOJA["App Store / Google Play<br/>Faixa etária planejada"]
-    APNS["APNs e FCM<br/>Entrega de push planejada"]
+    LOJA["App Store / Google Play<br/>sinal de faixa etária — planejado"]
+    APNS["APNs e FCM<br/>entrega do aviso push — planejado"]
   end
 
-  subgraph br["Brasil - datacenters e parceiros"]
+  subgraph br["Brasil — datacenters e parceiros"]
     direction LR
-    ASSOC["Associação - fase 0<br/>Certificado de membro<br/>assoc certify - stub"]
-    IDADE["Serviço de idade<br/>Planejado"]
-    SEM["Semeadores<br/>Réplicas e relay"]
-    PUSH["Gateway de push<br/>Payload cifrado - planejado"]
+    ASSOC["Associação — fase 0<br/>emissão de certificado de membro<br/>assoc certify — stub"]
+    IDADE["Serviço de idade<br/>planejado"]
+    SEM["Semeadores<br/>réplicas e relay"]
+    PUSH["Gateway de push<br/>payload cifrado — planejado"]
   end
 
   DHT(("Hyperswarm / HyperDHT"))
 
-  subgraph cel["Aparelhos dos membros - Hypercore local"]
+  subgraph cel["Aparelhos dos membros — diário Hypercore local em cada um"]
     direction LR
     C1["Celular A"]
     C2["Celular B"]
@@ -72,9 +72,9 @@ flowchart TB
   SEM --- DHT
   SEM <-->|relay CGNAT| C2
 
-  LOJA -.->|antes da conta| C1
-  ASSOC -.->|certificado| C3
-  IDADE -.->|cadastro| C3
+  LOJA -.->|antes da conta — planejado| C1
+  ASSOC -.->|certificado de membro| C3
+  IDADE -.->|cadastro — planejado| C3
   C2 -.->|aviso| PUSH
   PUSH -.-> APNS
   APNS -.-> C2
