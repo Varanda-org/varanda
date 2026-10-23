@@ -412,7 +412,7 @@ Os bytes do WebSocket são um fluxo Noise com a chave do semeador, o mesmo que o
 
 ### Docker Compose
 
-`deploy/seeder/compose.yaml` sobe a imagem de `deploy/seeder/Dockerfile`: Node 24, só as dependências de produção da CLI, usuário `node`, sistema de arquivos só de leitura e os dados no volume `seeder-data` (em `/data`). O serviço usa a rede do host, reinicia sozinho (`unless-stopped`), recebe SIGTERM com 30 s para fechar e deixa o endpoint de saúde em `127.0.0.1:8788`, onde o healthcheck da imagem o consulta. É para um servidor Linux: no Docker Desktop a rede do host não funciona do mesmo jeito.
+`deploy/seeder/compose.yaml` sobe a imagem de `deploy/seeder/Dockerfile`: Node 24, só as dependências de produção da CLI, o `LICENSE` do repositório em `/app/LICENSE`, usuário `node`, sistema de arquivos só de leitura e os dados no volume `seeder-data` (em `/data`). O serviço usa a rede do host, reinicia sozinho (`unless-stopped`), recebe SIGTERM com 30 s para fechar e deixa o endpoint de saúde em `127.0.0.1:8788`, onde o healthcheck da imagem o consulta. É para um servidor Linux: no Docker Desktop a rede do host não funciona do mesmo jeito.
 
 Configuração, uma vez, a partir da raiz do repositório (`ASSOC` é a chave pública da associação):
 
