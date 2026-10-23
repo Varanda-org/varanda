@@ -1,6 +1,6 @@
 # varanda — UI <-> node RPC contract, version 1 (normative)
 
-This document is the single normative reference for `@varanda/rpc` (`packages/rpc`): the JSON contract between the user interface (React Native app, web) and a Varanda node, which is either the in-app Bare worklet (over IPC) or `varanda-serve` (over a loopback WebSocket). Names, values, shapes, messages and constants are exact. Record formats, reason strings, the feed and the sync rules are those of `docs/protocol.md` (cited below as "protocol §n"); this document only says how they travel.
+This document is the single normative reference for `@varanda/rpc` (`packages/rpc`): the JSON contract between the user interface (React Native app, web) and a Varanda node, which is the in-app Bare worklet (over IPC), `varanda-serve` (over a loopback WebSocket) or the browser node of `@varanda/web-member` (in memory, in the same page). Names, values, shapes, messages and constants are exact. Record formats, reason strings, the feed and the sync rules are those of `docs/protocol.md` (cited below as "protocol §n"); this document only says how they travel.
 
 Conventions: CommonJS ES2020 with `'use strict'`, standard style, zero dependencies, no Node built-ins and no `Buffer` (the package loads unchanged in a Metro / react-native-web bundle, in Node >= 20 and in Bare; it uses only `Uint8Array`, `DataView`, `ArrayBuffer.isView` and `setTimeout`; UTF-8 is encoded and decoded in pure JS, section 3, because `TextEncoder` / `TextDecoder` support in Hermes and Bare is unverified). Code and identifiers in English; every message a user can see is pt-BR. Tests use brittle (`npm test -w packages/rpc`).
 
@@ -77,6 +77,10 @@ One text frame per message, no length prefix. A binary frame is a protocol error
 
 - `parseMessage(text, max = MAX_MESSAGE)` -> `{ ok: true, value }` or `{ ok: false, code: 'USAGE', message }`: a non-string is rejected; then the UTF-8 byte length of `text` is checked against `max` (computed without allocating, a lone surrogate counting 3 bytes); then `JSON.parse`; then the top level must be a plain object. Never throws. The server parses with `max = MAX_REQUEST`.
 
+### In memory (the browser node)
+
+The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `varanda-node.js`) and the page's client exchange exactly what the WebSocket carries: one JSON text per envelope, in both directions, delivered asynchronously (the app uses a microtask). The node parses each request with `parseMessage(text, MAX_REQUEST)` and the client each response or event with `parseMessage(text, MAX_MESSAGE)`; a request that does not parse closes the connection, as on the WebSocket. No object is shared between the two sides. One connection at a time: a second `connect` closes the first.
+
 ## 4. Session
 
 - `session.open` MUST be the first request on a connection. Any other method before a successful `session.open` -> `UNAUTHORIZED` `'sessão não aberta'`. A second `session.open` -> `USAGE` `'sessão já aberta'`.
@@ -104,7 +108,7 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
   - `memberCert`: block 0 of the own diary holds a member certificate that passes `certForKey` against the trust root.
   - `followCount`: `follows.json` length.
   - `sync`: as `sync.status` (5.16).
-  - `publicDht`: `true` when the node was started against the public DHT (no bootstrap override).
+  - `publicDht`: `true` when the node was started against the public DHT (no bootstrap override). Always `false` for the browser node, which uses no DHT (its only peer is the configured seeder).
 - It carries no path, no secret, no association key, no bootstrap list and no DHT host.
 
 ### 5.3 `identity.create`
@@ -188,7 +192,7 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 
 - Params: `{}`.
 - Result: `{ closed: true }`.
-- Offered only by the in-app worklet (`apps/app/worklet/main.js`), next to the session's handlers; the node session itself (`session.handlers`) and `varanda-serve` do not register it, so over the WebSocket it reaches no handler and the dispatcher answers `INTERNAL` `'erro interno'` (section 8, step 6).
+- Offered only by the in-app worklet (`apps/app/worklet/main.js`), next to the session's handlers; the node session itself (`session.handlers`), `varanda-serve` and the browser node do not register it, so over the WebSocket it reaches no handler and the dispatcher answers `INTERNAL` `'erro interno'` (section 8, step 6).
 - The worklet detaches and closes the node session (any running sync is stopped and awaited, every store is closed and the data-dir lock released), then sends this response, then ends its side of the IPC stream and ignores every later frame. The host terminates the worklet after the response; only a received response means a clean stop, after which the next worklet needs no lock takeover (`recover`). Needed because the bare-kit IPC has no end-of-stream signal from the React Native side.
 
 ### Errors common to every method
@@ -217,6 +221,8 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 ### 6.1 Preemption (the node session, `packages/core/lib/session.js`)
 
 Every member operation opens the store and takes the data-dir lock, and a running sync holds that lock (protocol §9). The node therefore serves requests strictly one at a time, and before any request that opens the store (every member method, and `node.info` / `sync.start` while the own identity is not yet known to the session) it aborts the running sync and awaits it (`sync.stopped` with reason `'preempted'`). After the request, a continuous run (`once: false`) that the user did not stop is restarted with a new `runId` (`sync.started`, sent before that response); when several requests are queued the run is preempted once and restarted after the last of them. A `node.info` that preempted the run reports the restarted run in its `sync` field. A preempted `once` run is over: it is not restarted. `sync.status`, `sync.stop` and a `node.info` served from the session's cache never preempt. While the app is in the background (the host suspends the session) the run is paused the same way and restarted on resume; requests sent meanwhile wait.
+
+The browser node's session (`packages/web-member/lib/session.js`) follows the same rules (one request at a time, the same preemption and restart, the same events), because two Hypercore instances on the same browser storage would corrupt it; it has no suspend and resume. Its run (`packages/web-member/lib/sync.js`) has one peer, the seeder at the configured address, re-dialled with a backoff (1 s doubling to 30 s) while the run lasts. Its `sync.event` lines are the ones above except `withdrawn`, and its `peer` line always names the endpoint at the configured address (anything but a verified seeder is then dropped); its own `warning` lines are `aviso: sem conexão com o semeador; nova tentativa em <n> s` and `aviso: o endereço configurado não respondeu como um semeador verificado (<key8>)`. In its SyncResult, `peers` and `seeders` are 0 or 1 (the verified seeder link), and an endpoint that fails the seeder check adds `semeador não verificado` to `errorsSoft`. The seeder address never appears in an event, a result or an error.
 
 ### Capped SyncResult (`capSyncResult(result)`)
 
@@ -295,7 +301,8 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 
 ## 11. Security rules
 
-- IPC carries no token: the channel is private to the app process (the worklet is spawned by it). Its dispatcher is created with `token: null`.
+- IPC carries no token: the channel is private to the app process (the worklet is spawned by it). Its dispatcher is created with `token: null`. The browser node's in-memory channel has no token either (`token: null`): it never leaves the page.
+- The browser node is opened by `VarandaWebNode.start({ association, seederUrl })` (`packages/web-member/web/node.js`) before any RPC: it takes the exclusive Web Lock `varanda-node`, so a second tab of the same browser is refused (`'outra aba já usa o Varanda neste navegador'`, code `LOCKED`) before a session exists. The handle it returns exposes only `connect` and `close`.
 - The WebSocket is `varanda-serve`'s job (T7): it binds loopback only, checks the `Host` and `Origin` headers, requires a token in `session.open` (high-entropy, compared with `tokensEqual`), rejects binary frames, parses with `parseMessage(text, MAX_REQUEST)` and drops a client whose queued outbound bytes exceed `MAX_OUTBOUND`.
 - `tokensEqual(a, b)` is constant-time over the longer length: no early exit on the first difference or on a length mismatch; a length mismatch or a non-string gives `false`.
 - Results and messages never carry a filesystem path, a secret key, the bootstrap list or the DHT host (section 5.2, section 7).

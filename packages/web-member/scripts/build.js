@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Bundles the browser member (web/app.js) for Chromium with esbuild, and the
-// relay page (web/relay.js) when it exists.
+// Bundles the browser member (web/app.js, the spike page) for Chromium with
+// esbuild, the relay page (web/relay.js) when it exists, and the browser node
+// (web/node.js, the RPC session the app's web build runs) as varanda-node.js
+// next to them.
 //
 //   node packages/web-member/scripts/build.js [--out <file>]
+//   node packages/web-member/scripts/build.js --node <file>   (the node only)
 //
 // platform 'browser' makes esbuild pick the `browser` import condition, so
 // @varanda/core's #fs/#path/#process resolve to its lib/browser stubs, and
@@ -16,7 +19,8 @@
 // piece (FORBIDDEN below). Prints 'BUNDLE <bytes> GZIP <bytes>'. The relay
 // build is held to the same FORBIDDEN list and prints 'RELAY_BUNDLE ok
 // <bytes>' or 'RELAY_BUNDLE fail <reason>' (a forbidden module also fails
-// the run).
+// the run). The node bundle has the same FORBIDDEN list and prints
+// 'NODE_BUNDLE <bytes> GZIP <bytes>'; any failure of it fails the run.
 const fs = require('node:fs')
 const path = require('node:path')
 const zlib = require('node:zlib')
@@ -164,11 +168,13 @@ function options (entry, outfile) {
 
 function parseArgs (argv) {
   let out = path.join(ROOT, 'dist', 'app.js')
+  let node = null
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out' && argv[i + 1]) out = path.resolve(argv[++i])
+    else if (argv[i] === '--node' && argv[i + 1]) node = path.resolve(argv[++i])
     else throw new Error('argumento desconhecido: ' + argv[i])
   }
-  return { out }
+  return { out, node }
 }
 
 function firstError (err) {
@@ -179,8 +185,28 @@ function firstError (err) {
   return String(err && err.message ? err.message : err).split('\n')[0]
 }
 
+// The browser node bundle (web/node.js) -> true when written.
+async function buildNode (out) {
+  fs.mkdirSync(path.dirname(out), { recursive: true })
+  const result = await esbuild.build(options(path.join(ROOT, 'web', 'node.js'), out))
+  const bad = forbiddenIn(result.metafile)
+  if (bad.length > 0) {
+    fs.rmSync(out, { force: true })
+    console.error('o pacote do nó contém módulos proibidos: ' + bad.join(', '))
+    process.exitCode = 1
+    return false
+  }
+  const bytes = fs.readFileSync(out)
+  console.log('NODE_BUNDLE ' + bytes.length + ' GZIP ' + zlib.gzipSync(bytes, { level: 9 }).length)
+  return true
+}
+
 async function main () {
-  const { out } = parseArgs(process.argv.slice(2))
+  const { out, node } = parseArgs(process.argv.slice(2))
+  if (node !== null) {
+    await buildNode(node)
+    return
+  }
   fs.mkdirSync(path.dirname(out), { recursive: true })
 
   const result = await esbuild.build(options(path.join(ROOT, 'web', 'app.js'), out))
@@ -216,6 +242,8 @@ async function main () {
       console.log('RELAY_BUNDLE fail ' + firstError(err))
     }
   }
+
+  await buildNode(path.join(path.dirname(out), 'varanda-node.js'))
 }
 
 if (require.main === module) {

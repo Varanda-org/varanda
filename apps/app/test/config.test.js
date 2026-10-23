@@ -60,3 +60,38 @@ test('isLoopbackAddress matches packages/core', async (t) => {
   t.ok(isLoopbackAddress('127.0.0.1'))
   t.absent(isLoopbackAddress('127.0.0.256'))
 })
+
+test('web: the seeder address follows the browser node rule', async (t) => {
+  const { validSeederUrl } = await load()
+  const { checkSeederUrl } = require('@varanda/web-member/lib/seeder-url')
+  const cases = [
+    'ws://127.0.0.1:8789/seeder', 'wss://semeador.example/seeder', 'wss://semeador.example', 'WSS://Semeador.Example:443/x',
+    'ws://[::1]:8789/seeder', 'http://semeador.example/seeder', 'https://semeador.example/', 'ftp://x/', 'ws://user:pw@x/',
+    'ws://user@x/', 'ws://x/?a=1', 'ws://x/?', 'ws://x/#f', 'ws://x/#', 'ws://', 'ws:x', '', ' ws://x/', 'ws://x /y', 'ws://x/' + 'a'.repeat(2048)
+  ]
+  for (const c of cases) {
+    let node = true
+    try { checkSeederUrl(c) } catch { node = false }
+    t.is(validSeederUrl(c), node, JSON.stringify(c.slice(0, 40)) + ': same verdict as the node')
+  }
+  t.ok(validSeederUrl('wss://semeador.example/seeder'))
+  t.absent(validSeederUrl('http://semeador.example/seeder'))
+})
+
+test('web: checkWebForm, webFormOf and reviveWeb', async (t) => {
+  const { checkWebForm, webFormOf, reviveWeb } = await load()
+  const { checkSeederUrl } = require('@varanda/web-member/lib/seeder-url')
+  const ok = checkWebForm({ association: ' ' + ASSOC.toUpperCase() + ' ', seederUrl: ' WSS://Semeador.Example/seeder ' })
+  t.alike(ok.config, { association: ASSOC, seederUrl: 'wss://semeador.example/seeder' })
+  t.is(ok.config.seederUrl, checkSeederUrl('wss://semeador.example/seeder'), 'normalized as the node normalizes it')
+  t.is(checkWebForm({ association: 'xyz', seederUrl: 'wss://x/' }).error, 'chave da associação inválida (64 dígitos hexadecimais)')
+  t.is(checkWebForm({ association: ASSOC, seederUrl: 'https://x/' }).error, 'endereço do semeador inválido: use ws:// ou wss://, sem usuário, consulta ou fragmento')
+  t.is(checkWebForm({ association: ASSOC, seederUrl: 'ws://x/seeder' }, { secure: true }).error, 'nesta página segura (https), o endereço do semeador deve começar com wss://')
+  t.ok(checkWebForm({ association: ASSOC, seederUrl: 'ws://127.0.0.1:8789/seeder' }).config, 'ws:// from an http page')
+  t.alike(webFormOf(null), { association: '', seederUrl: '' })
+  t.alike(webFormOf(ok.config), { association: ASSOC, seederUrl: 'wss://semeador.example/seeder' })
+  t.alike(reviveWeb({ association: ASSOC, seederUrl: 'wss://semeador.example/seeder', extra: 1 }), ok.config)
+  for (const bad of [null, [], 'x', { association: ASSOC }, { association: ASSOC, seederUrl: 'http://x/' }]) {
+    t.is(reviveWeb(bad), null, JSON.stringify(bad))
+  }
+})

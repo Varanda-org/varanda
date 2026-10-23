@@ -42,3 +42,6 @@ yarn-error.*
 
 # the packed worklet (scripts/pack-worklet.sh)
 /assets/worklet/
+
+# the browser node bundle (npm run build:node)
+/public/varanda-node.js

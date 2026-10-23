@@ -27,6 +27,7 @@
       "apps/app/dist/",
       "apps/app/.expo/",
       "apps/app/assets/worklet/",
+      "apps/app/public/varanda-node.js",
       "**/*.bundle",
       "packages/web-member/dist/"
     ]

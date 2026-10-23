@@ -1,16 +1,106 @@
-// "Conectar" (native, before the node runs) and the "Conexão" tab.
+/* global location */
+
+// "Conectar" (before the node runs) and the "Conexão" tab.
 // Native: association, bootstrap or public DHT, optional DHT host; a change
-// stops the node and starts it again. Web: no onboarding (the configuration
-// is varanda-serve's), only the connection state and a reconnect button.
+// stops the node and starts it again. Web with the node in the browser: the
+// association and the seeder's WebSocket address; a change closes the node
+// and opens it again. Web with varanda-serve: no onboarding (the
+// configuration is varanda-serve's), only the connection state and a
+// reconnect button.
 
 import { useEffect, useState } from 'react'
-import { Switch, View } from 'react-native'
+import { Platform, Switch, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { checkForm, formOf } from '../config'
+import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
+import { canConfigure } from '../configStore'
 import { useNode } from '../node'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
 
-export default function Conexao ({ active = true, embedded = false }) {
+// Fixed for the app's lifetime (src/client/mode.js on the web).
+const BROWSER_NODE = Platform.OS === 'web' && canConfigure
+
+export default function Conexao (props) {
+  return BROWSER_NODE ? <ConexaoNavegador {...props} /> : <ConexaoNo {...props} />
+}
+
+// node.info while the screen is shown and the node is ready.
+function useInfo (node, active, ready) {
+  const [info, setInfo] = useState(null)
+  const [infoError, setInfoError] = useState('')
+  useEffect(() => {
+    if (!active || !ready) return
+    let off = false
+    node.request('node.info', {}).then(
+      (r) => { if (!off) { setInfo(r); setInfoError('') } },
+      (err) => { if (!off) setInfoError(errorText(err)) }
+    )
+    return () => { off = true }
+  }, [active, ready, node.request])
+  return [info, infoError]
+}
+
+function ConexaoNavegador ({ active = true, embedded = false }) {
+  const node = useNode()
+  const [form, setForm] = useState(() => webFormOf(node.config))
+  const [localError, setLocalError] = useState('')
+  const apply = useAction()
+  const ready = node.phase === 'ready'
+  const [info, infoError] = useInfo(node, active, ready)
+
+  useEffect(() => { setForm(webFormOf(node.config)) }, [node.config])
+
+  const hasIdentity = info !== null && info.publicKey !== null
+  const set = (key) => (value) => setForm((f) => ({ ...f, [key]: value }))
+
+  const submit = async () => {
+    const secure = typeof location !== 'undefined' && location.protocol === 'https:'
+    // Once the identity exists the association is fixed (the field is gone).
+    const checked = checkWebForm(hasIdentity && node.config ? { ...form, association: node.config.association } : form, { secure })
+    if (checked.error) return setLocalError(checked.error)
+    setLocalError('')
+    await apply.run(() => node.restart(checked.config))
+  }
+
+  const busy = node.phase === 'connecting' || node.phase === 'loading' || apply.pending
+  return (
+    <Page>
+      {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+      {!ready ? <Soft>Na web, o seu nó roda neste navegador: a chave do diário fica guardada aqui, e as publicações passam pelo semeador da associação. Informe a associação e o endereço do semeador.</Soft> : null}
+      {busy ? <Notice>conectando…</Notice> : null}
+      <ErrorText>{node.error || apply.error || infoError}</ErrorText>
+      <Card>
+        {ready
+          ? (
+            <View style={{ gap: 4 }}>
+              <Label>estado</Label>
+              <Body>o nó roda neste navegador</Body>
+            </View>
+            )
+          : null}
+        {hasIdentity
+          ? (
+            <View style={{ gap: 4 }}>
+              <Label>chave da associação (não muda depois que a identidade existe)</Label>
+              <Mono>{displayText(node.config ? node.config.association : form.association)}</Mono>
+            </View>
+            )
+          : <Field label='chave da associação (64 dígitos hexadecimais)' value={form.association} onChangeText={set('association')} mono multiline lines={3} />}
+        <Field
+          label='endereço do semeador (ws:// ou wss://)'
+          value={form.seederUrl}
+          onChangeText={set('seederUrl')}
+          mono
+          placeholder='wss://semeador.exemplo/seeder'
+        />
+        <ErrorText>{localError}</ErrorText>
+        <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submit} pending={busy} />
+      </Card>
+      <Notice>A chave fica só neste navegador e ainda não tem cópia de segurança: limpar os dados deste site apaga a sua identidade.</Notice>
+    </Page>
+  )
+}
+
+function ConexaoNo ({ active = true, embedded = false }) {
   const node = useNode()
   const [form, setForm] = useState(() => formOf(node.config))
   const [localError, setLocalError] = useState('')

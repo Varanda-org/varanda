@@ -68,6 +68,49 @@ export function formOf (config) {
   }
 }
 
+// The seeder's WebSocket address for the node in the browser, as
+// packages/web-member/lib/seeder-url.js accepts it: ws: or wss:, a host, an
+// optional port and path; no credentials, query or fragment.
+export function validSeederUrl (text) {
+  if (typeof text !== 'string' || text.length === 0 || text.length > 2048 || /\s/.test(text)) return false
+  if (text.includes('#') || text.includes('?')) return false
+  let url
+  try {
+    url = new URL(text)
+  } catch {
+    return false
+  }
+  return (url.protocol === 'ws:' || url.protocol === 'wss:') && url.hostname !== '' &&
+    url.username === '' && url.password === ''
+}
+
+// Web, node in the browser. form: { association, seederUrl }; secure: the
+// page itself is https (a browser refuses ws:// from it).
+// -> { config: { association, seederUrl } } or { error } (pt-BR).
+export function checkWebForm (form, { secure = false } = {}) {
+  const association = String(form.association || '').trim()
+  if (!HEX64.test(association)) return { error: 'chave da associação inválida (64 dígitos hexadecimais)' }
+  const seederUrl = String(form.seederUrl || '').trim()
+  if (!validSeederUrl(seederUrl)) {
+    return { error: 'endereço do semeador inválido: use ws:// ou wss://, sem usuário, consulta ou fragmento' }
+  }
+  if (secure && seederUrl.slice(0, 5).toLowerCase() === 'ws://') {
+    return { error: 'nesta página segura (https), o endereço do semeador deve começar com wss://' }
+  }
+  return { config: { association: association.toLowerCase(), seederUrl: new URL(seederUrl).href } }
+}
+
+export function webFormOf (config) {
+  if (config === null || config === undefined) return { association: '', seederUrl: '' }
+  return { association: config.association, seederUrl: config.seederUrl }
+}
+
+// A stored web configuration is only trusted after the same check.
+export function reviveWeb (value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  return checkWebForm({ association: value.association, seederUrl: value.seederUrl }).config || null
+}
+
 // A stored value is only trusted after the same check (a hand-edited file).
 export function revive (value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null

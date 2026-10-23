@@ -18,7 +18,7 @@ The root `package.json` declares the workspaces `packages/*` and `apps/*`.
 | `packages/core` | `@varanda/core` | The protocol library and the node session. Runs on Node and on Bare (`#fs`, `#path` and `#process` resolve through the package `imports`, with the `bare` condition for Bare). |
 | `apps/cli` | `varanda` | The CLI, the seeder, the demo and `varanda-serve`. |
 | `apps/app` | `@varanda/app` | The Expo / React Native app and its Bare worklet. |
-| `packages/web-member` | `@varanda/web-member` | Private spike: a browser-held member (Hypercore 10) replicating through the seeder. Not shipped. |
+| `packages/web-member` | `@varanda/web-member` | The browser node: an RPC session on Hypercore 10 over IndexedDB that syncs through the seeder's WebSocket entry (`lib/session.js`, `lib/sync.js`, bundled from `web/node.js`), plus the spike page and the dht-relay evaluation. Private. |
 
 `bin/varanda.js` and `bin/varanda-serve.js` at the root forward to `apps/cli/bin/`.
 
@@ -67,7 +67,7 @@ One file, from the repo root:
 node apps/cli/test/serve.test.js
 ```
 
-`apps/app` runs its pure helper tests with `npm test -w apps/app`: the form rules of `src/config.js` (`apps/app/test/config.test.js`) and the display helpers of `src/format.js` (`apps/app/test/format.test.js`); the modules are loaded with `import()` through Node's module syntax detection, which prints a `MODULE_TYPELESS_PACKAGE_JSON` warning. There are no UI tests: the screens are checked by hand on the simulator and on the web. Network tests use an in-process local DHT bound to `127.0.0.1`. No test uses the public DHT.
+`apps/app` runs its pure helper tests with `npm test -w apps/app`: the form rules of `src/config.js` (`apps/app/test/config.test.js`, the web Conectar rules included, checked against `@varanda/web-member`'s seeder address rule) and the display helpers of `src/format.js` (`apps/app/test/format.test.js`); the modules are loaded with `import()` through Node's module syntax detection, which prints a `MODULE_TYPELESS_PACKAGE_JSON` warning. There are no UI tests: the screens are checked by hand on the simulator and on the web. Network tests use an in-process local DHT bound to `127.0.0.1`. No test uses the public DHT.
 
 ### Bare desktop smoke test
 
@@ -81,6 +81,23 @@ npm run demo
 
 Runs `npm run demo -w apps/cli`, that is `node scripts/demo.js`: an automatic walkthrough with a local DHT, a seeder and two members. The root README describes it in "Demo automática".
 
+## The web app with the node in the browser
+
+The default web mode: the node runs in the page (`packages/web-member`) and syncs only through a seeder's WebSocket entry. The app bundle never contains the node (Metro blocks `packages/core` and `packages/web-member`); `npm run build:node -w apps/app` bundles it with esbuild (`packages/web-member/scripts/build.js --node`) into `apps/app/public/varanda-node.js`, which Expo serves at `/varanda-node.js` and copies into `dist` on export. The file is generated and ignored by version control. `npm run web` and `npm run export:web` (in `apps/app`) build it first.
+
+On one machine, from the repo root, with a local DHT and a certified seeder (the same setup as [verification.md](verification.md) section 8):
+
+```sh
+node apps/cli/scripts/local-dht.js --port 49800
+node bin/varanda.js seed --data <seeder> --ws-port 8789 \
+  --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1      # ws://127.0.0.1:8789/seeder
+npm run web -w apps/app                                   # http://localhost:8081
+```
+
+In Conectar, type the association key and `ws://127.0.0.1:8789/seeder`, create the identity, and paste the certificate from `node bin/varanda.js assoc certify --data <assoc> --member <key> ...`. The seeder's WebSocket entry accepts browser pages from loopback origins by default; a page served from elsewhere needs the seeder's origin allow-list (the hosting PR). A static export (`npm run export:web -w apps/app`) works the same once `apps/app/dist` is served over HTTP. Its CSP must allow `'wasm-unsafe-eval'` (the node compiles WebAssembly at load) and `connect-src` to the seeder.
+
+To start over in a browser, clear the site data (or delete the IndexedDB database `varanda-node` and the `localStorage` key `varanda-web-config`): that deletes the identity, and there is no backup yet.
+
 ## varanda-serve with the web export
 
 `varanda-serve` runs a node on this computer and exposes it to a browser UI over a loopback WebSocket. Its flags and security rules are in the root [README](../README.md) ("Servidor local para a interface web"). One way to use it with the exported web app:
@@ -93,7 +110,7 @@ node bin/varanda-serve.js --data ./data --association <hex> \
   --bootstrap <host:port> --dht-host 127.0.0.1 --ui apps/app/dist
 ```
 
-Use `--public-dht` instead of `--bootstrap` to opt in to the public DHT. The server prints the URL with the token in the fragment once. Open that URL. Without `--ui`, serve the web build with `npm run web -w apps/app` (Expo dev server) and pass its exact origin with `--origin http://localhost:8081`.
+Use `--public-dht` instead of `--bootstrap` to opt in to the public DHT. The server prints the URL with the token in the fragment once. Open that URL: the token in the fragment is what puts the page in varanda-serve mode (the tab remembers it), instead of the node in the browser. In that mode the page never loads the browser node (varanda-serve's CSP, `script-src 'self'` without `'wasm-unsafe-eval'`, would block its WebAssembly anyway). Without `--ui`, serve the web build with `npm run web -w apps/app` (Expo dev server) and pass its exact origin with `--origin http://localhost:8081`.
 
 The `dist` directory is ignored by version control. The export was run on 2026-10-22 (see [verification.md](verification.md)): it reports `Exported: dist` and writes `apps/app/dist/index.html`, `favicon.ico`, `metadata.json` and the bundle under `apps/app/dist/_expo/static/js/web/`.
 
@@ -124,7 +141,7 @@ Release signing: the committed `debug.keystore` is the public React Native debug
 
 ## Browser member spike (packages/web-member)
 
-A spike of a member whose key lives in the browser. It is private and not shipped; the results are in [verification.md](verification.md) section 8. Its Node tests need Node 20.19 or newer (`engines` in its package.json): the browser crypto shim loads `@noble/curves` 2.x, which is ESM-only, through `require()`. From the repo root, with a local DHT and a certified seeder already set up (see section 8 for the setup):
+The spike of a member whose key lives in the browser, kept next to the browser node it led to (previous section). The spike page and the relay are private and not shipped; the results are in [verification.md](verification.md) section 8, and the browser node's in section 9. Its Node tests need Node 20.19 or newer (`engines` in its package.json): the browser crypto shim loads `@noble/curves` 2.x, which is ESM-only, through `require()`. From the repo root, with a local DHT and a certified seeder already set up (see section 8 for the setup):
 
 ```sh
 node bin/varanda.js seed --data <seeder> --ws-port 8789 \
@@ -135,7 +152,7 @@ node packages/web-member/scripts/dht-relay.js --port 8791 --host 127.0.0.1 \
   --bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1     # optional: the relay evaluation
 ```
 
-`npm test -w packages/web-member` runs the CI tests; `spike/relay-eval.test.js` is manual.
+`node packages/web-member/scripts/build.js` also writes the browser node bundle, `dist/varanda-node.js`. `npm test -w packages/web-member` runs the CI tests, among them the browser node's: `test/session.test.js` (the RPC handlers), `test/sync-gate.test.js` (its quarantine gate and quota against a fake seeder), `test/node-storage.test.js` (the IndexedDB storage, through fake-indexeddb), `test/node-bundle.test.js` (the built bundle run in Node against a seeder) and `test/session-e2e.test.js` (the web session and a CLI member exchanging posts through a CLI seeder); `spike/relay-eval.test.js` is manual.
 
 ## Site and brand assets
 
