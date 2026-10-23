@@ -128,6 +128,16 @@ function sameLock (a, b) {
   return a !== null && b !== null && a.dev === b.dev && a.ino === b.ino && a.raw === b.raw
 }
 
+// Whether the live lock is still the one inspected as stale. (dev, ino) does
+// not identify a lock dir over time: a removed lock dir's inode is reused by
+// the next mkdir (Linux does so at once), and a lock between its mkdir and
+// its owner write has no owner content, exactly like an owner-less stale
+// lock. The mtime tells them apart: an owner-less lock is stale only when its
+// mtime is LOCK_GRACE_MS away from now, a fresh one's is not.
+function sameStaleLock (current, stale) {
+  return sameLock(current, stale) && current.mtimeMs === stale.mtimeMs
+}
+
 // Published by rename, so a reader never sees a partial owner. The temp
 // name carries our token, so a failure only ever unlinks our own file.
 function writeLockOwner (lockDir, token) {
@@ -188,10 +198,13 @@ function releaseMutex (mutex, token) {
 }
 
 // Under the takeover mutex, re-checks that lockDir is still exactly the lock
-// inspected as stale (same dir identity, same owner content), moves it aside
-// (atomic rename) and deletes the aside copy only if it is still that exact
-// stale lock. Anything else (e.g. a hung pid-less owner that published while
-// we moved it) is renamed back, and the caller re-inspects. If renaming it
+// inspected as stale (same dir identity and mtime, same owner content: see
+// sameStaleLock), moves it aside (atomic rename) and deletes the aside copy
+// only if it is still that exact stale lock (same identity and owner
+// content: nobody but the mutex holder replaces a stale lock, so only its
+// content can change once checked). Anything else (e.g. a hung pid-less
+// owner that published while we moved it) is renamed back, and the caller
+// re-inspects. If renaming it
 // back fails (a racer already made a new lock dir), the moved lock is never
 // deleted: it stays at <lockDir>.stale-<hex> and we throw LOCKED. Its owner,
 // if alive, keeps running; its release is then a no-op (the token at lockDir
@@ -201,7 +214,7 @@ function takeOverLock (lockDir, stale, token) {
   const mutex = lockDir + '.takeover'
   if (!tryMutex(mutex, token)) return false
   try {
-    if (!sameLock(inspectLock(lockDir), stale)) return true
+    if (!sameStaleLock(inspectLock(lockDir), stale)) return true
     const aside = lockDir + '.stale-' + b4a.toString(randomBytes(6), 'hex')
     try {
       fs.renameSync(lockDir, aside)
