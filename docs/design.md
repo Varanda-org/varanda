@@ -41,26 +41,25 @@ Nenhum componente tem todos os dados: os celulares guardam e trocam as publicaç
 
 ```mermaid
 flowchart TB
-  %% Tracejado / (planejado): pós-fase-0. Fase 0: certificado de membro via assoc certify (stub).
   classDef planned stroke-dasharray: 5 5
 
-  subgraph fora ["Fora do Brasil — apoio, não o feed social"]
+  subgraph fora["Fora do Brasil - apoio, não o feed social"]
     direction LR
-    LOJA["App Store / Google Play<br/>sinal de faixa etária (planejado)"]
-    APNs["APNs e FCM<br/>entrega do aviso push (planejado)"]
+    LOJA["App Store / Google Play<br/>Faixa etária planejada"]
+    APNS["APNs e FCM<br/>Entrega de push planejada"]
   end
 
-  subgraph br ["Brasil — datacenters e parceiros"]
+  subgraph br["Brasil - datacenters e parceiros"]
     direction LR
-    ASSOC["Associação (fase 0)<br/>emissão de certificado de membro<br/>assoc certify (stub)"]
-    IDADE["Serviço de idade<br/>(planejado)"]
-    SEM["Semeadores<br/>réplicas e relay"]
-    PUSH_BR["Gateway de push<br/>payload cifrado (planejado)"]
+    ASSOC["Associação - fase 0<br/>Certificado de membro<br/>assoc certify - stub"]
+    IDADE["Serviço de idade<br/>Planejado"]
+    SEM["Semeadores<br/>Réplicas e relay"]
+    PUSH["Gateway de push<br/>Payload cifrado - planejado"]
   end
 
   DHT(("Hyperswarm / HyperDHT"))
 
-  subgraph cel ["Aparelhos dos membros — diário Hypercore local em cada um"]
+  subgraph cel["Aparelhos dos membros - Hypercore local"]
     direction LR
     C1["Celular A"]
     C2["Celular B"]
@@ -69,23 +68,18 @@ flowchart TB
 
   C1 <-->|réplicas| C2
   C2 <-->|réplicas| C3
-
   C2 --- DHT
   SEM --- DHT
   SEM <-->|relay CGNAT| C2
 
-  LOJA -.->|antes da conta (planejado)| C1
-  ASSOC -.->|certificado de membro| C3
-  IDADE -.->|cadastro (planejado)| C3
-  C2 -.->|aviso| PUSH_BR
-  PUSH_BR -.-> APNs
-  APNs -.-> C2
+  LOJA -.->|antes da conta| C1
+  ASSOC -.->|certificado| C3
+  IDADE -.->|cadastro| C3
+  C2 -.->|aviso| PUSH
+  PUSH -.-> APNS
+  APNS -.-> C2
 
-  class LOJA,APNs,PUSH_BR,IDADE planned
-
-  fora ~~~ br
-  br ~~~ DHT
-  DHT ~~~ cel
+  class LOJA,APNS,PUSH,IDADE planned
 ```
 
 Legenda: linhas sólidas = réplicas P2P (também entre outros pares) e descoberta na DHT (cada aparelho); linhas tracejadas = apoio (certificado de membro, idade, push). Nós com borda tracejada e etiqueta *(planejado)* são pós-fase-0; na fase 0, o certificado de membro vem de `assoc certify` (operador local, `method: stub`) no nó Associação. O conteúdo social não passa por servidor central: só cópias entre aparelhos e semeadores.
