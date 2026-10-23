@@ -136,7 +136,10 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
             <Icon name='engrenagem' size={20} color='#ffffff' />
           </Pressable>
         </SunsetBand>
-        <View style={styles.headRow}>
+        {/* The row rises into the band (marginTop -44) and is drawn after it,
+            so its empty space would take the gear's touches: only the avatar
+            and the pill receive them. */}
+        <View style={styles.headRow} pointerEvents='box-none'>
           <Avatar name={hasName ? knownName : null} publicKey={info.publicKey} size={88} ring />
           <Pill label='Editar perfil' onPress={() => setEditing(true)} />
         </View>
