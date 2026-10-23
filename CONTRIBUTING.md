@@ -105,6 +105,39 @@ Ao participar, siga o [Código de Conduta](CODE_OF_CONDUCT.md).
 
 ## Licença
 
-As contribuições são aceitas sob a mesma [licença MIT do repositório](LICENSE).
-A licença de entrada é a mesma de saída (“inbound = outbound”).
-Ao abrir um PR, você concorda com esses termos.
+O repositório é distribuído sob a [PolyForm Noncommercial 1.0.0](LICENSE) (SPDX `PolyForm-Noncommercial-1.0.0`): usar, copiar e modificar é permitido para fins não comerciais; usos comerciais não abrangidos pela licença dependem de autorização prévia do licenciante, Rodrigo Serviuc Pavezi.
+Ao abrir um PR, você declara que tem o direito de enviar a contribuição e concede a Rodrigo Serviuc Pavezi uma licença perpétua, mundial, gratuita, não exclusiva e irrevogável para usar, copiar, modificar, distribuir e sublicenciar a contribuição sob quaisquer termos, inclusive a PolyForm Noncommercial 1.0.0 e licenças comerciais.
+Você continua titular dos direitos autorais da sua contribuição.
+Não há acordo de licença de contribuição (CLA) para assinar.
+
+### Contribuições anteriores, sob a MIT
+
+Até a troca de licença, as contribuições eram aceitas sob a MIT.
+As contribuições de terceiros recebidas assim são os commits `b863d4f`, `6a40d2b` e `601d5f6`, de Karik-ribasu, em `README.md` e `docs/design.md`.
+O aviso da MIT abaixo cobre apenas os trechos desses commits; o restante do repositório é distribuído só sob a PolyForm Noncommercial 1.0.0.
+
+```text
+Este aviso cobre apenas as contribuições de Karik-ribasu nos commits b863d4f, 6a40d2b e 601d5f6 (README.md e docs/design.md).
+
+MIT License
+
+Copyright (c) 2026 Varanda contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

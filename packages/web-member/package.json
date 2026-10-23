@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "spike: membro no navegador (Hypercore 10)",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "node": ">=20.19"
   },
