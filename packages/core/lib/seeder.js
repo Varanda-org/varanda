@@ -6,6 +6,7 @@ const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const { Duplex } = require('streamx')
 const {
   normalizeHex,
   certForKey,
@@ -57,7 +58,160 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 
+// Frame guard for external streams (acceptStream). @hyperswarm/secret-stream
+// 6.9.2 frames the raw bytes as a 3-byte little-endian length followed by the
+// body and allocates every declared length (up to 16 MiB) as soon as the
+// first body byte arrives, BEFORE the Noise handshake completes: an anonymous
+// client sending `ff ff ff 00` costs the seeder ~16 MiB per connection.
+// FrameGuard sits between the raw stream and the secret stream and parses
+// the framing of the incoming bytes before forwarding them.
+// Limits, measured on the installed libraries (secret-stream 6.9.2, Noise XX,
+// hypercore 11.39.0, corestore 7.15.0, protomux 3) with a member diary of
+// near-16 KiB blocks (16 265 bytes) and a hello carrying the maximum
+// inventory (4096 keys) replicating through acceptStream over loopback TCP:
+// - the responder receives exactly HANDSHAKE_FRAMES handshake frames, msg1
+//   (`e`) of 32 bytes and msg3 (`s, se`) of 64 bytes, 102 bytes with their
+//   headers. Each must declare at most MAX_HANDSHAKE_FRAME = 1024 bytes
+//   (16 x msg3), so everything up to and including the second frame is at
+//   most MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES x (3 + MAX_HANDSHAKE_FRAME)
+//   = 2054 bytes, a derived bound (no separate budget is kept).
+// - every frame after the second one is a post-handshake frame and must
+//   declare at most MAX_EXTERNAL_FRAME, whether or not the secret stream has
+//   confirmed the handshake yet. Anyone completes a Noise XX handshake with
+//   an arbitrary key pair for free, so the bytes after msg3 are exposed to
+//   the post-handshake bound in any case; judging them by a stricter
+//   pre-'connect' rule buys no security and refuses valid members: a
+//   coalescing transport delivers a member's first post-handshake writes
+//   (its stream-id header and the channel opens of every core it
+//   replicates, 500 opens are ~43 KiB) in the same chunk as msg3.
+//   The largest frame seen after 'connect' was 16 477 bytes (one block and
+//   its proof; 40 blocks, 61 frames), but the code allows far more: hypercore
+//   corks the muxer while it answers its queue of block requests
+//   (replicator.js _handleRequests) and protomux flushes a corked batch only
+//   once it reaches MAX_BATCH = 8 MiB, so a member answering up to 512
+//   in-flight requests for near-16 KiB blocks may legitimately send a frame
+//   of up to MAX_BATCH plus one message. MAX_EXTERNAL_FRAME is therefore
+//   MAX_BATCH plus a 64 KiB margin for that last message and its encoding;
+//   it is a code bound, not a measured one, because a tighter value would
+//   break legitimate replication. Residual risk: a peer that completed the
+//   handshake (not necessarily admitted) can still make the seeder allocate
+//   up to MAX_EXTERNAL_FRAME per frame.
+const HANDSHAKE_FRAMES = 2 // Noise XX responder: receives e, then s+se
+const MAX_HANDSHAKE_FRAME = 1024
+const MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES * (3 + MAX_HANDSHAKE_FRAME)
+const MAX_EXTERNAL_FRAME = 8 * 1024 * 1024 + 64 * 1024
+const HEADER_MUL = [1, 256, 65536]
+// An external socket with no incoming data for this long after the handshake
+// is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
+const EXTERNAL_IDLE_MS = 30000
+
 function noop () {}
+
+// A streamx Duplex proxy over a raw duplex: writes pass through unchanged,
+// incoming bytes are parsed with the secret-stream framing before they are
+// pushed, and close/destroy/error propagate both ways. The first
+// HANDSHAKE_FRAMES frames may declare at most MAX_HANDSHAKE_FRAME bytes
+// each, every later frame at most MAX_EXTERNAL_FRAME; nothing is held back
+// (the secret stream parses the same framing and handles post-handshake
+// bytes that arrive in the chunk of msg3 exactly as it does over TCP). Over
+// a limit the guard calls onLimit, destroys itself and the raw stream, and
+// the offending chunk is never forwarded, not even its frames before the
+// offending one.
+class FrameGuard extends Duplex {
+  constructor (raw, { onLimit }) {
+    super()
+    this._raw = raw
+    this._onLimit = onLimit
+    this._frames = 0 // complete incoming frames parsed so far
+    this._header = 0 // header bytes of the current frame read so far (0..2)
+    this._len = 0 // declared length being assembled from the header
+    this._remaining = 0 // body bytes of the current frame still to come
+    this._drainCb = null
+    raw.on('data', (chunk) => this._onRawData(chunk))
+    // A peer that ends its side before both handshake frames arrived can
+    // never complete the handshake: drop it now instead of holding a
+    // connection slot until the handshake deadline.
+    raw.on('end', () => {
+      if (this._frames < HANDSHAKE_FRAMES) return this.destroy()
+      this.push(null)
+    })
+    raw.on('error', (err) => this.destroy(err))
+    raw.on('close', () => {
+      this._releaseDrain()
+      this.destroy()
+    })
+    raw.on('drain', () => this._releaseDrain())
+  }
+
+  _onRawData (chunk) {
+    if (this.destroying) return
+    if (!this._parse(chunk)) return this._limit()
+    if (this.push(chunk) === false) this._raw.pause()
+  }
+
+  // Parses the framing of the whole chunk (parser state carries over between
+  // chunks). Returns false when a frame declares more than its limit.
+  _parse (chunk) {
+    let offset = 0
+    while (offset < chunk.byteLength) {
+      if (this._remaining > 0) {
+        const n = Math.min(this._remaining, chunk.byteLength - offset)
+        this._remaining -= n
+        offset += n
+        if (this._remaining === 0) this._frames++
+        continue
+      }
+      this._len += chunk[offset++] * HEADER_MUL[this._header]
+      if (++this._header < 3) continue
+      const len = this._len
+      this._header = 0
+      this._len = 0
+      const limit = this._frames < HANDSHAKE_FRAMES ? MAX_HANDSHAKE_FRAME : MAX_EXTERNAL_FRAME
+      if (len > limit) return false
+      this._remaining = len
+      if (len === 0) this._frames++
+    }
+    return true
+  }
+
+  _limit () {
+    if (this.destroying) return
+    this._onLimit()
+    this.destroy(new Error('frame over the limit'))
+  }
+
+  _read (cb) {
+    this._raw.resume()
+    cb(null)
+  }
+
+  _write (data, cb) {
+    if (this._raw.destroyed) return cb(null)
+    if (this._raw.write(data) === false) this._drainCb = cb
+    else cb(null)
+  }
+
+  _releaseDrain () {
+    const cb = this._drainCb
+    if (cb === null) return
+    this._drainCb = null
+    cb(null)
+  }
+
+  _final (cb) {
+    this._raw.end()
+    cb(null)
+  }
+
+  _predestroy () {
+    this._raw.destroy()
+    this._releaseDrain()
+  }
+
+  _destroy (cb) {
+    cb(null)
+  }
+}
 
 function isPlainObject (x) {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return false
@@ -150,8 +304,9 @@ class Seeder {
   // 'open', awaited right before that admission step; a throw simulates the
   // step failing) and storeHook() (awaited right after the main store, and
   // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
-  // (maxLogBlocks, maxLogBytes, maxConnections, maxServed, maxAnnounces,
-  // announceRate, announceBurst, maxBadAnnounces; defaults = the constants).
+  // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
+  // maxAnnounces, announceRate, announceBurst, maxBadAnnounces; defaults =
+  // the constants, maxExternal = half of maxConnections, at least 1).
   constructor ({
     dataDir,
     associationKey = null,
@@ -165,6 +320,8 @@ class Seeder {
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
+    maxExternal = null,
+    externalIdleMs = EXTERNAL_IDLE_MS,
     maxServed = MAX_INVENTORY,
     maxAnnounces = MAX_INVENTORY,
     announceRate = ANNOUNCE_RATE,
@@ -188,6 +345,14 @@ class Seeder {
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
     this.maxConnections = maxConnections
+    // Sub-cap for external sockets (acceptStream, in-flight handshakes
+    // included), so unauthenticated WebSocket clients can never starve swarm
+    // peers below half of maxConnections.
+    this.maxExternal = maxExternal === null ? Math.max(1, Math.floor(maxConnections / 2)) : maxExternal
+    // Inactivity deadline for external sockets once the handshake completed:
+    // a peer that goes silent (no frame at all) would otherwise keep a
+    // WebSocket slot for good. Live peers send Hypercore keep-alives every 5 s.
+    this.externalIdleMs = externalIdleMs
 
     this.association = null
     this.topic = null
@@ -207,6 +372,7 @@ class Seeder {
     this._drops = new Map() // key -> promise of the drop (purge) in progress
     this._writeQueue = Promise.resolve()
     this._peers = new Set()
+    this._external = new Set() // NoiseSecretStreams from acceptStream (not in swarm.connections)
     this._keyPair = null
     this._cert = null
     this._started = false
@@ -447,7 +613,7 @@ class Seeder {
       dropping: this._dropping.size,
       blocks,
       bytes,
-      connections: this.swarm ? this.swarm.connections.size : 0,
+      connections: (this.swarm ? this.swarm.connections.size : 0) + this._external.size,
       peers: this._peers.size,
       firewalled: this.swarm ? this.swarm.dht.firewalled : null
     }
@@ -900,9 +1066,89 @@ class Seeder {
       socket.destroy()
       return
     }
-    // Connection cap (S1), before the store replicates the socket.
+    // Connection cap (S1), before the store replicates the socket. External
+    // sockets (acceptStream) are never in swarm.connections, so they are
+    // subtracted from the limit here and nothing is counted twice.
     const onDropped = (ev) => this.log(ev)
-    if (refuseOverConnectionLimit(this.swarm, socket, { limit: this.maxConnections, log: onDropped })) return
+    const limit = Math.max(0, this.maxConnections - this._external.size)
+    if (refuseOverConnectionLimit(this.swarm, socket, { limit, log: onDropped })) return
+    this._attachPeer(socket)
+  }
+
+  // Admits a member over a raw duplex that is not the swarm (phase 0 spike:
+  // a WebSocket). The stream is wrapped as a Noise responder keyed with
+  // seeder-key.json, so the member's seeder verification (seederCertForKey
+  // on the remote public key) is unchanged; after the handshake the socket
+  // follows exactly the same path as a swarm connection (_attachPeer).
+  // Returns the NoiseSecretStream, or null when the stream was refused.
+  // Known spike limit: a concurrent swarm accept and acceptStream can both
+  // pass the connection cap (no lock is taken).
+  acceptStream (rawStream, { handshakeTimeoutMs = 10000 } = {}) {
+    rawStream.on('error', noop)
+    if (!this._ready || this._closing) {
+      rawStream.destroy()
+      return null
+    }
+    // Connection cap (S1) BEFORE the handshake: in-flight handshakes count.
+    // External sockets also have their own sub-cap (maxExternal), so they
+    // never take more than half of the slots away from swarm peers.
+    const swarmCount = this.swarm ? this.swarm.connections.size : 0
+    if (this._external.size >= this.maxExternal || swarmCount + this._external.size >= this.maxConnections) {
+      rawStream.destroy()
+      this.log({ event: 'peer-dropped', peerKey: null, reason: 'connection-limit' })
+      return null
+    }
+    const NoiseSecretStream = require('@hyperswarm/secret-stream')
+    // The frame guard bounds what an unauthenticated client can make the
+    // secret stream allocate (see FrameGuard); swarm sockets keep
+    // secret-stream's own behaviour.
+    const guard = new FrameGuard(rawStream, {
+      onLimit: () => {
+        const key = socket.connected && socket.remotePublicKey ? b4a.toString(socket.remotePublicKey, 'hex') : null
+        this.log({ event: 'peer-dropped', peerKey: key, reason: 'frame-limit' })
+      }
+    })
+    guard.on('error', noop)
+    const socket = new NoiseSecretStream(false, guard, { keyPair: this._keyPair })
+    socket.on('error', noop)
+    this._external.add(socket)
+    // Absolute handshake deadline (never refreshed by incoming bytes).
+    let timer = setTimeout(() => {
+      timer = null
+      socket.destroy()
+    }, handshakeTimeoutMs)
+    if (timer.unref) timer.unref()
+    const clear = () => {
+      if (timer === null) return
+      clearTimeout(timer)
+      timer = null
+    }
+    const onRawClose = () => { if (!socket.connected) socket.destroy() }
+    rawStream.on('close', onRawClose)
+    socket.on('close', () => {
+      clear()
+      this._external.delete(socket)
+    })
+    // The peer key is snapshotted when the admission channel is attached, so
+    // _attachPeer never runs before the handshake completes.
+    socket.on('connect', () => {
+      clear()
+      if (socket.remotePublicKey === null || this._closing) {
+        socket.destroy()
+        return
+      }
+      // secret-stream destroys the stream after this long without incoming
+      // data (each received chunk refreshes the timer).
+      socket.setTimeout(this.externalIdleMs)
+      this._attachPeer(socket)
+    })
+    return socket
+  }
+
+  // Everything after the connection cap, shared by swarm and external
+  // sockets: replicate the store, then attach the admission channel.
+  _attachPeer (socket) {
+    const onDropped = (ev) => this.log(ev)
     this.store.replicate(socket)
     const have = []
     for (const [key, entry] of this._served) {
@@ -943,6 +1189,9 @@ class Seeder {
       if (this._stopRediscovery) this._stopRediscovery()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
+      for (const socket of [...this._external]) {
+        try { socket.destroy() } catch {}
+      }
       if (this.swarm) {
         try { await this.swarm.destroy() } catch {}
       }
@@ -972,4 +1221,4 @@ Seeder.ANNOUNCE_RATE = ANNOUNCE_RATE
 Seeder.ANNOUNCE_BURST = ANNOUNCE_BURST
 Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
-module.exports = { Seeder, GATE_TIMEOUT_MS }
+module.exports = { Seeder, GATE_TIMEOUT_MS, MAX_HANDSHAKE_FRAME, MAX_HANDSHAKE_BYTES, MAX_EXTERNAL_FRAME, EXTERNAL_IDLE_MS }

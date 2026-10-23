@@ -78,7 +78,7 @@ Comandos:
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
   sync                       sincroniza com pares e com o semeador (--once, --timeout-ms)
-  seed                       semeador sempre ligado (--health-port)
+  seed                       semeador sempre ligado (--health-port, --ws-port)
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
@@ -91,7 +91,7 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host
+  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -153,6 +153,8 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_DHT_HOST` | Endereço local em que a DHT deste processo escuta. O mesmo que `--dht-host`. |
 | `VARANDA_HEALTH_PORT` | Porta do endpoint de saúde do `seed`. O mesmo que `--health-port`. Ausente, não há endpoint. |
 | `VARANDA_HEALTH_HOST` | Endereço do endpoint de saúde. O mesmo que `--health-host`. Padrão `127.0.0.1`. |
+| `VARANDA_WS_PORT` | Porta da entrada WebSocket do `seed`. O mesmo que `--ws-port`. Ausente, nada escuta. |
+| `VARANDA_WS_HOST` | Endereço da entrada WebSocket. O mesmo que `--ws-host`. Padrão `127.0.0.1`. |
 
 `--bootstrap` pode repetir. Se algum `--bootstrap` aparece na linha, ele prevalece sobre `VARANDA_BOOTSTRAP`. `--dht-host` prevalece sobre `VARANDA_DHT_HOST`.
 
@@ -161,6 +163,8 @@ Um `VARANDA_BOOTSTRAP` vazio ou malformado é erro de uso e não cai na DHT púb
 `VARANDA_DHT_HOST` e `--dht-host` aceitam uma string não vazia e sem espaço. Qualquer outro valor termina com `uso: dht-host inválido`.
 
 `VARANDA_HEALTH_PORT` e `--health-port` aceitam um número de 0 a 65535, sem zero à esquerda (`0` deixa o sistema escolher a porta); senão `uso: health-port inválido`. `VARANDA_HEALTH_HOST` e `--health-host` seguem a regra do `--dht-host` (`uso: health-host inválido`). A opção prevalece sobre a variável. Detalhes em "Operar o semeador".
+
+`VARANDA_WS_PORT` e `--ws-port` seguem a regra do `--health-port` (`uso: ws-port inválido`); `VARANDA_WS_HOST` e `--ws-host` seguem a do `--dht-host` (`uso: ws-host inválido`).
 
 A DHT local de `apps/cli/scripts/local-dht.js` escuta só em `127.0.0.1`. Com ela, defina `VARANDA_DHT_HOST=127.0.0.1` ou passe `--dht-host 127.0.0.1`. Testes e `npm run demo` usam esse endereço. Sem bootstrap (DHT pública, uso manual), o endereço local é opcional e a DHT fica nos padrões da biblioteca.
 
@@ -391,6 +395,12 @@ curl -s http://127.0.0.1:8788/health
 
 O endpoint só tem contagens. Nenhuma chave, certificado, endereço ou conteúdo, e nenhuma requisição é registrada. Aceita só GET e HEAD (senão 405) em `/health` e `/metrics` (senão 404), sem cabeçalhos CORS.
 
+### Entrada WebSocket
+
+`seed --ws-port <porta>` (ou `VARANDA_WS_PORT`) abre uma entrada WebSocket em `ws://127.0.0.1:<porta>/seeder`, para um membro que roda no navegador. É um experimento da fase 0. Outro endereço só com `--ws-host` (ou `VARANDA_WS_HOST`); o padrão é `127.0.0.1`. Sem a porta, nada escuta. A porta `0` escolhe uma livre, e a saída diz qual: `ws ws://127.0.0.1:<porta>/seeder`. Porta ocupada termina com `erro: porta em uso` (código 1) antes de abrir o diretório.
+
+Os bytes do WebSocket são um fluxo Noise com a chave do semeador, o mesmo que o membro vê pela DHT. Um proxy TLS pode repassá-los, mas não pode terminar o Noise. Essas conexões entram em `connections` do `/health`. Só o caminho `/seeder` aceita o upgrade; qualquer outro devolve 404, e um `GET /seeder` sem upgrade devolve 426. O cabeçalho `Host` precisa nomear a própria entrada (`127.0.0.1:<porta>`, `localhost:<porta>` ou `[::1]:<porta>` no loopback); outro devolve 421, o que barra o DNS rebinding. Clientes sem `Origin` (a CLI, apps nativos) entram normalmente; um navegador só entra se a origem estiver na lista permitida, que por padrão aceita apenas páginas `http` em loopback (qualquer outra devolve 403; a implantação pública vai configurar a origem do PWA). As conexões externas ocupam no máximo metade do limite de conexões do semeador, para que uma aba aberta não deixe os membros do enxame sem vaga.
+
 ### Docker Compose
 
 `deploy/seeder/compose.yaml` sobe a imagem de `deploy/seeder/Dockerfile`: Node 24, só as dependências de produção da CLI, usuário `node`, sistema de arquivos só de leitura e os dados no volume `seeder-data` (em `/data`). O serviço usa a rede do host, reinicia sozinho (`unless-stopped`), recebe SIGTERM com 30 s para fechar e deixa o endpoint de saúde em `127.0.0.1:8788`, onde o healthcheck da imagem o consulta. É para um servidor Linux: no Docker Desktop a rede do host não funciona do mesmo jeito.
@@ -451,9 +461,9 @@ Registros: `journalctl -u varanda-seeder -f`. `seed list` e `seed drop`: `system
 
 Provisória até o parecer jurídico sobre registros de acesso (issue #38).
 
-- **Formato.** Uma linha por evento na saída padrão. No serviço, `--json`: JSON Lines com os eventos `health`, `ready`, `peer`, `admitted`, `rejected`, `have`, `peer-dropped`, `warning` e `fatal` (o mais frequente é `have`, a cada crescimento de um diário). Erros vão para a saída de erro como `erro: <mensagem>`. A linha não traz data e hora: o journal e o Docker carimbam cada uma.
+- **Formato.** Uma linha por evento na saída padrão. No serviço, `--json`: JSON Lines com os eventos `health`, `ws`, `ready`, `peer`, `admitted`, `rejected`, `have`, `peer-dropped`, `warning` e `fatal` (o mais frequente é `have`, a cada crescimento de um diário). Erros vão para a saída de erro como `erro: <mensagem>`. A linha não traz data e hora: o journal e o Docker carimbam cada uma.
 - **O que entra.** Chaves públicas de diários (64 hex), com tamanho ou motivo de recusa; a chave Noise dos pares (`peer`, `peer-dropped`); o tópico da associação (`ready`). São pseudônimos, e contam como dado pessoal quando alguém consegue ligá-los a uma pessoa.
-- **O que nunca entra.** Endereço IP ou porta de par, conteúdo de publicação ou de perfil, certificados, chaves secretas e as requisições ao endpoint de saúde.
+- **O que nunca entra.** Endereço IP ou porta de par (a entrada WebSocket nunca registra o endereço do cliente), conteúdo de publicação ou de perfil, certificados, chaves secretas e as requisições ao endpoint de saúde.
 - **Rotação.** Pelo supervisor. Docker: driver `json-file` com até 5 arquivos de 10 MB (`compose.yaml`). systemd: o journal rotaciona sozinho.
 - **Retenção provisória: 30 dias.** No systemd, `deploy/seeder/journald-varanda.conf` vai para `/etc/systemd/journald.conf.d/varanda.conf` (`MaxRetentionSec=30day`). Vale para o journal inteiro da máquina, então use numa máquina dedicada. No Docker o limite é de volume (50 MB), não de tempo; para limitar por tempo, troque o driver para `journald` no `compose.yaml` e use a mesma configuração.
 - **Registros de acesso (Marco Civil, Art. 15).** O semeador não registra endereço IP, então hoje não guarda registro de acesso. Se o parecer concluir que o Art. 15 se aplica à associação, a guarda por 6 meses vai exigir registrar endereço e horário das conexões (mudança de código, ainda não feita) e ajustar a retenção acima. A retenção é configuração do supervisor (`MaxRetentionSec`, `max-size` e `max-file`), não do código: muda sem nova versão.
