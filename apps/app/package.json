@@ -9,7 +9,9 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web",
+    "build:node": "node ../../packages/web-member/scripts/build.js --node public/varanda-node.js",
+    "web": "npm run build:node && expo start --web",
+    "export:web": "npm run build:node && expo export --platform web",
     "link:addons": "bash scripts/link-addons.sh",
     "pack:worklet": "bash scripts/pack-worklet.sh",
     "gate": "node scripts/gate-server.js",
@@ -32,6 +34,7 @@
     "react-native-web": "0.21.3"
   },
   "devDependencies": {
+    "@varanda/web-member": "0.1.0",
     "bare-link": "4.0.1",
     "bare-pack": "2.2.4",
     "brittle": "4.5.0"

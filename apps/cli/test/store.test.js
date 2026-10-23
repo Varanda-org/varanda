@@ -724,6 +724,64 @@ test('data-dir lock: a failing close keeps the lock', async (t) => {
   t.absent(fs.existsSync(lockDir(dir)), 'released after a successful close')
 })
 
+// The interleaving behind a flake of the 30-process race on Linux, replayed
+// in one process: our opener inspects an owner-less stale lock; before its
+// takeover re-checks the lock under the mutex, another opener removes the
+// stale dir and a third one mkdirs a fresh lock dir on the SAME inode number
+// (Linux reuses a freed inode at once; lstat is stubbed to report it) and
+// has not written its owner yet. Same dev, ino and (absent) owner content:
+// only the mtime tells the fresh lock from the stale one. A takeover that
+// removed it would leave two holders.
+test('data-dir lock: a takeover never removes a younger lock on a reused inode', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const lock = lockDir(dir)
+  fs.mkdirSync(lock)
+  age(lock)
+  const stale = fs.lstatSync(lock)
+  // The third opener: alive, it publishes its owner a moment later.
+  const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  t.teardown(() => owner.kill('SIGKILL'), { force: true })
+
+  const realLstat = fs.lstatSync
+  let lockCalls = 0
+  let fresh = null // real { dev, ino } of the fresh lock dir
+  fs.lstatSync = function (p, ...rest) {
+    if (p === lock && ++lockCalls === 2) {
+      // Between our inspection and our takeover's re-check.
+      fs.rmSync(lock, { recursive: true })
+      fs.mkdirSync(lock)
+      const st = realLstat.call(fs, lock)
+      fresh = { dev: st.dev, ino: st.ino }
+      setTimeout(() => {
+        try { fs.writeFileSync(path.join(lock, 'pid'), owner.pid + ' ' + 'ab'.repeat(16) + '\n') } catch {}
+      }, 100)
+    }
+    const st = realLstat.call(fs, p, ...rest)
+    // The fresh dir has the stale dir's inode number, wherever it is moved.
+    if (fresh !== null && st.dev === fresh.dev && st.ino === fresh.ino) {
+      return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { ino: stale.ino })
+    }
+    return st
+  }
+  t.teardown(() => { fs.lstatSync = realLstat }, { force: true })
+
+  let opened = null
+  let error = null
+  try {
+    opened = await store.openStore(dir)
+  } catch (err) {
+    error = err
+  }
+  fs.lstatSync = realLstat
+  if (opened !== null) await opened.close()
+  t.ok(lockCalls >= 2, 'the takeover re-checked the lock')
+  t.is(error && error.code, 'LOCKED', 'the younger lock wins: LOCKED')
+  t.ok(fs.existsSync(lock), 'the younger lock dir is still there')
+  t.is(fs.existsSync(path.join(lock, 'pid')) ? ownerPid(dir) : null, owner.pid, 'with its own owner')
+  t.alike(leftovers(dir), [], 'no aside copy or mutex left')
+})
+
 test('data-dir lock: 30 processes racing over a stale lock, one wins', async (t) => {
   await testnet(t)
   const dir = tmpDir(t)

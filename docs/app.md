@@ -14,16 +14,17 @@ Os formatos de registro e de certificado estão em [protocol.md](protocol.md). O
 
 ## Onde o nó roda
 
-Há dois jeitos de ter um nó, e a interface é a mesma:
+Há três jeitos de ter um nó, e a interface é a mesma:
 
 - **No aplicativo (iOS, Android).** O nó é a sessão do `@varanda/core` rodando num worklet Bare dentro do app. A interface fala com ele por IPC, sem token: o canal é privado do processo do app. Os dados ficam no diretório de documentos do app, na pasta `varanda`. A prova no simulador iOS está em [ios-gate.md](ios-gate.md). Android ainda não foi verificado em execução nativa.
-- **Na web, com o `varanda-serve`.** O navegador não roda o nó. Quem roda é o `varanda-serve`, na máquina da pessoa, e a interface fala com ele por um WebSocket em `127.0.0.1`. As chaves ficam na máquina, não no navegador. As opções e as regras de segurança do servidor estão no [README](../README.md) (seção "Servidor local para a interface web").
+- **Na web, no próprio navegador.** O nó roda na página: é a sessão do `@varanda/web-member` (Hypercore 10), carregada como o script `varanda-node.js`, servido ao lado do app. A chave do diário e os diários seguidos ficam no IndexedDB do navegador (banco `varanda-node`). O nó não usa a DHT: o único par é o semeador da associação, alcançado pela entrada WebSocket dele (`seed --ws-port`). A interface fala com o nó em memória, sem rede e sem token, com as mesmas mensagens de [rpc.md](rpc.md). É o modo padrão da versão web.
+- **Na web, com o `varanda-serve`.** O navegador não roda o nó. Quem roda é o `varanda-serve`, na máquina da pessoa, e a interface fala com ele por um WebSocket em `127.0.0.1`. As chaves ficam na máquina, não no navegador. As opções e as regras de segurança do servidor estão no [README](../README.md) (seção "Servidor local para a interface web"). A página entra nesse modo quando é aberta no endereço que o `varanda-serve` imprime (com `#token=...`); a aba lembra o modo até ser fechada.
 
 ## Primeira configuração
 
 ### No app nativo: tela Conectar
 
-Só o app nativo tem essa tela. Ela pede:
+No app nativo, a tela pede:
 
 - a chave pública da associação (64 dígitos hexadecimais);
 - como achar pares: uma lista de bootstrap (`host:porta`) ou o interruptor "DHT pública", que começa desligado;
@@ -33,17 +34,36 @@ Com a DHT pública ligada, o endereço local da DHT não pode ser de loopback (`
 
 A DHT pública é uma escolha ativa da pessoa (opt-in). Sem bootstrap e sem o interruptor ligado, o nó não tem como achar pares. A configuração, que não é segredo, fica em `Documents/varanda-config.json`, fora do diretório de dados do nó, e só é gravada depois que o nó inicia com ela. Ajustes › Conexão mostra a mesma configuração depois: dá para trocar o bootstrap ou a DHT pública (o nó reinicia), mas a associação fica só para leitura depois que a identidade existe.
 
-Depois do Conectar (ou, na web, logo de início), a etapa Identidade aparece sozinha, sem as abas, até a identidade existir e o certificado estar gravado. Nela, um link "Conexão" abre Ajustes › Conexão.
+Depois do Conectar (ou, com o `varanda-serve`, logo de início), a etapa Identidade aparece sozinha, sem as abas, até a identidade existir e o certificado estar gravado. Nela, um link "Conexão" abre Ajustes › Conexão.
 
-### Na web: sem Conectar
+### Na web, com o nó no navegador: tela Conectar
 
-A web não tem a tela Conectar, mas tem a mesma etapa Identidade e certificado. A associação, o bootstrap e a DHT vêm das opções do `varanda-serve`. O token chega no fragmento da URL (`#token=...`) que o `varanda-serve` imprime. O app o lê uma vez, tira o fragmento da barra de endereço (`history.replaceState`), o guarda só em memória (nem `localStorage`, nem cookie) e o envia em `session.open`. O navegador não envia o fragmento ao servidor. A página só conecta se foi aberta em `127.0.0.1` ou `localhost`. Ela não reconecta sozinha: Ajustes › Conexão tem o botão "reconectar". Se outra aba abrir a sessão, esta mostra "outra aba assumiu a conexão".
+A tela Conectar da web pede:
+
+- a chave pública da associação (64 dígitos hexadecimais);
+- o endereço do semeador: `ws://` ou `wss://`, com servidor, porta e caminho opcionais (por exemplo `wss://semeador.exemplo/seeder`), sem usuário, consulta nem fragmento. Numa página `https`, só `wss://` (o navegador recusa `ws://` ali).
+
+O nó confere o semeador pelo certificado que a associação assinou para ele, como a CLI faz; a chave do semeador não é pedida. Um endereço que responde sem esse certificado não recebe nada: a sincronização mostra "peer seeder <chave8> não verificado" e o aviso "o endereço configurado não respondeu como um semeador verificado".
+
+A configuração, que não é segredo, fica no `localStorage` (`varanda-web-config`) e só é gravada depois que o nó abre com ela. A chave do diário fica no IndexedDB, nunca no `localStorage`. Ajustes › Conexão mostra o estado ("o nó roda neste navegador"), a associação e o endereço do semeador; dá para trocar o endereço ("aplicar e reconectar" fecha o nó e o abre de novo), e a associação fica só para leitura depois que a identidade existe.
+
+Uma aba por navegador: o nó guarda o diário no IndexedDB e duas abas gravando nele estragariam o diário. A primeira aba fica com o nó (Web Lock `varanda-node`); outra aba mostra "outra aba já usa o Varanda neste navegador" no Conectar. Num navegador sem a API Web Locks, não há essa proteção.
+
+Limites desta versão (a chave protegida por passkey, a cópia de segurança e o PWA vêm em PRs seguintes; veja [verification.md](verification.md), seção 9):
+
+- A chave fica sem criptografia no IndexedDB, como no spike. Qualquer script da mesma origem a lê, e quem serve a página pode trocar o código dela.
+- Não há cópia de segurança nem exportação da chave: limpar os dados do site apaga a identidade. A tela Conectar diz isso.
+- Cada arquivo de um diário aberto fica inteiro na memória da aba enquanto está aberto (as gravações no IndexedDB são por página de 16 KiB, não o arquivo inteiro).
+
+### Na web, com o `varanda-serve`: sem Conectar
+
+Com o `varanda-serve` não há tela Conectar, mas há a mesma etapa Identidade e certificado. A associação, o bootstrap e a DHT vêm das opções do `varanda-serve`. O token chega no fragmento da URL (`#token=...`) que o `varanda-serve` imprime. O app o lê uma vez, tira o fragmento da barra de endereço (`history.replaceState`), o guarda só em memória (nem `localStorage`, nem cookie) e o envia em `session.open`; no `sessionStorage` fica só a marca de que a aba usa o `varanda-serve`, nunca o token. O navegador não envia o fragmento ao servidor. A página só conecta se foi aberta em `127.0.0.1` ou `localhost`. Ela não reconecta sozinha: Ajustes › Conexão tem o botão "reconectar". Se outra aba abrir a sessão, esta mostra "outra aba assumiu a conexão".
 
 ## Telas
 
 Os nomes estão fixos; os detalhes visuais ainda mudam. O desenho (cores, tamanhos, componentes) está em [app-design.md](../apps/site/artwork/app-design.md); as funções e o protocolo são os mesmos de antes.
 
-O app tem três abas na barra de baixo: **A Rua**, **Seguindo** e **Diário** (abre em A Rua). Um botão verde, "publicar", abre a folha de Publicar por cima de qualquer aba. Os ajustes ficam numa folha aberta pela engrenagem do cabeçalho do Diário. No app nativo, a primeira configuração acontece antes das abas (veja "Primeira configuração").
+O app tem três abas na barra de baixo: **A Rua**, **Seguindo** e **Diário** (abre em A Rua). Um botão verde, "publicar", abre a folha de Publicar por cima de qualquer aba. Os ajustes ficam numa folha aberta pela engrenagem do cabeçalho do Diário. No app nativo e na web com o nó no navegador, a primeira configuração acontece antes das abas (veja "Primeira configuração").
 
 - **Barra do topo (A Rua e Seguindo).** A cadeira, o título e o chip de sincronia, que mostra o estado em uma palavra: "sem conexão", "sincronizando…", "sincronizado agora" (ou "sincronizado há N min") depois de uma rodada que terminou por `done` e sem `result.ok` falso, ou "sincronizar" quando não há rodada concluída. O chip sempre abre Ajustes › Sincronizar, que oferece "abrir Conexão" quando não há conexão. Não há faixa de conexão sobre a linha do tempo: o estado fica só no chip e em Ajustes › Conexão.
 - **A Rua.** O feed, da mais nova para a mais antiga, numa linha do tempo contínua. Cada publicação tem avatar com as duas iniciais do nome (a cor vem do primeiro byte da chave, módulo 5: azul, laranja, amarelo, vermelho, verde), o nome em negrito (sem nome, o handle: `@` e os seis primeiros dígitos hexadecimais da chave), o tempo relativo ("agora", "5 min", "1 h", "ontem", "12 out") e uma única ação, "responder". Uma resposta mostra "respondendo a Nome": o nome vem do perfil do diário seguido, ou o handle se não houver. Abre com 30 publicações; ao rolar até o fim chega ao máximo de 35 (`FEED_LIMIT_MAX`, em [rpc.md](rpc.md)) e depois avisa que as mais antigas não estão disponíveis nesta versão. Puxar para baixo recarrega (no app nativo; na web, o botão "atualizar"). A lista recarrega sozinha quando uma rodada de sincronização termina (menos quando foi interrompida por outro pedido) e depois de publicar; os avisos de itens ignorados ou com data futura continuam. Por ora A Rua mostra só os diários seguidos; trazer quem a pessoa não segue é uma mudança de desenho descrita em [design.md](design.md).
@@ -52,7 +72,7 @@ O app tem três abas na barra de baixo: **A Rua**, **Seguindo** e **Diário** (a
 - **Diário.** O perfil e o diário da própria pessoa. Uma faixa em gradiente passa por trás da barra de estado, com a engrenagem dos ajustes; embaixo, avatar de 88 pt, o botão "Editar perfil", o nome, o handle (tocar mostra a chave inteira), a bio e "N seguindo" (não há seguidores). Falta o certificado? Uma linha de aviso diz isso. Em "PUBLICAÇÕES" ficam as publicações da pessoa no estilo da linha do tempo, só a página mais recente; perfil, certificado e blocos inválidos aparecem como linhas técnicas discretas ("bloco inválido (#seq: motivo)").
 - **Editar perfil.** Folha com nome (1 a 80 caracteres) e bio (0 a 280), preenchida com o registro de perfil mais novo entre os 42 blocos mais novos do próprio diário; "Cancelar" descarta.
 - **Ajustes.** Folha com três itens, sem mudança de função:
-  - **Conexão.** No app nativo, a configuração da tela Conectar; na web, o estado da conexão com o `varanda-serve` e o botão "reconectar".
+  - **Conexão.** No app nativo e na web com o nó no navegador, a configuração da tela Conectar; com o `varanda-serve`, o estado da conexão com ele e o botão "reconectar".
   - **Sincronizar.** Sincroniza uma vez ou de modo contínuo, para a sincronização e mostra as últimas 200 linhas de evento.
   - **Identidade.** Cria a identidade e mostra a chave pública e o estado do certificado de membro. Aceita colar o JSON do certificado emitido pela associação.
 
@@ -84,7 +104,7 @@ Onde ficou cada uma das oito telas de antes:
 
 Um pedido que muda algo e fica sem resposta (tempo esgotado ou conexão perdida) aparece como "incerto: pode ter sido aplicado; confira antes de repetir". O app nunca reenvia esse pedido sozinho. Antes de oferecer a ação de novo, ele lê o estado outra vez. Publicar relê o próprio diário: se a publicação está lá (mesmo texto e mesma resposta, criada por este envio), conta como publicada, limpa o rascunho e fecha a folha; senão o rascunho fica, com a mensagem "incerto: pode ter sido aplicado; confira antes de repetir". Editar perfil faz a mesma conferência no registro de perfil mais novo. Seguindo relê a lista depois de qualquer falha ao seguir ou deixar de seguir.
 
-Só um nó usa um diretório de dados por vez: um segundo worklet no mesmo diretório recebe `LOCKED`. Todo texto vindo de outros pares passa por `displayText`, do `@varanda/rpc`, antes de aparecer.
+Só um nó usa um diretório de dados por vez: um segundo worklet no mesmo diretório recebe `LOCKED`. Na web com o nó no navegador, só uma aba por navegador abre o nó (veja "Na web, com o nó no navegador"). Todo texto vindo de outros pares passa por `displayText`, do `@varanda/rpc`, antes de aparecer.
 
 ## Fora do piloto
 
