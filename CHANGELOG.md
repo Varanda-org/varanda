@@ -16,6 +16,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
   Guias de contribuição, segurança e conduta, modelos de issue e de PR, e CODEOWNERS.
 - Operação do semeador: `seed status`, `seed list` e `seed drop`; endpoint de saúde e métricas (`--health-port`, em `127.0.0.1` por padrão);
   imagem Docker, Compose e unidade systemd com reinício e SIGTERM; política de registros provisória. ([#34](https://github.com/Varanda-org/varanda/issues/34))
+- Entrada WebSocket do semeador (`seed --ws-port`, desligada por padrão, só em `127.0.0.1`) e pacote experimental `@varanda/web-member`
+  (membro com a chave no navegador, Hypercore 10, replicação pelo semeador e avaliação do dht-relay); resultado em `docs/verification.md` §8.
 
 ### Alterado
 

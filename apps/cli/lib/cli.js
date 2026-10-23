@@ -16,7 +16,7 @@ Comandos:
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
   sync                       sincroniza com pares e com o semeador (--once, --timeout-ms)
-  seed                       semeador sempre ligado (--health-port)
+  seed                       semeador sempre ligado (--health-port, --ws-port)
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
@@ -29,14 +29,14 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host`
+  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host`
 
 const booleanFlags = new Set(['--json', '--once', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
-  '--health-port', '--health-host'
+  '--health-port', '--health-host', '--ws-port', '--ws-host'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -124,6 +124,9 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const healthHost = get('health-host') ?? env.VARANDA_HEALTH_HOST ?? null
   if (healthHost !== null && (!healthHost || /\s/.test(healthHost))) throw new UsageError('health-host inválido')
 
+  const wsHost = get('ws-host') ?? env.VARANDA_WS_HOST ?? null
+  if (wsHost !== null && (!wsHost || /\s/.test(wsHost))) throw new UsageError('ws-host inválido')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -139,6 +142,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     dhtHost,
     healthPort: port(get('health-port') ?? env.VARANDA_HEALTH_PORT ?? null, 'health-port'),
     healthHost,
+    wsPort: port(get('ws-port') ?? env.VARANDA_WS_PORT ?? null, 'ws-port'),
+    wsHost,
     ageBand: get('age-band'),
     method: get('method'),
     out: get('out') === null ? null : path.resolve(cwd, get('out')),

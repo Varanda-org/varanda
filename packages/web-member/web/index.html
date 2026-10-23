@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Varanda — membro no navegador (spike)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; font: 15px/1.4 system-ui, sans-serif; max-width: 720px; }
+    h1 { font-size: 1.2em; margin: 0 0 12px; }
+    label { display: block; margin: 10px 0 4px; font-weight: 600; }
+    input, textarea { width: 100%; font: 13px ui-monospace, monospace; padding: 8px; }
+    textarea { min-height: 6em; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    button { flex: 1 1 140px; padding: 10px; font: inherit; }
+    #erase { color: #b00020; }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin: 12px 0; }
+    dd { margin: 0; font: 12px ui-monospace, monospace; overflow-wrap: anywhere; }
+    #log { border: 1px solid #8888; padding: 8px; height: 16em; overflow-y: auto; font: 12px ui-monospace, monospace; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Membro no navegador (spike)</h1>
+
+  <label for="association">associação (hex)</label>
+  <input id="association" autocomplete="off" spellcheck="false">
+
+  <label for="seeder-url">URL do semeador</label>
+  <input id="seeder-url" value="ws://127.0.0.1:8789/seeder" autocomplete="off" spellcheck="false">
+
+  <label for="seeder-key">chave Noise do semeador (hex, opcional)</label>
+  <input id="seeder-key" autocomplete="off" spellcheck="false">
+
+  <label for="cert">certificado (JSON)</label>
+  <textarea id="cert" spellcheck="false"></textarea>
+
+  <label for="text">texto</label>
+  <input id="text" value="poste do navegador (spike)">
+
+  <div class="buttons">
+    <button id="create-key" type="button">criar chave</button>
+    <button id="open-diary" type="button">abrir diário</button>
+    <button id="save-cert" type="button">gravar certificado</button>
+    <button id="connect" type="button">conectar ao semeador</button>
+    <button id="publish" type="button">publicar</button>
+    <button id="erase" type="button">apagar tudo</button>
+  </div>
+
+  <!-- Spike G3: shown by /relay.js (a separate bundle); stays hidden when
+       /relay.js was not built (its 404 is harmless). -->
+  <section id="relay-panel" hidden>
+    <label for="relay-url">URL do relay (DHT)</label>
+    <input id="relay-url" value="ws://127.0.0.1:8791" autocomplete="off" spellcheck="false">
+    <div class="buttons">
+      <button id="relay-join" type="button">entrar pela DHT (relay)</button>
+      <button id="relay-leave" type="button">sair da DHT</button>
+    </div>
+  </section>
+
+  <dl>
+    <dt>chave pública</dt><dd id="public-key">—</dd>
+    <dt>comprimento</dt><dd id="length">—</dd>
+  </dl>
+
+  <div id="log" role="log" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+  <script src="/relay.js"></script>
+</body>
+</html>

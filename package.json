@@ -27,7 +27,8 @@
       "apps/app/dist/",
       "apps/app/.expo/",
       "apps/app/assets/worklet/",
-      "**/*.bundle"
+      "**/*.bundle",
+      "packages/web-member/dist/"
     ]
   }
 }
