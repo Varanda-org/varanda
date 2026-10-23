@@ -1,6 +1,6 @@
 # varanda
 
-Protótipo de fase 0 de uma rede social ponto a ponto no Holepunch (Hypercore, Hyperswarm e HyperDHT). Os comandos são um programa de terminal. A referência normativa dos formatos é [docs/protocol.md](docs/protocol.md).
+Monorepo npm da fase 0 de uma rede social ponto a ponto no Holepunch (Hypercore, Hyperswarm e HyperDHT): o programa de terminal (`varanda`, `varanda-serve`), o aplicativo iOS, Android e web (`apps/app`), o site estático (`apps/site`) e as bibliotecas compartilhadas (`packages/*`). A referência normativa dos formatos é [docs/protocol.md](docs/protocol.md). O guia de desenvolvimento está em [docs/development.md](docs/development.md).
 
 ## Estrutura do repositório
 
@@ -12,7 +12,7 @@ Protótipo de fase 0 de uma rede social ponto a ponto no Holepunch (Hypercore, H
 - `packages/core`: o núcleo do protocolo e a sessão do nó, usados pelo CLI e pelo app (Node e Bare). [README](packages/core/README.md).
 - `packages/rpc`: o contrato JSON entre a interface e o nó. [README](packages/rpc/README.md).
 - `deploy/seeder`: imagem Docker, Compose e unidade systemd do semeador. Ver [Operar o semeador](#operar-o-semeador).
-- `docs/`: `protocol.md` (referência normativa dos formatos), `rpc.md` (contrato da interface), `design.md` (documento de design), `development.md`, `app.md` e `ios-gate.md`. O índice está em [docs/README.md](docs/README.md).
+- `docs/`: `protocol.md` (referência normativa dos formatos), `rpc.md` (contrato da interface), `design.md` (documento de design), `development.md`, `app.md`, `ios-gate.md`, `verification.md` (verificação ponta a ponta do monorepo) e `site.md` (site estático). O índice está em [docs/README.md](docs/README.md).
 
 ## O que é
 
@@ -29,6 +29,16 @@ O semeador também tem certificado da mesma associação. Só um semeador verifi
 
 O programa de terminal roda no Node e não tem etapa de compilação. O núcleo (`packages/core`) também roda no runtime Bare, dentro do aplicativo (`apps/app`; veja [docs/development.md](docs/development.md) para compilar o app). Esta fase não usa o runtime Pear.
 
+## Contribuir
+
+Guia completo em [CONTRIBUTING.md](CONTRIBUTING.md).
+
+- Faça fork do repositório e abra um pull request contra `main`.
+- Comente na issue antes de começar, para alinhar escopo e evitar trabalho duplicado.
+- Use branch no formato `<tipo>/<slug>` (por exemplo `fix/nome-curto`).
+- No PR, referencie a issue com `Closes #n`.
+- Vulnerabilidades: siga [SECURITY.md](SECURITY.md); não abra issue pública com detalhes sensíveis.
+
 ## Instalação
 
 Na raiz deste repositório:
@@ -36,6 +46,8 @@ Na raiz deste repositório:
 ```sh
 npm install
 ```
+
+Os executáveis em `bin/` na raiz são atalhos para `apps/cli/bin/` (por exemplo `bin/varanda.js`).
 
 O programa é `node bin/varanda.js`. A ajuda:
 
@@ -488,32 +500,43 @@ Ctrl-C (SIGINT) ou SIGTERM fecha as conexões (código 1001), espera a sessão t
 
 ## Testes e lint
 
+Na raiz:
+
 ```sh
 npm test
 npm run lint
-node apps/cli/test/smoke.test.js
 ```
 
-`npm test` roda, dentro de `apps/cli`, `node ../../scripts/run-tests.js`, que executa cada `test/*.test.js` desse diretório em sequência. Um arquivo sozinho, a partir da raiz:
+`npm test` executa `npm test --workspaces --if-present`. Cada workspace que define script de teste usa `node ../../scripts/run-tests.js`, que roda cada `test/*.test.js` desse workspace em sequência (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000).
+
+Um workspace:
 
 ```sh
-node apps/cli/test/assoc.test.js
-node apps/cli/test/cert.test.js
-node apps/cli/test/cli.test.js
-node apps/cli/test/commands.test.js
-node apps/cli/test/e2e.test.js
-node apps/cli/test/feed.test.js
-node apps/cli/test/net.test.js
-node apps/cli/test/records.test.js
-node apps/cli/test/seed-ops.test.js
-node apps/cli/test/seeder.test.js
-node apps/cli/test/serve.test.js
-node apps/cli/test/smoke.test.js
-node apps/cli/test/store.test.js
-node apps/cli/test/sync.test.js
+npm test -w packages/rpc
+npm test -w packages/core
+npm test -w apps/cli
+npm test -w apps/site
 ```
 
-Os testes de rede usam uma DHT local em processo (`hyperdht/testnet` por `apps/cli/test/helpers/net.js`), presa a `127.0.0.1`. Nenhum teste usa a DHT pública. `npm run lint` roda o `standard`.
+Servidor de desenvolvimento do site estático (`apps/site`):
+
+```sh
+npm run dev -w apps/site
+```
+
+Abre em http://127.0.0.1:4173/. Publicação em GitHub Pages: [docs/site.md](docs/site.md).
+
+Em cada pull request e em cada push para `main`, o workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em `ubuntu-24.04` com Node 20 e 24 (matriz): `npm ci`, `npm run lint`, `npm test` e `npm run demo` (a demo deve terminar com `DEMO OK`).
+
+Um arquivo, a partir da raiz:
+
+```sh
+node apps/cli/test/serve.test.js
+```
+
+`apps/app` não tem script de teste. Em `packages/core`, `test/bare-load.test.js` confere o núcleo no runtime Bare (parte de `npm test -w packages/core`).
+
+Os testes de rede usam uma DHT local em processo (`hyperdht/testnet` por `apps/cli/test/helpers/net.js`), presa a `127.0.0.1`. Nenhum teste usa a DHT pública. `npm run lint` roda o `standard` em todo o repositório. Detalhes em [docs/development.md](docs/development.md).
 
 ## Layout de armazenamento
 
@@ -634,7 +657,7 @@ Fora desta fase:
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
 - Listas de moderação e revogação. Certificado de membro e certificado de semeador não expiram e não são revogados nesta fase. Comentários `TODO(phase2): moderation lists — consult a block list before admitting.` e `TODO(phase2): certificate revocation list.` em `packages/core/lib/seeder.js`. Também `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js`, e os `TODO(phase2)` / `TODO(later phases)` correspondentes em `docs/protocol.md` (registros, certificados e admissão).
 - Mídia. Publicação é só texto, até 1000 caracteres. O comentário de `packages/core/lib/records.js` citado acima, e `docs/protocol.md` (registros), deixam anexos para uma fase posterior.
-- Empacotamento Pear ou Bare, e interface gráfica. O protótipo é um programa Node. Não há comentário `TODO` no código para esse empacotamento.
+- Empacotamento Pear e distribuição fora das lojas. O aplicativo Expo (`apps/app`) já roda o núcleo no Bare (iOS e Android) e a exportação web usa `varanda-serve` na máquina local; ver [docs/app.md](docs/app.md), [docs/verification.md](docs/verification.md) e [docs/development.md](docs/development.md). O CLI continua sendo um programa Node sem etapa de compilação.
 - Relay de certificados por seguidores. O `sync` anuncia só o próprio diário (`packages/core/lib/sync.js` envia `announce` da chave local e ignora `announce` recebido). Um seguidor não apresenta ao semeador o certificado de outra pessoa. Se a autora nunca sincronizou, o semeador não tem a cópia, mesmo que um seguidor já a tenha. Não há comentário `TODO` no código para esse relay. `docs/protocol.md` registra que o `announce` permanece sem autenticação de propósito: qualquer par pode pedir a admissão, e só entra o diário cujo bloco 0 passa na verificação.
 
 ## Códigos de saída

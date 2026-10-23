@@ -2,7 +2,7 @@
 
 19 de outubro de 2026 · Rodrigo S Pavezi
 
-> Cópia em Markdown do documento de design (Claude Docs), exportada em 22 de outubro de 2026. Os três diagramas do original não entram na exportação; cada um aparece abaixo como uma nota.
+> Cópia em Markdown do documento de design (Claude Docs), exportada em 22 de outubro de 2026. Os três diagramas do original foram recriados em Mermaid abaixo.
 
 A Varanda (varanda.app) é uma rede social que roda nos aparelhos dos próprios brasileiros: cada pessoa guarda as suas publicações e as de quem segue, e parceiros no Brasil mantêm semeadores sempre ligados. A idade é verificada antes de a conta existir, pelo sinal de idade das lojas de aplicativos, e o desenho segue a LGPD e o ECA Digital. É um rascunho para discussão; os pontos jurídicos ainda precisam de parecer de advogado.
 
@@ -39,7 +39,50 @@ Os pontos em aberto de cada nome estão em Perguntas em aberto.
 
 Nenhum componente tem todos os dados: os celulares guardam e trocam as publicações, e parceiros e serviços no Brasil só dão apoio.
 
-> Diagrama no documento original: arquitetura · aparelhos, parceiros e serviços no Brasil.
+```mermaid
+flowchart TB
+  classDef planned stroke-dasharray: 5 5
+
+  subgraph fora["Fora do Brasil — apoio, não o feed social"]
+    direction LR
+    LOJA["App Store / Google Play<br/>sinal de faixa etária — planejado"]
+    APNS["APNs e FCM<br/>entrega do aviso push — planejado"]
+  end
+
+  subgraph br["Brasil — datacenters e parceiros"]
+    direction LR
+    ASSOC["Associação — fase 0<br/>emissão de certificado de membro<br/>assoc certify — stub"]
+    IDADE["Serviço de idade<br/>planejado"]
+    SEM["Semeadores<br/>réplicas e relay"]
+    PUSH["Gateway de push<br/>payload cifrado — planejado"]
+  end
+
+  DHT(("Hyperswarm / HyperDHT"))
+
+  subgraph cel["Aparelhos dos membros — diário Hypercore local em cada um"]
+    direction LR
+    C1["Celular A"]
+    C2["Celular B"]
+    C3["Celular C"]
+  end
+
+  C1 <-->|réplicas| C2
+  C2 <-->|réplicas| C3
+  C2 --- DHT
+  SEM --- DHT
+  SEM <-->|relay CGNAT| C2
+
+  LOJA -.->|antes da conta — planejado| C1
+  ASSOC -.->|certificado de membro| C3
+  IDADE -.->|cadastro — planejado| C3
+  C2 -.->|aviso| PUSH
+  PUSH -.-> APNS
+  APNS -.-> C2
+
+  class LOJA,APNS,PUSH,IDADE planned
+```
+
+Legenda: linhas sólidas = réplicas P2P (também entre outros pares) e descoberta na DHT (cada aparelho); linhas tracejadas = apoio (certificado de membro, idade, push). Nós com borda tracejada e etiqueta *(planejado)* são pós-fase-0; na fase 0, o certificado de membro vem de `assoc certify` (operador local, `method: stub`) no nó Associação. O conteúdo social não passa por servidor central: só cópias entre aparelhos e semeadores.
 
 Só dois fluxos saem do Brasil: o sinal de idade das lojas e a entrega de avisos pela Apple e pelo Google.
 
@@ -99,9 +142,25 @@ A chave de cada pessoa é dividida em três partes e quaisquer duas assinam: nin
 
 A idade é confirmada antes de a identidade existir, e a rede guarda só a faixa etária, nunca documento ou foto.
 
-> Diagrama no documento original: cadastro · 2 decisões, 3 saídas por faixa etária.
+```mermaid
+flowchart TD
+  A[Instala o app] --> B[Cria par de chaves no aparelho]
+  B --> C{Sinal da loja disponível?}
+  C -->|Sim| D[Faixa etária da loja]
+  C -->|Não| E[Estimativa por rosto — imagem apagada na hora]
+  E --> F{Resultado perto do limite ou inconclusivo?}
+  F -->|Sim| G[Documento e selfie — só a faixa é guardada]
+  F -->|Não| D
+  D --> H{Faixa etária}
+  H -->|18+| I[Emite certificado de membro — MVP]
+  H -->|16–17| J[Fase 2 — privacidade restritiva]
+  H -->|até 15| K[Fase 3 — conta vinculada ao responsável]
+  I --> L[Divide a chave para recuperação]
+  J -.->|fora do MVP| L
+  K -.->|fora do MVP| L
+```
 
-No MVP só a saída de 18 anos ou mais existe; as saídas tracejadas entram nas fases 2 e 3.
+No MVP só a saída de 18 anos ou mais existe; as saídas tracejadas (fases 2 e 3) entram depois.
 
 | Método | Quando entra | O que a rede recebe | Custo |
 | --- | --- | --- | --- |
@@ -131,7 +190,9 @@ Usar o gov.br como login seria diferente: a rede receberia CPF e nome de cada me
 
 ## LGPD
 
-A proposta é que a associação que publica o app e mantém os serviços compartilhados seja a controladora, e que o desenho reduza ao mínimo o que ela vê. Quem é controlador numa rede P2P ainda precisa de parecer jurídico.
+**Hipóteses de desenho, não parecer.** As tabelas, bases legais e fluxos desta seção expressam o que o produto *pretende* fazer para cumprir a LGPD e o ECA Digital. São hipóteses para engenharia e para discussão com advogados; **não substituem parecer jurídico formal**. Onde o texto pede “parecer jurídico” ou lista itens em Perguntas em aberto, a validação legal ainda não foi fechada.
+
+A proposta é que a associação que publica o app e mantém os serviços compartilhados seja a controladora, e que o desenho reduza ao mínimo o que ela vê. Quem é controlador numa rede P2P é uma dessas hipóteses e ainda precisa de parecer jurídico.
 
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
@@ -195,7 +256,25 @@ O maior risco é escala: nenhuma rede social P2P chegou a milhões de usuários 
 
 Ninguém do canal entra antes de o piloto provar que a rede funciona, e cada onda de convites só abre quando há semeadores e moderação para ela.
 
-> Diagrama no documento original: fases · 4 etapas e 3 portões.
+```mermaid
+flowchart LR
+  E1["Etapa 1\nProtótipo técnico\n(CLI, app, core fase 0)"]
+  P1["Portão 1\nAntes do piloto"]
+  E2["Etapa 2\nPiloto fechado\n(prova que a rede funciona)"]
+  P2["Portão 2\nCada onda de convite"]
+  E3["Etapa 3\nOndas de convite\n(mais membros)"]
+  P3["Portão 3\nAntes de menores"]
+  E4["Etapa 4\nCanal e escala\n(fases 2 e 3 adolescentes)"]
+  E1 --> P1 --> E2 --> P2 --> E3 --> P3 --> E4
+```
+
+**Critérios dos portões** (do texto desta seção, de Moderação, de Riscos e de Perguntas em aberto):
+
+| Portão | Quando | Critérios |
+| --- | --- | --- |
+| **1** | Antes do piloto fechado | A rede P2P e os semeadores funcionam de ponta a ponta (o piloto existe para provar isso antes do canal). As seis primeiras perguntas em aberto têm resposta de advogado. Checklist “Antes do lançamento” em LGPD (encarregado, RIPD, política, plano de incidentes). |
+| **2** | Antes de cada onda de convite | Semeadores no Brasil com capacidade para a onda (parceiros ou fallback da associação; ver tabela de Riscos). Equipe de moderação suficiente para os prazos legais (“ondas de convite só quando houver moderação para elas”). |
+| **3** | Antes de abrir contas de menores (fases 2 e 3) | Verificação de idade e produto para 16–17 e até 15 anos (privacidade restritiva, vínculo com responsável, supervisão), alinhados ao ECA Digital — fora do MVP, que só admite 18+. |
 
 As fases ainda não têm datas: dependem de quem vai desenvolver e de quantos parceiros entrarem.
 
