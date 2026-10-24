@@ -14,3 +14,7 @@ apps/app/android/app/build/
 apps/app/assets/worklet/
 *.bundle
 packages/web-member/dist/
+
+# deploy da versão web: o .env local (domínio)
+deploy/seeder/.env
+deploy/seeder/www/

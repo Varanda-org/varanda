@@ -29,14 +29,15 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host`
+  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --ws-origin`
 
 const booleanFlags = new Set(['--json', '--once', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
-  '--health-port', '--health-host', '--ws-port', '--ws-host'
+  '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -74,6 +75,28 @@ function bootstrapList (rawValues) {
   return entries
 }
 
+// Browser origins allowed on the seeder's WebSocket entry: each one exactly
+// as a browser sends it (scheme http or https, host, optional port; no path,
+// no trailing slash). Values may also be comma-separated.
+function originList (rawValues) {
+  const origins = []
+  for (const raw of rawValues) {
+    for (const piece of raw.split(',')) {
+      const value = piece.trim()
+      if (!value) continue
+      let url = null
+      try {
+        url = new URL(value)
+      } catch {}
+      if (url === null || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== value) {
+        throw new UsageError('ws-origin inválido ' + value)
+      }
+      origins.push(value)
+    }
+  }
+  return origins
+}
+
 // Seq is canonical decimal (no leading zeros) and a safe integer >= 1.
 // Block 0 is the member certificate, so it is not a reply target.
 function replyTo (value) {
@@ -89,6 +112,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const values = new Map()
   const positionals = []
   const bootstraps = []
+  const wsOriginFlags = []
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (booleanFlags.has(token)) {
@@ -100,6 +124,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
       if (value === undefined) throw new UsageError('falta o valor de ' + token)
       i++
       if (token === '--bootstrap') bootstraps.push(value)
+      else if (token === '--ws-origin') wsOriginFlags.push(value)
       else values.set(token, value)
     } else if (token.startsWith('-')) {
       throw new UsageError('opção desconhecida ' + token)
@@ -127,6 +152,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const wsHost = get('ws-host') ?? env.VARANDA_WS_HOST ?? null
   if (wsHost !== null && (!wsHost || /\s/.test(wsHost))) throw new UsageError('ws-host inválido')
 
+  // Any --ws-origin flag wins over VARANDA_WS_ORIGIN; a source that is present
+  // but yields no origin is a usage error (it would silently fall back to the
+  // loopback-only default).
+  const originSource = wsOriginFlags.length ? wsOriginFlags : (env.VARANDA_WS_ORIGIN !== undefined ? [env.VARANDA_WS_ORIGIN] : [])
+  const wsOrigins = originList(originSource)
+  if (originSource.length > 0 && wsOrigins.length === 0) throw new UsageError('ws-origin inválido (vazio)')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -144,6 +176,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     healthHost,
     wsPort: port(get('ws-port') ?? env.VARANDA_WS_PORT ?? null, 'ws-port'),
     wsHost,
+    wsOrigins: wsOrigins.length ? wsOrigins : null,
     ageBand: get('age-band'),
     method: get('method'),
     out: get('out') === null ? null : path.resolve(cwd, get('out')),

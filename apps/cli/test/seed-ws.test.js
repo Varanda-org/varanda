@@ -45,8 +45,8 @@ function prepareSeederDir (t, assoc) {
 }
 
 // `seed --json` as a child process; lines are its stdout JSON events.
-function seedProcess (t, dataDir, args) {
-  const child = spawn(process.execPath, [BIN, 'seed', '--json', '--data', dataDir, ...args], { env })
+function seedProcess (t, dataDir, args, extraEnv = {}) {
+  const child = spawn(process.execPath, [BIN, 'seed', '--json', '--data', dataDir, ...args], { env: { ...env, ...extraEnv } })
   const proc = { child, stdout: '', stderr: '', code: null }
   child.stdout.on('data', (d) => { proc.stdout += d })
   child.stderr.on('data', (d) => { proc.stderr += d })
@@ -428,4 +428,36 @@ test('startSeedWs: an explicit origins list replaces the loopback default', asyn
   t.is(await upgradeStatus(t, server.port, { Origin: 'http://127.0.0.1:8790' }), 403, 'loopback origin refused when not listed')
   t.is(await upgradeStatus(t, server.port, { Origin: 'https://app.example:8443' }), 403, 'another port of the origin refused')
   t.is(await upgradeStatus(t, server.port), 'open', 'no Origin still accepted')
+})
+
+test('seed --ws-origin: the listed browser origins replace the loopback default; Host rewritten by a proxy is accepted', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const proc = seedProcess(t, dataDir, ['--ws-port', '0', '--ws-origin', 'https://app.example', ...bootstrapFlags(bootstrap)], { VARANDA_WS_ORIGIN: 'https://ignored.example' })
+  const { port } = await proc.event('ws')
+  await proc.event('ready')
+
+  t.is(await upgradeStatus(t, port, { Origin: 'https://app.example' }), 'open', 'the listed origin is accepted')
+  t.is(await upgradeStatus(t, port, { Origin: 'https://ignored.example' }), 403, 'the flag wins over VARANDA_WS_ORIGIN')
+  t.is(await upgradeStatus(t, port, { Origin: 'http://127.0.0.1:8790' }), 403, 'the loopback default no longer applies')
+  t.is(await upgradeStatus(t, port, {}), 'open', 'an Origin-less (non-browser) client is still accepted')
+  // A TLS proxy forwards to 127.0.0.1:<port> and rewrites Host to it (Caddy's
+  // header_up Host {upstream_hostport}); the public name itself is refused.
+  t.is(await upgradeStatus(t, port, { Origin: 'https://app.example', Host: 'app.example' }), 421, 'the public Host is refused')
+
+  proc.child.kill('SIGTERM')
+  t.is(await proc.exited, 0)
+})
+
+test('--ws-origin and VARANDA_WS_ORIGIN are validated as usage errors', async (t) => {
+  await testnet(t)
+  const run = (args, extra = {}) => spawnSync(process.execPath, [BIN, ...args], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20000 })
+  const flag = run(['seed', '--ws-origin', 'https://app.example/'])
+  t.is(flag.status, 2)
+  t.ok(flag.stderr.includes('ws-origin inválido https://app.example/'))
+  const variable = run(['seed'], { VARANDA_WS_ORIGIN: ' , ' })
+  t.is(variable.status, 2)
+  t.ok(variable.stderr.includes('ws-origin inválido (vazio)'))
 })

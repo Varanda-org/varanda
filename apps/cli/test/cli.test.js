@@ -37,7 +37,8 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host`
+  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --ws-origin`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -57,7 +58,7 @@ function usage (t, argv, message, env = {}) {
 
 function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
-  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST']) delete env[name]
+  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -117,6 +118,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     healthHost: null,
     wsPort: null,
     wsHost: null,
+    wsOrigins: null,
     ageBand: null,
     method: null,
     out: null,
@@ -255,6 +257,18 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const host of ['', ' ', 'local host', 'local\nhost']) {
     usage(t, ['--ws-host', host], 'ws-host inválido')
     usage(t, [], 'ws-host inválido', { VARANDA_WS_HOST: host })
+  }
+  t.alike(parse(['--ws-origin', 'https://app.varanda.app']).wsOrigins, ['https://app.varanda.app'])
+  t.alike(parse(['--ws-origin', 'https://a.example', '--ws-origin', 'http://localhost:8081']).wsOrigins, ['https://a.example', 'http://localhost:8081'])
+  t.alike(parse([], { VARANDA_WS_ORIGIN: 'https://a.example, https://b.example:8443' }).wsOrigins, ['https://a.example', 'https://b.example:8443'])
+  t.alike(parse(['--ws-origin', 'https://flag.example'], { VARANDA_WS_ORIGIN: 'not an origin' }).wsOrigins, ['https://flag.example'])
+  for (const value of ['https://a.example/', 'https://a.example/path', 'ftp://a.example', 'null', 'a.example', 'https://A.example', 'https://a.example:443', 'https://user@a.example']) {
+    usage(t, ['--ws-origin', value], 'ws-origin inválido ' + value)
+    usage(t, [], 'ws-origin inválido ' + value, { VARANDA_WS_ORIGIN: value })
+  }
+  for (const value of ['', ' ', ',', ' , ']) {
+    usage(t, ['--ws-origin', value], 'ws-origin inválido (vazio)')
+    usage(t, [], 'ws-origin inválido (vazio)', { VARANDA_WS_ORIGIN: value })
   }
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])

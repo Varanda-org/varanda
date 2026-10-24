@@ -1,0 +1,56 @@
+# Versão web do Varanda no mesmo servidor do semeador: complementa
+# compose.yaml. Liga a entrada WebSocket do semeador (só em 127.0.0.1) e põe
+# um Caddy na frente, com TLS automático, servindo o app (deploy/seeder/www) e
+# repassando wss://<domínio>/seeder.
+#
+# Da raiz do repositório, com deploy/seeder/.env contendo VARANDA_DOMAIN e o
+# app já publicado em deploy/seeder/www (deploy/seeder/build-web.sh):
+#   docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --build
+# Passo a passo no README, seção "Pôr a versão web no ar".
+
+services:
+  seeder:
+    environment:
+      VARANDA_WS_PORT: "8789"
+      VARANDA_WS_HOST: 127.0.0.1
+      # O navegador manda Origin https://<domínio>; só ele é aceito.
+      VARANDA_WS_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
+
+  web:
+    image: caddy:2.11.6-alpine@sha256:d44355d3c2149dc580ce2cac735955d1c08d3d00882c30489c241aa51a5c10d9
+    # Rede do host, como o semeador: as portas 80 e 443 do servidor e o
+    # semeador em 127.0.0.1:8789.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      VARANDA_DOMAIN: "${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
+      VARANDA_WS_PORT: "8789"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Preenchido por deploy/seeder/build-web.sh (nunca recriado, só o
+      # conteúdo: o mount continua valendo depois de cada atualização).
+      - ./www:/srv/web:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      # Escutar nas portas 80 e 443.
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    # O Caddy não grava registro de acesso (não há diretiva log); os erros
+    # que ele registra podem incluir o endereço do cliente. Mesma rotação do
+    # semeador (política de registros no README, issue #38).
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  caddy-data:
+  caddy-config:

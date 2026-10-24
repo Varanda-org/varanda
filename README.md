@@ -101,6 +101,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --ws-origin
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -164,6 +165,7 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_HEALTH_HOST` | Endereço do endpoint de saúde. O mesmo que `--health-host`. Padrão `127.0.0.1`. |
 | `VARANDA_WS_PORT` | Porta da entrada WebSocket do `seed`. O mesmo que `--ws-port`. Ausente, nada escuta. |
 | `VARANDA_WS_HOST` | Endereço da entrada WebSocket. O mesmo que `--ws-host`. Padrão `127.0.0.1`. |
+| `VARANDA_WS_ORIGIN` | Origens de navegador aceitas na entrada WebSocket, separadas por vírgula (ex.: `https://app.exemplo.org`). O mesmo que `--ws-origin` (repetível). Ausente, só páginas `http` em loopback. |
 
 `--bootstrap` pode repetir. Se algum `--bootstrap` aparece na linha, ele prevalece sobre `VARANDA_BOOTSTRAP`. `--dht-host` prevalece sobre `VARANDA_DHT_HOST`.
 
@@ -173,7 +175,7 @@ Um `VARANDA_BOOTSTRAP` vazio ou malformado é erro de uso e não cai na DHT púb
 
 `VARANDA_HEALTH_PORT` e `--health-port` aceitam um número de 0 a 65535, sem zero à esquerda (`0` deixa o sistema escolher a porta); senão `uso: health-port inválido`. `VARANDA_HEALTH_HOST` e `--health-host` seguem a regra do `--dht-host` (`uso: health-host inválido`). A opção prevalece sobre a variável. Detalhes em "Operar o semeador".
 
-`VARANDA_WS_PORT` e `--ws-port` seguem a regra do `--health-port` (`uso: ws-port inválido`); `VARANDA_WS_HOST` e `--ws-host` seguem a do `--dht-host` (`uso: ws-host inválido`).
+`VARANDA_WS_PORT` e `--ws-port` seguem a regra do `--health-port` (`uso: ws-port inválido`); `VARANDA_WS_HOST` e `--ws-host` seguem a do `--dht-host` (`uso: ws-host inválido`). Cada origem de `--ws-origin` / `VARANDA_WS_ORIGIN` é escrita exatamente como o navegador a envia: `http` ou `https`, host e porta só se não for a padrão, sem caminho nem barra no fim; outra forma é `uso: ws-origin inválido <valor>`, e uma lista vazia é `uso: ws-origin inválido (vazio)`. Qualquer `--ws-origin` vale mais que a variável.
 
 A DHT local de `apps/cli/scripts/local-dht.js` escuta só em `127.0.0.1`. Com ela, defina `VARANDA_DHT_HOST=127.0.0.1` ou passe `--dht-host 127.0.0.1`. Testes e `npm run demo` usam esse endereço. Sem bootstrap (DHT pública, uso manual), o endereço local é opcional e a DHT fica nos padrões da biblioteca.
 
@@ -408,7 +410,7 @@ O endpoint só tem contagens. Nenhuma chave, certificado, endereço ou conteúdo
 
 `seed --ws-port <porta>` (ou `VARANDA_WS_PORT`) abre uma entrada WebSocket em `ws://127.0.0.1:<porta>/seeder`, para um membro que roda no navegador. É um experimento da fase 0. Outro endereço só com `--ws-host` (ou `VARANDA_WS_HOST`); o padrão é `127.0.0.1`. Sem a porta, nada escuta. A porta `0` escolhe uma livre, e a saída diz qual: `ws ws://127.0.0.1:<porta>/seeder`. Porta ocupada termina com `erro: porta em uso` (código 1) antes de abrir o diretório.
 
-Os bytes do WebSocket são um fluxo Noise com a chave do semeador, o mesmo que o membro vê pela DHT. Um proxy TLS pode repassá-los, mas não pode terminar o Noise. Essas conexões entram em `connections` do `/health`. Só o caminho `/seeder` aceita o upgrade; qualquer outro devolve 404, e um `GET /seeder` sem upgrade devolve 426. O cabeçalho `Host` precisa nomear a própria entrada (`127.0.0.1:<porta>`, `localhost:<porta>` ou `[::1]:<porta>` no loopback); outro devolve 421, o que barra o DNS rebinding. Clientes sem `Origin` (a CLI, apps nativos) entram normalmente; um navegador só entra se a origem estiver na lista permitida, que por padrão aceita apenas páginas `http` em loopback (qualquer outra devolve 403; a implantação pública vai configurar a origem do PWA). As conexões externas ocupam no máximo metade do limite de conexões do semeador, para que uma aba aberta não deixe os membros do enxame sem vaga.
+Os bytes do WebSocket são um fluxo Noise com a chave do semeador, o mesmo que o membro vê pela DHT. Um proxy TLS pode repassá-los, mas não pode terminar o Noise. Essas conexões entram em `connections` do `/health`. Só o caminho `/seeder` aceita o upgrade; qualquer outro devolve 404, e um `GET /seeder` sem upgrade devolve 426. O cabeçalho `Host` precisa nomear a própria entrada (`127.0.0.1:<porta>`, `localhost:<porta>` ou `[::1]:<porta>` no loopback); outro devolve 421, o que barra o DNS rebinding. Clientes sem `Origin` (a CLI, apps nativos) entram normalmente; um navegador só entra se a origem estiver na lista permitida, que por padrão aceita apenas páginas `http` em loopback (qualquer outra devolve 403). `--ws-origin <origem>` (repetível, ou `VARANDA_WS_ORIGIN`) troca esse padrão pelas origens dadas, como a do PWA publicado (seção "Pôr a versão web no ar"). As conexões externas ocupam no máximo metade do limite de conexões do semeador, para que uma aba aberta não deixe os membros do enxame sem vaga.
 
 ### Docker Compose
 
@@ -435,6 +437,22 @@ curl -s http://127.0.0.1:8788/health
 ```
 
 `docker compose -f deploy/seeder/compose.yaml ps` mostra `(healthy)` depois de `seed ready`. Registros: `docker compose -f deploy/seeder/compose.yaml logs -f seeder`. Estado sem parar: `docker compose -f deploy/seeder/compose.yaml exec seeder node apps/cli/bin/varanda.js seed status`. Para `seed list` ou `seed drop`, pare antes (`stop`), rode com `run --rm seeder seed list` e suba de novo (`start`). Não use `run` com o serviço no ar: cada contêiner tem os próprios pids, e o lock do diretório não enxerga o processo do outro. O lock do RocksDB em `store/` ainda barra o segundo processo (`erro: File descriptor could not be locked`, nada é apagado), mas o `run` remove o `.varanda-lock` do semeador no ar, e `seed status` passa a dizer `parado` até ele reiniciar.
+
+### Pôr a versão web no ar
+
+A versão web (o PWA: o app com o nó no navegador, a chave guardada no próprio navegador) fica no mesmo servidor do semeador. `deploy/seeder/compose.web.yaml` complementa o `compose.yaml`: liga a entrada WebSocket do semeador só em `127.0.0.1:8789`, aceitando apenas a origem `https://<domínio>`, e sobe um Caddy (`deploy/seeder/Caddyfile`) que pede o certificado TLS sozinho, serve o app publicado em `deploy/seeder/www` e repassa `wss://<domínio>/seeder` ao semeador. O Caddy só termina o TLS: o Noise vai do navegador ao semeador, que o membro verifica pelo certificado do semeador.
+
+Antes: o semeador configurado como na seção anterior; um registro DNS (A e/ou AAAA) do domínio apontando para o servidor; as portas 80 e 443 abertas (o semeador usa a DHT por UDP, como antes). Da raiz do repositório:
+
+```sh
+cp deploy/seeder/.env.example deploy/seeder/.env    # e ponha o domínio em VARANDA_DOMAIN
+bash deploy/seeder/build-web.sh                     # gera o app num contêiner Node e o publica em deploy/seeder/www
+docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --build
+```
+
+Depois abra `https://<domínio>/`. Na tela Conectar, a associação é a chave pública da associação e o endereço do semeador é `wss://<domínio>/seeder`. Cada pessoa cria a identidade na página e recebe da associação o certificado de membro (`assoc certify --member <chave>`), que cola na etapa Identidade. A cada atualização do código: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
+
+Limites desta fase: a chave do membro fica sem cifra no armazenamento do navegador (a proteção com passkey vem depois, ver `docs/verification.md` seção 8); a página só é tão confiável quanto o código que o servidor entrega; a entrada WebSocket ainda não tem os limites para a internet aberta previstos no PR de endurecimento. Use com um grupo pequeno de pessoas de confiança. O Caddy não grava registro de acesso; os erros que ele registra podem incluir o endereço do cliente (mesma rotação do semeador).
 
 ### systemd
 
