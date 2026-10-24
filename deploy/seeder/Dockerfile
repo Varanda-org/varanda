@@ -1,8 +1,9 @@
 # Imagem do semeador Varanda (`varanda seed`, apps/cli).
 #
 # Build a partir da raiz do repositório: o contexto precisa dos workspaces
-# packages/core, packages/rpc e apps/cli, e o .dockerignore da raiz deixa o
-# resto de fora.
+# packages/core, packages/rpc e apps/cli e do LICENSE, e o .dockerignore da
+# raiz deixa o resto de fora. O LICENSE vai para /app/LICENSE: a PolyForm
+# Noncommercial 1.0.0 exige que os termos acompanhem cada cópia.
 #   docker build -f deploy/seeder/Dockerfile -t varanda-seeder .
 #
 # Só as dependências de produção da CLI, sem scripts de instalação. Roda como
@@ -24,6 +25,8 @@ ENV NODE_ENV=production \
     VARANDA_DATA=/data \
     VARANDA_HEALTH_PORT=8788
 WORKDIR /app
+LABEL org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0"
+COPY LICENSE ./
 COPY --from=deps /app /app
 COPY packages/core packages/core
 COPY packages/rpc packages/rpc
