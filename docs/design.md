@@ -218,7 +218,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 - **Acesso e portabilidade:** o diário já está no celular da pessoa; o app exporta tudo num arquivo.
 - **Correção:** a pessoa publica uma versão corrigida, que substitui a anterior nos apps.
 - **Eliminação:** o app publica um pedido de exclusão assinado. Apps e semeadores da rede apagam suas cópias; cópias em apps modificados não podem ser garantidas, e a política de privacidade diz isso claramente.
-- **Excluir a conta:** o certificado é revogado e os semeadores descartam o diário.
+- **Excluir a conta:** um certificado de membro não tem revogação própria; a conta é excluída bloqueando a chave na lista de bloqueio, e a partir daí os semeadores e apps atualizados apagam e recusam o diário.
 
 **Onde os dados ficam**
 
@@ -234,11 +234,20 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 ## Moderação e obrigações legais
 
-Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a moderação funciona por listas assinadas que o app obedece e os semeadores seguem.
+Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a moderação funciona por uma lista assinada que os nós honestos obedecem. A primeira versão já existe (PR B2, `docs/protocol.md` seção 3).
 
-1. **Denúncia:** qualquer membro denuncia uma publicação ou conta pelo app. A denúncia vai para a equipe de moderação da associação, com voluntários e um núcleo pago.
-2. **Decisão:** a equipe decide e publica a decisão numa lista de moderação assinada pela associação.
-3. **Efeito:** os apps oficiais escondem o conteúdo, os semeadores param de guardar e repassar, e a conta pode perder o certificado de membro.
+1. **Denúncia:** qualquer membro denuncia uma publicação ou conta pelo app. A denúncia vai para a equipe de moderação da associação, com voluntários e um núcleo pago. O fluxo de denúncia e o painel da equipe ainda não existem (próximo passo, PR B3).
+2. **Decisão:** a equipe decide e o operador publica a decisão com `mod block <chave>` numa lista assinada pela chave da moderação, que a associação certificou. A chave secreta da moderação fica só na máquina do operador; a da associação continua fora do ar.
+3. **Efeito:** a lista bloqueia o diário por chave pública (não por publicação). Semeadores, membros da CLI e a versão web trocam a lista entre si no canal `varanda/blocklist/1`, guardam a mais nova que confere, apagam o que tinham desse diário e se recusam a buscá-lo, guardá-lo, anunciá-lo ou servi-lo de novo. Os semeadores também recusam a admissão de uma chave bloqueada.
+
+**O que a lista garante e o que não garante**
+
+- Um nó atualizado e honesto purga e recusa o diário bloqueado. Por isso um app modificado não consegue empurrar um diário bloqueado por meio dele.
+- Um app modificado ainda pode falar direto com o autor bloqueado, e dois apps modificados podem trocar o diário entre si. A lista não alcança aparelhos que não a obedecem, e os nós de antes desta versão também não a aplicam.
+- O app oficial da própria pessoa bloqueada mantém o diário no armazenamento dela e pode servi-lo a quem já conhece a chave de descoberta dele (o armazenamento do nó serve qualquer diário que guarda a quem o pede; `docs/protocol.md` seção 4, quarentena). Bloquear não apaga o diário do aparelho do autor.
+- A versão web instalada (PWA) aplica sem rede a lista que tem guardada e só recebe uma lista mais nova pelo semeador. Os membros da CLI e os semeadores trocam a lista também pela DHT, sem depender de um semeador.
+- A lista traz só chaves públicas, um número de sequência e datas: nunca o motivo da decisão, o nome, o e-mail ou a conta Google.
+- Isto não é revogação de certificado de membro: o certificado individual continua válido, e o que sai é o diário, pelo bloqueio da chave. A revogação existe só para a chave de emissor do serviço de conta (`mod revoke-issuer`): se ela vazar, os certificados v2 e os @nomes que ela assinou deixam de valer em todos os nós atualizados.
 
 - **Mídia ilegal:** antes de exibir ou repassar, o app compara fotos e vídeos com listas de hashes de material ilegal conhecido, obtidas com organizações especializadas (a definir). Abuso sexual infantil é denunciado à SaferNet Brasil e à Polícia Federal.
 - **Prazos:** desde a decisão do STF sobre o Art. 19 (junho de 2025), a plataforma responde por crimes e atos ilícitos que não remover após notificação, sem precisar de ordem judicial (lógica do Art. 21). Para crimes contra a honra vale o Art. 19: a responsabilidade depende de ordem judicial. Anúncios pagos e circulação em massa de crimes graves exigem cuidado ainda maior. A associação publica seus prazos de resposta.

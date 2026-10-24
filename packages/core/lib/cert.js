@@ -1,5 +1,5 @@
-// Membership (v1 and v2), issuer and seeder certificates, the `username`
-// record (docs/protocol.md section 3) and key pair files.
+// Membership (v1 and v2), issuer, moderator and seeder certificates, the
+// `username` record (docs/protocol.md section 3) and key pair files.
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
@@ -11,10 +11,12 @@ const MEMBER_PREFIX_V2 = 'varanda-cert-v2'
 const SEEDER_PREFIX = 'varanda-seeder-v1'
 const ISSUER_PREFIX = 'varanda-issuer-v1'
 const USERNAME_PREFIX = 'varanda-username-v1'
+const MODERATOR_PREFIX = 'varanda-moderator-v1'
 const MEMBER_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const MEMBER_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const SEEDER_KEYS = ['v', 'seeder', 'date', 'association', 'signature']
 const ISSUER_KEYS = ['v', 'issuer', 'date', 'association', 'signature']
+const MODERATOR_KEYS = ['v', 'moderator', 'date', 'association', 'signature']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const AGE_BAND_RE = /^[a-z0-9+-]{1,32}$/
 const METHOD_RE = /^[a-z0-9-]{1,32}$/
@@ -90,6 +92,15 @@ function issuerCertPayload (cert) {
   return b4a.from([
     ISSUER_PREFIX,
     cert.issuer.toLowerCase(),
+    cert.date,
+    cert.association.toLowerCase()
+  ].join(LF), 'utf8')
+}
+
+function moderatorCertPayload (cert) {
+  return b4a.from([
+    MODERATOR_PREFIX,
+    cert.moderator.toLowerCase(),
     cert.date,
     cert.association.toLowerCase()
   ].join(LF), 'utf8')
@@ -178,6 +189,26 @@ function createIssuerCert ({ issuer, date = new Date().toISOString() } = {}, key
     signature: ''
   }
   cert.signature = b4a.toString(crypto.sign(issuerCertPayload(cert), keyPair.secretKey), 'hex')
+  return cert
+}
+
+// Signed by the association: lets `moderator` sign blocklist snapshots
+// (packages/core/lib/blocklist.js). Its own prefix, so an issuer delegation
+// (or any other association signature) never certifies a moderator.
+function createModeratorCert ({ moderator, date = new Date().toISOString() } = {}, keyPair) {
+  if (!isHex(moderator, 32)) throw new TypeError('moderator must be 64 hex characters')
+  if (!isCanonicalIso(date)) throw new TypeError('date must be a canonical ISO-8601 UTC string')
+  checkKeyPair(keyPair)
+  const association = b4a.toString(keyPair.publicKey, 'hex')
+  if (moderator.toLowerCase() === association) throw new TypeError('moderator must differ from the association')
+  const cert = {
+    v: 1,
+    moderator: moderator.toLowerCase(),
+    date,
+    association,
+    signature: ''
+  }
+  cert.signature = b4a.toString(crypto.sign(moderatorCertPayload(cert), keyPair.secretKey), 'hex')
   return cert
 }
 
@@ -288,6 +319,20 @@ function validateIssuerCertShape (cert) {
   }
 }
 
+function validateModeratorCertShape (cert) {
+  try {
+    if (!isPlainObject(cert) || !hasExactKeys(cert, MODERATOR_KEYS)) return 'malformed'
+    if (cert.v !== 1) return 'malformed'
+    if (!isLowerHex(cert.moderator, 32) || !isLowerHex(cert.association, 32)) return 'malformed'
+    if (cert.moderator === cert.association) return 'malformed'
+    if (!isLowerHex(cert.signature, 64)) return 'malformed'
+    if (!isCanonicalIso(cert.date)) return 'malformed'
+    return null
+  } catch {
+    return 'malformed'
+  }
+}
+
 // Same rule as the `username` case of validateRecord in records.js.
 function validateUsernameRecordShape (record) {
   try {
@@ -331,32 +376,59 @@ function verifyIssuerCert (cert, associationHex) {
   }
 }
 
-// Shared tail for a v2 certificate or a username record whose shape already
-// passed: the association, then the embedded issuer certificate, then the
-// issuer's own signature over `payload`.
-function verifyIssued (o, payload, associationHex) {
-  if (!isHex(associationHex, 32)) return { ok: false, reason: 'malformed' }
-  if (o.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
-  const delegation = { v: 1, issuer: o.issuer, date: o.issuerDate, association: o.association, signature: o.issuerSignature }
-  if (!verifyIssuerCert(delegation, o.association).ok) return { ok: false, reason: 'bad-issuer-signature' }
-  if (!crypto.verify(payload, b4a.from(o.signature, 'hex'), b4a.from(o.issuer, 'hex'))) return { ok: false, reason: 'bad-signature' }
-  return { ok: true }
-}
-
-function verifyUsernameRecord (record, memberHex, associationHex) {
+function verifyModeratorCert (cert, associationHex) {
   try {
-    if (validateUsernameRecordShape(record) !== null) return { ok: false, reason: 'malformed' }
-    if (record.member !== normalizeHex(memberHex)) return { ok: false, reason: 'member-mismatch' }
-    return verifyIssued(record, usernameRecordPayload(record), associationHex)
+    if (validateModeratorCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
+    if (!isHex(associationHex, 32)) return { ok: false, reason: 'malformed' }
+    if (cert.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
+    if (!checkSignature(moderatorCertPayload(cert), cert)) return { ok: false, reason: 'bad-signature' }
+    return { ok: true }
   } catch {
     return { ok: false, reason: 'malformed' }
   }
 }
 
-function verifyCert (cert, associationHex) {
+// The revoked issuer keys of the current blocklist snapshot
+// (blocklist.js revokedIssuerSet), or null. Anything without a `has` method
+// means "none revoked", so callers that pass no options keep the B1 verdicts.
+function revokedSet (opts) {
+  if (opts === null || typeof opts !== 'object') return null
+  const set = opts.revokedIssuers
+  return set !== null && typeof set === 'object' && typeof set.has === 'function' ? set : null
+}
+
+// Shared tail for a v2 certificate or a username record whose shape already
+// passed: the association, then the embedded issuer certificate, then the
+// issuer's own signature over `payload`, then revocation. Revocation is
+// checked last so 'revoked-issuer' is only ever claimed for an object the
+// revoked issuer really signed; anything forged keeps its signature reason.
+function verifyIssued (o, payload, associationHex, opts) {
+  if (!isHex(associationHex, 32)) return { ok: false, reason: 'malformed' }
+  if (o.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
+  const delegation = { v: 1, issuer: o.issuer, date: o.issuerDate, association: o.association, signature: o.issuerSignature }
+  if (!verifyIssuerCert(delegation, o.association).ok) return { ok: false, reason: 'bad-issuer-signature' }
+  if (!crypto.verify(payload, b4a.from(o.signature, 'hex'), b4a.from(o.issuer, 'hex'))) return { ok: false, reason: 'bad-signature' }
+  const revoked = revokedSet(opts)
+  if (revoked !== null && revoked.has(o.issuer)) return { ok: false, reason: 'revoked-issuer' }
+  return { ok: true }
+}
+
+function verifyUsernameRecord (record, memberHex, associationHex, opts) {
+  try {
+    if (validateUsernameRecordShape(record) !== null) return { ok: false, reason: 'malformed' }
+    if (record.member !== normalizeHex(memberHex)) return { ok: false, reason: 'member-mismatch' }
+    return verifyIssued(record, usernameRecordPayload(record), associationHex, opts)
+  } catch {
+    return { ok: false, reason: 'malformed' }
+  }
+}
+
+// `opts.revokedIssuers` (a Set of lowercase hex64 issuer keys) affects v2
+// certificates only: a v1 certificate is signed by the association itself.
+function verifyCert (cert, associationHex, opts) {
   try {
     if (validateCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
-    if (cert.v === 2) return verifyIssued(cert, certPayloadV2(cert), associationHex)
+    if (cert.v === 2) return verifyIssued(cert, certPayloadV2(cert), associationHex, opts)
     if (!isHex(associationHex, 32)) return { ok: false, reason: 'malformed' }
     if (cert.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
     if (!checkSignature(certPayload(cert), cert)) return { ok: false, reason: 'bad-signature' }
@@ -366,11 +438,11 @@ function verifyCert (cert, associationHex) {
   }
 }
 
-function certForKey (cert, keyHex, associationHex) {
+function certForKey (cert, keyHex, associationHex, opts) {
   try {
     if (validateCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
     if (cert.member !== normalizeHex(keyHex)) return { ok: false, reason: 'member-mismatch' }
-    return verifyCert(cert, associationHex)
+    return verifyCert(cert, associationHex, opts)
   } catch {
     return { ok: false, reason: 'malformed' }
   }
@@ -537,6 +609,10 @@ module.exports = {
   isUsername,
   isHex,
   normalizeHex,
+  isLowerHex,
+  isCanonicalIso,
+  isPlainObject,
+  hasExactKeys,
   certPayload,
   certPayloadV2,
   createCert,
@@ -548,6 +624,10 @@ module.exports = {
   createIssuerCert,
   validateIssuerCertShape,
   verifyIssuerCert,
+  moderatorCertPayload,
+  createModeratorCert,
+  validateModeratorCertShape,
+  verifyModeratorCert,
   usernameRecordPayload,
   createUsernameRecord,
   validateUsernameRecordShape,

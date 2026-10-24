@@ -79,6 +79,7 @@ Comandos:
   assoc init|show|certify    chave da associação de teste e certificados de membro
   assoc certify-seeder       certifica a chave de um semeador (--seeder)
   assoc certify-issuer       certifica a chave do emissor do serviço de conta (--issuer)
+  assoc certify-moderator    certifica a chave da moderação (--moderator)
   id create|show             identidade (chave pública do diário)
   cert add                   grava o certificado como bloco 0 do diário
   profile set                define nome e bio
@@ -97,6 +98,12 @@ Comandos:
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
+  mod init|show              chave da moderação e estado da lista de bloqueio
+  mod cert add               grava o certificado da moderação (--cert-file <f>)
+  mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
+  mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
+  mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
+  mod publish                reenvia a lista gravada ao semeador (--seeder)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -107,7 +114,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -391,7 +398,7 @@ Sem `seeder-key.json` a segunda linha é `chave do semeador: ausente (use seed k
 
 `seed list` e `seed drop` abrem o store e pegam o lock do diretório. Só funcionam com o semeador parado; com ele no ar saem com `erro: diretório de dados em uso` (código 1) e não mexem em nada. Pare o serviço, rode o comando e suba de novo.
 
-`seed drop` não é bloqueio. No próximo `sync` da autora o semeador confere o bloco 0 e admite o diário outra vez. Manter um diário fora depende das listas de moderação, previstas para a fase 2.
+`seed drop` não é bloqueio. No próximo `sync` da autora o semeador confere o bloco 0 e admite o diário outra vez. Para manter um diário fora, bloqueie a conta (veja "Bloquear uma conta").
 
 ### Saúde e métricas
 
@@ -632,6 +639,47 @@ Provisória até o parecer jurídico sobre registros de acesso (issue #38).
 - **Retenção provisória: 30 dias.** No systemd, `deploy/seeder/journald-varanda.conf` vai para `/etc/systemd/journald.conf.d/varanda.conf` (`MaxRetentionSec=30day`). Vale para o journal inteiro da máquina, então use numa máquina dedicada. No Docker o limite é de volume (50 MB), não de tempo; para limitar por tempo, troque o driver para `journald` no `compose.yaml` e use a mesma configuração.
 - **Registros de acesso (Marco Civil, Art. 15).** O semeador não registra endereço IP, então hoje não guarda registro de acesso. Se o parecer concluir que o Art. 15 se aplica à associação, a guarda por 6 meses vai exigir registrar endereço e horário das conexões (mudança de código, ainda não feita) e ajustar a retenção acima. A retenção é configuração do supervisor (`MaxRetentionSec`, `max-size` e `max-file`), não do código: muda sem nova versão.
 
+### Bloquear uma conta
+
+A associação mantém uma lista de bloqueio assinada pela chave da moderação. Cada nó (semeador, membro de linha de comando e versão web) troca a lista com os pares no canal `varanda/blocklist/1`, guarda a mais nova que confere e deixa de guardar, servir e mostrar os diários bloqueados. A lista traz só chaves públicas (contas bloqueadas e emissores revogados), um número de sequência e a data: nunca o motivo, um nome ou um e-mail.
+
+Tudo roda na máquina do operador, num diretório só da moderação (`--data <modDir>`, separado do da associação, de membro, de semeador e do serviço de conta). A chave secreta da moderação nunca vai para o servidor: só a lista assinada sai da máquina.
+
+1. Crie a chave da moderação e grave a chave pública Noise do semeador da associação (`seed status` a mostra); o comando imprime só a chave pública da moderação e nunca troca uma chave existente:
+
+   ```sh
+   node bin/varanda.js mod init --data <modDir> --association <hex> --seeder <chave do semeador>
+   ```
+
+   `--seeder` é opcional aqui: rodar `mod init --seeder <chave>` de novo num diretório que já existe só grava ou troca a chave do semeador. Sem ela gravada, cada comando que publica precisa de `--seeder <chave>`; sem nenhuma das duas, o comando sai com `erro: informe --seeder <chave do semeador> (seed status a mostra) ou use --no-publish` (código 1) antes de assinar qualquer coisa.
+
+2. Com a associação, certifique essa chave e grave o certificado na moderação:
+
+   ```sh
+   node bin/varanda.js assoc certify-moderator --data <assocDir> --moderator <hex> --out moderator-cert.json
+   node bin/varanda.js mod cert add --data <modDir> --cert-file moderator-cert.json
+   ```
+
+3. Bloqueie ou desbloqueie uma conta pela chave pública do diário (64 hex). A primeira lista da associação precisa de `--new-list`:
+
+   ```sh
+   node bin/varanda.js mod block <chave> --data <modDir> --new-list
+   node bin/varanda.js mod block <outra chave> --data <modDir>
+   node bin/varanda.js mod unblock <chave> --data <modDir>
+   ```
+
+Cada comando grava a próxima lista (`seq` + 1) em `blocklist.json`, anota a mudança em `moderation.jsonl` e publica a lista (as mesmas opções `--bootstrap` e `--dht-host` de `sync`). Num diretório sem `blocklist.json`, um comando que muda a lista recusa sem `--new-list` (`erro: este diretório não tem lista anterior; ...`, código 1, nada assinado): uma lista começada do zero por engano desfaria, em todos os nós, todos os bloqueios e revogações anteriores. Com uma lista já gravada, `--new-list` é recusado (`erro: este diretório já tem uma lista`).
+
+A lista vai só para o semeador da associação: o publicador o chama direto pela chave Noise dele, com uma chave Noise descartável (nunca a da moderação nem a da associação), sem entrar no tópico público da associação. A entrega só conta quando esse par se prova semeador da associação (o hello traz um certificado de semeador da associação para a chave Noise da própria conexão) e responde que guardou exatamente essa lista (o `have` dele traz o início da assinatura da lista): `lista publicada`, código 0. Se o semeador já tem outra lista com o mesmo número (acontece ao restaurar uma cópia antiga do diretório da moderação), o comando sai na hora com `erro: o semeador já tem outra lista com o mesmo número (seq N); isto acontece ao restaurar uma cópia antiga da moderação` e `faça uma nova alteração (ela recebe um número maior) ou rode mod publish depois de recuperar a lista mais recente` (código 1). De lá os nós a repassam entre si. O semeador precisa estar no ar. Sem confirmação em `--timeout-ms` (padrão 30000), o comando sai com `erro: não foi possível publicar a lista` e `a lista ficou gravada; rode mod publish quando o semeador estiver no ar` (código 1). `mod publish` reenvia a lista gravada sem mudar nada (mesmo `seq`, nenhuma linha nova em `moderation.jsonl`); sem lista gravada, `erro: nenhuma lista para publicar`. `--no-publish` só grava. Desbloquear uma chave que não estava na lista também gera uma lista nova e diz `não estava bloqueada`.
+
+Quem vê o endereço IP da máquina do operador ao publicar: o semeador (infraestrutura da associação) e os nós da DHT que encaminham a busca e a conexão até a chave dele. Os pares do tópico da associação não veem.
+
+`mod show` mostra a associação, a chave pública da moderação, o estado do certificado e a lista (`lista seq <n> de <data>: <k> contas bloqueadas, <r> emissores revogados`, ou `lista vazia`). Com `--json`, os comandos imprimem a lista pública; nenhum imprime a chave secreta.
+
+Se a chave do emissor do serviço de conta vazar, `mod revoke-issuer <chave>` põe essa chave na lista de emissores revogados: os certificados de membro v2 e os @nomes que ela assinou deixam de valer em todos os nós. `mod unrevoke-issuer <chave>` desfaz. As duas publicam a lista como `block`.
+
+Uma chave da moderação nova (outro `mod init` em outro diretório, certificada depois da atual) substitui a anterior: os nós aceitam a lista dela como mais nova mesmo começando de `seq` 1. Para trocar a chave sem perder nada, copie o `blocklist.json` da moderação anterior para o diretório novo antes do primeiro comando: o código continua dessa lista (mantém todos os bloqueios e emissores revogados) e assina a próxima com a chave nova. Sem a cópia, o diretório novo recusa sem `--new-list`, que só serve para a primeira lista da associação.
+
 ## Servidor local para a interface web (varanda-serve)
 
 `node bin/varanda-serve.js` roda um nó Varanda (a sessão do núcleo) neste computador e o expõe a uma interface no navegador por um WebSocket local. As chaves ficam nesta máquina. É um programa separado: `node bin/varanda.js` não muda.
@@ -722,6 +770,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `quarantine/` — Corestore só da busca do bloco 0 de um diário ainda não aceito. O `sync` apaga esse diretório ao abrir (depois do lock de `store/`) e de novo ao fechar. Não é estado.
 - `config.json` — `{ "v": 1, "role": "member", "association": "<hex64>" }`, escrito por `id create`.
 - `follows.json` — `{ "v": 1, "follows": ["<hex64>"] }`, chaves únicas em ordem.
+- `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a lista de bloqueio mais nova que este nó aceitou. Só chaves públicas.
 
 ### Semeador (`data/seeder`)
 
@@ -730,7 +779,8 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `config.json` — `{ "v": 1, "role": "seeder", "association": "<hex64>" }`, escrito pelo primeiro de `seed key`, `seed cert add` e `seed`.
 - `seeder-key.json` — par Noise do semeador, modo `0600`: `v`, `publicKey` (hex64) e `secretKey`. Criado por `seed key`. O comando não imprime `secretKey`.
 - `seeder-cert.json` — certificado do semeador em JSON indentado, escrito por `seed cert add`.
-- `admitted.json` — único arquivo de estado: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> } }`. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
+- `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita. Um arquivo ilegível impede a partida (`erro: lista de bloqueio ilegível`).
+- `admitted.json` — único arquivo de estado dos diários servidos: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> } }`. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
 
 ### Associação (`data/assoc`)
 
@@ -738,6 +788,17 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `members.jsonl` — uma linha JSON por certificado de membro, exatamente `member`, `ageBand`, `method` e `date`.
 - `seeders.jsonl` — uma linha JSON por certificado de semeador: `{"seeder":"<hex64>","date":"<ISO>"}`. Sem assinatura e sem segredo.
 - `issuers.jsonl` — uma linha JSON por certificado de emissor do serviço de conta: `{"issuer":"<hex64>","date":"<ISO>"}`. Sem assinatura e sem segredo.
+- `moderators.jsonl` — uma linha JSON por certificado da moderação: `{"moderator":"<hex64>","date":"<ISO>"}`. Sem assinatura e sem segredo.
+
+### Moderação (`data/mod`)
+
+Fica na máquina do operador, como a associação.
+
+- `config.json` — `{ "v": 1, "role": "moderator", "association": "<hex64>", "seeder": "<hex64>" }`, escrito por `mod init`; `seeder` (a chave Noise do semeador para onde a lista é publicada) só existe depois de `mod init --seeder`.
+- `moderator.json` — par de chaves da moderação, modo `0600`. `mod init` imprime só a chave pública.
+- `moderator-cert.json` — certificado da moderação assinado pela associação, escrito por `mod cert add`.
+- `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a última lista gravada. Ao trocar a chave da moderação, copie este arquivo para o diretório novo.
+- `moderation.jsonl` — uma linha JSON por mudança, modo `0600`: `{"op":"block","member":"<hex64>","seq":<n>,"date":"<ISO>"}` (`op` `block` ou `unblock`; em `revoke-issuer` e `unrevoke-issuer` o campo é `issuer`). Sem assinatura e sem segredo.
 
 Exemplo de linha em `members.jsonl` (a data real é a da emissão):
 
@@ -828,13 +889,16 @@ Limites desta fase:
 - O app nativo e a CLI ainda colam o certificado v1 emitido pela associação (`assoc certify`); só a versão web hospedada recebe o certificado v2 do serviço de conta. Nós de antes desta mudança rejeitam um certificado v2 como `malformed`, então o semeador e todo membro nativo ou da CLI precisam atualizar antes da primeira emissão v2.
 - A identidade piloto da versão web mantém o certificado v1 (um diário não aceita um segundo certificado). Ela pode vincular a conta Google e ganhar um @nome pelo registro de @nome, mas o certificado dela continua v1.
 - O @nome troca no máximo uma vez a cada 7 dias e um nome já usado por um membro não vai para outro; um nó antigo ou um seguidor que ainda não sincronizou pode mostrar por um tempo o nome anterior.
+- A lista de bloqueio é obedecida só por nós atualizados e honestos: um nó de antes da PR B2 não a aplica, um app modificado ainda pode falar direto com a conta bloqueada, e o app oficial da própria conta bloqueada guarda o diário e pode servi-lo a quem já conhece a chave de descoberta. A versão web sem rede aplica a lista que já guardou e só recebe uma nova pelo semeador. Bloquear não apaga nada do aparelho do autor. Veja `docs/verification.md` seção 13.
+- A lista tem no máximo 4096 contas bloqueadas e 64 emissores revogados. Cada conexão troca no máximo uma lista a cada 10 s e é derrubada depois de 5 mensagens inválidas no canal `varanda/blocklist/1`.
+- Certificados de membro individuais não são revogáveis (bloqueie a chave do diário). A chave do emissor do serviço de conta é revogada com `mod revoke-issuer`; depois disso gere outra (`account key`), certifique (`assoc certify-issuer`), `account cert add`, reinicie o serviço e peça que os membros vinculem de novo, porque os certificados v2 antigos deixam de valer. A reemissão automática fica para uma PR futura.
 
 Fora desta fase:
 
 - Verificação de idade real. Hoje o operador de `assoc certify` afirma `--age-band`. Comentário `TODO(phase1): the real age-check vendor decides here; today the operator asserts the age band.` em `packages/core/lib/assoc.js`. O mesmo limite está em `docs/protocol.md` (certificados).
 - Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync).
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
-- Listas de moderação e revogação. Certificado de membro e certificado de semeador não expiram e não são revogados nesta fase. Comentários `TODO(phase2): moderation lists — consult a block list before admitting.` e `TODO(phase2): certificate revocation list.` em `packages/core/lib/seeder.js`. Também `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js`, e os `TODO(phase2)` / `TODO(later phases)` correspondentes em `docs/protocol.md` (registros, certificados e admissão).
+- Denúncias e painel da moderação (a lista de bloqueio assinada já existe: `mod block`). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista. O comentário `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js` ainda cita a moderação.
 - Mídia. Publicação é só texto, até 1000 caracteres. O comentário de `packages/core/lib/records.js` citado acima, e `docs/protocol.md` (registros), deixam anexos para uma fase posterior.
 - Empacotamento Pear e distribuição fora das lojas. O aplicativo Expo (`apps/app`) já roda o núcleo no Bare (iOS e Android), e a versão web roda o nó no próprio navegador (sincronizando pelo semeador) ou usa o `varanda-serve` na máquina local; ver [docs/app.md](docs/app.md), [docs/verification.md](docs/verification.md) e [docs/development.md](docs/development.md). O CLI continua sendo um programa Node sem etapa de compilação.
 - Relay de certificados por seguidores. O `sync` anuncia só o próprio diário (`packages/core/lib/sync.js` envia `announce` da chave local e ignora `announce` recebido). Um seguidor não apresenta ao semeador o certificado de outra pessoa. Se a autora nunca sincronizou, o semeador não tem a cópia, mesmo que um seguidor já a tenha. Não há comentário `TODO` no código para esse relay. `docs/protocol.md` registra que o `announce` permanece sem autenticação de propósito: qualquer par pode pedir a admissão, e só entra o diário cujo bloco 0 passa na verificação.

@@ -23,6 +23,8 @@ const METRICS = [
   ['connections', 'conexões abertas', (s) => s.connections],
   ['peers', 'pares com canal de admissão aberto', (s) => s.peers],
   ['firewalled', '1 quando a DHT se vê atrás de firewall ou NAT', (s) => (s.firewalled ? 1 : 0)],
+  ['blocked', 'chaves na lista de bloqueio adotada', (s) => s.blocked],
+  ['blocklist_seq', 'seq da lista de bloqueio adotada; 0 sem lista', (s) => s.blocklistSeq],
   ['uptime_seconds', 'segundos desde o início do semeador', (s) => s.uptimeSeconds]
 ]
 

@@ -45,6 +45,33 @@
 //   link-closed                   the link dropped: nothing is tracked
 // They are emitted by checkOwnSync() from the hello / have handlers and the
 // diary watcher, in once and continuous runs alike.
+//
+// Moderation (docs/protocol.md section 3, "Blocklist snapshot"): the newest
+// signed snapshot this node accepted is kept in the storage's key-value area
+// (./node-store.js readBlocklist / writeBlocklist) and enforced from the
+// start of every run, before any connection: a blocked followed diary is
+// skipped 'blocked' and every stored replica of a blocked key is purged; a
+// diary whose v2 certificate comes from a revoked issuer fails its gates as
+// 'revoked-issuer' and is purged the same way. The own diary is never
+// deleted: when the own key is blocked it is simply not announced. Newer
+// snapshots arrive on the 'varanda/blocklist/1' channel of the SAME seeder
+// link (@varanda/core lib/blocklist-net.js), attached as soon as the muxer
+// exists but adopted only after the seeder's hello verified. There is no
+// second WebSocket and no service worker: offline, the node enforces the
+// stored snapshot and refreshes it only when the seeder link is back.
+// A snapshot that unblocks the own key (or un-revokes the own certificate's
+// issuer) makes the diary announced again on the same link. Enforcement of
+// an adopted snapshot is tracked like a purge, so it runs to its end even
+// when the run is ending and the result never lists a dropped diary.
+//
+// Replicas outside the follows: an unfollowed diary keeps its replica
+// (./member-ops.js followRemove, still readable with log.read). The storage
+// cannot list its cores, so every run records the keys it follows in the
+// key-value entry 'replicas' ({ v: 1, keys }, pruned of keys no longer
+// stored); the revocation sweep gates those replicas too, so one certified
+// by a revoked issuer is purged whatever its follow state. A replica
+// unfollowed before this index existed is not known here; ./member-ops.js
+// still hides it from log.read.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -52,6 +79,8 @@ const b4a = require('b4a')
 const { decodeBlock, validateRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { certForKey, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
+const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { memoryStorage } = require('./storage')
 const { wsStream } = require('./ws-stream')
 const store = require('./node-store')
@@ -67,6 +96,7 @@ const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
 
 const HEX64 = /^[0-9a-f]{64}$/
+const REPLICA_INDEX = 'replicas'
 
 function noop () {}
 
@@ -79,25 +109,42 @@ function hex (buf) {
 }
 
 // Block-0 verdict (docs §5, identical in the seeder and lib/sync.js):
-// null = accepted.
-function gateVerdict (raw, keyHex, associationHex) {
+// null = accepted. opts = { revokedIssuers } (the current snapshot's revoked
+// issuer keys): a v2 certificate from one of them is 'revoked-issuer'.
+function gateVerdict (raw, keyHex, associationHex, opts) {
   try {
     const block0 = decodeBlock(raw)
     if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
-    const r = certForKey(block0.cert, keyHex, associationHex)
+    const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
   } catch {
     return 'not-in-log'
   }
 }
 
-async function localGate (core, keyHex, associationHex) {
+async function localGate (core, keyHex, associationHex, opts) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return gateVerdict(raw, keyHex, associationHex)
+    return gateVerdict(raw, keyHex, associationHex, opts)
   } catch {
     return 'not-in-log'
   }
+}
+
+// The keys recorded in the 'replicas' entry (see the header); a torn value
+// reads as empty, an IndexedDB failure throws.
+async function readReplicaIndex (storage) {
+  let data = null
+  try {
+    data = await storage.readJson(REPLICA_INDEX)
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err
+  }
+  const keys = new Set()
+  if (data && data.v === 1 && Array.isArray(data.keys)) {
+    for (const k of data.keys) if (typeof k === 'string' && HEX64.test(k)) keys.add(k)
+  }
+  return keys
 }
 
 function watchContiguous (core, onGrow) {
@@ -152,7 +199,8 @@ async function runSync ({
   gateTimeoutMs = GATE_TIMEOUT_MS,
   connectTimeoutMs = CONNECT_TIMEOUT_MS,
   retryMinMs = RETRY_MIN_MS,
-  retryMaxMs = RETRY_MAX_MS
+  retryMaxMs = RETRY_MAX_MS,
+  blocklistMinIntervalMs // test-only: blocklist-net.js minIntervalMs
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   // The trust root is checked before anything is opened.
@@ -163,6 +211,23 @@ async function runSync ({
   }
   if (!(await store.diaryExists(storage))) throw new Error('identidade não encontrada')
   const association = config.association
+  // The stored snapshot is kept only if it still verifies for the trust
+  // root (createBlocklistState). A storage failure refuses the run: syncing
+  // without knowing what is blocked could fetch a blocked diary again.
+  const blocklist = createBlocklistState({
+    association,
+    load: async () => {
+      const data = await store.readBlocklist(storage)
+      return data === null ? null : data.snapshot
+    },
+    save: (snapshot) => store.writeBlocklist(storage, snapshot)
+  })
+  try {
+    await blocklist.ready()
+  } catch {
+    log('erro: falha ao ler a lista de bloqueio')
+    throw new Error('falha ao ler a lista de bloqueio')
+  }
   const deadline = Date.now() + timeoutMs
 
   let diary = null
@@ -208,6 +273,10 @@ async function runSync ({
   const hardError = (msg) => {
     if (!hardErrors.includes(msg)) hardErrors.push(msg)
   }
+  const isBlockedKey = (key) => blocklist.blocked().has(key)
+  const gateOpts = () => ({ revokedIssuers: blocklist.revokedIssuers() })
+  let unfollowedReplicas = new Set() // index keys not followed in this run
+  let sweepChain = Promise.resolve() // storage sweeps run one at a time
 
   function track (p, onOk, onErr) {
     const wrapped = p.then(onOk, onErr).catch(noop)
@@ -279,8 +348,20 @@ async function runSync ({
       quarantine: new Set(), // quarantine cores replicating on this link
       lastAdv: new Map(), // key -> last length processed (own + follows only)
       emittedHave: new Map(), // key -> last length reported as a 'have' event
-      timer: null
+      timer: null,
+      blocklist: null, // the 'varanda/blocklist/1' handle on this link
+      blocklistUnsupported: false, // the seeder does not speak it (pre-B2)
+      blocklistOffers: 0, // offers from this link in flight
+      blocklistOfferedHave: null, // ordering key of the newest offer from this link that resolved
+      verifiedGate: null, // resolves at onVerified, rejects on an unverified close
+      passVerified: noop,
+      failVerified: noop
     }
+    l.verifiedGate = new Promise((resolve, reject) => {
+      l.passVerified = resolve
+      l.failVerified = reject
+    })
+    l.verifiedGate.catch(noop)
     link = l
     l.timer = later(() => {
       l.timer = null
@@ -307,6 +388,11 @@ async function runSync ({
       // The muxer only (hypercore 10.38.2 index.js:157-187): no core is
       // attached before the hello verified.
       Hypercore.createProtocolStream(l.noise)
+      // The blocklist channel goes on the muxer at once, before the hello,
+      // so whichever side opens first is paired (protomux pairs an incoming
+      // open only for an opened or `pair`ed protocol); its snapshots are
+      // held by offerFromLink until the hello verified.
+      attachLinkBlocklist(l)
       l.peer = attachAdmission(l.noise, {
         role: 'member',
         have: inventory(),
@@ -338,6 +424,8 @@ async function runSync ({
   function onLinkClose (l) {
     clearLater(l.timer)
     l.timer = null
+    // A link that closes unverified never adopts what it sent.
+    l.failVerified(new Error('link fechado'))
     // Quarantine fetches on this link end now (their get() rejects).
     for (const q of l.quarantine) q.close().catch(noop)
     l.quarantine.clear()
@@ -363,7 +451,19 @@ async function runSync ({
       if ((e.state === 'active' || e.state === 'regate') && e.core) e.core.replicate(l.noise)
     }
     // send() queues until the channel opens, right after hello.
-    if (cert) l.peer.send({ type: 'announce', key: ownHex, cert })
+    announceOwn()
+    // Snapshots held since the channel opened may now be offered, and our
+    // have goes out again so the seeder sends anything newer (C2).
+    l.passVerified()
+    if (l.blocklist !== null) l.blocklist.announce()
+  }
+
+  // The own diary is announced only with a valid certificate and when the
+  // association has neither blocked the key nor revoked the certificate's
+  // issuer (the seeder would refuse it; the diary itself is never deleted).
+  function announceOwn () {
+    if (cert === null || ownRefused()) return
+    send({ type: 'announce', key: ownHex, cert })
   }
 
   // Keys whose advertisements matter: our own and the follows.
@@ -429,6 +529,12 @@ async function runSync ({
           emit({ event: 'rejected', key: msg.key, reason: msg.reason })
           if (msg.reason === 'timeout') {
             softError('rejeitado: timeout (' + key8(peer.peerKey) + ')')
+          } else if (!once && (msg.reason === 'blocked' || msg.reason === 'revoked-issuer')) {
+            // A moderation drop (the seeder adopted a snapshot refusing the
+            // own diary) does not end a continuous run: a later snapshot
+            // may allow it again on this link (onOwnModeration).
+            rejectedReason = msg.reason
+            softError('rejeitado: ' + msg.reason)
           } else {
             rejectedReason = msg.reason
             fail(['rejeitado: ' + msg.reason])
@@ -490,7 +596,7 @@ async function runSync ({
       if (ending || cert !== null) return
       if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) {
         cert = block0.cert
-        send({ type: 'announce', key: ownHex, cert })
+        announceOwn()
         emit({ event: 'own-recovered', length: diary.contiguousLength })
       } else {
         recoveryFailed = true
@@ -553,10 +659,13 @@ async function runSync ({
     } else if (recovering) {
       unmet.push(ownHex + ':recovering')
     }
-    // G2
-    if (cert && seederLink() !== null && !seederHolds()) {
+    // G2 (a refused own diary is never announced, so never held)
+    if (cert && !ownRefused() && seederLink() !== null && !seederHolds()) {
       unmet.push(ownHex + ':' + diary.length + '/' + (theirs(ownHex) || 0))
     }
+    // G3: the verified seeder's snapshot is known and not newer than ours
+    // (or one it sent was refused), or it does not speak the channel.
+    if (l !== null && !blocklistSettled(l)) unmet.push('blocklist')
     return unmet
   }
 
@@ -574,7 +683,7 @@ async function runSync ({
     for (const e of follows.values()) {
       if (e.state === 'failed' || e.state === 'failing') continue
       const t = theirs(e.key)
-      if (e.state === 'active') downloaded[e.key] = e.core.contiguousLength
+      if (e.state === 'active' && !isBlockedKey(e.key)) downloaded[e.key] = e.core.contiguousLength
       if (t === undefined || t < 1) unadvertised.push(e.key)
     }
     const l = seederLink()
@@ -760,9 +869,15 @@ async function runSync ({
     if (entry.gating || entry.state !== 'regate') return
     entry.gating = true
     const core = entry.core
-    track(localGate(core, entry.key, association), (reason) => {
+    track(localGate(core, entry.key, association, gateOpts()), (reason) => {
       entry.gating = false
       if (entry.state !== 'regate') return
+      if (reason === 'blocked' || reason === 'revoked-issuer') {
+        // A snapshot adopted after the quarantine verdict: moderation, not
+        // divergent data (the same skip and purge as any blocked author).
+        failFollow(entry, reason, { purge: true })
+        return
+      }
       if (reason) {
         // The seeder served a different block 0 to the replica than to the
         // quarantine: skip and purge, and the run cannot be ok.
@@ -791,6 +906,7 @@ async function runSync ({
 
   function noteAdvertisement (key, length) {
     if (key === ownHex) return // G2 reads the advertisement itself
+    if (isBlockedKey(key)) return
     const entry = follows.get(key)
     if (!entry || entry.state !== 'pending' || length < 1) return
     entry.advSeq++
@@ -799,6 +915,7 @@ async function runSync ({
 
   function maybeFetch (entry) {
     if (ending || deadlineHit || entry.state !== 'pending' || entry.fetching) return
+    if (isBlockedKey(entry.key)) return
     if (entry.advSeq <= entry.fetchedAdv) return
     const l = seederLink()
     if (l === null || (theirs(entry.key) || 0) < 1) return
@@ -872,7 +989,11 @@ async function runSync ({
       return
     }
     if (ending) return
-    const reason = gateVerdict(r.raw, entry.key, association)
+    if (isBlockedKey(entry.key)) {
+      failFollow(entry, 'blocked', { purge: false })
+      return
+    }
+    const reason = gateVerdict(r.raw, entry.key, association, gateOpts())
     if (reason) {
       failFollow(entry, reason, { purge: false })
       return
@@ -901,12 +1022,262 @@ async function runSync ({
     evaluate()
   }
 
+  // ---- moderation: the blocklist snapshot ----
+
+  let warnedOwnBlocked = false
+  let warnedOwnRevoked = false
+
+  // Whether the association refuses the own diary (blocked key, or a v2
+  // certificate from a revoked issuer: `cert` was verified when it was set).
+  // Warns once per run.
+  function ownRefused () {
+    if (ownHex === null) return false
+    if (isBlockedKey(ownHex)) {
+      if (!warnedOwnBlocked) {
+        warnedOwnBlocked = true
+        log('aviso: sua identidade está bloqueada pela associação')
+      }
+      return true
+    }
+    if (cert !== null && cert.v === 2 && blocklist.revokedIssuers().has(cert.issuer)) {
+      if (!warnedOwnRevoked) {
+        warnedOwnRevoked = true
+        log('aviso: o emissor do seu certificado foi revogado pela associação')
+      }
+      return true
+    }
+    return false
+  }
+
+  function attachLinkBlocklist (l) {
+    l.blocklist = attachBlocklist(l.noise, {
+      current: blocklist.current,
+      offer: (snapshot) => offerFromLink(l, snapshot),
+      compare: compareSnapshots,
+      ...(blocklistMinIntervalMs === undefined ? {} : { minIntervalMs: blocklistMinIntervalMs }),
+      onhave: () => evaluate(),
+      log: (ev) => {
+        if (ev && ev.event === 'peer-dropped') log('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
+      }
+    })
+    l.blocklist.supported.then((ok) => {
+      if (ok || link !== l) return
+      l.blocklistUnsupported = true
+      evaluate()
+    }, noop)
+  }
+
+  function blocklistSettled (l) {
+    if (l.blocklistUnsupported) return true
+    if (l.blocklist === null || l.blocklistOffers > 0) return false
+    const remote = l.blocklist.remoteHave
+    if (remote === null) return false
+    if (compareSnapshots(blocklist.current(), remote) >= 0) return true
+    // The seeder's newest was offered and refused (forged, stale): nothing
+    // newer to wait for from this link.
+    return l.blocklistOfferedHave !== null && compareSnapshots(l.blocklistOfferedHave, remote) >= 0
+  }
+
+  // Snapshots from the link wait for the hello to verify: an endpoint that
+  // is not a certified seeder never changes what this node enforces. A
+  // rejection is a local failure to blocklist-net.js (it retries while the
+  // connection lives), never a bad message from the peer.
+  async function offerFromLink (l, snapshot) {
+    await l.verifiedGate
+    if (ending || link !== l) throw new Error('fora da sincronização')
+    l.blocklistOffers++
+    // The save and the enforcement of what it adopted are ONE tracked unit:
+    // a snapshot saved while the run is ending (timeout, cancel) is still
+    // enforced, and finish() builds the result only after its purges were
+    // tracked (onAdopted tracks them synchronously, before the unit settles).
+    let r
+    let error = null
+    const unit = (async () => {
+      try {
+        r = await blocklist.offer(snapshot)
+      } catch (err) {
+        error = err
+        return
+      }
+      if (r.adopted) onAdopted(r)
+    })()
+    track(unit, noop, noop)
+    await unit
+    l.blocklistOffers--
+    if (error !== null) {
+      if (!ended) log('aviso: falha ao gravar a lista de bloqueio')
+      evaluate()
+      throw error
+    }
+    // Settles G3 only for what this offer covered: a newer snapshot the
+    // seeder advertises later keeps the run open until it is offered too.
+    const offered = { moderatorDate: snapshot && snapshot.moderatorDate, seq: snapshot && snapshot.seq }
+    if (l.blocklistOfferedHave === null || compareSnapshots(offered, l.blocklistOfferedHave) > 0) {
+      l.blocklistOfferedHave = offered
+    }
+    evaluate()
+    return r
+  }
+
+  // A snapshot was adopted (and saved): enforced whatever the run's state.
+  // The web node holds one link, so there is no other blocklist handle to
+  // announce it to (C4).
+  function onAdopted (r) {
+    onOwnModeration(r)
+    sweepBlocked()
+    if (r.revokedAdded.size > 0) {
+      regateRevoked()
+      sweepRevoked()
+    }
+  }
+
+  // The own diary's standing, recomputed both ways from the adopted
+  // snapshot (the sets say what it was before the swap). Newly refused: the
+  // seeder drops it, so a later admission must be fresh (G2). Allowed again:
+  // announced at once on the current link, and G2 applies again.
+  function onOwnModeration ({ added, removed, revokedAdded, revokedRemoved }) {
+    if (ownHex === null) return
+    const issuer = cert !== null && cert.v === 2 ? cert.issuer : null
+    const nowBlocked = isBlockedKey(ownHex)
+    const nowRevoked = issuer !== null && blocklist.revokedIssuers().has(issuer)
+    const wasBlocked = nowBlocked ? !added.has(ownHex) : removed.has(ownHex)
+    const wasRevoked = issuer !== null && (nowRevoked ? !revokedAdded.has(issuer) : revokedRemoved.has(issuer))
+    // A later refusal warns again.
+    if (!nowBlocked) warnedOwnBlocked = false
+    if (!nowRevoked) warnedOwnRevoked = false
+    const l = seederLink()
+    if (nowBlocked || nowRevoked) {
+      ownRefused()
+      if (!wasBlocked && !wasRevoked && l !== null) l.admittedOwn = false
+      return
+    }
+    if (!wasBlocked && !wasRevoked) return
+    if (l !== null) l.admittedOwn = false
+    if (ending) return
+    announceOwn()
+    evaluate()
+  }
+
+  // Storage sweeps (blocked, revoked) never overlap: two of them must not
+  // open or purge the same replica at once.
+  function serialSweep (fn) {
+    const p = sweepChain.then(fn)
+    sweepChain = p.catch(noop)
+    return p
+  }
+
+  // Every blocked key other than the own one: a follow not yet failed fails
+  // 'blocked' and is purged; whatever the storage still holds for any other
+  // blocked key (a failed follow, an unfollowed diary) is purged directly
+  // (C7: failFollow returns at once for a failing/failed entry, and a quota
+  // failure keeps an active replica's blocks). -> the tracked sweep.
+  function sweepBlocked () {
+    const direct = []
+    const cores = []
+    for (const key of blocklist.blocked()) {
+      if (key === ownHex) continue
+      const entry = follows.get(key)
+      if (entry && entry.state !== 'failing' && entry.state !== 'failed') {
+        failFollow(entry, 'blocked', { purge: true })
+        continue
+      }
+      if (entry && entry.state === 'failing') continue // its purge is in flight
+      if (entry && entry.core) {
+        cores.push(entry.core)
+        entry.core = null
+      }
+      direct.push(key)
+    }
+    return track(serialSweep(async () => {
+      for (const core of cores) await core.close()
+      for (const key of direct) {
+        if (await store.replicaExists(storage, key)) await store.purgeReplica(storage, key)
+      }
+    }), noop, () => {
+      if (!ended) fail(['falha ao limpar diário bloqueado'])
+      else log('aviso: falha ao limpar diário bloqueado')
+    })
+  }
+
+  // A newly revoked issuer: every accepted replica is gated again with the
+  // new set, and one whose certificate comes from that issuer fails
+  // 'revoked-issuer' and is purged.
+  function regateRevoked () {
+    for (const entry of follows.values()) {
+      if ((entry.state !== 'active' && entry.state !== 'regate') || !entry.core) continue
+      const core = entry.core
+      track(localGate(core, entry.key, association, gateOpts()), (reason) => {
+        if (reason !== 'revoked-issuer' || entry.core !== core) return
+        if (entry.state !== 'active' && entry.state !== 'regate') return
+        failFollow(entry, reason, { purge: true })
+      }, noop)
+    }
+  }
+
+  // Stored replicas the follow states do not cover (an unfollowed diary, a
+  // failed follow that kept its blocks): one whose block-0 v2 certificate
+  // comes from a revoked issuer is purged. Never the own diary; a blocked
+  // key is sweepBlocked's. -> the tracked sweep.
+  function sweepRevoked () {
+    const cores = []
+    const keys = []
+    for (const key of unfollowedReplicas) {
+      if (key !== ownHex && !follows.has(key) && !isBlockedKey(key)) keys.push(key)
+    }
+    for (const entry of follows.values()) {
+      if (entry.state !== 'failed' || isBlockedKey(entry.key)) continue
+      if (entry.core) {
+        cores.push(entry.core)
+        entry.core = null
+      }
+      keys.push(entry.key)
+    }
+    return track(serialSweep(async () => {
+      for (const core of cores) await core.close()
+      for (const key of keys) {
+        if (!(await store.replicaExists(storage, key))) continue
+        const core = await store.openReplica(storage, key)
+        let reason
+        try {
+          reason = await localGate(core, key, association, gateOpts())
+        } finally {
+          await core.close()
+        }
+        if (reason === 'revoked-issuer') await store.purgeReplica(storage, key)
+      }
+    }), noop, () => {
+      if (!ended) fail(['falha ao limpar diário de emissor revogado'])
+      else log('aviso: falha ao limpar diário de emissor revogado')
+    })
+  }
+
+  // Records this run's follows in the 'replicas' index and keeps the
+  // unfollowed keys that still hold a replica. Best effort: a failure only
+  // narrows what the revocation sweep can reach.
+  async function updateReplicaIndex () {
+    try {
+      const previous = await readReplicaIndex(storage)
+      const next = new Set()
+      for (const key of previous) {
+        if (key === ownHex || follows.has(key)) continue
+        if (await store.replicaExists(storage, key)) next.add(key)
+      }
+      unfollowedReplicas = new Set(next)
+      for (const key of follows.keys()) next.add(key)
+      const same = next.size === previous.size && [...next].every((k) => previous.has(k))
+      if (!same) await storage.writeJson(REPLICA_INDEX, { v: 1, keys: [...next].sort() })
+    } catch {
+      log('aviso: falha ao atualizar o índice de réplicas')
+    }
+  }
+
   try {
     diary = await store.openDiary(storage)
     ownHex = hex(diary.key)
     const block0 = await store.readBlock0(diary)
     if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) cert = block0.cert
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
+    ownRefused()
 
     if (once) deadlineTimer = setTimeout(onDeadline, Math.max(0, deadline - Date.now()))
     if (signal) {
@@ -944,11 +1315,18 @@ async function runSync ({
         discardedRegate: false
       }
       follows.set(key, entry)
+      if (isBlockedKey(key)) {
+        // Never opened: the sweep below purges whatever is stored.
+        entry.state = 'failed'
+        skipped.push({ key, reason: 'blocked' })
+        emit({ event: 'skipped', key, reason: 'blocked' })
+        continue
+      }
       if (!(await store.replicaExists(storage, key))) continue
       const core = await store.openReplica(storage, key)
       let reason = null
       if (core.fork !== 0) reason = 'fork'
-      else if (core.contiguousLength > 0) reason = await localGate(core, key, association)
+      else if (core.contiguousLength > 0) reason = await localGate(core, key, association, gateOpts())
       if (core.contiguousLength > 0 && reason === null) {
         activate(entry, core)
         continue
@@ -968,6 +1346,12 @@ async function runSync ({
         emit({ event: 'skipped', key, reason })
       }
     }
+
+    if (!ending) await updateReplicaIndex()
+    // Stored replicas of blocked keys, and unfollowed ones from a revoked
+    // issuer, go before any connection.
+    if (!ending) await sweepBlocked()
+    if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevoked()
 
     if (!ending) {
       stopDiaryWatch = watchContiguous(diary, (length) => {

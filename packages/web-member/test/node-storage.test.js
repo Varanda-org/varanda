@@ -12,7 +12,7 @@ const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
 const { idbNodeStorage, memoryNodeStorage, PAGE_SIZE } = require('../lib/node-storage')
-const { openDiary, diaryStatus, appendRecord, readAll } = require('../lib/node-store')
+const { openDiary, diaryStatus, appendRecord, readAll, readBlocklist, writeBlocklist } = require('../lib/node-store')
 const { postRecord } = require('@varanda/core/lib/records')
 const { testnet } = require('./helpers/net')
 
@@ -333,6 +333,30 @@ test('a legacy store on IndexedDB: no page holds the secret after the first open
   await diary.close()
   await storage.deleteCore('diary')
   t.absent(await storage.hasCore('diary'))
+  await storage.close()
+})
+
+test('blocklist kv: round trip, absent and malformed are null, survives deleting the diary', async (t) => {
+  await testnet(t, 1)
+  const storage = await idbNodeStorage(dbName())
+  t.is(await readBlocklist(storage), null, 'absent')
+  const snapshot = { v: 1, seq: 2, blocked: ['a'.repeat(64)] }
+  await writeBlocklist(storage, snapshot)
+  t.alike(await readBlocklist(storage), { v: 1, snapshot })
+  for (const bad of ['x', [], { v: 2, snapshot: {} }, { v: 1 }, { v: 1, snapshot: [] }, { v: 1, snapshot: null }]) {
+    await storage.writeJson('blocklist', bad)
+    t.is(await readBlocklist(storage), null, 'malformed')
+  }
+  // A value that is not JSON at all reads as absent; a storage failure throws.
+  const torn = { readJson: async () => { throw new SyntaxError('Unexpected token') } }
+  t.is(await readBlocklist(torn), null, 'unparseable value is null')
+  const broken = { readJson: async () => { throw new Error('ler blocklist: falha') } }
+  await t.exception(readBlocklist(broken), /falha/, 'an IndexedDB error still throws')
+  await writeBlocklist(storage, snapshot)
+  const diary = await openDiary(storage, crypto.keyPair())
+  await diary.close()
+  await storage.deleteCore('diary')
+  t.alike(await readBlocklist(storage), { v: 1, snapshot }, 'the diary reset keeps it')
   await storage.close()
 })
 

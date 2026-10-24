@@ -14,17 +14,21 @@ function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
-// Pure: no I/O, inputs are not mutated.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now() }) {
+// Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
+// keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
+// revoked issuer invalid (username.js), so a stolen issuer key cannot keep
+// naming diaries once the association revokes it.
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const items = []
   const future = []
+  const usernameOpts = { revokedIssuers }
   for (const { key, entries } of logs) {
     // Snapshot peer data once so all three readers see the same values,
     // even when the input has getters.
     const copied = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
     const name = (latestProfile(copied) || {}).name || null
-    const username = latestUsername(copied, key, association)
+    const username = latestUsername(copied, key, association, usernameOpts)
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {

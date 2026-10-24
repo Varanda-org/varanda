@@ -10,6 +10,10 @@
 // work locked, writes need it, ./node-store.js openDiary; limits: test-only
 // overrides of the diary limits, ./node-store.js appendRecord). Nothing here
 // talks to the network.
+//
+// Moderation: reads consult the blocklist snapshot ./sync.js stored (kept
+// only if it still verifies for the trust root), so a blocked followed
+// diary is hidden at once, even before a sync run purges its replica.
 const b4a = require('b4a')
 const { certForKey } = require('@varanda/core/lib/cert')
 const {
@@ -22,6 +26,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const store = require('./node-store')
 
@@ -83,6 +88,17 @@ async function withIdentity (ctx, fn) {
   }
 }
 
+// The stored snapshot's sets -> { blocked, revokedIssuers } (both empty when
+// none is stored or it does not verify; a storage failure throws).
+async function moderation (storage, association) {
+  const data = await store.readBlocklist(storage)
+  const snapshot = data === null ? null : data.snapshot
+  if (snapshot === null || !verifySnapshot(snapshot, association).ok) {
+    return { blocked: new Set(), revokedIssuers: new Set() }
+  }
+  return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
 // ---- id ----
 
 // Creates the diary for the session key pair (the trust root first), or
@@ -133,7 +149,10 @@ async function identityState (ctx) {
 
 async function certAdd (ctx, cert) {
   return withIdentity(ctx, async ({ diary, ownHex, association }) => {
-    const r = certForKey(cert, ownHex, association)
+    // Block 0 is never replaced: a certificate whose issuer the stored
+    // snapshot revoked (B2, R4) would leave the diary unusable for good.
+    const { revokedIssuers } = await moderation(ctx.storage, association)
+    const r = certForKey(cert, ownHex, association, { revokedIssuers })
     if (!r.ok) throw new Error('certificado inválido (' + r.reason + ')')
     if (diary.length > 0) {
       const block0 = decodeBlock(await diary.get(0, { wait: false, raw: true }))
@@ -193,6 +212,11 @@ const USERNAME_RECORD_KEYS = ['type', 'username', 'member', 'date', 'association
 // Appends a plain copy of an issuer-signed username record (the caller,
 // lib/session.js username.add, has verified it for the own key) -> { seq }.
 async function usernameAdd (ctx, record) {
+  // A record from a revoked issuer (B2, R4) is invalid for every reader.
+  const { revokedIssuers } = await moderation(ctx.storage, await trustRoot(ctx))
+  if (typeof record.issuer === 'string' && revokedIssuers.has(record.issuer.toLowerCase())) {
+    throw new UsageError('registro de nome inválido')
+  }
   const copy = {}
   for (const k of USERNAME_RECORD_KEYS) copy[k] = record[k]
   const { seq } = await publish(ctx, copy)
@@ -208,8 +232,11 @@ async function ownEntries (ctx) {
 // ---- follows ----
 
 async function followChange (ctx, author, follow) {
-  return withIdentity(ctx, async ({ ownHex }) => {
+  return withIdentity(ctx, async ({ ownHex, association }) => {
     if (author === ownHex) throw new Error('não é possível seguir a própria chave')
+    if (follow && (await moderation(ctx.storage, association)).blocked.has(String(author).toLowerCase())) {
+      throw new UsageError('autor bloqueado')
+    }
     const current = await store.readFollows(ctx.storage)
     const has = current.includes(author)
     if (follow === has) return { follows: current, changed: false }
@@ -256,25 +283,47 @@ async function readReplica (ctx, key) {
 }
 
 async function logRead (ctx, { author = null } = {}) {
-  const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: author && author !== ownHex ? null : await store.readAll(diary) }))
-  if (own.entries !== null) return own
-  return { key: author, entries: await readReplica(ctx, author.toLowerCase()) }
+  const own = await withIdentity(ctx, async ({ diary, ownHex, association }) => ({ key: ownHex, association, entries: author && author !== ownHex ? null : await store.readAll(diary) }))
+  if (own.entries !== null) return { key: own.key, entries: own.entries }
+  // The rule of skipReason: a blocked diary, or one whose block-0
+  // certificate comes from a revoked issuer, reads as absent (the same
+  // error, never why), even before a sync run purges it and whatever its
+  // follow state.
+  const key = String(author).toLowerCase()
+  const mod = await moderation(ctx.storage, own.association)
+  if (mod.blocked.has(key)) throw new Error('sem dados locais para este diário')
+  const entries = await readReplica(ctx, key)
+  if (mod.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, mod.revokedIssuers)) {
+    throw new Error('sem dados locais para este diário')
+  }
+  return { key: author, entries }
+}
+
+// Whether the log's block-0 certificate fails only because its issuer is
+// revoked.
+function revokedIssuerOf (entries, key, association, revokedIssuers) {
+  const first = entries.length > 0 ? entries[0].record : null
+  if (first === null || validateRecord(first, 0) !== null) return false
+  return certForKey(first.cert, key, association, { revokedIssuers }).reason === 'revoked-issuer'
 }
 
 // ---- feed ----
 
-// Reason a followed log is not shown, or null when it is kept.
-function skipReason (core, entries, key, association) {
+// Reason a followed log is not shown, or null when it is kept. mod: the
+// stored snapshot's { blocked, revokedIssuers } (optional).
+function skipReason (core, entries, key, association, mod = {}) {
+  if (mod.blocked && mod.blocked.has(key)) return 'blocked'
   if (core.fork !== 0) return 'fork'
   if (entries.length === 0) return 'no-cert'
   const first = entries[0].record
   if (validateRecord(first, 0) !== null) return 'not-in-log'
-  const r = certForKey(first.cert, key, association)
+  const r = certForKey(first.cert, key, association, { revokedIssuers: mod.revokedIssuers })
   return r.ok ? null : r.reason
 }
 
 async function feedRead (ctx, { limit = Infinity } = {}) {
   const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
   const kept = [own]
   const skipped = []
@@ -284,6 +333,11 @@ async function feedRead (ctx, { limit = Infinity } = {}) {
     const key = raw.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
+    // Hidden before any read, whether or not its purge already ran.
+    if (mod.blocked.has(key)) {
+      skipped.push({ key, reason: 'blocked' })
+      continue
+    }
     // Never create a core for a key with no local data (R5.4 a).
     if (!(await store.replicaExists(ctx.storage, key))) {
       skipped.push({ key, reason: 'no-cert' })
@@ -295,7 +349,7 @@ async function feedRead (ctx, { limit = Infinity } = {}) {
     let empty
     try {
       entries = await store.readAll(replica)
-      reason = skipReason(replica, entries, key, association)
+      reason = skipReason(replica, entries, key, association, mod)
       empty = replica.contiguousLength === 0
     } finally {
       await replica.close()
@@ -305,7 +359,7 @@ async function feedRead (ctx, { limit = Infinity } = {}) {
     if (reason === null) kept.push({ key, entries })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers })
   return { items: built.items, skipped, future: built.future }
 }
 

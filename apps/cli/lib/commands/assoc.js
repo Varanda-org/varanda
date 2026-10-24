@@ -1,7 +1,7 @@
 'use strict'
 
 const fs = require('node:fs')
-const { initAssociation, showAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate } = require('@varanda/core/lib/assoc')
+const { initAssociation, showAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate, issueModeratorCertificate } = require('@varanda/core/lib/assoc')
 
 function usage (message) {
   const err = new Error(message)
@@ -57,8 +57,17 @@ async function run (flags) {
     } else {
       process.stdout.write(JSON.stringify(cert) + '\n')
     }
+  } else if (sub === 'certify-moderator') {
+    if (!flags.moderator) throw usage('informe --moderator <hex>')
+    const cert = issueModeratorCertificate(dir, { moderator: flags.moderator })
+    if (flags.out) {
+      writePretty(flags.out, cert)
+      print(flags, { out: flags.out, cert }, 'certificado da moderação gravado em ' + flags.out)
+    } else {
+      process.stdout.write(JSON.stringify(cert) + '\n')
+    }
   } else {
-    throw usage('node bin/varanda.js assoc init|show|certify|certify-seeder|certify-issuer')
+    throw usage('node bin/varanda.js assoc init|show|certify|certify-seeder|certify-issuer|certify-moderator')
   }
 }
 

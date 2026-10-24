@@ -33,6 +33,7 @@ function eventLine (event) {
     case 'rejected': return 'rejected ' + safe(event.key) + ' ' + safe(event.reason)
     case 'have': return 'have ' + safe(event.key) + ' ' + safe(event.length)
     case 'fatal': return 'fatal ' + safe(event.key) + ' ' + safe(event.reason)
+    case 'blocklist': return 'blocklist ' + safe(event.seq)
     default: return safe(event.event)
   }
 }
@@ -122,6 +123,7 @@ function statusLines (status) {
     'chave do semeador: ' + (status.publicKey === null ? 'ausente (use seed key)' : status.publicKey),
     certificateLine(status.certificate),
     'diários admitidos: ' + status.admitted,
+    'lista de bloqueio: ' + (status.blocklist === null ? 'nenhuma' : 'seq ' + status.blocklist.seq + ' de ' + safe(status.blocklist.date)),
     'estado: ' + (status.running ? 'em execução' : 'parado')
   ].join('\n')
 }

@@ -16,6 +16,7 @@ Comandos:
   assoc init|show|certify    chave da associação de teste e certificados de membro
   assoc certify-seeder       certifica a chave de um semeador (--seeder)
   assoc certify-issuer       certifica a chave do emissor do serviço de conta (--issuer)
+  assoc certify-moderator    certifica a chave da moderação (--moderator)
   id create|show             identidade (chave pública do diário)
   cert add                   grava o certificado como bloco 0 do diário
   profile set                define nome e bio
@@ -34,6 +35,12 @@ Comandos:
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
+  mod init|show              chave da moderação e estado da lista de bloqueio
+  mod cert add               grava o certificado da moderação (--cert-file <f>)
+  mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
+  mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
+  mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
+  mod publish                reenvia a lista gravada ao semeador (--seeder)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -44,7 +51,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -113,6 +120,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     help: false,
     json: false,
     once: false,
+    noPublish: false,
+    newList: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
@@ -120,6 +129,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     member: null,
     seeder: null,
     issuer: null,
+    moderator: null,
     dhtHost: null,
     healthPort: null,
     healthHost: null,
@@ -142,7 +152,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   })
   t.alike(parseArgs([]), parseArgs([], process.env, process.cwd()), 'default env and cwd')
   t.alike(parse(['--json', 'seed', 'cert', '--once', 'add']).positionals, ['cert', 'add'])
-  for (const [command, positionals] of [['seed', ['key']], ['seed', ['cert', 'add']], ['seed', ['drop', upperKey]], ['assoc', ['certify-seeder']], ['assoc', ['certify-issuer']]]) {
+  for (const [command, positionals] of [['seed', ['key']], ['seed', ['cert', 'add']], ['seed', ['drop', upperKey]], ['assoc', ['certify-seeder']], ['assoc', ['certify-issuer']], ['assoc', ['certify-moderator']], ['mod', ['cert', 'add']], ['mod', ['unrevoke-issuer', upperKey]]]) {
     const flags = parse([command, ...positionals])
     t.is(flags.command, command)
     t.alike(flags.positionals, positionals)
@@ -150,6 +160,14 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const flag of ['--help', '-h']) t.is(parse([flag]).help, true)
   t.is(parse(['--json', '--json']).json, true)
   t.is(parse(['--once']).once, true)
+  t.is(parse(['mod', 'block', upperKey, '--no-publish']).noPublish, true)
+  t.alike(parse(['mod', 'block', upperKey, '--no-publish']).positionals, ['block', upperKey])
+  t.is(parse(['mod', 'block', upperKey, '--new-list']).newList, true)
+  t.is(parse(['mod', 'block', upperKey, '--seeder', upperKey]).seeder, lowerKey)
+  t.alike(parse(['mod', 'publish', '--seeder', upperKey]).positionals, ['publish'])
+  usage(t, ['--new-list=true'], 'opção desconhecida --new-list=true')
+  usage(t, ['--no-publish=true'], 'opção desconhecida --no-publish=true')
+  usage(t, ['--reason', 'spam'], 'opção desconhecida --reason')
 
   const strings = {
     data: ['relative', 'dataDir', path.join(root, 'relative')],
@@ -158,6 +176,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     member: [upperKey, 'member', lowerKey],
     seeder: [upperKey, 'seeder', lowerKey],
     issuer: [upperKey, 'issuer', lowerKey],
+    moderator: [upperKey, 'moderator', lowerKey],
     'age-band': ['18+', 'ageBand', '18+'],
     method: ['stub', 'method', 'stub'],
     out: ['cert.json', 'out', path.join(root, 'cert.json')],
@@ -204,7 +223,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--association', upperKey], { VARANDA_ASSOCIATION: 'invalid' }).association, lowerKey)
   usage(t, [], 'chave da associação inválida', { VARANDA_ASSOCIATION: 'invalid' })
   for (const invalid of ['', 'g'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), upperKey + '\n']) {
-    for (const name of ['member', 'author', 'seeder']) usage(t, ['--' + name, invalid], 'chave inválida')
+    for (const name of ['member', 'author', 'seeder', 'moderator']) usage(t, ['--' + name, invalid], 'chave inválida')
     if (invalid) usage(t, ['--association', invalid], 'chave da associação inválida')
   }
 

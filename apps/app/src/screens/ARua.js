@@ -19,6 +19,9 @@ const STEP = 5
 // never trigger a reload, or the screen would loop.
 const RELOAD_REASONS = ['done', 'timeout', 'stopped']
 
+// Feed skip reasons that come from the association's signed blocklist.
+const MODERATION_REASONS = ['blocked', 'revoked-issuer']
+
 export default function ARua ({ active, refresh, onReply }) {
   const node = useNode()
   const names = useNames()
@@ -66,7 +69,12 @@ export default function ARua ({ active, refresh, onReply }) {
 
   const items = feed === null ? [] : feed.items.slice().reverse()
   const atEnd = feed !== null && feed.items.length >= limit && limit >= FEED_LIMIT_MAX
-  const skipped = feed === null ? 0 : feed.skipped.length + feed.skippedTruncated
+  // Diaries skipped by the association's moderation (B2: a blocked author,
+  // or a certificate from a revoked issuer, member.js feedRead) get their own
+  // sentence, without the key; every other reason, and the truncated rest,
+  // keep the generic one.
+  const blocked = feed === null ? 0 : feed.skipped.filter((s) => MODERATION_REASONS.includes(s.reason)).length
+  const skipped = feed === null ? 0 : feed.skipped.length + feed.skippedTruncated - blocked
   const future = feed === null ? 0 : feed.future.length + feed.futureTruncated
 
   const onEndReached = () => {
@@ -89,6 +97,7 @@ export default function ARua ({ active, refresh, onReply }) {
   const footer = (
     <View style={styles.footer}>
       {atEnd ? <Soft>As publicações mais antigas não estão disponíveis nesta versão.</Soft> : null}
+      {blocked > 0 ? <Soft>{String(blocked) + (blocked === 1 ? ' diário seguido não aparece (bloqueado pela associação)' : ' diários seguidos não aparecem (bloqueados pela associação)')}</Soft> : null}
       {skipped > 0 ? <Soft>{String(skipped) + (skipped === 1 ? ' diário seguido não aparece (sem certificado válido ou com dados inválidos)' : ' diários seguidos não aparecem (sem certificado válido ou com dados inválidos)')}</Soft> : null}
       {future > 0 ? <Soft>{String(future) + (future === 1 ? ' publicação com data futura foi ignorada' : ' publicações com data futura foram ignoradas')}</Soft> : null}
     </View>

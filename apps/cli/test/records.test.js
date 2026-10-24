@@ -521,3 +521,31 @@ test('latestUsername: only the newest own record is a candidate', async (t) => {
   t.is(latestUsername(base, K1, 'zz'), null)
   t.is(latestUsername(base, K1, null), null)
 })
+
+test('latestUsername: a record from a revoked issuer is invalid', async (t) => {
+  await testnet(t)
+  const { assocHex, assocKp, issuerKp, issuerCert } = issuerSetup()
+  const issuer = issuerCert.issuer
+  const v2 = certLib.createIssuedCert({ member: K1, date: AT }, issuerKp, issuerCert)
+  // a second issuer certified by the same association
+  const newKp = crypto.keyPair()
+  const newCert = certLib.createIssuerCert({ issuer: b4a.toString(newKp.publicKey, 'hex'), date: AT }, assocKp)
+  const ana = certLib.createUsernameRecord({ member: K1, username: 'ana', date: AT }, issuerKp, issuerCert)
+  const bia = certLib.createUsernameRecord({ member: K1, username: 'bia', date: AT }, newKp, newCert)
+  const entries = [
+    { seq: 0, record: { type: 'member-cert', cert: v2 } },
+    { seq: 1, record: ana }
+  ]
+  const revokedIssuers = new Set([issuer])
+  t.is(latestUsername(entries, K1, assocHex), 'ana')
+  t.is(latestUsername(entries, K1, assocHex, { revokedIssuers: new Set() }), 'ana')
+  t.is(latestUsername(entries, K1, assocHex, { revokedIssuers }), null)
+  t.is(latestUsernameRecord(entries, K1, assocHex, { revokedIssuers }), null)
+  // a newer record from a non-revoked issuer is the name again
+  const relinked = entries.concat([{ seq: 2, record: bia }])
+  t.is(latestUsername(relinked, K1, assocHex, { revokedIssuers }), 'bia')
+  // no fallback: a revoked newest record hides an older valid one
+  const hidden = [entries[0], { seq: 1, record: bia }, { seq: 2, record: ana }]
+  t.is(latestUsername(hidden, K1, assocHex), 'ana')
+  t.is(latestUsername(hidden, K1, assocHex, { revokedIssuers }), null)
+})

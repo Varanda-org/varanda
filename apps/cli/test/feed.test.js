@@ -114,6 +114,29 @@ test('feed usernames follow the newest own record on v1 and v2 diaries', (t) => 
   t.alike(buildFeed({ logs: invalidLogs, association, now: NOW }).items.map((item) => item.username), [null, null])
 })
 
+test('feed usernames ignore records from a revoked issuer', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const otherIssuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerHex = b4a.toString(issuerKey.publicKey, 'hex')
+  const otherHex = b4a.toString(otherIssuerKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: issuerHex, date: AT }, associationKey)
+  const otherCert = createIssuerCert({ issuer: otherHex, date: AT }, associationKey)
+  const entries = [
+    { seq: 0, record: { type: 'member-cert', cert: createCert({ member: KA, date: AT }, associationKey) } },
+    { seq: 1, record: createUsernameRecord({ member: KA, username: 'ana', date: AT }, otherIssuerKey, otherCert) },
+    { seq: 2, record: createUsernameRecord({ member: KA, username: 'ana_maria', date: AT }, issuerKey, issuerCert) },
+    { seq: 3, record: post('oi', AT) }
+  ]
+  const read = (revokedIssuers) => buildFeed({ logs: [{ key: KA, entries }], association, now: NOW, revokedIssuers }).items[0]
+  t.is(read(undefined).username, 'ana_maria', 'no revocation: the newest record')
+  t.is(read(null).username, 'ana_maria', 'null means none revoked')
+  t.is(read(new Set([otherHex])).username, 'ana_maria', 'revoking another issuer changes nothing')
+  t.is(read(new Set([issuerHex])).username, null, 'a newest record from a revoked issuer yields null, with no fallback')
+  t.is(read(new Set([issuerHex])).text, 'oi', 'the posts of a v1 diary stay visible')
+})
+
 test('junk username records cost one candidate verification per log', (t) => {
   const associationKey = crypto.keyPair()
   const issuerKey = crypto.keyPair()

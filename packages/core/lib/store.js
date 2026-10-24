@@ -3,7 +3,7 @@
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
-const { randomBytes } = require('hypercore-crypto')
+const { randomBytes, discoveryKey } = require('hypercore-crypto')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
@@ -356,6 +356,23 @@ async function openStore (dataDir, { lock = 'posix', recover = false, suspend } 
   return store
 }
 
+// The data-dir lock alone, for a command that edits files in a data dir
+// without a Corestore (apps/cli `mod`: read-modify-write of blocklist.json).
+// Exactly the lock openStore takes in its default 'posix' mode (acquireLock),
+// so such commands exclude each other and any openStore on the same dir.
+// Rejects with LOCKED ('diretório de dados em uso') when held. Resolves an
+// idempotent release() that frees only this acquisition (its token).
+async function lockDataDir (dataDir) {
+  privateDir(dataDir)
+  const { lockDir, token } = await acquireLock(dataDir, { lock: 'posix', recover: false })
+  let released = false
+  return function release () {
+    if (released) return
+    released = true
+    releaseLock(lockDir, token)
+  }
+}
+
 // Read-only probe for status commands: whether a live process holds the
 // data-dir lock, by the same rules acquireLock applies (an owner-less lock
 // still inside its grace period counts as held). It never creates, takes
@@ -571,8 +588,34 @@ function writeFollows (dataDir, list) {
   writeJsonAtomic(path.join(dataDir, 'follows.json'), { v: 1, follows })
 }
 
+// The signed moderation snapshot, next to follows.json. Only the shape is
+// checked here (the caller verifies the signature); anything else is absent.
+function readBlocklist (dataDir) {
+  let data
+  try {
+    data = readJson(path.join(dataDir, 'blocklist.json'), null)
+  } catch (err) {
+    if (err instanceof SyntaxError) return null // torn or hand-edited file: treated as absent
+    throw err
+  }
+  const ok = data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
+    data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
+  return ok ? data : null
+}
+
+function writeBlocklist (dataDir, snapshot) {
+  writeJsonAtomic(path.join(dataDir, 'blocklist.json'), { v: 1, snapshot }, 0o600)
+}
+
+// Whether the store holds a core for this key (same probe as member.js and
+// seeder.js), without opening or creating it.
+function replicaStored (store, keyHex) {
+  return store.storage.hasCore(discoveryKey(b4a.from(keyHex.toLowerCase(), 'hex')))
+}
+
 module.exports = {
   openStore,
+  lockDataDir,
   lockHeld,
   storeExists,
   openDiary,
@@ -586,6 +629,9 @@ module.exports = {
   writeConfig,
   readFollows,
   writeFollows,
+  readBlocklist,
+  writeBlocklist,
+  replicaStored,
   readJson,
   writeJsonAtomic
 }
