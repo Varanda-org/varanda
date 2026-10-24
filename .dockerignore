@@ -1,8 +1,9 @@
 # Build context of the seeder image (deploy/seeder/Dockerfile): only what the
-# CLI needs at run time.
+# CLI needs at run time, plus the LICENSE that ships with it.
 *
 !package.json
 !package-lock.json
+!LICENSE
 !packages/core
 !packages/rpc
 !apps/cli

@@ -24,6 +24,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- A licença de distribuição passou de MIT para PolyForm Noncommercial 1.0.0, com Rodrigo Serviuc Pavezi como licenciante: uso não comercial é permitido; usos comerciais não abrangidos pela licença dependem de autorização prévia.
+  Ao abrir um PR, quem contribui concede ao licenciante uma licença para distribuir a contribuição sob quaisquer termos, sem CLA; os trechos de terceiros recebidos antes, sob a MIT, mantêm o aviso em CONTRIBUTING.md. O site e os guias deixaram de descrever o código como aberto.
 - O app ganhou o desenho da página de apresentação: três abas (A Rua, Seguindo, Diário), botão e folha de publicar, cabeçalho de perfil e ajustes.
   As funções e o protocolo são os mesmos; o desenho está em `apps/site/artwork/app-design.md`.
 

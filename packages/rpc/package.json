@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Contrato JSON entre a interface e o nó Varanda (IPC e WebSocket)",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "main": "index.js",
   "exports": {
     ".": "./index.js",

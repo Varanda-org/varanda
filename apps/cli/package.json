@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Protótipo fase 0 de rede social P2P (perfis, publicações, semeador)",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "node": ">=20"
   },
