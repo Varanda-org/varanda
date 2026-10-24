@@ -18,6 +18,9 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
   imagem Docker, Compose e unidade systemd com reinício e SIGTERM; política de registros provisória. ([#34](https://github.com/Varanda-org/varanda/issues/34))
 - Entrada WebSocket do semeador (`seed --ws-port`, desligada por padrão, só em `127.0.0.1`) e pacote experimental `@varanda/web-member`
   (membro com a chave no navegador, Hypercore 10, replicação pelo semeador e avaliação do dht-relay); resultado em `docs/verification.md` §8.
+- Versão web com o nó no navegador: a interface web roda contra uma sessão do `@varanda/web-member` na própria página (Hypercore 10, chave e diários no IndexedDB),
+  ligada ao contrato RPC em memória e sincronizada só pelo semeador (`seed --ws-port`), com as mesmas regras de quarentena, de certificado e de cota.
+  A web ganhou a tela Conectar (associação e endereço do semeador); uma segunda aba é recusada; o modo `varanda-serve` continua. Resultado em `docs/verification.md` §9.
 
 ### Alterado
 

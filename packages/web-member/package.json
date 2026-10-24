@@ -2,7 +2,7 @@
   "name": "@varanda/web-member",
   "version": "0.1.0",
   "private": true,
-  "description": "spike: membro no navegador (Hypercore 10)",
+  "description": "membro no navegador (Hypercore 10): o nó da versão web e o spike",
   "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "node": ">=20.19"
@@ -33,6 +33,7 @@
     "brittle": "4.5.0",
     "esbuild": "0.28.2",
     "events": "3.3.0",
+    "fake-indexeddb": "6.2.5",
     "hyperdht": "6.34.1",
     "ws": "8.22.0"
   }

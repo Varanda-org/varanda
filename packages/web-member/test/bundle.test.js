@@ -1,6 +1,7 @@
-// The browser bundle: scripts/build.js produces web/app.js bundled for the
-// browser without Node-only pieces (sodium-native, rocksdb) and without an
-// unresolved node: require. Both bundles (app and relay) carry
+// The browser bundles: scripts/build.js produces web/app.js bundled for the
+// browser (plus the relay page and the browser node, varanda-node.js, which
+// test/node-bundle.test.js runs) without Node-only pieces (sodium-native,
+// rocksdb) and without an unresolved node: require. Both bundles (app and relay) carry
 // lib/sodium-browser.js (sodium-javascript plus the ed25519 scalarmult
 // noise-curve-ed needs, on @noble/curves) in place of plain sodium-javascript:
 // recognised by the shim's failure message and a noble point-decoding
@@ -31,6 +32,10 @@ test('build.js bundles the member for the browser', async (t) => {
   const relayLine = (r.stdout || '').split('\n').find((l) => l.startsWith('RELAY_BUNDLE '))
   t.ok(relayLine && /^RELAY_BUNDLE ok \d+$/.test(relayLine), 'prints RELAY_BUNDLE ok <bytes>')
   t.comment(relayLine)
+  const nodeLine = (r.stdout || '').split('\n').find((l) => l.startsWith('NODE_BUNDLE '))
+  t.ok(nodeLine && /^NODE_BUNDLE \d+ GZIP \d+$/.test(nodeLine), 'prints NODE_BUNDLE <bytes> GZIP <bytes>')
+  t.comment(nodeLine)
+  t.ok(fs.existsSync(path.join(path.dirname(out), 'varanda-node.js')), 'node bundle written next to the app bundle')
   const relayOut = path.join(path.dirname(out), 'relay.js')
   t.ok(fs.existsSync(relayOut), 'relay bundle written next to the app bundle')
   const relay = fs.readFileSync(relayOut, 'utf8')
