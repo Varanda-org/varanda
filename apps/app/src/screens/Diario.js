@@ -1,6 +1,9 @@
 // Diário: the person's own profile header (sunset band, avatar, name, key,
 // bio, follow count) over the own log (log.read, the newest page), newest
 // first. Publications are PostRows; other blocks are short technical lines.
+// Posts still in the outbox ('fila de saída', browser node) are listed above
+// them; they are not PostRows (no reply, no publication date yet). A queued
+// item this page session did not write waits for the person ('enviar').
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -9,6 +12,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { useOutbox } from '../outboxProvider'
+import { UNCERTAIN_MESSAGE } from '../outbox'
 import { handleOf, relativeTime } from '../format'
 import { ErrorText, Mono, SectionHeader, Soft, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -36,6 +41,17 @@ function newestProfile (log) {
   return best === null ? null : best.record
 }
 
+// The state line of an outbox item. `held`: queued, but not sent
+// automatically (found in storage from an earlier visit).
+function PendingState ({ item, held }) {
+  if (item.state === 'sending') return <Soft>publicando…</Soft>
+  if (held) return <Soft>guardado antes: confira o texto e toque em enviar</Soft>
+  if (item.state === 'uncertain') return <ErrorText>{UNCERTAIN_MESSAGE}</ErrorText>
+  if (item.state === 'failed') return <ErrorText>{displayText(item.lastError)}</ErrorText>
+  if (item.attempts === 0) return <Soft>aguardando conexão</Soft>
+  return <Soft>{'nova tentativa em breve · ' + displayText(item.lastError)}</Soft>
+}
+
 function TechRow ({ children }) {
   return <Text style={styles.tech}>{children}</Text>
 }
@@ -43,6 +59,7 @@ function TechRow ({ children }) {
 export default function Diario ({ active, refresh, onSettings, onReply }) {
   const node = useNode()
   const names = useNames()
+  const outbox = useOutbox()
   const insets = useSafeAreaInsets()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
@@ -116,6 +133,63 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
 
   const bandHeight = insets.top + BAND
 
+  // Only this identity's items for this association.
+  const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
+  // Queued items not approved in this page session (stored before it, or
+  // changed in storage since they were approved): they wait for 'enviar',
+  // which approves them exactly as shown here.
+  const held = pending.filter((item) => item.state === 'queued' && !outbox.isAllowed(item))
+  const heldIds = held.map((item) => item.id)
+  // The post a queued reply answers, shown before it is approved: the stored
+  // target can be changed by any script of this origin, so the person must
+  // see which post 'enviar' approves (the approval covers the target too).
+  const replyTargetText = (to) => {
+    const sep = typeof to === 'string' ? to.indexOf(':') : -1
+    if (sep < 0) return displayText(String(to))
+    const author = to.slice(0, sep)
+    return displayText(names.nameOf(author) || handleOf(author)) + ' · #' + displayText(to.slice(sep + 1))
+  }
+  const outboxList = pending.length > 0
+    ? (
+      <>
+        <SectionHeader>Fila de saída</SectionHeader>
+        {heldIds.length > 0
+          ? (
+            <View style={styles.pendingAll}>
+              <Pill label='enviar todos' onPress={() => outbox.release(held)} />
+            </View>
+            )
+          : null}
+        {pending.map((item) => (
+          <View key={item.id} style={styles.pending}>
+            <Text style={styles.pendingText}>{displayText(item.text, { multiline: true })}</Text>
+            {item.kind === 'reply'
+              ? <Soft>{'resposta a ' + replyTargetText(item.to)}</Soft>
+              : null}
+            <Soft>
+              {'escrito ' + (relativeTime(item.writtenAt, now) ?? displayText(item.writtenAt)) +
+                ' · a data será a da publicação'}
+            </Soft>
+            <PendingState item={item} held={heldIds.includes(item.id)} />
+            {item.state !== 'sending'
+              ? (
+                <View style={styles.pendingActions}>
+                  {heldIds.includes(item.id)
+                    ? <Pill label='enviar' onPress={() => outbox.release([item])} />
+                    : null}
+                  {item.state === 'uncertain' || item.state === 'failed'
+                    ? <Pill label='tentar de novo' onPress={() => outbox.retry(item)} />
+                    : null}
+                  <Pill label='descartar' onPress={() => outbox.discard(item.id)} />
+                </View>
+                )
+              : null}
+          </View>
+        ))}
+      </>
+      )
+    : null
+
   const header = info === null
     ? (
       <View>
@@ -173,6 +247,7 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
             ? <Soft>Nenhum perfil nos últimos blocos; um perfil mais antigo pode existir.</Soft>
             : null}
         </View>
+        {outboxList}
         <SectionHeader right={Platform.OS === 'web' ? <Pill label='atualizar' onPress={reload} pending={pull.pending} /> : null}>
           Publicações
         </SectionHeader>
@@ -288,6 +363,16 @@ const styles = StyleSheet.create({
   countsNum: { color: colors.ink, fontWeight: '700' },
   warn: { fontSize: 14, lineHeight: 20, color: colors.warn, marginTop: 6 },
   footer: { padding: 16, gap: 8 },
+  pending: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    gap: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line
+  },
+  pendingText: { ...type.postText, color: colors.ink },
+  pendingActions: { flexDirection: 'row', gap: 8, marginTop: 6 },
+  pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 },
   tech: {
     ...type.replyMark,
     color: colors.soft,

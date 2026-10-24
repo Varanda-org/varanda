@@ -11,7 +11,7 @@
     "ios": "expo run:ios",
     "build:node": "node ../../packages/web-member/scripts/build.js --node public/varanda-node.js",
     "web": "npm run build:node && expo start --web",
-    "export:web": "npm run build:node && expo export --platform web",
+    "export:web": "npm run build:node && expo export --platform web && node scripts/finish-web.js",
     "link:addons": "bash scripts/link-addons.sh",
     "pack:worklet": "bash scripts/pack-worklet.sh",
     "gate": "node scripts/gate-server.js",

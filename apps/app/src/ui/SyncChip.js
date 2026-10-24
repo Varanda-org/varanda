@@ -1,5 +1,5 @@
-// The sync state chip of the top bar: offline, syncing, last sync or a call
-// to sync. Pressing it opens the sync screen (onPress).
+// The sync state chip of the top bar: no network (the browser says it is
+// offline), offline (no node), syncing, last sync or a call to sync. Pressing it opens the sync screen (onPress).
 
 import { Pressable, StyleSheet, Text } from 'react-native'
 import { sinceText } from '../format'
@@ -9,12 +9,14 @@ import { useNow } from './index'
 import { colors, type } from './theme'
 
 export function SyncChip ({ onPress }) {
-  const { phase, sync } = useNode()
+  const { phase, sync, online } = useNode()
   const now = useNow(30000)
-  const connected = phase === 'ready'
+  const offline = online === false
+  const connected = phase === 'ready' && !offline
   const stopped = sync && sync.stopped
   let text
-  if (!connected) text = 'sem conexão'
+  if (offline) text = 'sem rede'
+  else if (!connected) text = 'sem conexão'
   else if (sync && sync.active) text = 'sincronizando…'
   else if (stopped && stopped.reason === 'done' && !(stopped.result && stopped.result.ok === false)) text = 'sincronizado ' + sinceText(stopped.at, now)
   else text = 'sincronizar'

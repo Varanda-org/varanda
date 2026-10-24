@@ -7,6 +7,9 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- PWA hospedado abre sem rede depois de uma visita com rede, permite Entrar com a passkey e ler o que está no aparelho; o `sw.js` guarda a versão verificada do app e confere de novo o SHA-256 de cada arquivo guardado antes de entregá-lo, e a fila de saída guarda publicações e respostas para enviar quando a conexão voltar, com a identidade desbloqueada.
+  A fila aparece no Diário; a data de cada publicação é a do envio efetivo ao diário, não a de quando o texto foi escrito. Um envio incerto espera a decisão da pessoa, sem repetição automática.
+  Só sai sozinho o que foi escrito com a página aberta; o que ficou de uma visita anterior espera a pessoa tocar em "enviar" no Diário. Isso protege contra uma publicação plantada no aparelho enquanto a identidade estava bloqueada.
 - Implantação automática pelo GitHub Actions: a cada push em `main`, o fluxo `deploy` repete o CI e roda `deploy/seeder/deploy.sh` no servidor por SSH (chave de comando forçado, `known_hosts` fixo, ambiente `producao`).
   O script só implanta a ponta de `main`, confere a saúde (semeador, app servido e WebSocket) e volta sozinho para a versão anterior se falhar. Fica pulado até `VARANDA_DEPLOY=true`.
 - Versão web no ar no servidor do semeador: `seed --ws-origin` (ou `VARANDA_WS_ORIGIN`) libera a origem do PWA na entrada WebSocket;
@@ -32,6 +35,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- O Caddy serve todos os arquivos de `/srv/web` com `Cache-Control: no-cache`, revalidado por ETag; arquivos ausentes com extensão dão 404 com `no-store`, e só caminhos sem extensão recebem `index.html` (`/varanda.json` continua com `no-store`).
+  O build e a implantação conferem `sw.js`, com sonda byte a byte quando ele existe em `www` (a primeira implantação ainda roda o `deploy.sh` anterior); `expo.web.lang` passa a `pt-BR`, e o servidor do `varanda-serve` reconhece `.webmanifest`.
 - A licença de distribuição passou de MIT para PolyForm Noncommercial 1.0.0, com Rodrigo Serviuc Pavezi como licenciante: uso não comercial é permitido; usos comerciais não abrangidos pela licença dependem de autorização prévia.
   Ao abrir um PR, quem contribui concede ao licenciante uma licença para distribuir a contribuição sob quaisquer termos, sem CLA; os trechos de terceiros recebidos antes, sob a MIT, mantêm o aviso em CONTRIBUTING.md. O site e os guias deixaram de descrever o código como aberto.
 - O app ganhou o desenho da página de apresentação: três abas (A Rua, Seguindo, Diário), botão e folha de publicar, cabeçalho de perfil e ajustes.

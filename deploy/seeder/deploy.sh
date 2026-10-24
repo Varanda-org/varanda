@@ -319,9 +319,10 @@ aguardar_health() {
   return 1
 }
 
-# O fallback do Caddy responde 200 para qualquer caminho, então um 200 não
-# prova nada: os bytes servidos precisam ser os de www. Sem --compressed o
-# Caddy não comprime e a comparação é direta.
+# O Caddy responde o index.html (200) para qualquer caminho sem extensão, e
+# um arquivo com extensão que falta é um 404 de verdade; mesmo assim um 200
+# não prova nada: os bytes servidos precisam ser os de www. Sem --compressed
+# o Caddy não comprime e a comparação é direta.
 servido_igual() {
   local arquivo=$1 baixado="$state/sonda.tmp"
   rm -f "$baixado"
@@ -355,14 +356,23 @@ servido_json() {
 # na saúde. A primeira implantação com esta mudança roda o deploy.sh anterior
 # (o bash já leu o arquivo inteiro antes do git reset), sem esta sonda: essa
 # primeira vez é conferida à mão, com curl.
+# O mesmo vale para o sw.js e para o bundle com hash em /_expo/: a primeira
+# implantação que traz estas sondas ainda roda o deploy.sh anterior, então
+# elas só valem a partir da implantação seguinte, e essa primeira vez é
+# conferida à mão, com curl. Uma volta para um www sem sw.js (ou sem bundle
+# citado no index.html) ainda passa: a sonda só roda se o arquivo existe.
+# O bundle prova que o Caddy serve o arquivo com hash, não o index.html.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0
+  local fim=$((SECONDS + 60)) json=0 bundle
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
     json=1
   fi
+  bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
   while [ "$SECONDS" -lt "$fim" ]; do
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
-      && { [ "$json" = 0 ] || servido_json; }; then
+      && { [ "$json" = 0 ] || servido_json; } \
+      && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
+      && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; }; then
       return 0
     fi
     sleep 3
@@ -438,8 +448,8 @@ construir_web() {
     log 'o build gerou links simbólicos ou arquivos especiais em apps/app/dist'
     return 1
   fi
-  if [ ! -f "$dist/index.html" ] || [ ! -f "$dist/varanda-node.js" ]; then
-    log 'o build não gerou index.html e varanda-node.js'
+  if [ ! -f "$dist/index.html" ] || [ ! -f "$dist/varanda-node.js" ] || [ ! -f "$dist/sw.js" ]; then
+    log 'o build não gerou index.html, varanda-node.js e sw.js'
     return 1
   fi
   if [ -n "$(git status --porcelain --untracked-files=no)" ] \

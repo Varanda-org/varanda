@@ -266,6 +266,7 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><p>varanda</p>')
   fs.mkdirSync(path.join(root, 'assets'))
   fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'console.log(1)')
+  fs.writeFileSync(path.join(root, 'manifest.webmanifest'), '{"name":"Varanda"}')
   fs.writeFileSync(path.join(root, '.env'), 'SECRET=1')
   fs.writeFileSync(path.join(outside, 'secret.txt'), 'segredo')
   fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'))
@@ -291,6 +292,11 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   t.is(js.status, 200)
   t.is(js.headers['content-type'], 'text/javascript; charset=utf-8')
   t.is((await request(s, { path: '/assets/app.js', method: 'HEAD' })).status, 200, 'HEAD')
+
+  const manifest = await request(s, { path: '/manifest.webmanifest' })
+  t.is(manifest.status, 200, 'web manifest served')
+  t.is(manifest.headers['content-type'], 'application/manifest+json; charset=utf-8', 'web manifest type')
+  t.is((await request(s, { path: '/missing.webmanifest' })).status, 404, 'missing web manifest -> 404')
 
   const spa = await request(s, { path: '/perfil/abc' })
   t.is(spa.status, 200, 'SPA fallback')

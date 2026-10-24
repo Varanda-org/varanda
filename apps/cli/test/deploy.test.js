@@ -151,7 +151,14 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'chown -R 65534:65534 "$stage"',
     // The rollback only undoes what the deploy actually changed.
     'servicos_trocados=1',
-    'www_trocado=1'
+    'www_trocado=1',
+    // The service worker and the hashed bundle are probed after the deploy,
+    // and the build must produce sw.js.
+    'servido_igual sw.js sw.js',
+    '[ ! -f "$www/sw.js" ]',
+    // Split so that standard does not read it as a template placeholder.
+    'servido_igual "$' + '{bundle#/}" "$' + '{bundle#/}"',
+    'o build não gerou index.html, varanda-node.js e sw.js'
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
