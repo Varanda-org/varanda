@@ -50,7 +50,9 @@ const USAGE_MESSAGES = new Set([
   'limite de diários seguidos atingido',
   'limite do diário atingido',
   'diretório não é de um membro',
-  'associação diferente da configurada'
+  'associação diferente da configurada',
+  'registro de nome inválido',
+  'registro de nome antigo'
 ])
 // Reason codes are lowercase ASCII tokens (cert.js and records.js).
 const USAGE_PATTERNS = [
@@ -476,10 +478,30 @@ function createSession ({
       return { seq: r.seq }
     }),
 
+    // Registered so the dispatcher answers USAGE rather than INTERNAL: a
+    // Hypercore 11 diary key is not the raw signer (docs/protocol.md:13), so
+    // only the browser node, whose diary key is the Ed25519 public key, can
+    // prove it (packages/web-member/lib/session.js). Nothing is opened.
+    'account.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     'profile.set': serial(async ({ name, bio }) => {
       const own = await requireOwnKey()
       const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))
       return { seq, ref: own + ':' + seq }
+    }),
+
+    // Appends an issuer-signed username record (docs/rpc.md 5.19), verified
+    // for the own key and the association; idempotent, and a record not newer
+    // than the diary's latest is USAGE 'registro de nome antigo'. A Hypercore
+    // 11 diary key is not the signer, so a record for it is normally not
+    // issued and this answers USAGE 'registro de nome inválido'.
+    'username.add': serial(async ({ record }) => {
+      await requireOwnKey()
+      const r = await withStore((c) => member.usernameAdd(c, record))
+      if (!r.changed) return { changed: false, username: record.username }
+      return { changed: true, username: record.username, seq: r.seq }
     }),
 
     'post.create': serial(async ({ text }) => {

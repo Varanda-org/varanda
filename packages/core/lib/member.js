@@ -11,7 +11,8 @@ const path = require('#path')
 const process = require('#process')
 const b4a = require('b4a')
 const { discoveryKey, randomBytes } = require('hypercore-crypto')
-const { certForKey } = require('./cert')
+const { certForKey, verifyUsernameRecord } = require('./cert')
+const { latestUsernameRecord } = require('./username')
 const {
   decodeBlock,
   memberCertRecord,
@@ -40,6 +41,9 @@ const { UsageError } = require('./errors')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
+const BAD_USERNAME_RECORD = 'registro de nome inválido'
+const OLD_USERNAME_RECORD = 'registro de nome antigo'
+const USERNAME_RECORD_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 
 function hex (key) {
   return b4a.toString(key, 'hex')
@@ -245,6 +249,34 @@ async function postReply (ctx, { to, text }) {
   return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to })))
 }
 
+// ---- username ----
+
+// Appends an issuer-signed username record (docs/rpc.md 5.19) after
+// verifying it for the own diary key and the trust root -> { changed, seq }.
+// A record that already is the diary's latest verified one is not written
+// again ({ changed: false }); one not newer (by `date`) than it is refused
+// (OLD_USERNAME_RECORD): the newest record by seq is the displayed name, so
+// an earlier name would revert a rename, and two records of the same instant
+// cannot be ordered. A Hypercore 11 diary key is not the signing key, so the
+// issuing service normally has no record for it.
+async function usernameAdd (ctx, record) {
+  return withIdentity(ctx, async ({ diary, ownHex, association }) => {
+    if (!verifyUsernameRecord(record, ownHex, association).ok) throw new Error(BAD_USERNAME_RECORD)
+    const latest = latestUsernameRecord(await readAll(diary), ownHex, association)
+    if (latest !== null && deepEqual(latest, record)) return { changed: false, seq: null }
+    if (latest !== null && record.date <= latest.date) throw new Error(OLD_USERNAME_RECORD)
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const copy = {}
+    for (const k of USERNAME_RECORD_KEYS) copy[k] = record[k]
+    try {
+      return { changed: true, seq: await appendRecord(diary, copy) }
+    } catch (err) {
+      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+      throw err
+    }
+  })
+}
+
 // ---- follows ----
 
 async function followChange (ctx, author, follow) {
@@ -357,7 +389,7 @@ async function feedRead (ctx, { limit = Infinity, onWarn = () => {} } = {}) {
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity })
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future }
   })
@@ -365,6 +397,7 @@ async function feedRead (ctx, { limit = Infinity, onWarn = () => {} } = {}) {
 
 module.exports = {
   GENESIS_REQUIRED,
+  BAD_USERNAME_RECORD,
   trustRoot,
   withIdentity,
   ensureMemberConfig,
@@ -377,6 +410,7 @@ module.exports = {
   profileSet,
   postCreate,
   postReply,
+  usernameAdd,
   followAdd,
   followRemove,
   followList,

@@ -1,8 +1,9 @@
 # Caddy na frente do semeador: serve o app web (o PWA, em deploy/seeder/www) e
 # repassa wss://<domínio>/seeder para a entrada WebSocket do semeador em
-# 127.0.0.1. TLS automático (Let's Encrypt) para o domínio em VARANDA_DOMAIN.
-# Usado por deploy/seeder/compose.web.yaml; passo a passo no README, seção
-# "Pôr a versão web no ar".
+# 127.0.0.1, e /account/* para o serviço de conta. TLS automático (Let's
+# Encrypt) para o domínio em VARANDA_DOMAIN. Usado por
+# deploy/seeder/compose.web.yaml; passo a passo no README, seção "Pôr a versão
+# web no ar".
 {
 	# Sem a API de administração (ela escutaria em 127.0.0.1:2019 do host).
 	admin off
@@ -44,6 +45,21 @@
 		header Content-Type "application/json"
 		header Cache-Control "no-store"
 		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
+	}
+
+	# O serviço de conta (vínculo com o Google e @nome), em 127.0.0.1. Como o
+	# semeador, ele só aceita o Host do destino. Os cabeçalhos com o endereço
+	# do cliente saem: nenhum endereço chega ao serviço. Toda resposta de
+	# /account vem dele com Cache-Control no-store. O CSP acima não muda: a
+	# página usa fetch na mesma origem e navega (página inteira) para o
+	# Google; form-action 'none' só vale para envio de formulários.
+	# Antes do handle abaixo: sem este, /account/* cairia no index.html.
+	handle /account/* {
+		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
 	}
 
 	# O app é uma página única: um caminho que não é arquivo volta para

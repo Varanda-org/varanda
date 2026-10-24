@@ -2,6 +2,7 @@
 
 const { safe, cpWidth, displayWidth } = require('./safe')
 const { validRecordCopy, latestProfile, formatRef } = require('./records')
+const { latestUsername } = require('./username')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -14,21 +15,23 @@ function cmp (a, b) {
 }
 
 // Pure: no I/O, inputs are not mutated.
-function buildFeed ({ logs, limit = Infinity, now = Date.now() }) {
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now() }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const items = []
   const future = []
   for (const { key, entries } of logs) {
-    const name = (latestProfile(entries) || {}).name || null
-    for (const { seq, record } of entries) {
-      // Plain copy validated once; every field below is read from the copy.
-      const post = validRecordCopy(record, seq)
+    // Snapshot peer data once so all three readers see the same values,
+    // even when the input has getters.
+    const copied = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const name = (latestProfile(copied) || {}).name || null
+    const username = latestUsername(copied, key, association)
+    for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         future.push({ author: key, seq })
         continue
       }
-      items.push({ author: key, name, seq, at: post.at, text: post.text, replyTo: post.replyTo })
+      items.push({ author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
@@ -74,7 +77,8 @@ function formatFeedItem (item, { width } = {}) {
   const max = total - 2
   const name = safe(item.name || 'anônimo')
   const head = '[' + item.at + '] '
-  const tail = ' (' + shortKey(item.author) + ') #' + item.seq + reply
+  const username = item.username == null ? '' : ' @' + safe(item.username)
+  const tail = ' (' + shortKey(item.author) + username + ') #' + item.seq + reply
   let rows
   if (total === Infinity) {
     rows = [head + name + tail]

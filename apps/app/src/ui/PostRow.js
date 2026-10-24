@@ -5,15 +5,16 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { handleOf, relativeTime } from '../format'
+import { atHandle, relativeTime } from '../format'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { colors, type } from './theme'
 
-export function PostRow ({ author, name, at, text, replyToName, now, onReply }) {
+export function PostRow ({ author, name, username, at, text, replyToName, now, onReply }) {
   const time = relativeTime(at, now) ?? displayText(at)
   const hasName = typeof name === 'string' && name.trim() !== ''
-  const shown = hasName ? displayText(name) : displayText(handleOf(author))
+  const handle = displayText(atHandle(username, author))
+  const shown = hasName ? displayText(name) : handle
   return (
     <View style={styles.row}>
       <Avatar name={name} publicKey={author} size={44} />
@@ -23,7 +24,7 @@ export function PostRow ({ author, name, at, text, replyToName, now, onReply }) 
             {shown}
           </Text>
           <Text style={styles.meta} numberOfLines={1}>
-            {hasName ? displayText(handleOf(author)) + ' · ' + time : time}
+            {hasName ? handle + ' · ' + time : time}
           </Text>
         </View>
         {replyToName

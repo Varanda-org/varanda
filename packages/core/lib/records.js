@@ -13,11 +13,18 @@ const MAX_LOG_BLOCKS = 100000
 const MAX_LOG_BYTES = 64 * 1024 * 1024
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
+const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const PROFILE_KEYS = ['type', 'name', 'bio', 'at']
 const POST_KEYS = ['type', 'text', 'at', 'replyTo']
-// Same field rules as validateCertShape in lib/cert.js (not imported here).
+const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
+// Same field rules as validateCertShape and validateUsernameRecordShape in
+// lib/cert.js (not imported here); apps/cli/test/records.test.js checks parity.
 const AGE_BAND_RE = /^[a-z0-9+-]{1,32}$/
 const METHOD_RE = /^[a-z0-9-]{1,32}$/
+const AGE_BAND_V2 = 'unchecked'
+const METHOD_V2 = 'google'
+const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
+const FALLBACK_HANDLE_RE = /^[0-9a-f]{6}$/
 
 function nowIso () {
   return new Date().toISOString()
@@ -85,15 +92,49 @@ function hasControlChars (s, allowLf) {
   return false
 }
 
+function isUsername (s) {
+  return typeof s === 'string' && USERNAME_RE.test(s) && !FALLBACK_HANDLE_RE.test(s)
+}
+
+// The issuer fields shared by a v2 certificate and a username record.
+function validDelegation (o) {
+  return isHex64(o.association) &&
+    isHex64(o.issuer) &&
+    o.issuer !== o.association &&
+    isHex128(o.issuerSignature) &&
+    isCanonicalIso(o.issuerDate)
+}
+
 function validCertShape (cert) {
-  if (!isPlainObject(cert) || !hasExactKeys(cert, CERT_KEYS)) return false
-  return cert.v === 1 &&
-    isHex64(cert.member) &&
-    isHex64(cert.association) &&
-    isHex128(cert.signature) &&
-    typeof cert.ageBand === 'string' && AGE_BAND_RE.test(cert.ageBand) &&
-    typeof cert.method === 'string' && METHOD_RE.test(cert.method) &&
-    isCanonicalIso(cert.date)
+  if (!isPlainObject(cert)) return false
+  if (hasExactKeys(cert, CERT_KEYS)) {
+    return cert.v === 1 &&
+      isHex64(cert.member) &&
+      isHex64(cert.association) &&
+      isHex128(cert.signature) &&
+      typeof cert.ageBand === 'string' && AGE_BAND_RE.test(cert.ageBand) &&
+      typeof cert.method === 'string' && METHOD_RE.test(cert.method) &&
+      isCanonicalIso(cert.date)
+  }
+  if (hasExactKeys(cert, CERT_KEYS_V2)) {
+    return cert.v === 2 &&
+      isHex64(cert.member) &&
+      validDelegation(cert) &&
+      isHex128(cert.signature) &&
+      cert.ageBand === AGE_BAND_V2 &&
+      cert.method === METHOD_V2 &&
+      isCanonicalIso(cert.date)
+  }
+  return false
+}
+
+function validUsernameShape (record) {
+  if (!hasExactKeys(record, USERNAME_KEYS)) return false
+  return isUsername(record.username) &&
+    isHex64(record.member) &&
+    validDelegation(record) &&
+    isHex128(record.signature) &&
+    isCanonicalIso(record.date)
 }
 
 function validReplyTo (r) {
@@ -105,12 +146,15 @@ function validReplyTo (r) {
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
   const type = record.type
-  if (type !== 'member-cert' && type !== 'profile' && type !== 'post') return 'malformed'
+  if (type !== 'member-cert' && type !== 'profile' && type !== 'post' && type !== 'username') return 'malformed'
   if (seq === 0 && type !== 'member-cert') return 'genesis-required'
   if (type === 'member-cert') {
     if (seq !== 0) return 'cert-not-first'
     return validCertShape(record.cert) ? null : 'malformed'
   }
+  // Shape only: the issuer signatures are checked by verifyUsernameRecord
+  // (lib/cert.js) where the username is read (lib/username.js).
+  if (type === 'username') return validUsernameShape(record) ? null : 'malformed'
   if (type === 'profile') {
     if (!hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
     const { name, bio, at } = record

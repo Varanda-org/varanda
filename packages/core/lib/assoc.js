@@ -105,4 +105,19 @@ function issueSeederCertificate (dir, { seeder } = {}) {
   return issued
 }
 
-module.exports = { initAssociation, showAssociation, issueCertificate, issueSeederCertificate }
+// The association signs a delegation to the account service's issuer key. Only the
+// issuer key and the date are recorded: never a signature or a secret. No key is
+// generated here: the issuer pair lives in the account volume.
+function issueIssuerCertificate (dir, { issuer } = {}) {
+  const kp = loadKeyPair(dir)
+  // Checked before signing so a mistyped association key is a clear error (createIssuerCert refuses it too).
+  if (typeof issuer === 'string' && issuer.toLowerCase() === b4a.toString(kp.publicKey, 'hex')) {
+    throw new TypeError('issuer must differ from the association')
+  }
+  const issued = cert.createIssuerCert({ issuer }, kp)
+  const line = JSON.stringify({ issuer: issued.issuer, date: issued.date }) + '\n'
+  appendPrivate(path.join(dir, 'issuers.jsonl'), line)
+  return issued
+}
+
+module.exports = { initAssociation, showAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate }

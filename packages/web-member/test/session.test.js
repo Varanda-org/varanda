@@ -3,18 +3,28 @@
 // dial a loopback port nothing listens on (session-e2e.test.js,
 // sync-gate.test.js and passkey-e2e.test.js cover a seeder), so the
 // fixtures turn the write gate off; the one gate test here turns it on to
-// see it refuse.
+// see it refuse. The exception is the two-device username.add test, which
+// runs the gate against a fake seeder (sync-gate.test.js's stand-in) to see
+// the record of another device arrive before the duplicate check.
 const test = require('brittle')
 const net = require('node:net')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { WebSocket } = require('ws')
+const Hypercore = require('hypercore')
+const NoiseSecretStream = require('@hyperswarm/secret-stream')
+const { WebSocket, WebSocketServer } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
-const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createIssuerCert, createSeederCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { memberCertRecord } = require('@varanda/core/lib/records')
+const { attachAdmission } = require('@varanda/core/lib/admission')
+const { latestUsername } = require('@varanda/core/lib/username')
+const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
+const { memoryStorage } = require('../lib/storage')
+const { wsStream } = require('../lib/ws-stream')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const MISMATCH = 'passkey não corresponde ao diário guardado'
@@ -74,6 +84,50 @@ async function setup (t, { storage = memoryNodeStorage(), assoc = association(),
   if (keyPair !== null) await node.setKeyPair(keyPair)
   const web = await connectClient(node)
   return { node, web, assoc, storage, keyPair, internal }
+}
+
+// A seeder stand-in (as sync-gate.test.js): role 'seeder' with a certificate
+// signed by `signer`, replicating and advertising `cores`; it admits an
+// announced diary at the length the member advertised.
+async function fakeSeeder (t, { signer, cores = [] }) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', () => {})
+    noise.once('connect', () => {
+      Hypercore.createProtocolStream(noise)
+      for (const core of cores) core.replicate(noise)
+      attachAdmission(noise, {
+        role: 'seeder',
+        cert,
+        have: cores.map((core) => ({ key: hex(core.key), length: core.length })),
+        onmessage: (msg, peer) => {
+          if (msg.type !== 'announce') return
+          peer.send({ type: 'admitted', key: msg.key, length: peer.remoteHave.get(msg.key) || 0 })
+        }
+      })
+    })
+  })
+  return { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder' }
+}
+
+// The runs started since event index `from`: [{ runId, lines, stopped }].
+async function runsSince (web, from) {
+  const out = []
+  for (const e of web.events.slice(from)) {
+    if (e.name !== 'sync.started') continue
+    const { runId } = e.data
+    const lines = web.events.filter((x) => x.name === 'sync.event' && x.data.runId === runId).map((x) => x.data.line)
+    out.push({ runId, lines, stopped: await stoppedOf(web.events, runId) })
+  }
+  return out
 }
 
 async function certified (t, options) {
@@ -274,6 +328,202 @@ test('locked: reads work, writes and creation need the key pair', async (t) => {
   await locked.node.clearKeyPair()
   t.is((await errorOf(locked.web.request('post.create', { text: 'x' }))).message, LOCKED)
   t.is((await locked.node.identityStatus()).unlocked, false)
+})
+
+test('account.sign: the unlocked key signs the account-link statement, locked refuses', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { phase: 'reserve', nonce, username: 'ana_1', sub: '' }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('account.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  t.is(s.key, hex(keyPair.publicKey))
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('account.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: s.key, association: assoc.hex }
+  t.alike(verifyAccountLink(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyAccountLink({ ...fields, phase: 'rename' }, r.signature), { ok: false, reason: 'bad-signature' })
+
+  const finish = { phase: 'finish', nonce, username: 'ana_1', sub: '1234567890' }
+  const f = await s.web.request('account.sign', finish)
+  t.alike(verifyAccountLink({ ...finish, member: s.key, association: assoc.hex }, f.signature), { ok: true })
+  const rename = await s.web.request('account.sign', { ...params, phase: 'rename', username: 'bia_2' })
+  t.alike(verifyAccountLink({ ...params, phase: 'rename', username: 'bia_2', member: s.key, association: assoc.hex }, rename.signature), { ok: true })
+
+  const bad = await errorOf(s.web.request('account.sign', { ...params, member: 'ab'.repeat(32) }))
+  t.alike([bad.code, bad.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the member')
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('account.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('username.add: appends a verified username record once, locked and foreign records refused', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc.kp)
+  const s = await certified(t, { assoc })
+  const issue = (member, username, date) => createUsernameRecord({ member, username, date }, issuerKp, issuerCert)
+  const before = await s.web.request('log.read', {})
+
+  const foreign = await errorOf(s.web.request('username.add', { record: issue('ab'.repeat(32), 'ana') }))
+  t.alike([foreign.code, foreign.message], ['USAGE', 'registro de nome inválido'], 'a record for another member')
+  const otherAssoc = association()
+  const otherIssuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, otherAssoc.kp)
+  const untrusted = createUsernameRecord({ member: s.key, username: 'ana' }, issuerKp, otherIssuerCert)
+  const untrustedErr = await errorOf(s.web.request('username.add', { record: untrusted }))
+  t.alike([untrustedErr.code, untrustedErr.message], ['USAGE', 'registro de nome inválido'], 'another association')
+  const tampered = { ...issue(s.key, 'ana'), username: 'bia' }
+  t.is((await errorOf(s.web.request('username.add', { record: tampered }))).message, 'registro de nome inválido', 'a tampered record')
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+
+  const record = issue(s.key, 'ana', '2026-10-24T10:00:00.000Z')
+  t.alike(await s.web.request('username.add', { record }), { changed: true, username: 'ana', seq: 1 })
+  const log = await s.web.request('log.read', {})
+  t.alike(log.entries.map((e) => e.seq), [0, 1])
+  t.alike(log.entries[1].record, record, 'the record as given')
+  t.is(latestUsername(log.entries, s.key, assoc.hex), 'ana')
+
+  t.alike(await s.web.request('username.add', { record }), { changed: false, username: 'ana' }, 'the same record again')
+  t.alike(await s.web.request('log.read', {}), log, 'no new block')
+
+  const rename = issue(s.key, 'ana_2', '2026-10-24T11:00:00.000Z')
+  t.alike(await s.web.request('username.add', { record: rename }), { changed: true, username: 'ana_2', seq: 2 })
+  const after = await s.web.request('log.read', {})
+  t.is(latestUsername(after.entries, s.key, assoc.hex), 'ana_2')
+  const older = await errorOf(s.web.request('username.add', { record }))
+  t.alike([older.code, older.message], ['USAGE', 'registro de nome antigo'], 'an older record would revert the rename')
+  const sameDate = issue(s.key, 'ana_3', '2026-10-24T11:00:00.000Z')
+  const sameDateErr = await errorOf(s.web.request('username.add', { record: sameDate }))
+  t.alike([sameDateErr.code, sameDateErr.message], ['USAGE', 'registro de nome antigo'], 'a different record of the same instant')
+  t.alike(await s.web.request('log.read', {}), after, 'nothing appended')
+  t.alike(await s.web.request('username.add', { record: rename }), { changed: false, username: 'ana_2' }, 'the latest record is still accepted')
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('username.add', { record: rename }))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.is((await s.web.request('log.read', {})).entries.length, 3, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('username.add across devices: the gate precedes the duplicate check, and a duplicate retries an outstanding push', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc.kp)
+  const keyPair = crypto.keyPair()
+  const keyHex = hex(keyPair.publicKey)
+  const issue = (username, date) => createUsernameRecord({ member: keyHex, username, date }, issuerKp, issuerCert)
+  const cert = createCert({ member: keyHex }, assoc.kp)
+  const first = issue('ana', '2026-10-24T10:00:00.000Z')
+  const gated = { writeGate: true, writeGateTimeoutMs: 15000, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } }
+
+  // ---- a push that failed after the append: the same record pushes again ----
+  // The record was written with no push (as after a push that timed out, or
+  // in a previous session); the storage outlives the node.
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const a = await certified(t, { assoc, keyPair, seederUrl: seeder.url })
+  t.alike(await a.web.request('username.add', { record: first }), { changed: true, username: 'ana', seq: 1 })
+  t.absent(a.web.events.some((e) => e.name === 'sync.started'), 'no push with the gate off')
+  a.storage.close = async () => {}
+  await a.node.close()
+
+  const again = await setup(t, { assoc, keyPair, storage: a.storage, seederUrl: seeder.url, ...gated })
+  let from = again.web.events.length
+  t.alike(await again.web.request('username.add', { record: first }), { changed: false, username: 'ana' }, 'the same record again')
+  let runs = await runsSince(again.web, from)
+  t.is(runs.length, 2, 'the gate run and a push run although nothing was appended')
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.is(runs[1].lines[0], 'enviando ao semeador')
+  t.is(runs[1].stopped.reason, 'done')
+  t.is(runs[1].stopped.result.seederConfirmed, true, 'the seeder confirmed the local length')
+  t.alike((await again.web.request('log.read', {})).entries.map((e) => e.seq), [0, 1], 'no new block')
+
+  from = again.web.events.length
+  t.alike(await again.web.request('username.add', { record: first }), { changed: false, username: 'ana' })
+  runs = await runsSince(again.web, from)
+  t.is(runs.length, 1, 'confirmed: only the gate run this time')
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.alike(again.internal, [], 'no internal error')
+
+  // ---- the record another device published arrives with the gate ----
+  // The seeder holds the own diary as that device left it: the certificate,
+  // the first record and a rename. This device knows none of it yet.
+  const rename = issue('ana_2', '2026-10-24T11:00:00.000Z')
+  const published = new Hypercore(memoryStorage(), { keyPair, valueEncoding: 'json' })
+  await published.ready()
+  t.teardown(() => published.close(), { force: true })
+  await published.append(memberCertRecord(cert))
+  await published.append(first)
+  await published.append(rename)
+  const holder = await fakeSeeder(t, { signer: assoc.kp, cores: [published] })
+  const b = await setup(t, { assoc, keyPair, seederUrl: holder.url, ...gated })
+  t.alike(await b.web.request('identity.create'), { publicKey: keyHex, association: assoc.hex }, 'the same key on an empty device')
+  t.alike((await b.web.request('log.read', {})).entries, [], 'nothing before the gate')
+  from = b.web.events.length
+  t.alike(await b.web.request('username.add', { record: rename }), { changed: false, username: 'ana_2' }, 'the record arrived with the gate: not appended again')
+  runs = await runsSince(b.web, from)
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.ok(runs[0].lines.includes('diário próprio atrasado (0/3)'), 'the device saw itself behind')
+  t.ok(runs[0].lines.includes('diário próprio sincronizado (3)'), 'and caught up before the duplicate check')
+  const log = await b.web.request('log.read', {})
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2], 'no duplicate block')
+  t.alike(log.entries[2].record, rename)
+  t.is(latestUsername(log.entries, keyHex, assoc.hex), 'ana_2')
+
+  // An older record (after the gate) is refused: it would revert the rename.
+  from = b.web.events.length
+  const older = await errorOf(b.web.request('username.add', { record: first }))
+  t.alike([older.code, older.message], ['USAGE', 'registro de nome antigo'])
+  runs = await runsSince(b.web, from)
+  t.is(runs.length, 1, 'the gate run only, no push')
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.is((await b.web.request('log.read', {})).entries.length, 3, 'nothing appended')
+  t.alike(b.internal, [], 'no internal error')
+})
+
+test('account.sign right after an unlock does not preempt a running sync', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+
+  // The app's flow: the handle reads identityStatus on connection, a locked
+  // node starts a once (recovery) sync, the passkey unlocks it, the handle
+  // reads identityStatus again, and the member signs.
+  const { node, web } = await setup(t, { storage, assoc, keyPair: null, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  t.alike(await node.identityStatus(), { exists: true, publicKey: first.key, legacy: false, unlocked: false, synced: false })
+  const { runId } = await web.request('sync.start', { once: true, timeoutMs: 5000 })
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: true })
+  await node.setKeyPair(keyPair)
+  t.alike(await node.identityStatus(), { exists: true, publicKey: first.key, legacy: false, unlocked: true, synced: false })
+
+  const params = { phase: 'reserve', nonce: 'A-_9'.repeat(11), username: 'ana_1', sub: '' }
+  const r = await web.request('account.sign', params)
+  t.alike(verifyAccountLink({ ...params, member: first.key, association: assoc.hex }, r.signature), { ok: true }, 'signs with the diary key')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: true }, 'the once run is still running')
+  t.absent(web.events.some((e) => e.name === 'sync.stopped'), 'no run was preempted')
+  t.is(web.events.filter((e) => e.name === 'sync.started').length, 1, 'and none restarted')
+  await web.request('sync.stop')
 })
 
 test('a pair that does not match the stored diary is refused', async (t) => {

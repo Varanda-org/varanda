@@ -7,6 +7,7 @@ Uso: node bin/varanda.js <comando> [subcomando] [opções]
 Comandos:
   assoc init|show|certify    chave da associação de teste e certificados de membro
   assoc certify-seeder       certifica a chave de um semeador (--seeder)
+  assoc certify-issuer       certifica a chave do emissor do serviço de conta (--issuer)
   id create|show             identidade (chave pública do diário)
   cert add                   grava o certificado como bloco 0 do diário
   profile set                define nome e bio
@@ -20,6 +21,11 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
+  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account key                chave do emissor do serviço de conta (imprime só a pública)
+  account cert add           grava o certificado do emissor (--cert-file <f>)
+  account status             estado do serviço de conta
+  account export             exporta os vínculos de conta do serviço parado
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -30,14 +36,15 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin`
+  --ws-origin --issuer --account-port --account-host`
 
 const booleanFlags = new Set(['--json', '--once', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
-  '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin'
+  '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
+  '--issuer', '--account-port', '--account-host'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -149,6 +156,9 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const healthHost = get('health-host') ?? env.VARANDA_HEALTH_HOST ?? null
   if (healthHost !== null && (!healthHost || /\s/.test(healthHost))) throw new UsageError('health-host inválido')
 
+  const accountHost = get('account-host') ?? env.VARANDA_ACCOUNT_HOST ?? null
+  if (accountHost !== null && (!accountHost || /\s/.test(accountHost))) throw new UsageError('account-host inválido')
+
   const wsHost = get('ws-host') ?? env.VARANDA_WS_HOST ?? null
   if (wsHost !== null && (!wsHost || /\s/.test(wsHost))) throw new UsageError('ws-host inválido')
 
@@ -171,12 +181,15 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     timeoutMs: integer(get('timeout-ms'), 'timeout-ms'),
     member: key(get('member')),
     seeder: key(get('seeder')),
+    issuer: key(get('issuer')),
     dhtHost,
     healthPort: port(get('health-port') ?? env.VARANDA_HEALTH_PORT ?? null, 'health-port'),
     healthHost,
     wsPort: port(get('ws-port') ?? env.VARANDA_WS_PORT ?? null, 'ws-port'),
     wsHost,
     wsOrigins: wsOrigins.length ? wsOrigins : null,
+    accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
+    accountHost,
     ageBand: get('age-band'),
     method: get('method'),
     out: get('out') === null ? null : path.resolve(cwd, get('out')),

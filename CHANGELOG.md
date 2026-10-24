@@ -29,6 +29,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 - Entrada com passkey (por exemplo, a conta Google) na versão web: a identidade do membro é derivada da passkey (WebAuthn com a extensão PRF) e a chave nunca é gravada, só existe na memória da página; a mesma passkey abre a mesma identidade em qualquer aparelho, e navegadores sem PRF não entram.
   Antes de escrever, o nó alcança o semeador e, depois, envia o diário; num aparelho novo, o diário e o certificado voltam do semeador. Um diário de antes das passkeys é apagado com "recomeçar". Resultado em `docs/verification.md` §10.
 - Conexão automática da versão web: o Caddy serve `/varanda.json` com a associação (`VARANDA_ASSOCIATION` em `deploy/seeder/.env`, obrigatória) e o app se configura sozinho; a implantação confere o arquivo. Em desenvolvimento, a tela Conectar continua.
+- Vínculo com a conta Google e @nome na versão web hospedada: o novo serviço `account` (`varanda account`, no Compose atrás do Caddy em `/account/*`) liga a chave da passkey a uma conta Google (OAuth com PKCE no servidor, escopos `openid` e `email`) e emite sozinho o certificado de membro v2 (faixa etária `unchecked`, assinado por uma chave de emissor que a associação certifica com `assoc certify-issuer`) e um registro de @nome no diário.
+  O @nome pode ser trocado uma vez a cada 7 dias, e um nome já usado por um membro nunca é dado a outro. O serviço sobe sem emissor até a cerimônia do README (`account key`, `assoc certify-issuer`, `account cert add`); o semeador e os membros nativos e da CLI precisam estar atualizados antes da primeira emissão v2, e a identidade piloto mantém o certificado v1. Resultado e limites em `docs/verification.md` seção 11.
 
 ### Alterado
 

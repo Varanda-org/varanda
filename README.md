@@ -78,6 +78,7 @@ Uso: node bin/varanda.js <comando> [subcomando] [opções]
 Comandos:
   assoc init|show|certify    chave da associação de teste e certificados de membro
   assoc certify-seeder       certifica a chave de um semeador (--seeder)
+  assoc certify-issuer       certifica a chave do emissor do serviço de conta (--issuer)
   id create|show             identidade (chave pública do diário)
   cert add                   grava o certificado como bloco 0 do diário
   profile set                define nome e bio
@@ -91,6 +92,11 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
+  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account key                chave do emissor do serviço de conta (imprime só a pública)
+  account cert add           grava o certificado do emissor (--cert-file <f>)
+  account status             estado do serviço de conta
+  account export             exporta os vínculos de conta do serviço parado
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -101,7 +107,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin
+  --ws-origin --issuer --account-port --account-host
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -454,6 +460,36 @@ docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml u
 
 Depois abra `https://<domínio>/` (confira também `curl https://<domínio>/varanda.json`). Os membros não preenchem mais a tela Conectar: a página só mostra "Entrar". Cada pessoa cria uma passkey (de preferência no Gerenciador de Senhas do Google) e recebe da associação o certificado de membro (`assoc certify --member <chave>`), que cola na etapa Identidade. A cada atualização do código, sem a implantação automática da próxima seção: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
 
+#### Vínculo de conta Google e @nome (serviço `account`)
+
+O `compose.web.yaml` também sobe o serviço `account`, que liga a passkey de um membro a uma conta Google e dá a ele um @nome e um certificado de membro automático. O Caddy repassa `/account/*` a ele. Dois valores novos em `deploy/seeder/.env` (veja `.env.example`):
+
+- `VARANDA_GOOGLE_CLIENT_ID` e `VARANDA_GOOGLE_CLIENT_SECRET`: um cliente OAuth do Google Cloud. No console (APIs e serviços, Credenciais), crie um "ID do cliente OAuth" do tipo "Aplicativo da Web"; em "URIs de redirecionamento autorizados" ponha `https://<domínio>/account/callback`; na tela de consentimento use os escopos `openid` e `email`. Copie o ID e o segredo para o `.env`. O segredo nunca vai para o repositório nem para registros.
+
+O serviço sobe sem emissor: até a cerimônia abaixo, `/account/health` responde `{"status":"ok"}` e as rotas de vínculo respondem 503 `indisponivel`. A cerimônia roda DEPOIS da primeira implantação com o serviço (a imagem `varanda-seeder:local` só passa a ter o comando `account` depois do `up -d --build`). Da raiz do repositório no servidor, com o serviço `account` parado se já estiver rodando (`docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml stop account`):
+
+1. Gere a chave do emissor dentro do volume do serviço; o comando imprime só a chave pública:
+
+   ```sh
+   docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml run --rm account account key
+   ```
+
+2. Na máquina do operador (onde está a associação), certifique essa chave pública:
+
+   ```sh
+   node bin/varanda.js assoc certify-issuer --data <assocDir> --issuer <hex> --out issuer-cert.json
+   ```
+
+3. Copie só esse arquivo público (`issuer-cert.json`) para o servidor e grave-o no serviço:
+
+   ```sh
+   docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml run --rm -v $PWD/issuer-cert.json:/cert/issuer-cert.json:ro account account cert add --cert-file /cert/issuer-cert.json
+   ```
+
+4. Reinicie o serviço: `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml restart account`. Depois disso `account status` deixa de dizer `emissor não certificado`.
+
+O `association.json` nunca sai da máquina do operador, e o segredo do emissor nunca sai do volume do serviço `account`. O `account cert add` recusa um certificado de outra associação ou de outra chave.
+
 Limites desta fase: a chave do membro é derivada da passkey (extensão PRF) e nunca é gravada: ela só existe na memória da página enquanto a identidade está desbloqueada, perder a passkey perde a identidade e um navegador sem PRF não entra (ver `docs/verification.md` seção 10); a passkey vale para o endereço exato da página; a página só é tão confiável quanto o código que o servidor entrega; a entrada WebSocket ainda não tem os limites para a internet aberta previstos no PR de endurecimento. Use com um grupo pequeno de pessoas de confiança. O Caddy não grava registro de acesso; os erros que ele registra podem incluir o endereço do cliente (mesma rotação do semeador).
 
 ### Implantação automática pelo GitHub Actions
@@ -697,6 +733,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `association.json` — par de chaves da associação, modo `0600`. `assoc show` imprime só a chave pública.
 - `members.jsonl` — uma linha JSON por certificado de membro, exatamente `member`, `ageBand`, `method` e `date`.
 - `seeders.jsonl` — uma linha JSON por certificado de semeador: `{"seeder":"<hex64>","date":"<ISO>"}`. Sem assinatura e sem segredo.
+- `issuers.jsonl` — uma linha JSON por certificado de emissor do serviço de conta: `{"issuer":"<hex64>","date":"<ISO>"}`. Sem assinatura e sem segredo.
 
 Exemplo de linha em `members.jsonl` (a data real é a da emissão):
 
@@ -783,6 +820,10 @@ Limites desta fase:
 - Cada conexão aceita até 100 mensagens por segundo (rajada de 4160); um par acima disso é desconectado.
 - Em `sync --once`, a busca do bloco 0 de um diário seguido dura no máximo 15 s; se ninguém o entregar, o diário aparece como não anunciado e o resultado pode ser `sync done` sem ele.
 - `log --author <chave>` exige dados locais do diário (`erro: sem dados locais para este diário` caso contrário).
+- O vínculo com a conta Google não verifica idade: o certificado v2 traz `ageBand: unchecked` (a lacuna do ECA Digital continua aberta; `docs/design.md`).
+- O app nativo e a CLI ainda colam o certificado v1 emitido pela associação (`assoc certify`); só a versão web hospedada recebe o certificado v2 do serviço de conta. Nós de antes desta mudança rejeitam um certificado v2 como `malformed`, então o semeador e todo membro nativo ou da CLI precisam atualizar antes da primeira emissão v2.
+- A identidade piloto da versão web mantém o certificado v1 (um diário não aceita um segundo certificado). Ela pode vincular a conta Google e ganhar um @nome pelo registro de @nome, mas o certificado dela continua v1.
+- O @nome troca no máximo uma vez a cada 7 dias e um nome já usado por um membro não vai para outro; um nó antigo ou um seguidor que ainda não sincronizou pode mostrar por um tempo o nome anterior.
 
 Fora desta fase:
 

@@ -2,7 +2,11 @@
 
 const test = require('brittle')
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const records = require('@varanda/core/lib/records')
+const certLib = require('@varanda/core/lib/cert')
+const { latestUsername, latestUsernameRecord } = require('@varanda/core/lib/username')
+const { MAX_CERT_BYTES } = require('@varanda/rpc')
 const { testnet } = require('./helpers/net')
 
 const {
@@ -345,4 +349,175 @@ test('validRecordCopy skips a revoked proxy or a throwing prototype trap', async
     t.is(records.validRecordCopy(hostile, 1), null)
   }
   t.is(latestProfile([{ seq: 1, record: proxy }]), null)
+})
+
+// Member certificate v2 and the username record (docs/protocol.md section 3).
+function issuerSetup () {
+  const assocKp = crypto.keyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = certLib.createIssuerCert({ issuer: b4a.toString(issuerKp.publicKey, 'hex'), date: AT }, assocKp)
+  return { assocKp, assocHex: issuerCert.association, issuerKp, issuerCert }
+}
+
+test('validateRecord: v2 member-cert and username records', async (t) => {
+  await testnet(t)
+  const { issuerKp, issuerCert } = issuerSetup()
+  const v2 = certLib.createIssuedCert({ member: K1, date: AT }, issuerKp, issuerCert)
+  const certRec = { type: 'member-cert', cert: v2 }
+  t.is(validateRecord(certRec, 0), null)
+  t.is(validateRecord(certRec, 1), 'cert-not-first')
+  t.alike(memberCertRecord(v2), certRec)
+  t.alike(genesisCert([{ seq: 0, record: certRec }]), v2)
+
+  const name = certLib.createUsernameRecord({ member: K1, username: 'ana', date: AT }, issuerKp, issuerCert)
+  t.is(validateRecord(name, 0), 'genesis-required')
+  t.is(validateRecord(name, 1), null)
+  t.is(validateRecord(name, 7), null)
+  t.is(validateRecord({ ...name, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ ...name, username: 'Ana' }, 1), 'malformed')
+  t.is(validateRecord({ ...name, username: 'abc123' }, 1), 'malformed')
+  t.is(validateRecord({ ...name, issuer: name.association }, 1), 'malformed')
+  // a username record is never a genesis block nor a certificate
+  t.is(validateRecord({ type: 'member-cert', cert: name }, 0), 'malformed')
+  t.is(latestProfile([{ seq: 1, record: name }]), null)
+})
+
+// Records.js duplicates the certificate and username-record shape rules
+// instead of importing cert.js; both validators must agree on every input.
+test('records and cert.js shape rules agree (parity)', async (t) => {
+  await testnet(t)
+  const { assocKp, issuerKp, issuerCert } = issuerSetup()
+  const v1 = certLib.createCert({ member: K1, date: AT }, assocKp)
+  const v2 = certLib.createIssuedCert({ member: K1, date: AT }, issuerKp, issuerCert)
+  const name = certLib.createUsernameRecord({ member: K1, username: 'ana_maria', date: AT }, issuerKp, issuerCert)
+  const drop = (o, k) => { const c = { ...o }; delete c[k]; return c }
+
+  const certs = [
+    v1, v2,
+    { ...v1, extra: 1 }, { ...v1, v: 2 }, { ...v1, ageBand: 'unchecked', method: 'google' }, { ...v1, method: 'Stub' },
+    drop(v1, 'method'),
+    { ...v2, v: 1 }, { ...v2, v: 3 }, { ...v2, ageBand: '18+' }, { ...v2, method: 'stub' },
+    { ...v2, issuer: v2.association }, { ...v2, issuer: v2.issuer.toUpperCase() },
+    { ...v2, issuerSignature: 'c'.repeat(127) }, { ...v2, issuerDate: '2026-01-01' }, { ...v2, date: '2026-13-01T00:00:00.000Z' },
+    { ...v2, username: 'ana' }, drop(v2, 'issuerDate'), { ...v2, member: 'A'.repeat(64) },
+    null, [], 'x', 5, Object.create(null)
+  ]
+  for (const [i, c] of certs.entries()) {
+    const viaCert = certLib.validateCertShape(c) === null
+    const viaRecords = validateRecord({ type: 'member-cert', cert: c }, 0) === null
+    t.is(viaRecords, viaCert, 'cert #' + i)
+  }
+
+  const usernames = ['ana', 'Ana', '1ana', 'ab', 'a'.repeat(20), 'a'.repeat(21), 'abc123', 'facade', 'abcdeg', 'ana-b', 'aná', 5]
+  const names = [
+    name,
+    ...usernames.map((username) => ({ ...name, username })),
+    { ...name, extra: 1 }, drop(name, 'issuer'), { ...name, type: 'profile' },
+    { ...name, issuer: name.association }, { ...name, member: K1.toUpperCase() },
+    { ...name, signature: 'c'.repeat(128) }, { ...name, signature: 'C'.repeat(128) },
+    { ...name, date: 'nope' }, { ...name, issuerDate: 5 }
+  ]
+  for (const [i, r] of names.entries()) {
+    const viaCert = certLib.validateUsernameRecordShape(r) === null
+    const viaRecords = validateRecord(r, 1) === null
+    t.is(viaRecords, viaCert, 'username record #' + i)
+  }
+})
+
+test('the largest legal v2 member-cert and username record fit the limits', async (t) => {
+  await testnet(t)
+  // The longest canonical ISO date (expanded year) and the longest username.
+  const LONG_DATE = new Date(-8.64e15).toISOString()
+  t.is(LONG_DATE.length, 27)
+  t.ok(isCanonicalIso(LONG_DATE))
+  const sig = 'f'.repeat(128)
+  const c = {
+    v: 2,
+    member: K1,
+    ageBand: 'unchecked',
+    method: 'google',
+    date: LONG_DATE,
+    association: K2,
+    issuer: 'c'.repeat(64),
+    issuerDate: LONG_DATE,
+    issuerSignature: sig,
+    signature: sig
+  }
+  const certRec = { type: 'member-cert', cert: c }
+  t.is(validateRecord(certRec, 0), null)
+  t.ok(b4a.byteLength(JSON.stringify(c)) < MAX_CERT_BYTES, 'cert under MAX_CERT_BYTES')
+  t.ok(b4a.byteLength(JSON.stringify(certRec)) < MAX_BLOCK_BYTES, 'block 0 under MAX_BLOCK_BYTES')
+  const name = {
+    type: 'username',
+    username: 'z'.repeat(20),
+    member: K1,
+    date: LONG_DATE,
+    association: K2,
+    issuer: 'c'.repeat(64),
+    issuerDate: LONG_DATE,
+    issuerSignature: sig,
+    signature: sig
+  }
+  t.is(validateRecord(name, 1), null)
+  t.ok(b4a.byteLength(JSON.stringify(name)) < MAX_BLOCK_BYTES, 'username record under MAX_BLOCK_BYTES')
+  t.ok(b4a.byteLength(JSON.stringify(name)) < 2048, 'username record under the username.add limit')
+})
+
+test('latestUsername: only the newest own record is a candidate', async (t) => {
+  await testnet(t)
+  const { assocHex, issuerKp, issuerCert } = issuerSetup()
+  const other = issuerSetup()
+  const v2 = certLib.createIssuedCert({ member: K1, date: AT }, issuerKp, issuerCert)
+  const named = (username, member = K1, setup = { issuerKp, issuerCert }) =>
+    certLib.createUsernameRecord({ member, username, date: AT }, setup.issuerKp, setup.issuerCert)
+  const ana = named('ana')
+  const bia = named('bia')
+  const base = [
+    { seq: 0, record: { type: 'member-cert', cert: v2 } },
+    { seq: 1, record: ana },
+    { seq: 2, record: { type: 'post', text: 'oi', at: AT, replyTo: null } },
+    { seq: 3, record: bia }
+  ]
+  // an older valid record followed by a newer valid one: the newer
+  t.is(latestUsername(base, K1, assocHex), 'bia')
+  t.alike(latestUsernameRecord(base, K1, assocHex), bia)
+  t.not(latestUsernameRecord(base, K1, assocHex), bia, 'a copy')
+  t.is(latestUsername(base.slice(0, 3), K1, assocHex), 'ana')
+  t.is(latestUsername(base.slice(0, 1), K1, assocHex), null)
+  t.is(latestUsername([], K1, assocHex), null)
+  // the entries order does not matter, the seq does
+  t.is(latestUsername(base.slice().reverse(), K1, assocHex), 'bia')
+  // a username record at seq 0 is not valid
+  t.is(latestUsername([{ seq: 0, record: ana }], K1, assocHex), null)
+
+  // another member's record (copied from someone else's diary) is never a
+  // candidate, so it neither hides nor replaces the name
+  const foreign = base.concat([{ seq: 4, record: named('caio', K2) }, { seq: 5, record: null }])
+  t.is(latestUsername(foreign, K1, assocHex), 'bia')
+  t.is(latestUsername(foreign.slice().reverse(), K1, assocHex), 'bia')
+  t.is(latestUsername(foreign, K2, assocHex), 'caio', 'it is the candidate of its own member')
+
+  // an invalid NEWEST own record gives null: no fallback to an older record
+  const invalidNewest = [
+    ['another association', named('dani', K1, other)],
+    ['a swapped issuerSignature', { ...named('edu'), issuerSignature: other.issuerCert.signature }],
+    ['a tampered name', { ...ana, username: 'fabi' }]
+  ]
+  for (const [label, record] of invalidNewest) {
+    const entries = base.concat([{ seq: 6, record }])
+    t.is(latestUsername(entries, K1, assocHex), null, label + ' on the newest record -> null')
+    t.is(latestUsername(entries.slice().reverse(), K1, assocHex), null, label + ', reversed input -> null')
+  }
+  // the record signed for the other association is valid there
+  t.is(latestUsername(base.concat([{ seq: 6, record: named('dani', K1, other) }]), K1, other.assocHex), 'dani')
+  // a valid record after the invalid one is the candidate again
+  t.is(latestUsername(base.concat([{ seq: 6, record: { ...ana, username: 'fabi' } }, { seq: 7, record: ana }]), K1, assocHex), 'ana')
+
+  // hostile input never throws
+  for (const bad of [null, undefined, 5, [null], [{ seq: 1, get record () { throw new Error('boom') } }]]) {
+    t.is(latestUsername(bad, K1, assocHex), null)
+  }
+  t.is(latestUsername(base, null, assocHex), null)
+  t.is(latestUsername(base, K1, 'zz'), null)
+  t.is(latestUsername(base, K1, null), null)
 })

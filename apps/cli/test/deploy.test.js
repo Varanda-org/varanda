@@ -151,7 +151,11 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'chown -R 65534:65534 "$stage"',
     // The rollback only undoes what the deploy actually changed.
     'servicos_trocados=1',
-    'www_trocado=1'
+    'www_trocado=1',
+    // The account service is probed through the domain, and its OAuth client
+    // must be configured before anything changes.
+    '/account/health',
+    'VARANDA_GOOGLE_CLIENT_ID'
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
@@ -166,6 +170,7 @@ test('deploy.sh: forbidden constructs are absent', (t) => {
   t.absent(/git clean/.test(shCode), 'no git clean')
   t.absent(/volume\s+(rm|prune)/.test(shCode), 'no volume rm/prune')
   t.absent(/seed (key|cert)/.test(shCode), 'no seed key/cert')
+  t.absent(/account (key|cert)/.test(shCode), 'no account key/cert')
   // Raw build/docker output stays on the server: Actions logs of a public
   // repository are public.
   t.absent(/tail\b[^\n]*log_file/.test(shCode), 'no log tail forwarded to the caller')
@@ -180,6 +185,32 @@ test('deploy.sh: forbidden constructs are absent', (t) => {
   const shellOnly = shCode.replace(/^ws_script='[\s\S]*?^'$/m, '')
   t.ok(shellOnly.length < shCode.length, 'ws_script block located')
   t.absent(/(^|[^$])\(\(/.test(shellOnly), 'no standalone (( )) arithmetic command')
+})
+
+// compose.web.yaml and the Caddyfile, comment lines dropped as above.
+const COMPOSE_WEB = path.join(repoRoot, 'deploy/seeder/compose.web.yaml')
+const CADDYFILE = path.join(repoRoot, 'deploy/seeder/Caddyfile')
+
+test('compose.web.yaml: the account service has its own volume', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const start = webLines.findIndex((l) => /^ {2}account:\s*$/.test(l))
+  t.ok(start !== -1, 'account service found')
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  const account = webLines.slice(start, end).join('\n')
+  t.ok(/^ {6}- account-data:\/data\s*$/m.test(account), 'account mounts account-data:/data')
+  t.absent(/seeder-data/.test(account), 'account never mounts seeder-data')
+  t.absent(/^ {4}build:/m.test(account), 'account has no build: (the seeder service builds the image)')
+  t.ok(/^ {2}account-data:\s*$/m.test(webLines.slice(webLines.findIndex((l) => /^volumes:/.test(l))).join('\n')), 'account-data: is declared')
+})
+
+test('Caddyfile: /account/* drops the client address headers', (t) => {
+  const caddy = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  t.ok(caddy.includes('handle /account/*'), 'handle /account/*')
+  t.ok(caddy.includes('header_up -X-Forwarded-For'), 'header_up -X-Forwarded-For')
+  t.ok(caddy.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
 })
 
 test('deploy.sh: bash -n and refusal to run as non-root', (t) => {
