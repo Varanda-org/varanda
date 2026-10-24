@@ -95,3 +95,34 @@ test('web: checkWebForm, webFormOf and reviveWeb', async (t) => {
     t.is(reviveWeb(bad), null, JSON.stringify(bad))
   }
 })
+
+test('web: hostedConfigOf builds the seeder address from the page host', async (t) => {
+  const { hostedConfigOf } = await load()
+  t.alike(hostedConfigOf({ v: 1, association: ASSOC }, { host: 'varanda.example', secure: true }).config,
+    { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' })
+  t.alike(hostedConfigOf({ v: 1, association: ASSOC.toUpperCase() }, { host: 'localhost:8081', secure: false }).config,
+    { association: ASSOC, seederUrl: 'ws://localhost:8081/seeder' }, 'ws:// on http, port kept, key lower-cased')
+  t.alike(hostedConfigOf({ v: 1, association: ASSOC, seederUrl: 'wss://evil.example/x' }, { host: 'varanda.example', secure: true }).config,
+    { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' }, 'an address in the JSON is ignored')
+  const bad = [
+    [{ v: 2, association: ASSOC }, 'wrong v'], [{ association: ASSOC }, 'missing v'],
+    [{ v: 1 }, 'missing association'], [{ v: 1, association: 'xyz' }, 'invalid association'],
+    [{ v: 1, association: 7 }, 'non-string association'], [[], 'array'], [null, 'null'], ['x', 'string']
+  ]
+  for (const [input, why] of bad) {
+    const r = hostedConfigOf(input, { host: 'varanda.example', secure: true })
+    t.is(r.config, undefined, why + ': no config')
+    t.ok(typeof r.error === 'string', why + ': error')
+  }
+  t.is(hostedConfigOf({ v: 1, association: ASSOC }, { host: 'a.example/evil', secure: true }).config, undefined, 'host with a path')
+  t.is(hostedConfigOf({ v: 1, association: ASSOC }, { host: 'u@a.example', secure: true }).config, undefined, 'host with credentials')
+})
+
+test('web: isHostedPage', async (t) => {
+  const { isHostedPage } = await load()
+  const page = (mode, protocol, hostname) => isHostedPage({ mode, protocol, hostname })
+  t.ok(page('browser', 'https:', 'varanda.example'))
+  t.absent(page('browser', 'http:', 'varanda.example'))
+  t.absent(page('serve', 'https:', 'varanda.example'))
+  for (const h of ['localhost', 'LocalHost', '127.0.0.1', '[::1]']) t.absent(page('browser', 'https:', h), h)
+})

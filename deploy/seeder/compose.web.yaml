@@ -25,6 +25,8 @@ services:
     environment:
       VARANDA_DOMAIN: "${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
       VARANDA_WS_PORT: "8789"
+      # Chave pública da associação, servida em /varanda.json (Caddyfile).
+      VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Preenchido por deploy/seeder/build-web.sh (nunca recriado, só o

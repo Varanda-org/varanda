@@ -1,10 +1,13 @@
 // The browser node session's RPC handlers (lib/session.js through lib/node.js
 // and an in-memory client), on memory storage. No seeder here: the sync runs
-// dial a loopback port nothing listens on (session-e2e.test.js and
-// sync-gate.test.js cover a seeder).
+// dial a loopback port nothing listens on (session-e2e.test.js,
+// sync-gate.test.js and passkey-e2e.test.js cover a seeder), so the
+// fixtures turn the write gate off; the one gate test here turns it on to
+// see it refuse.
 const test = require('brittle')
 const net = require('node:net')
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
@@ -12,6 +15,9 @@ const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/ce
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
+
+const LOCKED = 'identidade bloqueada: entre com a passkey'
+const MISMATCH = 'passkey não corresponde ao diário guardado'
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -31,7 +37,24 @@ async function deadPort () {
   return port
 }
 
-async function setup (t, { storage = memoryNodeStorage(), assoc = association(), ...options } = {}) {
+// True when some file of the 'diary' core holds `needle`.
+async function diaryHolds (storage, needle) {
+  let found = false
+  for (const name of ['oplog', 'tree', 'bitfield', 'data', 'header']) {
+    const file = storage.core('diary')(name)
+    const { size } = await new Promise((resolve, reject) => file.stat((err, v) => (err ? reject(err) : resolve(v))))
+    if (size > 0) {
+      const buf = await new Promise((resolve, reject) => file.read(0, size, (err, v) => (err ? reject(err) : resolve(v))))
+      if (b4a.indexOf(buf, needle) !== -1) found = true
+    }
+    await new Promise((resolve) => file.close(() => resolve()))
+  }
+  return found
+}
+
+// keyPair: the identity pair handed to the node before anything else (null
+// = the node stays locked).
+async function setup (t, { storage = memoryNodeStorage(), assoc = association(), keyPair = crypto.keyPair(), ...options } = {}) {
   const port = await deadPort()
   const internal = []
   const node = createBrowserNode({
@@ -44,11 +67,13 @@ async function setup (t, { storage = memoryNodeStorage(), assoc = association(),
       return ws
     },
     onInternalError: (err) => internal.push(err),
+    writeGate: false,
     ...options
   })
   t.teardown(() => node.close(), { force: true })
+  if (keyPair !== null) await node.setKeyPair(keyPair)
   const web = await connectClient(node)
-  return { node, web, assoc, storage, internal }
+  return { node, web, assoc, storage, keyPair, internal }
 }
 
 async function certified (t, options) {
@@ -193,14 +218,197 @@ test('the storage outlives the node: same identity and diary after a restart', a
   const err = await errorOf(first.web.request('node.info'))
   t.is(err.code, 'CLOSED', 'the old client is closed with its node')
 
-  const second = await setup(t, { storage, assoc })
+  const second = await setup(t, { storage, assoc, keyPair: first.keyPair })
   t.alike(await second.web.request('identity.create'), { publicKey: first.key, association: assoc.hex })
   const log = await second.web.request('log.read', {})
   t.is(log.entries[1].record.text, 'antes')
 
-  const changed = await setup(t, { storage })
+  const changed = await setup(t, { storage, keyPair: first.keyPair })
   const mismatch = await errorOf(changed.web.request('identity.show'))
   t.is(mismatch.message, 'associação diferente da configurada')
+})
+
+test('locked: reads work, writes and creation need the key pair', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const { web, node } = await setup(t, { storage, assoc, keyPair: null })
+  t.alike(await node.identityStatus(), { exists: false, publicKey: null, legacy: false, unlocked: false, synced: false })
+  const create = await errorOf(web.request('identity.create'))
+  t.is(create.code, 'USAGE')
+  t.is(create.message, LOCKED, 'no diary is created without the key')
+  t.absent(await storage.hasCore('diary'))
+  t.ok(await storage.readJson('config'), 'the trust root was written')
+  const before = await errorOf(web.request('post.create', { text: 'x' }))
+  t.is(before.code, 'NOT_FOUND', 'no identity yet: not found, not locked')
+
+  // The same storage with the key: identity, certificate, a post.
+  const keyPair = crypto.keyPair()
+  const unlocked = await setup(t, { storage, assoc, keyPair })
+  const { publicKey } = await unlocked.web.request('identity.create')
+  t.is(publicKey, hex(keyPair.publicKey), 'the diary key is the pair\'s public key')
+  await unlocked.web.request('cert.add', { cert: createCert({ member: publicKey }, assoc.kp) })
+  await unlocked.web.request('post.create', { text: 'com a chave' })
+  t.alike(await unlocked.node.identityStatus(), { exists: true, publicKey, legacy: false, unlocked: true, synced: false })
+  await unlocked.node.close()
+
+  // Locked again over the stored diary: reads work, every write is refused.
+  const locked = await setup(t, { storage, assoc, keyPair: null })
+  const info = await locked.web.request('node.info')
+  t.is(info.publicKey, publicKey)
+  t.is(info.memberCert, true)
+  t.is((await locked.web.request('log.read', {})).entries[1].record.text, 'com a chave')
+  t.alike(await locked.web.request('identity.create'), { publicKey, association: assoc.hex }, 'opening an existing diary needs no key')
+  for (const [method, params] of [['cert.add', { cert: createCert({ member: publicKey }, assoc.kp) }], ['profile.set', { name: 'B' }], ['post.create', { text: 'x' }], ['post.reply', { to: publicKey + ':1', text: 'x' }]]) {
+    const err = await errorOf(locked.web.request(method, params))
+    t.is(err && err.code, 'USAGE', method)
+    t.is(err && err.message, LOCKED, method)
+  }
+  t.alike(await locked.web.request('follow.add', { key: 'cd'.repeat(32) }), { changed: true, followCount: 1 }, 'follows are not diary writes')
+  t.is((await locked.web.request('log.read', {})).entries.length, 2, 'nothing was appended')
+
+  // Unlocking the running node with the right pair, then locking it.
+  await locked.node.setKeyPair(keyPair)
+  t.is((await locked.web.request('post.create', { text: 'destrancado' })).seq, 2)
+  await locked.node.clearKeyPair()
+  t.is((await errorOf(locked.web.request('post.create', { text: 'x' }))).message, LOCKED)
+  t.is((await locked.node.identityStatus()).unlocked, false)
+})
+
+test('a pair that does not match the stored diary is refused', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const first = await certified(t, { storage, assoc })
+  await first.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const status = await other.node.identityStatus()
+  t.alike(status, { exists: true, publicKey: first.key, legacy: false, unlocked: true, synced: false }, 'the status reports the stored key, it does not throw')
+  for (const [method, params] of [['identity.show', {}], ['identity.create', {}], ['node.info', {}], ['post.create', { text: 'x' }]]) {
+    const err = await errorOf(other.web.request(method, params))
+    t.is(err && err.code, 'USAGE', method)
+    t.is(err && err.message, MISMATCH, method)
+  }
+  t.is((await other.web.request('log.read', {}).catch((err) => err)).message, MISMATCH, 'reads with the wrong pair are refused too')
+  await other.node.clearKeyPair()
+  t.is((await other.web.request('node.info')).publicKey, first.key, 'locked, the stored diary reads again')
+  t.ok(crypto.validateKeyPair(first.keyPair), 'the caller\'s buffers were copied, not zeroed')
+})
+
+test('a legacy store (secret in the header) is wiped on first use, refused for writing and removed by reset', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  // A diary created before the key moved to memory, with its trust root.
+  await storage.writeJson('config', { v: 1, role: 'member', association: assoc.hex })
+  const legacy = new (require('hypercore'))(storage.core('diary'), { valueEncoding: 'json' })
+  await legacy.ready()
+  const legacyKey = hex(legacy.key)
+  const secret = b4a.from(legacy.keyPair.secretKey)
+  await legacy.append({ type: 'member-cert', cert: createCert({ member: legacyKey }, assoc.kp) })
+  await legacy.close()
+  t.ok(await diaryHolds(storage, secret), 'the legacy store holds its secret')
+
+  const { web, node } = await setup(t, { storage, assoc, keyPair: null })
+  // Opening an existing diary through identity.create caches nothing about
+  // its header: the first open wipes the secret and reports legacy.
+  t.alike(await web.request('identity.create'), { publicKey: legacyKey, association: assoc.hex })
+  t.absent(await diaryHolds(storage, secret), 'the secret is gone from the storage on the first open')
+  t.alike(await node.identityStatus(), { exists: true, publicKey: legacyKey, legacy: true, unlocked: false, synced: false })
+  const info = await web.request('node.info')
+  t.is(info.publicKey, legacyKey)
+  t.is(info.memberCert, true, 'the legacy diary still reads')
+  t.is((await errorOf(web.request('post.create', { text: 'x' }))).message, LOCKED, 'writes stay refused')
+  await node.setKeyPair(crypto.keyPair())
+  t.is((await errorOf(web.request('post.create', { text: 'x' }))).message, MISMATCH, 'the passkey never matches a legacy store')
+  await node.reset()
+  t.alike(await node.identityStatus(), { exists: false, publicKey: null, legacy: false, unlocked: false, synced: false })
+  t.absent(await storage.hasCore('diary'), 'the diary is gone')
+})
+
+test('the write gate: no seeder reached, no write', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const { publicKey } = await web.request('identity.create')
+  t.absent(web.events.some((e) => e.name === 'sync.started'), 'creating the identity is not gated')
+  const cert = createCert({ member: publicKey }, assoc.kp)
+  const refused = await errorOf(web.request('cert.add', { cert }))
+  t.is(refused.code, 'USAGE')
+  t.is(refused.message, 'sincronize com o semeador antes de publicar')
+  const started = web.events.filter((e) => e.name === 'sync.started')
+  t.is(started.length, 1, 'one internal once run')
+  t.is(started[0].data.once, true)
+  const { runId } = started[0].data
+  const lines = web.events.filter((e) => e.name === 'sync.event' && e.data.runId === runId).map((e) => e.data.line)
+  t.is(lines[0], 'sincronizando antes de publicar', 'the run names itself')
+  const stopped = await stoppedOf(web.events, runId)
+  t.is(stopped.reason, 'timeout')
+  t.alike(stopped.result.errors, ['sem pares'])
+  t.is((await web.request('node.info')).memberCert, false, 'nothing was written')
+  t.alike(await web.request('sync.status'), { state: 'idle' })
+
+  // A user's continuous intent survives a failed gate: the run restarts.
+  const { runId: continuous } = await web.request('sync.start', {})
+  const again = await errorOf(web.request('cert.add', { cert }))
+  t.is(again.message, 'sincronize com o semeador antes de publicar')
+  t.ok(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === continuous && e.data.reason === 'preempted'), 'the continuous run was preempted by the gate')
+  const status = await web.request('sync.status')
+  t.is(status.state, 'running', 'and restarted after the failed gate')
+  t.is(status.once, false)
+  await web.request('sync.stop')
+
+  // Locked: refused before any run.
+  const runs = web.events.filter((e) => e.name === 'sync.started').length
+  await node.clearKeyPair()
+  const locked = await errorOf(web.request('cert.add', { cert }))
+  t.is(locked.message, LOCKED)
+  t.is(web.events.filter((e) => e.name === 'sync.started').length, runs, 'no run for a locked identity')
+})
+
+test('a client that detaches during the gate: nothing is written and no run is restarted', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const { publicKey } = await web.request('identity.create')
+  const cert = createCert({ member: publicKey }, assoc.kp)
+  await web.request('sync.start', {})
+  const pending = errorOf(web.request('cert.add', { cert }))
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  t.ok(web.events.some((e) => e.name === 'sync.event' && e.data.line === 'sincronizando antes de publicar'), 'the gate run is under way')
+  web.port.close() // the page's connection goes (detach): the continuous intent is dropped with it
+  t.is((await pending).code, 'CLOSED', 'the client side is closed')
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+
+  const second = await connectClient(node)
+  t.alike(await second.request('sync.status'), { state: 'idle' }, 'no continuous run was restarted for a client that is gone')
+  t.is((await second.request('node.info')).memberCert, false, 'the certificate was not written after the detach')
+  t.is((await second.request('log.read', {})).entries.length, 0)
+})
+
+test('reset removes the diary and locks; config and follows stay', async (t) => {
+  await testnet(t)
+  const { web, node, storage, key, keyPair } = await certified(t, { syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  await web.request('post.create', { text: 'apagado' })
+  await web.request('follow.add', { key: 'cd'.repeat(32) })
+  const { runId } = await web.request('sync.start', {})
+  await node.reset()
+  t.absent(await storage.hasCore('diary'), 'the diary is gone')
+  t.alike(await node.identityStatus(), { exists: false, publicKey: null, legacy: false, unlocked: false, synced: false })
+  t.ok(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId && e.data.reason === 'stopped'))
+  t.alike(await web.request('sync.status'), { state: 'idle' }, 'the continuous run was stopped and not restarted')
+  const info = await web.request('node.info')
+  t.is(info.publicKey, null)
+  t.is(info.memberCert, false)
+  t.is(info.followCount, 1, 'follows stay')
+  t.ok(await storage.readJson('config'), 'config stays')
+  t.is((await errorOf(web.request('identity.create'))).message, LOCKED, 'locked after the reset')
+  await node.setKeyPair(keyPair)
+  t.is((await web.request('identity.create')).publicKey, key, 'the same pair recreates the same key, empty')
+  t.alike((await web.request('log.read', {})).entries, [])
 })
 
 test('a once run with no seeder ends in timeout, naming no address', async (t) => {

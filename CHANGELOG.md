@@ -26,6 +26,10 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
   ligada ao contrato RPC em memória e sincronizada só pelo semeador (`seed --ws-port`), com as mesmas regras de quarentena, de certificado e de cota.
   A web ganhou a tela Conectar (associação e endereço do semeador); uma segunda aba é recusada; o modo `varanda-serve` continua. Resultado em `docs/verification.md` §9.
 
+- Entrada com passkey (por exemplo, a conta Google) na versão web: a identidade do membro é derivada da passkey (WebAuthn com a extensão PRF) e a chave nunca é gravada, só existe na memória da página; a mesma passkey abre a mesma identidade em qualquer aparelho, e navegadores sem PRF não entram.
+  Antes de escrever, o nó alcança o semeador e, depois, envia o diário; num aparelho novo, o diário e o certificado voltam do semeador. Um diário de antes das passkeys é apagado com "recomeçar". Resultado em `docs/verification.md` §10.
+- Conexão automática da versão web: o Caddy serve `/varanda.json` com a associação (`VARANDA_ASSOCIATION` em `deploy/seeder/.env`, obrigatória) e o app se configura sozinho; a implantação confere o arquivo. Em desenvolvimento, a tela Conectar continua.
+
 ### Alterado
 
 - A licença de distribuição passou de MIT para PolyForm Noncommercial 1.0.0, com Rodrigo Serviuc Pavezi como licenciante: uso não comercial é permitido; usos comerciais não abrangidos pela licença dependem de autorização prévia.

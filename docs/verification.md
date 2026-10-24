@@ -437,7 +437,7 @@ Verified findings, after merging duplicates and an upgrade-only triage (five wer
 | high | `seed --ws-port`: no `Host` / `Origin` check, so any web page in a browser on the seeder host could open `/seeder`, replicate the (network-public) diaries and hold the connection cap that WebSocket clients shared with swarm peers | Claude, Grok, built-in review | fixed: `Host` check (421), `Origin` allow-list for browser clients (403; loopback origins by default, Origin-less clients accepted), WebSocket clients capped at half the connection limit |
 | high | spike dht-relay: silent WebSocket clients held every slot (the relay protocol's failsafe arms only after a ping/pong), no `Host` / `Origin` check, `--host` accepted any address | GPT, verifier | fixed: loopback-only `--host`, `Host` / `Origin` checks, a first-message deadline (10 s) and an idle deadline (45 s) |
 | high | relay page: the diary's signing key was also the Noise and DHT key (cross-protocol reuse, non-constant-time DH with attacker-chosen points) | Claude, verifier | fixed: an ephemeral key pair per relay session |
-| high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; design below) |
+| high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; resolved in section 10: the key is derived from a passkey and never stored) |
 | high | the browser member replicated its diary before the seeder's certificate was verified | Grok | fixed: replication starts only after a verified seeder hello (tests with an impostor endpoint) |
 | medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | deferred to the hardening PR: a frame-completion deadline that body bytes do not refresh, and a lower frame limit until the peer has an admitted diary |
 | high (re-audit) | the page hook's facade still let a page script reach the key pair through `replicate()` with its own muxer, contrary to its comment | Claude (re-audit) | same impact as the accepted key-at-rest risk (a same-origin script can read the key from IndexedDB): the comment now says the hook is not a security boundary; the hook goes away in PR 4, when the relay entry joins the page bundle |
@@ -452,7 +452,7 @@ The built-in review's single candidate (the missing `Origin` check) was discarde
 Deferred, not fixed in this PR:
 
 - Two tabs on the same diary can overwrite each other's posts (the IndexedDB adapter rewrites whole files, with no cross-tab writer lock). Deferred to the key and backup PR (cross-tab Web Lock).
-- The browser key is stored unencrypted in IndexedDB, by the page and inside Hypercore 10's own header; there is no export or backup yet (clearing site data loses the identity). Accepted for this spike (a loopback-only page, not distributed) and deferred to PR 4 with the passkey design below.
+- The browser key was stored unencrypted in IndexedDB, by the page and inside Hypercore 10's own header, with no export or backup. Accepted for this spike (a loopback-only page, not distributed); resolved in PR 4 by deriving the key from a passkey and storing none (section 10).
 - The IndexedDB adapter rewrites whole files: fine for a spike, not for multi-MB diaries.
 - `member.post()` does not enforce the diary quota (100,000 blocks / 64 MiB); the seeder would reject and purge on `quota`. The real browser session must enforce it.
 - `ws-stream` drops buffered bytes on `end()` or `destroy()` before the socket opens.
@@ -474,25 +474,18 @@ The estimates below are rough, not measured (person-days with agent assistance):
 |---|---|---|
 | 2 | Browser node session behind `packages/rpc`, and `apps/app` web client using it instead of `varanda-serve` (dominated by porting the 15 RPC handlers onto Hypercore 10 and the browser storage, plus quotas and feeds) | medium, 3-5 d |
 | 3 | PWA manifest, service worker, icons | small, 1-2 d |
-| 4 | The key at rest protected with a passkey (WebAuthn PRF, design below), export and import of the wrapped key, a passphrase fallback, cross-tab lock | medium, 3-5 d |
+| 4 | Identity derived from a passkey (WebAuthn PRF): no key at rest, nothing to wrap or back up; write gate, push and own-diary recovery; hosted `/varanda.json` auto-connect. Built as section 10; export/import of a wrapped key and the passphrase fallback were dropped by that design | done, section 10 |
 | 5 | Caddy (automatic TLS) and compose serving the PWA and `wss:///seeder` on one origin, CSP with `'wasm-unsafe-eval'` | small, 1-2 d, plus the user's DNS and hosting steps |
 | 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision | medium, 3-5 d |
 
-### Next: the key at rest with a passkey (PR 4 design, decided 2026-10-23)
+### Shipped: the key from a passkey (supersedes the PR 4 wrap design of 2026-10-23)
 
-Decision: the member's key is protected at rest with a passkey through the WebAuthn PRF extension, so "Entrar com Google" means a passkey kept in the Google Password Manager (or iCloud Keychain, or a security key), not a Google sign-in (OIDC). An OIDC login proves who the person is but hands the page no secret, so encrypting with it would need a server that releases a wrapping key after the login: that server (and its operator) could then open the key and would learn which Google account belongs to which member. With the passkey, no server holds anything and Google never sees the key.
+The first PR 4 design (an AES-GCM wrap of a stored Ed25519 key, under a key from the passkey's PRF, plus a passphrase fallback and an export of the wrapped blob) was replaced before it was built. The shipped design stores no key at all, so there is nothing to wrap, export or recover from a file. It is described and verified in section 10; in short:
 
-Design (to implement and verify in PR 4):
-
-- **Enrolment.** `navigator.credentials.create()` with a discoverable credential (`residentKey: 'required'`), `userVerification: 'required'`, `user.id` = 16 random bytes (never an email or a Google identifier), `rp.id` = the PWA's domain (set by the hosting PR), and the `prf` extension with `eval.first` = a fixed salt (SHA-256 of `varanda/key-wrap/v1`). Some authenticators report `prf.enabled` at creation and return the PRF result only on `get()`, so enrolment ends with one `get()`.
-- **Key derivation.** The 32-byte PRF output goes through HKDF-SHA-256 (a random 32-byte salt stored with the blob, info `varanda/diary-key-wrap/v1`) into a non-extractable AES-GCM-256 `CryptoKey`; the PRF output is never stored.
-- **Wrapping.** The 64-byte Ed25519 secret key is encrypted with AES-GCM (random 96-bit IV) and stored in IndexedDB as `{ v: 1, credentialId, hkdfSalt, iv, ciphertext, publicKey }`. The plaintext key exists only in memory after an unlock.
-- **Unlock.** On opening, `navigator.credentials.get()` with `allowCredentials: [credentialId]`, `userVerification: 'required'` and the same PRF salt (biometrics or PIN), then HKDF, then decrypt; the key stays in memory until the page closes.
-- **Hypercore's own copy.** Hypercore 10 also persists the key pair in its header file. PR 4 must remove that copy: either a storage wrapper that encrypts the `header` file (or every file) with the same key, or opening the core in a way that keeps the secret key only in memory. The choice is measured in PR 4.
-- **Recovery and other devices.** The passkey syncs through its provider, and the PRF output is deterministic per credential, so the same passkey unlocks the same wrapped blob on another device. The blob is exported and imported as a file or QR code (safe to keep anywhere, since it is encrypted). Losing both the passkey and every copy of the plaintext key loses the identity; this must be said plainly in the UI.
-- **Fallback.** Where PRF is unavailable, a passphrase with a slow KDF (PBKDF2-SHA-256 with an iteration count from current OWASP guidance, or Argon2id through WASM; the numbers are to be checked when PR 4 is written).
-- **What it protects against.** The key read from disk or from a copied browser profile, and other pages sharing the origin when the page is locked. **Not** against JavaScript served by the PWA's own origin while the key is unlocked (the hosted-PWA trust limit above), nor against a compromised device.
-- **To verify in PR 4.** Browser and provider support for PRF (my understanding, not verified here: Chrome with Google Password Manager passkeys, and Safari 18 with iCloud Keychain, support it; Firefox and Windows Hello are uncertain); the exact `rp.id` once the domain exists; the UX of first enrolment and of a lost passkey.
+- the diary's Ed25519 key pair is **derived** from the passkey's PRF output (HKDF-SHA-256 over a fixed PRF input, with fixed labels), so the same passkey gives the same identity on every device that has it;
+- nothing is wrapped or stored: the secret key lives only in the session's closure while unlocked, and Hypercore's header is written with `secretKey: null`;
+- a browser or password manager without PRF is blocked, with no fallback (a passphrase fallback would be a second, weaker identity);
+- what it protects against: the key read from disk or from a copied browser profile (there is none there). It does **not** protect against JavaScript served by the app's own origin while the key is unlocked (the hosted-PWA trust limit above), nor against a compromised device.
 
 ### Not verified
 
@@ -553,11 +546,11 @@ Commands (loopback only): `node apps/cli/scripts/local-dht.js --port 49811`; `as
 - The session mirrors the core session's preemption: a member request stops a running sync and a continuous run restarts after it. Two Hypercore instances on one browser storage would corrupt it, and the app was built around that contract. Cost: during a continuous run each member request reconnects to the seeder.
 - The node is a separate esbuild bundle loaded at run time, not part of the Metro bundle: the sodium shim, the `events` shim and the forbidden-module check already exist for esbuild, and Metro keeps blocking the node code.
 - The node runs on the page's main thread (no Worker).
-- A minimal cross-tab guard (the exclusive Web Lock) landed here rather than in PR 4, because two tabs on one IndexedDB diary corrupt it; PR 4 keeps the passkey, export and import.
+- A minimal cross-tab guard (the exclusive Web Lock) landed here rather than in PR 4, because two tabs on one IndexedDB diary corrupt it.
 
 ### Limits and open risks
 
-- The key is still unencrypted in IndexedDB, and there is no backup or export: clearing the site data loses the identity (PR 4; the page says so).
+- (At the time of this section) the key was still unencrypted in IndexedDB, with no backup or export. Superseded by section 10: the key is derived from a passkey and never stored; clearing site data does not lose the identity.
 - Each file of an open diary is held whole in memory; `feed.read` opens every followed diary in turn.
 - One seeder is the only peer: with it down, nothing syncs (no DHT, no relay).
 - `ws://` is accepted for any host (the Noise stream is end-to-end encrypted and the seeder is verified by its certificate, but the WebSocket itself is not); an https page needs `wss://`, which only arrives with the hosting PR.
@@ -573,3 +566,79 @@ Commands (loopback only): `node apps/cli/scripts/local-dht.js --port 49811`; `as
 - TLS (`wss://`), a public host and the public DHT.
 - Long sessions, multi-MB diaries and IndexedDB eviction under storage pressure.
 - Node 20 locally (CI runs 20 and 24).
+
+## 10. Identity from a passkey (PR 4, 2026-10-24)
+
+### Summary
+
+- The browser member's identity is **derived** from a WebAuthn passkey with the PRF extension; the key is never stored. The same passkey (for example in the Google Password Manager, which syncs it) opens the same identity on any device.
+- On a hosted installation the page configures itself from `https://<host>/varanda.json`; the person only presses "Entrar".
+- Writes are gated on catching up with the seeder and are pushed to it right after; a member on a new device recovers the own diary and certificate from the seeder.
+- Verified by Node tests (below) and by a headless Chrome 156 run against a CLI seeder with a CDP virtual authenticator with PRF (scenarios A to I, below). Not verified on real devices or real providers: see the Human verification checklist.
+
+### Design as built
+
+- **Derivation (`packages/web-member/lib/passkey.js`, version 1).** `prf = PRF(credential, utf8('varanda/member-identity/prf/v1'))` (32 bytes); `seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-identity/hkdf/v1'), info = utf8('varanda/member-identity/ed25519/v1'), 32 bytes)`; the key pair is `hypercore-crypto.keyPair(seed)` (Ed25519 from the seed). Nothing else enters it (not the challenge, credential id, rp.id, device or association). Changing any label changes every member's key. The labels are raw UTF-8 bytes so the ceremony options are built synchronously, inside the click.
+- **Nothing wrapped or stored.** The pair is installed in the session by `setKeyPair` (copied synchronously, the caller zeroes its own copy), kept only in the session's closure, and zero-filled on lock, reset or close. The diary's Hypercore header is written with `secretKey: null`, and the session hands the pair to the core after it opens (Hypercore keeps it in memory only). The page never receives the key: no getter, no signing call, and RPC results never carry a secret. The only thing stored besides the diary is the non-secret record `{ v: 1, credentialId, rpId, userId }` in the key-value area (`passkey`).
+- **No PRF, no identity.** A browser or password manager without PRF is blocked with `NO_PRF` and no fallback. A passkey that was created but gave no PRF stays in the manager; the page names it (the text says to delete the passkey "Varanda xxxxxx" from the password manager, where `xxxxxx` is the first six hex digits of its user handle) and excludes it from the next creation.
+- **`rp.id` is the exact host** (`rpIdFor`: no widening to the registrable domain, no IP literal; development uses `localhost`). Why: the apex `varanda.app` is a separate GitHub Pages origin, and with a widened `rp.id` any origin under the apex could ask for this passkey's PRF. Consequence: the passkey is bound to the host. Moving the app to another host later needs WebAuthn Related Origin Requests from the old host (or the members lose the passkey's use on the new one); this is not built.
+- **The passkey options.** Discoverable credential (`residentKey: 'required'`), `userVerification: 'required'`, `user.id` = 32 random bytes with the label `Varanda <6 hex>` (never an email or a Google identifier), timeout 120 s, PRF eval input as above. Some authenticators report PRF as enabled at creation and return the result only on `get()`: the creation then resolves `{ pending: true }` and a second click (`complete`) fetches it.
+- **Write gate.** Before `cert.add`, `profile.set`, `post.create` and `post.reply` the session requires the key (`USAGE 'identidade bloqueada: entre com a passkey'`; `NOT_FOUND 'identidade não encontrada'` with no identity), then catches up with the seeder (an internal once run, event line `sincronizando antes de publicar`, default timeout `writeGateTimeoutMs = 15000`, skipped while a continuous run already has the own diary synced), writes, then pushes (`enviando ao semeador`; a continuous run is restarted to push instead). **Its limit, stated plainly:** the gate only narrows the window. Two devices that write at the same head within seconds of each other, or a device that is offline when it writes, can still fork the diary, and the seeder purges a forked diary (the fork watcher, as for any member). This is a known open risk for a future PR (a stronger writer lease or conflict handling), not solved here.
+- **Own-diary recovery.** On a new device (or after clearing site data) the same passkey derives the same key; the session fetches the own diary and the member certificate from the seeder before any write (event lines `diário próprio sincronizado (<n>)`, `diário próprio atrasado (<n>/<m>)`, `certificado recuperado do semeador`).
+- **Legacy store.** A store written before the passkeys (key kept in the browser) is never opened with a derived key. On its first open under this code the node wipes the stored secret (zero-filled, removed from the header, both oplog header slots rewritten and their tails zeroed; the decision reads both raw slots and their tails, so a wipe interrupted at any step is finished by the next open; `packages/web-member/lib/node-store.js` `scrubLegacySecret`): the diary stays readable and is never writable again. The page offers "apagar o diário e recomeçar", which calls `reset` (`deleteCore('diary')`). The old identity cannot be reconstructed and needs a new certificate; the operator removes the old key from the seeder with `seed drop`. `MISMATCH` (`'passkey não corresponde ao diário guardado'`) is raised when the stored diary belongs to another key; `legacy` is set for the old kind while the page stays open (after a reload the wiped store reports as a plain mismatch). This closes a finding of the security audit (raised to high): until this change the old secret stayed in IndexedDB until the member chose to reset.
+- **Certificates never expire.** The old test identity's certificate stays valid and the seeder still holds its diary: the operator removes it with `seed drop`.
+- **The PR B seam.** The certificate step (`CertificateStep` in the app) is where the future automatic certification attaches: it will need a domain-separated challenge signer in the node (so that the member can prove the key to the certifier without exposing it). Not built; the page still takes the certificate by paste.
+- **Hosted configuration.** `deploy/seeder/Caddyfile` serves `/varanda.json` = `{"v":1,"association":"<VARANDA_ASSOCIATION>"}` (never an address: the page uses `wss://<its host>/seeder`); compose refuses to start without `VARANDA_ASSOCIATION` and `deploy.sh` refuses to deploy without a valid one and, when the Caddyfile has the handle, probes the body byte for byte. Local development keeps the manual Conectar form.
+
+### Automated (CI)
+
+`npm test -w packages/web-member` (14 test files, 0 failures) on the final code:
+
+| File | Tests / asserts | What |
+|---|---|---|
+| `test/passkey.test.js` | 14 / 161 | a golden vector (fixed PRF, fixed seed and public key), the raw UTF-8 v1 labels, `rpIdFor`, `supportStatus`, the ceremony options, `register` (including pending then `completeRegistration`), `signIn`, the error mapping, zeroing |
+| `test/node-storage.test.js` | 9 / 92 | the paged storage, a Hypercore 10 diary on IndexedDB that survives a close without its secret, a legacy store (secret in the header) whose secret is wiped on the first open (no IndexedDB page or memory file holds it afterwards), readable and never writable, a wipe cut short after its first header write, and one cut short before its tail writes, both finished by the next open (the decision reads both raw oplog header slots and their tails; no 8-byte window of the seed survives) |
+| `test/session.test.js` | 16 / 176 | the RPC handlers and the session's passkey controls (`setKeyPair`, `clearKeyPair`, `identityStatus`, `reset`), mismatch and locked behaviour, the gate with an unreachable seeder, a client detaching during the gate (nothing written, no run restarted), a legacy store wiped on first open |
+| `test/passkey-e2e.test.js` | 1 / 98 | two browser sessions with the same key pair through a CLI seeder: the write gate (catch-up first, refused when the seeder is unreachable), the push the seeder confirms, own-diary and certificate recovery on a fresh device, interleaved writes |
+| `test/node-bundle.test.js` | 1 / 91 | the built `varanda-node.js` evaluated as a script with a faked `navigator.credentials`, over IndexedDB against a seeder: the frozen handle exposes only `connect`, `close` and `identity` (no getter, no signer) |
+| `test/sync-gate.test.js` | 4 / 46 | the quarantine and quota gate; an inventory completed only by the timeout leaves the own diary unknown (no `done`, no write); a write pushes while the seeder has not confirmed the local length, an idempotent `cert.add` included |
+
+`apps/app` `test/config.test.js` covers `hostedConfigOf` and `isHostedPage`.
+
+### Browser end to end (headless Chrome 156, CDP virtual authenticator with PRF)
+
+A production export served by a static server with the production CSP, a CLI seeder on a local DHT with `--ws-port`, `/varanda.json` served as in production. All nine scenarios passed:
+
+| | Scenario | Result |
+|---|---|---|
+| A | First visit | the page configured itself from `/varanda.json` (no Conectar) and showed "Entrar" |
+| B | "criar passkey" | a passkey with PRF created; identity key derived; the diary created |
+| C | Certificate | the member certificate pasted and stored; the tabs appear |
+| D | Post | published through the write gate and pushed: the seeder logged `admitted` and `have` for the member's key |
+| E | Reload, then "entrar" | the same key, the same posts |
+| F | "bloquear identidade" | the key dropped from memory and the page returned to Entrar |
+| G | Authenticator without PRF | the notice, including the hint to delete the passkey "Varanda xxxxxx"; no identity created |
+| H | A different authenticator (new passkey) | a different key from the first passkey's |
+| I | Site data cleared, same passkey | key, posts and certificate recovered from the seeder in about 2 s |
+
+The production CSP raised no violation in any scenario. The seeder log names no client address.
+
+### Limits and open risks
+
+- **Fork risk.** The write gate does not prevent two devices from forking the diary (see above). A fork gets the diary purged by the seeder. Open; a future PR.
+- **Lost passkey = lost identity.** There is no recovery file, by design. The page says so.
+- **One passkey, one identity.** The OS may offer another provider (an iPhone with iCloud Keychain); a passkey from another provider is another identity and needs a new certificate.
+- **Host-bound.** A host move needs Related Origin Requests from the old host (not built).
+- **Hosted-PWA trust limit.** Whoever serves the page can change its code; the key is in memory while unlocked.
+- **The first deploy with this change runs the previous `deploy.sh`** (no `/varanda.json` probe, and a missing `VARANDA_ASSOCIATION` makes compose fail and roll back): the operator adds `VARANDA_ASSOCIATION` to the server's `deploy/seeder/.env` before the merge, and checks `/varanda.json` with curl after it.
+- Real providers were not tried (only a virtual authenticator): whether Google Password Manager, iCloud Keychain, Windows Hello or Firefox return PRF is for the checklist below.
+
+### Human verification
+
+- [ ] `curl -i https://<host>/varanda.json` returns 200, `application/json`, `Cache-Control: no-store` and `{"v":1,"association":"<64 hex>"}` with the association the seeder trusts.
+- [ ] Chrome on a computer with the Google Password Manager: first visit, "criar passkey", certificate, a post; the passkey is listed as `Varanda xxxxxx`.
+- [ ] Reload, then "entrar": the same key and posts.
+- [ ] Android with the same Google account: "entrar" gives the same key; the own diary and certificate are recovered; a post right after a post from the computer passes the gate without a fork.
+- [ ] iPhone (Safari): which provider the OS offers (iCloud Keychain gives another identity); whether PRF works.
+- [ ] A browser without PRF (for example Firefox, if it lacks it): the notice, no identity created.
+- [ ] The old test identity: the page offers "apagar o diário e recomeçar"; after it, a new identity and a new certificate; the operator runs `seed drop` for the old key.

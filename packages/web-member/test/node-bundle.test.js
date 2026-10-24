@@ -2,8 +2,13 @@
 // app's web build serves) run as a browser would run it: evaluated as a
 // script that defines VarandaWebNode, over IndexedDB (fake-indexeddb) and a
 // WebSocket global (ws), against an in-process seeder behind a WebSocket
-// entry. Proves the bundle's whole graph (Hypercore 10, the sodium shim, the
-// session and the dispatcher) runs, and that its storage survives a restart.
+// entry, with the page's WebAuthn globals faked (navigator.credentials, a
+// fake authenticator with the PRF extension, PublicKeyCredential,
+// isSecureContext, location). Proves the bundle's whole graph (Hypercore 10,
+// the sodium shim, the session, the dispatcher and the passkey identity) runs:
+// the diary opens only with the key derived from the passkey, the storage
+// survives a restart and never holds the secret.
+/* global indexedDB */
 require('fake-indexeddb/auto')
 const test = require('brittle')
 const fs = require('node:fs')
@@ -13,7 +18,8 @@ const { spawnSync } = require('node:child_process')
 const ws = require('ws')
 const b4a = require('b4a')
 const { testnet, tmpDir, localSwarmOptions } = require('./helpers/net')
-const { connectClient, stoppedOf } = require('./helpers/session')
+const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
+const { keyPairFromPrf, toBase64Url } = require('../lib/passkey')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 
@@ -21,6 +27,94 @@ const BUILD = path.join(__dirname, '..', 'scripts', 'build.js')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
+}
+
+const FIXED32 = new Uint8Array(32).map((_, i) => i + 1)
+const OTHER32 = new Uint8Array(32).fill(7)
+
+function arrayBufferOf (bytes) {
+  return new Uint8Array(bytes).buffer
+}
+
+// A fake CredentialsContainer holding at most one passkey. createMode:
+// 'results' (PRF output on create), 'pending' (enabled only: the PRF comes
+// on the next get) or 'disabled' (no PRF). prf: the output the
+// authenticator gives (a fresh copy each time: passkey.js wipes it).
+function fakeAuthenticator () {
+  const fake = {
+    createMode: 'results',
+    prf: FIXED32,
+    credential: null, // { rawId: Uint8Array, userId: Uint8Array }
+    calls: [],
+    create ({ publicKey }) {
+      fake.calls.push({ kind: 'create', publicKey })
+      const rawId = globalThis.crypto.getRandomValues(new Uint8Array(16))
+      fake.credential = { rawId, userId: new Uint8Array(publicKey.user.id) }
+      const ext = fake.createMode === 'results'
+        ? { prf: { enabled: true, results: { first: arrayBufferOf(fake.prf) } } }
+        : { prf: { enabled: fake.createMode === 'pending' } }
+      return Promise.resolve(fake.credentialOf(ext))
+    },
+    get ({ publicKey }) {
+      fake.calls.push({ kind: 'get', publicKey })
+      if (fake.credential === null) return Promise.reject(Object.assign(new Error('none'), { name: 'NotAllowedError' }))
+      // get() reports no `enabled`, only the output.
+      return Promise.resolve(fake.credentialOf({ prf: { results: { first: arrayBufferOf(fake.prf) } } }))
+    },
+    credentialOf (ext) {
+      const { rawId, userId } = fake.credential
+      return {
+        type: 'public-key',
+        rawId: arrayBufferOf(rawId),
+        id: toBase64Url(rawId),
+        response: { userHandle: arrayBufferOf(userId) },
+        getClientExtensionResults: () => ext
+      }
+    }
+  }
+  return fake
+}
+
+// Defines the page globals on globalThis (Node 24's navigator is a getter
+// without a setter) and restores the original descriptors in teardown.
+function installGlobals (t, values) {
+  const saved = {}
+  for (const [name, value] of Object.entries(values)) {
+    saved[name] = Object.getOwnPropertyDescriptor(globalThis, name)
+    Object.defineProperty(globalThis, name, { value, configurable: true, enumerable: true, writable: true })
+  }
+  t.teardown(() => {
+    for (const [name, descriptor] of Object.entries(saved)) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+      else delete globalThis[name]
+    }
+  })
+}
+
+// Every raw row of an object store of the node's IndexedDB database.
+function idbRows (store) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('varanda-node')
+    req.onerror = () => reject(req.error)
+    req.onsuccess = () => {
+      const db = req.result
+      const tx = db.transaction([store], 'readonly')
+      const all = tx.objectStore(store).getAll()
+      const keys = tx.objectStore(store).getAllKeys()
+      tx.oncomplete = () => {
+        db.close()
+        resolve(keys.result.map((key, i) => ({ key, value: all.result[i] })))
+      }
+      tx.onerror = () => reject(tx.error)
+    }
+  })
+}
+
+function holds (rows, needle) {
+  return rows.some(({ value }) => {
+    const buf = typeof value === 'string' ? b4a.from(value) : new Uint8Array(value)
+    return b4a.indexOf(buf, needle) !== -1
+  })
 }
 
 test('the built node bundle serves the RPC over IndexedDB and syncs with a seeder', async (t) => {
@@ -61,13 +155,24 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   })
   const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
 
-  // The page's globals: WebSocket (ws) and IndexedDB (fake-indexeddb, above).
+  // The page's globals: WebSocket (ws), IndexedDB (fake-indexeddb, above)
+  // and WebAuthn (a fake authenticator).
+  const fake = fakeAuthenticator()
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' }
+  })
   const savedWs = globalThis.WebSocket
   globalThis.WebSocket = ws.WebSocket
   t.teardown(() => {
     globalThis.WebSocket = savedWs
     delete globalThis.VarandaWebNode
   })
+  t.ok(code.includes('varanda/member-identity/prf/v1'), 'carries the passkey derivation')
   vm.runInThisContext(code, { filename: out })
   const api = globalThis.VarandaWebNode
   t.is(api.version, 1)
@@ -76,10 +181,114 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const bad = await api.start({ association: 'xyz', seederUrl }).then(() => null, (err) => err)
   t.is(bad && bad.message, 'chave da associação inválida', 'configuration errors reach the page in pt-BR')
 
+  const expected = await keyPairFromPrf(new Uint8Array(FIXED32))
+  const key = hex(expected.publicKey)
+  const secret = b4a.from(expected.secretKey)
+
   const handle = await api.start({ association, seederUrl })
-  t.alike(Object.keys(handle).sort(), ['close', 'connect'], 'only connect and close are exposed')
+  t.alike(Object.keys(handle).sort(), ['close', 'connect', 'identity'], 'only connect, close and identity are exposed')
+  t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity), 'the handle and identity are frozen')
+  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'status', 'unlock'], 'no getter, no signer')
   const web = await connectClient(handle, { timeoutMs: 60000 })
-  const { publicKey: key } = await web.request('identity.create')
+
+  const first = await handle.identity.status()
+  t.is(first.unlocked, false, 'locked at start')
+  t.is(first.exists, false)
+  t.is(first.webauthn, true)
+  t.is(first.prf, 'yes')
+  t.is(first.rpId, 'localhost')
+  t.is(first.passkeyKnown, false)
+  t.absent('rpIdError' in first)
+  const locked = await errorOf(web.request('identity.create'))
+  t.is(locked && locked.code, 'USAGE')
+  t.is(locked && locked.message, 'identidade bloqueada: entre com a passkey', 'identity.create needs the passkey')
+
+  // No PRF: blocked, still locked, no diary.
+  fake.createMode = 'disabled'
+  const noPrf = await errorOf(handle.identity.unlock({ register: true }))
+  t.is(noPrf && noPrf.code, 'NO_PRF', 'an authenticator without PRF is refused')
+  const unusable = fake.credential
+  t.is(noPrf && noPrf.credentialId, toBase64Url(unusable.rawId), 'the error names the unusable passkey')
+  t.is(noPrf && noPrf.userId, hex(unusable.userId))
+  const afterNoPrf = await handle.identity.status()
+  t.is(afterNoPrf.unlocked, false)
+  t.is(afterNoPrf.exists, false)
+  t.is(afterNoPrf.passkeyKnown, false)
+
+  // PRF only enabled on create: pending, then complete() fetches it.
+  fake.createMode = 'pending'
+  fake.calls.length = 0
+  const pendingCall = handle.identity.unlock({ register: true })
+  t.is(fake.calls.length, 1, 'create() is called synchronously, inside the click')
+  t.is(fake.calls[0].publicKey.rp.id, 'localhost')
+  t.ok(fake.calls[0].publicKey.excludeCredentials.every((c) => c.id instanceof Uint8Array))
+  t.alike(fake.calls[0].publicKey.excludeCredentials.map((c) => new Uint8Array(c.id)), [unusable.rawId],
+    'the unusable passkey is excluded from the next creation')
+  t.alike(await pendingCall, { pending: true }, 'a creation without the PRF output is pending')
+  t.is((await handle.identity.status()).unlocked, false, 'still locked while pending')
+
+  // A second creation while one is pending excludes the pending passkey
+  // (and, when the manager creates another anyway, replaces it).
+  const firstPending = fake.credential
+  fake.calls.length = 0
+  t.alike(await handle.identity.unlock({ register: true }), { pending: true })
+  t.alike(fake.calls[0].publicKey.excludeCredentials.map((c) => new Uint8Array(c.id)).sort(byBytes),
+    [unusable.rawId, firstPending.rawId].sort(byBytes), 'the pending passkey is excluded from a new creation')
+
+  // The record is published only with a successful unlock: a failed kv
+  // write, or a lock() during it, leaves no record and keeps the pending
+  // creation (complete() still works afterwards).
+  const realPut = globalThis.IDBObjectStore.prototype.put
+  t.teardown(() => { globalThis.IDBObjectStore.prototype.put = realPut })
+  globalThis.IDBObjectStore.prototype.put = function (value, key) {
+    if (key === 'passkey') throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' })
+    return realPut.call(this, value, key)
+  }
+  const writeFailed = await errorOf(handle.identity.complete())
+  globalThis.IDBObjectStore.prototype.put = realPut
+  t.ok(writeFailed, 'complete() fails when the record cannot be written')
+  const afterWriteFailed = await handle.identity.status()
+  t.is(afterWriteFailed.unlocked, false, 'locked after a failed record write')
+  t.is(afterWriteFailed.passkeyKnown, false, 'no passkey remembered after a failed record write')
+  t.absent(await kvValue('passkey'), 'no record stored')
+  let lockOnce = true
+  globalThis.IDBObjectStore.prototype.put = function (value, key) {
+    if (key === 'passkey' && lockOnce) {
+      lockOnce = false
+      handle.identity.lock()
+    }
+    return realPut.call(this, value, key)
+  }
+  const lockedDuringWrite = await errorOf(handle.identity.complete())
+  globalThis.IDBObjectStore.prototype.put = realPut
+  t.is(lockedDuringWrite && lockedDuringWrite.code, 'CANCELLED', 'a lock() during the record write cancels')
+  const afterLockedWrite = await handle.identity.status()
+  t.is(afterLockedWrite.unlocked, false)
+  t.is(afterLockedWrite.passkeyKnown, false, 'the record is rolled back after a lock() during its write')
+  t.absent(await kvValue('passkey'), 'the stored record is rolled back')
+
+  const completing = handle.identity.complete()
+  const concurrent = await errorOf(handle.identity.unlock())
+  t.is(concurrent && concurrent.code, 'LOCKED', 'one passkey ceremony at a time')
+  t.is(concurrent && concurrent.message, 'outra entrada com a passkey em andamento')
+  const done = await completing
+  t.alike(done, { publicKey: key, created: true }, 'complete() unlocks with the derived key')
+  const getCall = fake.calls.find((c) => c.kind === 'get')
+  t.ok(getCall.publicKey.allowCredentials[0].id instanceof Uint8Array, 'allowCredentials ids are bytes')
+  t.alike(new Uint8Array(getCall.publicKey.allowCredentials[0].id), fake.credential.rawId, 'restricted to the new passkey')
+
+  const kv = await idbRows('kv')
+  const stored = JSON.parse(kv.find((r) => r.key === 'passkey').value)
+  t.alike(Object.keys(stored).sort(), ['credentialId', 'rpId', 'userId', 'v'], 'the passkey record holds no secret')
+  t.is(stored.credentialId, toBase64Url(fake.credential.rawId))
+  t.is(stored.rpId, 'localhost')
+  t.is(stored.userId, hex(fake.credential.userId))
+
+  const unlocked = await handle.identity.status()
+  t.is(unlocked.unlocked, true)
+  t.is(unlocked.passkeyKnown, true)
+  const { publicKey: created } = await web.request('identity.create')
+  t.is(created, key, 'the diary key is the passkey-derived key')
   await web.request('cert.add', { cert: createCert({ member: key }, assocKp) })
   await web.request('post.create', { text: 'do pacote do nó' })
   const { runId } = await web.request('sync.start', { once: true, timeoutMs: 30000 })
@@ -89,13 +298,85 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.is(stopped.result.admitted, true)
   t.is(stopped.result.seederConfirmed, true)
   t.ok(seeder.admittedKeys().includes(key), 'the seeder admitted the diary')
-  await handle.close()
 
-  // A new start (a page reload) finds the same diary in IndexedDB.
+  // The superseded pending passkey stays excluded, with the unusable one
+  // and the current one (the creation is cancelled right away).
+  const current = fake.credential
+  fake.calls.length = 0
+  const extra = handle.identity.unlock({ register: true })
+  t.alike(fake.calls[0].publicKey.excludeCredentials.map((c) => new Uint8Array(c.id)).sort(byBytes),
+    [unusable.rawId, firstPending.rawId, current.rawId].sort(byBytes), 'the unusable, superseded and current passkeys are excluded')
+  await handle.identity.lock()
+  t.is((await errorOf(extra)).code, 'CANCELLED')
+  fake.credential = current
+  t.alike(await kvValue('passkey'), stored, 'the stored record is untouched')
+  await handle.close()
+  t.absent(holds(await idbRows('pages'), secret), 'no IndexedDB page holds the secret')
+  t.absent(holds(await idbRows('kv'), secret), 'no kv entry holds the secret')
+  t.absent(holds(await idbRows('kv'), b4a.from(hex(secret))), 'nor its hex')
+
+  // A new start (a page reload) finds the same diary, locked, and the
+  // stored passkey opens it again (signIn restricted to its id).
   const again = await api.start({ association, seederUrl })
   t.teardown(() => again.close(), { force: true })
   const web2 = await connectClient(again)
-  t.alike(await web2.request('identity.show'), { publicKey: key, association })
+  const reloaded = await again.identity.status()
+  t.is(reloaded.unlocked, false, 'locked after a reload')
+  t.is(reloaded.exists, true)
+  t.is(reloaded.publicKey, key)
+  t.is(reloaded.passkeyKnown, true)
+  t.alike(await web2.request('identity.show'), { publicKey: key, association }, 'reads work locked')
+
+  // Another PRF (another passkey) does not open this diary.
+  fake.prf = OTHER32
+  const mismatch = await errorOf(again.identity.unlock())
+  t.is(mismatch && mismatch.code, 'MISMATCH')
+  t.is(mismatch && mismatch.message, 'passkey não corresponde ao diário guardado')
+  t.is(mismatch && mismatch.legacy, false)
+  t.is((await again.identity.status()).unlocked, false, 'still locked after a mismatch')
+  fake.prf = FIXED32
+
+  // lock() during a ceremony cancels its result.
+  const racing = again.identity.unlock()
+  await again.identity.lock()
+  const cancelled = await errorOf(racing)
+  t.is(cancelled && cancelled.code, 'CANCELLED', 'a ceremony that outlives lock() is discarded')
+  t.is((await again.identity.status()).unlocked, false)
+
+  fake.calls.length = 0
+  t.alike(await again.identity.unlock(), { publicKey: key, created: false }, 'sign in gives the same key')
+  const signIn = fake.calls[0]
+  t.is(signIn.kind, 'get')
+  t.ok(signIn.publicKey.allowCredentials[0].id instanceof Uint8Array)
+  t.alike(new Uint8Array(signIn.publicKey.allowCredentials[0].id), fake.credential.rawId, 'restricted to the stored passkey')
+  t.is((await again.identity.status()).unlocked, true)
   const log = await web2.request('log.read', {})
   t.is(log.entries[1].record.text, 'do pacote do nó')
+
+  await again.identity.lock()
+  t.is((await again.identity.status()).unlocked, false, 'lock() locks')
+  const lockedPost = await errorOf(web2.request('post.create', { text: 'bloqueado' }))
+  t.is(lockedPost && lockedPost.message, 'identidade bloqueada: entre com a passkey')
+
+  // reset() forgets the diary and the passkey record; a new passkey with
+  // the PRF on create starts over.
+  await again.identity.reset()
+  const empty = await again.identity.status()
+  t.is(empty.exists, false)
+  t.is(empty.passkeyKnown, false)
+  t.is(empty.unlocked, false)
+  t.is(await kvValue('passkey'), null, 'the passkey record is gone')
+  fake.createMode = 'results'
+  t.alike(await again.identity.unlock({ register: true }), { publicKey: key, created: true }, 'PRF on create unlocks at once')
+  t.is((await web2.request('identity.create')).publicKey, key)
+  t.absent(holds(await idbRows('pages'), secret), 'still no page holds the secret')
 })
+
+function byBytes (a, b) {
+  return b4a.compare(a, b)
+}
+
+async function kvValue (key) {
+  const row = (await idbRows('kv')).find((r) => r.key === key)
+  return row ? JSON.parse(row.value) : undefined
+}

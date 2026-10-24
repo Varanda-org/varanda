@@ -1,12 +1,14 @@
 // Ajustes: a sheet with a grouped list (Conexão, Sincronizar, Identidade)
-// over the technical screens, which render embedded inside the sheet.
+// over the technical screens, which render embedded inside the sheet. On the
+// web's browser node it also offers 'bloquear identidade': the key derived
+// from the passkey is dropped from memory and the shell returns to Entrar.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
-import { Page, Soft } from '../ui'
+import { ErrorText, Page, Soft, useAction } from '../ui'
 import Conexao from './Conexao'
 import Identidade from './Identidade'
 import Sincronizar from './Sincronizar'
@@ -23,6 +25,12 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
   const node = useNode()
   // The embedded screens reload when the node becomes ready again.
   const ready = node.phase === 'ready'
+  const lockAction = useAction()
+  const canLock = node.passkey !== null && node.passkey.status !== null && node.passkey.status.unlocked === true
+  const doLock = async () => {
+    const r = await lockAction.run(() => node.passkey.lock())
+    if (r.ok) onClose()
+  }
   const left = screen === 'lista'
     ? (
       <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8}>
@@ -67,6 +75,24 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
                 </Pressable>
               ))}
             </View>
+            {canLock
+              ? (
+                <View style={styles.group}>
+                  <Pressable
+                    style={styles.row}
+                    accessibilityRole='button'
+                    accessibilityLabel='bloquear identidade'
+                    accessibilityState={{ disabled: lockAction.pending }}
+                    disabled={lockAction.pending}
+                    onPress={doLock}
+                  >
+                    <Icon name='lock' size={22} color={colors.soft} />
+                    <Text style={styles.label}>{lockAction.pending ? 'bloquear identidade…' : 'bloquear identidade'}</Text>
+                  </Pressable>
+                </View>
+                )
+              : null}
+            <ErrorText>{lockAction.error}</ErrorText>
             <Soft>As telas técnicas de hoje: a conexão com o nó, a sincronização com os pares e a identidade do diário.</Soft>
           </Page>
         </View>

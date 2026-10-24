@@ -43,10 +43,15 @@ sha_re='^[0-9a-f]{40}$'
 # Minúsculas e sem ponto final: o semeador exige que https://<domínio> seja
 # exatamente uma origem (originList em apps/cli/lib/cli.js) e não subiria.
 domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+# A chave pública da associação, servida pelo Caddy em /varanda.json. Qualquer
+# caixa, como na CLI e no app (que normalizam para minúsculas); a sonda compara
+# o corpo com o valor exato do .env, que é o que o Caddy serve.
+assoc_re='^[0-9a-fA-F]{64}$'
 
 root=''
 www=''
 domain=''
+assoc=''
 expected=''
 target=''
 previous=''
@@ -228,6 +233,13 @@ conferir_antes() {
     log 'VARANDA_DOMAIN ausente ou inválido em deploy/seeder/.env'
     exit 1
   fi
+  # Do mesmo jeito: lida, nunca executada. Conferida antes de qualquer
+  # mudança, para o compose up não falhar no meio da implantação.
+  assoc=$(sed -n 's/^VARANDA_ASSOCIATION=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
+  if ! [[ $assoc =~ $assoc_re ]]; then
+    log 'VARANDA_ASSOCIATION ausente ou inválida em deploy/seeder/.env'
+    exit 1
+  fi
 }
 
 # A versão no ar é a última implantada por este script. Um git pull manual
@@ -322,15 +334,44 @@ servido_igual() {
   return 1
 }
 
+# /varanda.json vem do Caddyfile, não de www. Pelo mesmo motivo, só um 200
+# não basta (sem o handle, o fallback serviria index.html): o corpo precisa ser
+# byte a byte o JSON com a associação de deploy/seeder/.env.
+servido_json() {
+  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp"
+  rm -f "$baixado" "$esperado"
+  if printf '{"v":1,"association":"%s"}' "$assoc" >"$esperado" \
+    && curl -fsS --connect-timeout 5 --max-time 10 -o "$baixado" "https://$domain/varanda.json" \
+    && cmp -s "$baixado" "$esperado"; then
+    rm -f "$baixado" "$esperado"
+    return 0
+  fi
+  rm -f "$baixado" "$esperado"
+  return 1
+}
+
+# O Caddyfile lido é o do checkout atual: depois que a volta faz o reset para
+# um commit anterior ao /varanda.json, a sonda não roda e a volta ainda passa
+# na saúde. A primeira implantação com esta mudança roda o deploy.sh anterior
+# (o bash já leu o arquivo inteiro antes do git reset), sem esta sonda: essa
+# primeira vez é conferida à mão, com curl.
 aguardar_web() {
-  local fim=$((SECONDS + 60))
+  local fim=$((SECONDS + 60)) json=0
+  if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
+    json=1
+  fi
   while [ "$SECONDS" -lt "$fim" ]; do
-    if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js; then
+    if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
+      && { [ "$json" = 0 ] || servido_json; }; then
       return 0
     fi
     sleep 3
   done
-  log "https://$domain/ não serve o app de deploy/seeder/www em 60 s"
+  if [ "$json" = 1 ]; then
+    log "https://$domain/ não serve o app de deploy/seeder/www e /varanda.json com VARANDA_ASSOCIATION em 60 s"
+  else
+    log "https://$domain/ não serve o app de deploy/seeder/www em 60 s"
+  fi
   return 1
 }
 

@@ -27,6 +27,24 @@
 // seederCertForKey on its Noise key, as lib/sync.js and ./seeder-link.js
 // do); an endpoint that fails that check is dropped. Nothing here logs or
 // returns the seeder URL.
+//
+// The own diary is opened read-only here (no key pair: ./node-store.js) and
+// DOWNLOADED from the verified seeder as a replica is, so a device that
+// holds less than the seeder (a fresh device, or one that missed another
+// device's writes) catches up: goal G0 (own contiguousLength >= the length
+// the seeder advertises). When block 0 arrives on a diary that had none,
+// the member certificate is recomputed from it, the diary is announced and
+// 'own-recovered' is emitted; the recovery in flight counts as an unmet
+// goal. The own-sync events feed the session's write gate:
+//   own-synced { length }         the verified seeder's actual hello arrived
+//                                 (not the inventory timeout) and the diary
+//                                 holds what it advertises, or it advertises
+//                                 nothing for the key once the inventory is
+//                                 complete (a new diary); once per length
+//   own-behind { length, theirs } the seeder advertises more than we hold
+//   link-closed                   the link dropped: nothing is tracked
+// They are emitted by checkOwnSync() from the hello / have handlers and the
+// diary watcher, in once and continuous runs alike.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -150,6 +168,11 @@ async function runSync ({
   let diary = null
   let ownHex = null
   let cert = null
+  let ownRange = null // the own diary's download range (catch-up, G0)
+  let recovering = false // block 0 arrived on a diary with no cert: reading it
+  let recoveryFailed = false
+  let lastOwnSynced = -1 // length last reported as own-synced on this link
+  let lastOwnBehind = null // 'length/theirs' last reported as own-behind
   let stopDiaryWatch = null
   let deadlineTimer = null
   let ending = false // finish() started: no new work, waiting for purges
@@ -251,6 +274,8 @@ async function runSync ({
       noise,
       peer: null,
       verified: false,
+      hello: false, // the seeder's actual hello arrived (and verified)
+      inventoryTimedOut: false, // inventoryComplete came from the timeout
       quarantine: new Set(), // quarantine cores replicating on this link
       lastAdv: new Map(), // key -> last length processed (own + follows only)
       emittedHave: new Map(), // key -> last length reported as a 'have' event
@@ -286,10 +311,17 @@ async function runSync ({
         role: 'member',
         have: inventory(),
         onmessage: (msg, peer) => onMessage(l, msg, peer),
-        oninventory: () => evaluate(),
+        oninventory: () => {
+          checkOwnSync()
+          evaluate()
+        },
         log: (ev) => {
-          if (ev && ev.event === 'inventory-timeout') log('aviso: inventário incompleto (' + key8(ev.peerKey) + ')')
-          else if (ev && ev.event === 'peer-dropped') log('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
+          if (ev && ev.event === 'inventory-timeout') {
+            l.inventoryTimedOut = true
+            log('aviso: inventário incompleto (' + key8(ev.peerKey) + ')')
+          } else if (ev && ev.event === 'peer-dropped') {
+            log('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
+          }
         }
       })
     } catch (err) {
@@ -312,6 +344,11 @@ async function runSync ({
     if (link !== l) return
     link = null
     if (ending) return
+    // Nothing is tracked until the next link's hello: own-synced is
+    // reported again then, even for an unchanged length.
+    lastOwnSynced = -1
+    lastOwnBehind = null
+    emit({ event: 'link-closed' })
     evaluate()
     reconnectLater()
   }
@@ -349,6 +386,7 @@ async function runSync ({
           l.noise.destroy()
           return
         }
+        l.hello = true
         onVerified(l)
         for (const [key, length] of peer.remoteHave) {
           if (relevant(key)) {
@@ -357,6 +395,7 @@ async function runSync ({
           }
           noteAdvertisement(key, length)
         }
+        checkOwnSync()
         break
       }
       case 'have': {
@@ -368,6 +407,7 @@ async function runSync ({
           emit({ event: 'have', key: msg.key, length: msg.length })
         }
         noteAdvertisement(msg.key, msg.length)
+        if (msg.key === ownHex) checkOwnSync()
         break
       }
       case 'admitted':
@@ -377,6 +417,7 @@ async function runSync ({
           l.admittedOwn = true
           admittedEver = true
           emit({ event: 'admitted', key: msg.key, length: msg.length })
+          checkOwnSync()
         }
         noteAdvertisement(msg.key, msg.length)
         break
@@ -399,6 +440,68 @@ async function runSync ({
         break // members ignore announce
     }
     evaluate()
+  }
+
+  // ---- the own diary: catch-up (G0), own-sync events, certificate recovery ----
+
+  // -> { behind, theirs } once the verified seeder's actual hello arrived and
+  // the own key's advertisement is known: undefined = not advertised, which
+  // means a new diary only after a complete inventory that did not time out
+  // (lib/admission.js marks inventoryComplete on a timer too). Else null.
+  function ownSyncState () {
+    const l = seederLink()
+    if (l === null || !l.hello) return null
+    const t = theirs(ownHex)
+    if (t === undefined) {
+      if (!l.peer.inventoryComplete || l.inventoryTimedOut) return null
+      return { behind: false, theirs: 0 }
+    }
+    return { behind: t > diary.contiguousLength, theirs: t }
+  }
+
+  // Emits own-synced / own-behind whatever the run mode (evaluate() only
+  // works for once runs), once per length.
+  function checkOwnSync () {
+    if (ending) return
+    const s = ownSyncState()
+    if (s === null) return
+    const length = diary.contiguousLength
+    if (s.behind) {
+      const mark = length + '/' + s.theirs
+      if (lastOwnBehind === mark) return
+      lastOwnBehind = mark
+      emit({ event: 'own-behind', length, theirs: s.theirs })
+      return
+    }
+    if (lastOwnSynced === length) return
+    lastOwnSynced = length
+    lastOwnBehind = null
+    emit({ event: 'own-synced', length })
+  }
+
+  // Block 0 arrived on a diary opened without a certificate (a fresh
+  // device): recompute it as at open, announce, and report own-recovered.
+  // Tracked, so finish() waits for it; unmetGoals holds the run meanwhile.
+  function recoverCert () {
+    if (recovering || recoveryFailed || ending || cert !== null || diary.contiguousLength < 1) return
+    recovering = true
+    track(store.readBlock0(diary), (block0) => {
+      recovering = false
+      if (ending || cert !== null) return
+      if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) {
+        cert = block0.cert
+        send({ type: 'announce', key: ownHex, cert })
+        emit({ event: 'own-recovered', length: diary.contiguousLength })
+      } else {
+        recoveryFailed = true
+        log('sem certificado válido no bloco 0: o diário não será anunciado')
+      }
+      evaluate()
+    }, () => {
+      recovering = false
+      recoveryFailed = true
+      evaluate()
+    })
   }
 
   // ---- goals (--once) ----
@@ -433,6 +536,22 @@ async function runSync ({
         const want = Math.max(e.core.length, t === undefined ? 0 : t)
         if (ours < want) unmet.push(e.key + ':' + ours + '/' + want)
       }
+    }
+    // G0: the own diary holds what the verified seeder advertises for it,
+    // and no certificate recovery is in flight (regardless of cert: a fresh
+    // device has none until block 0 arrives). As ownSyncState: an own key
+    // not advertised counts as "nothing held" only when the inventory
+    // completed for real; after the inventory timeout what the seeder
+    // holds is unknown and the goal stays unmet.
+    const own = theirs(ownHex)
+    const l = seederLink()
+    if (own === undefined) {
+      if (l !== null && l.inventoryTimedOut) unmet.push(ownHex + ':' + diary.contiguousLength + '/?')
+      else if (recovering) unmet.push(ownHex + ':recovering')
+    } else if (own > diary.contiguousLength) {
+      unmet.push(ownHex + ':' + diary.contiguousLength + '/' + own)
+    } else if (recovering) {
+      unmet.push(ownHex + ':recovering')
     }
     // G2
     if (cert && seederLink() !== null && !seederHolds()) {
@@ -853,8 +972,13 @@ async function runSync ({
     if (!ending) {
       stopDiaryWatch = watchContiguous(diary, (length) => {
         send({ type: 'have', key: ownHex, length })
+        if (cert === null) recoverCert()
+        checkOwnSync()
         evaluate()
       })
+      // Whatever the verified seeder holds beyond us is fetched (only a
+      // verified link replicates the diary, onVerified).
+      ownRange = diary.download({ start: 0, end: -1 })
       connect()
     }
 
@@ -868,6 +992,10 @@ async function runSync ({
     timers.clear()
     if (signal) signal.removeEventListener('abort', onAbort)
     if (stopDiaryWatch) stopDiaryWatch()
+    if (ownRange) {
+      try { ownRange.destroy() } catch {}
+      ownRange = null
+    }
     const l = link
     link = null
     if (l !== null) {

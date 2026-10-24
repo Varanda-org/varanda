@@ -6,6 +6,7 @@
 // certificate does not verify gets nothing.
 const test = require('brittle')
 const b4a = require('b4a')
+const c = require('compact-encoding')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -73,21 +74,77 @@ async function fakeSeeder (t, { signer, cores = [], spy = [] }) {
   return { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', publicKey: hex(keyPair.publicKey), announced }
 }
 
-async function webNode (t, assoc, url, syncOptions = {}) {
-  const storage = memoryNodeStorage()
+// A seeder stand-in that speaks the admission channel by hand: its hello
+// claims `count` diaries but carries none, and the overflow `have` messages
+// never come, so the member's inventory completes only by its timeout
+// (lib/admission.js INVENTORY_TIMEOUT_MS). It admits whatever is announced.
+async function stallingSeeder (t, { signer, count }) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', () => {})
+    noise.once('connect', () => {
+      const mux = Hypercore.createProtocolStream(noise).userData
+      let message = null
+      const send = (msg) => message.send(b4a.from(JSON.stringify(msg), 'utf8'))
+      const channel = mux.createChannel({
+        protocol: 'varanda/admission/1',
+        onopen: () => send({ type: 'hello', v: 1, role: 'seeder', count, have: [], cert })
+      })
+      message = channel.addMessage({
+        encoding: c.buffer,
+        onmessage: (buf) => {
+          const msg = JSON.parse(b4a.toString(buf, 'utf8'))
+          if (msg.type === 'announce') send({ type: 'admitted', key: msg.key, length: 0 })
+        }
+      })
+      channel.open()
+    })
+  })
+  return { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder' }
+}
+
+// The write gate is off unless asked: this file is about the follow gate,
+// and the fake seeder never serves the own diary back (passkey-e2e.test.js
+// covers it).
+async function webNode (t, assoc, url, syncOptions = {}, { storage = memoryNodeStorage(), keyPair = crypto.keyPair(), write = true, ...options } = {}) {
   const node = createBrowserNode({
     storage,
     association: assoc.hex,
     seederUrl: url,
     createSocket: (u) => new WebSocket(u),
-    syncOptions: { retryMinMs: 100, retryMaxMs: 200, ...syncOptions }
+    syncOptions: { retryMinMs: 100, retryMaxMs: 200, ...syncOptions },
+    writeGate: false,
+    ...options
   })
   t.teardown(() => node.close(), { force: true })
+  await node.setKeyPair(keyPair)
   const web = await connectClient(node, { timeoutMs: 30000 })
   const { publicKey } = await web.request('identity.create')
-  await web.request('cert.add', { cert: createCert({ member: publicKey }, assoc.kp) })
-  await web.request('post.create', { text: 'do navegador' })
-  return { web, storage, key: publicKey }
+  if (write) {
+    await web.request('cert.add', { cert: createCert({ member: publicKey }, assoc.kp) })
+    await web.request('post.create', { text: 'do navegador' })
+  }
+  return { node, web, storage, key: publicKey, keyPair }
+}
+
+// The runs started since event index `from`: [{ runId, lines, stopped }].
+async function runsSince (web, from) {
+  const out = []
+  for (const e of web.events.slice(from)) {
+    if (e.name !== 'sync.started') continue
+    const { runId } = e.data
+    const lines = web.events.filter((x) => x.name === 'sync.event' && x.data.runId === runId).map((x) => x.data.line)
+    out.push({ runId, lines, stopped: await stoppedOf(web.events, runId) })
+  }
+  return out
 }
 
 async function onceRun (web, timeoutMs = 10000) {
@@ -188,4 +245,63 @@ test('an endpoint whose seeder certificate does not verify gets nothing', async 
   t.is(impostor.announced.length, 0, 'never announced to it')
   t.is(spy.contiguousLength, 0, 'no block of the web diary reached it')
   t.absent(await nodeShell.storage.hasCore('replica/' + hex(served.key)), 'nothing stored from it')
+})
+
+test('an inventory completed only by the timeout leaves the own diary unknown: no done, no write', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  // Claims 3 diaries, sends none: the own key's advertisement never comes.
+  const seeder = await stallingSeeder(t, { signer: assoc.kp, count: 3 })
+  const { web, key } = await webNode(t, assoc, seeder.url, {}, { write: false, writeGate: true, writeGateTimeoutMs: 7000 })
+  const stopped = await onceRun(web, 7000)
+  t.is(stopped.reason, 'timeout', 'a once run cannot end done')
+  t.is(stopped.result.ok, false)
+  t.is(stopped.result.seeders, 1, 'the seeder verified')
+  t.alike(stopped.result.errors, ['tempo esgotado: ' + key + ':0/?'], 'the own diary is the unmet goal, unknown')
+  const warnings = web.events.filter((e) => e.name === 'warning').map((e) => e.data.line)
+  t.ok(warnings.some((l) => l.startsWith('aviso: inventário incompleto')), 'the inventory timed out')
+  t.absent(web.events.some((e) => e.name === 'sync.event' && /^diário próprio sincronizado/.test(e.data.line)), 'never own-synced')
+
+  const from = web.events.length
+  const refused = await web.request('cert.add', { cert: createCert({ member: key }, assoc.kp) }).catch((err) => err)
+  t.is(refused.code, 'USAGE')
+  t.is(refused.message, 'sincronize com o semeador antes de publicar', 'the gate does not pass on an unknown inventory')
+  const runs = await runsSince(web, from)
+  t.is(runs.length, 1)
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.is(runs[0].stopped.reason, 'timeout')
+  t.is((await web.request('node.info')).memberCert, false, 'nothing written')
+})
+
+test('a write handler pushes while the seeder has not confirmed the local length, an idempotent cert.add included', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  // The certificate was written without a push (as after a push that
+  // timed out, or in a previous session); the storage outlives the node.
+  const first = await webNode(t, assoc, seeder.url, {}, { write: false })
+  const cert = createCert({ member: first.key }, assoc.kp)
+  t.alike(await first.web.request('cert.add', { cert }), { seq: 0 })
+  t.absent(first.web.events.some((e) => e.name === 'sync.started'), 'no push with the gate off')
+  first.storage.close = async () => {}
+  await first.node.close()
+
+  const { web } = await webNode(t, assoc, seeder.url, {}, { storage: first.storage, keyPair: first.keyPair, write: false, writeGate: true })
+  const from = web.events.length
+  t.alike(await web.request('cert.add', { cert }), { seq: 0 }, 'the same certificate again')
+  const runs = await runsSince(web, from)
+  t.is(runs.length, 2, 'the gate run and a push run although nothing was appended')
+  t.is(runs[0].lines[0], 'sincronizando antes de publicar')
+  t.is(runs[1].lines[0], 'enviando ao semeador')
+  t.is(runs[1].stopped.reason, 'done')
+  t.is(runs[1].stopped.result.seederConfirmed, true, 'the seeder confirmed the local length')
+  t.ok(seeder.announced.includes(first.key), 'announced (the gate run announces too: block 0 holds the certificate)')
+
+  const again = web.events.length
+  t.alike(await web.request('cert.add', { cert }), { seq: 0 })
+  const later = await runsSince(web, again)
+  t.is(later.length, 1, 'confirmed: only the gate run this time')
+  t.is(later[0].lines[0], 'sincronizando antes de publicar')
 })

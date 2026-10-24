@@ -1,4 +1,5 @@
-// The app shell: the first connection, the setup step (identity and member
+// The app shell: the first connection, the setup step (on the web's browser
+// node first 'Entrar' with the passkey, then identity and member
 // certificate) and then three tabs (A Rua, Seguindo, Diário) with the top
 // bar and its sync chip, the publish button and the sheets (Publicar,
 // Ajustes). Design: apps/site/artwork/app-design.md.
@@ -65,19 +66,49 @@ function Member () {
     setInfoError('')
   }, [])
 
+  // Browser node: the passkey identity. Every page load starts locked; the
+  // tabs show only while it is unlocked and node.info is about that key.
+  const passkey = node.passkey
+  const pkStatus = passkey !== null ? passkey.status : null
+  const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
+  const generation = passkey !== null ? passkey.generation : 0
+  const generationRef = useRef(generation)
+  generationRef.current = generation
+
   const readInfo = useCallback(async () => {
+    const gen = generationRef.current
     try {
-      takeInfo(await node.request('node.info', {}))
+      const i = await node.request('node.info', {})
+      // A read sent before an unlock, lock or reset describes another key.
+      if (gen === generationRef.current) takeInfo(i)
     } catch (err) {
-      setInfoError(errorText(err))
+      if (gen === generationRef.current) setInfoError(errorText(err))
     }
   }, [node.request, takeInfo])
 
-  useEffect(() => { if (ready) readInfo() }, [ready, version, readInfo])
+  // Unlock, lock and reset change the identity: the info read before is
+  // stale and the setup is confirmed again.
+  useEffect(() => {
+    setInfo(null)
+    setInfoError('')
+    setSetupDone(false)
+  }, [generation])
 
-  const confirmed = setupComplete(info)
+  // With a passkey the setup step reads node.info through Identidade (which
+  // holds it back while the sync after an unlock runs, since any member
+  // request would preempt that run); the shell reads it once the tabs show.
+  const shellReads = passkey === null || setupDone
+  useEffect(() => { if (ready && !locked && shellReads) readInfo() }, [ready, locked, shellReads, generation, version, readInfo])
+
+  const confirmed = setupComplete(info) &&
+    (passkey === null || (!locked && pkStatus !== null && info.publicKey === pkStatus.publicKey))
   useEffect(() => { if (confirmed) setSetupDone(true) }, [confirmed])
-  const setupStep = !setupDone && !confirmed
+  useEffect(() => {
+    if (!locked) return
+    setSetupDone(false)
+    setInfo(null)
+  }, [locked])
+  const setupStep = locked || (!setupDone && !confirmed)
 
   // The feed carries only followed authors' names: look the own name up
   // once (one log.read through the names cache) for the Publicar avatar.
@@ -137,7 +168,7 @@ function Member () {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
     let body
-    if (info !== null) {
+    if (passkey !== null || info !== null) {
       // embedded: the top bar above already carries the 'Identidade' title
       body = <Identidade active={ready} embedded onInfo={takeInfo} />
     } else if (infoError) {
@@ -152,7 +183,7 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title='Identidade' right={chip} />
+        <TopBar title={locked ? 'Entrar' : 'Identidade'} right={chip} />
         <View style={styles.flex}>{body}</View>
         {connectionLink}
       </View>

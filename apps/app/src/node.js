@@ -3,14 +3,28 @@
 // is shown; `sync.stopped` carries the local time `at` it arrived, and
 // `sync.starting` is true while a sync.start request is in flight) and hands
 // the screens one `request` function.
+//
+// `passkey` (web, browser node only; null for the native node and
+// varanda-serve): the in-page node's passkey identity. `status` is the last
+// identity.status() (read before the phase becomes 'ready' and after every
+// unlock, complete, lock and reset; null until read), `error` the text of a
+// failed read, `generation` is bumped when the unlocked identity may have
+// changed (the shell drops its node.info then). unlock(opts) and complete()
+// call the handle synchronously, so the WebAuthn ceremony stays inside the
+// click that triggered it: never await anything before calling them.
+// `recovering` is true from an unlock until the once sync that follows it
+// (recover()) has ended: one shared flag, so no screen sends a member request
+// meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
+// anyway is started once more if the certificate is still missing.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText } from '@varanda/rpc'
 import { connectNode } from './client/connect'
-import { loadConfig, saveConfig, canConfigure } from './configStore'
+import { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } from './configStore'
 import { errorText } from './ui'
 
 const MAX_SYNC_LINES = 200
+const RECOVERY_TIMEOUT_MS = 30000
 
 const NodeContext = createContext(null)
 
@@ -41,20 +55,33 @@ export function useNotice (context = null) {
 const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
 
 export function NodeProvider ({ children }) {
-  // loading | config (native: the Conectar form) | connecting | ready | error
+  // loading | config (the Conectar form) | config-error (hosted page, no
+  // configuration found: retry) | connecting | ready | error
   const [phase, setPhase] = useState('loading')
   const [config, setConfig] = useState(null)
   const [error, setError] = useState('')
+  // true when the live configuration came from the installation's
+  // /varanda.json (discovered, never saved).
+  const [hosted, setHosted] = useState(false)
   const [sync, setSync] = useState({ active: null, lines: [], stopped: null })
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
   const startedRef = useRef(false)
   const busyRef = useRef(false)
+  // The connect in flight (settles, never rejects), or null.
+  const inflightRef = useRef(null)
   // sync.start requests in flight: a lookup sent before the sync.started event
   // would preempt a once-run and end it for good (docs/rpc.md 6.1).
   const startingRef = useRef(0)
   const [starting, setStarting] = useState(false)
+  // Passkey identity of the browser node (see the header).
+  const [hasPasskey, setHasPasskey] = useState(false)
+  const [pkStatus, setPkStatus] = useState(null)
+  const [pkError, setPkError] = useState('')
+  const [pkGeneration, setPkGeneration] = useState(0)
+  // null, or { runId: null (not started yet) | integer, restarted }
+  const [recovery, setRecovery] = useState(null)
 
   const onEvent = useCallback((name, data) => {
     setSync((prev) => {
@@ -72,13 +99,12 @@ export function NodeProvider ({ children }) {
     })
   }, [])
 
-  const connect = useCallback(async (cfg, { save = false } = {}) => {
-    if (busyRef.current) return
-    busyRef.current = true
+  const connectNow = useCallback(async (cfg, { save = false } = {}) => {
     setPhase('connecting')
     setError('')
     setSync({ active: null, lines: [], stopped: null })
     setEpoch((e) => e + 1)
+    setRecovery(null)
     const holder = {}
     try {
       const conn = await connectNode(cfg, {
@@ -86,6 +112,7 @@ export function NodeProvider ({ children }) {
         onClose: ({ code }) => {
           if (connRef.current !== holder.conn) return
           connRef.current = null
+          setRecovery(null)
           setSync({ active: null, lines: [], stopped: null })
           setEpoch((e) => e + 1)
           setError(code === 4000 ? 'outra aba assumiu a conexão' : 'a conexão com o nó foi encerrada')
@@ -99,6 +126,18 @@ export function NodeProvider ({ children }) {
       }
       const status = await conn.request('sync.status')
       if (status.state === 'running') setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
+      // First paint: the shell must know whether the identity is locked
+      // before it renders anything for this connection.
+      const identity = conn.identity || null
+      let pk = null
+      let pkErr = ''
+      if (identity !== null) {
+        try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
+      }
+      setHasPasskey(identity !== null)
+      setPkStatus(pk)
+      setPkError(pkErr)
+      setPkGeneration((g) => g + 1)
       setConfig(cfg)
       setPhase('ready')
     } catch (err) {
@@ -112,17 +151,70 @@ export function NodeProvider ({ children }) {
     }
   }, [onEvent])
 
+  // One connect at a time: a call while one is in flight returns that one.
+  const connect = useCallback((cfg, opts) => {
+    if (busyRef.current) return inflightRef.current
+    busyRef.current = true
+    const run = connectNow(cfg, opts)
+    inflightRef.current = run
+    run.then(() => { if (inflightRef.current === run) inflightRef.current = null })
+    return run
+  }, [connectNow])
+
+  // Precedence: varanda-serve (no onboarding), then a saved configuration (an
+  // explicit manual choice), then the installation's own (not saved, so a
+  // changed key in the deployment propagates on reload), then the form. On a
+  // hosted page a missing installation configuration is an error to retry,
+  // never the form.
+  const begin = useCallback(async () => {
+    const saved = await loadConfig()
+    setConfig(saved)
+    if (!canConfigure) return connect(null)
+    if (saved !== null) {
+      setHosted(false)
+      return connect(saved)
+    }
+    setPhase('loading')
+    const found = await discoverConfig()
+    if (found !== null) {
+      setHosted(true)
+      return connect(found)
+    }
+    setHosted(false)
+    if (hostedPage) {
+      setError('não foi possível carregar a configuração desta instalação')
+      setPhase('config-error')
+    } else {
+      setPhase('config')
+    }
+  }, [connect])
+
   useEffect(() => {
     if (startedRef.current) return
     startedRef.current = true
-    ;(async () => {
-      const saved = await loadConfig()
-      setConfig(saved)
-      if (!canConfigure) await connect(null)
-      else if (saved !== null) await connect(saved)
-      else setPhase('config')
-    })()
-  }, [connect])
+    begin()
+  }, [begin])
+
+  // Hosted page: look for the installation's configuration again.
+  const retryDiscovery = useCallback(async () => {
+    setError('')
+    await begin()
+  }, [begin])
+
+  // Drop the saved manual configuration and go back to the installation's.
+  const forgetConfig = useCallback(async () => {
+    // A connect in flight (with the configuration being dropped) settles
+    // first; its connection is then closed below.
+    while (inflightRef.current !== null) await inflightRef.current
+    const conn = connRef.current
+    connRef.current = null
+    if (conn) {
+      setPhase('connecting')
+      try { await conn.close() } catch {}
+    }
+    await clearConfig()
+    await begin()
+  }, [begin])
 
   // Native: apply a new configuration (bootstrap, DHT): stop the node
   // (node.close, then terminate) and start it again. The client module
@@ -134,6 +226,7 @@ export function NodeProvider ({ children }) {
       setPhase('connecting')
       try { await conn.close() } catch {}
     }
+    setHosted(false)
     await connect(cfg, { save: true })
   }, [connect])
 
@@ -159,9 +252,137 @@ export function NodeProvider ({ children }) {
     return pending
   }, [])
 
+  // Re-reads identity.status() of `conn` (the current connection by
+  // default); a result for a connection that is no longer current is dropped.
+  // `changed` also bumps the generation in the same render.
+  const readPasskey = useCallback(async (conn = connRef.current, changed = false) => {
+    if (!conn || !conn.identity) return null
+    try {
+      const st = await conn.identity.status()
+      if (connRef.current === conn) {
+        setPkStatus(st)
+        setPkError('')
+        if (changed) setPkGeneration((g) => g + 1)
+      }
+      return st
+    } catch (err) {
+      if (connRef.current === conn) {
+        setPkError(errorText(err))
+        if (changed) setPkGeneration((g) => g + 1)
+      }
+      return null
+    }
+  }, [])
+
+  // Calls one identity operation synchronously (no await before it), then
+  // re-reads the status whatever the outcome and resolves (or rejects) with
+  // the operation's own result (or error, with its .code and .legacy).
+  const passkeyOp = useCallback((name, arg) => {
+    const conn = connRef.current
+    if (!conn || !conn.identity) return noConnection()
+    let pending
+    try {
+      pending = name === 'unlock' ? conn.identity.unlock(arg) : conn.identity[name]()
+    } catch (err) {
+      pending = Promise.reject(err)
+    }
+    return Promise.resolve(pending).then(
+      async (result) => {
+        const changed = !(result && result.pending === true)
+        // Locked at once: a failed re-read below keeps this, never the
+        // previous unlocked status.
+        if ((name === 'lock' || name === 'reset') && connRef.current === conn) {
+          setPkStatus((st) => (st === null
+            ? st
+            : { ...st, unlocked: false, synced: false, ...(name === 'reset' ? { exists: false, publicKey: null, legacy: false } : {}) }))
+        }
+        await readPasskey(conn, changed)
+        if (changed) setEpoch((e) => e + 1)
+        return result
+      },
+      async (err) => {
+        await readPasskey(conn, false)
+        throw err
+      }
+    )
+  }, [readPasskey])
+
+  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts), [passkeyOp])
+  const pkComplete = useCallback(() => passkeyOp('complete'), [passkeyOp])
+  const pkLock = useCallback(() => passkeyOp('lock'), [passkeyOp])
+  const pkReset = useCallback(() => passkeyOp('reset'), [passkeyOp])
+  const pkRefresh = useCallback(() => readPasskey(), [readPasskey])
+
+  // The recovery after an unlock. beginRecovery() is called (synchronously)
+  // before the ceremony, endRecovery() when it did not unlock, recover()
+  // once the diary exists: it starts the once run and resolves false when it
+  // could not (the recovery is then over).
+  const beginRecovery = useCallback(() => setRecovery({ runId: null, restarted: false }), [])
+  const endRecovery = useCallback(() => setRecovery(null), [])
+  // A run already active (started from Sincronizar, or a gate run) is
+  // adopted as the recovery run: reads now would preempt it.
+  const startRecoveryRun = useCallback(async (restarted) => {
+    try {
+      const r = await request('sync.start', { once: true, timeoutMs: RECOVERY_TIMEOUT_MS })
+      setRecovery((cur) => (cur === null ? null : { runId: r.runId, restarted }))
+      return true
+    } catch {}
+    try {
+      const st = await request('sync.status', {}) // never preempts
+      if (st.state === 'running') {
+        setRecovery((cur) => (cur === null ? null : { runId: st.runId, restarted }))
+        return true
+      }
+    } catch {}
+    setRecovery(null)
+    return false
+  }, [request])
+  const recover = useCallback(() => startRecoveryRun(false), [startRecoveryRun])
+
+  useEffect(() => {
+    if (recovery === null || recovery.runId === null) return
+    const stopped = sync.stopped
+    if (stopped === null || stopped.runId !== recovery.runId) {
+      // One run at a time: another one active means ours ended (its stop
+      // was replaced by the next start); that one is followed instead.
+      if (sync.active !== null && sync.active.runId !== recovery.runId) {
+        setRecovery({ runId: sync.active.runId, restarted: recovery.restarted })
+      }
+      return
+    }
+    if (stopped.reason === 'preempted' && !recovery.restarted) {
+      // The run that preempted it, if a sync run, is adopted instead.
+      if (sync.active !== null) {
+        setRecovery({ runId: sync.active.runId, restarted: true })
+        return
+      }
+      setRecovery({ runId: null, restarted: true })
+      ;(async () => {
+        try {
+          const i = await request('node.info', {})
+          if (i.publicKey !== null && i.memberCert === true) {
+            setRecovery(null)
+            readPasskey()
+            return
+          }
+        } catch {}
+        if (await startRecoveryRun(true)) return
+        readPasskey()
+      })()
+      return
+    }
+    setRecovery(null)
+    readPasskey()
+  }, [recovery, sync.stopped, sync.active, request, readPasskey, startRecoveryRun])
+
+  const recovering = recovery !== null
+  const passkey = useMemo(() => (hasPasskey
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkReset, recovering, beginRecovery, endRecovery, recover])
+
   const value = useMemo(() => ({
-    phase, config, error, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure
-  }), [phase, config, error, sync, starting, epoch, request, restart, reconnect, connect])
+    phase, config, error, hosted, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey
+  }), [phase, config, error, hosted, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }
