@@ -18,3 +18,5 @@ packages/web-member/dist/
 # deploy da versão web: o .env local (domínio)
 deploy/seeder/.env
 deploy/seeder/www/
+# cópia exportada do commit onde deploy/seeder/deploy.sh gera o app web
+/.deploy-build/

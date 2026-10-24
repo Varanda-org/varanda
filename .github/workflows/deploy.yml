@@ -1,0 +1,109 @@
+# Deploys main to the production server (web app + seeder behind Caddy).
+#
+# On every push to main (or a manual run on main) it repeats the CI checks,
+# then connects over SSH as varanda-deploy with a pinned host key. That key can
+# only run deploy/seeder/deploy.sh on the server, which deploys the current
+# head of origin/main only if it equals the tested commit, gates on health and
+# rolls back on failure. The tested SHA is sent on stdin; nothing else is.
+#
+# Skipped until the repository variable VARANDA_DEPLOY is exactly "true".
+#
+# One-time user steps (see README, "Implantação automática pelo GitHub Actions"):
+#   - On the server: create the varanda-deploy user, its forced-command
+#     authorized_keys entry and the sudoers rule for deploy.sh
+#   - Settings > Environments > producao: deployment branches main only;
+#     secret DEPLOY_SSH_KEY; variables DEPLOY_HOST and DEPLOY_KNOWN_HOSTS
+#   - Settings > Secrets and variables > Actions > Variables:
+#     VARANDA_DEPLOY = true (any other value pauses deploys)
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per ref: a manual run on another branch (skipped by the job
+# guards) must not take the pending slot of a queued main deploy.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Repeats the CI checks on purpose: the deploy runs only on a commit that
+  # passed them in this same workflow, even if ci.yml was cancelled.
+  check:
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run demo
+
+  # No checkout and no third-party action: only native ssh with the pinned key.
+  deploy:
+    needs: check
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: producao
+    permissions: {}
+    steps:
+      - name: Prepare SSH key and known host
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_KNOWN_HOSTS" ] \
+            || ! [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "::error::configuração incompleta: veja README, seção Implantação automática"
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/varanda_deploy_key"
+          chmod 600 "$HOME/.ssh/varanda_deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/varanda_known_hosts"
+
+      # Exit code 3 from the server means main moved past this commit; the
+      # newer run deploys it, so this run ends green with a notice.
+      - name: Deploy over SSH
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          rc=0
+          printf '%s\n' "$EXPECTED_SHA" | ssh -T \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/varanda_known_hosts" \
+            -o HostKeyAlias=varanda-producao \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -i "$HOME/.ssh/varanda_deploy_key" \
+            "varanda-deploy@$DEPLOY_HOST" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::notice::main avançou desde este commit; a execução mais nova de main implanta (se nenhuma estiver na fila, use Run workflow)"
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/varanda_deploy_key"

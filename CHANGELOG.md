@@ -7,6 +7,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Implantação automática pelo GitHub Actions: a cada push em `main`, o fluxo `deploy` repete o CI e roda `deploy/seeder/deploy.sh` no servidor por SSH (chave de comando forçado, `known_hosts` fixo, ambiente `producao`).
+  O script só implanta a ponta de `main`, confere a saúde (semeador, app servido e WebSocket) e volta sozinho para a versão anterior se falhar. Fica pulado até `VARANDA_DEPLOY=true`.
 - Versão web no ar no servidor do semeador: `seed --ws-origin` (ou `VARANDA_WS_ORIGIN`) libera a origem do PWA na entrada WebSocket;
   `deploy/seeder/compose.web.yaml` e `deploy/seeder/Caddyfile` sobem um Caddy com TLS automático que serve o app e repassa `wss://<domínio>/seeder`; o app web vira um PWA instalável (manifesto e ícones).
 - Protótipo P2P da fase 0 no Holepunch: CLI com identidade, certificado de membro, perfil, publicações, respostas, seguir pessoas, feed e sincronização.

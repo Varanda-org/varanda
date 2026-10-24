@@ -450,9 +450,102 @@ bash deploy/seeder/build-web.sh                     # gera o app num contêiner 
 docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --build
 ```
 
-Depois abra `https://<domínio>/`. Na tela Conectar, a associação é a chave pública da associação e o endereço do semeador é `wss://<domínio>/seeder`. Cada pessoa cria a identidade na página e recebe da associação o certificado de membro (`assoc certify --member <chave>`), que cola na etapa Identidade. A cada atualização do código: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
+Depois abra `https://<domínio>/`. Na tela Conectar, a associação é a chave pública da associação e o endereço do semeador é `wss://<domínio>/seeder`. Cada pessoa cria a identidade na página e recebe da associação o certificado de membro (`assoc certify --member <chave>`), que cola na etapa Identidade. A cada atualização do código, sem a implantação automática da próxima seção: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
 
 Limites desta fase: a chave do membro fica sem cifra no armazenamento do navegador (a proteção com passkey vem depois, ver `docs/verification.md` seção 8); a página só é tão confiável quanto o código que o servidor entrega; a entrada WebSocket ainda não tem os limites para a internet aberta previstos no PR de endurecimento. Use com um grupo pequeno de pessoas de confiança. O Caddy não grava registro de acesso; os erros que ele registra podem incluir o endereço do cliente (mesma rotação do semeador).
+
+### Implantação automática pelo GitHub Actions
+
+O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) e, se passarem, entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
+
+O script só implanta se esse SHA for a ponta de `origin/main`. Se `main` já avançou, sai com 3 e o fluxo termina verde com um aviso: a execução mais nova de `main` implanta (se nenhuma estiver na fila, use Run workflow). Ele recusa, sem mudar nada, um checkout com alterações locais ou com commits que não estão em `origin/main`, e um `VARANDA_DOMAIN` que não seja um nome em minúsculas sem ponto final. Depois ele:
+
+- guarda a imagem que o semeador está rodando (etiquetada `varanda-seeder:anterior`) e uma cópia do `deploy/seeder/www` em `/var/lib/varanda-deploy`; o commit que está no ar fica anotado em `/var/lib/varanda-deploy/implantado` desde a última implantação;
+- atualiza o checkout e gera o app web (`build-web.sh`) numa cópia exportada do commit (`.deploy-build/`, nunca no checkout, e como o usuário `nobody`, nunca como root: os scripts de instalação das dependências não podem reescrever os compose, o Caddyfile nem deixar nada com poder de root no servidor);
+- constrói a imagem do semeador, copia o app para `www` (só arquivos e diretórios comuns: um link simbólico deixado pelo build é recusado) e sobe o semeador e o Caddy;
+- confere a saúde: `/health` do semeador com 200 em até 180 s, o `index.html` e o `varanda-node.js` servidos pelo domínio byte a byte iguais aos de `www` em até 60 s, e um WebSocket de verdade aberto em `wss://<domínio>/seeder` com o Origin de produção;
+- se algo falhar (ou se receber Ctrl-C ou SIGTERM no meio), volta sozinho para o commit, a imagem e o `www` anteriores, sem reconstruir nada, e sai com 1. Só reinicia o semeador e o Caddy se eles já tinham sido trocados: uma falha no build não derruba nada. Os últimos registros do semeador e do Caddy ficam em `/var/lib/varanda-deploy/deploy.log`.
+
+O semeador e o Caddy ficam fora do ar por alguns instantes a cada implantação. A volta não desfaz mudanças de formato dos dados que a versão nova já tenha gravado. O registro fica em `/var/lib/varanda-deploy/deploy.log`. O log do fluxo mostra só as mensagens do script; a saída do build e do docker fica no servidor, porque o log do GitHub Actions de um repositório público é público. O `deploy/seeder/.env` não faz parte da implantação nem da volta: a volta sobe a versão anterior com o `.env` que estiver no servidor. Para trocar o domínio, faça como na seção anterior, à mão, e confira o site antes da próxima implantação. Se a ponta de `main` já estiver no ar e saudável, o script só confere a saúde e sai com 0 sem reiniciar nada; para forçar uma nova implantação, apague `/var/lib/varanda-deploy/implantado`. O checkout (`/opt/varanda`, `deploy/`, `deploy/seeder/`, o `deploy.sh`, o `.git` e o `.git/config`) precisa ser de root e sem escrita para grupo ou outros, porque o sudoers dá root a esse arquivo e root roda `git` ali; senão o script recusa. Códigos de saída: 0 implantado, 1 falha (nada mudou ou voltou), 2 uso errado, 3 `main` já avançou.
+
+Antes: o semeador e a versão web no ar à mão, como nas seções anteriores (o script exige `deploy/seeder/.env`, o semeador rodando e o app publicado em `deploy/seeder/www`). Os passos abaixo são todos seus (do usuário); o fluxo fica pulado até o passo 9. Troque `<ip>` pelo endereço do servidor e `AAAA…` pela chave pública gerada no passo 3.
+
+1. Faça o merge do pull request. Sem a variável `VARANDA_DEPLOY` (passo 9), o fluxo não faz nada.
+
+2. Como root no servidor, atualize o checkout e crie o usuário:
+
+   ```sh
+   git -C /opt/varanda pull
+   useradd --system --create-home --shell /bin/bash varanda-deploy
+   install -d -o varanda-deploy -g varanda-deploy -m 0700 /home/varanda-deploy/.ssh
+   ```
+
+   Se o `sshd` usa `AllowUsers`, acrescente `varanda-deploy` a ele e recarregue o serviço. Confira que o checkout é de root e sem escrita para grupo ou outros (cada linha deve mostrar `root` e um modo como `755`; o script recusa rodar senão):
+
+   ```sh
+   stat -c '%U %a %n' /opt/varanda /opt/varanda/deploy /opt/varanda/deploy/seeder /opt/varanda/deploy/seeder/deploy.sh /opt/varanda/.git /opt/varanda/.git/config
+   ```
+
+3. Na sua máquina, gere um par de chaves só para isso:
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C varanda-deploy -f varanda-deploy-key
+   cat varanda-deploy-key.pub
+   ```
+
+4. No servidor, grave em `/home/varanda-deploy/.ssh/authorized_keys` (modo 0600, dono `varanda-deploy`) esta linha, com a chave pública do passo 3:
+
+   ```
+   restrict,command="sudo -n /opt/varanda/deploy/seeder/deploy.sh" ssh-ed25519 AAAA… varanda-deploy
+   ```
+
+   O `command=` faz essa chave rodar só o script, e o `restrict` desliga encaminhamentos e pty.
+
+5. No servidor, crie `/etc/sudoers.d/varanda-deploy` (modo 0440) com esta linha e confira com `visudo -c`:
+
+   ```
+   varanda-deploy ALL=(root) NOPASSWD: /opt/varanda/deploy/seeder/deploy.sh ""
+   ```
+
+   O `""` proíbe qualquer argumento.
+
+6. Monte a linha de `known_hosts` com a chave do próprio servidor, lida numa sessão em que você já confia (nunca de um `ssh-keyscan` sem conferência):
+
+   ```sh
+   echo "varanda-producao $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+   ```
+
+   O resultado tem a forma `varanda-producao ssh-ed25519 <chave>`. Guarde essa linha para o passo 8.
+
+7. Teste à mão, da sua máquina (use um `known_hosts` seu, com a mesma chave conferida). A entrada vazia implanta a ponta de `main`:
+
+   ```sh
+   ssh -T -i varanda-deploy-key varanda-deploy@<ip> </dev/null
+   ```
+
+   Deve terminar com `implantado <sha>`. Este teste também cria o registro da versão em produção: sem ele, a primeira implantação automática logo depois de um `git pull` manual não tem como saber o que está no ar, loga `sem registro da versão em produção` e usa o HEAD do checkout como ponto de volta.
+
+8. No GitHub, Settings > Environments > New environment `producao`:
+   - Deployment branches and tags: só `main`;
+   - Secret `DEPLOY_SSH_KEY`: o conteúdo de `varanda-deploy-key`;
+   - Variable `DEPLOY_HOST`: o endereço do servidor (só letras, números, `.` e `-`);
+   - Variable `DEPLOY_KNOWN_HOSTS`: a linha do passo 6.
+
+   Depois apague a chave privada da sua máquina (o macOS não tem `shred`):
+
+   ```sh
+   rm -f varanda-deploy-key
+   ```
+
+9. Em Settings > Secrets and variables > Actions > Variables, crie `VARANDA_DEPLOY` com o valor `true`. Qualquer outro valor pausa as implantações.
+
+10. Em Actions > deploy > Run workflow, na branch `main`, rode a primeira implantação e acompanhe o log.
+
+Uma chave vazada só consegue pedir a implantação da ponta de `main`: se ela já estiver no ar e saudável, nada é reiniciado. Não escolhe o commit nem lê a chave do semeador, o volume, o `.env` ou a chave da associação. Para trocar a chave, substitua o `authorized_keys` e o segredo `DEPLOY_SSH_KEY`.
+
+Quem tem o servidor de fato é quem faz merge em `main`: os compose, o Dockerfile e o `build-web.sh` vêm do checkout e rodam como root. A proteção é a regra de `main` (revisão, code owners e os checks `test (20)` e `test (24)`).
+
+Se a conexão SSH cair, o script termina sozinho; leia `/var/lib/varanda-deploy/deploy.log`. Alterações locais em `/opt/varanda` barram a implantação (`alterações locais`): guarde-as ou descarte-as. Para repetir, use Run workflow, não Re-run de uma execução antiga: um Re-run pode deslocar uma execução mais nova que está esperando, e ela sai com 3. Recuperação à mão, como root no servidor: `bash deploy/seeder/deploy.sh </dev/null` (da raiz do repositório), e `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs`.
 
 ### systemd
 
