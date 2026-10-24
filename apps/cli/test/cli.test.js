@@ -15,6 +15,7 @@ Uso: node bin/varanda.js <comando> [subcomando] [opções]
 Comandos:
   assoc init|show|certify    chave da associação de teste e certificados de membro
   assoc certify-seeder       certifica a chave de um semeador (--seeder)
+  assoc certify-issuer       certifica a chave do emissor do serviço de conta (--issuer)
   id create|show             identidade (chave pública do diário)
   cert add                   grava o certificado como bloco 0 do diário
   profile set                define nome e bio
@@ -28,6 +29,11 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
+  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account key                chave do emissor do serviço de conta (imprime só a pública)
+  account cert add           grava o certificado do emissor (--cert-file <f>)
+  account status             estado do serviço de conta
+  account export             exporta os vínculos de conta do serviço parado
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -38,7 +44,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin`
+  --ws-origin --issuer --account-port --account-host`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -113,12 +119,15 @@ test('CLI parser, R5 help and command router', async (t) => {
     timeoutMs: null,
     member: null,
     seeder: null,
+    issuer: null,
     dhtHost: null,
     healthPort: null,
     healthHost: null,
     wsPort: null,
     wsHost: null,
     wsOrigins: null,
+    accountPort: null,
+    accountHost: null,
     ageBand: null,
     method: null,
     out: null,
@@ -133,7 +142,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   })
   t.alike(parseArgs([]), parseArgs([], process.env, process.cwd()), 'default env and cwd')
   t.alike(parse(['--json', 'seed', 'cert', '--once', 'add']).positionals, ['cert', 'add'])
-  for (const [command, positionals] of [['seed', ['key']], ['seed', ['cert', 'add']], ['seed', ['drop', upperKey]], ['assoc', ['certify-seeder']]]) {
+  for (const [command, positionals] of [['seed', ['key']], ['seed', ['cert', 'add']], ['seed', ['drop', upperKey]], ['assoc', ['certify-seeder']], ['assoc', ['certify-issuer']]]) {
     const flags = parse([command, ...positionals])
     t.is(flags.command, command)
     t.alike(flags.positionals, positionals)
@@ -148,6 +157,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     'timeout-ms': ['12', 'timeoutMs', 12],
     member: [upperKey, 'member', lowerKey],
     seeder: [upperKey, 'seeder', lowerKey],
+    issuer: [upperKey, 'issuer', lowerKey],
     'age-band': ['18+', 'ageBand', '18+'],
     method: ['stub', 'method', 'stub'],
     out: ['cert.json', 'out', path.join(root, 'cert.json')],
@@ -162,7 +172,9 @@ test('CLI parser, R5 help and command router', async (t) => {
     'health-port': ['8788', 'healthPort', 8788],
     'health-host': ['0.0.0.0', 'healthHost', '0.0.0.0'],
     'ws-port': ['8789', 'wsPort', 8789],
-    'ws-host': ['0.0.0.0', 'wsHost', '0.0.0.0']
+    'ws-host': ['0.0.0.0', 'wsHost', '0.0.0.0'],
+    'account-port': ['8790', 'accountPort', 8790],
+    'account-host': ['127.0.0.1', 'accountHost', '127.0.0.1']
   }
   for (const [name, [value, property, expected]] of Object.entries(strings)) {
     const flag = '--' + name

@@ -24,9 +24,17 @@ const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/...): live configuration,
-// the worker script itself and the seeder's own pages.
+// Paths that are never intercepted (besides /seeder/... and /account/...):
+// live configuration, the worker script itself and the seeder's own pages.
 const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder'])
+// The account service (Google link, @username; a later moderation panel under
+// /account/mod/) is reverse-proxied by Caddy and never part of the shell. The
+// Google step returns by a top-level navigation to /account/callback?code=…,
+// and the page fetches /account/status, /start, /authorize, /finish...: none
+// of them may be answered with the cached index.html (an OAuth error would
+// become the app shell), turned into a 503 offline, or looked up in the cache
+// at all. The network alone answers them.
+const ACCOUNT_PREFIX = '/account/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 
 const abs = (p) => new URL(p, self.location.origin).href
@@ -236,7 +244,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
   const pathname = url.pathname
-  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/')) return
+  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith(ACCOUNT_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {

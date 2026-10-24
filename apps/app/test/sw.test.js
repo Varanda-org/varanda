@@ -364,6 +364,26 @@ test('bypassed requests are never intercepted', async (t) => {
   t.absent((await dispatch(w, ORIGIN + BUNDLE, { method: 'POST' })).responded, 'POST')
 })
 
+// The account service (Google link, @username, later /account/mod/) is
+// reverse-proxied by Caddy: the OAuth callback is a top-level navigation to
+// /account/callback and the page fetches /account/status etc. Offline here,
+// so an intercepted request would show as the cached index.html (navigation)
+// or a 503; neither is allowed, and the worker makes no fetch of its own.
+test('/account/* is never intercepted: the OAuth callback navigation and the API fetches', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const callback = await dispatch(w, ORIGIN + '/account/callback?code=4%2Fabc&state=xyz', { mode: 'navigate' })
+  t.absent(callback.responded, 'navigation to /account/callback is left to the network')
+  for (const p of ['/account/status?member=ab12', '/account/start', '/account/authorize', '/account/pending',
+    '/account/finish', '/account/username/maria', '/account/rename', '/account/health', '/account/mod/']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  // Still intercepted: an app route next to it, and the shell itself.
+  t.ok((await dispatch(w, ORIGIN + '/accounts', { mode: 'navigate' })).responded, '/accounts is an app route')
+  t.ok((await dispatch(w, ORIGIN + '/', { mode: 'navigate' })).responded, '/ is the shell')
+})
+
 test('nothing cached and offline: 503 sem conexão', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))

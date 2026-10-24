@@ -14,8 +14,8 @@ const { MAX_LIST, RpcError } = require('@varanda/rpc')
 const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure, scanWire } = require('./helpers/net')
 const { createSession, toRpcError, checkConfig, redactLogLine } = require('../lib/session')
-const { initAssociation, issueCertificate } = require('../lib/assoc')
-const { createCert } = require('../lib/cert')
+const { initAssociation, issueCertificate, issueIssuerCertificate } = require('../lib/assoc')
+const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
 const { postRecord, validateRecord } = require('../lib/records')
@@ -173,6 +173,41 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.alike(feed.items[1].replyTo, { author: pk, seq: 2 })
   t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated], [[], 0, [], 0])
   t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('account.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const params = { phase: 'reserve', nonce: 'n'.repeat(43), username: 'ana_1', sub: '' }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('account.sign', params)), { code: 'USAGE', message: 'assinatura disponível só no navegador' }, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('account.sign', params)), { code: 'USAGE', message: 'assinatura disponível só no navegador' })
+  t.alike(await failure(m.call('account.sign', { ...params, phase: 'finish', sub: '1234' })), { code: 'USAGE', message: 'assinatura disponível só no navegador' })
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('username.add: a record that does not verify for the diary key is refused, nothing written', async (t) => {
+  const issuerKp = crypto.keyPair()
+  const fresh = await member(t)
+  const m = await member(t, { cert: true })
+  const issuerCert = issueIssuerCertificate(m.assoc.dir, { issuer: b4a.toString(issuerKp.publicKey, 'hex') })
+  const BAD = { code: 'USAGE', message: 'registro de nome inválido' }
+
+  const forOther = createUsernameRecord({ member: randomKey(), username: 'ana' }, issuerKp, issuerCert)
+  t.alike(await failure(fresh.call('username.add', { record: forOther })), { code: 'NOT_FOUND', message: 'identidade não encontrada' }, 'before an identity')
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('username.add', { record: forOther })), BAD, 'a record for another member')
+  const tampered = { ...createUsernameRecord({ member: m.publicKey, username: 'ana' }, issuerKp, issuerCert), username: 'bia' }
+  t.alike(await failure(m.call('username.add', { record: tampered })), BAD, 'a tampered record')
+  t.alike(await failure(m.call('username.add', { record: { type: 'username' } })), BAD, 'a malformed record')
+  // The refusal of a record not newer than the diary's latest one (USAGE
+  // 'registro de nome antigo') is reached only after a record verifies for
+  // the diary key, which a Hypercore diary key normally never does; the
+  // verification refusal above comes first and writes nothing either.
+  t.alike(await failure(m.call('username.add', { record: { ...forOther, date: '2000-01-01T00:00:00.000Z' } })), BAD, 'an old record for another member')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
 test('follows: add, remove, list paging, unknown author', async (t) => {

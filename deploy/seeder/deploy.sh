@@ -47,6 +47,8 @@ domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 # caixa, como na CLI e no app (que normalizam para minúsculas); a sonda compara
 # o corpo com o valor exato do .env, que é o que o Caddy serve.
 assoc_re='^[0-9a-fA-F]{64}$'
+# O Content-Type de /account/health: JSON, com ou sem parâmetros (charset).
+json_type_re='^application/json( *;.*)?$'
 
 root=''
 www=''
@@ -212,7 +214,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env"
+  local env_file="$root/deploy/seeder/.env" google_id google_secret
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -238,6 +240,19 @@ conferir_antes() {
   assoc=$(sed -n 's/^VARANDA_ASSOCIATION=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
   if ! [[ $assoc =~ $assoc_re ]]; then
     log 'VARANDA_ASSOCIATION ausente ou inválida em deploy/seeder/.env'
+    exit 1
+  fi
+  # O cliente OAuth do serviço de conta (compose.web.yaml exige os dois).
+  # Lidos do mesmo jeito, só para ver se estão vazios: o valor nunca vai para
+  # o registro nem para quem chamou (o segredo, em especial).
+  google_id=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_ID=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
+  if [ -z "$google_id" ]; then
+    log 'VARANDA_GOOGLE_CLIENT_ID ausente em deploy/seeder/.env'
+    exit 1
+  fi
+  google_secret=$(sed -n 's/^VARANDA_GOOGLE_CLIENT_SECRET=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
+  if [ -z "$google_secret" ]; then
+    log 'VARANDA_GOOGLE_CLIENT_SECRET ausente em deploy/seeder/.env'
     exit 1
   fi
 }
@@ -351,11 +366,33 @@ servido_json() {
   return 1
 }
 
+# O serviço de conta pelo domínio: prova o handle /account/* do Caddy e o
+# contêiner account. O fallback do Caddy também responderia 200, então o corpo
+# precisa ser exatamente {"status":"ok"} seguido de LF (o serviço termina todo
+# corpo JSON com uma quebra de linha: apps/cli/lib/account/server.js, send) e
+# o tipo, JSON. /account/health responde ok mesmo sem emissor configurado (a
+# cerimônia vem depois do deploy). Só esta URL fixa, sem consulta: nenhum
+# código do Google passa aqui.
+servido_conta() {
+  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp" tipo
+  rm -f "$baixado" "$esperado"
+  if printf '%s\n' '{"status":"ok"}' >"$esperado" \
+    && tipo=$(curl -fsS --connect-timeout 5 --max-time 10 -o "$baixado" -w '%{content_type}' \
+      "https://$domain/account/health") \
+    && [[ $tipo =~ $json_type_re ]] \
+    && cmp -s "$baixado" "$esperado"; then
+    rm -f "$baixado" "$esperado"
+    return 0
+  fi
+  rm -f "$baixado" "$esperado"
+  return 1
+}
+
 # O Caddyfile lido é o do checkout atual: depois que a volta faz o reset para
-# um commit anterior ao /varanda.json, a sonda não roda e a volta ainda passa
-# na saúde. A primeira implantação com esta mudança roda o deploy.sh anterior
-# (o bash já leu o arquivo inteiro antes do git reset), sem esta sonda: essa
-# primeira vez é conferida à mão, com curl.
+# um commit anterior ao /varanda.json (ou ao /account/*), a sonda dele não
+# roda e a volta ainda passa na saúde. A primeira implantação com uma sonda
+# nova roda o deploy.sh anterior (o bash já leu o arquivo inteiro antes do
+# git reset), sem ela: essa primeira vez é conferida à mão, com curl.
 # O mesmo vale para o sw.js e para o bundle com hash em /_expo/: a primeira
 # implantação que traz estas sondas ainda roda o deploy.sh anterior, então
 # elas só valem a partir da implantação seguinte, e essa primeira vez é
@@ -363,21 +400,27 @@ servido_json() {
 # citado no index.html) ainda passa: a sonda só roda se o arquivo existe.
 # O bundle prova que o Caddy serve o arquivo com hash, não o index.html.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0 bundle
+  local fim=$((SECONDS + 60)) json=0 conta=0 bundle
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
     json=1
+  fi
+  if grep -q 'handle /account/\*' "$root/deploy/seeder/Caddyfile"; then
+    conta=1
   fi
   bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
   while [ "$SECONDS" -lt "$fim" ]; do
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
-      && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; }; then
+      && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
+      && { [ "$conta" = 0 ] || servido_conta; }; then
       return 0
     fi
     sleep 3
   done
-  if [ "$json" = 1 ]; then
+  if [ "$conta" = 1 ]; then
+    log "https://$domain/ não serve o app de deploy/seeder/www, /varanda.json com VARANDA_ASSOCIATION e /account/health em 60 s"
+  elif [ "$json" = 1 ]; then
     log "https://$domain/ não serve o app de deploy/seeder/www e /varanda.json com VARANDA_ASSOCIATION em 60 s"
   else
     log "https://$domain/ não serve o app de deploy/seeder/www em 60 s"
@@ -505,7 +548,7 @@ voltar() {
   log "implantação de $target: $motivo; voltando para $previous"
   # O motivo de uma falha do Caddy ou do semeador fica no registro do servidor.
   if [ "$servicos_trocados" = 1 ]; then
-    compose logs --no-color --tail 50 seeder web
+    compose logs --no-color --tail 50 seeder web account
     # Com um Caddyfile inválido o caddy run sai sem dizer por quê; o adapt
     # diz. Só diagnóstico: o resultado não muda a volta.
     compose run --rm --no-deps -T web caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null

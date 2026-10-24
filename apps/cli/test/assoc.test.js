@@ -7,6 +7,7 @@ const assoc = require('@varanda/core/lib/assoc')
 const cert = require('@varanda/core/lib/cert')
 
 const MEMBER = 'ab'.repeat(32)
+const ISSUER = 'cd'.repeat(32)
 const SEEDER = 'ef'.repeat(32)
 
 function secretHex (dir) {
@@ -242,4 +243,72 @@ test('planted symlinks never redirect the key write', async (t) => {
   }
   t.absent(fs.existsSync(destTarget))
   t.alike(fs.readdirSync(dir2), ['association.json'])
+})
+
+test('issueIssuerCertificate verifies and stores only issuer and date, 0o600', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const { publicKey } = assoc.initAssociation(dir)
+  const issued = assoc.issueIssuerCertificate(dir, { issuer: ISSUER.toUpperCase() })
+  t.alike(cert.verifyIssuerCert(issued, publicKey), { ok: true })
+  const file = path.join(dir, 'issuers.jsonl')
+  const text = fs.readFileSync(file, 'utf8')
+  t.ok(text.endsWith('\n'))
+  const lines = text.split('\n').filter(Boolean)
+  t.is(lines.length, 1)
+  const entry = JSON.parse(lines[0])
+  t.alike(Object.keys(entry).sort(), ['date', 'issuer'])
+  t.is(entry.issuer, ISSUER)
+  t.is(entry.date, issued.date)
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  t.absent(text.includes(secretHex(dir)))
+  t.absent(text.includes(issued.signature))
+  t.alike(fs.readdirSync(dir).sort(), ['association.json', 'issuers.jsonl'], 'no key generated')
+})
+
+test('issueIssuerCertificate refuses the association key, bad input and a missing association', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const { publicKey } = assoc.initAssociation(dir)
+  t.exception.all(() => assoc.issueIssuerCertificate(dir, { issuer: publicKey }), /differ/)
+  t.exception.all(() => assoc.issueIssuerCertificate(dir, { issuer: 'abc' }), TypeError)
+  t.absent(fs.existsSync(path.join(dir, 'issuers.jsonl')))
+  try {
+    assoc.issueIssuerCertificate(tmpDir(t), { issuer: ISSUER })
+    t.fail('should throw')
+  } catch (err) {
+    t.is(err.code, 'NOT_INITIALIZED')
+  }
+})
+
+test('assoc certify-issuer CLI: file and stdout carry no secret, missing --issuer is exit 2', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const { publicKey } = assoc.initAssociation(dir)
+  const bin = path.join(__dirname, '../bin/varanda.js')
+  const run = (...args) => spawnSync(process.execPath, [bin, 'assoc', ...args, '--data', dir], { encoding: 'utf8' })
+  // A signature is 128 hex by design, so the check is for the secret key itself.
+  const secret = secretHex(dir)
+
+  const missing = run('certify-issuer')
+  t.is(missing.status, 2)
+  t.ok(missing.stderr.includes('informe --issuer <hex>'))
+
+  const out = path.join(tmpDir(t), 'issuer-cert.json')
+  const filed = run('certify-issuer', '--issuer', ISSUER, '--out', out, '--json')
+  t.is(filed.status, 0)
+  t.absent(filed.stdout.includes(secret))
+  const fileText = fs.readFileSync(out, 'utf8')
+  t.ok(fileText.endsWith('}\n'))
+  t.ok(fileText.includes('\n  "issuer"'), 'pretty JSON')
+  t.absent(fileText.includes(secret))
+  t.alike(cert.verifyIssuerCert(JSON.parse(fileText), publicKey), { ok: true })
+
+  const plain = run('certify-issuer', '--issuer', ISSUER)
+  t.is(plain.status, 0)
+  t.is(plain.stdout.split('\n').filter(Boolean).length, 1)
+  t.alike(cert.verifyIssuerCert(JSON.parse(plain.stdout), publicKey), { ok: true })
+  t.absent(plain.stdout.includes(secret))
+
+  t.not(run('certify-issuer', '--issuer', publicKey).status, 0)
 })

@@ -7,7 +7,7 @@ import { FlatList, Platform, RefreshControl, StyleSheet, View } from 'react-nati
 import { FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { handleOf } from '../format'
+import { atHandle, handleOf } from '../format'
 import { ErrorText, Soft, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -101,11 +101,12 @@ export default function ARua ({ active, refresh, onReply }) {
     <PostRow
       author={item.author}
       name={item.name}
+      username={item.username}
       at={item.at}
       text={item.text}
       replyToName={item.replyTo ? (names.nameOf(item.replyTo.author) || handleOf(item.replyTo.author)) : null}
       now={now}
-      onReply={() => onReply({ ref: item.author + ':' + item.seq, name: item.name || handleOf(item.author), text: item.text })}
+      onReply={() => onReply({ ref: item.author + ':' + item.seq, name: item.name || atHandle(item.username, item.author), text: item.text })}
     />
   )
 

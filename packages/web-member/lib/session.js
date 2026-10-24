@@ -28,8 +28,12 @@
 // storage holds the public key, ./node-store.js), reaches member-ops as
 // ctx.keyPair for the duration of one operation, and is zero-filled by
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
-// the key is USAGE 'identidade bloqueada: entre com a passkey'. There is no
-// signing API.
+// the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
+// signature the session makes outside the diary is account.sign: the
+// domain-separated account-link statement (@varanda/core lib/account-link.js,
+// prefix 'varanda-account-link-v1'), whose member and association the
+// session fills in itself, so a caller can never get arbitrary bytes, a
+// certificate or a block signed. It returns the signature only.
 //
 // Single writer (docs/app.md): the same passkey opens the same diary on
 // every device, so before every diary write the session makes sure this
@@ -41,11 +45,15 @@
 // once runs (sync.started / sync.event / sync.stopped) with the lines
 // 'sincronizando antes de publicar' / 'enviando ao semeador', and never
 // touch the user's sync intent.
+const b4a = require('b4a')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const { validRecordCopy, validateRecord, parseRef } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
+const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const member = require('./member-ops')
 const { runSync } = require('./sync')
 const store = require('./node-store')
@@ -56,6 +64,8 @@ const LOCKED_MESSAGE = 'diretório de dados em uso'
 const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
+const BAD_USERNAME_RECORD = 'registro de nome inválido'
+const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 // One deadline for the internal catch-up and push runs.
@@ -75,7 +85,9 @@ const USAGE_MESSAGES = new Set([
   'associação diferente da configurada',
   store.LOCKED,
   store.MISMATCH,
-  NOT_SYNCED_MESSAGE
+  NOT_SYNCED_MESSAGE,
+  BAD_USERNAME_RECORD,
+  OLD_USERNAME_RECORD
 ])
 const USAGE_PATTERNS = [
   /^certificado inválido \([a-z0-9-]{1,40}\)$/,
@@ -521,6 +533,31 @@ function createBrowserSession ({
       return { seq: r.seq }
     }),
 
+    // Signs the account-link statement with the in-memory key (docs/rpc.md
+    // 5.18). Not a diary write: no withStore/ensureCaughtUp (they would
+    // preempt a running sync for nothing), no append, no network, and the
+    // key stays set. The result never carries the payload or a key.
+    'account.sign': serial(async ({ phase, nonce, username, sub }) => {
+      // The diary's key, without opening the store: setKeyPair forgets
+      // ownKey, but diaryInfo (cached by identityStatus from the header)
+      // still holds it, and the key never changes short of reset. Only a
+      // node that has seen neither reads the store, which preempts a run as
+      // node.info does, and restarts it the same way.
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      // A pair for another diary would only make a signature the service
+      // refuses.
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const signature = signAccountLink({ phase, nonce, member: own, username, association: cfg.association, sub }, keyPair)
+      return { signature }
+    }),
+
     'profile.set': serial(async ({ name, bio }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
@@ -528,6 +565,33 @@ function createBrowserSession ({
       wrote(seq)
       await pushAfterWrite()
       return { seq, ref: own + ':' + seq }
+    }),
+
+    // Appends an issuer-signed username record (docs/rpc.md 5.19). The record
+    // must verify for the own key and the configured association. The gate
+    // runs before the "already the latest" check, so a record another device
+    // published (caught up here by the gate) is not appended again; a record
+    // that already is the diary's latest verified one is not written, but is
+    // still pushed while the seeder is not known to hold it (a push that
+    // failed after the append is retried by handing the record in again).
+    // The newest record by seq is the displayed name, so a record not newer
+    // (by `date`) than the latest one is refused: an earlier name would
+    // revert a rename, and two records of the same instant cannot be ordered.
+    'username.add': serial(async ({ record }, epoch) => {
+      const own = await requireUnlocked()
+      if (!verifyUsernameRecord(record, own, cfg.association).ok) throw new UsageError(BAD_USERNAME_RECORD)
+      await ensureCaughtUp(epoch)
+      const { entries } = await withStore((c) => member.ownEntries(c))
+      const latest = latestUsernameRecord(entries, own, cfg.association)
+      if (latest !== null && member.deepEqual(latest, record)) {
+        await pushAfterWrite()
+        return { changed: false, username: record.username }
+      }
+      if (latest !== null && record.date <= latest.date) throw new UsageError(OLD_USERNAME_RECORD)
+      const { seq } = await withStore((c) => member.usernameAdd(c, record))
+      wrote(seq)
+      await pushAfterWrite()
+      return { changed: true, username: record.username, seq }
     }),
 
     'post.create': serial(async ({ text }, epoch) => {

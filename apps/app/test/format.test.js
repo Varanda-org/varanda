@@ -15,6 +15,17 @@ test('handleOf and shortKey lowercase the key', async (t) => {
   t.is(shortKey('E905A4FFFF'), 'e905a4ff')
 })
 
+test('atHandle shows a username or falls back to the six-hex key', async (t) => {
+  const { atHandle } = await load()
+  for (const username of ['ana', 'ana_123', 'u'.repeat(20), 'abcdefg', 'abc12_']) {
+    t.is(atHandle(username, 'E905A4FFFF'), '@' + username)
+  }
+  for (const username of [null, undefined, '', 'an', 'a'.repeat(21), 'Ana', '1ana', 'ana-maria', 'ana maria', '@ana', 'abc123', 'abcdef', '123456', 'josé', '\u001b[31m', 123, {}, ['ana']]) {
+    t.is(atHandle(username, 'E905A4FFFF'), '@e905a4')
+  }
+  t.is(atHandle(null, null), '@')
+})
+
 test('initialsOf', async (t) => {
   const { initialsOf } = await load()
   t.is(initialsOf('Marília Prado', 'e9'), 'MP')

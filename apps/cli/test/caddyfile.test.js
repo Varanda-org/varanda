@@ -59,8 +59,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json and /seeder')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /seeder and /account/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -69,6 +69,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(arquivo.some((l) => l.trim() === 'not file {'), '@ausenteArquivo is a missing file')
   const app = block('@ausenteApp {')
   t.ok(app.some((l) => l.trim() === 'not path *.*'), '@ausenteApp covers app routes')
+  t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/account/*')),
+    '@ausenteApp leaves /account/* alone')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -78,6 +80,23 @@ test('Caddyfile: cache headers', (t) => {
 
   t.ok(lines.some((l) => l.trim() === 'header /manifest.webmanifest >Content-Type "application/manifest+json"'),
     'web manifest type pinned')
+})
+
+// The account service (Google link, @username) answers /account/* from
+// 127.0.0.1, before the SPA catch-all, without the client address and with
+// its own Cache-Control (no-store): nothing from the app's cache rules.
+test('Caddyfile: /account/* goes to the account service, before the SPA handle', (t) => {
+  const account = block('handle /account/* {')
+  t.ok(account.length > 0, 'handle /account/*')
+  t.ok(account.some((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'),
+    'reverse proxy to VARANDA_ACCOUNT_PORT on loopback')
+  t.ok(account.some((l) => l.trim() === 'header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(account.some((l) => l.trim() === 'header_up -X-Forwarded-For'), 'X-Forwarded-For stripped')
+  t.ok(account.some((l) => l.trim() === 'header_up -X-Real-Ip'), 'X-Real-Ip stripped')
+  t.absent(account.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /account/*')
+  const start = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(start !== -1 && spa > start, 'handle /account/* comes before the catch-all handle')
 })
 
 test('Caddyfile: SPA only for paths without an extension, real 404s otherwise', (t) => {

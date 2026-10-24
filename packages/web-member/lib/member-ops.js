@@ -186,6 +186,25 @@ async function postReply (ctx, { to, text }) {
   return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to })))
 }
 
+// ---- username ----
+
+const USERNAME_RECORD_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
+
+// Appends a plain copy of an issuer-signed username record (the caller,
+// lib/session.js username.add, has verified it for the own key) -> { seq }.
+async function usernameAdd (ctx, record) {
+  const copy = {}
+  for (const k of USERNAME_RECORD_KEYS) copy[k] = record[k]
+  const { seq } = await publish(ctx, copy)
+  return { seq }
+}
+
+// The own diary's entries ({ seq, record }), for the "already the latest
+// username record" check of username.add.
+async function ownEntries (ctx) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
+}
+
 // ---- follows ----
 
 async function followChange (ctx, author, follow) {
@@ -286,7 +305,7 @@ async function feedRead (ctx, { limit = Infinity } = {}) {
     if (reason === null) kept.push({ key, entries })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association })
   return { items: built.items, skipped, future: built.future }
 }
 
@@ -302,6 +321,8 @@ module.exports = {
   profileSet,
   postCreate,
   postReply,
+  usernameAdd,
+  ownEntries,
   followAdd,
   followRemove,
   followList,

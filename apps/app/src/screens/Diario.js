@@ -12,9 +12,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { accountStatus, usernameMatches } from '../account'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
-import { handleOf, relativeTime } from '../format'
+import { atHandle, handleOf, relativeTime } from '../format'
 import { ErrorText, Mono, SectionHeader, Soft, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -74,15 +75,22 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
   const [saved, setSaved] = useState(null)
   const pull = useAction()
   const seqRef = useRef(0)
+  // The own @nome from the account service (hosted page with a passkey), or
+  // null: the 6-hex handle. Not from log.read, which only returns the newest
+  // page and cannot check the issuer's signature.
+  const [username, setUsername] = useState(null)
+  const linkMode = node.hosted === true && node.passkey !== null
 
   const { learn, resolve } = names
   const load = useCallback(async () => {
     const mine = ++seqRef.current
+    let key = null
     try {
       // One read after the other: each read preempts a running sync.
       const info = await node.request('node.info', {})
       const log = await node.request('log.read', { limit: LOG_LIMIT_MAX })
       if (mine !== seqRef.current) return
+      key = info.publicKey
       setData({ info, log })
       setLoadError('')
       const profile = newestProfile(log)
@@ -95,8 +103,19 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
       }
     } catch (err) {
       if (mine === seqRef.current) setLoadError(errorText(err))
+      return
     }
-  }, [node.request, learn, resolve])
+    // After the reads: a failure (not linked, service unavailable) only
+    // leaves the 6-hex handle.
+    let name = null
+    if (linkMode && typeof key === 'string') {
+      try {
+        const status = await accountStatus(key)
+        if (status.linked === true && usernameMatches(status.usernameRecord, key, status.username)) name = status.username
+      } catch {}
+    }
+    if (mine === seqRef.current) setUsername(name)
+  }, [node.request, learn, resolve, linkMode])
 
   useEffect(() => { if (active) load() }, [active, load, refresh])
 
@@ -113,6 +132,7 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
 
   const info = data === null ? null : data.info
   const log = data === null ? null : data.log
+  const handle = atHandle(username, info?.publicKey)
   const loaded = log === null ? null : newestProfile(log)
   const carried = loaded !== null && saved !== null && loaded.name === saved.name && (loaded.bio || '') === saved.bio
   const profile = saved !== null && !carried ? saved : loaded
@@ -219,7 +239,7 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
         </View>
         <View style={styles.data}>
           <Text style={styles.name}>
-            {hasName ? displayText(knownName) : displayText(handleOf(info.publicKey))}
+            {hasName ? displayText(knownName) : displayText(handle)}
           </Text>
           <Pressable
             accessibilityRole='button'
@@ -227,7 +247,7 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
             onPress={() => setShowKey((v) => !v)}
             style={styles.keyWrap}
           >
-            <Text style={styles.keyText}>{displayText(handleOf(info.publicKey))}</Text>
+            <Text style={styles.keyText}>{displayText(handle)}</Text>
           </Pressable>
           {showKey ? <Mono>{displayText(info.publicKey)}</Mono> : null}
           {profile && profile.bio
@@ -279,13 +299,14 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
         <PostRow
           author={info.publicKey}
           name={hasName ? knownName : null}
+          username={username}
           at={record.at}
           text={record.text}
           replyToName={record.replyTo ? (names.nameOf(record.replyTo.author) || handleOf(record.replyTo.author)) : null}
           now={now}
           onReply={() => onReply({
             ref: info.publicKey + ':' + row.seq,
-            name: hasName ? knownName : handleOf(info.publicKey),
+            name: hasName ? knownName : handle,
             text: record.text
           })}
         />
@@ -295,11 +316,12 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
       return <TechRow>{head + ' · perfil · ' + displayText(record.name) + ' · ' + (relativeTime(record.at, now) ?? displayText(record.at))}</TechRow>
     }
     if (record.type === 'member-cert') return <TechRow>{head + ' · certificado de membro'}</TechRow>
+    if (record.type === 'username') return <TechRow>{head + ' · nome de usuário · ' + displayText(atHandle(record.username, info.publicKey))}</TechRow>
     return <TechRow>{head + ' · registro desconhecido'}</TechRow>
   }
 
   // Rows re-render when a name is learned or the clock ticks.
-  const extra = useMemo(() => ({ nameOf: names.nameOf, now, knownName }), [names.nameOf, now, knownName])
+  const extra = useMemo(() => ({ nameOf: names.nameOf, now, knownName, username }), [names.nameOf, now, knownName, username])
 
   return (
     <View style={styles.list}>

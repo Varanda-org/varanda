@@ -1,6 +1,10 @@
 'use strict'
 
 const test = require('brittle')
+const crypto = require('hypercore-crypto')
+const b4a = require('b4a')
+const certModule = require('@varanda/core/lib/cert')
+const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } = certModule
 const { buildFeed, shortKey, formatFeedItem, MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
 const { testnet } = require('./helpers/net')
 const { displayWidth } = require('@varanda/core/lib/safe')
@@ -64,6 +68,91 @@ test('limit keeps the last n', async (t) => {
   t.is(buildFeed({ logs, now: NOW }).items.length, 5)
 })
 
+test('feed usernames follow the newest own record on v1 and v2 diaries', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKey.publicKey, 'hex'), date: AT }, associationKey)
+  const username = (name, member = KA) => createUsernameRecord({ member, username: name, date: AT }, issuerKey, issuerCert)
+  const first = username('ana')
+  const renamed = username('ana_maria')
+
+  for (const genesis of [createCert({ member: KA, date: AT }, associationKey), createIssuedCert({ member: KA, date: AT }, issuerKey, issuerCert)]) {
+    const entries = [
+      { seq: 0, record: { type: 'member-cert', cert: genesis } },
+      // a profile name that is itself a valid username is still not one
+      { seq: 1, record: profile('bia_souza') },
+      { seq: 2, record: post('oi', AT) }
+    ]
+    const read = (root = association, list = entries) => buildFeed({ logs: [{ key: KA, entries: list }], association: root, now: NOW }).items[0]
+    t.is(read().username, null, 'a certificate and profile never supply the username')
+    t.is(read().name, 'bia_souza')
+    entries.push({ seq: 3, record: first })
+    t.is(read().username, 'ana', 'a signed username works with either genesis version')
+    entries.push({ seq: 5, record: renamed }, { seq: 4, record: first })
+    t.is(read().username, 'ana_maria', 'highest sequence wins even for unordered entries and equal dates')
+    t.is(read().name, 'bia_souza', 'display name is independent')
+    entries.push({ seq: 6, record: username('outra', KB) })
+    t.is(read().username, 'ana_maria', 'foreign records do not hide the name')
+    t.is(read('f'.repeat(64)).username, null, 'the configured association is required')
+    t.is(read(null).username, null, 'missing trust root gives no username')
+    t.is(formatFeedItem(read()), '[' + AT + '] bia_souza (aaaaaaaa @ana_maria) #2\n  oi')
+    for (const bad of [
+      { ...renamed, username: 'forged' },
+      { ...renamed, issuerSignature: '0'.repeat(128) }
+    ]) {
+      t.is(read(association, entries.concat([{ seq: 7, record: bad }])).username, null, 'an invalid newest own record yields username null')
+    }
+    // a 6-hex name is not shape-valid, so the record is no candidate at all
+    t.is(read(association, entries.concat([{ seq: 7, record: { ...renamed, username: 'abc123' } }])).username, 'ana_maria', 'a malformed record is skipped')
+  }
+
+  const invalidLogs = [
+    { key: KA, entries: [{ seq: 0, record: first }, { seq: 1, record: post('oi', AT) }] },
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: first }, { seq: 2, record: post('oi', AT) }] }
+  ]
+  t.alike(buildFeed({ logs: invalidLogs, association, now: NOW }).items.map((item) => item.username), [null, null])
+})
+
+test('junk username records cost one candidate verification per log', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKey.publicKey, 'hex'), date: AT }, associationKey)
+  const valid = createUsernameRecord({ member: KA, username: 'ana_maria', date: AT }, issuerKey, issuerCert)
+  // shape-valid records of the log's own member whose signatures fail
+  const junk = (i) => ({ ...valid, username: 'junk' + i })
+  const JUNK = 5000
+
+  let calls = 0
+  const original = certModule.verifyUsernameRecord
+  certModule.verifyUsernameRecord = (...args) => {
+    calls++
+    return original(...args)
+  }
+  t.teardown(() => { certModule.verifyUsernameRecord = original })
+
+  const head = [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('oi', AT) }]
+  const run = (entries) => {
+    calls = 0
+    const item = buildFeed({ logs: [{ key: KA, entries }], association, now: NOW }).items[0]
+    return { username: item.username, calls }
+  }
+
+  const before = head.slice()
+  for (let i = 0; i < JUNK; i++) before.push({ seq: 2 + i, record: junk(i) })
+  before.push({ seq: 2 + JUNK, record: valid })
+  const a = run(before)
+  t.is(a.username, 'ana_maria', 'junk before the final valid record: the valid name')
+  t.is(a.calls, 1, 'exactly one candidate verification')
+
+  const after = head.concat([{ seq: 2, record: valid }])
+  for (let i = 0; i < JUNK; i++) after.push({ seq: 3 + i, record: junk(i) })
+  const b = run(after)
+  t.is(b.username, null, 'junk after the valid record: an invalid newest record yields null')
+  t.is(b.calls, 1, 'exactly one candidate verification')
+})
+
 test('limit must be Infinity or an integer >= 1', async (t) => {
   await testnet(t)
   const logs = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('p', AT) }] }]
@@ -89,13 +178,13 @@ test('returned items do not alias the input', async (t) => {
   t.alike(logs[0].entries[1].record.replyTo, { author: KB, seq: 1 })
 
   // a post whose text turns invalid after it is copied: the feed shows the
-  // value that was validated (latestProfile and buildFeed each copy once)
+  // value that was validated (all feed readers share one plain snapshot)
   let reads = 0
-  const shifty = { type: 'post', get text () { return reads++ < 2 ? 'ok' : '' }, at: AT, replyTo: null }
+  const shifty = { type: 'post', get text () { return reads++ < 1 ? 'ok' : '' }, at: AT, replyTo: null }
   const r = buildFeed({ logs: [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: shifty }] }], now: NOW })
   t.is(r.items.length, 1)
   t.is(r.items[0].text, 'ok')
-  t.is(reads, 2)
+  t.is(reads, 1)
 })
 
 test('reply annotation and name resolution', async (t) => {
@@ -135,6 +224,21 @@ test('formatFeedItem indents every line of a multi-line text', async (t) => {
   t.is(lines[0], '[' + AT + '] Ana (aaaaaaaa) #1')
   t.alike(lines.slice(1), ['  primeira', '  [2026-01-01T00:00:00.000Z] Falsa (cccccccc) #9', '  ', '  última'])
   t.ok(lines.slice(1).every((l) => l.startsWith('  ')), 'no text line starts at column 0')
+})
+
+test('formatFeedItem escapes usernames and keeps their header within the width', (t) => {
+  const item = { author: KA, name: 'Ana', username: 'ana\n\u001b[31m', seq: 1, at: AT, text: 'oi', replyTo: null }
+  const out = formatFeedItem(item)
+  t.is(out.split('\n').length, 2, 'a username cannot introduce a header line')
+  t.absent(out.includes('\u001b'), 'no terminal escape')
+  item.username = 'u'.repeat(20)
+  item.name = '界'.repeat(80)
+  for (const width of [20, 60, 100]) {
+    const rows = formatFeedItem(item, { width }).split('\n')
+    t.ok(rows.every((row) => displayWidth(row) <= width), 'header fits ' + width)
+    t.ok(rows.slice(1).every((row) => row.startsWith('  ')), 'continuations are indented')
+    if (width === 100) t.ok(rows[0].endsWith('(aaaaaaaa @' + item.username + ') #1'), 'key and username stay visible')
+  }
 })
 
 test('formatFeedItem hard-wraps to width and indents every segment (L1)', async (t) => {

@@ -17,13 +17,13 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'cert.add', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
+    'account.sign', 'cert.add', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'log.read', 'node.close', 'node.info', 'post.create', 'post.reply', 'profile.set',
-    'session.open', 'sync.start', 'sync.status', 'sync.stop'
+    'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'node.close', 'post.create', 'post.reply',
-    'profile.set', 'sync.start', 'sync.stop'
+    'profile.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
@@ -54,6 +54,57 @@ test('cert.add', (t) => {
   bad(t, 'cert.add', { cert: null })
   bad(t, 'cert.add', { cert: { pad: 'x'.repeat(4096) } }, 'oversized cert')
   bad(t, 'cert.add', { cert: {}, file: 'x' })
+})
+
+test('account.sign', (t) => {
+  const nonce = 'n'.repeat(43)
+  const base = { phase: 'reserve', nonce, username: 'ana_1', sub: '' }
+  t.absent(isMutating('account.sign'))
+  ok(t, 'account.sign', base, base)
+  ok(t, 'account.sign', { ...base, phase: 'rename' })
+  ok(t, 'account.sign', { ...base, phase: 'finish', sub: '1234567890' })
+  ok(t, 'account.sign', { ...base, phase: 'finish', sub: '!'.repeat(255) })
+  ok(t, 'account.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'account.sign', { ...base, username: 'a' + 'b'.repeat(19) })
+  bad(t, 'account.sign', {})
+  for (const k of Object.keys(base)) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'account.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'message', 'key']) {
+    bad(t, 'account.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const phase of ['', 'Reserve', 'cert', 1, null]) bad(t, 'account.sign', { ...base, phase }, 'phase ' + phase)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'account.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+  for (const u of ['ab', 'Ana', '1ana', 'a'.repeat(21), 'ana-b', 'ana b', 'abc123', 'deadbe', '', 7]) {
+    bad(t, 'account.sign', { ...base, username: u }, 'username ' + u)
+  }
+  for (const sub of ['1 2', '1\n2', 'é', '!'.repeat(256), null, 5]) {
+    bad(t, 'account.sign', { ...base, phase: 'finish', sub }, 'sub ' + JSON.stringify(sub))
+  }
+  // A subject only at finish, and always there.
+  bad(t, 'account.sign', { ...base, phase: 'finish', sub: '' }, 'finish without sub')
+  bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
+  bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
+})
+
+test('username.add', (t) => {
+  t.ok(isMutating('username.add'))
+  const record = { type: 'username', username: 'ana' }
+  ok(t, 'username.add', { record }, { record })
+  ok(t, 'username.add', { record: { pad: 'x'.repeat(2048 - 10) } }, undefined)
+  bad(t, 'username.add', {})
+  bad(t, 'username.add', { record: [] })
+  bad(t, 'username.add', { record: 'x' })
+  bad(t, 'username.add', { record: null })
+  bad(t, 'username.add', { record: 1 })
+  bad(t, 'username.add', { record, cert: {} }, 'extra param')
+  bad(t, 'username.add', { record, username: 'ana' }, 'extra username')
+  bad(t, 'username.add', { record: { pad: 'x'.repeat(2048 - 9) } }, 'oversized record')
 })
 
 test('profile.set', (t) => {

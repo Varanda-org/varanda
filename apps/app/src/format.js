@@ -8,6 +8,12 @@ export function handleOf (key) {
   return '@' + (typeof key === 'string' ? key.toLowerCase().slice(0, 6) : '')
 }
 
+export function atHandle (username, key) {
+  return typeof username === 'string' && /^[a-z][a-z0-9_]{2,19}$/.test(username) && !/^[0-9a-f]{6}$/.test(username)
+    ? '@' + username
+    : handleOf(key)
+}
+
 export function shortKey (key) {
   return String(key).toLowerCase().slice(0, 8)
 }

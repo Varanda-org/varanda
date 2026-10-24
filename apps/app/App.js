@@ -10,6 +10,7 @@ import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
+import { parseReturn } from './src/account'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
@@ -31,6 +32,14 @@ import Seguindo from './src/screens/Seguindo'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
+
+// True when this page load is the return from the Google step of the account
+// link (?conta=…). Read at import, before any screen renders; only read here:
+// Identidade's LinkCard is the one that removes the query. Native has no
+// location.
+const LINK_RETURN = (() => {
+  try { return parseReturn(globalThis.location?.search) !== null } catch { return false }
+})()
 
 // True when node.info confirms an identity and a member certificate.
 function setupComplete (info) {
@@ -110,6 +119,17 @@ function Member () {
     setInfo(null)
   }, [locked])
   const setupStep = locked || (!setupDone && !confirmed)
+
+  // Back from the Google step with a certificate already held: the tabs show
+  // after the unlock, so open Ajustes → Identidade once, where LinkCard offers
+  // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
+  // handles the return.
+  const linkReturnRef = useRef(LINK_RETURN)
+  useEffect(() => {
+    if (setupStep || !linkReturnRef.current) return
+    linkReturnRef.current = false
+    setAjustes('identidade')
+  }, [setupStep])
 
   // The feed carries only followed authors' names: look the own name up
   // once (one log.read through the names cache) for the Publicar avatar.

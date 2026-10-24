@@ -77,6 +77,7 @@ Every node trusts exactly ONE association public key, persisted in `config.json`
 - Block 0 (genesis) MUST be `{ "type": "member-cert", "cert": Certificate }` with `cert.member` equal to the diary key; no other block may have this type; a diary without block 0 cannot receive other records.
 - `{ "type": "profile", "name": <string 1..80 chars>, "bio": <string 0..280 chars>, "at": <ISO-8601 UTC string> }`
 - `{ "type": "post", "text": <string 1..1000 chars>, "at": <ISO>, "replyTo": null | { "author": "<hex64>", "seq": <integer >= 1> } }` — a post with `replyTo` is a reply to block `seq` of `author` (`seq >= 1` because block 0 is never a post).
+- `{ "type": "username", ... }` (seq >= 1 only; at seq 0 it is `genesis-required`): the member's @username, signed by the association's issuer (section 3, "Username record"). `validateRecord` checks its shape only; readers take the name from `latestUsername` (`packages/core/lib/username.js`), which also verifies the signatures. Nodes from before this type treat it as an unknown type (`malformed`) and skip it like any invalid block, without rejecting the diary.
 
 Example records:
 
@@ -149,6 +150,104 @@ Certificate fields (no other keys):
 
 R4.3: `verifyCert`, `certForKey` and `validateCertShape` NEVER throw for any input (including hostile strings such as a `date` of `'2026-13-01T00:00:00.000Z'`, getters and non-objects); an input that would make a check throw yields `'malformed'`. Tests cover `'2026-13-01T00:00:00.000Z'` and non-string values.
 
+The v1 format above stays valid and unchanged (same keys, payload and verdicts); an object with the v1 key set and `v !== 1`, or with any extra key, is `'malformed'`. `validateCertShape`, `verifyCert` and `certForKey` accept a v1 OR a v2 certificate (below) and branch on the key set and `v`; `genesisCert` and the block-0 gate (section 5) therefore accept both. A v2 certificate is valid only as block 0.
+
+### Issuer certificate
+
+The association delegates the issuing of v2 member certificates and username records to an online issuer key, so the association secret stays offline.
+
+```json
+{
+  "v": 1,
+  "issuer": "<hex64, the issuer public key>",
+  "date": "2026-01-01T00:00:00.000Z",
+  "association": "<hex64>",
+  "signature": "<128 lowercase hex>"
+}
+```
+
+Exactly these 5 keys: `v` (`1`), `issuer` (lowercase hex64, `issuer !== association`), `date` (canonical ISO, `isCanonicalIso`), `association` (lowercase hex64), `signature` (128 lowercase hex, `sign(payload, associationSecretKey)`). Anything else is `'malformed'`.
+
+`payload` = UTF-8 bytes of `'varanda-issuer-v1'`, `issuer`, `date`, `association` joined by a single LF (no trailing LF, hex lowercase). The prefix differs from every other payload, so no other signature of the association is ever a valid issuer signature.
+
+- `issuerCertPayload(cert)` -> Buffer.
+- `createIssuerCert({ issuer, date = new Date().toISOString() }, associationKeyPair)` -> IssuerCertificate; TypeError unless `issuer` is hex64 in any case (stored lowercase) and differs from the association key, `date` is canonical and the key pair is valid.
+- `validateIssuerCertShape(cert)` -> `null | 'malformed'`.
+- `verifyIssuerCert(cert, associationHex)` -> `{ ok: true } | { ok: false, reason }` with reasons in order `'malformed'`, `'untrusted-association'`, `'bad-signature'`. Never throws.
+
+### Membership certificate v2
+
+```json
+{
+  "v": 2,
+  "member": "<hex64, the diary key>",
+  "ageBand": "unchecked",
+  "method": "google",
+  "date": "2026-01-01T00:00:00.000Z",
+  "association": "<hex64>",
+  "issuer": "<hex64>",
+  "issuerDate": "2026-01-01T00:00:00.000Z",
+  "issuerSignature": "<128 lowercase hex>",
+  "signature": "<128 lowercase hex>"
+}
+```
+
+Exactly these 10 keys (written in this order by `createIssuedCert`): `v` (`2`), `member` (lowercase hex64), `ageBand` (exactly `'unchecked'`), `method` (exactly `'google'`), `date` (canonical ISO), `association`, `issuer` (lowercase hex64, `issuer !== association`), `issuerDate` (canonical ISO), `issuerSignature` (128 lowercase hex), `signature` (128 lowercase hex). Anything else is `'malformed'`. A v2 certificate asserts NO age: `'unchecked'` records that the issuer only linked an account (`'google'`); no age band is claimed. The @username is not part of the certificate (it is the `username` record below, so it can change).
+
+`payload` = UTF-8 bytes of `'varanda-cert-v2'`, `member`, `ageBand`, `method`, `date`, `association`, `issuer`, `issuerDate`, `issuerSignature` joined by a single LF (no trailing LF, hex lowercase). `signature` = `sign(payload, issuerSecretKey)`.
+
+`verifyCert(cert, associationHex)` for a v2 certificate returns the FIRST failing reason in this order:
+
+1. `'malformed'` (shape above).
+2. `'untrusted-association'` (`cert.association !== associationHex` lowercase).
+3. `'bad-issuer-signature'`: the embedded delegation `{ v: 1, issuer, date: issuerDate, association, signature: issuerSignature }` fails `verifyIssuerCert(delegation, association)`.
+4. `'bad-signature'` (`verify(payload, signature, issuer)` is false).
+
+`certForKey` inserts `'member-mismatch'` after `'malformed'`, as for v1.
+
+- `certPayloadV2(cert)` -> Buffer.
+- `createIssuedCert({ member, date = new Date().toISOString() }, issuerKeyPair, issuerCert)` -> v2 Certificate; TypeError unless `member` is hex64, `date` is canonical, `issuerCert` is a valid issuer certificate that verifies for its own association and `hex(issuerKeyPair.publicKey) === issuerCert.issuer`.
+
+### Username record
+
+A diary record (section 2, seq >= 1) that gives the member an @username:
+
+```json
+{
+  "type": "username",
+  "username": "ana_maria",
+  "member": "<hex64, the diary key>",
+  "date": "2026-01-01T00:00:00.000Z",
+  "association": "<hex64>",
+  "issuer": "<hex64>",
+  "issuerDate": "2026-01-01T00:00:00.000Z",
+  "issuerSignature": "<128 lowercase hex>",
+  "signature": "<128 lowercase hex>"
+}
+```
+
+Exactly these 9 keys: `type` (`'username'`), `username` (matches `USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/` and NOT `/^[0-9a-f]{6}$/`: a 6-hex name cannot be told apart from the fallback handle `'@' + key.slice(0, 6)`; `isUsername(s)`), `member` (lowercase hex64), `date` (canonical ISO), `association`, `issuer` (lowercase hex64, `issuer !== association`), `issuerDate` (canonical ISO), `issuerSignature`, `signature` (128 lowercase hex). Anything else is `'malformed'`.
+
+`payload` = UTF-8 bytes of `'varanda-username-v1'`, `username`, `member`, `date`, `association`, `issuer`, `issuerDate`, `issuerSignature` joined by a single LF (no trailing LF, hex lowercase). `signature` = `sign(payload, issuerSecretKey)`.
+
+- `usernameRecordPayload(record)` -> Buffer.
+- `createUsernameRecord({ member, username, date = new Date().toISOString() }, issuerKeyPair, issuerCert)` -> record; same TypeError rules as `createIssuedCert`, plus `isUsername(username)`.
+- `validateUsernameRecordShape(record)` -> `null | 'malformed'`.
+- `verifyUsernameRecord(record, memberHex, associationHex)` -> `{ ok: true } | { ok: false, reason }`, first failing reason in order `'malformed'`, `'member-mismatch'` (`record.member !== normalizeHex(memberHex)`), `'untrusted-association'`, `'bad-issuer-signature'`, `'bad-signature'`. Never throws.
+- The @username of a diary is `latestUsername(entries, logKey, association)`. The candidate is the HIGHEST-seq shape-valid `username` record whose `member` equals the log key; only that one record is verified (`verifyUsernameRecord` with `memberHex` = the log key and the association). If it verifies its `username` is the result, otherwise `null`: there is no fallback to an earlier record. A record naming another member (copied from someone else's diary) is never a candidate; it is dropped by the shape/member filter at no crypto cost. Rationale: only the diary's owner can append to it and `username.add` verifies a record before appending, so a bad newest record can only come from the owner's own modified client and only hides the owner's own name; in exchange a followed peer cannot make readers pay one verification per junk record it appends: the cost is at most one candidate verification per log per feed build.
+
+### Golden vectors (`apps/cli/test/cert.test.js`)
+
+Keys from hypercore-crypto `keyPair(seed)`: association seed = 32 bytes `0x01`, issuer seed = 32 bytes `0x02`; member = `'ab'` x 32; issuer `date` = `2026-10-24T00:00:00.000Z`; member certificate and username record `date` = `2026-10-24T12:00:00.000Z`; username `ana_maria`. Ed25519 signatures are deterministic.
+
+- association = `8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c`
+- issuer = `8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394`
+- issuer certificate `signature` (= `issuerSignature` below) = `7e06f2e675e84ea405dba956c8bb54f3a2e070c4bfb2803a067f1b9215fae89a76b4cb2a8b1137c1fec106e14cf25a390a58f1e7a0757d762c7cb1c9d9faf50d`
+- member certificate v2 `signature` = `3e9041b0a15d3ab5066697e6998be04a0a6599dee997649c51ff7420a80238742b258fffc06c29861c65a18bbad04b792b6bb31d9621f2b530319c40d6777605`
+- username record `signature` = `43d469145321e09697cbd68cad520105d594941d173f236c35ca6e9460f2a67d4541990b253f3a0c4544900cb72bf15b8e490b17604081826c88ba4967c42500`
+
+Size: the largest legal v2 certificate (two 27-character expanded-year dates) is under `MAX_CERT_BYTES = 4096` (`packages/rpc/lib/limits.js`) and its block 0, like the largest username record, is under `MAX_BLOCK_BYTES = 16384` (`apps/cli/test/records.test.js`).
+
 ### Seeder certificate (R5.2)
 
 ```json
@@ -174,7 +273,7 @@ R4.3: `verifyCert`, `certForKey` and `validateCertShape` NEVER throw for any inp
 
 The association issues it with `assoc certify-seeder` (`issueSeederCertificate`, which appends the `seeders.jsonl` line). Members verify it against the Noise-authenticated `socket.remotePublicKey` of the connection that carried it (section 6, R5.3 c).
 
-No expiry or revocation in phase 0 for either certificate (TODO phase 2: revocation and moderation lists). The age check is a stub: the operator of `assoc certify` asserts the age band (TODO phase 1: real age-verification vendor). The association stores only (public key, age band, method, date) for members and (seeder key, date) for seeders.
+No expiry or revocation in phase 0 for any certificate (member v1 and v2, issuer, seeder) or username record (TODO phase 2: revocation and moderation lists). The age check is a stub: the operator of `assoc certify` asserts the age band (TODO phase 1: real age-verification vendor). The association stores only (public key, age band, method, date) for members and (seeder key, date) for seeders.
 
 ## 4. Network
 
@@ -241,7 +340,7 @@ Hyperswarm refreshes a discovery only every 10 minutes, so two swarms whose firs
 - `have`: `{ "type": "have", "key": "<hex64>", "length": <integer >= 0> }` — sent (1) for each inventory entry that did not fit in `hello`, (2) whenever the `contiguousLength` of a served core grows, and (3) by a member when a followed key changes state: becoming pending (length 0, interest only) or passing the gate (length = `contiguousLength`).
 - `announce`: `{ "type": "announce", "key": "<hex64>", "cert": Certificate }` — member -> seeder: replicate this diary, here is its certificate; sent once per connection for the member's own key when its block 0 is a valid member-cert for the trusted association. Members ignore incoming `announce`. `announce` stays unauthenticated by design.
 - `admitted`: `{ "type": "admitted", "key": "<hex64>", "length": <integer >= 0> }` — seeder -> member after admission (idempotent; `length` = the seeder's `contiguousLength`).
-- `rejected`: `{ "type": "rejected", "key": "<hex64>", "reason": <string matching /^[a-z0-9-]{1,64}$/> }` — R5.1 a: may be sent by ANY role, to any peer. Meaning: "the sender will not keep or serve `key`". Reason master list (R5.9 f, S3): `malformed` | `member-mismatch` | `untrusted-association` | `bad-signature` | `not-in-log` | `timeout` | `fork` | `no-cert` | `admission-failed` | `quota` | `seeder-full` (review item 4a: the seeder already serves `MAX_INVENTORY` logs). S4: a `reason` outside that charset (free text, control characters) is a bad message, never dispatched; every reason the seeder or a member can send is a token of the master list. Defence in depth: `apps/cli/lib/commands/sync.js` escapes C0/C1 controls, DEL, U+2028/U+2029 and the bidi controls as `\u{XX}` in every string it prints that came from a peer or a log (`safe`).
+- `rejected`: `{ "type": "rejected", "key": "<hex64>", "reason": <string matching /^[a-z0-9-]{1,64}$/> }` — R5.1 a: may be sent by ANY role, to any peer. Meaning: "the sender will not keep or serve `key`". Reason master list (R5.9 f, S3): `malformed` | `member-mismatch` | `untrusted-association` | `bad-issuer-signature` (a v2 certificate whose embedded issuer certificate fails, section 3) | `bad-signature` | `not-in-log` | `timeout` | `fork` | `no-cert` | `admission-failed` | `quota` | `seeder-full` (review item 4a: the seeder already serves `MAX_INVENTORY` logs). S4: a `reason` outside that charset (free text, control characters) is a bad message, never dispatched; every reason the seeder or a member can send is a token of the master list. Defence in depth: `apps/cli/lib/commands/sync.js` escapes C0/C1 controls, DEL, U+2028/U+2029 and the bidi controls as `\u{XX}` in every string it prints that came from a peer or a log (`safe`).
 - `admitted` (S2) may only come from a peer whose hello role is `seeder`: an `admitted` from any other role (or before the hello) is a bad message and never touches `remoteHave`. (`rejected` stays allowed from any role: members send it as a withdrawal, R5.1 a.)
   - Members send it (broadcast to every open admission channel) when (1) a followed key's remote gate FAILS with a non-timeout reason (section 6, R5.8), (2) a fork is detected on a followed key, reason `'fork'` (R5.9), and (3) the local re-gate of a replica opened after a remote pass fails (section 6, `bloco 0 divergente`).
   - Seeders send it to the announcer on admission failure (including `'admission-failed'`: the gate passed but persisting or opening the replica threw, section 5 d) and broadcast it on every runtime drop (R5.5, R5.9).
@@ -372,7 +471,7 @@ Shutdown order (the `finally` of `runSync`, after the result is settled or on a 
 - A non-null verdict reason -> K FAILED: `skipped.push({ key: K, reason })`, `onEvent({ event: 'skipped', key: K, reason })`, broadcast `rejected { key: K, reason }` (R5.1 a). K is excluded from `hello.have`, from every goal and from `downloaded`.
 - `null` -> K passes the REMOTE gate: `core = await openReplica(store, K)` (the main store now creates it; block 0 is re-downloaded from the connected advertiser(s)), `watchFork`, live download, `watchContiguous`. If the run started ending (deadline, abort, completion) or K left `pending` while that `openReplica` was in flight, the replica is closed and PURGED (review item 8: the main store already holds the core, and corestore serves stored cores); the purge is tracked like every other (the result waits for it), and a purge failure follows the purge-failure rule of (e) (`ok: false` with `falha ao limpar diário rejeitado: <key8>` while the result is not built yet; after it, a warning `aviso: falha ao limpar diário <key8>` through `log`, and the store is still closed only after the purge settled). Otherwise K is then in state `regate` (below) until block 0 arrives in the main store and passes the LOCAL gate; only then is it ACTIVE: `have` broadcast with `contiguousLength`, `onEvent({ event: 'downloaded', key: K, length })`, `downloaded[K] = core.contiguousLength`.
 
-(d) `skipped` reasons are exactly `malformed | member-mismatch | untrusted-association | bad-signature | not-in-log | fork | quota` (never `timeout`).
+(d) `skipped` reasons are exactly `malformed | member-mismatch | untrusted-association | bad-issuer-signature | bad-signature | not-in-log | fork | quota` (never `timeout`).
 
 (f) Log quota (S3): once a replica is open in the main store (`regate` or `active`), its signed `length` and `byteLength` advance on the upgrade proof (hypercore emits `'append'` before the blocks arrive); on every `'append'`, on every growth and once at open, `core.length > MAX_LOG_BLOCKS || core.byteLength > MAX_LOG_BYTES` fails the follow with reason `quota`: the download range is destroyed, `rejected { key, reason: 'quota' }` is broadcast, K is `skipped`. Chosen outcome: an ACTIVE replica keeps the blocks already verified (no purge; the next run re-gates it at startup, hits the quota again and skips it again, so the data dir never downloads past the limit), a replica still in `regate` holds nothing verified and is purged. `runSync` takes `maxLogBlocks` / `maxLogBytes` (tests only).
 
@@ -598,13 +697,14 @@ After `run()` resolves or throws, `apps/cli/bin/varanda.js` sets `process.exitCo
 
 ### FeedItem
 
-`FeedItem = { author: hex64, name: string | null, seq, at, text, replyTo: null | { author, seq } }`, ascending by `(at, author, seq)`; future-dated posts (R5.10) are excluded before `--limit` applies; `--limit` keeps the LAST n. `key8` = first 8 hex chars.
+`FeedItem = { author: hex64, name: string | null, username: string | null, seq, at, text, replyTo: null | { author, seq } }` (`username` comes from the author's newest own `username` record if it verifies, else `null`; section 3, "Username record"), ascending by `(at, author, seq)`; future-dated posts (R5.10) are excluded before `--limit` applies; `--limit` keeps the LAST n. `key8` = first 8 hex chars.
 
 ## 8. Module map and exports
 
-- `packages/core/lib/cert.js`: `isHex(str, bytes)`, `normalizeHex(str)`, `certPayload(cert)` -> Buffer, `createCert({ member, ageBand = '18+', method = 'stub', date = new Date().toISOString() }, associationKeyPair)` -> Certificate, `validateCertShape(cert)` -> `null | 'malformed'`, `verifyCert(cert, associationHex)` -> `{ ok, reason }`, `certForKey(cert, keyHex, associationHex)` -> `{ ok, reason }`, `generateAssociationKeyPair()`, `refuseSymlinkDir(dir)` (throws `Error('diretório é um link simbólico')` when `dir` is a symlink; a missing dir is fine), `saveKeyPairFile(file, kp, { overwrite = false })` (writes through a unique temp name `.<base>.<12 random bytes hex>.tmp` opened with `'wx'` and mode `0o600`, fsynced; without `overwrite` the publish is a hard `link` to `file`, which fails with `EEXIST` when it exists, so an existing key is never clobbered; with `overwrite: true` a rename; the temp name is always unlinked and the directory fsynced; parent dir `0o700`, refused when a symlink), `loadKeyPairFile(file)` -> `{ publicKey, secretKey }` Buffers (throws `Error('arquivo de chave inválido')` on bad shape), `saveAssociationKeyPair(file, kp)` / `loadAssociationKeyPair(file)` (wrappers over the two above; the association loader keeps its message `chave da associação inválida`), `seederCertPayload(cert)` -> Buffer, `createSeederCert({ seeder, date }, associationKeyPair)` -> SeederCertificate, `validateSeederCertShape(cert)` -> `null | 'malformed'`, `verifySeederCert(cert, associationHex)` -> `{ ok, reason }`, `seederCertForKey(cert, noiseHex, associationHex)` -> `{ ok, reason }` (section 3). `validateCertShape`, `verifyCert`, `certForKey` and the four seeder-cert functions never throw (R4.3).
+- `packages/core/lib/cert.js`: `isHex(str, bytes)`, `normalizeHex(str)`, `certPayload(cert)` -> Buffer, `createCert({ member, ageBand = '18+', method = 'stub', date = new Date().toISOString() }, associationKeyPair)` -> Certificate, `validateCertShape(cert)` -> `null | 'malformed'`, `verifyCert(cert, associationHex)` -> `{ ok, reason }`, `certForKey(cert, keyHex, associationHex)` -> `{ ok, reason }`, `generateAssociationKeyPair()`, `refuseSymlinkDir(dir)` (throws `Error('diretório é um link simbólico')` when `dir` is a symlink; a missing dir is fine), `saveKeyPairFile(file, kp, { overwrite = false })` (writes through a unique temp name `.<base>.<12 random bytes hex>.tmp` opened with `'wx'` and mode `0o600`, fsynced; without `overwrite` the publish is a hard `link` to `file`, which fails with `EEXIST` when it exists, so an existing key is never clobbered; with `overwrite: true` a rename; the temp name is always unlinked and the directory fsynced; parent dir `0o700`, refused when a symlink), `loadKeyPairFile(file)` -> `{ publicKey, secretKey }` Buffers (throws `Error('arquivo de chave inválido')` on bad shape), `saveAssociationKeyPair(file, kp)` / `loadAssociationKeyPair(file)` (wrappers over the two above; the association loader keeps its message `chave da associação inválida`), `seederCertPayload(cert)` -> Buffer, `createSeederCert({ seeder, date }, associationKeyPair)` -> SeederCertificate, `validateSeederCertShape(cert)` -> `null | 'malformed'`, `verifySeederCert(cert, associationHex)` -> `{ ok, reason }`, `seederCertForKey(cert, noiseHex, associationHex)` -> `{ ok, reason }` (section 3), `USERNAME_RE`, `isUsername(s)`, `issuerCertPayload(cert)` -> Buffer, `createIssuerCert({ issuer, date }, associationKeyPair)` -> IssuerCertificate, `validateIssuerCertShape(cert)` -> `null | 'malformed'`, `verifyIssuerCert(cert, associationHex)` -> `{ ok, reason }`, `certPayloadV2(cert)` -> Buffer, `createIssuedCert({ member, date }, issuerKeyPair, issuerCert)` -> v2 Certificate, `usernameRecordPayload(record)` -> Buffer, `createUsernameRecord({ member, username, date }, issuerKeyPair, issuerCert)` -> username record, `validateUsernameRecordShape(record)` -> `null | 'malformed'`, `verifyUsernameRecord(record, memberHex, associationHex)` -> `{ ok, reason }` (section 3). `validateCertShape`, `verifyCert`, `certForKey`, the four seeder-cert functions, the issuer-cert and username-record validators and verifiers never throw (R4.3).
+- `packages/core/lib/username.js`: `latestUsernameRecord(entries, memberHex, associationHex)` -> plain-data copy of the highest-seq shape-valid `username` record of that member if `verifyUsernameRecord` accepts it for that member and association (only that one candidate is verified, no fallback), or `null`; `latestUsername(entries, memberHex, associationHex)` -> its `username` or `null`. Never throw.
 - `packages/core/lib/assoc.js`: `initAssociation(dir)` -> `{ publicKey }`, `showAssociation(dir)` -> `{ publicKey }`, `issueCertificate(dir, { member, ageBand, method })` -> Certificate, `issueSeederCertificate(dir, { seeder })` -> SeederCertificate (appends ONE `{ "seeder": hex64, "date": ISO }` line + LF to `<dir>/seeders.jsonl`).
-- `packages/core/lib/records.js`: `MAX_NAME`, `MAX_BIO`, `MAX_TEXT`, `MAX_BLOCK_BYTES = 16384`, `MAX_LOG_BLOCKS = 100000`, `MAX_LOG_BYTES = 67108864` (S3), `validRecordCopy(record, seq)` -> plain-data copy of a valid record (`structuredClone` when the runtime has it, else a plain-data walker that copies only null, booleans, numbers, strings, arrays and plain objects and refuses everything else: functions, `undefined`, BigInt, cycles, accessors that throw; validated on the copy, never throws) or `null`, `nowIso()`, `isHex64(s)`, `isCanonicalIso(s)` -> boolean (R4.3, never throws), `decodeBlock(buf)` -> plain object | `null` (R4.1), `memberCertRecord(cert)`, `profileRecord({ name, bio, at })`, `postRecord({ text, replyTo, at })`, `validateRecord(record, seq)` -> `null | reason` (`validateRecord(null, seq)` returns `'malformed'`; never throws, R4.3), `parseRef(str)` -> `{ author, seq } | null`, `formatRef({ author, seq })`, `latestProfile(entries)` -> `{ name, bio } | null`, `genesisCert(entries)` -> `cert | null`; `entries` = `[{ seq, record }]`.
+- `packages/core/lib/records.js`: `MAX_NAME`, `MAX_BIO`, `MAX_TEXT`, `MAX_BLOCK_BYTES = 16384`, `MAX_LOG_BLOCKS = 100000`, `MAX_LOG_BYTES = 67108864` (S3), `validRecordCopy(record, seq)` -> plain-data copy of a valid record (`structuredClone` when the runtime has it, else a plain-data walker that copies only null, booleans, numbers, strings, arrays and plain objects and refuses everything else: functions, `undefined`, BigInt, cycles, accessors that throw; validated on the copy, never throws) or `null`, `nowIso()`, `isHex64(s)`, `isCanonicalIso(s)` -> boolean (R4.3, never throws), `decodeBlock(buf)` -> plain object | `null` (R4.1), `memberCertRecord(cert)`, `profileRecord({ name, bio, at })`, `postRecord({ text, replyTo, at })`, `validateRecord(record, seq)` -> `null | reason` (`validateRecord(null, seq)` returns `'malformed'`; never throws, R4.3), `parseRef(str)` -> `{ author, seq } | null`, `formatRef({ author, seq })`, `latestProfile(entries)` -> `{ name, bio } | null`, `genesisCert(entries)` -> `cert | null` (v1 or v2); `entries` = `[{ seq, record }]`. records.js does not import cert.js: it duplicates the v1/v2 certificate and username-record shape rules (a parity test in `apps/cli/test/records.test.js` feeds both validators the same objects).
 - `packages/core/lib/feed.js`: `MAX_FUTURE_MS = 86400000`, `buildFeed({ logs: [{ key, entries }], limit = Infinity, now = Date.now() })` -> `{ items: FeedItem[], future: ['<hex64>:<seq>', ...] }` (a valid post whose `Date.parse(at) - now > MAX_FUTURE_MS` is excluded from `items` and its `formatRef` reference is appended to `future`, ascending by author then seq; `limit` applies after the exclusion; `now` is injectable for tests), `shortKey(hex)` -> first 8 chars, `formatFeedItem(item)` -> string.
 - `packages/core/lib/store.js`: `openStore(dataDir, { lock = 'posix', recover = false, suspend } = {})` -> Corestore (takes the `<dataDir>/.varanda-lock` data-dir lock first, section 1 (rule 3: our own pid is live only with a token this process holds): `Error('diretório de dados em uso')` with `code 'LOCKED'` when another live process holds it, `LOCK_INVALID` / `STORE_INVALID` for a non-directory lock path or a symlinked `store/`; released once, by token, on a successful `store.close()` and on process exit; `lock: 'worklet'` and `recover` per section 1 "Lock modes", `Error('lock inválido')` for any other `lock`; `suspend` passed to Corestore only when not `undefined`), `lockHeld(dataDir)` -> boolean (section 1 rule 9), `storeExists(dataDir)`, `openDiary(store)` -> core, `openReplica(store, hex)` -> core, `openQuarantine(dataDir, { suspend } = {})` -> Corestore (`fs.rmSync(path.join(dataDir, 'quarantine'), { recursive: true, force: true })`, then `new Corestore(path.join(dataDir, 'quarantine'))` (with `{ suspend }` when given) awaited ready), `removeQuarantine(dataDir)` (sync `rmSync`, called after `qstore.close()` on shutdown, best effort), `purgeReplica(store, hex)` (`const c = store.get({ key: b4a.from(hex, 'hex') }); await c.ready(); await c.purge()` — a fresh session, so it also works after hypercore closed the key's sessions on a conflict), `readAll(core)` -> `[{ seq, record }]` (R4.1: reads every block `0..core.contiguousLength-1` with `core.get(i, { wait: false, raw: true })` + `decodeBlock`; a `null` result becomes `{ seq: i, record: null }`; never throws `DECODING_ERROR`, never stops early), `appendRecord(core, record, limits?)` -> seq (throws `Error('limite do diário atingido')` when the encoded block exceeds `MAX_BLOCK_BYTES`, the diary already holds `MAX_LOG_BLOCKS` blocks, or `byteLength` + block would exceed `MAX_LOG_BYTES`; `limits` overrides them for tests), `readConfig(dataDir)` -> object | null, `writeConfig(dataDir, config)`, `readFollows(dataDir)` -> `string[]`, `writeFollows(dataDir, list)`, `readJson(file, fallback)`, `writeJsonAtomic(file, obj, mode)` (unique `.<base>.<pid>.<random>.tmp` in the same directory opened `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` with `mode`, fsync, rename over `file`, then fsync of the parent directory (only EISDIR/EPERM/EINVAL ignored), temp unlinked on failure; section 1 "Files and replicas").
 - `packages/core/lib/admission.js`: the `attachAdmission` implementation (and its message validation); `packages/core/lib/net.js` re-exports it, so callers keep requiring `attachAdmission` from `net.js`.

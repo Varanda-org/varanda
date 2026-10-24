@@ -14,8 +14,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
+import { atHandle } from '../format'
 import { useOutbox } from '../outboxProvider'
-import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
+import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { colors, fonts } from '../ui/theme'
 
 const ENTRAR_TEXT = 'A sua identidade é derivada da passkey. Guarde-a no Gerenciador de Senhas do Google para entrar com a mesma identidade no celular e no computador. A chave fica só na memória enquanto a página está aberta; perder a passkey perde a identidade. O sistema pode oferecer outro gerenciador (um iPhone pode usar as Chaves do iCloud): outra passkey é outra identidade.'
@@ -108,6 +110,349 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
       <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
       <Btn label='gravar certificado' onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
+    </Card>
+  )
+}
+
+// The account link (hosted page with a passkey): the association's account
+// service issues the member certificate and the @nome once the key is linked
+// to a Google account. Only same-origin /account/* calls (../account.js) and
+// the RPCs account.sign, cert.add and username.add; the Google page opens in
+// this same tab, so nothing is kept in the browser across the reload.
+const LINK_TEXT = 'Para receber o certificado de membro, vincule esta chave a uma conta Google e escolha um @nome. A associação registra o vínculo entre esta chave e a conta Google para poder responder a um pedido judicial ou bloquear a conta; nada mais é coletado. Esta etapa não verifica a idade. Você poderá trocar o @nome depois, uma vez a cada 7 dias.'
+const RELOAD_TEXT = 'A página vai abrir o Google e, na volta, recarregar e pedir a passkey de novo.'
+const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
+const NAME_RULE = 'nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
+const LINK_FAILED = 'não foi possível vincular a conta'
+const CERT_KEPT_ERROR = 'certificado já gravado'
+const CERT_KEPT_TEXT = 'vínculo registrado; o certificado atual foi mantido'
+const CERT_RECEIVED = 'certificado recebido'
+// Finish errors (account.js ERROR_MESSAGES) after which the pending row is
+// useless: the member may pick another Google account.
+const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
+
+// ?conta=ok|erro|cancelado, read once per page load (every mounted
+// Identidade shows it, including the one App.js opens in Ajustes after the
+// return) and removed from the address bar. The value is cached here, so a
+// LinkCard mounted after the removal still shows it; App.js only reads the
+// query, this is the only place that removes it.
+let returnNotice
+function takeReturnNotice () {
+  if (returnNotice !== undefined) return returnNotice
+  returnNotice = null
+  try {
+    const loc = globalThis.location
+    const hist = globalThis.history
+    if (!loc || typeof loc.search !== 'string' || !hist) return null
+    returnNotice = parseReturn(loc.search)
+    if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
+  } catch {}
+  return returnNotice
+}
+
+// username.add runs at most once per record per page load (the RPC is
+// idempotent, but it is a mutating request that preempts a running sync).
+const syncedRecords = new Set()
+// Records whose automatic username.add failed on this page (see LinkCard).
+const failedRecords = new Set()
+// Per key, the newest `date` of a username record this page sent
+// successfully or saw in status: the newest record by seq is the displayed
+// name, so a record older than one already accepted here is never sent (it
+// would revert a rename). The node refuses such a record anyway
+// ('registro de nome antigo', docs/rpc.md 5.19); from the automatic path
+// that is not an error (expected after a rename on another device).
+const acceptedDates = new Map()
+const OLD_RECORD_ERROR = 'registro de nome antigo'
+function noteDate (key, date) {
+  const newest = acceptedDates.get(key)
+  if (newest === undefined || date > newest) acceptedDates.set(key, date)
+}
+function accepted (key, record) {
+  syncedRecords.add(JSON.stringify(record))
+  noteDate(key, record.date)
+}
+
+function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
+  const node = useNode()
+  const now = useNow(60000)
+  // { key, status, pending } of the last load for this key.
+  const [acct, setAcct] = useState(null)
+  const [acctError, setAcctError] = useState('')
+  const [returned] = useState(takeReturnNotice)
+  const [name, setName] = useState('')
+  const [formOpen, setFormOpen] = useState(false)
+  // A pending Google account the member gives up on (rejected by finish, or
+  // 'começar de novo'): the stale row is ignored for this page load and the
+  // link form shows; its 'vincular conta Google' starts a new row, whose
+  // cookie replaces the old one (the service lets the old row expire).
+  const [restart, setRestart] = useState(false)
+  const [confirmFailed, setConfirmFailed] = useState(false)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [newName, setNewName] = useState('')
+  const busyRef = useRef(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [note, setNote] = useState('')
+  const seqRef = useRef(0)
+
+  const load = useCallback(async () => {
+    const mine = ++seqRef.current
+    try {
+      const status = await accountStatus(publicKey)
+      const pending = status.linked === true ? null : await readPending()
+      if (mine !== seqRef.current) return
+      setAcct({ key: publicKey, status, pending })
+      setAcctError('')
+    } catch (err) {
+      if (mine === seqRef.current) setAcctError(errorText(err))
+    }
+  }, [publicKey])
+
+  useEffect(() => { if (active) load() }, [active, load])
+
+  const cur = acct !== null && acct.key === publicKey ? acct : null
+  const status = cur === null ? null : cur.status
+  const linked = status !== null && status.linked === true
+
+  const run = async (fn) => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy(true)
+    setError('')
+    setNote('')
+    try {
+      await fn()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+
+  // The certificate, then the username record. A diary that already holds a
+  // certificate (the pilot's v1 identity) keeps it: block 0 never changes.
+  const apply = async (cert, record) => {
+    let kept = false
+    try {
+      await node.request('cert.add', { cert })
+    } catch (err) {
+      if (!(err && err.message === CERT_KEPT_ERROR)) throw err
+      kept = true
+    }
+    if (record) {
+      await node.request('username.add', { record })
+      accepted(publicKey, record)
+    }
+    return kept
+  }
+
+  const certTried = useRef(new Set())
+  // A username record whose automatic username.add failed is kept in the
+  // module-level failedRecords (it survives closing Ajustes): no automatic
+  // retry, since each try runs the write gate's sync, until the member
+  // presses 'enviar o @nome de novo'.
+  const [, setRetryTick] = useState(0)
+  const failedTag = status && status.usernameRecord ? JSON.stringify(status.usernameRecord) : null
+  const nameFailed = failedTag !== null && failedRecords.has(failedTag)
+  const retryName = () => {
+    if (!nameFailed) return
+    failedRecords.delete(failedTag)
+    syncedRecords.delete(failedTag)
+    setError('')
+    setRetryTick((n) => n + 1)
+  }
+  const receive = () => run(async () => {
+    try {
+      const kept = await apply(status.cert, status.usernameRecord || null)
+      setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
+    } finally {
+      await onChanged()
+    }
+  })
+
+  // Linked: a member without a certificate receives it automatically (also
+  // after a finish whose answer was lost: status carries the same cert); a
+  // member with one gets the newest username record into the diary.
+  useEffect(() => {
+    if (!active || quiet || busy || !linked) return
+    const record = status.usernameRecord || null
+    if (!memberCert) {
+      // Once per certificate: a failure shows the error and 'receber o
+      // certificado' instead of retrying in a loop.
+      const certTag = JSON.stringify(status.cert)
+      if (certTried.current.has(certTag)) return
+      certTried.current.add(certTag)
+      receive()
+      return
+    }
+    if (record === null) return
+    const tag = JSON.stringify(record)
+    if (syncedRecords.has(tag) || failedRecords.has(tag)) return
+    const newest = acceptedDates.get(publicKey)
+    if (newest !== undefined && record.date < newest) return
+    syncedRecords.add(tag)
+    noteDate(publicKey, record.date)
+    node.request('username.add', { record }).then(() => accepted(publicKey, record), (err) => {
+      if (err && err.message === OLD_RECORD_ERROR) return
+      syncedRecords.delete(tag)
+      failedRecords.add(tag)
+      setError(errorText(err))
+      setRetryTick((n) => n + 1)
+    })
+  }, [active, quiet, busy, linked, status, memberCert, publicKey, nameFailed])
+
+  const doLink = () => {
+    const username = isUsername(name)
+    if (username === null) return setError(NAME_RULE)
+    run(async () => {
+      const { nonce } = await startLink({ member: publicKey, username })
+      const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
+      const { authorizeUrl } = await authorizeLink({ signature })
+      if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
+      setNote(RELOAD_TEXT)
+      globalThis.location.assign(authorizeUrl)
+    })
+  }
+
+  const doConfirm = () => run(async () => {
+    const row = cur === null ? null : cur.pending
+    // Never sign for a pending link of another key.
+    if (row === null || row.member !== publicKey || typeof row.sub !== 'string' || row.sub === '') throw new Error(LINK_FAILED)
+    setConfirmFailed(false)
+    try {
+      const { signature } = await node.request('account.sign', { phase: 'finish', nonce: row.nonce, username: row.username, sub: row.sub })
+      const done = await finishLink({ signature })
+      const kept = await apply(done.cert, done.usernameRecord)
+      certTried.current.add(JSON.stringify(done.cert))
+      setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
+    } catch (err) {
+      // The account or the name belongs to another key, or the row expired:
+      // this row can never be confirmed, so offer another account.
+      if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
+      throw err
+    } finally {
+      // A lost answer or 'expirado' after a finish that went through: the
+      // status read below brings the certificate back.
+      await onChanged()
+      load()
+    }
+  })
+
+  const doRename = () => {
+    const username = isUsername(newName)
+    if (username === null) return setError(NAME_RULE)
+    run(async () => {
+      try {
+        const { nonce } = await renameStart({ member: publicKey, username })
+        const { signature } = await node.request('account.sign', { phase: 'rename', nonce, username, sub: '' })
+        const r = await renameFinish({ member: publicKey, nonce, signature })
+        await node.request('username.add', { record: r.usernameRecord })
+        accepted(publicKey, r.usernameRecord)
+        setNewName('')
+        setRenameOpen(false)
+        setNote('Pronto: agora você é @' + username + '. A próxima troca fica liberada em ' + formatNextChange(r.nextChangeAt) + '.')
+      } finally {
+        // Awaited: busy clears only once status is fresh, so the effect
+        // above never acts on a status that still carries the old record.
+        await onChanged()
+        await load()
+      }
+    })
+  }
+
+  const restartLink = () => {
+    setError('')
+    setNote('')
+    setConfirmFailed(false)
+    setRestart(true)
+    setFormOpen(true)
+  }
+
+  let body
+  if (cur === null) {
+    body = acctError ? null : <Soft>carregando…</Soft>
+  } else if (linked) {
+    const next = typeof status.nextChangeAt === 'string' ? Date.parse(status.nextChangeAt) : NaN
+    const blocked = !Number.isNaN(next) && now < next
+    const typed = isUsername(newName)
+    body = (
+      <>
+        <Label>nome de usuário</Label>
+        <Body>{displayText(atHandle(status.username, publicKey))}</Body>
+        {/* After the one automatic try (certTried), whatever else cleared the error. */}
+        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='receber o certificado' onPress={receive} /> : null}
+        {memberCert && nameFailed && !busy ? <Btn label='enviar o @nome de novo' onPress={retryName} /> : null}
+        {!renameOpen
+          ? <Btn label='trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} />
+          : blocked
+            ? (
+              <>
+                <Body>{'Você poderá trocar o @nome de novo em ' + formatNextChange(status.nextChangeAt) + '.'}</Body>
+                <Btn label='fechar' secondary onPress={() => setRenameOpen(false)} />
+              </>
+              )
+            : (
+              <>
+                <Field label='novo @nome' placeholder='@nome' value={newName} onChangeText={setNewName} mono />
+                <Body>{RENAME_RULE}</Body>
+                <Row>
+                  <Btn label={'trocar para @' + displayText(typed || newName.trim().replace(/^@/, ''))} onPress={doRename} pending={busy} disabled={typed === null} />
+                  <Btn label='cancelar' secondary onPress={() => setRenameOpen(false)} disabled={busy} />
+                </Row>
+              </>
+              )}
+      </>
+    )
+  } else {
+    const row = restart ? null : cur.pending
+    const foreign = row !== null && row.member !== publicKey
+    const confirmable = row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
+    const showForm = !confirmable && (!memberCert || formOpen)
+    body = (
+      <>
+        {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
+        {confirmable
+          ? (
+            <>
+              <Body>{'Conta Google escolhida. Confirme o vínculo com o nome ' + displayText(atHandle(row.username, publicKey)) + '.'}</Body>
+              {confirmFailed
+                // The mapped message is the card's error line below.
+                ? <Btn label='usar outra conta Google' onPress={restartLink} disabled={busy} />
+                : (
+                  <>
+                    <Btn label='confirmar vínculo' onPress={doConfirm} pending={busy} />
+                    <Btn label='começar de novo' secondary onPress={restartLink} disabled={busy} />
+                  </>
+                  )}
+            </>
+            )
+          : null}
+        {showForm
+          ? (
+            <>
+              <Body>{LINK_TEXT}</Body>
+              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+              <Soft>{RELOAD_TEXT}</Soft>
+              <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+            </>
+            )
+          : null}
+        {!confirmable && !showForm
+          ? <Btn label='vincular conta Google' secondary onPress={() => { setError(''); setFormOpen(true) }} />
+          : null}
+      </>
+    )
+  }
+
+  return (
+    <Card>
+      <Label>conta Google</Label>
+      <Notice>{returned || ''}</Notice>
+      {body}
+      <ErrorText>{acctError || error}</ErrorText>
+      <Notice>{note}</Notice>
+      {acctError ? <Btn label='tentar de novo' secondary onPress={load} /> : null}
     </Card>
   )
 }
@@ -394,6 +739,7 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
             : null}
           <ErrorText>{pkError}</ErrorText>
           <Notice>{pkNote}</Notice>
+          {node.hosted === true ? <Notice>{takeReturnNotice() || ''}</Notice> : null}
         </Card>
       )
     }
@@ -410,6 +756,9 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
 
   const withPasskey = passkey !== null
   const needsCert = info !== null && info.publicKey !== null && !info.memberCert
+  // Hosted page with a passkey: the account link replaces the pasted
+  // certificate. Native and varanda-serve keep CertificateStep / the field.
+  const linkMode = node.hosted === true && withPasskey
 
   return (
     <Page>
@@ -439,7 +788,18 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
           )
         : null}
       {needsCert ? <Soft>Sem o certificado, o nó não publica nem sincroniza.</Soft> : null}
-      {needsCert && withPasskey
+      {linkMode && info !== null && info.publicKey !== null
+        ? (
+          <LinkCard
+            publicKey={info.publicKey}
+            memberCert={info.memberCert === true}
+            active={active}
+            quiet={recovering || onceActive}
+            onChanged={refresh}
+          />
+          )
+        : null}
+      {needsCert && withPasskey && !linkMode
         ? (
           <CertificateStep
             publicKey={info.publicKey}

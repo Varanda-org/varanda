@@ -4,7 +4,7 @@ O app é a interface do Varanda para iOS, Android e web. Ele não guarda lógica
 
 ## O que o app faz hoje
 
-- Cria a identidade (a chave pública do diário; na web, derivada de uma passkey) e mostra o estado do certificado de membro.
+- Cria a identidade (a chave pública do diário; na web, derivada de uma passkey) e mostra o estado do certificado de membro; na web hospedada, vincula a chave a uma conta Google e dá um @nome.
 - Publica textos e respostas no diário da pessoa, e define nome e bio.
 - Segue e deixa de seguir chaves públicas.
 - Mostra o feed dos diários seguidos e o diário da própria pessoa.
@@ -82,6 +82,8 @@ Limites desta versão (detalhes em [verification.md](verification.md), seções 
 - A janela instalada e a aba da mesma origem se excluem pelo Web Lock `varanda-node`. A fila de saída é um único valor no `localStorage`, atualizado por leitura, alteração e gravação: sem a API Web Locks, duas janelas poderiam rodar e guardar textos ao mesmo tempo, perdendo um dos itens. Os navegadores que podem Entrar com WebAuthn PRF (Chrome/Edge recentes e Safari 18) têm Web Locks e barram a segunda janela; sem essa API, o próprio diário já estaria desprotegido.
 - Dois aparelhos publicando ao mesmo tempo ainda podem bifurcar o diário, mesmo com a sincronização antes de escrever; o semeador apaga um diário bifurcado.
 - Cada arquivo de um diário aberto fica inteiro na memória da aba enquanto está aberto (as gravações no IndexedDB são por página de 16 KiB, não o arquivo inteiro).
+
+**Vínculo com a conta Google e @nome.** Numa instalação hospedada, a etapa Identidade (e depois Ajustes › Identidade) tem um passo de vínculo: a pessoa escolhe um @nome e toca "vincular conta Google"; a página abre o Google (só escopos `openid` e `email`), volta, recarrega, pede a passkey de novo e mostra "Confirme o vínculo com o nome @x" ("confirmar vínculo"). Ao confirmar, o serviço de conta emite o certificado de membro e o primeiro registro de @nome, e a página os grava no diário. O texto do passo diz que a associação registra o vínculo entre a chave e a conta Google (para pedido judicial ou bloqueio), que esta etapa não verifica a idade e que o @nome pode ser trocado uma vez a cada 7 dias. Depois, o cartão Identidade mostra o @nome e "trocar @nome": antes de 7 dias mostra "Você poderá trocar o @nome de novo em <data>." e nenhum campo; depois, um campo e a frase "Depois de trocar, você só poderá mudar de novo daqui a 7 dias." antes do botão. Quem já tem certificado (a identidade piloto, com certificado v1) também pode vincular e ganha um @nome, e o certificado dela continua v1. O Google só é aberto pela página inteira, sem script do Google dentro dela. Seguindo aceita `@nome` além da chave. Enquanto o serviço está sem emissor, o vínculo responde "indisponivel" (a cerimônia do operador está no README); o app nativo e a CLI continuam colando o certificado emitido pela associação. Detalhes e limites em [verification.md](verification.md), seção 12.
 
 ### Na web, com o `varanda-serve`: sem Conectar
 

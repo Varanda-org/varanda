@@ -1,9 +1,11 @@
 # Versão web do Varanda no mesmo servidor do semeador: complementa
 # compose.yaml. Liga a entrada WebSocket do semeador (só em 127.0.0.1) e põe
-# um Caddy na frente, com TLS automático, servindo o app (deploy/seeder/www) e
-# repassando wss://<domínio>/seeder.
+# um Caddy na frente, com TLS automático, servindo o app (deploy/seeder/www),
+# repassando wss://<domínio>/seeder e https://<domínio>/account/* (o serviço de
+# conta: vínculo com o Google e @nome). Só este arquivo precisa do Google: o
+# compose.yaml sozinho (só o semeador) sobe sem ele.
 #
-# Da raiz do repositório, com deploy/seeder/.env contendo VARANDA_DOMAIN e o
+# Da raiz do repositório, com deploy/seeder/.env preenchido (.env.example) e o
 # app já publicado em deploy/seeder/www (deploy/seeder/build-web.sh):
 #   docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --build
 # Passo a passo no README, seção "Pôr a versão web no ar".
@@ -25,6 +27,8 @@ services:
     environment:
       VARANDA_DOMAIN: "${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
       VARANDA_WS_PORT: "8789"
+      # O serviço de conta, em 127.0.0.1 (handle /account/* no Caddyfile).
+      VARANDA_ACCOUNT_PORT: "8790"
       # Chave pública da associação, servida em /varanda.json (Caddyfile).
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
     volumes:
@@ -53,6 +57,55 @@ services:
         max-size: 10m
         max-file: "5"
 
+  # Serviço de conta: liga o membro a uma conta Google e emite o certificado e
+  # o @nome. Mesma imagem do semeador, construída só pelo serviço seeder
+  # (compose.yaml), por isso sem build aqui. Sobe sem emissor configurado:
+  # /account/health responde ok e as rotas de vínculo respondem 503
+  # indisponivel até `account key` e `account cert add` (README) gravarem a
+  # chave e o certificado do emissor no volume dele. Nenhum segredo do emissor
+  # passa por aqui (nem variável, nem mount).
+  account:
+    image: varanda-seeder:local
+    command: ["account", "--json"]
+    # Rede do host, como o semeador; escuta só em 127.0.0.1, atrás do Caddy.
+    network_mode: host
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    environment:
+      VARANDA_ACCOUNT_PORT: "8790"
+      VARANDA_ACCOUNT_HOST: 127.0.0.1
+      VARANDA_DATA: /data
+      VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
+      VARANDA_PUBLIC_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
+      VARANDA_GOOGLE_CLIENT_ID: "${VARANDA_GOOGLE_CLIENT_ID:?defina VARANDA_GOOGLE_CLIENT_ID em deploy/seeder/.env}"
+      VARANDA_GOOGLE_CLIENT_SECRET: "${VARANDA_GOOGLE_CLIENT_SECRET:?defina VARANDA_GOOGLE_CLIENT_SECRET em deploy/seeder/.env}"
+    # Volume próprio: o diretório de contas e a chave do emissor nunca ficam
+    # no volume do semeador.
+    volumes:
+      - account-data:/data
+    # O HEALTHCHECK da imagem (Dockerfile) consulta VARANDA_HEALTH_PORT, que
+    # não existe aqui; mesmos intervalos que ele.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8790/account/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Mesma rotação do semeador (política de registros no README, issue #38).
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
 volumes:
   caddy-data:
   caddy-config:
+  account-data:

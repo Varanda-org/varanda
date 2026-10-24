@@ -7,6 +7,7 @@ import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
+import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { handleOf } from '../format'
 import { ErrorText, Field, Mono, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -105,12 +106,30 @@ export default function Seguindo ({ active }) {
     }
   }, [keys, nameOf, resolve])
 
+  // A 64-hex key, or '@nome' on a hosted page: the account service names the
+  // key, and the follow is still that key (follows stay keys).
   const doAdd = async () => {
     setDone('')
-    const key = input.trim().toLowerCase()
-    if (!isKey(key)) return setLocalError('chave inválida (64 dígitos hexadecimais)')
+    const text = input.trim()
+    const key = text.toLowerCase()
+    let name = null
+    if (!isKey(key)) {
+      if (!text.startsWith('@')) return setLocalError('chave inválida (64 dígitos hexadecimais) ou @nome')
+      if (!node.hosted) return setLocalError('siga pela chave nesta versão')
+      name = isUsername(text)
+      if (name === null) return setLocalError('nome inválido')
+    }
     setLocalError('')
-    const r = await add.run(() => node.request('follow.add', { key }))
+    const r = await add.run(async () => {
+      let target = key
+      if (name !== null) {
+        const found = await lookupUsername(name)
+        // Same-origin data, not a signature check: only a consistent answer.
+        if (found === null || !isKey(found.member) || !usernameMatches(found.usernameRecord, found.member, name)) throw new Error('nome não encontrado')
+        target = found.member
+      }
+      return node.request('follow.add', { key: target })
+    })
     if (r.ok) {
       setInput('')
       setDone(r.value.changed ? 'seguindo' : 'você já seguia esta chave')
@@ -143,7 +162,7 @@ export default function Seguindo ({ active }) {
   const header = (
     <View style={styles.header}>
       <Field
-        placeholder='chave pública do diário (64 dígitos hexadecimais)'
+        placeholder={node.hosted ? 'chave pública do diário (64 dígitos hexadecimais) ou @nome' : 'chave pública do diário (64 dígitos hexadecimais)'}
         value={input}
         onChangeText={setInput}
         mono

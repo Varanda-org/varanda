@@ -7,6 +7,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Vínculo com a conta Google e @nome na versão web hospedada: o novo serviço `account` (`varanda account`, no Compose atrás do Caddy em `/account/*`) liga a chave da passkey a uma conta Google (OAuth com PKCE no servidor, escopos `openid` e `email`) e emite sozinho o certificado de membro v2 (faixa etária `unchecked`, assinado por uma chave de emissor que a associação certifica com `assoc certify-issuer`) e um registro de @nome no diário.
+  O @nome pode ser trocado uma vez a cada 7 dias, e um nome já usado por um membro nunca é dado a outro. O serviço sobe sem emissor até a cerimônia do README (`account key`, `assoc certify-issuer`, `account cert add`); o semeador e os membros nativos e da CLI precisam estar atualizados antes da primeira emissão v2, e a identidade piloto mantém o certificado v1. Resultado e limites em `docs/verification.md` seção 12.
 - PWA hospedado abre sem rede depois de uma visita com rede, permite Entrar com a passkey e ler o que está no aparelho; o `sw.js` guarda a versão verificada do app e confere de novo o SHA-256 de cada arquivo guardado antes de entregá-lo, e a fila de saída guarda publicações e respostas para enviar quando a conexão voltar, com a identidade desbloqueada.
   A fila aparece no Diário; a data de cada publicação é a do envio efetivo ao diário, não a de quando o texto foi escrito. Um envio incerto espera a decisão da pessoa, sem repetição automática.
   Só sai sozinho o que foi escrito com a página aberta; o que ficou de uma visita anterior espera a pessoa tocar em "enviar" no Diário. Isso protege contra uma publicação plantada no aparelho enquanto a identidade estava bloqueada.

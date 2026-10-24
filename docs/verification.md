@@ -746,3 +746,80 @@ The totals of the whole run are recorded by the integration run, not here.
 - [ ] `curl -I https://<domain>/varanda.json` keeps `Cache-Control: no-store`.
 - [ ] The first deploy with this change runs the previous `deploy.sh`: check the items above by hand. The deploy log of the **second** deploy shows the probe of `sw.js`.
 - [ ] Operator steps: no new `.env` variable; after the first deploy run the curl checks above, and roll back with the usual procedure if something is wrong (see the rollback analysis).
+
+## 12. Google account link, @username and automatic certificate (PR B1, 2026-10-24)
+
+### Summary
+
+- A member on the hosted page links the passkey-derived diary key to a Google account, picks a @username and receives, with no operator step, a **member certificate v2** (`ageBand: 'unchecked'`, `method: 'google'`, signed by an *issuer* key that the association delegated) plus a signed **username record** that goes into the diary. The @username can be changed once every 7 days.
+- Verified by Node tests (below). Not verified with the real Google consent screen, on two real devices or on the real server: see the human checklist.
+- CI result on the final tree, integrated with main (#114), Node 24.22.1: `npm ci`, `npm run lint`, `npm test` (all workspaces, 67 test files, 0 failures) and `npm run demo` (DEMO OK). Node 20.20.2 before the merge: the same, except `packages/web-member/test/sodium-browser.test.js`, which hangs on the author's machine only (known since §10, untouched here) and passes in GitHub's CI. Deploy checks: `shellcheck` and `bash -n` (3.2 and 5.3) on `deploy.sh`, `caddy adapt` with `caddy:2.11.6-alpine`, `docker compose … config`.
+
+### The flow, as built
+
+1. The page asks `POST /account/start { member, username }` and gets a single-use `nonce` and the cookie `__Host-varanda-link` (600 s). The member signs the nonce with the diary key (RPC `account.sign`, phase `reserve`, `packages/core/lib/account-link.js`); `POST /account/authorize { signature }` verifies it and returns the Google URL.
+2. The page navigates to Google (`openid email`, `state`, PKCE S256). Google returns to `GET /account/callback?code&state`. The service requires the cookie and the `state` to name the same pending row **before** any call to the token endpoint, exchanges the code server side with the client secret and the PKCE verifier, and checks `userinfo` and the `id_token` claims (`iss`, `aud`, `exp`, `sub`, `email_verified`; `apps/cli/lib/account/google.js`). It redirects to `/?conta=ok|erro|cancelado`, never with a code in the URL.
+3. The page loads, reads `GET /account/pending`, shows the chosen @username and asks the member to confirm. The member signs again (phase `finish`, over the Google subject); `POST /account/finish { signature }` returns `{ cert, usernameRecord, nextChangeAt }`. The page runs `cert.add`, then `username.add`.
+4. Rename: `POST /account/rename/start { member, username }` then `POST /account/rename/finish { member, nonce, signature }` (phase `rename`, no cookie: the key proof is the authority). Before 7 days the service answers 409 `troca-bloqueada` with `nextChangeAt`.
+
+### What the server stores and what it never sees
+
+- The directory (`<data>/directory.json`, mode 0600, replaced atomically; `apps/cli/lib/account/store.js`) keeps per link: member key, Google `sub`, e-mail, the current @username and its signed record, `usernameChangedAt`, `linkedAt`, the finish `nonce` and `signature`, and the certificate; plus `usedNames` (every name a member ever held). It never stores the Google tokens or the pending Google transaction (state, verifier), which live in memory for at most 600 s.
+- It never sees the member secret, the passkey, or the association secret. The issuer secret never leaves `issuer-key.json` in the service volume.
+- The e-mail never enters the diary, the certificate, the username record, the seeder or the browser; `GET /account/username/<name>` and `/account/status` return no e-mail. `account export` (service stopped) is the only way out and has the e-mail but no signature, certificate or secret.
+- Logs receive only `{ event, reason }` tokens; no e-mail, subject, code, token, signature or client address. The rate limits need no address (see "Reservations and rate limits" below).
+
+### Rules worth restating
+
+- **7-day rename.** One change per member per 7 days (`COOLDOWN_MS`); the page says so before the link and before the rename button, and after a rename shows the date of the next one.
+- **Never reassigned.** A name once held by a member is never given to another member; the same member may take it back after the cooldown. An old record copied around therefore never names someone else.
+- **Old names can linger.** A node from before B1, or a follower that has not synced yet, may briefly show the previous name (or none: nodes from before B1 ignore the `username` record type). The newest valid own record wins (`packages/core/lib/username.js`); `username.add` refuses an older one (`registro de nome antigo`), so the official client cannot revert a rename.
+- **Single writer.** The service holds `<data>/.account-lock` while serving; `account key`, `cert add` and `status` do not take it; `export` refuses while it runs.
+
+### Reservations and rate limits (security audit fixes, 2026-10-24)
+
+The audit before the push found that the first cut let an unauthenticated client spend what members need: shared per-route windows charged before any proof, per-member windows keyed on a key anyone can name (keys are public via `/account/username/<name>`), and key-proven reservations that cost nothing (a key is free to generate) yet held names and were never evicted. The rules are now:
+
+- **A name is held only once Google answered.** A pending row holds its @username and is protected from eviction only after the callback put the Google `sub` on it. A key-proven row (`/account/authorize` passed) holds nothing and is evictable like a bare start; `finish` re-checks the name. When two rows claim the same name (both started before either reached Google) the first to claim holds it and the other's finish answers `nome-em-uso`; neither blocks the other. Pending rows: at most 1000 live; at most 3 bare rows per member (a bare row only went through `/account/start`; its oldest is replaced, and a row the member already signed at `/account/authorize` is never replaced this way, because anyone can name a public key in `start`); signed rows without a Google answer are bounded by the signed `/account/authorize` window (5 per member per 10 min); at most **2 per Google subject** (a third claim for the same `sub` replaces its oldest row); the oldest unclaimed row (bare or signed) evicted when the table is full, which only a flood reaches; `lotado` only when every row is Google-claimed.
+- **Nothing shared is charged before a proof.** `/account/start` and `/account/rename/start` have no per-member window (they need no proof, so a window keyed on the body's member would let anyone lock a member out); they are bounded by their tables (pending rows as above; rename nonces at most 1000, the oldest evicted) and by the global bucket. The per-member windows are charged only after the member's signature verified and are keyed on the member it proved: 5 `/account/authorize` per member per 10 min, 10 `/account/finish` per member per 10 min, 5 `/account/rename/finish` per member per 10 min. The callback quota is per pending row (3), charged only after the cookie and the `state` named the same row. The public reads (`/account/status`, `/account/username/<name>`) share one window of 1200 per minute. A keyed window whose table (10 000 keys) is full drops expired entries, then the oldest; it never refuses a new key.
+- **Residual (documented, not fixed).** The one global token bucket (20 requests/s, burst 100) is the last-resort ceiling and an unauthenticated flood can still drain it for everyone. A per-source limit needs client addresses, which the design keeps out of the service pending the legal opinion on logs (issue #38): Caddy strips `X-Forwarded-For` and the service never reads it. The operator can add per-IP limiting in front of Caddy without changing the service.
+
+### Compatibility (read before the first deploy)
+
+- A node from before B1 answers `malformed` for any v2 certificate (the exact-key check in `packages/core/lib/cert.js`, `MEMBER_KEYS`). The **seeder and every native or CLI member must be updated before the first v2 issuance**, or a v2 diary is rejected by them.
+- The first deploy boots the `account` service **unconfigured**: `/account/health` answers `{"status":"ok"}`, the link routes answer 503 `indisponivel`, and `account status` prints `emissor não certificado`. The ceremony runs after the deploy: `account key`, `assoc certify-issuer` on the operator machine, `account cert add`, restart of the service (README, "Vínculo de conta Google e @nome"). `account cert add` refuses a certificate for another association or key.
+- The pilot's live web member keeps its **v1 certificate**: `cert.add` refuses a second certificate (`packages/web-member/lib/member-ops.js`, `certAdd`: "certificado já gravado"), and a diary that already has block 0 cannot take a second one. It can still link and receive a @username through its username record; its certificate stays v1. Its feed items carry the @username like any other member's.
+
+### Threat limits
+
+- Whoever serves the PWA can change its code; an XSS on the origin can call `account.sign` while the identity is unlocked and so link or rename the key to an account the attacker controls.
+- The member signature proves the web key only. The association vouches for "someone controlled this Google account when linking", not for age (`ageBand: 'unchecked'`) and not for being one person: one Google account per key, but nothing stops one person from owning several accounts.
+- The page loads no Google script; the sign-in is a top-level navigation to Google, and the CSP is unchanged (`script-src 'self'`).
+- The browser handle always caches the diary key before an unlock (`packages/web-member/web/node.js`, `identityStatus`); a direct session caller that never called `identityStatus()` can see `account.sign` preempt a `once` sync (as `node.info` does). Not reachable through the shipped handle.
+- Only the newest own username record is verified, which bounds a follower's cost to one verification per log; a modified client of the owner can only hide the owner's own name.
+- The e-mail and the Google subject sit on one server in Brazil; retention is open (issue #38; `docs/design.md`, LGPD).
+- **The issuer key is online and cannot be revoked yet.** It lives in the account container's volume on the public host. Whoever steals it can mint v2 certificates and username records that every node accepts (the delegation has no expiry; an expiry would not help, since a stolen key can back-date). PR B2 adds the revocation: the moderator's signed list carries revoked issuer keys and every node refuses them. Until then the only response is rotating the association key and re-certifying every member.
+- `/account/pending` returns the Google subject (`sub`) to the browser that holds the link cookie, because the member signs over it at `finish`. It reaches no other member, log, redirect, error body or diary; the e-mail never leaves the server except through `account export`.
+- If the account container is down when Google sends the browser back, Caddy's error log may record the request URI, `code` and `state` included. The code is single-use and worthless without the PKCE verifier and the client secret, which never leave the service.
+
+### Automated (CI)
+
+- `packages/core/test/account-link.test.js`: constants, golden vector, every field bound, phases never cross-verify, shape rejections, pure module.
+- `apps/cli/test/cert.test.js` and `apps/cli/test/records.test.js` (golden vectors and rejections for the issuer certificate, certificate v2 and the username record: wrong member, other association, swapped issuer signature, seq 0), `packages/core/test/session.test.js` and `packages/web-member/test/session.test.js` (`account.sign`, `username.add`), `packages/rpc/test/methods.test.js` (method lists).
+- `apps/cli/test/google.test.js`: PKCE, authorize URL parameters, userinfo and `id_token` checks, size, redirect and timeout limits, no value echoed.
+- `apps/cli/test/account-store.test.js`: pending rows, eviction (a key-proven row is evicted only by a full table and holds no name; starts naming a member's key never evict the row that member signed; a Google-claimed row is kept and holds it; first claim wins; a third row per `sub` replaces the oldest), 0600 files, crash safety, conflicts, 7-day cooldown with an injected clock, names never reassigned.
+- `apps/cli/test/account.test.js`: the full link, cookie-and-state binding before the token call, replay and wrong-key signatures, rename routes, request hygiene, rate limits (unauthenticated starts, rename/starts and finishes naming a member never block its own signed flow; the 6th signed authorize in 10 min is 429; a keyed window at capacity still admits a new key; an unmatched callback charges no per-row quota), unconfigured service, the data-dir lock, `account key|cert add|status|export`.
+- `apps/app/test/account.test.js`: request builders, return parsing, fixed error messages, `formatNextChange`.
+- `apps/cli/test/feed.test.js` (items carry the @username), `cli.test.js` and `readme-help.test.js` (flags and help).
+- `apps/cli/test/account-e2e.test.js`: link, `username.add`, a CLI follower sees @a, rename refused before 7 days, allowed after, the follower sees @b.
+
+### Human verification
+
+- [ ] The real Google consent screen with the `openid email` scopes; the unverified-app warning (while the OAuth client is in testing) and what a tester sees.
+- [ ] Two devices with the same Google account and passkey: the link made on one is recovered on the other (status, certificate, @username).
+- [ ] A @username collision: two members, the same name; the second gets `nome-em-uso`.
+- [ ] A rename before 7 days shows the date and no input; after 7 days it works and the old name is not given to another member.
+- [ ] `curl https://<host>/account/username/<name>` and `/account/status?member=<key>` return no e-mail.
+- [ ] The seeder and `account` logs show no client address (`docker compose logs account seeder`).
+- [ ] The pilot's v1 member links, gets a @username and keeps its v1 certificate.
+- [ ] After the deploy and before the ceremony, the link routes answer 503 `indisponivel`; after `cert add` and the restart, `account status` stops saying `emissor não certificado`.

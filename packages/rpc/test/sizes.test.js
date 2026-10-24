@@ -33,7 +33,7 @@ function size (result) {
 }
 
 function feedResult (n, ch) {
-  const item = { author: HEX, name: ch.repeat(MAX_NAME), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ } }
+  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ } }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -64,6 +64,7 @@ test('a post outweighs a profile and a certificate in a log page', (t) => {
 })
 
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
+  t.is(FEED_LIMIT_MAX, 35)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800'))
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
@@ -95,4 +96,5 @@ test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
   await new Promise((resolve) => setTimeout(resolve, 5))
   t.is(sent[1].ok, true)
   t.is(sent[1].result.items.length, FEED_LIMIT_MAX)
+  t.alike(sent[1].result, feedResult(FEED_LIMIT_MAX, '\ud800'))
 })

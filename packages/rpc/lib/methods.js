@@ -43,9 +43,31 @@ function int (min, max) {
 
 const isBool = (v) => typeof v === 'boolean'
 
+// account.sign (docs/rpc.md 5.18). Duplicated from
+// @varanda/core lib/account-link.js, which this package cannot import.
+const ACCOUNT_PHASES = ['reserve', 'finish', 'rename']
+const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
+const SUB_RE = /^[\x21-\x7e]{1,255}$/
+const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
+const HEX6 = /^[0-9a-f]{6}$/
+
+const isPhase = (v) => typeof v === 'string' && ACCOUNT_PHASES.includes(v)
+const isNonce = (v) => typeof v === 'string' && NONCE_RE.test(v)
+const isUsername = (v) => typeof v === 'string' && USERNAME_RE.test(v) && !HEX6.test(v)
+const isSub = (v) => v === '' || (typeof v === 'string' && SUB_RE.test(v))
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
+}
+
+// username.add (docs/rpc.md 5.19): an issuer-signed username record is far
+// smaller than a cert; the node verifies it, this only bounds the size.
+const MAX_USERNAME_RECORD_BYTES = 2048
+
+function isUsernameRecord (v) {
+  if (!isPlainObject(v)) return false
+  return utf8ByteLength(JSON.stringify(v)) <= MAX_USERNAME_RECORD_BYTES
 }
 
 // field(check, { optional, fallback }): `fallback` is filled in when the
@@ -68,6 +90,24 @@ const SPECS = {
   'identity.create': { fields: none, mutating: true },
   'identity.show': { fields: none },
   'cert.add': { fields: { cert: req(isCert) }, mutating: true },
+  // Signs the account-link statement with the identity key; the node fills
+  // in member and association itself, so a caller never chooses the bytes.
+  'account.sign': {
+    fields: {
+      phase: req(isPhase),
+      nonce: req(isNonce),
+      username: req(isUsername),
+      sub: req(isSub)
+    },
+    cross (given, value) {
+      // A Google subject only at 'finish', and always there.
+      if ((value.phase === 'finish') !== (value.sub !== '')) return 'parâmetro inválido: sub'
+      return null
+    }
+  },
+  // Appends an issuer-signed username record to the own diary; the node
+  // verifies it against its own key and the association.
+  'username.add': { fields: { record: req(isUsernameRecord) }, mutating: true },
   'profile.set': {
     fields: { name: req(str(1, L.MAX_NAME)), bio: opt(str(0, L.MAX_BIO), '') },
     mutating: true
