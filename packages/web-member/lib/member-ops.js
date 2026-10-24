@@ -5,9 +5,11 @@
 // things live (the storage's key-value area instead of config.json and
 // follows.json, storage cores instead of a corestore).
 //
-// ctx = { storage, association = null, limits } (limits: test-only overrides
-// of the diary limits, ./node-store.js appendRecord). Nothing here talks to
-// the network.
+// ctx = { storage, association = null, keyPair = null, limits } (keyPair: the
+// session's in-memory key pair, null while the identity is locked; reads
+// work locked, writes need it, ./node-store.js openDiary; limits: test-only
+// overrides of the diary limits, ./node-store.js appendRecord). Nothing here
+// talks to the network.
 const b4a = require('b4a')
 const { certForKey } = require('@varanda/core/lib/cert')
 const {
@@ -64,11 +66,16 @@ async function trustRoot (ctx) {
   return config.association
 }
 
-// Opens the own diary, runs fn and always closes it.
+function keyPairOf (ctx) {
+  return ctx.keyPair === undefined ? null : ctx.keyPair
+}
+
+// Opens the own diary (unlocked when ctx holds the key pair), runs fn and
+// always closes it.
 async function withIdentity (ctx, fn) {
   const association = await trustRoot(ctx)
   if (!(await store.diaryExists(ctx.storage))) throw new Error('identidade não encontrada')
-  const diary = await store.openDiary(ctx.storage)
+  const diary = await store.openDiary(ctx.storage, keyPairOf(ctx))
   try {
     return await fn({ diary, ownHex: hex(diary.key), association })
   } finally {
@@ -78,6 +85,8 @@ async function withIdentity (ctx, fn) {
 
 // ---- id ----
 
+// Creates the diary for the session key pair (the trust root first), or
+// opens the existing one; creating needs the pair, opening does not.
 async function idCreate (ctx) {
   let config = await store.readConfig(ctx.storage)
   if (config === null) {
@@ -89,9 +98,13 @@ async function idCreate (ctx) {
   if (ctx.association && ctx.association !== config.association) {
     throw new Error('associação diferente da configurada')
   }
-  const diary = await store.openDiary(ctx.storage)
+  const keyPair = keyPairOf(ctx)
+  const existed = await store.diaryExists(ctx.storage)
+  if (keyPair === null && !existed) throw new UsageError(store.LOCKED)
+  const diary = await store.openDiary(ctx.storage, keyPair)
   try {
-    return { publicKey: hex(diary.key), association: config.association }
+    // created: the diary was made now, for this pair (so it is not legacy).
+    return { publicKey: hex(diary.key), association: config.association, created: !existed }
   } finally {
     await diary.close()
   }
@@ -127,10 +140,10 @@ async function certAdd (ctx, cert) {
       if (!deepEqual(block0, { type: 'member-cert', cert })) {
         throw new Error('certificado já gravado')
       }
-      return { seq: 0 }
+      return { seq: 0, appended: false }
     }
     await store.appendRecord(diary, memberCertRecord(cert), ctx.limits)
-    return { seq: 0 }
+    return { seq: 0, appended: true }
   })
 }
 

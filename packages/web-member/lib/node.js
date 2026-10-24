@@ -12,9 +12,17 @@
 //   port.receive(text)                                    // one incoming envelope
 //   port.close(); await node.close()
 //
+// The identity key (./session.js host controls, all serialized with the
+// RPC handlers; none is reachable over the channel):
+//   await node.setKeyPair({ publicKey, secretKey })  // unlock, in memory only
+//   await node.clearKeyPair()                        // lock (zero-filled)
+//   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
+//   await node.reset()           // delete the diary and lock; config and follows stay
+//
 // A second connect() replaces the first (its port is closed and its onClose
 // called, as when another varanda-serve socket takes over). node.close()
-// closes the session (any sync stopped and awaited) and then the storage.
+// closes the session (any sync stopped and awaited, the key zero-filled)
+// and then the storage.
 const { createServerDispatcher, parseMessage, MAX_REQUEST } = require('@varanda/rpc')
 const { createBrowserSession } = require('./session')
 
@@ -81,6 +89,10 @@ function createBrowserNode ({ storage, ...options } = {}) {
   return {
     connect,
     close,
+    setKeyPair: (keyPair) => session.setKeyPair(keyPair),
+    clearKeyPair: () => session.clearKeyPair(),
+    identityStatus: () => session.identityStatus(),
+    reset: () => session.reset(),
     get state () {
       return session.state
     }

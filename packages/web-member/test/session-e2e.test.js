@@ -8,6 +8,7 @@ const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
+const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { testnet, tmpDir, until, bootstrapFlags } = require('./helpers/net')
 const { connectClient, stoppedOf } = require('./helpers/session')
@@ -83,16 +84,20 @@ test('the web session and a CLI member exchange posts through the seeder', async
   await until(() => jsonLines(seed.stdout).some((e) => e.event === 'ready'), { name: 'semeador pronto', timeoutMs: 30000 })
   const seederUrl = 'ws://127.0.0.1:' + wsEvent.port + '/seeder'
 
-  // The web node, its client in memory.
+  // The web node, its client in memory, its identity key handed to it as the
+  // page does after the passkey. The write gate is off: the explicit once
+  // runs below are the point of this test (passkey-e2e.test.js covers it).
   const internal = []
   const node = createBrowserNode({
     storage: memoryNodeStorage(),
     association,
     seederUrl,
     createSocket: (url) => new WebSocket(url),
-    onInternalError: (err) => internal.push(err)
+    onInternalError: (err) => internal.push(err),
+    writeGate: false
   })
   t.teardown(() => node.close(), { force: true })
+  await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
 
   const { publicKey: webKey } = await web.request('identity.create')

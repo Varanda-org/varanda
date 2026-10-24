@@ -105,6 +105,29 @@ export function webFormOf (config) {
   return { association: config.association, seederUrl: config.seederUrl }
 }
 
+// Web, hosted installation: /varanda.json is { v: 1, association } and never
+// carries an address; the seeder is this page's own host at /seeder. host is
+// location.host (port included), secure: the page is https.
+// -> { config } or { error } (pt-BR).
+export function hostedConfigOf (json, { host, secure = false }) {
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) return { error: 'configuração da instalação inválida' }
+  if (json.v !== 1) return { error: 'versão da configuração da instalação não suportada' }
+  if (typeof json.association !== 'string' || !HEX64.test(json.association)) {
+    return { error: 'chave da associação inválida (64 dígitos hexadecimais)' }
+  }
+  if (typeof host !== 'string' || host === '' || /[\s/@?#]/.test(host)) return { error: 'endereço da instalação inválido' }
+  return checkWebForm({ association: json.association, seederUrl: (secure ? 'wss://' : 'ws://') + host + '/seeder' }, { secure })
+}
+
+// A hosted page: the node in the browser (not varanda-serve), served over
+// https from a host that is not loopback. There a missing /varanda.json is an
+// error to retry, never the manual form (that stays for local development).
+export function isHostedPage ({ mode, protocol, hostname }) {
+  if (mode !== 'browser' || protocol !== 'https:') return false
+  const host = String(hostname).toLowerCase()
+  return host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]' && host !== '::1'
+}
+
 // A stored web configuration is only trusted after the same check.
 export function reviveWeb (value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null

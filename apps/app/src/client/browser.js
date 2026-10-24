@@ -4,9 +4,12 @@
 // bundle (Metro blocks packages/core and packages/web-member): it is the
 // separate script /varanda-node.js (packages/web-member/scripts/build.js
 // --node, written to public/ by `npm run build:node`), loaded once on
-// demand, which defines VarandaWebNode. The node keeps the member's key in
-// IndexedDB and syncs only through the seeder whose address the person
-// typed in Conectar.
+// demand, which defines VarandaWebNode. The node keeps the diary in
+// IndexedDB but never its secret key: the member's key is derived from the
+// passkey (WebAuthn PRF) on 'entrar' and lives only in the page's memory,
+// through the handle's `identity` API (status, unlock, complete, lock,
+// reset). It syncs only through the seeder whose address comes from the
+// installation's /varanda.json (the page's own origin) or from Conectar.
 //
 // The client side is the same @varanda/rpc createClient the other web and
 // native clients use, wired in memory: each envelope crosses as JSON text,
@@ -56,7 +59,8 @@ function loadNode () {
 }
 
 // config: { association, seederUrl } (src/config.js checkWebForm).
-// -> { request(method, params), close(), kind } after session.open.
+// -> { request(method, params), close(), kind: 'browser', identity } after
+// session.open; `identity` is the node handle's passkey API (src/node.js).
 // onClose({ code }) is called if the node ends the connection on its own
 // (never after close()).
 export async function connectBrowserNode (config, { onEvent, onClose } = {}) {
@@ -95,6 +99,7 @@ export async function connectBrowserNode (config, { onEvent, onClose } = {}) {
   return {
     kind: 'browser',
     request: (method, params = {}) => client.request(method, params),
-    close
+    close,
+    identity: node.identity
   }
 }

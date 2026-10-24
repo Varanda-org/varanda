@@ -35,6 +35,17 @@
 		}
 	}
 
+	# Configuração pública do app: a chave pública da associação, de
+	# VARANDA_ASSOCIATION (deploy/seeder/.env), lida quando o Caddy carrega
+	# este arquivo. Mesma origem: o connect-src 'self' acima permite o fetch.
+	# O endereço do semeador não vai aqui: a página usa wss://<seu host>/seeder.
+	# Antes do handle abaixo: sem este, /varanda.json cairia no index.html.
+	handle /varanda.json {
+		header Content-Type "application/json"
+		header Cache-Control "no-store"
+		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
+	}
+
 	# O app é uma página única: um caminho que não é arquivo volta para
 	# index.html.
 	handle {

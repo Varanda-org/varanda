@@ -25,3 +25,12 @@ export async function saveConfig (config) {
 }
 
 export const canConfigure = true
+
+// No hosted installation on native: the person configures the node.
+export async function discoverConfig () {
+  return null
+}
+
+export async function clearConfig () {}
+
+export const hostedPage = false

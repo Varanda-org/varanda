@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { Platform, Switch, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
-import { canConfigure } from '../configStore'
+import { canConfigure, hostedPage } from '../configStore'
 import { useNode } from '../node'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
 
@@ -43,6 +43,12 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   const node = useNode()
   const [form, setForm] = useState(() => webFormOf(node.config))
   const [localError, setLocalError] = useState('')
+  // Hosted page: the form stays hidden until asked for.
+  const [manual, setManual] = useState(false)
+  // Going back to the installation's configuration with a diary already in
+  // this browser asks first: the diary is bound to the association it was
+  // created with, and the installation may use another one.
+  const [confirmBack, setConfirmBack] = useState(false)
   const apply = useAction()
   const ready = node.phase === 'ready'
   const [info, infoError] = useInfo(node, active, ready)
@@ -62,10 +68,67 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   }
 
   const busy = node.phase === 'connecting' || node.phase === 'loading' || apply.pending
+  const copy = (
+    <Soft>Na web, o seu nó roda neste navegador. A identidade vem da sua passkey; só os diários ficam neste navegador.</Soft>
+  )
+
+  // Hosted page, no configuration found: an error with a retry, never the form
+  // (until the person asks for it).
+  if (node.phase === 'config-error' && !manual) {
+    return (
+      <Page>
+        {embedded ? null : <Title>Conectar</Title>}
+        <Card>
+          <ErrorText>{node.error}</ErrorText>
+          <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
+          <Btn label='configurar manualmente' onPress={() => setManual(true)} secondary />
+        </Card>
+      </Page>
+    )
+  }
+
+  // Hosted page with the installation's own configuration: read-only, with a
+  // way to use another one.
+  if (node.hosted && node.config && !manual) {
+    return (
+      <Page>
+        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {copy}
+        {busy ? <Notice>conectando…</Notice> : null}
+        <ErrorText>{node.error || apply.error || infoError}</ErrorText>
+        <Card>
+          {ready
+            ? (
+              <View style={{ gap: 4 }}>
+                <Label>estado</Label>
+                <Body>o nó roda neste navegador</Body>
+              </View>
+              )
+            : null}
+          <View style={{ gap: 4 }}>
+            <Label>detectados nesta instalação</Label>
+            <Mono>{displayText(node.config.association)}</Mono>
+            <Mono>{displayText(node.config.seederUrl)}</Mono>
+          </View>
+          {ready ? null : <Btn label='tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
+          <Btn label='usar outra configuração' onPress={() => setManual(true)} secondary />
+        </Card>
+        <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
+      </Page>
+    )
+  }
+
+  const backToHosted = async () => {
+    if (hasIdentity && !confirmBack) return setConfirmBack(true)
+    setConfirmBack(false)
+    setManual(false)
+    setLocalError('')
+    await apply.run(() => node.forgetConfig())
+  }
   return (
     <Page>
       {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
-      {!ready ? <Soft>Na web, o seu nó roda neste navegador: a chave do diário fica guardada aqui, e as publicações passam pelo semeador da associação. Informe a associação e o endereço do semeador.</Soft> : null}
+      {!ready ? copy : null}
       {busy ? <Notice>conectando…</Notice> : null}
       <ErrorText>{node.error || apply.error || infoError}</ErrorText>
       <Card>
@@ -94,8 +157,14 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
         />
         <ErrorText>{localError}</ErrorText>
         <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submit} pending={busy} />
+        {confirmBack
+          ? <Notice>O diário deste navegador foi criado com a associação desta configuração. Se a instalação usa outra associação, ele deixa de funcionar aqui.</Notice>
+          : null}
+        {manual || hostedPage
+          ? <Btn label={confirmBack ? 'voltar mesmo assim' : 'voltar à configuração detectada'} onPress={backToHosted} disabled={busy} secondary />
+          : null}
       </Card>
-      <Notice>A chave fica só neste navegador e ainda não tem cópia de segurança: limpar os dados deste site apaga a sua identidade.</Notice>
+      <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
     </Page>
   )
 }
