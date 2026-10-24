@@ -24,6 +24,53 @@
 		-Server
 	}
 
+	# Cache. Tudo o que sai de /srv/web (index.html, sw.js, varanda-node.js,
+	# o manifesto, os ícones e também os nomes com hash em /_expo/ e
+	# /assets/) é revalidado pelo ETag a cada carga: no-cache. Sem cache
+	# longo (um ano, "imutável") de propósito: o deploy troca os arquivos de
+	# www no lugar enquanto o Caddy segue servindo, e um arquivo lido pela
+	# metade durante a cópia ganharia um ano de cache que o navegador nunca
+	# revalida; com no-cache ele ganha outro ETag quando a cópia termina e
+	# se cura na carga seguinte. O service worker já serve os arquivos com
+	# hash do seu próprio cache conferido (instala com cache: 'reload'),
+	# então um cache HTTP longo renderia pouco. /varanda.json tem o seu
+	# próprio no-store e /seeder fica como está.
+	@mutavel {
+		not path /varanda.json /seeder
+	}
+	header @mutavel Cache-Control "no-cache"
+
+	# Um 404 nunca fica guardado em cache (nem pelo navegador, nem pelo
+	# service worker): no-store, por cima do no-cache acima. Com extensão, o
+	# 404 é o arquivo que falta; sem extensão, só se falta o index.html (por
+	# exemplo, enquanto o deploy troca o www).
+	@ausenteArquivo {
+		path *.*
+		not path /varanda.json
+		not file {
+			root /srv/web
+		}
+	}
+	@ausenteApp {
+		not path *.*
+		not path /seeder
+		not file /index.html {
+			root /srv/web
+		}
+	}
+	header @ausenteArquivo Cache-Control "no-store"
+	header @ausenteApp Cache-Control "no-store"
+
+	# O tipo do manifesto do PWA. A tabela mailcap da imagem alpine já deve
+	# dar este tipo; a linha só o fixa. O '>' adia a operação para depois do
+	# file_server, para que ela vença o tipo que ele põe.
+	header /manifest.webmanifest >Content-Type "application/manifest+json"
+
+	# Um caminho sem ponto é uma rota do app.
+	@semExtensao {
+		not path *.*
+	}
+
 	# A entrada WebSocket do semeador só aceita o Host 127.0.0.1:<porta>
 	# (defesa contra DNS rebinding): o proxy reescreve o Host para o do
 	# destino. O Origin do navegador (https://<domínio>) segue intacto e o
@@ -46,11 +93,12 @@
 		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
 	}
 
-	# O app é uma página única: um caminho que não é arquivo volta para
-	# index.html.
+	# O app é uma página única: um caminho sem extensão é o app (index.html).
+	# Um caminho COM extensão é servido como arquivo ou é um 404 de verdade,
+	# nunca o index.html (que, com nosniff, viraria uma página em branco).
 	handle {
 		root * /srv/web
-		try_files {path} /index.html
+		rewrite @semExtensao /index.html
 		file_server
 	}
 }

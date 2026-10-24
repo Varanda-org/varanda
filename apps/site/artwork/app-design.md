@@ -58,6 +58,7 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Seguindo**: lista de linhas com avatar, nome e handle, e uma pílula "Seguindo" / "Seguir" à direita; o campo para colar uma chave fica no topo; paginação como hoje.
 - **Ajustes** (engrenagem): uma lista agrupada com **Conexão**, **Sincronizar** e **Identidade**, as telas técnicas de hoje sem mudança de função.
 - **Estado de conexão**: só no chip de sincronia e em Ajustes › Conexão; nenhum banner na linha do tempo.
+- **Fila de saída**: uma publicação esperando na fila de saída é uma linha no Diário, nunca um cartão em A Rua e nunca um banner.
 
 ## Navegação
 

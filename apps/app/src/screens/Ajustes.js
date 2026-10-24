@@ -1,10 +1,14 @@
+/* global navigator */
+
 // Ajustes: a sheet with a grouped list (Conexão, Sincronizar, Identidade)
 // over the technical screens, which render embedded inside the sheet. On the
 // web's browser node it also offers 'bloquear identidade': the key derived
 // from the passkey is dropped from memory and the shell returns to Entrar.
 
+import { useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
+import { askPersist } from '../persist'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -30,6 +34,17 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
   const doLock = async () => {
     const r = await lockAction.run(() => node.passkey.lock())
     if (r.ok) onClose()
+  }
+  // Result of asking the browser to keep this origin's data (null: not asked yet).
+  const [persisted, setPersisted] = useState(null)
+  const [persistPending, setPersistPending] = useState(false)
+  const doPersist = async () => {
+    setPersistPending(true)
+    try {
+      setPersisted(await askPersist(typeof navigator === 'object' && navigator !== null ? navigator.storage : null))
+    } finally {
+      setPersistPending(false)
+    }
   }
   const left = screen === 'lista'
     ? (
@@ -77,19 +92,38 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
             </View>
             {canLock
               ? (
-                <View style={styles.group}>
-                  <Pressable
-                    style={styles.row}
-                    accessibilityRole='button'
-                    accessibilityLabel='bloquear identidade'
-                    accessibilityState={{ disabled: lockAction.pending }}
-                    disabled={lockAction.pending}
-                    onPress={doLock}
-                  >
-                    <Icon name='lock' size={22} color={colors.soft} />
-                    <Text style={styles.label}>{lockAction.pending ? 'bloquear identidade…' : 'bloquear identidade'}</Text>
-                  </Pressable>
-                </View>
+                <>
+                  <View style={styles.group}>
+                    <Pressable
+                      style={styles.row}
+                      accessibilityRole='button'
+                      accessibilityLabel='bloquear identidade'
+                      accessibilityState={{ disabled: lockAction.pending }}
+                      disabled={lockAction.pending}
+                      onPress={doLock}
+                    >
+                      <Icon name='lock' size={22} color={colors.soft} />
+                      <Text style={styles.label}>{lockAction.pending ? 'bloquear identidade…' : 'bloquear identidade'}</Text>
+                    </Pressable>
+                  </View>
+                  <View style={styles.group}>
+                    <Pressable
+                      style={styles.row}
+                      accessibilityRole='button'
+                      accessibilityLabel='manter os dados neste aparelho'
+                      accessibilityState={{ disabled: persistPending }}
+                      disabled={persistPending}
+                      onPress={doPersist}
+                    >
+                      <Icon name='rede' size={22} color={colors.soft} />
+                      <Text style={styles.label}>{persistPending ? 'manter os dados neste aparelho…' : 'manter os dados neste aparelho'}</Text>
+                    </Pressable>
+                  </View>
+                  {persisted === null
+                    ? null
+                    : <Soft>{persisted ? 'os dados ficam guardados neste aparelho' : 'o navegador não garantiu a guarda dos dados (pode apagá-los se faltar espaço)'}</Soft>}
+                  <Soft>Para instalar, use o menu do navegador (no iPhone: Compartilhar e depois Adicionar à Tela de Início). Depois de uma visita com rede, o app abre e deixa entrar com a passkey mesmo sem rede, e mostra o que já está neste aparelho. A fila de saída aparece no Diário: o que você escreve com a página aberta sai sozinho quando a conexão volta; o que ficou de uma visita anterior espera você tocar em enviar. Apagar os dados do site apaga os diários guardados e a fila de saída. Outra aba deste navegador fica bloqueada enquanto esta estiver aberta.</Soft>
+                </>
                 )
               : null}
             <ErrorText>{lockAction.error}</ErrorText>

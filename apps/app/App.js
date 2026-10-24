@@ -10,6 +10,7 @@ import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
+import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { loadIcons } from './src/ui/Icon'
@@ -123,6 +124,28 @@ function Member () {
     setToast(text)
     toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
   }
+
+  // The outbox (browser node) is sent only while a publish could go out
+  // right now: unlocked, set up (the member certificate exists), not
+  // recovering, online, and with no sync run active or starting (the write
+  // gate inside post.create would preempt a run the person started).
+  const outbox = useOutbox()
+  useOutboxDrain({
+    enabled: ready && !locked && setupDone && !(passkey && passkey.recovering) &&
+      node.online !== false && node.sync.active === null && node.sync.starting !== true &&
+      outbox.available,
+    author: ownKey,
+    association: node.config ? node.config.association : null
+  })
+  // A queued post went out: A Rua and Diário show it.
+  const lastSent = outbox.lastSent
+  const lastSentRef = useRef(lastSent.n)
+  useEffect(() => {
+    if (lastSent.n === lastSentRef.current) return
+    lastSentRef.current = lastSent.n
+    setVersion((v) => v + 1)
+    showToast(lastSent.kind === 'reply' ? 'resposta publicada da fila de saída' : 'publicado da fila de saída')
+  }, [lastSent])
 
   // The chip always opens Sincronizar; that screen offers Conexão when the
   // node is disconnected.
@@ -239,6 +262,8 @@ function Member () {
         onPublished={(kind, sentRef) => {
           // The reply context is dropped only if it is still the one sent.
           setComposer((c) => ({ open: false, reply: c.reply && c.reply.ref === sentRef ? null : c.reply }))
+          // Kept in the outbox: nothing new in the diary yet.
+          if (kind === 'queued-post' || kind === 'queued-reply') return showToast('guardado na fila de saída')
           setVersion((v) => v + 1)
           showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
         }}
@@ -263,7 +288,9 @@ export default function App () {
     <SafeAreaProvider>
       <NodeProvider>
         <NamesProvider>
-          <Member />
+          <OutboxProvider>
+            <Member />
+          </OutboxProvider>
         </NamesProvider>
       </NodeProvider>
     </SafeAreaProvider>
