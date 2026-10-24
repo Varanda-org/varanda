@@ -823,3 +823,70 @@ The audit before the push found that the first cut let an unauthenticated client
 - [ ] The seeder and `account` logs show no client address (`docker compose logs account seeder`).
 - [ ] The pilot's v1 member links, gets a @username and keeps its v1 certificate.
 - [ ] After the deploy and before the ceremony, the link routes answer 503 `indisponivel`; after `cert add` and the restart, `account status` stops saying `emissor não certificado`.
+
+## 13. Signed P2P blocklist and issuer revocation (PR B2, 2026-10-24)
+
+### Summary
+
+- The association's moderator signs numbered snapshots of blocked diary keys and revoked issuer keys. Every node (seeder, CLI member, browser node) swaps them on the `varanda/blocklist/1` channel, keeps the newest one that verifies and refuses, purges and skips the listed diaries. The operator runs `mod block|unblock|revoke-issuer|unrevoke-issuer` on their own machine; the moderator secret never goes to a server. Format, channel, limits and gates: `docs/protocol.md` section 3.
+- Verified by Node tests (below) on loopback networking only. Not verified on the real server, on two real devices or on the public DHT: see the human checklist.
+- CI result on the final tree, Node 24.22.1: `npm ci`, `npm run lint`, `npm test` (all workspaces, 74 test files, 0 failures) and `npm run demo` (DEMO OK). `apps/cli/test/blocklist-e2e.test.js` also passes 3 of 3 runs on Node 20.20.2; the full suite was not run on Node 20 locally (`packages/web-member/test/sodium-browser.test.js` hangs on the author's machine only, known since §10), GitHub's CI runs both versions.
+
+### Limits as built (read from the code)
+
+- Snapshot: at most 4096 blocked keys and 64 revoked issuers, `MAX_SNAPSHOT_BYTES = 393216`; channel message at most 393216 bytes, a `have` at most 256.
+- Flow control by credit: each `have` allows exactly one snapshot from its receiver; an uncredited snapshot is a bad message; snapshots are processed at most one per 10 s per connection; 5 bad messages drop the peer; a per-connection bucket (burst 512, 2 per second) drops a flooder (`message-rate`). Local save failures are retried with backoff up to 5 min.
+- Ordering: the newer moderator certificate date wins (its `seq` restarts); for the same moderator the higher `seq` wins; a different moderator with the same date loses (first stored wins).
+
+### Automated (CI)
+
+- `packages/core/test/blocklist.test.js`: shape, payload, golden vector, size bound, `verifySnapshot` reasons, `compareSnapshots` / `acceptSnapshot` rules (newer moderator, same moderator, stale, same), `createBlocklistState` (serialized offers, save failure keeps the previous snapshot, failing load fails closed).
+- `packages/core/test/blocklist-net.test.js`: the channel on loopback sockets: message validation, delivery once, a newer moderator travelling toward a higher `seq`, `announce`, stale never counts, the 5th bad message, an early credited snapshot held, seven bunched publishes, an uncredited snapshot, the message bucket, padded `have`, retry after a failing offer, and a peer without the channel (admission completes, `supported` false).
+- `packages/core/test/blocklist-member.test.js`: a member stores, enforces and relays a snapshot (purge, `log.read` / `follow.add` / feed rules); a newly revoked issuer drops the followed diaries it certified and purges the unfollowed and failed replicas.
+- `apps/cli/test/blocklist-seeder.test.js`: a snapshot drops and refuses a blocked diary (a forged one does nothing, an unblock lets it back), restart purges blocked and revoked-issuer diaries in step 3, an admission-only peer stays connected, a failing revocation sweep drops the diary, and an adoption during an in-flight admission or verdict refuses it.
+- `packages/web-member/test/blocklist.test.js` and `node-storage.test.js`: the browser node (blocked author purged, hidden and still blocked offline, forged snapshots ignored, revoked issuers, own key unblocked and announced again, a `once` run waits for the seeder's newest snapshot, storage in kv `'blocklist'`).
+- `apps/cli/test/mod.test.js`: the `mod` chain (init, cert add, block, unblock, revoke), foreign dirs and certificates and a damaged list refused, a missing or extra `--new-list` and a missing seeder key refused before anything is signed, `--no-publish` never touches the network, two concurrent writers (the second is refused), publish delivering to the certified seeder by its key (never through the topic), an echoing peer or a seeder certificate for another key never counting as delivery, and a timeout (exit 1, list kept). `cert.test.js` (moderator certificate and `revoked-issuer` reasons), `cli.test.js` and `readme-help.test.js` (flags and help).
+- `apps/cli/test/blocklist-e2e.test.js`: a block and an issuer revocation published to the seeder propagate to an honest member and drop the diaries. `seed-ops.test.js` covers `seed status` (`blocklist` in `--json`) and the `/health` keys `blocked` and `blocklistSeq`; the Prometheus gauges are `varanda_seeder_blocked` and `varanda_seeder_blocklist_seq` (`health.js`). `mod.test.js` also covers a rotation continuing from a copied `blocklist.json`.
+
+### Residual paths (what the list does not stop)
+
+- **Nodes from before B2 do not enforce it.** The channel open is rejected by protomux and nothing else changes for them; they keep replicating a blocked diary until updated.
+- **A modified app** can still connect straight to the blocked author and can serve the diary to other modified apps. An honest, up-to-date node on the path refuses it, so the diary cannot be pushed through such a node.
+- **The author's own official app** keeps its diary in its store (the own diary is never purged) and the Corestore serves a stored core to a peer that already knows its discovery key (`docs/protocol.md` section 4).
+- **The PWA offline** enforces the snapshot it has stored and gets a newer one only when it reaches the seeder; the DHT members exchange snapshots without the seeder.
+- **A node is only as current as its last contact.** A node that never meets a peer holding a newer snapshot never learns of it; the moderator publishes to the seeder and the others learn by fan-out.
+- **A torn or unparsable `blocklist.json` reads as no list.** The node enforces nothing until it receives the snapshot again from a peer; only the core member warns when a stored snapshot fails verification.
+- **The web regate's `'blocked'` branch is defensive** (blocked keys are purged before they are regated), and a peer that opens the channel after our open was rejected pairs again but `supported` already resolved `false`.
+- **The operator's address** is visible to the seeder and to the DHT nodes that route the lookup, not to arbitrary peers.
+- **Moderator compromise.** A stolen moderator key can block any diary or revoke any issuer until the association certifies a new moderator (a later certificate date replaces it, and the new list starts at `seq` 1). The association key stays offline.
+- **Individual member certificates are not revocable**; block the diary key instead. Re-issuing certificates after an issuer revocation is not implemented: affected members link again.
+- A blocked author who creates a new key and a new certificate is a new diary; blocking is per key (the Google link and the username rules raise the cost, they do not remove it).
+
+### Publishing, as built after the security audit
+
+- `mod` publishes only to the association's seeder, dialed by its Noise key (`--seeder`, or `mod init --seeder`); it never joins the public association topic. Delivery counts only on a peer whose admission `hello` carries a seeder certificate of this association for its Noise key AND whose blocklist `have` equals the snapshot. `mod publish` re-sends the stored list; a timeout leaves the signed list on disk (exit 1).
+- The first list of an association needs `--new-list`; a moderator rotation copies `blocklist.json` into the new directory (the command refuses otherwise), because a newer moderator's list replaces every node's whole list.
+
+### Security audit
+
+Auditors: Claude (opus; fable was out of credits) and GPT (gpt-6-astra, max); Grok out of balance. The built-in security review was not run for B2. Findings, each verified against the code: F1 forged delivery acknowledgement (medium, raised to high by triage), F2 a moderator rotation drops the list (low, raised to high), F3 the operator address exposed to peers of the topic (low, raised to high). All three are fixed in this PR (seeder-only publishing with a verified delivery, `--new-list` and the copied list, no topic). No forgery, rollback or enforcement bypass was found in the nodes.
+
+### Operator response to a stolen issuer key
+
+1. `node bin/varanda.js mod revoke-issuer <old issuer hex> --data <modDir>` (publishes; nodes drop that issuer's v2 diaries and ignore its username records).
+2. In the account service: `account key` (new key), then `assoc certify-issuer` on the operator machine, `account cert add`, restart the service.
+3. Affected members link again. Their old v2 certificates stop working; a later PR may add re-issuance.
+
+### Human verification
+
+- [ ] Upgrade the seeder and the clients to the B2 build first (old nodes do not enforce).
+- [ ] On the operator machine: `mod init`, `assoc certify-moderator`, `mod cert add`; `mod show` prints `lista vazia`.
+- [ ] With the seeder, a CLI member and the PWA connected, follow a test diary on both members, then `mod block <test key>`: it prints `lista publicada`; `seed status` shows `lista de bloqueio: seq 1 ...`; the seeder logs `{ event: 'blocklist', seq }` and a rejection for the dropped key; `/health` shows `blocked` 1 and `blocklistSeq` 1; the member drops the diary (`sync`, `log --author` says `sem dados locais para este diário`) and the PWA skips it ('ignorado (blocked)').
+- [ ] Stop the seeder, then block a second test key from the operator machine with a CLI member online: the member adopts it from the DHT; start the seeder again and watch it adopt the newer snapshot from the member and drop the key.
+- [ ] `mod unblock <key>`: the diary can be followed and synced again (the follow entry was kept).
+- [ ] With the PWA offline, the blocked diary stays hidden; online again it receives a newer list through the seeder.
+- [ ] `mod revoke-issuer <test issuer>` against a throwaway issuer: a v2 diary from it is dropped by the seeder and an honest member; `mod unrevoke-issuer` restores it.
+- [ ] A node from before B2 connected to the seeder keeps working (no disconnect) and does not enforce.
+- [ ] `docker compose logs seeder` shows no key list, address or reason for a block beyond `{ event: 'blocklist', seq }` and one rejection line per dropped key (that line carries the key, never the list or an address).
+- [ ] `mod block` run from a machine whose seeder key is wrong or whose seeder is stopped exits 1 with `a lista ficou gravada; rode mod publish quando o semeador estiver no ar`; with the seeder back, `mod publish` prints `lista seq <n> publicada`.
+- [ ] A first `mod block` in an empty directory without `--new-list` is refused; after a moderator rotation, the new directory (with `blocklist.json` copied from the old one) continues the `seq` and keeps every earlier block.

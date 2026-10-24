@@ -22,7 +22,11 @@ const cert = require('./cert')
 // the cost is at most one candidate verification per log per feed build.
 // Records naming another member (copied from someone else's diary) are never
 // candidates; they are dropped by the shape/member filter at no crypto cost.
-function latestUsernameRecord (entries, memberHex, associationHex) {
+//
+// `opts.revokedIssuers` (a Set of issuer keys, blocklist.js revokedIssuerSet)
+// makes a record from a revoked issuer invalid like any other failing
+// record: a newest candidate signed by a revoked issuer yields null.
+function latestUsernameRecord (entries, memberHex, associationHex, opts) {
   try {
     const member = cert.normalizeHex(memberHex)
     if (member === null) return null
@@ -36,15 +40,15 @@ function latestUsernameRecord (entries, memberHex, associationHex) {
       bestSeq = seq
     }
     if (best === null) return null
-    return cert.verifyUsernameRecord(best, member, associationHex).ok ? best : null
+    return cert.verifyUsernameRecord(best, member, associationHex, opts).ok ? best : null
   } catch {
     return null
   }
 }
 
 // The username string of that record, or null.
-function latestUsername (entries, memberHex, associationHex) {
-  const record = latestUsernameRecord(entries, memberHex, associationHex)
+function latestUsername (entries, memberHex, associationHex, opts) {
+  const record = latestUsernameRecord(entries, memberHex, associationHex, opts)
   return record === null ? null : record.username
 }
 

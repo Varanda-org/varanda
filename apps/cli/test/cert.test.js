@@ -617,3 +617,110 @@ test('v2, issuer and username verifiers never throw', async (t) => {
   t.alike(cert.verifyCert(c, null), { ok: false, reason: 'malformed' })
   t.alike(cert.verifyUsernameRecord(r, MEMBER, null), { ok: false, reason: 'malformed' })
 })
+
+// Moderator certificate (docs/protocol.md section 3): moderator seed = 32
+// bytes 0x03, certified by the golden association.
+const MODERATOR_SEED = b4a.alloc(32, 3)
+const GOLDEN_MODERATOR = 'ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1'
+const GOLDEN_MODERATOR_SIG = '00c028052fd43e7518b5825298baf5ef2d194670421b6422c4211f3b1d3f9a2839b6cec54e628c416c8367191a69628bc2e3db5d4263781df11de781fbe9920d'
+
+test('moderator certificate golden vector', async (t) => {
+  await testnet(t)
+  const { assocKp } = golden()
+  const modKp = crypto.keyPair(MODERATOR_SEED)
+  t.is(b4a.toString(modKp.publicKey, 'hex'), GOLDEN_MODERATOR)
+  const m = cert.createModeratorCert({ moderator: GOLDEN_MODERATOR.toUpperCase(), date: ISSUER_DATE }, assocKp)
+  t.alike(Object.keys(m), ['v', 'moderator', 'date', 'association', 'signature'])
+  t.alike(m, { v: 1, moderator: GOLDEN_MODERATOR, date: ISSUER_DATE, association: GOLDEN_ASSOC, signature: GOLDEN_MODERATOR_SIG })
+  const expected = b4a.from('varanda-moderator-v1' + LF + GOLDEN_MODERATOR + LF + ISSUER_DATE + LF + GOLDEN_ASSOC, 'utf8')
+  t.ok(b4a.equals(cert.moderatorCertPayload(m), expected))
+  t.is(cert.validateModeratorCertShape(m), null)
+  t.alike(cert.verifyModeratorCert(m, GOLDEN_ASSOC), { ok: true })
+  t.alike(cert.verifyModeratorCert(m, GOLDEN_ASSOC.toUpperCase()), { ok: true })
+})
+
+test('moderator certificate rejections', async (t) => {
+  await testnet(t)
+  const { kp: assocKp, assocHex } = fixture()
+  const other = fixture()
+  const moderator = 'ef'.repeat(32)
+  const m = cert.createModeratorCert({ moderator, date: DATE }, assocKp)
+  t.alike(cert.verifyModeratorCert(m, assocHex), { ok: true })
+
+  const without = { ...m }
+  delete without.date
+  const malformed = {
+    'missing key': without,
+    'extra key': { ...m, extra: 1 },
+    'v 2': { ...m, v: 2 },
+    'moderator equal to association': { ...m, moderator: m.association },
+    'uppercase moderator': { ...m, moderator: moderator.toUpperCase() },
+    'short signature': { ...m, signature: m.signature.slice(2) },
+    'bad date': { ...m, date: '2026-13-01T00:00:00.000Z' }
+  }
+  for (const [name, v] of Object.entries(malformed)) {
+    t.is(cert.validateModeratorCertShape(v), 'malformed', name + ' shape')
+    t.alike(cert.verifyModeratorCert(v, assocHex), { ok: false, reason: 'malformed' }, name)
+  }
+  t.alike(cert.verifyModeratorCert(m, 'zz'), { ok: false, reason: 'malformed' })
+  t.alike(cert.verifyModeratorCert(m, null), { ok: false, reason: 'malformed' })
+  t.alike(cert.verifyModeratorCert(m, other.assocHex), { ok: false, reason: 'untrusted-association' })
+  t.alike(cert.verifyModeratorCert({ ...m, date: '2026-10-25T00:00:00.000Z' }, assocHex), { ok: false, reason: 'bad-signature' })
+  // domain separation: the association's issuer or seeder signature over the
+  // same key and date is never a moderator signature, and vice versa
+  const issuerCert = cert.createIssuerCert({ issuer: moderator, date: DATE }, assocKp)
+  t.alike(cert.verifyModeratorCert({ ...m, signature: issuerCert.signature }, assocHex), { ok: false, reason: 'bad-signature' })
+  const seederCert = cert.createSeederCert({ seeder: moderator, date: DATE }, assocKp)
+  t.alike(cert.verifyModeratorCert({ ...m, signature: seederCert.signature }, assocHex), { ok: false, reason: 'bad-signature' })
+  t.alike(cert.verifyIssuerCert({ v: 1, issuer: moderator, date: DATE, association: assocHex, signature: m.signature }, assocHex), { ok: false, reason: 'bad-signature' })
+  // createModeratorCert refuses bad input and the association as moderator
+  t.exception.all(() => cert.createModeratorCert({ moderator: 'zz', date: DATE }, assocKp), /moderator/)
+  t.exception.all(() => cert.createModeratorCert({ moderator, date: 'yesterday' }, assocKp), /date/)
+  t.exception.all(() => cert.createModeratorCert({ moderator: assocHex, date: DATE }, assocKp), /differ/)
+  t.exception.all(() => cert.createModeratorCert({ moderator, date: DATE }, {}), /key pair/)
+  // never throws
+  const revoked = Proxy.revocable({}, {})
+  revoked.revoke()
+  const hostile = {}
+  for (const k of Object.keys(m)) Object.defineProperty(hostile, k, { enumerable: true, get () { throw new Error('boom') } })
+  for (const v of [null, undefined, 0, 'x', [], Object.create(null), revoked.proxy, hostile]) {
+    t.execution(() => {
+      if (cert.verifyModeratorCert(v, assocHex).ok) throw new Error('verifyModeratorCert accepted')
+      if (cert.validateModeratorCertShape(v) !== 'malformed') throw new Error('validateModeratorCertShape accepted')
+    })
+  }
+})
+
+test('revoked issuers: v2 certificates and username records fail, v1 unaffected', async (t) => {
+  await testnet(t)
+  const { kp: assocKp, assocHex } = fixture()
+  const issuerKp = crypto.keyPair()
+  const issuerHex = b4a.toString(issuerKp.publicKey, 'hex')
+  const issuerCert = cert.createIssuerCert({ issuer: issuerHex, date: ISSUER_DATE }, assocKp)
+  const c = cert.createIssuedCert({ member: MEMBER, date: ISSUED_DATE }, issuerKp, issuerCert)
+  const r = cert.createUsernameRecord({ member: MEMBER, username: 'ana', date: ISSUED_DATE }, issuerKp, issuerCert)
+  const v1 = cert.createCert({ member: MEMBER, date: DATE }, assocKp)
+  const revokedIssuers = new Set([issuerHex])
+
+  t.alike(cert.verifyCert(c, assocHex, { revokedIssuers }), { ok: false, reason: 'revoked-issuer' })
+  t.alike(cert.certForKey(c, MEMBER, assocHex, { revokedIssuers }), { ok: false, reason: 'revoked-issuer' })
+  t.alike(cert.verifyUsernameRecord(r, MEMBER, assocHex, { revokedIssuers }), { ok: false, reason: 'revoked-issuer' })
+  // another issuer revoked, an empty set, no options or junk options: B1 verdicts
+  const unaffected = [{ revokedIssuers: new Set(['cd'.repeat(32)]) }, { revokedIssuers: new Set() }, undefined, null, {}, { revokedIssuers: 5 }, 'x']
+  for (const opts of unaffected) {
+    t.alike(cert.verifyCert(c, assocHex, opts), { ok: true })
+    t.alike(cert.certForKey(c, MEMBER, assocHex, opts), { ok: true })
+    t.alike(cert.verifyUsernameRecord(r, MEMBER, assocHex, opts), { ok: true })
+  }
+  // v1 certificates are signed by the association, never by an issuer
+  t.alike(cert.verifyCert(v1, assocHex, { revokedIssuers: new Set([assocHex, issuerHex]) }), { ok: true })
+  t.alike(cert.certForKey(v1, MEMBER, assocHex, { revokedIssuers: new Set([assocHex]) }), { ok: true })
+  // earlier reasons win: revocation is only claimed for a genuine signature
+  t.alike(cert.certForKey(c, 'cd'.repeat(32), assocHex, { revokedIssuers }), { ok: false, reason: 'member-mismatch' })
+  t.alike(cert.verifyCert({ ...c, date: DATE }, assocHex, { revokedIssuers }), { ok: false, reason: 'bad-signature' })
+  t.alike(cert.verifyUsernameRecord({ ...r, username: 'bia' }, MEMBER, assocHex, { revokedIssuers }), { ok: false, reason: 'bad-signature' })
+  // a hostile set never makes a verifier throw
+  const hostileSet = { has () { throw new Error('boom') } }
+  t.alike(cert.verifyCert(c, assocHex, { revokedIssuers: hostileSet }), { ok: false, reason: 'malformed' })
+  t.alike(cert.verifyUsernameRecord(r, MEMBER, assocHex, { revokedIssuers: hostileSet }), { ok: false, reason: 'malformed' })
+})

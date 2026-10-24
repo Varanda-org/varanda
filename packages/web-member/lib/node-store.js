@@ -326,6 +326,27 @@ function writeFollows (storage, list) {
   return storage.writeJson('follows', { v: 1, follows })
 }
 
+// The signed moderation snapshot, in the kv beside follows. Association
+// state, not identity: reset() deletes only the diary core, so it stays.
+async function readBlocklist (storage) {
+  let data
+  try {
+    data = await storage.readJson('blocklist')
+  } catch (err) {
+    // A torn or hand-edited value reads as absent (as packages/core/lib/store.js
+    // readBlocklist does); an IndexedDB failure still throws.
+    if (err instanceof SyntaxError) return null
+    throw err
+  }
+  const ok = data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
+    data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
+  return ok ? data : null
+}
+
+function writeBlocklist (storage, snapshot) {
+  return storage.writeJson('blocklist', { v: 1, snapshot })
+}
+
 module.exports = {
   DIARY,
   LOCKED,
@@ -344,5 +365,7 @@ module.exports = {
   readConfig,
   writeConfig,
   readFollows,
-  writeFollows
+  writeFollows,
+  readBlocklist,
+  writeBlocklist
 }

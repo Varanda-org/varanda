@@ -1,6 +1,7 @@
 'use strict'
 
-// TODO(later): media attachments and moderation lists are out of scope for phase 0.
+// TODO(later): media attachments are out of scope for phase 0 (moderation
+// lists are signed snapshots outside the diary: lib/blocklist.js).
 
 const b4a = require('b4a')
 

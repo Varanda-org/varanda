@@ -13,6 +13,16 @@
 //   failing  gate failed or fork: its close + purge is in flight (completion
 //            is blocked until the purge settles)
 //   failed   skipped; excluded from every goal
+//
+// Moderation (B2, docs/protocol.md "Blocklist snapshot"): the run enforces
+// the newest signed snapshot it holds (blocklist.json) and adopts newer ones
+// from any peer over 'varanda/blocklist/1'. A blocked key other than our own
+// is never fetched, opened or advertised, and its stored replica is purged
+// whether it is followed or not (store.replicate serves every stored core to
+// a peer that knows its discovery key); a followed one is skipped with reason
+// 'blocked' and stays in follows.json, so an unblock needs no new follow. A
+// diary whose v2 certificate comes from a revoked issuer is treated the same
+// way with reason 'revoked-issuer'.
 const process = require('#process')
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
@@ -24,10 +34,15 @@ const {
   removeQuarantine,
   purgeReplica,
   readConfig,
-  readFollows
+  readFollows,
+  readBlocklist,
+  writeBlocklist,
+  replicaStored
 } = require('./store')
 const { genesisCert, decodeBlock, validateRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { certForKey, seederCertForKey } = require('./cert')
+const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
+const { attachBlocklist } = require('./blocklist-net')
 const {
   createSwarm,
   topicFor,
@@ -66,21 +81,23 @@ function key8 (hex) {
 }
 
 // Block-0 verdict (docs §5, identical in the seeder): null = accepted.
-function gateVerdict (raw, keyHex, associationHex) {
+// `revokedIssuers` (the current snapshot's Set, or null) makes a v2
+// certificate from a revoked issuer 'revoked-issuer' (cert.js).
+function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
   try {
     const block0 = decodeBlock(raw)
     if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
-    const r = certForKey(block0.cert, keyHex, associationHex)
+    const r = certForKey(block0.cert, keyHex, associationHex, { revokedIssuers })
     return r.ok ? null : r.reason
   } catch {
     return 'not-in-log'
   }
 }
 
-async function localGate (core, keyHex, associationHex) {
+async function localGate (core, keyHex, associationHex, revokedIssuers = null) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return gateVerdict(raw, keyHex, associationHex)
+    return gateVerdict(raw, keyHex, associationHex, revokedIssuers)
   } catch {
     return 'not-in-log'
   }
@@ -173,6 +190,12 @@ async function runSync ({
   let budgetExpired = false
   let confirmedLength = -1 // diary.length when G2 last held with a verified seeder
   const signalHandlers = []
+  let blocklist = null // createBlocklistState (blocklist.js), ready before any follow or peer
+  let blocklistGen = 0 // bumped on every adoption: gates started earlier run again
+  const blocklistHandles = new Set() // open 'varanda/blocklist/1' handles (fan-out, C4)
+  const purgeChains = new Map() // key -> the last purge of that key (serialized per key)
+  let warnedOwnBlocked = false
+  let warnedOwnRevoked = false
 
   const emit = (ev) => {
     try {
@@ -186,8 +209,257 @@ async function runSync ({
     if (!hardErrors.includes(msg)) hardErrors.push(msg)
   }
 
-  function purgeKey (key) {
-    return purgeHook ? purgeHook(key, store) : purgeReplica(store, key)
+  // Purges of one key run one after the other: a moderation sweep may purge a
+  // key whose follow purge is still in flight, and two concurrent purges of
+  // the same core would race (hypercore purge closes every session). With
+  // `ifStored` the purge is skipped when the main store holds no such core
+  // (checked inside the chain, after any earlier purge of the key settled),
+  // so no empty core is created just to be purged.
+  function purgeKey (key, { ifStored = false } = {}) {
+    return serialized(key, async () => {
+      if (ifStored && !(await replicaStored(store, key))) return
+      await (purgeHook ? purgeHook(key, store) : purgeReplica(store, key))
+    })
+  }
+
+  // Runs fn after every earlier serialized operation on key settled (the
+  // per-key chain of purgeKey; the revoked-issuer sweep reads in it too).
+  function serialized (key, fn) {
+    const prev = purgeChains.get(key) || Promise.resolve()
+    const p = prev.catch(noop).then(fn)
+    purgeChains.set(key, p)
+    const done = () => { if (purgeChains.get(key) === p) purgeChains.delete(key) }
+    p.then(done, done)
+    return p
+  }
+
+  // ---- moderation (B2) ----
+
+  // A key other than our own that the current snapshot blocks. The own diary
+  // is never blocked locally: it is still advertised (honest peers refuse
+  // it) and never purged, which would not hide it anyway: store.replicate
+  // serves every stored core to a peer that knows its discovery key
+  // (docs/protocol.md:379), and the own diary is the one copy of it.
+  function isBlockedKey (key) {
+    return blocklist !== null && key !== ownHex && blocklist.blocked().has(key)
+  }
+
+  function revokedIssuers () {
+    return blocklist === null ? null : blocklist.revokedIssuers()
+  }
+
+  // Every gate of the run: a blocked key fails before its block 0 is read.
+  function verdictFor (key, raw) {
+    return isBlockedKey(key) ? 'blocked' : gateVerdict(raw, key, association, revokedIssuers())
+  }
+
+  function gateLocal (core, key) {
+    return isBlockedKey(key) ? Promise.resolve('blocked') : localGate(core, key, association, revokedIssuers())
+  }
+
+  // Moderation verdicts are not a divergent block 0 (regate below).
+  function moderated (reason) {
+    return reason === 'blocked' || reason === 'revoked-issuer'
+  }
+
+  // Logged once per run each.
+  function warnOwn () {
+    if (blocklist === null || ownHex === null) return
+    if (!warnedOwnBlocked && blocklist.blocked().has(ownHex)) {
+      warnedOwnBlocked = true
+      log('aviso: sua identidade está bloqueada pela associação')
+    }
+    if (!warnedOwnRevoked && cert !== null && certForKey(cert, ownHex, association, { revokedIssuers: revokedIssuers() }).reason === 'revoked-issuer') {
+      warnedOwnRevoked = true
+      log('aviso: o emissor do seu certificado foi revogado pela associação')
+    }
+  }
+
+  // Purges whatever the main store holds for key, after `after` (an
+  // in-flight follow purge, never rejecting) settled. Tracked like every
+  // purge: finish() waits for it and a failure makes the run fail.
+  function purgeStored (key, after = null) {
+    return track((async () => {
+      if (after) await after
+      await purgeKey(key, { ifStored: true })
+    })(), noop, () => {
+      if (!ended) purgeFailed(key)
+      else log('aviso: falha ao limpar diário ' + key8(key))
+    })
+  }
+
+  // C7: by storage, not by follow state. A followed key is skipped with
+  // `reason` (unless it already is skipped) and whatever the store holds for
+  // it is purged: failFollow returns at once for an entry already failing or
+  // failed, and a quota failure keeps an active replica's blocks.
+  // -> the tracked purge (callers that must not go on before it awaits it).
+  function enforceBlock (key, reason) {
+    if (key === ownHex) return Promise.resolve()
+    const entry = follows.get(key)
+    let after = null
+    if (entry) {
+      if (entry.state !== 'failing' && entry.state !== 'failed') failFollow(entry, reason, { purge: entry.core !== null })
+      after = entry.purging || null
+    }
+    return purgeStored(key, after)
+  }
+
+  // A newly revoked issuer: every replica holding a v2 certificate from it
+  // goes like a blocked author. A replica in regate whose block 0 has not
+  // arrived yet is gated later with the new set (blocklistGen).
+  function recheckRevoked (entry) {
+    const core = entry.core
+    if (!core) return
+    track(localGate(core, entry.key, association, revokedIssuers()), (reason) => {
+      if (reason !== 'revoked-issuer' || entry.core !== core) return
+      if (entry.state !== 'active' && entry.state !== 'regate') return
+      enforceBlock(entry.key, 'revoked-issuer')
+    }, noop)
+  }
+
+  // Block-0 verdict of a core the main store holds, opened by discovery key
+  // without creating anything: corestore 7.15 opens a discoveryKey-only
+  // session through _preloadCheckIfExists, which throws STORAGE_EMPTY when
+  // the core is absent (node_modules/corestore/index.js:636, :663-665), the
+  // same kind of open its own purge uses (:405-423). Runs inside the key's
+  // chain, so no purge of that key is in flight meanwhile. null = nothing to
+  // judge: the core went meanwhile, or its block 0 is not stored locally
+  // (wait: false). Such a core is left alone: a replica only enters the main
+  // store after its block 0 passed the remote gate, and one still waiting
+  // for block 0 is a follow in regate, gated again with the new set
+  // (blocklistGen) when it arrives; without block 0 nothing certifies it.
+  async function storedVerdict (dk, key) {
+    if (!(await replicaStored(store, key))) return null
+    const session = store.get({ discoveryKey: dk, active: false })
+    try {
+      await session.ready()
+      const raw = await session.get(0, { wait: false, raw: true })
+      if (!raw) return null
+      return gateVerdict(raw, key, association, revokedIssuers())
+    } finally {
+      await session.close().catch(noop)
+    }
+  }
+
+  // R4 by storage (P1 of the B2 review): a revocation must stop this node
+  // distributing EVERY stored diary certified by the revoked issuer, not only
+  // the active follows: an unfollowed replica (member.js unfollow does not
+  // purge) or the leftover of a failed follow is still served on demand by
+  // store.replicate to any peer that asks for its discovery key (corestore
+  // _attachMaybe / ondiscoverykey, node_modules/corestore/index.js:487-524).
+  // So every stored core other than the own diary is enumerated (store.list()
+  // = the discovery keys of storage.createDiscoveryKeyStream, :382-384), its
+  // key read from the stored auth record (store.getAuth, :386-388, nothing
+  // opened) and its block 0 run through the local gate with the current
+  // revokedIssuers; each 'revoked-issuer' goes like a blocked author
+  // (enforceBlock: a followed key is skipped, the purge goes through the
+  // serialized purgeKey). Blocked keys stay with the blocked sweep. Cost:
+  // one auth read and one block read per stored core, and only while the
+  // revoked set is non-empty (a node whose snapshot revokes no issuer pays
+  // nothing at startup). Sweeps run one after the other and are tracked:
+  // finish() and the store close wait for them.
+  let sweepChain = Promise.resolve()
+
+  function sweepRevoked () {
+    const run = sweepChain.then(sweepRevokedOnce)
+    sweepChain = run.catch(noop)
+    return track(run, noop, () => {
+      // Fail closed: a sweep that could not enumerate the store may leave a
+      // revoked diary served.
+      if (!ended) fail(['falha ao verificar emissores revogados'])
+      else log('aviso: falha ao verificar emissores revogados')
+    })
+  }
+
+  async function sweepRevokedOnce () {
+    if (blocklist === null || blocklist.revokedIssuers().size === 0) return
+    const dks = []
+    for await (const dk of store.list()) {
+      if (!b4a.equals(dk, diary.discoveryKey)) dks.push(dk)
+    }
+    // The purges are awaited: at startup replication begins only after the
+    // sweep, so nothing it condemned is still there to be served.
+    const purges = []
+    for (const dk of dks) {
+      if (ended) break
+      const auth = await store.getAuth(dk)
+      if (!auth || !auth.key) continue
+      const key = b4a.toString(auth.key, 'hex')
+      if (key === ownHex || isBlockedKey(key)) continue
+      const reason = await sweepVerdict(dk, key)
+      if (reason === 'revoked-issuer' && !ended) purges.push(enforceBlock(key, 'revoked-issuer'))
+      else if (reason === 'unreadable' && !ended) purges.push(purgeStored(key))
+    }
+    await Promise.all(purges)
+  }
+
+  // The verdict of one stored core, read twice before giving up. A core that
+  // is gone (closed or purged meanwhile) has nothing left to judge. One still
+  // stored whose block 0 cannot be read is 'unreadable' and purged (fail
+  // closed: it could be a revoked diary that would otherwise stay servable),
+  // unless an active or regate follow holds it: recheckRevoked judges those
+  // on their open core.
+  async function sweepVerdict (dk, key) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await serialized(key, () => storedVerdict(dk, key))
+      } catch {
+        if (!(await replicaStored(store, key).catch(() => true))) return null
+      }
+    }
+    const entry = follows.get(key)
+    if (entry && (entry.state === 'active' || entry.state === 'regate')) return null
+    return 'unreadable'
+  }
+
+  function onAdopted (r, origin) {
+    blocklistGen++
+    warnOwn()
+    for (const key of r.added) enforceBlock(key, 'blocked')
+    if (r.revokedAdded.size > 0) {
+      for (const e of follows.values()) {
+        if (e.state === 'active' || e.state === 'regate') recheckRevoked(e)
+      }
+      sweepRevoked()
+    }
+    // Fan-out (C4): every other peer hears the new key and, when it holds an
+    // older snapshot, receives this one. No admission message is sent.
+    for (const h of blocklistHandles) if (h !== origin) h.announce()
+    evaluate()
+  }
+
+  // The offer of one connection (blocklist-net.js): adoption runs in the
+  // state's single queue (re-checked against the then-current snapshot,
+  // saved, then swapped); the enforcement follows at once.
+  async function offerSnapshot (snapshot, origin) {
+    if (ending) return { adopted: false, reason: 'ending' }
+    const p = blocklist.offer(snapshot)
+    track(p, noop, noop) // the store stays open until the save settled
+    const r = await p
+    if (r.adopted && !ended) onAdopted(r, origin)
+    return r
+  }
+
+  // Right after store.replicate (C2): the blocklist channel is opened before
+  // the admission hello, so whichever side opens first is paired.
+  function attachModeration (socket) {
+    let handle = null
+    try {
+      handle = attachBlocklist(socket, {
+        current: blocklist.current,
+        offer: (snapshot) => offerSnapshot(snapshot, handle),
+        compare: compareSnapshots,
+        log: (ev) => {
+          if (ev && ev.event === 'peer-dropped') onPeerDropped(ev)
+          else if (ev && ev.event === 'blocklist-offer-failed') log('aviso: falha ao gravar a lista de bloqueio')
+        }
+      })
+    } catch (err) {
+      log('aviso: canal de bloqueio: ' + err.message)
+      return
+    }
+    blocklistHandles.add(handle)
+    socket.once('close', () => blocklistHandles.delete(handle))
   }
 
   // Registers a promise finish() must wait for; the callbacks run on settle.
@@ -201,6 +473,7 @@ async function runSync ({
   function inventory () {
     const have = [{ key: ownHex, length: diary.length }]
     for (const e of follows.values()) {
+      if (isBlockedKey(e.key)) continue // never advertised, whatever its state
       if (e.state === 'active') have.push({ key: e.key, length: e.core.contiguousLength })
       else if (e.state === 'pending' || e.state === 'regate') have.push({ key: e.key, length: 0 })
     }
@@ -573,7 +846,7 @@ async function runSync ({
       if (core) await core.close()
       await purgeKey(entry.key)
     })()
-    track(p, () => {
+    entry.purging = track(p, () => {
       entry.state = 'failed'
       evaluate()
     }, () => {
@@ -665,14 +938,25 @@ async function runSync ({
     if (entry.gating || entry.state !== 'regate') return
     entry.gating = true
     const core = entry.core
+    const gen = blocklistGen
     const p = (async () => {
       let reason = regateHook ? await regateHook(entry.key) : null
-      if (reason === null || reason === undefined) reason = await localGate(core, entry.key, association)
+      if (reason === null || reason === undefined) reason = await gateLocal(core, entry.key)
       return reason
     })()
     track(p, (reason) => {
       entry.gating = false
       if (entry.state !== 'regate') return
+      // A snapshot adopted while the gate ran: gate again with the new one.
+      if (!reason && gen !== blocklistGen) {
+        regate(entry)
+        return
+      }
+      if (moderated(reason)) {
+        // Blocked or revoked meanwhile: not a divergent block 0.
+        enforceBlock(entry.key, reason)
+        return
+      }
       if (reason) {
         // The advertiser served a different block 0 to the main store than
         // to the quarantine: skip and purge, and the run cannot be ok.
@@ -719,7 +1003,7 @@ async function runSync ({
       return
     }
     const entry = follows.get(key)
-    if (!entry) return
+    if (!entry || isBlockedKey(key)) return
     noteClaim(entry, peer, length)
     if (entry.state !== 'pending' || length < 1) return
     entry.advSeq++
@@ -729,6 +1013,7 @@ async function runSync ({
 
   function maybeFetch (entry) {
     if (ending || deadlineHit || entry.state !== 'pending' || entry.fetching) return
+    if (isBlockedKey(entry.key)) return
     if (entry.advSeq <= entry.fetchedAdv) return
     // Open sockets only (item 2): a closed one neither starts a fetch nor
     // takes one of its slots.
@@ -823,7 +1108,7 @@ async function runSync ({
       return
     }
     if (ending) return
-    const reason = gateVerdict(r.raw, entry.key, association)
+    const reason = verdictFor(entry.key, r.raw)
     if (reason) {
       failFollow(entry, reason, { purge: false })
       return
@@ -842,6 +1127,10 @@ async function runSync ({
       if (!ended) log('aviso: falha ao abrir réplica ' + key8(entry.key) + ': ' + err.message)
       return
     }
+    // A snapshot adopted while the replica opened: the remote gate is repeated
+    // with it (a blocked key already left 'pending' through enforceBlock).
+    const late = entry.state === 'pending' && !ending ? verdictFor(entry.key, r.raw) : null
+    if (late) failFollow(entry, late, { purge: false })
     if (ending || entry.state !== 'pending') {
       // The main store already holds the core (servable): purge it (item 8).
       // finish() awaits tracked purges; after the result the finally still
@@ -930,9 +1219,10 @@ async function runSync ({
     evaluate()
   }
 
-  // Keys whose advertisements matter to this run: our own and the follows.
+  // Keys whose advertisements matter to this run: our own and the follows
+  // that are not blocked (a blocked author's advertisements are ignored).
   function relevant (key) {
-    return key === ownHex || follows.has(key)
+    return key === ownHex || (follows.has(key) && !isBlockedKey(key))
   }
 
   function onPeerDropped (ev) {
@@ -973,6 +1263,7 @@ async function runSync ({
       }
     })
     store.replicate(socket)
+    attachModeration(socket)
     let peer
     try {
       // The peer's opened/hello promises may resolve false/null on close;
@@ -1024,6 +1315,7 @@ async function runSync ({
     if (hex === rendezvousHex) return liveConnections > 0
     const key = topicKeys.get(hex)
     if (!key) return true
+    if (isBlockedKey(key)) return true // nobody is looked up for a blocked author
     // Item 6: a connection discovered on the topic counts only while its
     // peer has not sent hello yet, is a verified seeder, or advertises the
     // key at >= 1 (an empty follower must not stop re-discovery).
@@ -1073,6 +1365,40 @@ async function runSync ({
       : [])
     if (g && certForKey(g, ownHex, association).ok) cert = g
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
+
+    // The moderation snapshot, read with the data-dir lock held. A stored
+    // snapshot that no longer verifies is ignored; a read failure stops the
+    // run (fail closed: never serve or fetch without knowing what is blocked).
+    blocklist = createBlocklistState({
+      association,
+      load: () => {
+        const stored = readBlocklist(dataDir)
+        if (stored === null) return null
+        if (!verifySnapshot(stored.snapshot, association).ok) {
+          log('aviso: lista de bloqueio inválida ignorada')
+          return null
+        }
+        return stored.snapshot
+      },
+      save: (snapshot) => writeBlocklist(dataDir, snapshot)
+    })
+    try {
+      await blocklist.ready()
+    } catch {
+      throw new Error('falha ao ler a lista de bloqueio')
+    }
+    warnOwn()
+    // Every stored replica of a blocked key goes before anything is served,
+    // followed or not (an unfollowed replica is still served by
+    // store.replicate); the own diary is never purged (isBlockedKey).
+    for (const key of blocklist.blocked()) {
+      if (ending) break
+      if (isBlockedKey(key)) await purgeStored(key)
+    }
+    // Likewise every stored diary certified by a revoked issuer (no follow
+    // entry exists yet, so each one is purged directly).
+    if (!ending) await sweepRevoked()
+
     qstore = await openQuarantine(dataDir, storeOptions)
     if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer }) // test-only
 
@@ -1125,10 +1451,18 @@ async function runSync ({
         discardedRegate: false // purged from regate when the run ended (item 5)
       }
       follows.set(key, entry)
+      // A blocked author stays in follows.json but is never opened (its
+      // replica was purged above).
+      if (isBlockedKey(key)) {
+        entry.state = 'failed'
+        skipped.push({ key, reason: 'blocked' })
+        emit({ event: 'skipped', key, reason: 'blocked' })
+        continue
+      }
       const core = await openReplica(store, key)
       let reason = null
       if (core.fork !== 0) reason = 'fork'
-      else if (core.contiguousLength > 0) reason = await localGate(core, key, association)
+      else if (core.contiguousLength > 0) reason = await gateLocal(core, key)
       if (core.contiguousLength > 0 && reason === null) {
         activate(entry, core)
         continue

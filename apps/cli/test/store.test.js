@@ -149,6 +149,35 @@ test('follows round-trip and dedupe', async (t) => {
   t.alike(store.readFollows(dir), [])
 })
 
+test('blocklist round-trip, absent and malformed are null, mode 0600', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const snapshot = { v: 1, seq: 3, blocked: ['a'.repeat(64)] }
+  t.is(store.readBlocklist(dir), null, 'absent')
+  store.writeBlocklist(dir, snapshot)
+  t.alike(store.readBlocklist(dir), { v: 1, snapshot })
+  const file = path.join(dir, 'blocklist.json')
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot })
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  for (const bad of ['not json', '[]', '{"v":2,"snapshot":{}}', '{"v":1}', '{"v":1,"snapshot":[]}', '{"v":1,"snapshot":null}']) {
+    fs.writeFileSync(file, bad)
+    t.is(store.readBlocklist(dir), null, 'malformed: ' + bad)
+  }
+})
+
+test('replicaStored is true only for a core the store holds', async (t) => {
+  await testnet(t)
+  const a = await open(t, tmpDir(t))
+  const b = await open(t, tmpDir(t))
+  const diary = await store.openDiary(a)
+  const hex = b4a.toString(diary.key, 'hex')
+  t.ok(await store.replicaStored(a, hex), 'own diary')
+  t.absent(await store.replicaStored(b, hex), 'not stored')
+  await store.openReplica(b, hex)
+  t.ok(await store.replicaStored(b, hex.toUpperCase()), 'replica opened')
+  t.absent(await store.replicaStored(b, 'e'.repeat(64)), 'unknown key')
+})
+
 test('writeJsonAtomic and readJson', async (t) => {
   await testnet(t)
   const dir = tmpDir(t)
@@ -500,6 +529,33 @@ test('data-dir lock: lockHeld probes without creating, taking over or removing',
   const file = tmpDir(t)
   fs.writeFileSync(lockDir(file), 'x')
   t.exception(() => store.lockHeld(file), /lock inválido/)
+})
+
+test('data-dir lock: lockDataDir takes the same lock as openStore', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const release = await store.lockDataDir(dir)
+  t.is(ownerPid(dir), process.pid)
+  t.is(store.lockHeld(dir), true, 'probe: held')
+  await t.exception(() => store.lockDataDir(dir), /diretório de dados em uso/)
+  try {
+    await store.lockDataDir(dir)
+    t.fail('should throw')
+  } catch (err) {
+    t.is(err.code, 'LOCKED')
+  }
+  await t.exception(() => store.openStore(dir), /diretório de dados em uso/)
+  t.absent(fs.existsSync(path.join(dir, 'store')), 'no store dir created')
+  release()
+  t.is(store.lockHeld(dir), false, 'probe: released')
+  t.absent(fs.existsSync(lockDir(dir)))
+
+  const again = await store.lockDataDir(dir)
+  release() // a second call of an old release never removes the new lock
+  t.is(store.lockHeld(dir), true, 'the later lock survives the stale release')
+  again()
+  again()
+  t.is(store.lockHeld(dir), false)
 })
 
 test('data-dir lock: a fresh pid-less lock is not taken over', async (t) => {

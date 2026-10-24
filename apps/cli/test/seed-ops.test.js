@@ -10,10 +10,12 @@ const Corestore = require('corestore')
 const { discoveryKey } = require('hypercore-crypto')
 const { testnet, tmpDir, until, localSwarmOptions, bootstrapFlags } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { memberCertRecord } = require('@varanda/core/lib/records')
-const { openStore } = require('@varanda/core/lib/store')
-const { startHealth } = require('../lib/health')
+const { openStore, writeBlocklist } = require('@varanda/core/lib/store')
+const { keyPair: signingKeyPair } = require('hypercore-crypto')
+const { startHealth, metricsText } = require('../lib/health')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64_ANYWHERE = /[0-9a-f]{64}/i
@@ -126,7 +128,7 @@ test('seed status: reads the dir without the lock, a store or a write', async (t
 
   const r = varanda(dataDir, ['seed', 'status', '--json'])
   t.is(r.code, 0, r.stderr)
-  t.alike(lastJson(r), { association: assoc.hex, publicKey, certificate: 'ok', admitted: 0, running: false })
+  t.alike(lastJson(r), { association: assoc.hex, publicKey, certificate: 'ok', admitted: 0, blocklist: null, running: false })
   t.alike(fs.readdirSync(dataDir).sort(), before, 'nothing created: no store/, no lock')
 
   const human = varanda(dataDir, ['seed', 'status'])
@@ -136,8 +138,22 @@ test('seed status: reads the dir without the lock, a store or a write', async (t
     'chave do semeador: ' + publicKey,
     'certificado: válido',
     'diários admitidos: 0',
+    'lista de bloqueio: nenhuma',
     'estado: parado'
   ].join('\n') + '\n')
+
+  // The stored moderation snapshot is reported only when it verifies.
+  const moderator = signingKeyPair()
+  const modCert = createModeratorCert({ moderator: hex(moderator.publicKey) }, assoc.kp)
+  const date = '2026-10-24T12:00:00.000Z'
+  writeBlocklist(dataDir, createSnapshot({ seq: 3, date, blocked: ['b'.repeat(64)] }, moderator, modCert))
+  t.alike(lastJson(varanda(dataDir, ['seed', 'status', '--json'])).blocklist, { seq: 3, date })
+  t.ok(varanda(dataDir, ['seed', 'status']).stdout.includes('lista de bloqueio: seq 3 de ' + date + '\n'))
+  const foreign = makeAssociation()
+  const foreignCert = createModeratorCert({ moderator: hex(moderator.publicKey) }, foreign.kp)
+  writeBlocklist(dataDir, createSnapshot({ seq: 4, date }, moderator, foreignCert))
+  t.is(lastJson(varanda(dataDir, ['seed', 'status', '--json'])).blocklist, null, 'another association: ignored')
+  fs.rmSync(path.join(dataDir, 'blocklist.json'))
 
   // Answers while another process holds the data dir (here: this test).
   writeAdmitted(dataDir, { ['a'.repeat(64)]: {}, 'not-a-key': {} })
@@ -279,10 +295,12 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'blocks', 'bytes', 'connections', 'peers', 'firewalled'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'blocks', 'bytes', 'connections', 'peers', 'firewalled', 'blocked', 'blocklistSeq'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
+  t.is(body.blocked, 0)
+  t.is(body.blocklistSeq, 0)
   t.is(body.blocks, 3)
   t.ok(body.bytes > 0)
   t.ok(Number.isInteger(body.connections) && Number.isInteger(body.peers))
@@ -295,6 +313,9 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.ok(mtext.includes('\nvaranda_seeder_admitted_diaries 1\n'))
   t.ok(mtext.includes('\nvaranda_seeder_ready 1\n'))
   t.ok(mtext.includes('# TYPE varanda_seeder_bytes gauge\n'))
+  t.ok(mtext.includes('\nvaranda_seeder_blocked 0\n'), 'blocked gauge (count only)')
+  t.ok(mtext.includes('\nvaranda_seeder_blocklist_seq 0\n'), 'blocklist seq gauge')
+  t.ok(mtext.includes('# TYPE varanda_seeder_blocklist_seq gauge\n'))
   t.absent(HEX64_ANYWHERE.test(mtext), 'no key in /metrics')
   t.absent(mtext.includes(publicKey.slice(0, 8)) || mtext.includes(log.key.slice(0, 8)))
 
@@ -357,4 +378,11 @@ test('health endpoint: 503 while the seeder starts or closes', async (t) => {
   await server.close()
   await server.close()
   await t.exception.all(() => fetch(base + '/health'), 'closed')
+})
+
+test('metrics: blocklist gauges carry counts only', (t) => {
+  const text = metricsText({ status: 'ok', admitted: 2, dropping: 0, blocks: 9, bytes: 100, connections: 1, peers: 1, firewalled: false, blocked: 3, blocklistSeq: 7, uptimeSeconds: 5 })
+  t.ok(text.includes('# TYPE varanda_seeder_blocked gauge\nvaranda_seeder_blocked 3\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_blocklist_seq gauge\nvaranda_seeder_blocklist_seq 7\n'))
+  t.absent(HEX64_ANYWHERE.test(text))
 })

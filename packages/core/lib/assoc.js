@@ -120,4 +120,28 @@ function issueIssuerCertificate (dir, { issuer } = {}) {
   return issued
 }
 
-module.exports = { initAssociation, showAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate }
+// The association signs a delegation to the moderation key (blocklist
+// snapshots, packages/core/lib/blocklist.js). Only the moderator key and the
+// date are recorded: never a signature or a secret. No key is generated here:
+// the moderator pair lives in the moderation dir (`mod init`).
+function issueModeratorCertificate (dir, { moderator } = {}) {
+  const kp = loadKeyPair(dir)
+  // Checked before signing so a mistyped association key is a clear error (createModeratorCert refuses it too).
+  if (typeof moderator === 'string' && moderator.toLowerCase() === b4a.toString(kp.publicKey, 'hex')) {
+    throw new TypeError('moderator must differ from the association')
+  }
+  const issued = cert.createModeratorCert({ moderator }, kp)
+  const line = JSON.stringify({ moderator: issued.moderator, date: issued.date }) + '\n'
+  appendPrivate(path.join(dir, 'moderators.jsonl'), line)
+  return issued
+}
+
+module.exports = {
+  initAssociation,
+  showAssociation,
+  issueCertificate,
+  issueSeederCertificate,
+  issueIssuerCertificate,
+  issueModeratorCertificate,
+  appendPrivate
+}

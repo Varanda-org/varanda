@@ -38,8 +38,12 @@ const {
   readConfig,
   writeConfig,
   readJson,
-  writeJsonAtomic
+  writeJsonAtomic,
+  readBlocklist,
+  writeBlocklist
 } = require('./store')
+const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
+const { attachBlocklist } = require('./blocklist-net')
 const { validateRecord, decodeBlock, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
@@ -225,11 +229,14 @@ function key8 (hex) {
 
 // Block-0 verdict on a raw block (identical to lib/sync.js): null when block 0
 // is a valid member certificate for keyHex under the trusted association.
-function gateVerdict (raw, keyHex, associationHex) {
+// opts = { revokedIssuers } of the current blocklist snapshot: a v2
+// certificate from a revoked issuer answers 'revoked-issuer' (cert.js
+// verifyIssued).
+function gateVerdict (raw, keyHex, associationHex, opts) {
   try {
     const block0 = decodeBlock(raw)
     if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
-    const r = certForKey(block0.cert, keyHex, associationHex)
+    const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
   } catch {
     return 'not-in-log'
@@ -238,10 +245,10 @@ function gateVerdict (raw, keyHex, associationHex) {
 
 // LOCAL gate: block 0 already in the main store. Any error is 'not-in-log',
 // so a failure can never skip the purge.
-async function localVerdict (core, keyHex, associationHex) {
+async function localVerdict (core, keyHex, associationHex, opts) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return gateVerdict(raw, keyHex, associationHex)
+    return gateVerdict(raw, keyHex, associationHex, opts)
   } catch {
     return 'not-in-log'
   }
@@ -268,6 +275,13 @@ function configuredAssociation (config, given) {
 function readAdmitted (dataDir) {
   const data = readJson(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: {} })
   return isPlainObject(data) && isPlainObject(data.admitted) ? data.admitted : {}
+}
+
+// blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
+// writeBlocklist), or null.
+function readSnapshot (dataDir) {
+  const data = readBlocklist(dataDir)
+  return data === null ? null : data.snapshot
 }
 
 function storedCore (store, key) {
@@ -302,7 +316,9 @@ function checkSeederCert (cert, keyPair, associationHex) {
 class Seeder {
   // purgeHook(core), gateHook(key), admitHook(key, step) ('persist' |
   // 'open', awaited right before that admission step; a throw simulates the
-  // step failing) and storeHook() (awaited right after the main store, and
+  // step failing), regateHook(key, reason) (awaited after a served replica's
+  // local block-0 verdict is computed and before it is applied, _gate) and
+  // storeHook() (awaited right after the main store, and
   // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
   // maxAnnounces, announceRate, announceBurst, maxBadAnnounces; defaults =
@@ -316,6 +332,7 @@ class Seeder {
     purgeHook = null,
     gateHook = null,
     admitHook = null,
+    regateHook = null,
     storeHook = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
@@ -341,6 +358,7 @@ class Seeder {
     this.purgeHook = purgeHook
     this.gateHook = gateHook
     this.admitHook = admitHook
+    this.regateHook = regateHook
     this.storeHook = storeHook
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
@@ -371,6 +389,15 @@ class Seeder {
     this._reserved = new Set() // keys holding a capacity slot mid-admission (M1)
     this._drops = new Map() // key -> promise of the drop (purge) in progress
     this._writeQueue = Promise.resolve()
+    // The signed moderation snapshot (blocklist.js createBlocklistState),
+    // created in start() once the data-dir lock is held, and the open
+    // blocklist channel of every connection (for the C4 fan-out).
+    this._blocklist = null
+    this._blocklistHandles = new Set()
+    // Moderation generation: bumped on every adoption that blocks a key or
+    // revokes an issuer. A block-0 verdict computed across an await under an
+    // older generation is never applied as a pass (_gate re-runs it).
+    this._moderationGen = 0
     this._peers = new Set()
     this._external = new Set() // NoiseSecretStreams from acceptStream (not in swarm.connections)
     this._keyPair = null
@@ -424,7 +451,14 @@ class Seeder {
       certificate = 'malformed'
     }
     const admitted = Object.keys(readAdmitted(dataDir)).filter((key) => HEX64.test(key)).length
-    return { association, publicKey, certificate, admitted, running: lockHeld(dataDir) }
+    // The stored moderation snapshot, only when it verifies for the
+    // association (a start would ignore anything else). Never throws.
+    let blocklist = null
+    try {
+      const snapshot = readSnapshot(dataDir)
+      if (snapshot !== null && verifySnapshot(snapshot, association).ok) blocklist = { seq: snapshot.seq, date: snapshot.date }
+    } catch {}
+    return { association, publicKey, certificate, admitted, blocklist, running: lockHeld(dataDir) }
   }
 
   // `seed list`: the admitted logs and their signed sizes. It takes the
@@ -459,7 +493,7 @@ class Seeder {
   // purged FIRST, and only then the key leaves admitted.json, so every core
   // in the main store stays listed. A purge failure throws and leaves the
   // file untouched. It is not a block: the author's next announce runs the
-  // full gate again (moderation lists are phase 2).
+  // full gate again (to keep an author out, block the key with `mod block`).
   static async drop (dataDir, associationKey, key) {
     Seeder.checkConfig(dataDir, associationKey)
     if (typeof key !== 'string' || !HEX64.test(key)) throw new UsageError('chave inválida')
@@ -538,6 +572,22 @@ class Seeder {
       for (const [key, cert] of Object.entries(readAdmitted(this.dataDir))) {
         if (HEX64.test(key)) this._admitted.set(key, cert)
       }
+      // The stored moderation snapshot, read under the lock like
+      // admitted.json and kept only when it verifies for the association
+      // (createBlocklistState ignores anything else). An unreadable file
+      // fails the start closed: serving without knowing what is blocked
+      // could hand out a blocked diary.
+      const state = createBlocklistState({
+        association: this.association,
+        load: () => readSnapshot(this.dataDir),
+        save: (snapshot) => this._saveBlocklist(snapshot)
+      })
+      try {
+        await state.ready()
+      } catch {
+        throw new Error('lista de bloqueio ilegível')
+      }
+      this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
       // Step 3: re-gate every stored replica before anything can serve it.
@@ -545,10 +595,14 @@ class Seeder {
       for (const key of [...this._admitted.keys()]) {
         const core = await openReplica(this.store, key)
         let reason = null
-        if (core.fork !== 0) reason = 'fork'
+        // A blocked author takes the fork path (rejected, purged, un-listed),
+        // never _drop: _drop returns for a key not in _served (it is only
+        // filled in step 4). A revoked issuer surfaces through localVerdict.
+        if (this._isBlocked(key)) reason = 'blocked'
+        else if (core.fork !== 0) reason = 'fork'
         else if (core.contiguousLength === 0) reason = 'no-cert'
         else if (this._overQuota(core)) reason = 'quota' // item 5: before any serve/join
-        else reason = await localVerdict(core, key, this.association)
+        else reason = await localVerdict(core, key, this.association, this._certOpts())
         if (reason === null && survivors.length < this.maxServed) {
           survivors.push([key, core])
           continue
@@ -615,12 +669,12 @@ class Seeder {
       bytes,
       connections: (this.swarm ? this.swarm.connections.size : 0) + this._external.size,
       peers: this._peers.size,
-      firewalled: this.swarm ? this.swarm.dht.firewalled : null
+      firewalled: this.swarm ? this.swarm.dht.firewalled : null,
+      blocked: this._blocklist ? this._blocklist.blocked().size : 0,
+      blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0
     }
   }
 
-  // TODO(phase2): moderation lists — consult a block list before admitting.
-  // TODO(phase2): certificate revocation list.
   // (a) The announced certificate is checked synchronously BEFORE anything
   // is queued (review item 1), so a flood of announces never grows memory.
   // The per-peer rate limit runs before the signature check, and a peer
@@ -637,10 +691,18 @@ class Seeder {
       this._badAnnounce(peer)
       return Promise.resolve()
     }
-    const r = certForKey(cert, key, this.association)
+    const r = certForKey(cert, key, this.association, this._certOpts())
     if (!r.ok) {
       this._reject(peer, key, r.reason)
-      this._badAnnounce(peer)
+      // A certificate from a revoked issuer is a moderation outcome, like a
+      // blocked author: an honest member re-announcing it is not misbehaving.
+      if (r.reason !== 'revoked-issuer') this._badAnnounce(peer)
+      return Promise.resolve()
+    }
+    // A blocked author is refused before anything is queued or fetched (no
+    // quarantine core is opened for it).
+    if (this._isBlocked(key)) {
+      this._reject(peer, key, 'blocked')
       return Promise.resolve()
     }
     return this._enqueue(key, cert, peer)
@@ -738,7 +800,10 @@ class Seeder {
     if (this.gateHook) await this.gateHook(key)
     if (this._closing) return
     if (res.error) return this._reject(peer, key, 'timeout')
-    const verdict = gateVerdict(res.raw, key, this.association)
+    // A snapshot adopted while the fetch ran (C6): _drop cannot reach a key
+    // that is not served yet, so every await below is followed by a re-check.
+    if (this._isBlocked(key)) return this._reject(peer, key, 'blocked')
+    const verdict = gateVerdict(res.raw, key, this.association, this._certOpts())
     if (verdict !== null) {
       const out = this._reject(peer, key, verdict)
       if (verdict !== 'not-in-log') out.shared = true
@@ -767,6 +832,13 @@ class Seeder {
     let opening = false
     try {
       if (this.admitHook) await this.admitHook(key, 'persist')
+      const before = this._blockedReason(key, res.raw)
+      if (before !== null) {
+        // Nothing persisted or opened yet: un-admit in memory only.
+        this._admitted.delete(key)
+        if (this._closing) return
+        return this._reject(peer, key, before)
+      }
       await this._persist()
       if (this._closing) return
       opening = true
@@ -787,6 +859,23 @@ class Seeder {
       return this._reject(peer, key, 'admission-failed')
     }
     if (this._closing) return
+    const after = this._blockedReason(key, res.raw)
+    if (after !== null) {
+      // Adopted while persisting or opening: the key is listed and its core
+      // open but not served. Close, purge (a failure is fatal and keeps it
+      // listed for the next start), un-admit, persist, then refuse.
+      await core.close().catch(noop)
+      try {
+        if (await this._stored(key)) await this._purge(key)
+      } catch {
+        if (!this._closing) this._fatal(key)
+        return
+      }
+      this._admitted.delete(key)
+      await this._persist().catch(noop)
+      if (this._closing) return
+      return this._reject(peer, key, after)
+    }
     this._serve(key, core, { regate: true })
     // A resumed main-store core already over the quota was dropped inside
     // _serve (rejected sent, purge under way): no join, no admitted (item 6).
@@ -797,6 +886,23 @@ class Seeder {
     peer.send({ type: 'admitted', key, length })
     this.log({ event: 'admitted', key, length })
     return { type: 'admitted', length, shared: true }
+  }
+
+  _isBlocked (key) {
+    return this._blocklist !== null && this._blocklist.blocked().has(key)
+  }
+
+  // Options for every certificate check: the revoked issuers of the current
+  // snapshot (none before start).
+  _certOpts () {
+    return { revokedIssuers: this._blocklist ? this._blocklist.revokedIssuers() : new Set() }
+  }
+
+  // Re-check of an admission in flight against the snapshot current now:
+  // 'blocked', 'revoked-issuer' (block 0 from a now revoked issuer) or null.
+  _blockedReason (key, raw) {
+    if (this._isBlocked(key)) return 'blocked'
+    return gateVerdict(raw, key, this.association, this._certOpts()) === 'revoked-issuer' ? 'revoked-issuer' : null
   }
 
   _reject (peer, key, reason) {
@@ -840,16 +946,40 @@ class Seeder {
       // block 0 than the quarantine did.
       if (entry.gating) return
       entry.gating = true
-      localVerdict(entry.core, key, this.association).then((reason) => {
-        entry.gating = false
-        if (entry.dropped || this._closing) return
-        if (reason !== null) return this._drop(key, reason)
-        entry.gated = true
-        this._broadcastHave(key, entry.core.contiguousLength)
-      })
+      this._gate(key, entry)
       return
     }
     this._broadcastHave(key, length)
+  }
+
+  // Local gate of a served, not yet gated replica. The verdict is computed
+  // across an await with the revoked issuers current at call time, while
+  // _onBlocklistAdopted only re-checks entries already gated: a snapshot
+  // adopted in between would otherwise let a stale pass mark the entry gated
+  // and advertise a diary from a now revoked issuer for good (block 0 is
+  // never re-checked on later growth). So a pass is applied only when no
+  // moderation adoption happened meanwhile; otherwise the gate runs again
+  // with the then-current snapshot (entry.gating stays true throughout, so
+  // _onGrow never starts a second one).
+  _gate (key, entry) {
+    const gen = this._moderationGen
+    localVerdict(entry.core, key, this.association, this._certOpts()).then(async (reason) => {
+      if (this.regateHook) await this.regateHook(key, reason)
+      if (entry.dropped || this._closing) {
+        entry.gating = false
+        return
+      }
+      if (reason === null && this._isBlocked(key)) reason = 'blocked'
+      if (reason === null && gen !== this._moderationGen) return this._gate(key, entry)
+      entry.gating = false
+      if (reason !== null) return this._drop(key, reason)
+      entry.gated = true
+      this._broadcastHave(key, entry.core.contiguousLength)
+    }).catch(() => {
+      // Only a throwing test hook gets here: fail closed (never gated).
+      entry.gating = false
+      if (!entry.dropped && !this._closing) this._drop(key, 'not-in-log')
+    })
   }
 
   _broadcastHave (key, length) {
@@ -938,6 +1068,60 @@ class Seeder {
     const next = this._writeQueue.then(write, write)
     this._writeQueue = next.catch(noop)
     return next
+  }
+
+  // blocklist.json goes through the same serialized writer as
+  // admitted.json. The snapshot itself is never added to admitted.json.
+  // createBlocklistState.offer re-checks the order inside its own queue and
+  // swaps only after this resolves (C5); the write queue alone would not.
+  _saveBlocklist (snapshot) {
+    const write = () => writeBlocklist(this.dataDir, snapshot)
+    const next = this._writeQueue.then(write, write)
+    this._writeQueue = next.catch(noop)
+    return next
+  }
+
+  _offerBlocklist (snapshot, from) {
+    return this._blocklist.offer(snapshot).then((result) => {
+      if (result.adopted) this._onBlocklistAdopted(result, from)
+      return result
+    })
+  }
+
+  // A newer snapshot was adopted (and saved): tell every other connection
+  // (C4 fan-out), then drop every served diary it now blocks through the
+  // crash-safe _drop (purge before un-listing). Admissions in flight
+  // re-check after each await (_admitReserved). A key the snapshot unblocks
+  // is not re-admitted: the author's next announce runs the normal gate.
+  _onBlocklistAdopted (result, from) {
+    if (this._closing) return
+    const snapshot = this._blocklist.current()
+    // Before anything else: a gate verdict in flight (_gate) must not apply
+    // a pass computed against the previous snapshot.
+    if (result.added.size > 0 || result.revokedAdded.size > 0) this._moderationGen++
+    this.log({ event: 'blocklist', seq: snapshot.seq })
+    for (const handle of this._blocklistHandles) {
+      if (handle !== from) handle.announce()
+    }
+    for (const key of [...this._served.keys()]) {
+      if (this._isBlocked(key)) this._drop(key, 'blocked')
+    }
+    if (result.revokedAdded.size === 0) return
+    // Newly revoked issuers: re-run the local gate on every served replica
+    // whose block 0 has been gated. An ungated one is either waiting for
+    // block 0 (gated later with the then-current snapshot) or has a verdict
+    // in flight, which _gate re-runs because the generation moved.
+    for (const [key, entry] of this._served) {
+      if (!entry.gated) continue
+      // Any failing verdict drops (fail closed): a block 0 that cannot be
+      // read now ('not-in-log') would otherwise stay served with gated set,
+      // and later growth never re-checks it. An honest author is gated
+      // afresh on its next announce.
+      localVerdict(entry.core, key, this.association, this._certOpts()).then((reason) => {
+        if (reason === null || entry.dropped || this._closing) return
+        if (this._served.get(key) === entry) this._drop(key, reason)
+      })
+    }
   }
 
   // Bounded per-key announce queue (R4.7, review item 1): one admission
@@ -1146,10 +1330,28 @@ class Seeder {
   }
 
   // Everything after the connection cap, shared by swarm and external
-  // sockets: replicate the store, then attach the admission channel.
+  // sockets: replicate the store, then the blocklist channel (right after
+  // replicate, before the hello: protomux pairs an incoming open only once
+  // this side has opened or registered the protocol, C2), then the
+  // admission channel. A peer from before B2 rejects the blocklist open and
+  // stays connected (blocklist-net.js header).
   _attachPeer (socket) {
     const onDropped = (ev) => this.log(ev)
     this.store.replicate(socket)
+    let handle = null
+    try {
+      handle = attachBlocklist(socket, {
+        current: () => this._blocklist.current(),
+        offer: (snapshot) => this._offerBlocklist(snapshot, handle),
+        compare: compareSnapshots,
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._blocklistHandles.add(handle)
+    socket.once('close', () => this._blocklistHandles.delete(handle))
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
@@ -1210,6 +1412,7 @@ class Seeder {
         try { await this.store.close() } catch {}
       }
       this._peers.clear()
+      this._blocklistHandles.clear()
       this._resolveClosed()
     })()
     return this._closing
