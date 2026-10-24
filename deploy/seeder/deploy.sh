@@ -368,13 +368,15 @@ servido_json() {
 
 # O serviço de conta pelo domínio: prova o handle /account/* do Caddy e o
 # contêiner account. O fallback do Caddy também responderia 200, então o corpo
-# precisa ser exatamente {"status":"ok"} e o tipo, JSON. /account/health
-# responde ok mesmo sem emissor configurado (a cerimônia vem depois do
-# deploy). Só esta URL fixa, sem consulta: nenhum código do Google passa aqui.
+# precisa ser exatamente {"status":"ok"} seguido de LF (o serviço termina todo
+# corpo JSON com uma quebra de linha: apps/cli/lib/account/server.js, send) e
+# o tipo, JSON. /account/health responde ok mesmo sem emissor configurado (a
+# cerimônia vem depois do deploy). Só esta URL fixa, sem consulta: nenhum
+# código do Google passa aqui.
 servido_conta() {
   local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp" tipo
   rm -f "$baixado" "$esperado"
-  if printf '%s' '{"status":"ok"}' >"$esperado" \
+  if printf '%s\n' '{"status":"ok"}' >"$esperado" \
     && tipo=$(curl -fsS --connect-timeout 5 --max-time 10 -o "$baixado" -w '%{content_type}' \
       "https://$domain/account/health") \
     && [[ $tipo =~ $json_type_re ]] \

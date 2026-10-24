@@ -585,7 +585,8 @@ function createAccountServer ({ association, origin, google, store, issuer = nul
     states.delete(state)
     const row = store.get(id)
     if (row === null || row.state !== state || row.phase !== 'finish') return back('erro')
-    if (!limits.callback(id)) throw over()
+    // A top-level navigation: answer with the page, not a JSON 429.
+    if (!limits.callback(id)) return back('erro')
     const error = url.searchParams.get('error')
     if (error !== null) return back('cancelado')
     const code = url.searchParams.get('code')

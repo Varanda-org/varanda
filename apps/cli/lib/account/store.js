@@ -235,10 +235,18 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     return !Object.hasOwn(row, 'sub')
   }
 
-  // Drops the oldest unproven row (of `member`, or of anyone when null).
-  function evictOldestUnproven (member) {
+  // A bare row only went through start(): no key proof yet. Member keys are
+  // public, so the per-member cap (which anyone can trigger by naming a key)
+  // only ever evicts bare rows: a row the member signed (reserve) survives
+  // until Google answers or its TTL ends, unless a flood fills the table.
+  function bare (row) {
+    return row.phase === 'reserve' && unproven(row)
+  }
+
+  // Drops the oldest pending row for which `match(row)` is true.
+  function evictOldest (match) {
     for (const [id, row] of pending) {
-      if (unproven(row) && (member === null || row.member === member)) {
+      if (match(row)) {
         pending.delete(id)
         return true
       }
@@ -254,10 +262,13 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     sweep()
     let own = 0
     for (const row of pending.values()) {
-      if (row.member === member && unproven(row)) own++
+      if (row.member === member && bare(row)) own++
     }
-    if (own >= MAX_UNPROVEN_PER_MEMBER) evictOldestUnproven(member)
-    if (pending.size >= MAX_PENDING && !evictOldestUnproven(null)) throw fail('lotado')
+    if (own >= MAX_UNPROVEN_PER_MEMBER) evictOldest((row) => row.member === member && bare(row))
+    // Table full (only a flood gets here): the oldest row without a Google
+    // answer goes, bare or signed, so new logins outlive abandoned ones;
+    // claimed rows are never evicted.
+    if (pending.size >= MAX_PENDING && !evictOldest(unproven)) throw fail('lotado')
     const row = {
       id: randomToken(),
       member,

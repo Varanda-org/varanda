@@ -162,6 +162,9 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // The account service is probed through the domain, and its OAuth client
     // must be configured before anything changes.
     '/account/health',
+    // The service ends every JSON body with LF (apps/cli/lib/account/server.js
+    // send); account.test.js pins the same bytes.
+    "printf '%s\\n' '{\"status\":\"ok\"}'",
     'VARANDA_GOOGLE_CLIENT_ID'
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)

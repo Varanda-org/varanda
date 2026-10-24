@@ -219,6 +219,8 @@ test('full link: start, reserve proof, Google with PKCE, finish proof, certifica
   const health = await s.api('GET', '/account/health')
   t.is(health.status, 200)
   t.alike(health.body, { status: 'ok' })
+  // The exact bytes deploy.sh (servido_conta) compares with cmp.
+  t.is(await (await fetch('http://127.0.0.1:' + s.port + '/account/health')).text(), '{"status":"ok"}\n', 'health body is {"status":"ok"} + LF')
   for (const [k, v] of [['cache-control', 'no-store'], ['x-content-type-options', 'nosniff'], ['referrer-policy', 'no-referrer']]) {
     t.is(health.headers.get(k), v, k)
   }

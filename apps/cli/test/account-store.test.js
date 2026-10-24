@@ -130,7 +130,7 @@ test('a full table evicts the oldest unproven row', (t) => {
   t.ok(store.get(extra.id), 'the new row is live')
 })
 
-test('a full table evicts a key-proven row without sub and keeps the Google-claimed one', async (t) => {
+test('a full table evicts the oldest row without sub (a key-proven one here) and keeps the Google-claimed one', async (t) => {
   const { store, iss } = setup(t)
   const a = memberKey()
   const reserved = store.start({ member: a, username: 'bia' })
@@ -141,9 +141,9 @@ test('a full table evicts a key-proven row without sub and keeps the Google-clai
   const rows = []
   for (let i = 2; i < MAX_PENDING; i++) rows.push(store.start({ member: fillerMember(i), username: fillerName(i) }))
   store.start({ member: memberKey(), username: 'extra' })
-  t.is(store.get(reserved.id), null, 'the key-proven row is the oldest unproven one: evicted')
+  t.is(store.get(reserved.id), null, 'the key-proven row is the oldest row without sub: evicted')
   t.ok(store.get(claimed.id), 'the row holding Google claims survives')
-  t.ok(store.get(rows[0].id), 'the next unproven row stays')
+  t.ok(store.get(rows[0].id), 'the next row without sub stays')
   t.ok(store.start({ member: memberKey(), username: 'bia' }), 'a key-proven row never held its name')
   throwsCode(t, () => store.start({ member: memberKey(), username: 'caio' }), 'nome-em-uso', 'the claimed row holds its name')
   for (let i = 0; i < 3; i++) store.start({ member: memberKey(), username: 'mais_' + i })
@@ -529,4 +529,18 @@ test('readOnly: no mkdir or chmod, reads the links, refuses every disk mutation'
   const missing = path.join(path.dirname(dir), 'nao-existe')
   t.is(openAccountStore(missing, { readOnly: true }).exportLinks().length, 0, 'a missing dir reads as empty')
   t.absent(fs.existsSync(missing), 'and is not created')
+})
+
+test('starts naming a public key never evict the row that key signed', async (t) => {
+  const { store, iss } = setup(t)
+  const victim = memberKey()
+  const signed = store.start({ member: victim, username: 'vitima' })
+  store.reserve(signed.id)
+  // Anyone can name the victim's (public) key in start(): these never touch
+  // the row the victim already signed (the per-member cap drops bare rows).
+  for (let i = 0; i < MAX_UNPROVEN_PER_MEMBER + 2; i++) store.start({ member: victim, username: 'outro' + i })
+  t.ok(store.get(signed.id), 'the signed row survives the per-member cap')
+  store.putGoogle(signed.id, { sub: 'sub-vitima', email: 'v@example.test' })
+  const res = await store.finish(signed.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+  t.is(res.cert.member, victim, 'the victim still completes the link')
 })
