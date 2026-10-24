@@ -1,14 +1,19 @@
 // Publicar: the composer sheet. post.create, or post.reply when a post was
 // chosen to answer. The shell keeps this component mounted: the draft lives in
 // its state, outside the Modal, so closing the sheet keeps it.
+// On the browser node a post that cannot go out now (no network, or the write
+// gate could not reach the seeder) is kept in the outbox ('fila de saída',
+// ../outboxProvider) and sent later; Diário lists it until then.
 // Design: apps/site/artwork/app-design.md.
 
 import { useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useOutbox } from '../outboxProvider'
+import { GATE_MESSAGE } from '../outbox'
 import { countChars, handleOf } from '../format'
-import { ErrorText, errorText, useAction } from '../ui'
+import { ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -69,6 +74,7 @@ function Ring ({ progress }) {
 
 export default function Publicar ({ open, reply, me, onClose, onClearReply, onPublished }) {
   const node = useNode()
+  const outbox = useOutbox()
   const [text, setText] = useState('')
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
@@ -85,12 +91,35 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
   const valid = len >= 1 && len <= MAX_TEXT
   const busy = action.pending || checking
   const self = me || { publicKey: null, name: null }
+  const canQueue = outbox.available && typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
+    !!(node.config && node.config.association)
+  const offlineQueue = canQueue && node.online === false
 
   // Clears only what was sent (an edit made meanwhile stays) and tells the
   // shell, which shows the toast and clears the reply if it still matches.
   const published = (sent, sentReply) => {
     setText((current) => (current === sent ? '' : current))
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
+  }
+
+  // Keeps the post in the outbox (the reply target verbatim). True when it
+  // was stored; otherwise the draft stays with the reason.
+  const queue = (sent, sentReply) => {
+    try {
+      outbox.add({
+        author: self.publicKey,
+        association: node.config.association,
+        kind: sentReply ? 'reply' : 'post',
+        to: sentReply ? sentReply.ref : null,
+        text: sent
+      })
+    } catch (err) {
+      setCheckError(errorText(err))
+      return false
+    }
+    setText((current) => (current === sent ? '' : current))
+    onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    return true
   }
 
   const send = async () => {
@@ -100,13 +129,27 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     const startedAt = Date.now()
     const sent = text
     const sentReply = reply
+    if (offlineQueue) {
+      queue(sent, sentReply)
+      return
+    }
     // The draft is kept on any failure; a request is never resent.
-    const r = await action.run(() => sentReply
+    let raw = null
+    const r = await action.run(() => (sentReply
       ? node.request('post.reply', { to: sentReply.ref, text: sent })
-      : node.request('post.create', { text: sent }))
+      : node.request('post.create', { text: sent })).catch((err) => {
+      raw = err
+      throw err
+    }))
     if (r.ok) {
       confirm(seqOf(r.value))
       return published(sent, sentReply)
+    }
+    // The write gate could not reach the seeder: nothing was written, so the
+    // post waits in the outbox.
+    if (canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+      if (queue(sent, sentReply)) action.clearError()
+      return
     }
     if (!r.uncertain) return
     // Uncertain: re-read the own diary before offering the action again
@@ -147,7 +190,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     <Sheet
       open={open}
       onClose={onClose}
-      right={<Pill label='Publicar' filled onPress={send} pending={busy} disabled={!valid} />}
+      right={<Pill label={offlineQueue ? 'Guardar' : 'Publicar'} filled onPress={send} pending={busy} disabled={!valid} />}
     >
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView style={styles.flex} keyboardShouldPersistTaps='handled'>
@@ -191,6 +234,9 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
             <Ring progress={len / MAX_TEXT} />
             <Text style={[styles.counter, len >= MAX_TEXT && styles.counterFull]}>{len + '/' + MAX_TEXT}</Text>
           </View>
+          {offlineQueue
+            ? <View style={styles.errors}><Soft>sem rede: a publicação fica na fila de saída e sai sozinha quando a conexão voltar</Soft></View>
+            : null}
           <View style={styles.errors}>
             <ErrorText>{action.error}</ErrorText>
             <ErrorText>{checkError}</ErrorText>

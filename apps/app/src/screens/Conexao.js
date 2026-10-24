@@ -110,6 +110,9 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
             <Mono>{displayText(node.config.association)}</Mono>
             <Mono>{displayText(node.config.seederUrl)}</Mono>
           </View>
+          {node.hostedSource === 'remembered'
+            ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
+            : null}
           {ready ? null : <Btn label='tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
           <Btn label='usar outra configuração' onPress={() => setManual(true)} secondary />
         </Card>

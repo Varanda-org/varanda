@@ -16,6 +16,7 @@ import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
 import { atHandle } from '../format'
+import { useOutbox } from '../outboxProvider'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { colors, fonts } from '../ui/theme'
 
@@ -29,7 +30,7 @@ function staleText (userId) {
 
 const NO_PRF_TEXT = 'Este navegador ou gerenciador de passkeys não oferece o recurso necessário (PRF). Use o Chrome ou o Edge com o Gerenciador de Senhas do Google, ou o Safari 18 com as Chaves do iCloud.'
 const EXISTS_TEXT = 'Já existe um diário neste navegador; outra passkey é outra identidade.'
-const RESET_TEXT = 'A identidade antiga não pode ser reconstruída; ela precisa de um certificado novo.'
+const RESET_TEXT = 'A identidade antiga não pode ser reconstruída; ela precisa de um certificado novo. As publicações dela que ainda estão na fila de saída são apagadas.'
 const PENDING_TEXT = 'A passkey foi criada. Conclua a criação para derivar a sua identidade.'
 
 function mismatchText (legacy) {
@@ -458,6 +459,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
 
 export default function Identidade ({ active, embedded = false, onInfo }) {
   const node = useNode()
+  const outbox = useOutbox()
   const passkey = node.passkey
   const pkStatus = passkey !== null ? passkey.status : null
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
@@ -647,8 +649,17 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
 
   // Only the reset: the next click is 'entrar com a passkey' (a ceremony
   // after an awaited reset would have lost the click's activation).
+  // The outbox items of the identity being reset go first (their diary is
+  // about to be deleted): a crash in between never leaves posts queued for a
+  // diary that is gone. A reset that then fails keeps them deleted, as
+  // RESET_TEXT says.
   const doReset = () => {
     if (!pkStart()) return
+    const oldKey = pkStatus !== null ? pkStatus.publicKey : null
+    if (typeof oldKey === 'string' && !outbox.forgetAuthor(oldKey)) {
+      setPkError('não foi possível apagar a fila de saída deste aparelho')
+      return pkEnd()
+    }
     passkey.reset().then(() => {
       setMismatch(null)
       setAwaitingComplete(false)

@@ -1,3 +1,5 @@
+/* global navigator */
+
 // The node connection of the app: starts or connects, keeps the phase, the
 // sync state (fed by the node's events, so no event is lost while another tab
 // is shown; `sync.stopped` carries the local time `at` it arrived, and
@@ -15,12 +17,27 @@
 // `recovering` is true from an unlock until the once sync that follows it
 // (recover()) has ended: one shared flag, so no screen sends a member request
 // meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
-// anyway is started once more if the certificate is still missing.
+// anyway is started once more if the certificate is still missing. The
+// recovery run blocks the screens only when it has to (recoveryPolicy.js): a
+// diary that already holds its member certificate, or a browser that says it
+// is offline, ends the recovery at once without any sync request, so the
+// local tabs open immediately; going offline during a recovery ends it too,
+// and stops its run (it cannot reach the seeder, and Identidade holds its
+// reads while a once run is active).
+//
+// `online` (web) is the browser's network hint (online.web.js; always true on
+// native). `hostedSource` is where the hosted configuration came from: 'live'
+// (the installation answered), 'remembered' (the installation did not answer
+// and the last valid configuration of this origin is used) or null.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } from './configStore'
+import { isOnline, subscribeOnline } from './online'
+import { askPersist } from './persist'
+import { startPwa } from './pwa'
+import { blockingRecovery } from './recoveryPolicy'
 import { errorText } from './ui'
 
 const MAX_SYNC_LINES = 200
@@ -63,6 +80,9 @@ export function NodeProvider ({ children }) {
   // true when the live configuration came from the installation's
   // /varanda.json (discovered, never saved).
   const [hosted, setHosted] = useState(false)
+  // 'live' | 'remembered' | null (see the header).
+  const [hostedSource, setHostedSource] = useState(null)
+  const [online, setOnline] = useState(() => isOnline())
   const [sync, setSync] = useState({ active: null, lines: [], stopped: null })
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
@@ -82,6 +102,21 @@ export function NodeProvider ({ children }) {
   const [pkGeneration, setPkGeneration] = useState(0)
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
+  // The current sync state, for callbacks that must not depend on it.
+  const syncRef = useRef(sync)
+  syncRef.current = sync
+  // Bumped when going offline cancels the recovery: a recovery step that
+  // awaited across it starts nothing (independent of render timing).
+  const recoveryEpochRef = useRef(0)
+  // true while the recovery's own sync.start is in flight, then the runId it
+  // started: going offline stops only that run, never an adopted one (a
+  // continuous run, or a write's internal run that stands in for it).
+  const recoveryStartRef = useRef(false)
+  const recoveryOwnRunRef = useRef(null)
+
+  useEffect(() => subscribeOnline(setOnline), [])
+  // The service worker (hosted browser-node page only); never awaited.
+  useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
     setSync((prev) => {
@@ -175,7 +210,10 @@ export function NodeProvider ({ children }) {
       return connect(saved)
     }
     setPhase('loading')
-    const found = await discoverConfig()
+    const found = await discoverConfig({
+      onLine: isOnline(),
+      onStatus: (s) => setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
+    })
     if (found !== null) {
       setHosted(true)
       return connect(found)
@@ -213,6 +251,7 @@ export function NodeProvider ({ children }) {
       try { await conn.close() } catch {}
     }
     await clearConfig()
+    setHostedSource(null)
     await begin()
   }, [begin])
 
@@ -227,6 +266,7 @@ export function NodeProvider ({ children }) {
       try { await conn.close() } catch {}
     }
     setHosted(false)
+    setHostedSource(null)
     await connect(cfg, { save: true })
   }, [connect])
 
@@ -298,6 +338,10 @@ export function NodeProvider ({ children }) {
         }
         await readPasskey(conn, changed)
         if (changed) setEpoch((e) => e + 1)
+        if (changed && (name === 'unlock' || name === 'complete')) {
+          // Right after the person's own click; a denial changes nothing.
+          askPersist(typeof navigator === 'object' && navigator !== null ? navigator.storage : null).catch(() => {})
+        }
         return result
       },
       async (err) => {
@@ -320,13 +364,40 @@ export function NodeProvider ({ children }) {
   const beginRecovery = useCallback(() => setRecovery({ runId: null, restarted: false }), [])
   const endRecovery = useCallback(() => setRecovery(null), [])
   // A run already active (started from Sincronizar, or a gate run) is
-  // adopted as the recovery run: reads now would preempt it.
+  // adopted as the recovery run: reads now would preempt it. With no run
+  // active or starting, one local node.info read decides whether the run is
+  // needed at all (recoveryPolicy.js).
   const startRecoveryRun = useCallback(async (restarted) => {
+    const epoch = recoveryEpochRef.current
+    // A continuous run never ends, so it cannot be a recovery that blocks the
+    // screens until it stops: it keeps syncing in the background instead.
+    const running = syncRef.current.active
+    if (running !== null && running.once !== true) {
+      setRecovery(null)
+      return false
+    }
+    if (syncRef.current.active === null && startingRef.current === 0) {
+      let info = null
+      try { info = await request('node.info', {}) } catch {}
+      // Cancelled while reading (the browser went offline): start nothing.
+      if (recoveryEpochRef.current !== epoch) return false
+      if (!blockingRecovery({ onLine: isOnline(), memberCert: info !== null && info.memberCert === true })) {
+        setRecovery(null)
+        return false
+      }
+    }
+    recoveryStartRef.current = true
     try {
       const r = await request('sync.start', { once: true, timeoutMs: RECOVERY_TIMEOUT_MS })
+      // Run ids restart with every node session: the run is tied to its
+      // connection.
+      recoveryOwnRunRef.current = { conn: connRef.current, runId: r.runId }
       setRecovery((cur) => (cur === null ? null : { runId: r.runId, restarted }))
       return true
-    } catch {}
+    } catch {
+    } finally {
+      recoveryStartRef.current = false
+    }
     try {
       const st = await request('sync.status', {}) // never preempts
       if (st.state === 'running') {
@@ -338,6 +409,28 @@ export function NodeProvider ({ children }) {
     return false
   }, [request])
   const recover = useCallback(() => startRecoveryRun(false), [startRecoveryRun])
+
+  // Offline: the recovery stops blocking the screens, and its run (which
+  // cannot reach the seeder now) is stopped too: Identidade holds its reads
+  // while a once run is active, so a run left to time out would keep the
+  // local tabs closed for up to RECOVERY_TIMEOUT_MS. Native is always online.
+  useEffect(() => {
+    if (online) return
+    recoveryEpochRef.current += 1
+    setRecovery(null)
+    // Only the run the recovery itself started is stopped (offline it can
+    // only time out, and Identidade holds its reads while a once run is
+    // active). An adopted run is left alone: sync.stop would also clear the
+    // person's continuous-sync intent, which a write's internal run preserves.
+    // A start still in flight is the recovery's own: the session runs
+    // requests in order, so this stop ends the run it begins.
+    const active = syncRef.current.active
+    const own = recoveryOwnRunRef.current
+    const ownActive = active !== null && own !== null && own.conn === connRef.current && active.runId === own.runId
+    if (ownActive || (active === null && recoveryStartRef.current)) {
+      request('sync.stop', {}).catch(() => {})
+    }
+  }, [online, request])
 
   useEffect(() => {
     if (recovery === null || recovery.runId === null) return
@@ -381,8 +474,8 @@ export function NodeProvider ({ children }) {
     : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkReset, recovering, beginRecovery, endRecovery, recover])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey
-  }), [phase, config, error, hosted, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey])
+    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey
+  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

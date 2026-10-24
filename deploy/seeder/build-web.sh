@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Gera o app web (o PWA com o nó no navegador) em apps/app/dist, num
-# contêiner Node: o servidor não precisa de Node instalado. Rode da raiz do
-# repositório, antes de subir deploy/seeder/compose.web.yaml (e de novo a
-# cada atualização do código).
+# Gera o app web (o PWA com o nó no navegador e o service worker, sw.js) em
+# apps/app/dist, num contêiner Node: o servidor não precisa de Node instalado.
+# Rode da raiz do repositório, antes de subir deploy/seeder/compose.web.yaml (e
+# de novo a cada atualização do código).
 #   bash deploy/seeder/build-web.sh
 # Com um diretório como argumento (é o que deploy/seeder/deploy.sh faz), gera
 # o app nesse diretório, uma cópia exportada do commit, e não publica nada:
@@ -38,6 +38,7 @@ docker run --rm --init \
 
 test -f "$src/apps/app/dist/index.html"
 test -f "$src/apps/app/dist/varanda-node.js"
+test -f "$src/apps/app/dist/sw.js"
 if [ "$#" -gt 0 ]; then
   echo "app web gerado em $src/apps/app/dist (não publicado)"
   exit 0
