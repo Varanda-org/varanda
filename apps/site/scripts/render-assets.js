@@ -30,6 +30,7 @@ const APP = 'apps/app'
 const IOS = APP + '/ios/Varanda/Images.xcassets'
 const RES = APP + '/android/app/src/main/res'
 const PUB = 'apps/site/public'
+const WEB = APP + '/public'
 const DENSITIES = [['mdpi', 1], ['hdpi', 1.5], ['xhdpi', 2], ['xxhdpi', 3], ['xxxhdpi', 4]]
 
 function targets () {
@@ -63,7 +64,16 @@ function targets () {
     { out: PUB + '/apple-touch-icon.png', src: 'icon-ios.svg', size: 180, opaque: true },
     { out: PUB + '/assets/logo-lockup.svg', src: 'lockup-horizontal.svg', copy: true },
     { out: PUB + '/assets/logo-mark.svg', src: 'mark.svg', copy: true },
-    { out: PUB + '/assets/cadeira.svg', src: 'chair.svg', copy: true }
+    { out: PUB + '/assets/cadeira.svg', src: 'chair.svg', copy: true },
+    // The installable web app (apps/app/public/manifest.webmanifest). The
+    // maskable icon is the Android adaptive foreground, whose artwork sits
+    // inside the safe zone, flattened onto the same #fbf8f3 as
+    // icon-android-background.svg (the full-bleed square a mask may crop);
+    // icon-ios.svg runs nearly edge to edge and would be cut by a mask.
+    { out: WEB + '/icon-192.png', src: 'icon-ios.svg', size: 192, opaque: true },
+    { out: WEB + '/icon-512.png', src: 'icon-ios.svg', size: 512, opaque: true },
+    { out: WEB + '/icon-maskable-512.png', src: 'icon-android-foreground.svg', size: 512, opaque: true },
+    { out: WEB + '/apple-touch-icon.png', src: 'icon-ios.svg', size: 180, opaque: true }
   )
   return t
 }

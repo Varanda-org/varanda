@@ -227,7 +227,7 @@ Hyperswarm refreshes a discovery only every 10 minutes, so two swarms whose firs
 
 ### Environment summary
 
-`VARANDA_DATA`, `VARANDA_ASSOCIATION`, `VARANDA_BOOTSTRAP`, `VARANDA_DHT_HOST`, `VARANDA_WS_PORT`, `VARANDA_WS_HOST`.
+`VARANDA_DATA`, `VARANDA_ASSOCIATION`, `VARANDA_BOOTSTRAP`, `VARANDA_DHT_HOST`, `VARANDA_WS_PORT`, `VARANDA_WS_HOST`, `VARANDA_WS_ORIGIN`.
 
 ## 5. Admission channel (`'varanda/admission/1'`)
 
@@ -490,7 +490,7 @@ Shape: `{ ok, peers, seeders, admitted: boolean, rejected: null | reason, downlo
 
 `--data <dir>` (`VARANDA_DATA`, default `./data`), `--association <hex64>` (`VARANDA_ASSOCIATION`), `--bootstrap <host:port>` (repeatable; `VARANDA_BOOTSTRAP` comma-separated), `--dht-host <ip>` (`VARANDA_DHT_HOST`; a non-empty string without whitespace, else UsageError `dht-host inválido`; passed as `host` to `runSync` and `Seeder`, R5.11), `--json`, `--help` / `-h`. Only `--flag value` syntax; booleans: `--json`, `--once`, `--help`, `-h`.
 
-String command flags include `--seeder` (hex64 any case -> lowercase, else UsageError `chave inválida`), `--health-port <n>` (`VARANDA_HEALTH_PORT`; canonical decimal `0`-`65535`, `0` = the system picks a free port, else UsageError `health-port inválido`) and `--health-host <ip>` (`VARANDA_HEALTH_HOST`; a non-empty string without whitespace, else UsageError `health-host inválido`; default `127.0.0.1`, used only with `--health-port`). `--ws-port <n>` (`VARANDA_WS_PORT`; same rule as `--health-port`, else UsageError `ws-port inválido`) and `--ws-host <ip>` (`VARANDA_WS_HOST`; same rule as `--health-host`, else UsageError `ws-host inválido`; default `127.0.0.1`, used only with `--ws-port`). Only `seed` reads the two health flags and the two ws flags. As with `--dht-host`, a flag wins over its variable, and a variable that is set but invalid is a usage error for every command. `flags` keys include `seeder`, `dhtHost`, `healthPort`, `healthHost`, `wsPort` (`null` when absent) and `wsHost` (R5.12).
+String command flags include `--seeder` (hex64 any case -> lowercase, else UsageError `chave inválida`), `--health-port <n>` (`VARANDA_HEALTH_PORT`; canonical decimal `0`-`65535`, `0` = the system picks a free port, else UsageError `health-port inválido`) and `--health-host <ip>` (`VARANDA_HEALTH_HOST`; a non-empty string without whitespace, else UsageError `health-host inválido`; default `127.0.0.1`, used only with `--health-port`). `--ws-port <n>` (`VARANDA_WS_PORT`; same rule as `--health-port`, else UsageError `ws-port inválido`) and `--ws-host <ip>` (`VARANDA_WS_HOST`; same rule as `--health-host`, else UsageError `ws-host inválido`; default `127.0.0.1`, used only with `--ws-port`). `--ws-origin <origin>` (repeatable; `VARANDA_WS_ORIGIN`, comma-separated) lists the browser origins allowed on the WebSocket entry (section 7 "Seeder WebSocket entry"). Only `seed` reads the two health flags and the three ws flags. As with `--dht-host`, a flag wins over its variable, and a variable that is set but invalid is a usage error for every command. `flags` keys include `seeder`, `dhtHost`, `healthPort`, `healthHost`, `wsPort` (`null` when absent), `wsHost` and `wsOrigins` (an array, or `null` when absent) (R5.12).
 
 ### Help (R5.12, exact)
 
@@ -525,6 +525,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --ws-origin
 ```
 
 ### Exit codes and output
@@ -586,7 +587,7 @@ After `run()` resolves or throws, `apps/cli/bin/varanda.js` sets `process.exitCo
 - Each accepted WebSocket becomes a Node duplex (`createWebSocketStream`: one binary frame per write) handed to `Seeder#acceptStream` (section 4 "External transports"); the socket is closed when that throws or returns `null`. The bytes on the socket are the Noise stream keyed with the seeder key: a TLS proxy may forward them but must not terminate Noise.
 - At most 128 sockets; headers within 4 s. Members stay unauthenticated by design (the announce, section 6), but WebSockets are not subject to CORS, so the entry guards against arbitrary web pages and DNS rebinding:
   - Host check: the `Host` header of every request and upgrade must name this listener, `<bound host>:<port>` (IPv6 bracketed; the port read from the listening socket, so port `0` works), and, when the bind is loopback, also `localhost:<port>`, `127.0.0.1:<port>` or `[::1]:<port>`; anything else -> 421 `host inválido` (an upgrade is answered and its socket destroyed).
-  - Origin policy (upgrades): a request WITHOUT an `Origin` header (a non-browser client: the CLI, Node, native apps) is accepted. A request WITH one must be in the allow-list, else 403 `origem não permitida` (answered and destroyed); `null` and unparsable origins are refused. `startSeedWs({ origins })` takes exact origins (scheme, host and port); without it the default allows any `http:` origin whose hostname is `127.0.0.1`, `localhost` or `[::1]`, on any port, so the loopback spike page works and public pages are refused. There is no CLI flag yet: the public deployment will add `--ws-origin` to allow the PWA's origin.
+  - Origin policy (upgrades): a request WITHOUT an `Origin` header (a non-browser client: the CLI, Node, native apps) is accepted. A request WITH one must be in the allow-list, else 403 `origem não permitida` (answered and destroyed); `null` and unparsable origins are refused. `startSeedWs({ origins })` takes exact origins (scheme, host and port); without it the default allows any `http:` origin whose hostname is `127.0.0.1`, `localhost` or `[::1]`, on any port, so the loopback spike page works and public pages are refused. `seed --ws-origin <origin>` (repeatable; or `VARANDA_WS_ORIGIN`, comma-separated; any flag wins over the variable) passes an explicit list, which REPLACES the loopback default: each value must be an exact `http:`/`https:` origin as a browser sends it (`new URL(v).origin === v`: no path, no trailing slash, no default port, lowercase host), else `uso: ws-origin inválido <value>`; a present source with no origin is `uso: ws-origin inválido (vazio)`. `flags.wsOrigins` is the array or `null`. The public deployment (`deploy/seeder/compose.web.yaml`) sets it to `https://<domain>` and puts a TLS proxy (Caddy, `deploy/seeder/Caddyfile`) in front that rewrites `Host` to `127.0.0.1:<port>` (`header_up Host {upstream_hostport}`) and forwards the Noise bytes untouched.
   - Order of the upgrade checks: Host (421), path (404), Origin (403), seeder ready (503).
   - The seeder's external sub-cap (section 4 "External transports": at most half of `maxConnections`) bounds what WebSocket clients can hold, so a browser tab cannot starve swarm members.
   - Nothing is logged per connection and never an address.

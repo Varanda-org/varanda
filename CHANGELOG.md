@@ -7,6 +7,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Versão web no ar no servidor do semeador: `seed --ws-origin` (ou `VARANDA_WS_ORIGIN`) libera a origem do PWA na entrada WebSocket;
+  `deploy/seeder/compose.web.yaml` e `deploy/seeder/Caddyfile` sobem um Caddy com TLS automático que serve o app e repassa `wss://<domínio>/seeder`; o app web vira um PWA instalável (manifesto e ícones).
 - Protótipo P2P da fase 0 no Holepunch: CLI com identidade, certificado de membro, perfil, publicações, respostas, seguir pessoas, feed e sincronização.
   Semeador com admissão por certificado e referência normativa em `docs/protocol.md`. ([#1](https://github.com/Varanda-org/varanda/pull/1))
 - Monorepo com CLI, núcleo compartilhado, contrato RPC e app P2P para iOS, Android e web.

@@ -377,6 +377,38 @@
       "height": 256,
       "bytes": 6953,
       "sha256": "410e73a3095eece60e5363d5c662e2dd2b3fa71eb6c886a38876d98364dcdf5a"
+    },
+    {
+      "path": "apps/app/public/icon-192.png",
+      "source": "apps/site/artwork/logo/icon-ios.svg",
+      "width": 192,
+      "height": 192,
+      "bytes": 11952,
+      "sha256": "7ace379ce6c60aeeee45b427dde0f667b50f04b1a857f58624e0b4520915d18c"
+    },
+    {
+      "path": "apps/app/public/icon-512.png",
+      "source": "apps/site/artwork/logo/icon-ios.svg",
+      "width": 512,
+      "height": 512,
+      "bytes": 33820,
+      "sha256": "a2ee8445acaa8f868e365167146c3a8293265ff7a219268cf7f143497d1d0516"
+    },
+    {
+      "path": "apps/app/public/icon-maskable-512.png",
+      "source": "apps/site/artwork/logo/icon-android-foreground.svg",
+      "width": 512,
+      "height": 512,
+      "bytes": 21246,
+      "sha256": "b0e95e071fcb9136c3eaca7ba54ea8558aa6d01911fa2f07dc52f3aa042383b0"
+    },
+    {
+      "path": "apps/app/public/apple-touch-icon.png",
+      "source": "apps/site/artwork/logo/icon-ios.svg",
+      "width": 180,
+      "height": 180,
+      "bytes": 11162,
+      "sha256": "20a121a866065ce0b38d4329baa25f76a4eede9825fc4c86f2ee24336ad1c821"
     }
   ]
 }

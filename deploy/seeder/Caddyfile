@@ -1,0 +1,45 @@
+# Caddy na frente do semeador: serve o app web (o PWA, em deploy/seeder/www) e
+# repassa wss://<domínio>/seeder para a entrada WebSocket do semeador em
+# 127.0.0.1. TLS automático (Let's Encrypt) para o domínio em VARANDA_DOMAIN.
+# Usado por deploy/seeder/compose.web.yaml; passo a passo no README, seção
+# "Pôr a versão web no ar".
+{
+	# Sem a API de administração (ela escutaria em 127.0.0.1:2019 do host).
+	admin off
+}
+
+{$VARANDA_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		# 'wasm-unsafe-eval' só permite compilar WebAssembly (os hashes do
+		# nó no navegador), não eval. connect-src: só a própria origem e o
+		# WebSocket do semeador nela.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	# A entrada WebSocket do semeador só aceita o Host 127.0.0.1:<porta>
+	# (defesa contra DNS rebinding): o proxy reescreve o Host para o do
+	# destino. O Origin do navegador (https://<domínio>) segue intacto e o
+	# semeador o confere contra VARANDA_WS_ORIGIN. O Noise vai fim a fim:
+	# o Caddy só termina o TLS.
+	handle /seeder {
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	# O app é uma página única: um caminho que não é arquivo volta para
+	# index.html.
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}
