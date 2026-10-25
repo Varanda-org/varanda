@@ -29,6 +29,21 @@
 // native). `hostedSource` is where the hosted configuration came from: 'live'
 // (the installation answered), 'remembered' (the installation did not answer
 // and the last valid configuration of this origin is used) or null.
+//
+// Sync is automatic. The APP owns the intent (`setAutoSync(wanted)`, decided
+// by the shell, never inferred here) because the node's `syncIntent` is lost
+// on a reload or a lock (docs/rpc.md 6.1). While it is wanted and nothing
+// blocks it (autoSyncPolicy.js), the provider sends ONE `sync.start {}`.
+// Preemptions are left to the node: it restarts a preempted continuous run
+// after the last queued operation, so the app only waits (a grace period
+// extended by every request it sends meanwhile) and, if no run came back,
+// asks `sync.status` (which never preempts) before starting anything. A lost
+// `sync.start` response is uncertain (@varanda/rpc client.js) and may have
+// started the run, so it is reconciled through `sync.status` too, never
+// retried blindly. A run that ends by itself is restarted after a backoff.
+// This logic never sends `sync.stop` (locking stops nothing). Every awaited
+// continuation re-checks the connection, the epoch and the passkey
+// generation. `signals` folds the sync events into UI hints (syncSignals.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText } from '@varanda/rpc'
@@ -38,6 +53,8 @@ import { isOnline, subscribeOnline } from './online'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
+import { EMPTY_SIGNALS, foldSignal, ackFresh as ackFreshSignals } from './syncSignals'
+import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, graceExpired, nextBackoff, startFailure, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
 
 const MAX_SYNC_LINES = 200
@@ -113,12 +130,120 @@ export function NodeProvider ({ children }) {
   // continuous run, or a write's internal run that stands in for it).
   const recoveryStartRef = useRef(false)
   const recoveryOwnRunRef = useRef(null)
+  // Mirrors of the epoch and the passkey generation, bumped synchronously
+  // (bumpEpoch, bumpGeneration): an awaited continuation compares them.
+  const epochRef = useRef(0)
+  const pkGenRef = useRef(0)
+
+  // Auto-sync (see the header). Every value has a ref for the callbacks.
+  const [signals, setSignals] = useState(EMPTY_SIGNALS)
+  const signalsRef = useRef(EMPTY_SIGNALS)
+  const [autoWanted, setAutoWanted] = useState(false)
+  const wantedRef = useRef(false)
+  // true after a start failed for good (no identity); the next
+  // setAutoSync(true) clears it.
+  const [gaveUp, setGaveUp] = useState(false)
+  const gaveUpRef = useRef(false)
+  // true from an uncertain start (or an expired preemption grace) until an
+  // authoritative sync.status answer; a failed read keeps it until the next
+  // connection or epoch.
+  const [reconciling, setReconciling] = useState(false)
+  const reconcilingRef = useRef(false)
+  const [backoffUntil, setBackoffUntil] = useState(0)
+  const backoffUntilRef = useRef(0)
+  const backoffMsRef = useRef(0)
+  // While the node should restart a preempted continuous run: until when the
+  // app waits for its sync.started (0 = not waiting).
+  const [awaitingRestartUntil, setAwaitingRestartUntil] = useState(0)
+  const awaitingRef = useRef(0)
+  // true from the auto-start's sync.start until its continuation ran.
+  const autoInflightRef = useRef(false)
+  const runStartedAtRef = useRef(0)
+  // The one re-evaluation timer (backoff end, grace end).
+  const autoTimerRef = useRef(null)
+  const [autoTick, setAutoTick] = useState(0)
+
+  const setWait = useCallback((until) => {
+    awaitingRef.current = until
+    setAwaitingRestartUntil(until)
+  }, [])
+  const setBackoff = useCallback((until) => {
+    backoffUntilRef.current = until
+    setBackoffUntil(until)
+  }, [])
+  const setRecon = useCallback((on) => {
+    reconcilingRef.current = on
+    setReconciling(on)
+  }, [])
+  const resetSignals = useCallback((next = EMPTY_SIGNALS) => {
+    signalsRef.current = next
+    setSignals(next)
+  }, [])
+  // A run learned from sync.status (no sync.started seen for it): its lines
+  // are folded from now on. A run already followed is kept.
+  const adoptSignals = useCallback((runId, once) => {
+    if (signalsRef.current.runId !== null) return
+    const now = Date.now()
+    if (once === false) runStartedAtRef.current = now
+    resetSignals({ ...signalsRef.current, runId, once, ready: false, peer: false, reconnecting: false, unverified: false, startedAt: now })
+  }, [resetSignals])
+  // A new connection, epoch or identity: what was being waited for, reconciled
+  // or backed off belonged to the previous one.
+  const resetAuto = useCallback(() => {
+    if (autoTimerRef.current !== null) clearTimeout(autoTimerRef.current)
+    autoTimerRef.current = null
+    setRecon(false)
+    setWait(0)
+    setBackoff(0)
+    backoffMsRef.current = 0
+  }, [setRecon, setWait, setBackoff])
+  const bumpEpoch = useCallback(() => {
+    epochRef.current += 1
+    resetAuto()
+    setEpoch((e) => e + 1)
+  }, [resetAuto])
+  // The identity may have changed: a give-up (no identity) no longer holds.
+  const bumpGeneration = useCallback(() => {
+    pkGenRef.current += 1
+    resetAuto()
+    gaveUpRef.current = false
+    setGaveUp(false)
+    setPkGeneration((g) => g + 1)
+  }, [resetAuto])
+
+  useEffect(() => () => {
+    if (autoTimerRef.current !== null) clearTimeout(autoTimerRef.current)
+    autoTimerRef.current = null
+  }, [])
 
   useEffect(() => subscribeOnline(setOnline), [])
   // The service worker (hosted browser-node page only); never awaited.
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
+    const now = Date.now()
+    if (name === 'sync.started') {
+      // The run came back (or a new one began): no restart is awaited.
+      if (awaitingRef.current) setWait(0)
+      if (data.once === false) runStartedAtRef.current = now
+    } else if (name === 'sync.stopped') {
+      // The mode of the run that ended: from the folded signals, else from
+      // the adopted active run.
+      const s = signalsRef.current
+      const a = syncRef.current.active
+      const once = s.runId === data.runId ? s.once : (a !== null && a.runId === data.runId ? a.once : null)
+      if (once === false && data.reason === 'preempted') {
+        const wait = afterPreempt({ once, wanted: wantedRef.current, now })
+        if (wait !== null) setWait(wait.awaitingRestartUntil)
+      } else if (once === false) {
+        const ms = nextBackoff({ reason: data.reason, startedAt: runStartedAtRef.current, stoppedAt: now, previousMs: backoffMsRef.current })
+        if (ms !== null) {
+          backoffMsRef.current = ms
+          setBackoff(now + ms)
+        }
+      }
+    }
+    resetSignals(foldSignal(signalsRef.current, name, data, now))
     setSync((prev) => {
       if (name === 'sync.started') return { ...prev, active: { runId: data.runId, once: data.once }, stopped: null }
       if (name === 'sync.stopped') {
@@ -132,13 +257,14 @@ export function NodeProvider ({ children }) {
       const lines = prev.lines.concat([line])
       return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
     })
-  }, [])
+  }, [setWait, setBackoff, resetSignals])
 
   const connectNow = useCallback(async (cfg, { save = false } = {}) => {
     setPhase('connecting')
     setError('')
     setSync({ active: null, lines: [], stopped: null })
-    setEpoch((e) => e + 1)
+    resetSignals()
+    bumpEpoch()
     setRecovery(null)
     const holder = {}
     try {
@@ -149,7 +275,8 @@ export function NodeProvider ({ children }) {
           connRef.current = null
           setRecovery(null)
           setSync({ active: null, lines: [], stopped: null })
-          setEpoch((e) => e + 1)
+          resetSignals()
+          bumpEpoch()
           setError(code === 4000 ? 'outra aba assumiu a conexão' : 'a conexão com o nó foi encerrada')
           setPhase('error')
         }
@@ -160,7 +287,10 @@ export function NodeProvider ({ children }) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
       const status = await conn.request('sync.status')
-      if (status.state === 'running') setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
+      if (status.state === 'running') {
+        setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
+        adoptSignals(status.runId, status.once)
+      }
       // First paint: the shell must know whether the identity is locked
       // before it renders anything for this connection.
       const identity = conn.identity || null
@@ -172,7 +302,7 @@ export function NodeProvider ({ children }) {
       setHasPasskey(identity !== null)
       setPkStatus(pk)
       setPkError(pkErr)
-      setPkGeneration((g) => g + 1)
+      bumpGeneration()
       setConfig(cfg)
       setPhase('ready')
     } catch (err) {
@@ -184,7 +314,7 @@ export function NodeProvider ({ children }) {
     } finally {
       busyRef.current = false
     }
-  }, [onEvent])
+  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals])
 
   // One connect at a time: a call while one is in flight returns that one.
   const connect = useCallback((cfg, opts) => {
@@ -277,20 +407,34 @@ export function NodeProvider ({ children }) {
     await connect(config)
   }, [connect, config])
 
+  // While the node should restart a preempted continuous run, every request
+  // sent may queue behind (or preempt) it again: the node restarts after the
+  // LAST queued operation, so the grace is extended at send and at settle.
+  const extendWait = useCallback(() => {
+    if (awaitingRef.current) setWait(Date.now() + PREEMPT_GRACE_MS)
+  }, [setWait])
+
   const request = useCallback((method, params) => {
     const conn = connRef.current
     if (!conn) return noConnection()
-    if (method !== 'sync.start') return conn.request(method, params)
+    const waiting = awaitingRef.current !== 0
+    if (waiting) extendWait()
+    if (method !== 'sync.start') {
+      const pending = conn.request(method, params)
+      if (waiting) pending.then(extendWait, extendWait)
+      return pending
+    }
     startingRef.current += 1
     setStarting(true)
     const settled = () => {
       startingRef.current -= 1
       if (startingRef.current === 0) setStarting(false)
+      if (waiting) extendWait()
     }
     const pending = conn.request(method, params)
     pending.then(settled, settled)
     return pending
-  }, [])
+  }, [extendWait])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.
@@ -302,17 +446,17 @@ export function NodeProvider ({ children }) {
       if (connRef.current === conn) {
         setPkStatus(st)
         setPkError('')
-        if (changed) setPkGeneration((g) => g + 1)
+        if (changed) bumpGeneration()
       }
       return st
     } catch (err) {
       if (connRef.current === conn) {
         setPkError(errorText(err))
-        if (changed) setPkGeneration((g) => g + 1)
+        if (changed) bumpGeneration()
       }
       return null
     }
-  }, [])
+  }, [bumpGeneration])
 
   // Calls one identity operation synchronously (no await before it), then
   // re-reads the status whatever the outcome and resolves (or rejects) with
@@ -337,7 +481,7 @@ export function NodeProvider ({ children }) {
             : { ...st, unlocked: false, synced: false, ...(name === 'reset' ? { exists: false, publicKey: null, legacy: false } : {}) }))
         }
         await readPasskey(conn, changed)
-        if (changed) setEpoch((e) => e + 1)
+        if (changed) bumpEpoch()
         if (changed && (name === 'unlock' || name === 'complete')) {
           // Right after the person's own click; a denial changes nothing.
           askPersist(typeof navigator === 'object' && navigator !== null ? navigator.storage : null).catch(() => {})
@@ -349,7 +493,7 @@ export function NodeProvider ({ children }) {
         throw err
       }
     )
-  }, [readPasskey])
+  }, [readPasskey, bumpEpoch])
 
   const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts), [passkeyOp])
   const pkComplete = useCallback(() => passkeyOp('complete'), [passkeyOp])
@@ -468,14 +612,141 @@ export function NodeProvider ({ children }) {
     readPasskey()
   }, [recovery, sync.stopped, sync.active, request, readPasskey, startRecoveryRun])
 
+  // An awaited continuation of `conn` in the epoch/generation it began in.
+  const stillCurrent = useCallback((conn, ep, gen) => (
+    connRef.current === conn && epochRef.current === ep && pkGenRef.current === gen
+  ), [])
+
+  // Did a run start? Asks sync.status on the same connection (it never
+  // preempts, the pattern of startRecoveryRun): a running run is adopted;
+  // only an authoritative idle answer lets the auto-start fire again (after
+  // FIRST_BACKOFF_MS). A failed read keeps `reconciling` until the next
+  // connection or epoch (resetAuto): no start is ever sent blindly.
+  const reconcile = useCallback(async () => {
+    const conn = connRef.current
+    if (!conn) return
+    const ep = epochRef.current
+    const gen = pkGenRef.current
+    setWait(0)
+    setRecon(true)
+    let st
+    try { st = await request('sync.status', {}) } catch { return }
+    if (!stillCurrent(conn, ep, gen) || !reconcilingRef.current) return
+    if (st && st.state === 'running') {
+      setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: st.runId, once: st.once } }))
+      adoptSignals(st.runId, st.once)
+      setRecon(false)
+    } else if (st && st.state === 'idle') {
+      setBackoff(Date.now() + FIRST_BACKOFF_MS)
+      setRecon(false)
+    }
+  }, [request, stillCurrent, setWait, setRecon, setBackoff, adoptSignals])
+
+  // The one auto-start: sync.start {} and the handling of its outcome.
+  const autoStart = useCallback(() => {
+    const conn = connRef.current
+    if (!conn) return
+    const ep = epochRef.current
+    const gen = pkGenRef.current
+    autoInflightRef.current = true
+    runStartedAtRef.current = Date.now()
+    request('sync.start', {}).then((r) => {
+      autoInflightRef.current = false
+      if (!stillCurrent(conn, ep, gen)) return
+      // sync.started precedes this response; adopted only if it was missed
+      // and the run has not ended already.
+      const runId = r && r.runId
+      setSync((prev) => (prev.active || (prev.stopped && prev.stopped.runId === runId) ? prev : { ...prev, active: { runId, once: false } }))
+    }, (err) => {
+      autoInflightRef.current = false
+      if (connRef.current !== conn) return
+      const action = startFailure({ code: err && err.code, message: err && err.message, uncertain: Boolean(err) && err.uncertain === true })
+      // Reconciling only reads; it is safe even when the epoch moved on.
+      if (action === 'reconcile') { reconcile(); return }
+      if (!stillCurrent(conn, ep, gen)) return
+      if (action === 'ignore') {
+        // A run is active that this provider has not seen: read it, never
+        // start again.
+        if (syncRef.current.active === null) reconcile()
+        return
+      }
+      if (action === 'give-up') {
+        gaveUpRef.current = true
+        setGaveUp(true)
+        return
+      }
+      const ms = Math.min(MAX_BACKOFF_MS, backoffMsRef.current ? backoffMsRef.current * 2 : FIRST_BACKOFF_MS)
+      backoffMsRef.current = ms
+      setBackoff(Date.now() + ms)
+    })
+  }, [request, stillCurrent, reconcile, setBackoff])
+
+  // Re-evaluated on every relevant change and by the one timer. Decisions read
+  // the refs (always current), so two evaluations before a re-render can never
+  // send two starts: the first one sets startingRef and autoInflightRef
+  // synchronously.
+  useEffect(() => {
+    if (autoTimerRef.current !== null) clearTimeout(autoTimerRef.current)
+    autoTimerRef.current = null
+    const now = Date.now()
+    const active = syncRef.current.active
+    if (graceExpired({ awaitingRestartUntil: awaitingRef.current, active, now })) {
+      reconcile()
+      return
+    }
+    const wanted = wantedRef.current && !gaveUpRef.current
+    const args = {
+      wanted,
+      phase,
+      online,
+      active,
+      starting: startingRef.current > 0 || autoInflightRef.current,
+      recovering: recovery !== null,
+      reconciling: reconcilingRef.current,
+      backoffUntil: backoffUntilRef.current,
+      awaitingRestartUntil: awaitingRef.current,
+      now
+    }
+    if (wantsStart(args)) {
+      autoStart()
+      return
+    }
+    if (!wanted) return
+    const at = Math.max(args.backoffUntil > now ? args.backoffUntil : 0, args.awaitingRestartUntil > now ? args.awaitingRestartUntil : 0)
+    if (at > now) {
+      autoTimerRef.current = setTimeout(() => {
+        autoTimerRef.current = null
+        setAutoTick((t) => t + 1)
+      }, at - now)
+    }
+  }, [autoWanted, gaveUp, phase, online, sync.active, starting, recovery, reconciling, backoffUntil, awaitingRestartUntil, autoTick, reconcile, autoStart])
+
+  // The shell's decision; true also clears a give-up.
+  const setAutoSync = useCallback((wanted) => {
+    const on = wanted === true
+    wantedRef.current = on
+    setAutoWanted(on)
+    if (on && gaveUpRef.current) {
+      gaveUpRef.current = false
+      setGaveUp(false)
+    }
+  }, [])
+
+  // Clears the fresh hints of `keys` (all when null) once a screen showed them.
+  const ackFresh = useCallback((keys = null) => {
+    resetSignals(ackFreshSignals(signalsRef.current, keys))
+  }, [resetSignals])
+
+  const autoSync = useMemo(() => ({ wanted: autoWanted, backoffUntil, reconciling }), [autoWanted, backoffUntil, reconciling])
+
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
     ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
     : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkReset, recovering, beginRecovery, endRecovery, recover])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey
-  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey])
+    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, autoSync, signals, ackFresh, setAutoSync
+  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, autoSync, signals, ackFresh, setAutoSync])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

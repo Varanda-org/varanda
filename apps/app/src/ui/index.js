@@ -4,7 +4,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { colors, fonts, layout, type } from './theme'
@@ -113,6 +113,10 @@ export function ErrorText ({ children }) {
 export function Notice ({ children }) {
   if (!children) return null
   return <Text style={styles.notice}>{children}</Text>
+}
+
+export function Spinner ({ size = 'small' }) {
+  return <ActivityIndicator size={size} color={colors.accent} />
 }
 
 export function Card ({ children }) {

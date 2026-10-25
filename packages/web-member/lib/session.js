@@ -664,10 +664,12 @@ function createBrowserSession ({
       return { follows: follows.slice(offset, offset + limit), total: follows.length }
     }),
 
-    'log.read': serial(async ({ author, limit }) => {
+    'log.read': serial(async ({ author, limit, before }) => {
       const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
-      const window = all.slice(Math.max(0, all.length - limit))
+      // The window ends at `before` (exclusive), clamped to the length.
+      const end = before === undefined ? all.length : Math.min(before, all.length)
+      const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
       for (const { seq, record } of window) {
@@ -679,11 +681,11 @@ function createBrowserSession ({
         if (copy !== null) entries.push({ seq, record: copy })
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
-      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, all.length - limit) }
+      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
     }),
 
-    'feed.read': serial(async ({ limit }) => {
-      const r = await withStore((c) => member.feedRead(c, { limit }))
+    'feed.read': serial(async ({ limit, before }) => {
+      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       return {
@@ -693,6 +695,12 @@ function createBrowserSession ({
         future: future.list,
         futureTruncated: future.truncated
       }
+    }),
+
+    // Local data only, works locked (docs/rpc.md 5.21).
+    'profile.read': serial(async ({ authors }) => {
+      const r = await withStore((c) => member.profileRead(c, { authors }))
+      return { profiles: r.profiles, missing: r.missing }
     }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {

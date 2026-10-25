@@ -1,32 +1,11 @@
-// Pure display helpers (handles, initials, avatar color, relative time,
+// Pure display helpers (short keys, avatar color, relative time,
 // gradient sampling). No imports and no Node built-ins: Metro bundles it and
 // the Node tests import it.
 
 export const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
 
-export function handleOf (key) {
-  return '@' + (typeof key === 'string' ? key.toLowerCase().slice(0, 6) : '')
-}
-
-export function atHandle (username, key) {
-  return typeof username === 'string' && /^[a-z][a-z0-9_]{2,19}$/.test(username) && !/^[0-9a-f]{6}$/.test(username)
-    ? '@' + username
-    : handleOf(key)
-}
-
 export function shortKey (key) {
   return String(key).toLowerCase().slice(0, 8)
-}
-
-export function initialsOf (name, key) {
-  const upper = (s) => s.toLocaleUpperCase('pt-BR')
-  const words = typeof name === 'string' ? name.trim().split(/\s+/).filter((w) => w !== '') : []
-  if (words.length >= 2) {
-    return upper(Array.from(words[0])[0] + Array.from(words[words.length - 1])[0])
-  }
-  if (words.length === 1) return upper(Array.from(words[0]).slice(0, 2).join(''))
-  const fromKey = key === null || key === undefined ? '' : Array.from(String(key)).slice(0, 2).join('')
-  return fromKey === '' ? '?' : upper(fromKey)
 }
 
 export function avatarColorOf (key) {

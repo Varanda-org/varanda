@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PROFILE_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -18,8 +18,8 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'log.read', 'node.close', 'node.info', 'post.create', 'post.reply', 'profile.set',
-    'report.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
+    'identity.show', 'log.read', 'node.close', 'node.info', 'post.create', 'post.reply', 'profile.read',
+    'profile.set', 'report.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'node.close', 'post.create', 'post.reply',
@@ -222,6 +222,9 @@ test('log.read', (t) => {
   bad(t, 'log.read', { limit: '5' })
   bad(t, 'log.read', { author: 'x' })
   bad(t, 'log.read', { author: KEY, offset: 1 })
+  ok(t, 'log.read', { before: 1 }, { limit: 20, before: 1 })
+  ok(t, 'log.read', { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER }, { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER })
+  for (const before of [0, -1, 1.5, '5']) bad(t, 'log.read', { before }, 'before ' + JSON.stringify(before))
 })
 
 test('feed.read', (t) => {
@@ -231,6 +234,39 @@ test('feed.read', (t) => {
   bad(t, 'feed.read', { limit: 0 })
   bad(t, 'feed.read', { limit: null })
   bad(t, 'feed.read', { limit: 5, author: KEY })
+})
+
+test('feed.read before', (t) => {
+  const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
+  ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
+  ok(t, 'feed.read', { before }, { limit: 30, before })
+  bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
+  bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
+  for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
+    bad(t, 'feed.read', { before: { ...before, at } }, 'at ' + JSON.stringify(at))
+  }
+  bad(t, 'feed.read', { before: { ...before, author: KEY.toUpperCase() } }, 'uppercase author')
+  bad(t, 'feed.read', { before: { at: before.at, author: KEY } }, 'missing seq')
+  bad(t, 'feed.read', { before: { ...before, x: 1 } }, 'extra key in the cursor')
+  bad(t, 'feed.read', { before: null })
+  bad(t, 'feed.read', { before: 'x' })
+  const r = validateParams('feed.read', { before: { ...before, at: '2026-10-24T12:00:00Z' } })
+  t.is(r.message, 'parâmetro inválido: before')
+})
+
+test('profile.read', (t) => {
+  t.absent(isMutating('profile.read'))
+  ok(t, 'profile.read', { authors: [KEY] }, { authors: [KEY] })
+  const many = Array.from({ length: PROFILE_LIMIT_MAX }, (_, i) => i.toString(16).padStart(64, '0'))
+  ok(t, 'profile.read', { authors: many }, { authors: many })
+  ok(t, 'profile.read', { authors: [KEY, KEY] }, { authors: [KEY, KEY] })
+  bad(t, 'profile.read', { authors: [] })
+  bad(t, 'profile.read', { authors: Array(PROFILE_LIMIT_MAX + 1).fill(KEY) }, 'PROFILE_LIMIT_MAX + 1 keys')
+  bad(t, 'profile.read', { authors: [KEY.toUpperCase()] })
+  bad(t, 'profile.read', { authors: KEY })
+  bad(t, 'profile.read', { authors: null })
+  bad(t, 'profile.read', {})
+  bad(t, 'profile.read', { authors: [KEY], limit: 5 })
 })
 
 test('sync.start', (t) => {

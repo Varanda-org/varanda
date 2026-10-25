@@ -4,14 +4,20 @@
 // sync once through a certified seeder, a continuous run preempted by a
 // request and restarted, sync.stop, detach, suspend/resume, and the events
 // (sync.started, sync.event, sync.stopped, warning) as the client sees them.
+// profile.read over synced replicas (names, handles, blocked and unknown keys).
 // The sessions get only the bootstrap list: the loopback DHT host is implied.
 const test = require('brittle')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const { tmpDir } = require('./helpers/tmp')
 const { testnet, localSwarmOptions, until, newSession, connect, failure, scanWire } = require('./helpers/net')
-const { initAssociation, issueCertificate, issueSeederCertificate } = require('../lib/assoc')
+const { initAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate, issueModeratorCertificate } = require('../lib/assoc')
+const { createUsernameRecord } = require('../lib/cert')
+const { createSnapshot } = require('../lib/blocklist')
+const { writeBlocklist } = require('../lib/store')
 const { Seeder } = require('../lib/seeder')
 
 function association (t) {
@@ -333,6 +339,67 @@ test('regression: requests queued during a continuous run preempt it once', asyn
   t.ok(eventOf(m, 'sync.started', (d) => d.runId === r1 + 1))
   t.alike(await m.call('sync.status'), { state: 'running', runId: r1 + 1, once: false })
   await m.call('sync.stop')
+})
+
+// One `once` run that must end 'done' with ok: true.
+async function syncOnce (t, m) {
+  const { runId } = await m.call('sync.start', { once: true, timeoutMs: 30000 })
+  const stopped = await waitEvent(m, 'sync.stopped', (d) => d.runId === runId)
+  t.is(stopped.data.reason, 'done')
+  t.is(stopped.data.result.ok, true)
+}
+
+test('profile.read over synced replicas: names, usernames, blocked and unknown keys', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association(t)
+  await startSeeder(t, bootstrap, assoc)
+
+  const a = await member(t, bootstrap, assoc)
+  await a.call('profile.set', { name: 'Ana', bio: 'oi' })
+  await a.call('post.create', { text: 'olá de A' })
+  await syncOnce(t, a)
+  const c = await member(t, bootstrap, assoc)
+  await c.call('profile.set', { name: 'Cris' })
+  await c.call('post.create', { text: 'olá de C' })
+  await syncOnce(t, c)
+
+  const b = await member(t, bootstrap, assoc)
+  await b.call('follow.add', { key: a.publicKey })
+  await b.call('follow.add', { key: c.publicKey })
+  await syncOnce(t, b)
+  const unknown = 'f'.repeat(64)
+  t.alike(await b.call('profile.read', { authors: [a.publicKey, unknown, c.publicKey, a.publicKey] }), {
+    profiles: [
+      { author: a.publicKey, name: 'Ana', bio: 'oi', username: null },
+      { author: c.publicKey, name: 'Cris', bio: '', username: null }
+    ],
+    missing: [unknown]
+  })
+
+  // An issuer-signed username record on A's diary reaches B with one more sync.
+  const issuerKp = crypto.keyPair()
+  const issuerCert = issueIssuerCertificate(assoc.dir, { issuer: b4a.toString(issuerKp.publicKey, 'hex') })
+  const record = createUsernameRecord({ member: a.publicKey, username: 'ana_1' }, issuerKp, issuerCert)
+  t.alike(await a.call('username.add', { record }), { changed: true, username: 'ana_1', seq: 3 })
+  t.alike((await a.call('profile.read', { authors: [a.publicKey] })).profiles[0].username, 'ana_1', 'the own diary')
+  await syncOnce(t, a)
+  await syncOnce(t, b)
+  t.alike(await b.call('profile.read', { authors: [a.publicKey] }), {
+    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', username: 'ana_1' }],
+    missing: []
+  })
+
+  // A key the enforced blocklist names is missing, as in feed.read.
+  const modKp = crypto.keyPair()
+  const modCert = issueModeratorCertificate(assoc.dir, { moderator: b4a.toString(modKp.publicKey, 'hex') })
+  writeBlocklist(b.dataDir, createSnapshot({ seq: 1, blocked: [c.publicKey] }, modKp, modCert))
+  t.alike(await b.call('profile.read', { authors: [c.publicKey, a.publicKey] }), {
+    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', username: 'ana_1' }],
+    missing: [c.publicKey]
+  })
+  t.alike((await b.call('feed.read')).skipped, [{ key: c.publicKey, reason: 'blocked' }], 'the same rule as feed.read')
+  t.alike([a.session.internal, b.session.internal, c.session.internal], [[], [], []], 'no internal error')
 })
 
 test('no response or event of this file carries a path', (t) => {

@@ -18,7 +18,7 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
-const { postRecord, validateRecord } = require('../lib/records')
+const { postRecord, profileRecord, validateRecord } = require('../lib/records')
 const store = require('../lib/store')
 
 // A bootstrap that is never dialled: these tests start no sync.
@@ -121,6 +121,7 @@ test('before an identity: node.info creates nothing, member methods are NOT_FOUN
   t.alike(await failure(m.call('log.read')), nf)
   t.alike(await failure(m.call('feed.read')), nf)
   t.alike(await failure(m.call('follow.list')), nf)
+  t.alike(await failure(m.call('profile.read', { authors: ['a'.repeat(64)] })), nf)
   t.alike(await failure(m.call('post.create', { text: 'oi' })), nf)
   t.alike(await failure(m.call('sync.start')), nf)
   t.alike(fs.readdirSync(m.dataDir), [], 'nothing was created in the data dir')
@@ -172,6 +173,84 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.is(feed.items[0].name, 'Ana')
   t.alike(feed.items[1].replyTo, { author: pk, seq: 2 })
   t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated], [[], 0, [], 0])
+
+  // profile.read folds duplicates; the own diary has no username record.
+  t.alike(await m.call('profile.read', { authors: [pk, pk] }), {
+    profiles: [{ author: pk, name: 'Ana', bio: 'oi', username: null }],
+    missing: []
+  })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('profile.read: an author with no local data is missing and gets no core', async (t) => {
+  const m = await member(t, { cert: true })
+  const unknown = randomKey()
+  t.alike(await m.call('profile.read', { authors: [unknown, m.publicKey, unknown] }), {
+    profiles: [{ author: m.publicKey, name: null, bio: null, username: null }],
+    missing: [unknown]
+  }, 'no profile record: name and bio null; duplicates fold')
+  const s = await store.openStore(m.dataDir)
+  try {
+    t.absent(await s.storage.hasCore(crypto.discoveryKey(b4a.from(unknown, 'hex'))), 'no core was created')
+  } finally {
+    await s.close()
+  }
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('profile.read: a stored replica without a member certificate is missing', async (t) => {
+  const m = await member(t, { cert: true })
+  // A diary whose block 0 is a profile (no certificate), replicated in-process
+  // into the member's store: log.read still reads it, profile.read never.
+  const src = await store.openStore(tmpDir(t))
+  const dst = await store.openStore(m.dataDir)
+  let key
+  try {
+    const core = src.get({ name: 'diary', valueEncoding: 'json' })
+    await core.ready()
+    await core.append(profileRecord({ name: 'Falsa', bio: '' }))
+    key = b4a.toString(core.key, 'hex')
+    const s1 = src.replicate(true)
+    const s2 = dst.replicate(false)
+    s1.pipe(s2).pipe(s1)
+    const replica = dst.get({ key: core.key, valueEncoding: 'json' })
+    await replica.ready()
+    await replica.get(0)
+    s1.destroy()
+    s2.destroy()
+  } finally {
+    await dst.close()
+    await src.close()
+  }
+  // log.read reads it (block 0 marked invalid: a profile cannot open a diary).
+  const raw = await m.call('log.read', { author: key })
+  t.alike([raw.entries, raw.invalid.map((i) => i.seq)], [[], [0]], 'stored and readable by log.read')
+  t.alike(await m.call('profile.read', { authors: [key] }), { profiles: [], missing: [key] })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('log.read and feed.read page backwards with before', async (t) => {
+  const m = await member(t, { cert: true })
+  for (const text of ['um', 'dois', 'três', 'quatro']) await m.call('post.create', { text })
+  // Five blocks: the certificate (0) and four posts (1..4).
+  const seqs = (r) => r.entries.map((e) => e.seq)
+  const mid = await m.call('log.read', { limit: 2, before: 3 })
+  t.alike(seqs(mid), [1, 2])
+  t.is(mid.entriesTruncated, 1)
+  const first = await m.call('log.read', { limit: 10, before: 1 })
+  t.alike(seqs(first), [0])
+  t.is(first.entriesTruncated, 0)
+  const clamped = await m.call('log.read', { limit: 2, before: 99 })
+  t.alike(clamped, await m.call('log.read', { limit: 2 }), 'a bound past the length clamps to the newest page')
+  t.alike(seqs(clamped), [3, 4])
+
+  const newest = await m.call('feed.read', { limit: 3 })
+  t.alike(newest.items.map((i) => i.text), ['dois', 'três', 'quatro'])
+  const oldest = newest.items[0]
+  const older = await m.call('feed.read', { limit: 3, before: { at: oldest.at, author: oldest.author, seq: oldest.seq } })
+  t.alike(older.items.map((i) => i.text), ['um'], 'no overlap; a short page is the last')
+  const end = await m.call('feed.read', { limit: 3, before: { at: older.items[0].at, author: older.items[0].author, seq: older.items[0].seq } })
+  t.alike(end.items, [])
   t.alike(m.session.internal, [], 'no internal error')
 })
 

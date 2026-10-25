@@ -14,12 +14,27 @@ function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
+// A copied, checked `before` cursor; anything else throws.
+function feedCursor (before) {
+  if (before === null || typeof before !== 'object') throw new TypeError('before inválido')
+  const { at, author, seq } = before
+  const t = typeof at === 'string' ? Date.parse(at) : NaN
+  if (!Number.isFinite(t) || typeof author !== 'string' || !Number.isSafeInteger(seq)) {
+    throw new TypeError('before inválido')
+  }
+  return { t, author, seq }
+}
+
 // Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
 // keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
 // revoked issuer invalid (username.js), so a stolen issuer key cannot keep
-// naming diaries once the association revokes it.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null }) {
+// naming diaries once the association revokes it. `before` ({ at, author,
+// seq } of an item, or null) keeps only the items strictly before it in feed
+// order, so a caller pages backwards from the oldest item it holds; the
+// `limit` newest of those are returned. `future` is never paged.
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
+  const cursor = before === null ? null : feedCursor(before)
   const items = []
   const future = []
   const usernameOpts = { revokedIssuers }
@@ -41,8 +56,11 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   // Numeric time order: string order breaks for negative-year ISO dates.
   items.sort((a, b) => (Date.parse(a.at) - Date.parse(b.at)) || cmp(a.author, b.author) || a.seq - b.seq)
   future.sort((a, b) => cmp(a.author, b.author) || a.seq - b.seq)
+  const kept = cursor === null
+    ? items
+    : items.filter((it) => ((Date.parse(it.at) - cursor.t) || cmp(it.author, cursor.author) || it.seq - cursor.seq) < 0)
   return {
-    items: limit === Infinity ? items : items.slice(Math.max(0, items.length - limit)),
+    items: limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit)),
     future: future.map(formatRef)
   }
 }

@@ -19,8 +19,14 @@ export const colors = {
   tabBar: 'rgba(251,248,243,0.94)',
   danger: '#a3201a',
   warn: '#8a5a00',
-  placeholder: '#9aa39e'
+  placeholder: '#9aa39e',
+  skeleton: 'rgba(31,42,36,0.08)',
+  pillBg: '#1d6b4f',
+  pillInk: '#ffffff'
 }
+
+// Animation durations in milliseconds.
+export const motion = { fast: 150, normal: 250 }
 
 // Avatar colors by the first key byte mod 5: azul, laranja, amarelo,
 // vermelho, verde.
@@ -59,7 +65,9 @@ export const type = {
   counter: { fontSize: 13, fontWeight: '600', lineHeight: 16 },
   section: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' },
   cancel: { fontSize: 17, fontWeight: '400', lineHeight: 22 },
-  sheetTitle: { fontSize: 17, fontWeight: '700', lineHeight: 22 }
+  sheetTitle: { fontSize: 17, fontWeight: '700', lineHeight: 22 },
+  emptyTitle: { fontSize: 18, fontWeight: '700', lineHeight: 24 },
+  stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
 }
 
 export const layout = {

@@ -44,6 +44,7 @@ Every message is ONE JSON object of one of three kinds. The protocol version is 
 | `MAX_NAME`, `MAX_BIO`, `MAX_TEXT` | 80, 280, 1000 | chars, same values as `records.js` |
 | `LOG_LIMIT_DEFAULT`, `LOG_LIMIT_MAX` | 20, 42 | `log.read` page |
 | `FEED_LIMIT_DEFAULT`, `FEED_LIMIT_MAX` | 30, 35 | `feed.read` page |
+| `PROFILE_LIMIT_MAX` | 100 | `profile.read` authors |
 | `FOLLOW_LIMIT_DEFAULT`, `FOLLOW_LIMIT_MAX` | 100, 500 | `follow.list` page |
 | `SYNC_TIMEOUT_MIN`, `SYNC_TIMEOUT_MAX`, `SYNC_TIMEOUT_DEFAULT` | 1000, 600000, 30000 | `sync.start` `timeoutMs` (ms) |
 
@@ -52,6 +53,7 @@ Every message is ONE JSON object of one of three kinds. The protocol version is 
 - Worst-case response sizes (checked by `test/sizes.test.js`). The most expensive character on the wire is a lone surrogate: `records.js` counts it as one char and accepts it in names and texts (a peer can write it), and `JSON.stringify` writes it as `\udXXX`, 6 bytes. A 4-byte UTF-8 character costs 4 bytes, `"` and `\` 2 bytes, LF (`\n`) 2 bytes; every other character JSON escapes (C0 controls) or `jsonLine` escapes (DEL, C1, U+2028/9, bidi controls) is forbidden in names and texts. Every other field takes its maximum: hex64 keys, `seq` = 9007199254740991, `at` = `'+275760-09-13T00:00:00.000Z'` (the longest canonical ISO), `id` = `MAX_ID`, and `skipped` / `future` full (100 entries each, reason `untrusted-association`).
   - `feed.read`: one item (80-char name, 20-char username, 1000-char text, a reply) is at most 6,780 bytes; the envelope with full `skipped` and `future` lists is 19,349 bytes. 35 items = 256,683 bytes (fits, 5,461 bytes to spare); 36 items = 263,464 bytes (does not fit), so `FEED_LIMIT_MAX` = 35. With 4-byte characters instead of lone surrogates an item is at most 4,620 bytes and 50 items would be 250,398 bytes (19,349 + 50 x 4,620 + 49 commas), but the lone-surrogate case decides. FeedItems carry no bio.
   - `log.read`: one entry (a post record of 1000 chars with a reply) is at most 6,206 bytes on the wire; a profile record (80-char name, 280-char bio) is at most about 2.3 KB and a certificate record has fixed-size fields, so posts are the worst case. 42 entries = 260,830 bytes (fits, 1,314 bytes to spare); 43 do not, so `LOG_LIMIT_MAX` = 42. An `invalid` entry (`{ seq, reason }`) is smaller than any entry it replaces in the window.
+  - `profile.read`: one profile (hex64 author, 80-char name, 20-char username, 280-char bio) is at most 2,290 bytes; the envelope with empty lists is 71 bytes. 100 profiles = 229,170 bytes (fits, 32,974 bytes to spare); the largest count that fits is 114 (261,244 bytes; 115 = 263,535 bytes does not), so `PROFILE_LIMIT_MAX` = 100 leaves a margin. A `missing` entry (a hex64 key, 66 bytes) is smaller than the profile it replaces, and duplicates are folded, so `profiles` plus `missing` never exceed 100 entries.
   - `follow.list`: 500 keys = 33,581 bytes (about 13% of `MAX_MESSAGE`).
 - No method takes a filesystem path, a data dir, an association key, a bootstrap list, a DHT host, a secret key or a limit override. Those are node configuration, fixed when the node starts; a request carrying any of them fails on the unknown key.
 
@@ -155,16 +157,17 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 
 ### 5.12 `log.read`
 
-- Params: `{ author?: hex64, limit?: integer 1..42 }`; `author` absent = the own diary; `limit` defaults to 20.
+- Params: `{ author?: hex64, limit?: integer 1..42, before?: integer >= 1 }`; `author` absent = the own diary; `limit` defaults to 20; `before` (an exclusive block-seq bound, safe integer) absent = the newest page. `0` is rejected (the window would be empty).
 - Result: `{ key: hex64, entries: [{ seq, record }], invalid: [{ seq, reason }], entriesTruncated: integer }`.
-  - The node takes the newest `limit` blocks of the log (`seq` from `length - limit` to `length - 1`), ascending by `seq`. Each block that passes `validRecordCopy(record, seq)` goes to `entries` with that copy; each other block goes to `invalid` with its `seq` and a reason code only (`validateRecord`'s reason, `'malformed'` for a block `decodeBlock` refused). A block that fails validation is NEVER returned as text (A8).
-  - `entriesTruncated` = the number of older blocks not in the window (`max(0, length - limit)`). v1 has no offset: only the newest page is readable.
+  - The node takes `end = before === undefined ? length : min(before, length)` and the window of block seqs `max(0, end - limit) .. end - 1`, ascending by `seq` (a `before` past the length clamps to the newest page). Each block that passes `validRecordCopy(record, seq)` goes to `entries` with that copy; each other block goes to `invalid` with its `seq` and a reason code only (`validateRecord`'s reason, `'malformed'` for a block `decodeBlock` refused). A block that fails validation is NEVER returned as text (A8).
+  - `entriesTruncated` = `max(0, end - limit)`, the number of blocks older than the window; `entriesTruncated === 0` means the window starts at the beginning of the diary. To page backwards, pass the lowest `seq` of the window (entries and invalid) as the next `before`.
   - Same rules as `log --json`: local data only; an author with no local data -> `NOT_FOUND` `'sem dados locais para este diário'` and no core is created.
 - Size: `LOG_LIMIT_MAX` entries always fit `MAX_MESSAGE` (section 2).
 
 ### 5.13 `feed.read`
 
-- Params: `{ limit?: integer 1..35 }`, default 30. `FEED_LIMIT_MAX` = 35 pages always fit `MAX_MESSAGE` (section 2).
+- Params: `{ limit?: integer 1..35, before?: { at, author, seq } }`, `limit` default 30. `FEED_LIMIT_MAX` = 35 pages always fit `MAX_MESSAGE` (section 2).
+- `before` (absent = the newest page) has exactly the keys `at` (a canonical ISO string, `new Date(at).toISOString() === at`, at most 32 chars), `author` (lowercase hex64) and `seq` (a safe integer >= 1). With `before`, only items strictly before the cursor in feed order `(Date.parse(at), author, seq)` are considered and the LAST `limit` of them are returned (`buildFeed`'s `before`). The UI copies the cursor from the oldest item it holds; pages never overlap (feed order is total), and a page with fewer than `limit` items is the last. A sync between two requests may add older items, which later pages include; newer ones need a reload of the newest page. Cursors are navigation bounds, not snapshots: moderation (blocklist, revoked issuers) is re-checked on every request.
 - Result: `{ items: [FeedItem], skipped: [{ key, reason }], skippedTruncated, future: [ref], futureTruncated }`, as `feed --json` plus the two counts.
   - `items`: `buildFeed`'s FeedItem objects unchanged (protocol §7 "FeedItem": `{ author, name, username, seq, at, text, replyTo }`, ascending by `(at, author, seq)`, the LAST `limit` kept).
   - `username: string | null`: the name in the highest-sequence `username` record whose issuer delegation and signature verify for the configured association and whose member is the diary key (`latestUsername`, `packages/core/lib/username.js`). It matches `/^[a-z][a-z0-9_]{2,19}$/` and is not six hex characters. No verified record means `null`; neither the member certificate nor `profile.name` supplies this field. Both v1 and v2 diaries can carry it. A rename updates the handle on every post in that diary once the record is synced.
@@ -246,6 +249,16 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 - Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyReport(fields, signature)`, using `member` as the public key. The signature proves that the reporter attested this text and this quote to the association's account service; it does NOT prove that the reported diary contains the quote (the moderator checks the diary).
 - Browser node (`packages/web-member/lib/session.js`): signs like `account.sign` (5.18): it opens no diary, does not preempt or start a sync, appends nothing and contacts no one. No identity -> `NOT_FOUND` `'identidade não encontrada'`; locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; a pair for another diary -> `USAGE` `'passkey não corresponde ao diário guardado'`; `target` = the own key -> `USAGE` `'não é possível denunciar a própria chave'`; a statement `report.js` refuses -> `USAGE` `'denúncia inválida'`.
 - Node session (`packages/core/lib/session.js`): as 5.18, always `USAGE` `'assinatura disponível só no navegador'`, with or without an identity, and nothing is opened.
+
+### 5.21 `profile.read`
+
+- Params: `{ authors: [hex64] }`, nothing else: 1..`PROFILE_LIMIT_MAX` (100) lowercase hex64 keys; duplicates are allowed and folded. Not mutating.
+- Result: `{ profiles: [{ author, name: string | null, username: string | null, bio: string | null }], missing: [hex64] }`, one entry per distinct author, in first-occurrence order within each list.
+  - An author is in `profiles` when `feed.read` would show its diary: the own key always; a followed or unfollowed replica with local data that passes `skipReason` (not blocked, no fork, a valid block-0 certificate for the association, issuer not revoked). `name` and `bio` come from the newest valid `profile` record of the WHOLE local log (`latestProfile`; none -> `null`, `null`); `username` = `latestUsername` (the newest candidate only, verified with the enforced revoked-issuer set; otherwise `null`).
+  - Every other author is in `missing`: no local replica, blocked, fork, certificate failure, revoked issuer. The result never says why.
+- No identity -> `NOT_FOUND` `'identidade não encontrada'`. Local data only: it never creates a core and works while the browser identity is locked. Like every member read it preempts a running sync (section 6.1), so a screen asks for all its authors in one batch.
+- A node that predates this method answers `USAGE` `'método desconhecido'`; the app treats that as "no profiles available".
+- Size: `PROFILE_LIMIT_MAX` profiles always fit `MAX_MESSAGE` (section 2).
 
 ### Errors common to every method
 
@@ -365,9 +378,9 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 
 ## 12. Module exports (`require('@varanda/rpc')`)
 
-`index.js` re-exports: every constant of section 2; every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
+`index.js` re-exports: every constant of section 2 (including `PROFILE_LIMIT_MAX`); every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
 
 ## 13. Known limits (v1)
 
-- Paging beyond the newest page is out of scope for v1: `feed.read` returns the newest `limit` items (at most 35) and `log.read` the newest `limit` blocks (at most 42), with no offset or cursor. Only `follow.list` pages (`offset`, `limit`).
+- `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are unchanged (35 items, 42 blocks). `follow.list` pages with `offset` and `limit`.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

@@ -19,7 +19,14 @@ const GLYPHS = {
   voltar: 'chevron-left',
   seta: 'chevron-right',
   fechar: 'x',
-  bandeira: 'flag'
+  bandeira: 'flag',
+  seta_cima: 'arrow-up',
+  copiar: 'copy',
+  chave: 'key',
+  ok: 'check',
+  atualizar: 'rotate-cw',
+  olho: 'eye',
+  olho_fechado: 'eye-off'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

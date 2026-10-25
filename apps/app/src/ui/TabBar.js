@@ -1,4 +1,5 @@
-// The bottom tab bar: A Rua, Seguindo and Diário.
+// The bottom tab bar: A Rua, Seguindo and Diário. Pressing the tab that is
+// already current calls onReselect (scroll to top / refresh), not onSelect.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -11,7 +12,7 @@ export const TABS = [
   { id: 'diario', label: 'Diário', icon: 'pessoa' }
 ]
 
-export function TabBar ({ current, onSelect }) {
+export function TabBar ({ current, onSelect, onReselect }) {
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
@@ -24,7 +25,13 @@ export function TabBar ({ current, onSelect }) {
             accessibilityRole='tab'
             accessibilityState={{ selected }}
             accessibilityLabel={tab.label}
-            onPress={() => onSelect(tab.id)}
+            onPress={() => {
+              if (selected) {
+                if (onReselect) onReselect(tab.id)
+              } else {
+                onSelect(tab.id)
+              }
+            }}
             style={styles.tab}
           >
             <Icon name={tab.icon} size={27} color={tint} />

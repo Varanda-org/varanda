@@ -1,8 +1,10 @@
-// The app shell: the first connection, the setup step (on the web's browser
-// node first 'Entrar' with the passkey, then identity and member
-// certificate) and then three tabs (A Rua, Seguindo, Diário) with the top
-// bar and its sync chip, the publish button and the sheets (Publicar,
-// Ajustes). Design: apps/site/artwork/app-design.md.
+// The app shell: the first connection, the onboarding (src/onboarding.js
+// decides the step: on the web's browser node 'Entrar' with the passkey, the
+// account link; natively identity and member certificate; then the own name)
+// and then three tabs (A Rua, Seguindo, Diário) with the top bar and its sync
+// chip, the publish button and the sheets (Publicar, Ajustes). Sync is
+// automatic: this shell owns the intent (node.setAutoSync) and nothing else in
+// the UI starts or stops a run. Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
@@ -11,8 +13,9 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
 import { parseReturn } from './src/account'
+import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
-import { Btn, ErrorText, Soft, colors, errorText } from './src/ui'
+import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { loadIcons } from './src/ui/Icon'
 import { SyncChip } from './src/ui/SyncChip'
@@ -25,6 +28,7 @@ import Conexao from './src/screens/Conexao'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Identidade from './src/screens/Identidade'
+import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 
@@ -33,6 +37,16 @@ import Seguindo from './src/screens/Seguindo'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
+// 'Um instante' offers 'Continuar mesmo assim' after this long.
+const SLOW_LOOKUP_MS = 10000
+// While the own profile is still unknown, it is asked again this often (the
+// cache retries a failed key only when asked after its retry delay).
+const LOOKUP_RETRY_MS = 5000
+const READY_TOAST = 'Tudo pronto. Siga pessoas para encher a Rua.'
+
+// The steps the setup branch (Identidade) renders; the others belong to the
+// shell (spinner, Perfil, the tabs).
+const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', 'certificado'])
 
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
@@ -60,10 +74,17 @@ function Member () {
   useEffect(() => { if (ready) setSeen(true) }, [ready])
 
   const [tab, setTab] = useState('rua')
+  // Per tab, bumped when its tab is selected again: the screen scrolls to top.
+  const [scrollSignal, setScrollSignal] = useState({})
   const [composer, setComposer] = useState({ open: false, reply: null })
   const [ajustes, setAjustes] = useState(null)
-  // The report sheet's target: null | { author, name, seq, text }.
+  // The report sheet's target: null | { author, name, username, seq, text }.
   const [report, setReport] = useState(null)
+  // 'Pular por enquanto' / 'Continuar mesmo assim': session-only, so the name
+  // is asked again only after a reload.
+  const [skippedName, setSkippedName] = useState(false)
+  // True once this identity reached the tabs in this page session.
+  const [reachedTabs, setReachedTabs] = useState(false)
   const [version, setVersion] = useState(0)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
@@ -105,6 +126,7 @@ function Member () {
     setInfo(null)
     setInfoError('')
     setSetupDone(false)
+    setReachedTabs(false)
   }, [generation])
 
   // With a passkey the setup step reads node.info through Identidade (which
@@ -122,9 +144,19 @@ function Member () {
   useEffect(() => {
     if (!locked) return
     setSetupDone(false)
+    setReachedTabs(false)
     setInfo(null)
   }, [locked])
   const setupStep = locked || (!setupDone && !confirmed)
+
+  // The sync intent: continuous sync is wanted as soon as the certificate is
+  // confirmed (the profile step does not gate it), never while locked or
+  // while the recovery run after an unlock is on. The provider does the rest.
+  const recovering = passkey !== null && passkey.recovering === true
+  const { setAutoSync } = node
+  useEffect(() => {
+    setAutoSync(ready && !locked && setupDone && !recovering)
+  }, [ready, locked, setupDone, recovering, setAutoSync])
 
   // Back from the Google step with a certificate already held: the tabs show
   // after the unlock, so open Ajustes → Identidade once, where LinkCard offers
@@ -137,11 +169,62 @@ function Member () {
     setAjustes('identidade')
   }, [setupStep])
 
-  // The feed carries only followed authors' names: look the own name up
-  // once (one log.read through the names cache) for the Publicar avatar.
+  // The own profile (one profile.read through the profiles cache): the
+  // onboarding's name step, the Publicar avatar and the own rows.
   const ownKey = info ? info.publicKey : null
   const { resolve } = names
   useEffect(() => { if (setupDone && ownKey) resolve(ownKey) }, [setupDone, ownKey, resolve])
+
+  // The onboarding step (src/onboarding.js). A failed lookup is not evidence
+  // that the profile is absent: profileKnown is true only once the cache
+  // answered (or the node has no profile.read).
+  const ownProfile = ownKey ? names.profileOf(ownKey) : undefined
+  const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
+  const onboarding = onboardingStep({
+    mode,
+    locked,
+    recovering,
+    hasIdentity: info !== null && info.publicKey !== null,
+    memberCert: info !== null && info.memberCert === true,
+    profileKnown: ownProfile !== undefined || names.unsupported === true,
+    hasName: !!(ownProfile && ownProfile.name),
+    skippedName
+  })
+  // The latched setupDone rule above decides between the setup branch and the
+  // shell's steps; the step machine only names the step within each.
+  let { step, index, total } = onboarding
+  if (setupStep && !SETUP_STEPS.has(step)) {
+    step = mode === 'hosted' ? 'vinculo' : 'certificado'
+    index = 1
+  } else if (!setupStep && SETUP_STEPS.has(step)) {
+    step = 'pronto'
+    index = total
+  } else if (!setupStep && reachedTabs && (step === 'carregando' || step === 'perfil')) {
+    // Latched like setupDone: once this identity reached the tabs, a cleared
+    // names cache (a reconnection) never brings the onboarding back, which
+    // would unmount the tabs and lose drafts and scroll positions.
+    step = 'pronto'
+    index = total
+  }
+  useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
+
+  // 'Um instante': the cache retries the own key while it is unknown, and
+  // after SLOW_LOOKUP_MS the person may continue without a name.
+  const loadingProfile = step === 'carregando'
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    if (!loadingProfile) {
+      setSlow(false)
+      return
+    }
+    const timer = setTimeout(() => setSlow(true), SLOW_LOOKUP_MS)
+    return () => clearTimeout(timer)
+  }, [loadingProfile])
+  useEffect(() => {
+    if (!loadingProfile || !ownKey) return
+    const timer = setInterval(() => resolve(ownKey), LOOKUP_RETRY_MS)
+    return () => clearInterval(timer)
+  }, [loadingProfile, ownKey, resolve])
 
   useEffect(() => () => clearTimeout(toastTimer.current), [])
 
@@ -153,12 +236,16 @@ function Member () {
 
   // The outbox (browser node) is sent only while a publish could go out
   // right now: unlocked, set up (the member certificate exists), not
-  // recovering, online, and with no sync run active or starting (the write
-  // gate inside post.create would preempt a run the person started).
+  // recovering, online, and with no ONCE run active or starting. A continuous
+  // run is preempted and restarted by the node (the browser node skips its
+  // own push when the intent is continuous, packages/web-member/lib/session.js
+  // L440), so the outbox drains while it is active; only a once run (the
+  // recovery, a write gate) must not be interrupted. The approval rule of the
+  // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
     enabled: ready && !locked && setupDone && !(passkey && passkey.recovering) &&
-      node.online !== false && node.sync.active === null && node.sync.starting !== true &&
+      node.online !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
     association: node.config ? node.config.association : null
@@ -177,6 +264,8 @@ function Member () {
   // node is disconnected.
   const openChip = () => setAjustes('sincronizar')
   const startReply = (r) => setComposer({ open: true, reply: r })
+  const openComposer = () => setComposer((c) => ({ ...c, open: true }))
+  const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
 
   if (!ready && !seen) {
     // loading, connecting, the native Conectar form, or a web error.
@@ -218,8 +307,8 @@ function Member () {
     // tabs never render before a successful node.info confirms both.
     let body
     if (passkey !== null || info !== null) {
-      // embedded: the top bar above already carries the 'Identidade' title
-      body = <Identidade active={ready} embedded onInfo={takeInfo} />
+      // embedded: the top bar above already carries the step's title
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>
@@ -232,9 +321,43 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={locked ? 'Entrar' : 'Identidade'} right={chip} />
+        <TopBar title={STEP_TITLES[step]} right={chip} />
         <View style={styles.flex}>{body}</View>
         {connectionLink}
+      </View>
+    )
+  } else if (step === 'carregando') {
+    // The own profile is being looked up (sync already runs in the background).
+    content = (
+      <View style={[styles.shell, wide && styles.shellWide]}>
+        <TopBar title={STEP_TITLES[step]} right={chip} />
+        <View style={styles.center}>
+          <Spinner size='large' />
+          {slow
+            ? <Btn label='Continuar mesmo assim' secondary onPress={() => setSkippedName(true)} />
+            : null}
+        </View>
+      </View>
+    )
+  } else if (step === 'perfil') {
+    // 'Como você quer aparecer': the saved name goes into the profiles cache
+    // (the step machine then shows the tabs) and the welcome toast shows there.
+    content = (
+      <View style={[styles.shell, wide && styles.shellWide]}>
+        <TopBar title={STEP_TITLES[step]} right={chip} />
+        <View style={styles.flex}>
+          <Perfil
+            page
+            ownKey={ownKey}
+            onSaved={(v) => {
+              names.learn(ownKey, v)
+              showToast(READY_TOAST)
+            }}
+            onSkip={() => setSkippedName(true)}
+            index={index}
+            total={total}
+          />
+        </View>
       </View>
     )
   } else {
@@ -249,10 +372,30 @@ function Member () {
           ? <TopBar title={tab === 'rua' ? 'A Rua' : 'Seguindo'} right={chip} />
           : null}
         <View style={styles.flex}>
-          <View style={shown('rua')}><ARua active={on('rua')} refresh={version} onReply={startReply} onReport={setReport} ownKey={ownKey} /></View>
-          <View style={shown('seguindo')}><Seguindo active={on('seguindo')} onReport={setReport} /></View>
+          <View style={shown('rua')}>
+            <ARua
+              active={on('rua')}
+              refresh={version}
+              onReply={startReply}
+              onReport={setReport}
+              ownKey={ownKey}
+              scrollToTop={scrollSignal.rua}
+              followCount={info ? info.followCount : null}
+              onFollowSomeone={() => setTab('seguindo')}
+            />
+          </View>
+          <View style={shown('seguindo')}>
+            <Seguindo active={on('seguindo')} onReport={setReport} scrollToTop={scrollSignal.seguindo} onFollowsChanged={() => setVersion((v) => v + 1)} />
+          </View>
           <View style={shown('diario')}>
-            <Diario active={on('diario')} refresh={version} onSettings={setAjustes} onReply={startReply} />
+            <Diario
+              active={on('diario')}
+              refresh={version}
+              onSettings={setAjustes}
+              onReply={startReply}
+              onPublish={openComposer}
+              scrollToTop={scrollSignal.diario}
+            />
           </View>
         </View>
         {toast
@@ -262,19 +405,22 @@ function Member () {
             </View>
             )
           : null}
-        <Fab onPress={() => setComposer((c) => ({ ...c, open: true }))} />
-        <TabBar current={tab} onSelect={setTab} />
+        <Fab onPress={openComposer} />
+        <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} />
       </View>
     )
   }
 
+  // The own identity for the composer: from the profiles cache, never
+  // derived from the key.
   const me = {
-    publicKey: info ? info.publicKey : null,
-    name: info && info.publicKey ? (names.nameOf(info.publicKey) || null) : null
+    publicKey: ownKey,
+    name: ownProfile ? (ownProfile.name || null) : null,
+    username: ownProfile ? (ownProfile.username || null) : null
   }
   // Light over the Diário band. The sheets leave the status bar over the
   // (dimmed) screen behind, so they keep it light there too.
-  const light = tab === 'diario' && !setupStep
+  const light = tab === 'diario' && step === 'pronto'
 
   return (
     <View style={styles.root}>

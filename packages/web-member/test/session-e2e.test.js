@@ -157,6 +157,18 @@ test('the web session and a CLI member exchange posts through the seeder', async
   t.is(log.entries.length, 3)
   t.is(log.entries[0].record.type, 'member-cert')
 
+  // The names of the downloaded member, from local data; an author with no
+  // local data is missing (and no core is created for it).
+  const stranger = 'ef'.repeat(32)
+  t.alike(await web.request('profile.read', { authors: [cliKey] }), {
+    profiles: [{ author: cliKey, name: 'Caio', bio: '', username: null }],
+    missing: []
+  }, 'the CLI member by name')
+  const mixed = await web.request('profile.read', { authors: [cliKey, stranger] })
+  t.alike(mixed.profiles.map((p) => [p.author, p.name]), [[cliKey, 'Caio']])
+  t.alike(mixed.missing, [stranger], 'no local data: missing')
+  t.absent(JSON.stringify(mixed).includes('ws://'), 'no address in the answer')
+
   // A reply from the web, read by the CLI member.
   const reply = await web.request('post.reply', { to: cliPost.ref, text: REPLY_TEXT })
   t.is(reply.seq, 3)

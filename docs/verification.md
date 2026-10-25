@@ -981,3 +981,83 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
 - [ ] `account reports --member <hex>` on the server prints the link e-mails; no other command or route does.
 - [ ] `docker compose logs account seeder caddy` shows no e-mail, address, Google subject, report text or note.
 - [ ] A sign-in started before the restart fails; after recreating the container the panel asks for a new sign-in, and a report started before the restart answers "a denúncia expirou, tente de novo".
+
+## 15. UX shell: onboarding, names, cursor paging, pull-to-refresh and auto-sync (Stage 1, 2026-10-24)
+
+### Summary
+
+- The app gets a Stage 1 shell: a three-step onboarding ('Passo n de 3'), names and @nomes instead of keys in every list, backward cursor paging with infinite scroll (A Rua 30 then 35, Diário 42, Seguindo 50), pull-to-refresh on native and on the web, a 'ver novidades' pill, loading/empty/error states, and a sync that runs by itself (one continuous `sync.start {}` once the identity is unlocked and the member certificate is confirmed; Ajustes › Sincronização is read-only). Contract additions: RPC `profile.read` and the optional `before` cursor on `feed.read` and `log.read` (`docs/rpc.md`, `docs/protocol.md`), implemented in the core node, the browser node and the shared feed code. The screens are described in `docs/app.md` and the design in `apps/site/artwork/app-design.md`.
+- Cleanup: `handleOf`, `atHandle` and `initialsOf` were removed from `apps/app/src/format.js` with their tests, after a grep over `apps/app/App.js`, `apps/app/src` and `apps/app/test` showed that only `format.js` and `format.test.js` mentioned them. `shortKey`, `avatarColorOf`, `relativeTime`, `sinceText`, `countChars`, `interpolateStops` and `MONTHS` stay. No exception to record.
+- CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order):
+  - `npm run lint`: clean (`standard`), exit 0.
+  - `npm test` (all workspaces): 88 test files, 0 failures (core 14, rpc 8, web-member 15, app 17, cli 32, site 2).
+  - `npm run demo`: DEMO OK.
+  - `node packages/rpc/test/sizes.test.js`: 7 tests, 37 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): `profile.read` at 100 authors 229170 bytes (largest that fits: 114 authors), feed page of 35 items 256683 bytes, log page of 42 entries 260830 bytes, `follow.list` at 500 keys 33581 bytes.
+  - `npm run pack:worklet -w apps/app`: bundle 1931224 bytes, 348 files, 38 linked addon entries; 'node scan: clean'.
+  - `npm run build:node -w apps/app`: `NODE_BUNDLE 603299 GZIP 183740`.
+  - `npm run export:web -w apps/app`: exported to `apps/app/dist` (ignored by git); service worker with 11 files.
+  - `node apps/cli/test/readme-help.test.js`: passes.
+  - the whitespace check on the diff (`git diff --check`): clean.
+  - `npm ci` was not run (installing was out of bounds for this run); the dependencies were already in the worktree.
+- Not verified: anything in a real browser, on a phone, in the iOS simulator, against production or with two devices. See "Human verification"; nothing in that list is marked done.
+
+### Automated (CI)
+
+- `packages/rpc/test/methods.test.js`: the contract of `profile.read` and of the `before` cursor on `feed.read` / `log.read`, with the fixed error `parâmetro inválido: before`.
+- `packages/rpc/test/sizes.test.js`: the worst-case responses fit `MAX_MESSAGE` with the maxima in `packages/rpc/lib/limits.js`; `profile.read` with `PROFILE_LIMIT_MAX` (100) keys measured at 229170 bytes, and a post outweighs a profile record in a log page.
+- `packages/core/test/session.test.js`: `profile.read` on the core node (an author with no local data is `missing` and gets no core opened, a stored replica without a member certificate is `missing`, duplicates collapse) and `log.read` / `feed.read` paging backwards with `before`.
+- `packages/core/test/session-sync.test.js`: `profile.read` over synced replicas: names, usernames, blocked and unknown keys, the own diary.
+- `packages/web-member/test/session.test.js`: the same on the browser node, plus `log.read` with `before` (a cursor past the end is the newest page, nothing before the oldest post), the verified username, the same answer while the identity is locked, a blocked replica is `missing`.
+- `packages/web-member/test/session-e2e.test.js`: `profile.read` of a CLI member's diary through the browser node over a real replication, including a mixed list.
+- `apps/cli/test/feed.test.js`: the shared feed paging: `before` pages backwards over every item exactly once, equal timestamps split by author then seq, a cursor newer than everything gives the newest page, the cursor is not mutated, an invalid `before` throws.
+- `apps/app/test/who.test.js`: the naming rule (trimmed name, valid username, or 'sem nome'), username validation rejecting malformed and six-hex handles, the reply mark that stays pending until the author is looked up.
+- `apps/app/test/paging.test.js`: reversing and merging pages without repeating a key, cursors from the oldest item and the progress requirement, diary rows interleaving invalid blocks, when a screen reloads (initial load, fresh hint, expired load).
+- `apps/app/test/syncSignals.test.js`: folding of sync events: download hints survive preemption, the own-diary baseline, fresh acknowledgements, warnings, stale runs and malformed lines ignored, and the chip label precedence.
+- `apps/app/test/pull.test.js`: the pull gesture math: bounded damping, activation, direction lock, cancel on sideways moves, arming only at the threshold with a vertical lock, the minimum spinner time.
+- `apps/app/test/autoSyncPolicy.test.js`: when a start is wanted, no start while waiting for the node's restart, the wait after a preempted continuous run, reconciliation when the grace passes, the back-off ladder and its reset, the failure map.
+- `apps/app/test/onboarding.test.js`: the step machine for hosted and for native/serve, skipping the name always reaches the tabs, locked and recovering take precedence, titles and hints cover every step.
+- `apps/app/test/format.test.js`: the remaining display helpers after the removal of `handleOf`, `atHandle` and `initialsOf`.
+
+### Limits
+
+- Every read still preempts the continuous run (#66). Mitigations only: `profile.read` batches (up to 100 keys), a 1 s floor between batches, background lookups wait until the run is 5 s old, the pill instead of an automatic reload, no reload on a tab switch within 60 s.
+- Pages are 35 (A Rua, after a first load of 30), 42 (Diário) and 50 (Seguindo). `profile.read` takes at most `PROFILE_LIMIT_MAX` (100) keys per call and reads whole replicas.
+- There is no forward ('since') paging.
+- The 'ver novidades' pill is a hint from `downloaded` lines and from the web's own-synced line, not a count; it can rarely appear without new posts. The Diário pill exists on the web only (on native there is no own-diary sync signal).
+- The Wi-Fi preference (#48) is not done.
+- On desktop web a list is refreshed by re-selecting the tab, by the pill or by the 'Atualizar' action; the pull gesture is for touch.
+- The name step is skippable per session: skipping is not remembered across sessions.
+- `varanda-serve` has no automatic transport reconnection.
+- Stages 2-4 (other people's profiles, likes and reposts, media) are not in this change; Seguindo rows are not pressable yet.
+
+### Security audit
+
+Multi-vendor audit of the uncommitted change (2026-10-25): Claude (fable, the audit brief), Claude (the built-in security review) and GPT (gpt-6-astra, max) took part; Grok did not (its usage balance was exhausted, HTTP 402). Result: 1 verified finding, medium, fixed in this PR; nothing critical, high or low remains.
+
+- Fixed (medium, CWE-451): with the key-derived handle gone, a free-form display name such as "@alice" rendered exactly like a member whose verified @nome is `alice` and who has no display name, so a followed member could impersonate the verified identity marker. Now the bold title comes only from the display name (leading at-signs, look-alikes included, removed) or, without one, the @nome written as a name (`alice`), and the `@alice` line appears only from a verified username record (`apps/app/src/who.js`, tests in `apps/app/test/who.test.js`).
+- Residual (accepted): two followed members who both have no verified @nome and pick the same display name still look alike in the lists; telling them apart needs the key, which Stage 2's profile pages can show. Moderation (block by key) and reports (by key) are unaffected.
+
+What the implementation was also checked against, by reading and by the tests above:
+
+- No new network surface: `profile.read` and the cursors are local reads on the node's existing RPC; no new route, port or replication behaviour.
+- The outbox approval rule is untouched. The drain gate now follows the sync run: the outbox drains while a continuous run is active and never during a once run.
+- Keys are never rendered as text in lists. They appear only in the own profile (behind 'mostrar chave'), in Ajustes › Identidade and in the certificate step, where the association needs them. The avatar never shows key characters (only its colour comes from the key).
+- Every peer-derived string in the new components (names, @nomes, bios, post text, reasons, event lines) goes through `displayText` from `@varanda/rpc`, as plain text.
+- `profile.read` uses the feed's admission rules: a forked, uncertified or blocked diary is `missing`, so it never names anyone.
+- The contract validates cursors and key lists (shape, size, duplicates) with fixed error messages.
+- An uncertain `sync.start` is reconciled through `sync.status` and never retried blindly; after a preempted stop the app waits for the node's own restart (up to 10 s, extended by each request) before reconciling; the app never sends `sync.stop`.
+- Error messages carry no filesystem path or key material.
+- No new dependency, no CSP change; the change to the web template (`apps/app/public/index.html`) is CSS only.
+
+### Human verification
+
+- [ ] Hosted PWA on a phone: onboarding from a clean browser ('Passo 1 de 3' to 'Passo 3 de 3'), 'Pular por enquanto' reaches the tabs, the toast 'Tudo pronto. Siga pessoas para encher a Rua.'.
+- [ ] Pull-to-refresh on A Rua, Seguindo and Diário (indicator, 72 px threshold; the page still scrolls normally; a sideways swipe does not trigger it).
+- [ ] The 'ver novidades' pill appears after another device publishes, and tapping it loads the new posts.
+- [ ] Infinite scroll on a followed diary of 100 posts to the very end: no repeats, no gaps, 'Isso é tudo por enquanto.' in A Rua and 'Início do diário.' in Diário; with the network cut mid-scroll, the failed page waits for 'tentar de novo' / 'mostrar mais'.
+- [ ] Names for a member with an old profile, for one with no profile ('sem nome') and for a reply to an author not yet looked up ('…' then the name); no key text in any list.
+- [ ] The sync chip toggling with airplane mode ('sem rede', then 'reconectando…', then 'sincronização automática'), and 'sincronizando…' during a download.
+- [ ] Ajustes › Sincronização is read-only (no button) and shows the state, the last stop and the event log.
+- [ ] iOS simulator: the system refresh control on the lists, re-selecting the current tab scrolls to the top and refreshes.
+- [ ] `varanda-serve` mode: onboarding steps 'Sua identidade', 'Certificado de membro' and the name, and the lists with names.
+- [ ] Two devices: publish on one, the other shows the post after its refresh or the pill; the outbox of a device that was offline drains once the continuous sync is back.

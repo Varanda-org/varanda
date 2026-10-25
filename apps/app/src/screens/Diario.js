@@ -1,46 +1,39 @@
-// Diário: the person's own profile header (sunset band, avatar, name, key,
-// bio, follow count) over the own log (log.read, the newest page), newest
-// first. Publications are PostRows; other blocks are short technical lines.
-// Posts still in the outbox ('fila de saída', browser node) are listed above
-// them; they are not PostRows (no reply, no publication date yet). A queued
-// item this page session did not write waits for the person ('enviar').
+// Diário: the person's own profile header (sunset band, avatar, name and
+// @nome from profile.read, bio, follow count, the public key behind 'mostrar
+// chave') over the own log (log.read), newest first, paged backwards with
+// infinite scroll and pull to refresh. Publications are PostRows; other valid
+// records are one compact line each, invalid blocks a short line with the
+// reason. Posts still in the outbox ('fila de saída', browser node) are
+// listed above them; they are not PostRows (no reply, no publication date
+// yet). A queued item this page session did not write waits for the person
+// ('enviar'). The 'ver novidades' pill (web only) follows the own-synced line
+// growing, i.e. another device published; the native node has no such
+// signal, so on native only the pull, the tab and the refresh prop reload.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { accountStatus, usernameMatches } from '../account'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
-import { atHandle, handleOf, relativeTime } from '../format'
+import { relativeTime } from '../format'
+import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
+import { atName, replyNameOf, whoOf } from '../who'
 import { ErrorText, Mono, SectionHeader, Soft, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
+import { RefreshableList } from '../ui/RefreshableList'
+import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
 import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
 
-// See ARua.js: a 'preempted' stop never triggers a reload.
-const RELOAD_REASONS = ['done', 'timeout', 'stopped']
-
 const BAND = 96
-
-// The newest 'profile' record of the page, or null.
-function newestProfile (log) {
-  let best = null
-  for (const entry of log.entries) {
-    const record = entry.record
-    if (record && record.type === 'profile' && (best === null || entry.seq > best.seq)) {
-      best = { seq: entry.seq, record }
-    }
-  }
-  return best === null ? null : best.record
-}
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -54,102 +47,118 @@ function PendingState ({ item, held }) {
 }
 
 function TechRow ({ children }) {
-  return <Text style={styles.tech}>{children}</Text>
+  return <View style={styles.tech}><Soft>{children}</Soft></View>
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, scrollToTop }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
   const insets = useSafeAreaInsets()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
-  // { info, log } from one load, or null before the first answer.
+  // { info, rows, atEnd } from the loads, or null before the first answer.
   const [data, setData] = useState(null)
   const [loadError, setLoadError] = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [olderError, setOlderError] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [editing, setEditing] = useState(false)
-  // The profile last saved from this screen ({ name, bio }), shown until a
-  // reload carries it: reopening the editor before that reload lands (or
-  // after it failed) must not start from the older profile.
-  const [saved, setSaved] = useState(null)
   const pull = useAction()
   const seqRef = useRef(0)
-  // The own @nome from the account service (hosted page with a passkey), or
-  // null: the 6-hex handle. Not from log.read, which only returns the newest
-  // page and cannot check the issuer's signature.
-  const [username, setUsername] = useState(null)
-  const linkMode = node.hosted === true && node.passkey !== null
+  const olderBusy = useRef(false)
+  const lastRefresh = useRef(refresh)
+  const dataRef = useRef(null)
+  dataRef.current = data
 
-  const { learn, resolve } = names
-  const load = useCallback(async () => {
+  const { learn, resolve, invalidate, profileOf } = names
+  const { request, ackFresh } = node
+  // Replaces the rows with the newest page (a refresh).
+  const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
-    let key = null
+    setLoadingMore(false)
+    setOlderError('')
+    olderBusy.current = false
+    const knownKey = dataRef.current && dataRef.current.info.publicKey
+    if (refreshProfile && typeof knownKey === 'string') invalidate([knownKey])
     try {
       // One read after the other: each read preempts a running sync.
-      const info = await node.request('node.info', {})
-      const log = await node.request('log.read', { limit: LOG_LIMIT_MAX })
+      const info = await request('node.info', {})
+      if (refreshProfile && mine === seqRef.current && typeof info.publicKey === 'string' && info.publicKey !== knownKey) {
+        invalidate([info.publicKey])
+      }
+      const log = await request('log.read', { limit: LOG_LIMIT_MAX })
       if (mine !== seqRef.current) return
-      key = info.publicKey
-      setData({ info, log })
+      const rows = logRows(log)
+      setData({ info, rows, atEnd: isLastLogPage(log) })
       setLoadError('')
-      const profile = newestProfile(log)
-      // Without a profile in this page the name stays whatever is known: an
-      // older profile may exist beyond the page.
-      if (profile && info.publicKey) learn(info.publicKey, profile.name)
+      setOlderError('')
+      setLoadingMore(false)
+      olderBusy.current = false
+      ackFresh(['own'])
+      if (typeof info.publicKey === 'string') resolve(info.publicKey)
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
     } catch (err) {
       if (mine === seqRef.current) setLoadError(errorText(err))
-      return
     }
-    // After the reads: a failure (not linked, service unavailable) only
-    // leaves the 6-hex handle.
-    let name = null
-    if (linkMode && typeof key === 'string') {
-      try {
-        const status = await accountStatus(key)
-        if (status.linked === true && usernameMatches(status.usernameRecord, key, status.username)) name = status.username
-      } catch {}
+  }, [request, ackFresh, resolve, invalidate])
+
+  // Appends the next older page; never while one is loading.
+  const loadOlder = useCallback(async () => {
+    const current = dataRef.current
+    if (current === null || current.atEnd || olderBusy.current) return
+    olderBusy.current = true
+    const mine = seqRef.current
+    setLoadingMore(true)
+    setOlderError('')
+    try {
+      const log = await request('log.read', { limit: LOG_LIMIT_MAX, before: oldestSeq(current.rows) })
+      // The cursor came from `current`: a newest page that replaced it
+      // meanwhile (a reload from activation or a refresh bump) would leave a
+      // gap between the two, so this page is dropped (that reload reset the
+      // paging state).
+      if (mine !== seqRef.current || dataRef.current !== current) return
+      const base = dataRef.current
+      setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log) })
+      setLoadingMore(false)
+      olderBusy.current = false
+      for (const entry of log.entries) {
+        const record = entry.record
+        if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
+      }
+    } catch (err) {
+      if (mine !== seqRef.current) return
+      setOlderError(errorText(err))
+      setLoadingMore(false)
+      olderBusy.current = false
     }
-    if (mine === seqRef.current) setUsername(name)
-  }, [node.request, learn, resolve, linkMode])
+  }, [request, resolve])
 
-  useEffect(() => { if (active) load() }, [active, load, refresh])
-
-  // Reload after a sync run that ended on its own or was stopped.
-  const stopped = node.sync.stopped
-  const prevStoppedRef = useRef(stopped)
+  // The own-diary growth signal at this render: an activation that is about
+  // to acknowledge it re-reads the profile too, or a change made on another
+  // device would be acknowledged without reaching the header and the editor.
+  const ownGrew = !!(node.signals && node.signals.fresh && typeof node.signals.fresh.own === 'number')
+  const ownGrewRef = useRef(ownGrew)
+  ownGrewRef.current = ownGrew
   useEffect(() => {
-    if (stopped === prevStoppedRef.current) return
-    prevStoppedRef.current = stopped
-    if (active && stopped && RELOAD_REASONS.includes(stopped.reason)) load()
-  }, [stopped, active, load])
+    if (!active) return
+    // A refresh bump while hidden is consumed on the next activation.
+    const refreshProfile = refresh !== lastRefresh.current || ownGrewRef.current
+    lastRefresh.current = refresh
+    loadNewest(refreshProfile)
+  }, [active, loadNewest, refresh])
 
-  const reload = () => pull.run(load)
+  const reload = () => pull.run(() => loadNewest(true))
 
   const info = data === null ? null : data.info
-  const log = data === null ? null : data.log
-  const handle = atHandle(username, info?.publicKey)
-  const loaded = log === null ? null : newestProfile(log)
-  const carried = loaded !== null && saved !== null && loaded.name === saved.name && (loaded.bio || '') === saved.bio
-  const profile = saved !== null && !carried ? saved : loaded
-  // Once a reload carries the saved profile, the loaded records rule again
-  // (a later change made elsewhere must show).
-  useEffect(() => { if (carried) setSaved(null) }, [carried])
-  const knownName = profile
-    ? profile.name
-    : (info && info.publicKey ? names.nameOf(info.publicKey) : undefined)
-  const hasName = typeof knownName === 'string' && knownName !== ''
-
-  // Entries and invalid blocks, newest first, in one list by seq.
-  const rows = log === null
-    ? []
-    : log.entries.map((e) => ({ seq: e.seq, entry: e }))
-      .concat(log.invalid.map((i) => ({ seq: i.seq, invalid: i })))
-      .sort((a, b) => b.seq - a.seq)
+  const rows = data === null ? [] : data.rows
+  const publicKey = info && typeof info.publicKey === 'string' ? info.publicKey : null
+  const profile = publicKey ? profileOf(publicKey) : undefined
+  const who = whoOf(profile || undefined)
+  const bio = profile && profile.bio ? profile.bio : ''
 
   const bandHeight = insets.top + BAND
 
@@ -167,7 +176,7 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
     const sep = typeof to === 'string' ? to.indexOf(':') : -1
     if (sep < 0) return displayText(String(to))
     const author = to.slice(0, sep)
-    return displayText(names.nameOf(author) || handleOf(author)) + ' · #' + displayText(to.slice(sep + 1))
+    return displayText(whoOf(profileOf(author) || undefined).title) + ' · #' + displayText(to.slice(sep + 1))
   }
   const outboxList = pending.length > 0
     ? (
@@ -210,11 +219,18 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
       )
     : null
 
+  // Copy only where the clipboard exists; elsewhere the key stays selectable.
+  const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
+  const copyKey = () => {
+    try {
+      navigator.clipboard.writeText(publicKey).catch(() => {})
+    } catch {}
+  }
+
   const header = info === null
     ? (
       <View>
         <View style={[styles.plainBand, { height: bandHeight }]} />
-        {loadError ? null : <View style={styles.pad}><Soft>carregando…</Soft></View>}
       </View>
       )
     : (
@@ -234,24 +250,14 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
             so its empty space would take the gear's touches: only the avatar
             and the pill receive them. */}
         <View style={styles.headRow} pointerEvents='box-none'>
-          <Avatar name={hasName ? knownName : null} publicKey={info.publicKey} size={88} ring />
+          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} ring />
           <Pill label='Editar perfil' onPress={() => setEditing(true)} />
         </View>
         <View style={styles.data}>
-          <Text style={styles.name}>
-            {hasName ? displayText(knownName) : displayText(handle)}
-          </Text>
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='mostrar a chave inteira'
-            onPress={() => setShowKey((v) => !v)}
-            style={styles.keyWrap}
-          >
-            <Text style={styles.keyText}>{displayText(handle)}</Text>
-          </Pressable>
-          {showKey ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-          {profile && profile.bio
-            ? <Text style={styles.bio}>{displayText(profile.bio, { multiline: true })}</Text>
+          <Text style={styles.name}>{displayText(who.title)}</Text>
+          {who.subtitle ? <Text style={styles.keyText}>{displayText(who.subtitle)}</Text> : null}
+          {bio
+            ? <Text style={styles.bio}>{displayText(bio, { multiline: true })}</Text>
             : null}
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
@@ -263,30 +269,62 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
               </Pressable>
               )
             : null}
-          {!profile && log.entriesTruncated > 0
-            ? <Soft>Nenhum perfil nos últimos blocos; um perfil mais antigo pode existir.</Soft>
+          <View style={styles.keyRow}>
+            <Text style={styles.keyText}>chave pública</Text>
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel={showKey ? 'esconder chave' : 'mostrar chave'}
+              onPress={() => setShowKey((v) => !v)}
+              style={styles.keyToggle}
+            >
+              <Icon name={showKey ? 'olho_fechado' : 'olho'} size={16} color={colors.soft} />
+              <Text style={styles.keyText}>{showKey ? 'esconder chave' : 'mostrar chave'}</Text>
+            </Pressable>
+          </View>
+          {showKey
+            ? (
+              <View style={styles.keyBox}>
+                <Mono>{displayText(info.publicKey)}</Mono>
+                {canCopy ? <Pill label='copiar' onPress={copyKey} /> : null}
+              </View>
+              )
             : null}
         </View>
         {outboxList}
-        <SectionHeader right={Platform.OS === 'web' ? <Pill label='atualizar' onPress={reload} pending={pull.pending} /> : null}>
-          Publicações
-        </SectionHeader>
+        <SectionHeader>Publicações</SectionHeader>
+        <ErrorText>{loadError}</ErrorText>
       </View>
       )
 
-  const footer = (
-    <View style={styles.footer}>
-      {log !== null && rows.length === 0 ? <Soft>O diário ainda está vazio.</Soft> : null}
-      {log !== null && log.entriesTruncated > 0
-        ? <Soft>{String(log.entriesTruncated) + ' blocos mais antigos não aparecem: nesta versão só a página mais recente pode ser lida.'}</Soft>
-        : null}
-      <ErrorText>{loadError}</ErrorText>
-      {/* The web has no pull to refresh: a failed load still offers a retry. */}
-      {loadError && Platform.OS === 'web' && info === null
-        ? <Pill label='tentar de novo' onPress={reload} pending={pull.pending} />
-        : null}
-    </View>
-  )
+  const footer = data !== null && rows.length > 0
+    ? (
+      <ListFooter
+        loading={loadingMore}
+        atEnd={data.atEnd}
+        endText='Início do diário.'
+        error={olderError}
+        onRetry={loadOlder}
+      />
+      )
+    : null
+
+  // Before the first answer, and for an empty log, under the header.
+  let empty
+  if (data === null) {
+    empty = loadError
+      ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
+      : <Skeleton />
+  } else {
+    empty = (
+      <EmptyState
+        icon='lapis'
+        title='Seu diário está vazio'
+        body='Sua primeira publicação aparece aqui.'
+        actionLabel='Publicar'
+        onAction={onPublish}
+      />
+    )
+  }
 
   const renderItem = ({ item: row }) => {
     const head = '#' + String(row.seq)
@@ -295,59 +333,71 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
     }
     const record = row.entry.record || {}
     if (record.type === 'post') {
+      const replyProfile = record.replyTo ? profileOf(record.replyTo.author) : undefined
       return (
         <PostRow
           author={info.publicKey}
-          name={hasName ? knownName : null}
-          username={username}
+          name={profile ? profile.name : null}
+          username={profile ? profile.username : null}
           at={record.at}
           text={record.text}
-          replyToName={record.replyTo ? (names.nameOf(record.replyTo.author) || handleOf(record.replyTo.author)) : null}
+          replyToName={record.replyTo ? replyNameOf(replyProfile) : null}
           now={now}
           onReply={() => onReply({
             ref: info.publicKey + ':' + row.seq,
-            name: hasName ? knownName : handle,
+            name: profile ? profile.name : null,
+            username: profile ? profile.username : null,
             text: record.text
           })}
         />
       )
     }
-    if (record.type === 'profile') {
-      return <TechRow>{head + ' · perfil · ' + displayText(record.name) + ' · ' + (relativeTime(record.at, now) ?? displayText(record.at))}</TechRow>
-    }
-    if (record.type === 'member-cert') return <TechRow>{head + ' · certificado de membro'}</TechRow>
-    if (record.type === 'username') return <TechRow>{head + ' · nome de usuário · ' + displayText(atHandle(record.username, info.publicKey))}</TechRow>
-    return <TechRow>{head + ' · registro desconhecido'}</TechRow>
+    if (record.type === 'profile') return <TechRow>perfil atualizado</TechRow>
+    if (record.type === 'member-cert') return <TechRow>certificado de membro</TechRow>
+    if (record.type === 'username') return <TechRow>{'@nome registrado ' + displayText(atName(record.username) || '')}</TechRow>
+    return <TechRow>registro desconhecido</TechRow>
   }
 
   // Rows re-render when a name is learned or the clock ticks.
-  const extra = useMemo(() => ({ nameOf: names.nameOf, now, knownName, username }), [names.nameOf, now, knownName, username])
+  const extra = useMemo(() => ({ profileOf, now, profile }), [profileOf, now, profile])
 
   return (
     <View style={styles.list}>
-      <FlatList
-        style={styles.list}
-        data={info === null ? [] : rows}
+      <RefreshableList
+        data={rows}
         keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}
         renderItem={renderItem}
         extraData={extra}
         ListHeaderComponent={header}
         ListFooterComponent={footer}
+        ListEmptyComponent={empty}
         contentContainerStyle={{ paddingBottom: bottomPad }}
-        keyboardShouldPersistTaps='handled'
-        refreshControl={Platform.OS === 'web'
-          ? undefined
-          : <RefreshControl refreshing={pull.pending} onRefresh={reload} tintColor={colors.accent} colors={[colors.accent]} />}
+        onRefresh={reload}
+        refreshing={pull.pending}
+        onLoadMore={loadOlder}
+        loadingMore={loadingMore}
+        loadMoreError={!!olderError}
+        atEnd={data === null ? true : data.atEnd}
+        scrollToTopSignal={scrollToTop}
+        newItems={{
+          label: 'ver novidades',
+          visible: Platform.OS === 'web' && !!(node.signals && node.signals.fresh && node.signals.fresh.own),
+          onPress: reload
+        }}
       />
       <Perfil
         open={editing}
-        current={{ name: (profile && profile.name) || '', bio: (profile && profile.bio) || '' }}
+        ownKey={info ? info.publicKey : null}
+        current={{ name: (profile && profile.name) || '', bio }}
         onClose={() => setEditing(false)}
         onSaved={(values) => {
-          setSaved(values)
-          if (info && info.publicKey) learn(info.publicKey, values.name)
+          if (info && info.publicKey) {
+            learn(info.publicKey, { name: values.name, bio: values.bio })
+            // The authoritative answer also replaces a cleared bio.
+            invalidate([info.publicKey])
+          }
           setEditing(false)
-          reload()
+          pull.run(loadNewest)
         }}
       />
     </View>
@@ -357,7 +407,6 @@ export default function Diario ({ active, refresh, onSettings, onReply }) {
 const styles = StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
   plainBand: { backgroundColor: colors.bg },
-  pad: { padding: 16 },
   gear: {
     position: 'absolute',
     right: 16,
@@ -378,13 +427,14 @@ const styles = StyleSheet.create({
   },
   data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
   name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
-  keyWrap: { alignSelf: 'flex-start' },
   keyText: { ...type.postMeta, color: colors.soft },
+  keyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
+  keyToggle: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  keyBox: { gap: 8, alignItems: 'flex-start' },
   bio: { ...type.postText, color: colors.ink, marginTop: 8 },
   counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
   countsNum: { color: colors.ink, fontWeight: '700' },
   warn: { fontSize: 14, lineHeight: 20, color: colors.warn, marginTop: 6 },
-  footer: { padding: 16, gap: 8 },
   pending: {
     paddingVertical: 10,
     paddingHorizontal: 16,
@@ -396,8 +446,6 @@ const styles = StyleSheet.create({
   pendingActions: { flexDirection: 'row', gap: 8, marginTop: 6 },
   pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 },
   tech: {
-    ...type.replyMark,
-    color: colors.soft,
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderBottomWidth: 1,

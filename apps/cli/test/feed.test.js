@@ -428,3 +428,70 @@ test('negative-year posts sort by time, not by string', async (t) => {
   const { items } = buildFeed({ logs, now: NOW })
   t.alike(items.map((i) => i.text), ['older', 'newer'])
 })
+
+// Ten posts across two diaries, several sharing one timestamp, so the
+// cursor order needs author then seq to split them.
+function pagingLogs () {
+  const t1 = '2026-01-01T00:00:00.000Z'
+  const t2 = '2026-01-02T00:00:00.000Z'
+  const t3 = '2026-01-03T00:00:00.000Z'
+  return [
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: post('b1', t1) }, { seq: 2, record: post('b2', t2) }, { seq: 3, record: post('b3', t2) }, { seq: 4, record: post('b4', t3) }] },
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', t1) }, { seq: 2, record: post('a2', t1) }, { seq: 3, record: post('a3', t2) }, { seq: 4, record: post('a4', t3) }, { seq: 5, record: post('a5', t3) }, { seq: 6, record: post('a6', t3) }] }
+  ]
+}
+
+test('before pages backwards over every item exactly once', async (t) => {
+  await testnet(t)
+  const logs = pagingLogs()
+  const all = buildFeed({ logs, now: NOW }).items.map((i) => i.text)
+  t.alike(all, ['a1', 'a2', 'b1', 'a3', 'b2', 'b3', 'a4', 'a5', 'a6', 'b4'])
+  const seen = []
+  let before = null
+  let pages = 0
+  for (;;) {
+    const { items } = buildFeed({ logs, limit: 3, now: NOW, before })
+    pages++
+    seen.unshift(...items.map((i) => i.text))
+    if (items.length < 3) break
+    before = { at: items[0].at, author: items[0].author, seq: items[0].seq }
+  }
+  t.alike(seen, all)
+  t.is(pages, 4)
+})
+
+test('before splits equal timestamps by author then seq', async (t) => {
+  await testnet(t)
+  const logs = pagingLogs()
+  const at = '2026-01-02T00:00:00.000Z'
+  t.alike(buildFeed({ logs, now: NOW, before: { at, author: KB, seq: 3 } }).items.map((i) => i.text), ['a1', 'a2', 'b1', 'a3', 'b2'])
+  t.alike(buildFeed({ logs, now: NOW, before: { at, author: KB, seq: 2 } }).items.map((i) => i.text), ['a1', 'a2', 'b1', 'a3'])
+  t.alike(buildFeed({ logs, limit: 2, now: NOW, before: { at, author: KA, seq: 3 } }).items.map((i) => i.text), ['a2', 'b1'])
+})
+
+test('a cursor newer than everything returns the newest page', async (t) => {
+  await testnet(t)
+  const logs = pagingLogs()
+  const before = { at: '2027-01-01T00:00:00.000Z', author: KA, seq: 1 }
+  t.alike(
+    buildFeed({ logs, limit: 3, now: NOW, before }).items,
+    buildFeed({ logs, limit: 3, now: NOW }).items
+  )
+  const snapshot = JSON.stringify(before)
+  buildFeed({ logs, limit: 3, now: NOW, before })
+  t.is(JSON.stringify(before), snapshot, 'the cursor is not mutated')
+})
+
+test('an invalid before throws', async (t) => {
+  await testnet(t)
+  const logs = pagingLogs()
+  const bad = ['x', 1, true, [], {}, { at: 'nope', author: KA, seq: 1 }, { at: AT, author: 1, seq: 1 }, { at: AT, author: KA, seq: 1.5 }, { at: AT, author: KA }]
+  for (const before of bad) {
+    try {
+      buildFeed({ logs, now: NOW, before })
+      t.fail('accepted ' + JSON.stringify(before))
+    } catch (err) {
+      t.ok(err instanceof TypeError && err.message === 'before inválido', 'rejects ' + JSON.stringify(before))
+    }
+  }
+})

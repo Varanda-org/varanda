@@ -43,6 +43,33 @@ function int (min, max) {
 
 const isBool = (v) => typeof v === 'boolean'
 
+// profile.read: 1..PROFILE_LIMIT_MAX keys; duplicates allowed (the node folds
+// them).
+function isKeyList (v) {
+  return Array.isArray(v) && v.length >= 1 && v.length <= L.PROFILE_LIMIT_MAX && v.every(isKey)
+}
+
+// The isCanonicalIso rule of @varanda/core lib/records.js, which this package
+// cannot import: a string that round-trips through Date unchanged.
+const MAX_ISO = 32
+
+function isCanonicalIso (v) {
+  if (typeof v !== 'string' || v.length > MAX_ISO) return false
+  try {
+    return new Date(v).toISOString() === v
+  } catch {
+    return false
+  }
+}
+
+// feed.read `before` (docs/rpc.md 5.13): exactly { at, author, seq }, the
+// feed-order position of the oldest item the caller holds.
+function isFeedCursor (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 3) return false
+  if (!hasOwn(v, 'at') || !hasOwn(v, 'author') || !hasOwn(v, 'seq')) return false
+  return isCanonicalIso(v.at) && isKey(v.author) && Number.isSafeInteger(v.seq) && v.seq >= 1
+}
+
 // account.sign (docs/rpc.md 5.18). Duplicated from
 // @varanda/core lib/account-link.js, which this package cannot import.
 const ACCOUNT_PHASES = ['reserve', 'finish', 'rename']
@@ -156,10 +183,20 @@ const SPECS = {
   'log.read': {
     fields: {
       author: opt(isKey),
-      limit: opt(int(1, L.LOG_LIMIT_MAX), L.LOG_LIMIT_DEFAULT)
+      limit: opt(int(1, L.LOG_LIMIT_MAX), L.LOG_LIMIT_DEFAULT),
+      // Exclusive block-seq bound; absent = the newest page.
+      before: opt(int(1, Number.MAX_SAFE_INTEGER))
     }
   },
-  'feed.read': { fields: { limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT) } },
+  'feed.read': {
+    fields: {
+      limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT),
+      // Exclusive feed-order cursor; absent = the newest page.
+      before: opt(isFeedCursor)
+    }
+  },
+  // Names of the given authors from local data only (docs/rpc.md 5.21).
+  'profile.read': { fields: { authors: req(isKeyList) } },
   'sync.start': {
     fields: {
       once: opt(isBool, false),

@@ -15,8 +15,9 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
-const { createCert, createIssuerCert, createSeederCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord } = require('@varanda/core/lib/records')
+const { createCert, createIssuerCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { memberCertRecord, profileRecord } = require('@varanda/core/lib/records')
+const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
@@ -26,6 +27,7 @@ const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
+const { writeBlocklist } = require('../lib/node-store')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const MISMATCH = 'passkey não corresponde ao diário guardado'
@@ -61,6 +63,34 @@ async function diaryHolds (storage, needle) {
     await new Promise((resolve) => file.close(() => resolve()))
   }
   return found
+}
+
+// The blocklist fixture of blocklist.test.js: a moderator certified by the
+// association and a snapshot it signs.
+function moderator (assocKp) {
+  const keyPair = crypto.keyPair()
+  return { keyPair, cert: createModeratorCert({ moderator: hex(keyPair.publicKey) }, assocKp) }
+}
+
+function snapshot (mod, { seq = 1, blocked = [], revokedIssuers = [] }) {
+  return createSnapshot({ seq, blocked, revokedIssuers }, mod.keyPair, mod.cert)
+}
+
+// Stores a full local replica of `source` (a Hypercore 10 core) in the node
+// storage, as a sync run would, by replicating in memory; the replica core
+// is closed again before the node opens it.
+async function storeReplica (storage, source) {
+  const key = hex(source.key)
+  const replica = new Hypercore(storage.core('replica/' + key), source.key, { valueEncoding: 'binary' })
+  await replica.ready()
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 0, end: source.length }).done()
+  a.destroy()
+  b.destroy()
+  await replica.close()
+  return key
 }
 
 // keyPair: the identity pair handed to the node before anything else (null
@@ -160,7 +190,7 @@ test('before an identity exists', async (t) => {
     sync: { state: 'idle' },
     publicDht: false
   })
-  for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}]]) {
+  for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }]]) {
     const err = await errorOf(web.request(method, params))
     t.is(err && err.code, 'NOT_FOUND', method)
     t.is(err && err.message, 'identidade não encontrada', method)
@@ -224,6 +254,30 @@ test('profile, posts, replies, log and feed of the own diary', async (t) => {
   t.alike(feed.items[1].replyTo, { author: key, seq: 2 })
   t.alike(feed.skipped, [])
   t.is(feed.skippedTruncated, 0)
+
+  // profile.read of the own key (duplicates folded).
+  t.alike(await web.request('profile.read', { authors: [key, key] }), {
+    profiles: [{ author: key, name: 'Bia', bio: 'oi', username: null }],
+    missing: []
+  })
+
+  // log.read pages backwards with `before`, which clamps to the length.
+  const back = await web.request('log.read', { limit: 2, before: 3 })
+  t.alike(back.entries.map((e) => e.seq), [1, 2])
+  t.is(back.entriesTruncated, 1)
+  const first = await web.request('log.read', { limit: 2, before: 1 })
+  t.alike(first.entries.map((e) => e.seq), [0])
+  t.is(first.entriesTruncated, 0)
+  t.alike(await web.request('log.read', { limit: 2, before: 99 }), page, 'a before past the length is the newest page')
+
+  // feed.read pages backwards from the oldest item held, without overlap.
+  const newest = await web.request('feed.read', { limit: 1 })
+  t.alike(newest.items.map((i) => i.seq), [3])
+  const oldest = newest.items[0]
+  const older = await web.request('feed.read', { limit: 1, before: { at: oldest.at, author: oldest.author, seq: oldest.seq } })
+  t.alike(older.items.map((i) => i.seq), [2])
+  const last = await web.request('feed.read', { limit: 1, before: { at: older.items[0].at, author: key, seq: 2 } })
+  t.alike(last.items, [], 'nothing before the oldest post')
 })
 
 test('follows, and reads of diaries with no local data', async (t) => {
@@ -244,6 +298,11 @@ test('follows, and reads of diaries with no local data', async (t) => {
   t.is(missing.code, 'NOT_FOUND')
   t.is(missing.message, 'sem dados locais para este diário')
   t.absent(await storage.hasCore('replica/' + other), 'no core created by a read')
+  t.alike(await web.request('profile.read', { authors: [other, key] }), {
+    profiles: [{ author: key, name: null, bio: null, username: null }],
+    missing: [other]
+  }, 'no profile record: null name and bio; no local data: missing')
+  t.absent(await storage.hasCore('replica/' + other), 'no core created by profile.read')
 
   t.alike(await web.request('follow.remove', { key: other }), { changed: true, followCount: 0 })
   t.alike(await web.request('follow.remove', { key: other }), { changed: false, followCount: 0 })
@@ -470,10 +529,40 @@ test('username.add: appends a verified username record once, locked and foreign 
   t.alike(await s.web.request('log.read', {}), after, 'nothing appended')
   t.alike(await s.web.request('username.add', { record: rename }), { changed: false, username: 'ana_2' }, 'the latest record is still accepted')
 
+  const named = { profiles: [{ author: s.key, name: null, bio: null, username: 'ana_2' }], missing: [] }
+  t.alike(await s.web.request('profile.read', { authors: [s.key] }), named, 'the verified username')
+
   await s.node.clearKeyPair()
   const locked = await errorOf(s.web.request('username.add', { record: rename }))
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.is((await s.web.request('log.read', {})).entries.length, 3, 'nothing written while locked')
+  t.alike(await s.web.request('profile.read', { authors: [s.key] }), named, 'locked: the same answer')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('profile.read: a readable replica is named, a blocked one is missing', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const s = await certified(t, { assoc })
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+  await source.append(profileRecord({ name: 'Autor', bio: 'de longe' }))
+  const A = await storeReplica(s.storage, source)
+
+  // Not followed: still named when its diary would be shown.
+  t.alike(await s.web.request('profile.read', { authors: [A, A] }), {
+    profiles: [{ author: A, name: 'Autor', bio: 'de longe', username: null }],
+    missing: []
+  })
+
+  await writeBlocklist(s.storage, snapshot(moderator(assoc.kp), { blocked: [A] }))
+  t.alike(await s.web.request('profile.read', { authors: [A, s.key] }), {
+    profiles: [{ author: s.key, name: null, bio: null, username: null }],
+    missing: [A]
+  }, 'blocked: missing, before any purge')
+  t.ok(await s.storage.hasCore('replica/' + A), 'still stored: the read hides it, the sync purges it')
   t.alike(s.internal, [], 'no internal error')
 })
 
