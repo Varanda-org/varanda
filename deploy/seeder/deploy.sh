@@ -49,6 +49,8 @@ domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 assoc_re='^[0-9a-fA-F]{64}$'
 # O Content-Type de /account/health: JSON, com ou sem parâmetros (charset).
 json_type_re='^application/json( *;.*)?$'
+# Um e-mail de moderador em VARANDA_MODERATOR_EMAILS (só a forma, sem espaço).
+moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
 
 root=''
 www=''
@@ -214,7 +216,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret
+  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -254,6 +256,24 @@ conferir_antes() {
   if [ -z "$google_secret" ]; then
     log 'VARANDA_GOOGLE_CLIENT_SECRET ausente em deploy/seeder/.env'
     exit 1
+  fi
+  # Moderadores: opcional (vazio deixa o painel desligado, e um .env sem a
+  # linha continua implantando). Lida do mesmo jeito, nunca executada e nunca
+  # impressa (são e-mails). Cada item precisa ter a forma a@b, sem espaço,
+  # vírgula nem outro @, e são no máximo 32. Um comentário no fim da linha
+  # (espaço e #) é descartado, como o Compose faz com um valor sem aspas.
+  moderators=$(sed -n 's/^VARANDA_MODERATOR_EMAILS=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$moderators" ]; then
+    while IFS= read -r item; do
+      item=${item#"${item%%[![:space:]]*}"}
+      item=${item%"${item##*[![:space:]]}"}
+      itens=$((itens + 1))
+      if [ "$itens" -gt 32 ] || ! [[ $item =~ $moderator_re ]]; then
+        log 'VARANDA_MODERATOR_EMAILS inválido em deploy/seeder/.env'
+        exit 1
+      fi
+    done < <(printf '%s\n' "$moderators" | tr ',' '\n')
   fi
 }
 
@@ -388,6 +408,29 @@ servido_conta() {
   return 1
 }
 
+# O painel de moderação pelo domínio, sem cookie e sem seguir redirecionamento:
+# GET /account/mod/api/me precisa responder 401, JSON e exatamente
+# {"error":"nao-autorizado"} mais LF (todo corpo JSON do serviço termina com
+# LF, como em servido_conta). Passa com o painel desligado
+# (VARANDA_MODERATOR_EMAILS vazio) e prova o handle /account/* do Caddy
+# chegando às rotas de moderação, não ao fallback do app. Nunca pede
+# /account/mod/login (iniciaria um fluxo OAuth) e nenhum cookie é enviado.
+servido_moderacao() {
+  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp" resposta
+  rm -f "$baixado" "$esperado"
+  if printf '%s\n' '{"error":"nao-autorizado"}' >"$esperado" \
+    && resposta=$(curl -sS --connect-timeout 5 --max-time 10 -o "$baixado" \
+      -w '%{http_code} %{content_type}' "https://$domain/account/mod/api/me") \
+    && [[ $resposta =~ ^401\ (.*)$ ]] \
+    && [[ ${BASH_REMATCH[1]} =~ $json_type_re ]] \
+    && cmp -s "$baixado" "$esperado"; then
+    rm -f "$baixado" "$esperado"
+    return 0
+  fi
+  rm -f "$baixado" "$esperado"
+  return 1
+}
+
 # O Caddyfile lido é o do checkout atual: depois que a volta faz o reset para
 # um commit anterior ao /varanda.json (ou ao /account/*), a sonda dele não
 # roda e a volta ainda passa na saúde. A primeira implantação com uma sonda
@@ -400,12 +443,16 @@ servido_conta() {
 # citado no index.html) ainda passa: a sonda só roda se o arquivo existe.
 # O bundle prova que o Caddy serve o arquivo com hash, não o index.html.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0 conta=0 bundle
+  local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
     json=1
   fi
   if grep -q 'handle /account/\*' "$root/deploy/seeder/Caddyfile"; then
     conta=1
+  fi
+  # Uma volta para um commit sem as rotas de moderação (B2) pula a sonda.
+  if grep -q '/account/mod/api/me' "$root/apps/cli/lib/account/mod-routes.js" 2>/dev/null; then
+    moderacao=1
   fi
   bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
   while [ "$SECONDS" -lt "$fim" ]; do
@@ -413,7 +460,8 @@ aguardar_web() {
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
       && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
-      && { [ "$conta" = 0 ] || servido_conta; }; then
+      && { [ "$conta" = 0 ] || servido_conta; } \
+      && { [ "$moderacao" = 0 ] || servido_moderacao; }; then
       return 0
     fi
     sleep 3

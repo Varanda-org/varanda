@@ -23,7 +23,9 @@ const modPublish = require('../mod-publish')
 // holds public keys only: the list says WHICH accounts are blocked, never
 // why. Publishing goes to the association's seeder only, by its Noise key
 // (--seeder, or `seeder` stored by `mod init --seeder`; mod-publish.js).
-const USAGE = 'node bin/varanda.js mod init|show|cert add|block|unblock|revoke-issuer|unrevoke-issuer|publish'
+// `mod apply --server <origin>` signs the decisions taken in the account
+// service's moderation panel (mod-apply.js).
+const USAGE = 'node bin/varanda.js mod init|show|cert add|block|unblock|revoke-issuer|unrevoke-issuer|publish|apply'
 const NO_SEEDER = 'informe --seeder <chave do semeador> (seed status a mostra) ou use --no-publish'
 const NO_LIST = 'este diretório não tem lista anterior; copie o blocklist.json da moderação anterior para cá ou, se é a primeira lista da associação, use --new-list'
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -31,6 +33,8 @@ const KEY_FILE = 'moderator.json'
 const CERT_FILE = 'moderator-cert.json'
 const LIST_FILE = 'blocklist.json'
 const LOG_FILE = 'moderation.jsonl'
+const SOURCE_OPERATOR = 'operacao'
+const SOURCE_PANEL = 'painel'
 // Files that mark the dir as another role's (an association dir has no config.json).
 const FOREIGN_FILES = ['association.json', 'seeder-key.json', 'issuer-key.json', 'store']
 
@@ -248,15 +252,18 @@ function listKey (value) {
   return value.toLowerCase()
 }
 
-// Builds, signs and stores the next snapshot; the audit line carries the op,
-// the key, the new seq and the date (never a signature or a secret).
+// Builds, signs and stores the next snapshot from `edits` ([{ op, key }],
+// applied in order); the audit log gets one line per edit with the op, the
+// key, the new seq, the date and the source: 'painel' for `mod apply` (a
+// decision taken in the account service's panel), 'operacao' for the
+// operator's own commands (never a signature or a secret). Lines written
+// before the field existed read as 'operacao' (blockSources).
 // A dir without a list starts one only with --new-list: after a moderator
 // rotation (fresh dir, newer moderator certificate) a list signed from empty
 // sets would be accepted everywhere as newer (blocklist.js acceptSnapshot)
 // and silently undo every earlier block and issuer revocation. The rotation
 // copies blocklist.json into the new dir and continues from it.
-function change (dataDir, association, op, key, newList) {
-  const spec = OPS[op]
+function signNext (dataDir, association, edits, newList, date, source = SOURCE_OPERATOR) {
   const kp = loadKeyPair(dataDir)
   const publicKey = b4a.toString(kp.publicKey, 'hex')
   const certificate = loadCert(dataDir, publicKey, association)
@@ -267,22 +274,64 @@ function change (dataDir, association, op, key, newList) {
     blocked: new Set(previous ? previous.blocked : []),
     revokedIssuers: new Set(previous ? previous.revokedIssuers : [])
   }
-  const set = lists[spec.list]
-  const had = set.has(key)
-  if (spec.add) set.add(key)
-  else set.delete(key)
-  if (set.size > LIMITS[spec.list]) throw new Error('lista cheia (máximo ' + LIMITS[spec.list] + ')')
+  const had = []
+  for (const { op, key } of edits) {
+    const spec = OPS[op]
+    const set = lists[spec.list]
+    had.push(set.has(key))
+    if (spec.add) set.add(key)
+    else set.delete(key)
+  }
+  // Only the final sets must fit: `mod apply` passes its blocks before its
+  // unblocks, so a full list with an unblock and a replacement block would
+  // overflow midway although the result fits (and retrying never helps).
+  // A single-key command has one edit, so its check is unchanged.
+  for (const list of ['blocked', 'revokedIssuers']) {
+    if (lists[list].size > LIMITS[list]) throw new Error('lista cheia (máximo ' + LIMITS[list] + ')')
+  }
   const snapshot = createSnapshot({
     seq: previous ? previous.seq + 1 : 1,
-    date: new Date().toISOString(),
+    date,
     blocked: [...lists.blocked],
     revokedIssuers: [...lists.revokedIssuers]
   }, kp, certificate)
   // A stored list from a newer moderator certificate would make ours stale everywhere.
   if (!acceptSnapshot(previous, snapshot, association).ok) throw new Error('a lista gravada é de uma moderação mais recente')
   writeJsonAtomic(path.join(dataDir, LIST_FILE), { v: 1, snapshot }, 0o600)
-  appendPrivate(path.join(dataDir, LOG_FILE), JSON.stringify({ op, [spec.field]: key, seq: snapshot.seq, date: snapshot.date }) + '\n')
-  return { snapshot, changed: spec.add ? !had : had }
+  let lines = ''
+  for (const { op, key } of edits) {
+    lines += JSON.stringify({ op, [OPS[op].field]: key, seq: snapshot.seq, date: snapshot.date, source }) + '\n'
+  }
+  if (lines !== '') appendPrivate(path.join(dataDir, LOG_FILE), lines)
+  return { snapshot, had }
+}
+
+function change (dataDir, association, op, key, newList) {
+  const { snapshot, had } = signNext(dataDir, association, [{ op, key }], newList, new Date().toISOString())
+  return { snapshot, changed: OPS[op].add ? !had[0] : had[0] }
+}
+
+// `mod apply` (mod-apply.js): ONE snapshot (seq + 1, as `mod block` and
+// `mod unblock` do, so an unblock of an absent key still bumps it) with
+// next = (current ∪ block) − unblock, one moderation.jsonl line per key,
+// then the publish unless `publish` is null. The caller holds the data-dir
+// lock (withLock) through the publish and the ack. Its audit lines carry
+// source 'painel'. publish(snapshot) ->
+// mod-publish.js { delivered, conflict, peers }.
+// -> { snapshot, published, result } (result: the publish answer or null).
+async function applySet (dataDir, { block = [], unblock = [] } = {}, { association, newList = false, publish = null, now = () => new Date() } = {}) {
+  const edits = []
+  for (const key of block) edits.push({ op: 'block', key: checkedKey(key) })
+  for (const key of unblock) edits.push({ op: 'unblock', key: checkedKey(key) })
+  const { snapshot } = signNext(dataDir, association, edits, newList, now().toISOString(), SOURCE_PANEL)
+  if (publish === null) return { snapshot, published: false, result: null }
+  const result = await publish(snapshot)
+  return { snapshot, published: !!(result && result.delivered === true), result }
+}
+
+function checkedKey (key) {
+  if (typeof key !== 'string' || !HEX64_RE.test(key)) throw new TypeError('invalid key')
+  return key
 }
 
 function listLine (snapshot) {
@@ -340,6 +389,31 @@ async function run (flags) {
     const seeder = resolveSeeder(dataDir, flags)
     return withLock(dataDir, () => republish(flags, dataDir, association, seeder))
   }
+  if (sub === 'apply') {
+    if (flags.positionals.length > 1) throw new UsageError(USAGE)
+    // apply exists to publish and then acknowledge: an ack for a list no
+    // seeder holds would empty the panel's queue for nothing.
+    if (flags.noPublish) throw new UsageError('apply publica; não aceita --no-publish')
+    // Loaded here: mod-apply.js requires this module for applySet.
+    const modApply = require('../mod-apply')
+    const server = modApply.checkServer(flags.server)
+    const association = checkConfig(dataDir, flags.association)
+    const seeder = resolveSeeder(dataDir, flags)
+    // Decided before the lock and before any request: without a terminal
+    // to review the changes, only --yes runs (and it applies blocks only).
+    const interactive = !!(process.stdin.isTTY && process.stdout.isTTY)
+    modApply.checkMode({ yes: flags.yes, interactive })
+    return withLock(dataDir, () => modApply.apply({
+      dir: dataDir,
+      association,
+      server,
+      newList: flags.newList,
+      json: flags.json,
+      yes: flags.yes,
+      interactive,
+      publish: (snapshot) => sendTo(flags, snapshot, association, seeder)
+    }))
+  }
   if (Object.prototype.hasOwnProperty.call(OPS, sub)) {
     const key = listKey(flags.positionals[1])
     if (flags.positionals.length > 2) throw new UsageError(USAGE)
@@ -361,13 +435,22 @@ function sendTo (flags, snapshot, association, seeder) {
   })
 }
 
+function conflictMessage (snapshot) {
+  return 'o semeador já tem outra lista com o mesmo número (seq ' + snapshot.seq + '); isto acontece ao restaurar uma cópia antiga da moderação'
+}
+
+// The one-line error `mod apply` exits with when a publish was not delivered.
+function publishFailedMessage (result, snapshot) {
+  return result && result.conflict ? conflictMessage(snapshot) : 'não foi possível publicar a lista'
+}
+
 // The signed list stays in blocklist.json; `mod publish` re-sends it.
 // A conflict (mod-publish.js header: the seeder holds another list with the
 // same seq, typically after restoring an old backup of this dir) has its
 // own message: re-sending the same list would never succeed.
 function publishFailed (result, snapshot) {
   if (result && result.conflict) {
-    process.stderr.write('erro: o semeador já tem outra lista com o mesmo número (seq ' + snapshot.seq + '); isto acontece ao restaurar uma cópia antiga da moderação\n')
+    process.stderr.write('erro: ' + conflictMessage(snapshot) + '\n')
     process.stderr.write('faça uma nova alteração (ela recebe um número maior) ou rode mod publish depois de recuperar a lista mais recente\n')
     return 1
   }
@@ -411,7 +494,61 @@ async function republish (flags, dataDir, association, seeder) {
   return 0
 }
 
+// For mod-apply.js: key -> source ('operacao' | 'painel') of the LAST
+// 'block' line of each of `keys` in moderation.jsonl. A key with no block
+// line (a list copied from another dir, or older than the log) and a line
+// without the field read as 'operacao': a block made outside the panel.
+// Unreadable lines are skipped.
+function blockSources (dataDir, keys) {
+  const wanted = new Set(keys)
+  const sources = new Map()
+  for (const key of wanted) sources.set(key, SOURCE_OPERATOR)
+  if (wanted.size === 0) return sources
+  let text
+  try {
+    text = fs.readFileSync(path.join(dataDir, LOG_FILE), 'utf8')
+  } catch (err) {
+    if (err.code === 'ENOENT') return sources
+    throw err
+  }
+  for (const raw of text.split('\n')) {
+    if (raw === '') continue
+    let line
+    try {
+      line = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    if (line === null || typeof line !== 'object' || line.op !== 'block' || !wanted.has(line.member)) continue
+    sources.set(line.member, line.source === SOURCE_PANEL ? SOURCE_PANEL : SOURCE_OPERATOR)
+  }
+  return sources
+}
+
+// For mod-apply.js: the key pair and the certificate, 'moderação não
+// certificada' when either file is missing (a damaged or foreign one keeps
+// its own message).
+function loadModerator (dataDir, association) {
+  let keyPair
+  try {
+    keyPair = loadKeyPairFile(path.join(dataDir, KEY_FILE))
+  } catch (err) {
+    if (err.code === 'ENOENT') throw new Error('moderação não certificada')
+    throw err
+  }
+  const publicKey = b4a.toString(keyPair.publicKey, 'hex')
+  if (!fs.existsSync(path.join(dataDir, CERT_FILE))) throw new Error('moderação não certificada')
+  return { keyPair, publicKey, certificate: loadCert(dataDir, publicKey, association) }
+}
+
 module.exports = {
+  applySet,
+  blockSources,
+  SOURCE_OPERATOR,
+  SOURCE_PANEL,
+  loadModerator,
+  loadSnapshot,
+  publishFailedMessage,
   commands: {
     mod: { summary: 'chave da moderação e lista de bloqueio assinada', run }
   }

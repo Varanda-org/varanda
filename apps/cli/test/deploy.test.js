@@ -165,7 +165,12 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // The service ends every JSON body with LF (apps/cli/lib/account/server.js
     // send); account.test.js pins the same bytes.
     "printf '%s\\n' '{\"status\":\"ok\"}'",
-    'VARANDA_GOOGLE_CLIENT_ID'
+    'VARANDA_GOOGLE_CLIENT_ID',
+    // The optional moderator list is validated by shape before anything
+    // changes, and the unauthenticated panel probe is guarded by the route
+    // file so a rollback to B2 skips it.
+    'VARANDA_MODERATOR_EMAILS',
+    '/account/mod/api/me'
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
@@ -181,6 +186,10 @@ test('deploy.sh: forbidden constructs are absent', (t) => {
   t.absent(/volume\s+(rm|prune)/.test(shCode), 'no volume rm/prune')
   t.absent(/seed (key|cert)/.test(shCode), 'no seed key/cert')
   t.absent(/account (key|cert)/.test(shCode), 'no account key/cert')
+  // The moderator key never exists on the server: the deploy never runs
+  // moderator commands.
+  t.absent(/mod (init|cert|block|unblock|apply)/.test(shCode), 'no moderator commands')
+  t.absent(/account\/mod\/login/.test(shCode), 'the probe never requests /account/mod/login')
   // Raw build/docker output stays on the server: Actions logs of a public
   // repository are public.
   t.absent(/tail\b[^\n]*log_file/.test(shCode), 'no log tail forwarded to the caller')
@@ -214,6 +223,28 @@ test('compose.web.yaml: the account service has its own volume', (t) => {
   t.absent(/seeder-data/.test(account), 'account never mounts seeder-data')
   t.absent(/^ {4}build:/m.test(account), 'account has no build: (the seeder service builds the image)')
   t.ok(/^ {2}account-data:\s*$/m.test(webLines.slice(webLines.findIndex((l) => /^volumes:/.test(l))).join('\n')), 'account-data: is declared')
+})
+
+test('compose.web.yaml: VARANDA_MODERATOR_EMAILS is optional and only on the account service', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes('VARANDA_MODERATOR_EMAILS'))
+  t.is(hits.length, 1, 'mentioned exactly once')
+  const start = webLines.findIndex((l) => /^ {2}account:\s*$/.test(l))
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the account service')
+  t.ok(/VARANDA_MODERATOR_EMAILS: "\$\{VARANDA_MODERATOR_EMAILS:-\}"/.test(hits[0][0]), 'optional (:-), never :?')
+})
+
+test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
+  const caddy = fs.readFileSync(CADDYFILE, 'utf8')
+  t.absent(caddy.includes('handle /mod'), 'no handle /mod')
+  const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
+  t.is(csp.length, 1, 'one CSP line')
+  // Byte-identical to the B2 tree (Caddyfile:20): the panel is written for it.
+  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
 })
 
 test('Caddyfile: /account/* drops the client address headers', (t) => {

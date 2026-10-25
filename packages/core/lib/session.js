@@ -486,6 +486,12 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // The same for the report statement (docs/rpc.md 5.20): verified against
+    // the diary key as the Ed25519 public key, so only the browser signs it.
+    'report.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     'profile.set': serial(async ({ name, bio }) => {
       const own = await requireOwnKey()
       const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))

@@ -431,7 +431,26 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     })
   }
 
-  return { start, reserve, putGoogle, get, finish, rename, status, lookup, exportLinks }
+  // For the moderation desk (apps/cli/lib/account/mod-routes.js and
+  // `account reports`): the contact of a linked member, or null. Never part
+  // of a public answer (status() and lookup() stay without e-mail and sub);
+  // the panel shows only the username.
+  function contact (member) {
+    if (!isHex(member, 32)) return null
+    const key = member.toLowerCase()
+    if (!has(state.links, key)) return null
+    const { email, sub, username } = state.links[key]
+    return { email, sub, username }
+  }
+
+  // The member a Google subject is linked to, or null (a moderator never
+  // sees the reports about their own linked diary).
+  function memberForSub (sub) {
+    if (typeof sub !== 'string' || !has(state.bySub, sub)) return null
+    return state.bySub[sub]
+  }
+
+  return { start, reserve, putGoogle, get, finish, rename, status, lookup, exportLinks, contact, memberForSub }
 }
 
 module.exports = {

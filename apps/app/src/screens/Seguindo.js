@@ -16,8 +16,10 @@ import { colors, type } from '../ui/theme'
 
 const PAGE = 50
 
-// One followed diary. Tapping the name column shows the whole key.
-function FollowRow ({ followKey, name, onRemove, pending, disabled }) {
+// One followed diary. Tapping the name column shows the whole key;
+// 'denunciar' opens the report sheet for the whole account (the list never
+// holds the own key: follow.add refuses it).
+function FollowRow ({ followKey, name, onRemove, onReport, pending, disabled }) {
   const [open, setOpen] = useState(false)
   const handle = displayText(handleOf(followKey))
   const named = typeof name === 'string' && name !== ''
@@ -48,11 +50,19 @@ function FollowRow ({ followKey, name, onRemove, pending, disabled }) {
         disabled={disabled}
         accessibilityLabel={'deixar de seguir ' + handle}
       />
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel={'denunciar ' + handle}
+        hitSlop={8}
+        onPress={() => onReport({ author: followKey, name: named ? name : null, seq: null, text: null })}
+      >
+        <Text style={styles.handle}>denunciar</Text>
+      </Pressable>
     </View>
   )
 }
 
-export default function Seguindo ({ active }) {
+export default function Seguindo ({ active, onReport }) {
   const node = useNode()
   const names = useNames()
   const bottomPad = useBottomPad()
@@ -210,6 +220,7 @@ export default function Seguindo ({ active }) {
           followKey={item}
           name={nameOf(item)}
           onRemove={doRemove}
+          onReport={onReport}
           pending={removing === item}
           disabled={changing}
         />

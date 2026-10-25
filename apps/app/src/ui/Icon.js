@@ -18,7 +18,8 @@ const GLYPHS = {
   semconexao: 'wifi-off',
   voltar: 'chevron-left',
   seta: 'chevron-right',
-  fechar: 'x'
+  fechar: 'x',
+  bandeira: 'flag'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

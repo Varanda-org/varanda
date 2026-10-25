@@ -19,7 +19,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'log.read', 'node.close', 'node.info', 'post.create', 'post.reply', 'profile.set',
-    'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
+    'report.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'node.close', 'post.create', 'post.reply',
@@ -90,6 +90,45 @@ test('account.sign', (t) => {
   bad(t, 'account.sign', { ...base, phase: 'finish', sub: '' }, 'finish without sub')
   bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
   bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
+})
+
+test('report.sign', (t) => {
+  const nonce = 'n'.repeat(43)
+  const account = { nonce, target: KEY, reason: 'spam' }
+  const post = { nonce, target: KEY, seq: 7, reason: 'assedio', text: 'ofensivo', quote: 'linha 1\nlinha 2' }
+  t.absent(isMutating('report.sign'))
+  ok(t, 'report.sign', account, { ...account, text: '', quote: '' })
+  ok(t, 'report.sign', post, post)
+  ok(t, 'report.sign', { ...account, text: '😀'.repeat(280) })
+  ok(t, 'report.sign', { ...post, quote: 'x'.repeat(MAX_TEXT) })
+  ok(t, 'report.sign', { ...post, seq: 1 })
+  ok(t, 'report.sign', { ...post, seq: 99999 })
+  for (const reason of ['spam', 'assedio', 'ilegal', 'outro']) ok(t, 'report.sign', { ...account, reason })
+  bad(t, 'report.sign', {})
+  for (const k of ['nonce', 'target', 'reason']) {
+    const p = { ...account }
+    delete p[k]
+    bad(t, 'report.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association, digests or bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'digest', 'textDigest', 'key']) {
+    bad(t, 'report.sign', { ...account, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 1]) bad(t, 'report.sign', { ...account, nonce: n }, 'nonce ' + n)
+  for (const target of [KEY.toUpperCase(), KEY.slice(1), KEY + '0', 1, null]) bad(t, 'report.sign', { ...account, target }, 'target ' + target)
+  for (const seq of [0, 100000, 1.5, '7', null, -1]) bad(t, 'report.sign', { ...post, seq }, 'seq ' + seq)
+  for (const reason of ['spam ', 'Spam', 'assédio', 'other', '', null]) bad(t, 'report.sign', { ...account, reason }, 'reason ' + reason)
+  bad(t, 'report.sign', { ...account, text: '😀'.repeat(281) }, 'text of 281 code points')
+  bad(t, 'report.sign', { ...account, text: null }, 'text null')
+  bad(t, 'report.sign', { ...post, quote: 'x'.repeat(MAX_TEXT + 1) }, 'quote too long')
+  // Cross-field: a quote only with a seq, and always with one.
+  const noSeq = validateParams('report.sign', { ...account, quote: 'x' })
+  t.alike(noSeq, { ok: false, code: 'USAGE', message: 'quote só com seq' })
+  const noQuote = validateParams('report.sign', { ...post, quote: '' })
+  t.alike(noQuote, { ok: false, code: 'USAGE', message: 'parâmetro inválido: quote' })
+  const absentQuote = { ...post }
+  delete absentQuote.quote
+  t.alike(validateParams('report.sign', absentQuote), { ok: false, code: 'USAGE', message: 'parâmetro inválido: quote' }, 'quote absent with seq')
 })
 
 test('username.add', (t) => {

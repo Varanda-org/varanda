@@ -7,6 +7,7 @@ const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
+const { createModRoutes } = require('./mod-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -16,6 +17,11 @@ const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varand
 // from the directory (apps/cli/lib/account/store.js). A linked member may
 // later rename itself with one more key proof (no cookie: the key is the
 // authority).
+//
+// The moderation desk (reports from the app, the moderators' panel and the
+// operator's signed pull/ack) lives in ./mod-routes.js and is dispatched
+// before any route that needs the issuer: reports and the panel work on a
+// service that has no certified issuer yet (C10).
 //
 // Modelled on health.js and seed-ws.js: loopback bind, Host pinned to the
 // listener (DNS-rebinding defence), no CORS headers at all (a cross-origin
@@ -55,6 +61,12 @@ const KEY_FILE = 'issuer-key.json'
 const CERT_FILE = 'issuer-cert.json'
 const LOCK_FILE = '.account-lock'
 const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:[0-9]{1,5})?$/
+// Plain HTTP on loopback: accepted by createAccountServer only, for the
+// loopback end-to-end tests that bind the real port into the origin the
+// operator signs (packages/core/lib/mod-request.js LOOPBACK_ORIGIN_RE). The
+// CLI reads VARANDA_PUBLIC_ORIGIN with ORIGIN_RE (https only), so a
+// deployment never runs with it.
+const LOOPBACK_ORIGIN_RE = /^http:\/\/127\.0\.0\.1(:[0-9]{1,5})?$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A store id, nonce or state: 32 random bytes, base64url (store.js randomToken).
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
@@ -73,7 +85,14 @@ const ERROR_STATUS = Object.freeze({
   'google-recusado': 502,
   'troca-bloqueada': 409,
   indisponivel: 503,
-  lotado: 503
+  lotado: 503,
+  // The moderation desk (./mod-routes.js, apps/cli/lib/account/moderation-store.js).
+  'nao-vinculado': 403,
+  'nao-autorizado': 401,
+  'limite-denuncias': 429,
+  limite: 503,
+  defasado: 409,
+  'ja-revertido': 409
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -424,12 +443,12 @@ function cookieId (req) {
   return null
 }
 
-// At most MAX_BODY bytes of JSON forming a plain object; anything else is
+// At most `max` bytes of JSON forming a plain object; anything else is
 // 'pedido-invalido' (413 when the body is too large).
-function readJsonBody (req) {
+function readJsonBody (req, max = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length'])
-    if (Number.isFinite(declared) && declared > MAX_BODY) return reject(new RouteError('pedido-invalido', 413))
+    if (Number.isFinite(declared) && declared > max) return reject(new RouteError('pedido-invalido', 413))
     const chunks = []
     let size = 0
     let done = false
@@ -442,7 +461,7 @@ function readJsonBody (req) {
     req.on('data', (chunk) => {
       size += chunk.length
       // Past the limit nothing more is kept; the 413 closes the connection.
-      if (size > MAX_BODY) return finish(new RouteError('pedido-invalido', 413))
+      if (size > max) return finish(new RouteError('pedido-invalido', 413))
       chunks.push(chunk)
     })
     req.on('error', () => finish(refuse('pedido-invalido')))
@@ -477,15 +496,43 @@ function signatureParam (value) {
 
 // --- the service --------------------------------------------------------------
 
-// createAccountServer({ association, origin, google, store, issuer, log, now })
+// The POST rules of every browser route: the exact Origin (a browser's
+// cross-site POST of a simple form never carries it) and a JSON content
+// type (never sent cross-site without a CORS preflight, which is never
+// answered). `requireOrigin: false` only for the operator's signed routes
+// (./mod-routes.js), whose authority is a signature, not a browser.
+function checkPost (req, origin, { requireOrigin = true } = {}) {
+  if (requireOrigin && req.headers.origin !== origin) throw new RouteError('pedido-invalido', 403)
+  const type = String(req.headers['content-type'] || '').toLowerCase()
+  if (!/^application\/json(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
+}
+
+// createAccountServer({ association, origin, google, store, issuer, log, now,
+// moderation, googleMod, modEmails, panelDir })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
 // (unconfigured: the link routes answer 503 'indisponivel'). The redirect
 // URI is always origin + '/account/callback', never taken from a request.
-function createAccountServer ({ association, origin, google, store, issuer = null, log = () => {}, now = Date.now } = {}) {
+// `moderation` (openModerationStore), `googleMod` (a createGoogle whose
+// redirect URI is origin + '/account/mod/callback'), `modEmails` (the
+// moderators' lowercase e-mails; empty disables the panel sign-in) and
+// `panelDir` (tests only) are passed to ./mod-routes.js.
+function createAccountServer ({
+  association,
+  origin,
+  google,
+  store,
+  issuer = null,
+  log = () => {},
+  now = Date.now,
+  moderation = null,
+  googleMod = null,
+  modEmails = [],
+  panelDir
+} = {}) {
   if (typeof association !== 'string' || !HEX64_RE.test(association)) throw new TypeError('association must be 64 lowercase hex characters')
-  if (typeof origin !== 'string' || !ORIGIN_RE.test(origin)) throw new TypeError('invalid origin')
+  if (typeof origin !== 'string' || !(ORIGIN_RE.test(origin) || LOOPBACK_ORIGIN_RE.test(origin))) throw new TypeError('invalid origin')
   if (!google || typeof google.authorizeUrl !== 'function' || typeof google.exchange !== 'function') throw new TypeError('google ausente')
   if (!store || typeof store.start !== 'function') throw new TypeError('store ausente')
   if (issuer !== null && checkIssuerCert(issuer.cert, issuer.keyPair, association) !== null) {
@@ -503,6 +550,19 @@ function createAccountServer ({ association, origin, google, store, issuer = nul
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
+
+  const mod = createModRoutes({
+    association,
+    origin,
+    accounts: store,
+    moderation,
+    googleMod,
+    modEmails,
+    panelDir,
+    log,
+    now,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow, BASE_HEADERS }
+  })
 
   // OAuth state -> pending id, written at authorize and deleted at the first
   // callback that presents it (single-use). One entry per pending row at
@@ -698,6 +758,8 @@ function createAccountServer ({ association, origin, google, store, issuer = nul
     const pathname = url.pathname
     if (req.method === 'GET' && pathname === '/account/health') return send(res, 200, { status: 'ok' })
     if (!limits.global()) throw over()
+    // Before the issuer-only routes: see the note at the top of the file.
+    if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
@@ -706,11 +768,7 @@ function createAccountServer ({ association, origin, google, store, issuer = nul
       throw refuse('nao-encontrado')
     }
     if (req.method === 'POST' && Object.hasOwn(POST, pathname)) {
-      // A browser's cross-site POST (no CORS preflight for a simple form)
-      // never carries this exact Origin plus a JSON content type.
-      if (req.headers.origin !== origin) throw new RouteError('pedido-invalido', 403)
-      const type = String(req.headers['content-type'] || '').toLowerCase()
-      if (!/^application\/json(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
+      checkPost(req, origin)
       const body = await readJsonBody(req)
       return POST[pathname](req, res, body)
     }
@@ -764,7 +822,9 @@ function createAccountServer ({ association, origin, google, store, issuer = nul
     })
   }
 
-  return { listen }
+  // modStats: table sizes of the moderation desk (counts only, never a
+  // nonce), so tests can show that unauthenticated traffic grows nothing.
+  return { listen, modStats: () => mod.stats() }
 }
 
 module.exports = {
@@ -777,6 +837,7 @@ module.exports = {
   LOCK_STALE_MS,
   COOKIE,
   ORIGIN_RE,
+  LOOPBACK_ORIGIN_RE,
   ERROR_STATUS,
   createAccountServer,
   keyedWindow,

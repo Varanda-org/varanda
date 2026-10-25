@@ -544,3 +544,23 @@ test('starts naming a public key never evict the row that key signed', async (t)
   const res = await store.finish(signed.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
   t.is(res.cert.member, victim, 'the victim still completes the link')
 })
+
+test('contact and memberForSub: the moderation desk view of a link; status and lookup stay without e-mail or sub', async (t) => {
+  const { store, iss } = setup(t)
+  const member = memberKey()
+  const other = memberKey()
+  await link(store, iss, member, 'vera', 'sub-vera', 'vera@example.test')
+
+  t.alike(store.contact(member), { email: 'vera@example.test', sub: 'sub-vera', username: 'vera' })
+  t.alike(store.contact(member.toUpperCase()), { email: 'vera@example.test', sub: 'sub-vera', username: 'vera' }, 'any hex case')
+  t.is(store.contact(other), null, 'an unlinked member has no contact')
+  t.is(store.contact('nope'), null, 'not a key')
+  t.is(store.memberForSub('sub-vera'), member)
+  t.is(store.memberForSub('sub-other'), null)
+  t.is(store.memberForSub('__proto__'), null, 'a prototype name is an ordinary key')
+  t.is(store.memberForSub(42), null)
+
+  const pub = JSON.stringify([store.status(member), store.lookup('vera')])
+  t.absent(pub.includes('vera@example.test'), 'status/lookup: no e-mail')
+  t.absent(pub.includes('sub-vera'), 'status/lookup: no sub')
+})

@@ -35,12 +35,14 @@ Comandos:
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
+  account reports            exporta as denúncias com os e-mails do vínculo (--member)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
   mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
+  mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -51,7 +53,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -122,6 +124,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     once: false,
     noPublish: false,
     newList: false,
+    yes: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
@@ -148,6 +151,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     to: null,
     author: null,
     limit: null,
+    server: null,
     cwd: root
   })
   t.alike(parseArgs([]), parseArgs([], process.env, process.cwd()), 'default env and cwd')
@@ -165,6 +169,11 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['mod', 'block', upperKey, '--new-list']).newList, true)
   t.is(parse(['mod', 'block', upperKey, '--seeder', upperKey]).seeder, lowerKey)
   t.alike(parse(['mod', 'publish', '--seeder', upperKey]).positionals, ['publish'])
+  // The parser keeps --server raw; mod apply validates it (mod-apply.js).
+  t.is(parse(['mod', 'apply', '--server', 'not a url']).server, 'not a url')
+  t.is(parse(['mod', 'apply', '--yes']).yes, true)
+  t.alike(parse(['mod', 'apply', '--yes']).positionals, ['apply'])
+  usage(t, ['--yes=true'], 'opção desconhecida --yes=true')
   usage(t, ['--new-list=true'], 'opção desconhecida --new-list=true')
   usage(t, ['--no-publish=true'], 'opção desconhecida --no-publish=true')
   usage(t, ['--reason', 'spam'], 'opção desconhecida --reason')
@@ -193,7 +202,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     'ws-port': ['8789', 'wsPort', 8789],
     'ws-host': ['0.0.0.0', 'wsHost', '0.0.0.0'],
     'account-port': ['8790', 'accountPort', 8790],
-    'account-host': ['127.0.0.1', 'accountHost', '127.0.0.1']
+    'account-host': ['127.0.0.1', 'accountHost', '127.0.0.1'],
+    server: ['https://varanda.example', 'server', 'https://varanda.example']
   }
   for (const [name, [value, property, expected]] of Object.entries(strings)) {
     const flag = '--' + name

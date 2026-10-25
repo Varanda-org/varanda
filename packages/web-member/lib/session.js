@@ -29,11 +29,13 @@
 // ctx.keyPair for the duration of one operation, and is zero-filled by
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
-// signature the session makes outside the diary is account.sign: the
-// domain-separated account-link statement (@varanda/core lib/account-link.js,
-// prefix 'varanda-account-link-v1'), whose member and association the
-// session fills in itself, so a caller can never get arbitrary bytes, a
-// certificate or a block signed. It returns the signature only.
+// signatures the session makes outside the diary are account.sign and
+// report.sign: the domain-separated account-link statement (@varanda/core
+// lib/account-link.js, prefix 'varanda-account-link-v1') and report statement
+// (@varanda/core lib/report.js, prefix 'varanda-report-v1'), whose member and
+// association the session fills in itself, so a caller can never get
+// arbitrary bytes, a certificate or a block signed. Each returns the
+// signature only.
 //
 // Single writer (docs/app.md): the same passkey opens the same diary on
 // every device, so before every diary write the session makes sure this
@@ -52,6 +54,7 @@ const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signReport } = require('@varanda/core/lib/report')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const member = require('./member-ops')
@@ -66,6 +69,8 @@ const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
+const SELF_REPORT = 'não é possível denunciar a própria chave'
+const BAD_REPORT = 'denúncia inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 // One deadline for the internal catch-up and push runs.
@@ -87,7 +92,9 @@ const USAGE_MESSAGES = new Set([
   store.MISMATCH,
   NOT_SYNCED_MESSAGE,
   BAD_USERNAME_RECORD,
-  OLD_USERNAME_RECORD
+  OLD_USERNAME_RECORD,
+  SELF_REPORT,
+  BAD_REPORT
 ])
 const USAGE_PATTERNS = [
   /^certificado inválido \([a-z0-9-]{1,40}\)$/,
@@ -555,6 +562,34 @@ function createBrowserSession ({
       // refuses.
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signAccountLink({ phase, nonce, member: own, username, association: cfg.association, sub }, keyPair)
+      return { signature }
+    }),
+
+    // Signs the report statement with the in-memory key (docs/rpc.md 5.20),
+    // exactly like account.sign: not a diary write, no append, no network,
+    // and the result never carries the payload or a key. The session fills
+    // in member and association; text and quote enter the payload hashed.
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      if (target === own) throw new UsageError(SELF_REPORT)
+      const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
+      let signature
+      try {
+        signature = signReport(fields, keyPair)
+      } catch (err) {
+        // A shape the RPC layer lets through but the statement refuses (a
+        // control character or a lone surrogate in text or quote).
+        if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+        throw err
+      }
       return { signature }
     }),
 

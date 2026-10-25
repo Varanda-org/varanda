@@ -20,6 +20,7 @@ const { memberCertRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
+const { verifyReport } = require('@varanda/core/lib/report')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -367,6 +368,61 @@ test('account.sign: the unlocked key signs the account-link statement, locked re
 
   await s.node.clearKeyPair()
   const locked = await errorOf(s.web.request('account.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('report.sign: the unlocked key signs the report statement, locked and self reports refused', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const target = hex(crypto.keyPair().publicKey)
+  const nonce = 'A-_9'.repeat(11)
+  const account = { nonce, target, reason: 'spam' }
+  const post = { nonce, target, seq: 4, reason: 'assedio', text: 'me ofendeu', quote: 'linha 1\nlinha 2' }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('report.sign', account))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const marker = b4a.from('me ofendeu')
+  const r = await s.web.request('report.sign', post)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...post, member: s.key, association: assoc.hex }
+  t.alike(verifyReport(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyReport({ ...fields, seq: 5 }, r.signature), { ok: false, reason: 'bad-signature' })
+
+  const a = await s.web.request('report.sign', account)
+  t.alike(verifyReport({ ...account, seq: null, text: '', quote: '', member: s.key, association: assoc.hex }, a.signature), { ok: true }, 'an account report')
+
+  // A post that holds a lone surrogate is reported through its well-formed quote.
+  const odd = { ...post, quote: 'antes \ud800 depois'.toWellFormed() }
+  const o = await s.web.request('report.sign', odd)
+  t.alike(verifyReport({ ...odd, member: s.key, association: assoc.hex }, o.signature), { ok: true })
+
+  const self = await errorOf(s.web.request('report.sign', { ...account, target: s.key }))
+  t.alike([self.code, self.message], ['USAGE', 'não é possível denunciar a própria chave'])
+  for (const params of [{ ...post, text: 'a\u202eb' }, { ...post, quote: 'x\ud800' }, { ...post, text: '\ud800' }]) {
+    const invalid = await errorOf(s.web.request('report.sign', params))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'denúncia inválida'])
+  }
+  for (const k of ['member', 'association']) {
+    const extra = await errorOf(s.web.request('report.sign', { ...account, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+  t.absent(await diaryHolds(storage, marker), 'the report text is not in the diary')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('report.sign', post))
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
   t.alike(s.internal, [], 'no internal error')
