@@ -24,7 +24,7 @@ const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/... and /account/...):
+// Paths that are never intercepted (besides /seeder/..., /account/... and /media/...):
 // live configuration, the worker script itself and the seeder's own pages.
 const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder'])
 // The account service (Google link, @username; a later moderation panel under
@@ -35,6 +35,10 @@ const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder'])
 // become the app shell), turned into a 503 offline, or looked up in the cache
 // at all. The network alone answers them.
 const ACCOUNT_PREFIX = '/account/'
+// Post media (/media/<diary>/<core>/<start>/<blocks>) is served by the seeder
+// through Caddy with its own long-lived Cache-Control and real 404s. Like the
+// account service, the worker never answers it: no cache lookup, no 503.
+const MEDIA_PREFIX = '/media/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 
 const abs = (p) => new URL(p, self.location.origin).href
@@ -244,7 +248,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
   const pathname = url.pathname
-  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith(ACCOUNT_PREFIX)) return
+  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith(ACCOUNT_PREFIX) ||
+    pathname.startsWith(MEDIA_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {

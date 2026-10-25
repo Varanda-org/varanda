@@ -186,9 +186,13 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const secret = b4a.from(expected.secretKey)
 
   const handle = await api.start({ association, seederUrl })
-  t.alike(Object.keys(handle).sort(), ['close', 'connect', 'identity'], 'only connect, close and identity are exposed')
-  t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity), 'the handle and identity are frozen')
-  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'status', 'unlock'], 'no getter, no signer')
+  t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
+  t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
+  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no getter, no signer')
+  t.alike(Object.keys(handle.media), ['upload'])
+  t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
+  const badKeys = await errorOf(handle.follows.confirmLegacy('x'))
+  t.ok(badKeys instanceof TypeError, 'a sync throw becomes a rejection')
   const web = await connectClient(handle, { timeoutMs: 60000 })
 
   const first = await handle.identity.status()
@@ -315,16 +319,24 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.absent(holds(await idbRows('kv'), secret), 'no kv entry holds the secret')
   t.absent(holds(await idbRows('kv'), b4a.from(hex(secret))), 'nor its hex')
 
-  // A new start (a page reload) finds the same diary, locked, and the
-  // stored passkey opens it again (signIn restricted to its id).
+  // A new start (a page reload) resumes the stored session (lock() kept it)
+  // without asking for the passkey; after signOut ('Sair') the diary is
+  // locked and the stored passkey opens it again (signIn restricted to its id).
+  fake.calls.length = 0
   const again = await api.start({ association, seederUrl })
   t.teardown(() => again.close(), { force: true })
   const web2 = await connectClient(again)
   const reloaded = await again.identity.status()
-  t.is(reloaded.unlocked, false, 'locked after a reload')
+  t.is(reloaded.unlocked, true, 'resumed after a reload')
+  t.is(reloaded.resumed, true)
+  t.is(fake.calls.length, 0, 'without a passkey ceremony')
   t.is(reloaded.exists, true)
   t.is(reloaded.publicKey, key)
   t.is(reloaded.passkeyKnown, true)
+  await again.identity.signOut()
+  const signedOut = await again.identity.status()
+  t.is(signedOut.unlocked, false, 'locked after signOut')
+  t.is(signedOut.resumed, false)
   t.alike(await web2.request('identity.show'), { publicKey: key, association }, 'reads work locked')
 
   // Another PRF (another passkey) does not open this diary.

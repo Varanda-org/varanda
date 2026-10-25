@@ -1061,3 +1061,94 @@ What the implementation was also checked against, by reading and by the tests ab
 - [ ] iOS simulator: the system refresh control on the lists, re-selecting the current tab scrolls to the top and refreshes.
 - [ ] `varanda-serve` mode: onboarding steps 'Sua identidade', 'Certificado de membro' and the name, and the lists with names.
 - [ ] Two devices: publish on one, the other shows the post after its refresh or the pill; the outbox of a device that was offline drains once the continuous sync is back.
+
+## 16. End-user polish, staying signed in, follows on every device, photos and GIFs (2026-10-25)
+
+### Summary
+
+- The app reads as a social app for people: no sync chip (a calm 'Sem internet' note only while offline), refresh by pulling on touch and by the wheel or trackpad on desktop (with a visually hidden, focusable 'Atualizar' for the keyboard), plain-language copy, Diário showing publications only, and Ajustes split into a main list (Editar perfil, Conta e @nome, Guardar dados neste aparelho, Instalar o app, Sair) and a collapsed Avançado (Conexão, Sincronização, Identidade técnica, Recomeçar). Screens: `docs/app.md`; design: `apps/site/artwork/app-design.md`.
+- Staying signed in on the web: the passkey's PRF output is kept sealed (AES-GCM-256 under a non-extractable `CryptoKey`, bound to the rp.id and the identity) in its own IndexedDB database `varanda-session`, so a reload resumes without WebAuthn until 'Sair' or 30 days without opening the app (each open refreshes the period). This reverses the earlier "key only in memory" rule; the trade-off is in `docs/design.md` and `docs/rpc.md` section 11.
+- Follows on every device: `follow` records in the own diary (public), local-first on the browser node (only while unlocked; every queued change signed with the identity key and verified before it is appended), old per-device follows published only after the person confirms them (the Seguindo card 'Pessoas que você seguia neste aparelho', host controls `follows.legacy()` / `confirmLegacy(keys)`), folded back from the diary by the sync (RPC event `follows.changed { count }`). The CLI and the core node append the record too.
+- Photos and GIFs: posts carry up to 4 media descriptors pointing into a per-device media core; the seeder binds media cores to diaries two ways, keeps them under the same `admitted.json` invariants and serves blocks over `GET|HEAD /media/<D>/<K>/<start>/<blocks>`; the hosted PWA verifies every byte (length and SHA-256) before showing it. Images only, no video: the illegal-media hash check is not implemented (Residual risks).
+- Contract: records `media-core` and `follow`, `post.media`, the media header (`docs/protocol.md` section 2), seeder media admission and the media route (sections 5 and 7), `post.create` / `post.reply` `media`, `FeedItem.media`, `follows.changed`, `report.sign` with an empty quote, and page maxima lowered to `FEED_LIMIT_MAX` 31 and `LOG_LIMIT_MAX` 36 (`docs/rpc.md`).
+
+### What changed, per area
+
+- `packages/core`: `lib/records.js` (descriptor, the two record types, media constants), `lib/media.js` (new, pure helpers), `lib/seeder.js` (media scan, binding, admission, startup step 3b, purge rules, `mediaRead`, `stats()` `mediaCores` / `mediaBytes`, `seed list` / `seed drop` with media), `lib/store.js` (`openMediaReplica`), `lib/member.js` (`follow` / `unfollow` append a `follow` record), `lib/feed.js` (`FeedItem.media`), `lib/session.js` (`'mídia disponível só na versão web'`).
+- `packages/rpc`: `media` params, `follows.changed`, `report.sign` empty quote with seq, `FEED_LIMIT_MAX` 35 -> 31 and `LOG_LIMIT_MAX` 42 -> 36 (worst cases re-measured).
+- `packages/web-member`: `lib/session-store.js` (new), resume / 'Sair' in `web/node.js` (the `signedOut` marker and the session-database deletion as two barriers), per-device media key (`lib/passkey.js`), `mediaUpload` host control, lazy paged storage for media cores (`lib/node-storage.js`), local-first follows with drain and fold, media replication and push confirmation in `lib/sync.js`.
+- `apps/cli`: the `/media` route on the WebSocket listener (`lib/seed-ws.js`), media metrics (`lib/health.js`), `seed list` media lines and media events (`lib/commands/seed.js`), human `log` lines and `[foto]` in `feed` (`lib/commands/member.js`).
+- `deploy/seeder/Caddyfile`: `handle /media/*`, excluded from `@mutavel` and `@ausenteApp`; CSP unchanged.
+- `apps/app`: `OfflineNote`, `MediaGrid`, `MediaView`, `EmojiPicker`, `src/media/*` (attach, encode, fetch, cache, plan), `src/emoji.js`; `SyncChip` removed; the service worker never intercepts `/media/`.
+
+### Automated (CI)
+
+CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order):
+
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 100 test files, 0 failures (core 15, rpc 8, web-member 21, app 21, cli 33, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 7 tests, 37 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): feed page of 31 items 260001 bytes, log page of 36 entries 258946 bytes, `profile.read` at 100 authors 229170 bytes, `follow.list` at 500 keys 33581 bytes.
+- `npm run pack:worklet -w apps/app`: bundle 1944309 bytes, 349 files, 38 linked addon entries; 'node scan: clean'.
+- `npm run build:node -w apps/app` (run by `export:web`): `NODE_BUNDLE 636946 GZIP 194188`.
+- `npm run export:web -w apps/app`: exported to `apps/app/dist` (ignored by git); service worker with 11 files.
+- `node apps/cli/test/readme-help.test.js`: passes.
+- the whitespace check on the diff (`git diff --check`): clean.
+
+New test files: `packages/web-member/test/e2e-media.test.js`, `packages/core/test/media.test.js`, `apps/cli/test/seeder-media.test.js`, `packages/web-member/test/session-store.test.js`, `resume.test.js`, `session-media.test.js`, `media-ops.test.js`, `sync-media.test.js`, `apps/app/test/emoji.test.js`, `mediaPlan.test.js`, `mediaFetch.test.js`, `mediaCache.test.js`; extended: the rpc, session, seeder, seed-ws, feed, records, node-storage and pull tests.
+
+### End-to-end (in process)
+
+`packages/web-member/test/e2e-media.test.js` (4 tests, 114 asserts; passed in each of 3 runs) drives a browser session against a real in-process seeder and CLI member:
+
+- A 100 KiB upload (3 x 32 KiB + 4 KiB blocks) reaches the seeder, and `GET /media/<D>/<K>/<start>/<blocks>` answers 200 with a byte-identical body whose SHA-256 equals the descriptor's; `HEAD` gives the same `Content-Length`; a wrong core, diary or range gives 404.
+- The browser's Hypercore 10 COMPAT media core interoperates with the Hypercore 11 seeder exactly as diaries do (the seeder's core key equals the media public key, compat true).
+- Largest browser -> seeder frame: 32,867 bytes, about 0.39 % of `MAX_EXTERNAL_FRAME` (8,454,144); one block per frame (41 frames, 107,400 bytes in total).
+- Upload to `media-admitted`: 60-89 ms.
+- A second device (same identity, new storage) rebuilds the follows from the diary on its first run (one `follows.changed { count: 2 }`) and then applies an unfollow made on the first device (`count: 1`).
+- The CLI member's `feed` shows `[foto]` and `feed --json` carries the descriptor intact.
+
+### Fixes made in this verification
+
+- Photos upload only on Publicar (critical, GPT audit): attaching a photo used to upload it at once, so a photo the person then removed or never posted was already public in the media core. Now attached photos stay in the page's memory until Publicar (`apps/app/src/screens/Publicar.js`).
+- Sign-in expires after 30 days idle (owner decision after a finding escalated to high): the stored session of the browser node is no longer kept indefinitely; the passkey is asked again after 30 days without opening the app (`packages/web-member/lib/session-store.js`).
+- Follow changes refused while signed out and signed before publication (escalated to high): `follow.add` / `follow.remove` refuse while the identity is locked, and every queued change carries an Ed25519 signature by the identity key that is verified before the `follow` record is appended, so changes planted in the storage of a signed-out profile are dropped (`packages/web-member/lib/member-ops.js`, `lib/session.js`).
+- Old follows confirmed, not published automatically (owner decision after the re-audit): a device's follows from before `follow` records existed were appended to the diary automatically at the first sign-in, but that local list cannot be authenticated, so a planted entry would have been published. Now the Seguindo card lists them (names, or 'Alguém sem nome' with a short key fragment; checkboxes on by default; 'Publicar selecionados' / 'Agora não') and only the confirmed ones become signed follow changes; the rest leave that device (`packages/web-member/lib/member-ops.js` `legacyFollows` / `confirmLegacyFollows`, `apps/app/src/screens/Seguindo.js`).
+- Replay of signed follow changes (escalated to high): a signed change copied or kept in the queue could be appended again after the diary had already recorded it, or after a newer decision. Now the drain keeps one change per key (the newest `at`), skips any change whose key already has a diary `follow` record with `at` at or after the change's (the record reuses the change's own `at`), and the queue is capped at `MAX_INVENTORY - 1` when read and written (`packages/web-member/lib/member-ops.js` `drainFollows`, `lib/node-store.js` `readFollowsPending`).
+- Fresh-device fold (`packages/web-member/lib/node-store.js` `writeFoldedFollows`): a device with no local follows and no pending changes was never marked migrated, so later folds of the diary's `follow` records were held back. Now such a device counts as migrated on its first fold. The end-to-end test above caught it, independently of the cross-vendor review.
+
+### Human verification
+
+None of these was performed for this change.
+
+- [ ] Phone, installed PWA: no sync chip anywhere (not performed yet).
+- [ ] Phone, airplane mode: 'Sem internet' appears under the top bar and disappears when the network is back (not performed yet).
+- [ ] Pull-to-refresh on A Rua, Seguindo and Diário (not performed yet).
+- [ ] Desktop: wheel / trackpad refresh at the top of a list, and the hidden 'Atualizar' appears on keyboard focus (not performed yet).
+- [ ] Reload and reopen keep you signed in (no passkey prompt) (not performed yet).
+- [ ] 'Sair' asks for the passkey again on the next load (not performed yet).
+- [ ] Attach photos and close the composer without Publicar: nothing is uploaded (no `/media` growth at the seeder) (not performed yet).
+- [ ] Post 1, 2, 3 and 4 photos and a GIF; the grid layouts and the full-screen viewer (not performed yet).
+- [ ] Download a posted photo and check its EXIF: no GPS (not performed yet).
+- [ ] A second device shows the same follows and the photos (not performed yet).
+- [ ] Ajustes: Avançado holds every technical item (Conexão, Sincronização, Identidade técnica, Recomeçar); the main list has none (not performed yet).
+
+### Residual risks
+
+- No illegal-media hash check: `docs/design.md` promises a comparison with lists of hashes of known illegal material before showing or relaying; it is not implemented. This PR therefore ships images only, no video. A blocked diary's media cores are purged with it.
+- A same-origin script can use the stored session: the `CryptoKey` is not exportable, but any script on the origin can call decrypt and act as the member (an XSS was already a full compromise while unlocked); anyone holding the unlocked device or profile can post until 'Sair' or the 30-day idle expiry.
+- The wrapping AES key lives in the same browser profile as the sealed PRF output: a copy of the profile yields the identity until 'Sair' or 30 days idle. The sealing only keeps the PRF output out of plain storage and stops the record alone from opening elsewhere.
+- Follows stored on a device before the update are not published automatically: the person confirms them in the Seguindo card 'Pessoas que você seguia neste aparelho'. Until the person decides, that device keeps its old list locally and does not receive follow changes from other devices. A confirmed follow cannot be taken back from the diary (append-only; only a later `on: false` record undoes it).
+- Follows are public: anyone holding a diary reads whom its member follows.
+- Old readers (apps, CLIs, seeders from before this change) skip media posts and the new records entirely; there is no text-only fallback.
+- One media core per device, no rotation: at 8192 blocks / 256 MiB uploads fail with 'espaço de fotos deste aparelho esgotado'.
+- Push confirmation of a media core counts a block "served" to the seeder on this link as held; served is not proof of storage (a later link's advertised length is the truth).
+- A transient IndexedDB error while loading the stored session clears it: the person signs in with the passkey once more.
+- Nothing is uploaded until Publicar (attached photos stay in the page's memory; removing one or closing the composer discards it). Once Publicar is pressed the uploaded bytes are public and permanent in the device's media core even if a later upload or the post fails: the only remaining case of unreferenced public bytes.
+- The media route's rate limit and caps are global (16 in flight, 64 requests/s, burst 128), with no per-client limit, because the deployment never handles client IP addresses: one client can make photos answer 503 for everyone, and hold slots up to the 120 s deadline.
+- Media responses are cacheable for a year (`Cache-Control: public, max-age=31536000, immutable`): a later block of the author does not purge browser caches (the feed hides blocked authors' posts).
+- `mediaRead` reads each block twice (once for the exact `Content-Length`, once to stream).
+- A post can be visible before its photos reach the seeder: the write gate confirms the diary push, and the media blocks travel through the continuous sync moments later. If the tab closes or the network drops right after posting, viewers see 'foto indisponível' until that device reconnects; the app retries a failed photo a few times automatically (`apps/app/src/ui/MediaView.js`) and on a tap.
+- Device-count limit: `MAX_MEDIA_CORES` = 4 with one media core per device and no rotation. A member who posts photos from a 5th device makes the seeder drop the oldest device's core (`unbound`); its photos answer 404 for everyone until that device declares its core again by uploading a new photo, and are lost for good if that device is gone.
+- Core node and CLI follows: `follow` / `unfollow` append `follow` records once block 0 exists, but an existing `follows.json` is never migrated into the diary unless the follow is run again, and the core node never folds another device's `follow` records into `follows.json`.
+- Follow changes made on another device take effect on this device's next sync run (the continuous run restarts once per change); the core node and `varanda-serve` do not fold another device's follows into `follows.json`.

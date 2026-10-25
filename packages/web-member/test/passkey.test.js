@@ -340,3 +340,52 @@ test('derivation end to end: same passkey output, same identity', async (t) => {
   t.is(hex((await keyPairFromPrf(a.prf)).publicKey), GOLDEN_PUBLIC_KEY)
   t.is(hex((await keyPairFromPrf(b.prf)).publicKey), GOLDEN_PUBLIC_KEY)
 })
+
+test('media key pair: per (PRF, nonce), unrelated to the identity, zeroed buffers', async (t) => {
+  const { MEDIA_HKDF_SALT, MEDIA_HKDF_INFO, mediaKeyPairFromPrf } = passkey
+  t.is(b4a.toString(MEDIA_HKDF_SALT), 'varanda/member-media/hkdf/v1')
+  t.is(b4a.toString(MEDIA_HKDF_INFO), 'varanda/member-media/ed25519/v1')
+  const prf = new Uint8Array(32).fill(7)
+  const nonce = new Uint8Array(32).map((_, i) => 255 - i)
+  const a = await mediaKeyPairFromPrf(prf, nonce)
+  const b = await mediaKeyPairFromPrf(new Uint8Array(prf), new Uint8Array(nonce))
+  t.is(hex(a.publicKey), hex(b.publicKey), 'same PRF and nonce, same key')
+  t.is(hex(a.secretKey), hex(b.secretKey))
+  t.is(a.publicKey.byteLength, 32)
+  t.is(a.secretKey.byteLength, 64)
+  t.not(a.secretKey.buffer, b.secretKey.buffer, 'fresh buffers')
+  const other = await mediaKeyPairFromPrf(prf, new Uint8Array(32).fill(1))
+  t.not(hex(other.publicKey), hex(a.publicKey), 'another nonce, another key')
+  const identity = await keyPairFromPrf(prf)
+  t.not(hex(identity.publicKey), hex(a.publicKey), 'not the identity key')
+  t.ok(prf.every((x) => x === 7), 'caller PRF untouched')
+  t.ok(nonce.every((x, i) => x === 255 - i), 'caller nonce untouched')
+
+  // Cross-checked against node:crypto: info = label || nonce.
+  const seed = crypto.hkdfSync('sha256', prf, MEDIA_HKDF_SALT, b4a.concat([MEDIA_HKDF_INFO, nonce]), 32)
+  t.is(hex(hypercoreCrypto.keyPair(b4a.from(seed)).publicKey), hex(a.publicKey), 'matches node:crypto hkdfSync')
+
+  // The seed and hypercore-crypto's pair are zeroed.
+  const original = hypercoreCrypto.keyPair
+  let seenSeed = null
+  let made = null
+  hypercoreCrypto.keyPair = (s) => {
+    seenSeed = s
+    made = original(s)
+    return made
+  }
+  try {
+    const kp = await mediaKeyPairFromPrf(prf, nonce)
+    t.is(hex(kp.publicKey), hex(a.publicKey))
+    t.ok(seenSeed.every((x) => x === 0), 'seed zeroed')
+    t.ok(made.secretKey.every((x) => x === 0), 'internal secret key zeroed')
+  } finally {
+    hypercoreCrypto.keyPair = original
+  }
+
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), null, 'x'.repeat(32), new Uint8Array(32).buffer]) {
+    t.is(await codeOf(() => mediaKeyPairFromPrf(bad, nonce)), 'TypeError', 'bad PRF refused')
+    t.is(await codeOf(() => mediaKeyPairFromPrf(prf, bad)), 'TypeError', 'bad nonce refused')
+  }
+  t.is(await codeOf(() => mediaKeyPairFromPrf(prf)), 'TypeError', 'a nonce is required')
+})

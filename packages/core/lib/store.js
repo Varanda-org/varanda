@@ -411,6 +411,21 @@ async function openReplica (store, hex) {
   return core
 }
 
+// A media core replica (lib/media.js): the same read-only session as
+// openReplica but WITHOUT the JSON value encoding, since blocks 1.. are raw
+// item bytes and block 0 is read raw and decoded by the caller. A key whose
+// secret this store holds is refused like a diary's.
+async function openMediaReplica (store, hex) {
+  if (typeof hex !== 'string' || !/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error('chave inválida')
+  const core = store.get({ key: b4a.from(hex.toLowerCase(), 'hex'), writable: false })
+  await core.ready()
+  if (core.writable) {
+    await core.close()
+    throw new Error('chave do próprio diário')
+  }
+  return core
+}
+
 // `suspend` undefined -> exactly the constructor call made before the
 // option existed.
 function newCorestore (dir, suspend) {
@@ -620,6 +635,7 @@ module.exports = {
   storeExists,
   openDiary,
   openReplica,
+  openMediaReplica,
   openQuarantine,
   removeQuarantine,
   purgeReplica,

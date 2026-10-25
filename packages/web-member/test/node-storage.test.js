@@ -4,14 +4,18 @@
 // and a Hypercore 10 diary that survives closing and reopening the database
 // with the same key and blocks while the storage never holds the secret key
 // (the key pair is handed to openDiary in memory, lib/node-store.js). The
-// memory twin is held to the same core-level behaviour.
+// memory twin is held to the same core-level behaviour. Lazy mode (a media
+// core's 'data' file): randomized concurrent interleavings against a
+// reference buffer with a two-page cache, and a Hypercore 10 core whose
+// blocks survive a reopen while the cache stays bounded.
 require('fake-indexeddb/auto')
 /* global indexedDB, IDBKeyRange */
 const test = require('brittle')
 const b4a = require('b4a')
+const { createHash } = require('node:crypto')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
-const { idbNodeStorage, memoryNodeStorage, PAGE_SIZE } = require('../lib/node-storage')
+const { idbNodeStorage, memoryNodeStorage, PAGE_SIZE, DEFAULT_CACHE_PAGES } = require('../lib/node-storage')
 const { openDiary, diaryStatus, appendRecord, readAll, readBlocklist, writeBlocklist } = require('../lib/node-store')
 const { postRecord } = require('@varanda/core/lib/records')
 const { testnet } = require('./helpers/net')
@@ -391,4 +395,308 @@ test('memory storage: same core behaviour', async (t) => {
   t.absent(await storage.hasCore('diary'))
   await storage.writeJson('follows', { v: 1, follows: [] })
   t.alike(await storage.readJson('follows'), { v: 1, follows: [] })
+})
+
+// ---- lazy mode -------------------------------------------------------------
+
+// The 'pages' keys of one core straight from IndexedDB.
+function pageKeys (name, core) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(name)
+    req.onerror = () => reject(req.error)
+    req.onsuccess = () => {
+      const db = req.result
+      const tx = db.transaction(['pages'], 'readonly')
+      const all = tx.objectStore('pages').getAllKeys(IDBKeyRange.bound([core], [core, []]))
+      all.onsuccess = () => {
+        db.close()
+        resolve(all.result)
+      }
+      all.onerror = () => reject(all.error)
+    }
+  })
+}
+
+// Deterministic PRNG (mulberry32): the seed is printed, so a failing
+// interleaving can be replayed with VARANDA_LAZY_SEED.
+function prng (seed) {
+  let s = seed >>> 0
+  return function next (n) {
+    s = (s + 0x6D2B79F5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) % n
+  }
+}
+
+// The reference: the operations applied one after the other, in issue order.
+class Reference {
+  constructor () {
+    this.buf = b4a.alloc(0)
+  }
+
+  get length () { return this.buf.length }
+
+  write (offset, data) {
+    const end = offset + data.length
+    if (end > this.buf.length) this.buf = b4a.concat([this.buf, b4a.alloc(end - this.buf.length)])
+    this.buf.set(data, offset)
+  }
+
+  read (offset, size) {
+    if (offset + size > this.buf.length) return null
+    return b4a.from(this.buf.subarray(offset, offset + size))
+  }
+
+  truncate (length) {
+    if (length <= this.buf.length) this.buf = b4a.from(this.buf.subarray(0, length))
+    else this.buf = b4a.concat([this.buf, b4a.alloc(length - this.buf.length)])
+  }
+
+  del (offset, size) {
+    if (offset >= this.buf.length) return
+    if (offset + size >= this.buf.length) return this.truncate(offset)
+    this.buf.fill(0, offset, offset + size)
+  }
+}
+
+// The pages the file holds in memory beyond the ones an operation is using.
+function idleCache (file) {
+  let busy = 0
+  for (const e of file.cache.values()) if (e.pins > 0 || e.persisting > 0 || e.page === null) busy++
+  return file.cache.size - busy
+}
+
+test('lazy file: randomized concurrent interleavings match issue order, with a two-page cache', async (t) => {
+  await testnet(t, 1)
+  const seed = Number(process.env.VARANDA_LAZY_SEED) || (Date.now() % 1000000)
+  t.comment('seed ' + seed)
+  const rnd = prng(seed)
+  const name = dbName()
+  const storage = await idbNodeStorage(name)
+  const CORE = 'media/' + 'ab'.repeat(32)
+  const SPAN = 6 * PAGE_SIZE
+  const file = storage.core(CORE, { lazy: ['data'], cachePages: 2 })('data')
+  const ref = new Reference()
+  let maxIdle = 0
+  let failures = 0
+
+  for (let round = 0; round < 150 && failures === 0; round++) {
+    const k = 1 + rnd(6)
+    const pending = []
+    for (let i = 0; i < k; i++) {
+      const kind = rnd(10)
+      if (kind < 4) {
+        const offset = rnd(SPAN)
+        const data = bytes(1 + rnd(Math.floor(2.5 * PAGE_SIZE)), rnd(256))
+        ref.write(offset, data)
+        pending.push(call(file, 'write', offset, data))
+      } else if (kind < 8) {
+        const offset = rnd(Math.max(1, ref.length))
+        const size = rnd(Math.floor(2.5 * PAGE_SIZE))
+        const expected = ref.read(offset, size)
+        pending.push(call(file, 'read', offset, size).then((got) => {
+          if (expected === null || !b4a.equals(got, expected)) failures++
+        }, () => { if (expected !== null) failures++ }))
+      } else if (kind < 9) {
+        const length = rnd(SPAN)
+        ref.truncate(length)
+        pending.push(call(file, 'truncate', length))
+      } else {
+        const offset = rnd(SPAN)
+        const size = rnd(Math.floor(2.5 * PAGE_SIZE))
+        ref.del(offset, size)
+        pending.push(call(file, 'del', offset, size))
+      }
+    }
+    await Promise.all(pending)
+    maxIdle = Math.max(maxIdle, idleCache(file))
+    if ((await call(file, 'stat')).size !== ref.length) failures++
+    if (ref.length > 0 && !b4a.equals(await call(file, 'read', 0, ref.length), ref.buf)) failures++
+  }
+  t.is(failures, 0, 'every read, length and whole-file check matched the reference')
+  t.ok(maxIdle <= 2, 'the cache never kept more than two idle pages (' + maxIdle + ')')
+
+  // Two reads of the same uncached page share one load.
+  const page = Math.floor(ref.length / PAGE_SIZE) - 1
+  if (page >= 0) {
+    file.cache.clear()
+    const a = call(file, 'read', page * PAGE_SIZE, 10)
+    const b = call(file, 'read', page * PAGE_SIZE + 10, 10)
+    t.is(file.cache.size, 1, 'one entry for the two concurrent loads')
+    t.alike(b4a.concat([await a, await b]), ref.read(page * PAGE_SIZE, 20))
+  }
+
+  await call(file, 'close')
+  await storage.close()
+  const again = await idbNodeStorage(name)
+  const reopened = again.core(CORE, { lazy: ['data'], cachePages: 2 })('data')
+  t.is((await call(reopened, 'stat')).size, ref.length, 'length survives a reopen')
+  if (ref.length > 0) t.alike(await call(reopened, 'read', 0, ref.length), ref.buf, 'bytes survive a reopen')
+  await call(reopened, 'close')
+  await again.close()
+  const keys = await pageKeys(name, CORE)
+  t.ok(keys.every((k) => k[2] < Math.ceil(ref.length / PAGE_SIZE)), 'no page row past the length')
+})
+
+test('lazy file: options, holes, truncate tail and the memory twin', async (t) => {
+  await testnet(t, 1)
+  const storage = await idbNodeStorage(dbName())
+  t.exception.all(() => storage.core('media/x', { lazy: 'data' }), /lazy must be/)
+  t.exception.all(() => storage.core('media/x', { cachePages: 0 }), /cachePages/)
+  const whole = storage.core('media/x', { lazy: ['data'] })('tree')
+  t.is(whole.cache, undefined, 'other files keep whole-file mode')
+  const file = storage.core('media/x', { lazy: ['data'] })('data')
+  t.is(file.cachePages, DEFAULT_CACHE_PAGES)
+  await call(file, 'write', 3 * PAGE_SIZE, b4a.from('fim'))
+  t.alike(await call(file, 'read', PAGE_SIZE, 5), b4a.alloc(5), 'a hole reads as zeros')
+  await t.exception(call(file, 'read', 3 * PAGE_SIZE, 4), /além do fim/)
+  await call(file, 'truncate', 3 * PAGE_SIZE + 1)
+  t.alike(await call(file, 'read', 3 * PAGE_SIZE, 1), b4a.from('f'))
+  await call(file, 'truncate', 3 * PAGE_SIZE + 3)
+  t.alike(await call(file, 'read', 3 * PAGE_SIZE, 3), b4a.from('f\0\0'), 'growing again never resurrects the old tail')
+  await call(file, 'close')
+  t.ok(await storage.hasCore('media/x'))
+  await storage.deleteCore('media/x')
+  const gone = storage.core('media/x', { lazy: ['data'] })('data')
+  t.is((await call(gone, 'stat')).size, 0, 'a deleted core reopens empty')
+  await call(gone, 'close')
+  await storage.close()
+  const memory = memoryNodeStorage()
+  const ram = memory.core('media/x', { lazy: ['data'] })('data')
+  await call(ram, 'write', 0, b4a.from('ok'))
+  t.alike(await call(ram, 'read', 0, 2), b4a.from('ok'), 'the memory twin accepts and ignores lazy')
+})
+
+// The lazy file's database connection with the next readwrite range delete
+// on 'pages' failing (the transaction aborts), once.
+function failNextRangeDelete (file) {
+  const db = file.owner.db
+  let armed = true
+  file.owner = {
+    db: {
+      transaction (names, mode) {
+        const tx = db.transaction(names, mode)
+        if (mode !== 'readwrite' || !armed) return tx
+        const objectStore = tx.objectStore.bind(tx)
+        tx.objectStore = (name) => {
+          const store = objectStore(name)
+          if (name !== 'pages') return store
+          return {
+            put: (value, key) => store.put(value, key),
+            delete: (key) => {
+              if (!(key instanceof IDBKeyRange)) return store.delete(key)
+              armed = false
+              throw new Error('falha simulada no apagamento')
+            }
+          }
+        }
+        return tx
+      }
+    }
+  }
+}
+
+test('lazy file: a truncate whose page deletion fails still waits for its tail page, so nothing is written after close or deleteCore', async (t) => {
+  await testnet(t, 1)
+  const name = dbName()
+  const CORE = 'media/x'
+  let storage = await idbNodeStorage(name)
+  let file = storage.core(CORE, { lazy: ['data'], cachePages: 1 })('data')
+  const data = bytes(2 * PAGE_SIZE, 9)
+  await call(file, 'write', 0, data)
+  t.is(file.cache.size, 1, 'a one-page cache: page 0 is out, page 1 cached')
+  t.ok(file.cache.has(1))
+  failNextRangeDelete(file)
+  await t.exception(call(file, 'truncate', 1), /gravar data/, 'the truncate fails')
+  t.is(file.inflight.size, 0, 'and answers only once all of its work settled')
+  await call(file, 'close')
+  t.is(file.persists.size, 0)
+  await t.exception(file._persist([], null), /fechado/, 'no persist may start after close')
+  await storage.deleteCore(CORE)
+  t.absent(await storage.hasCore(CORE))
+  await storage.close()
+  t.alike(await pageKeys(name, CORE), [], 'no page of the core is left behind')
+
+  storage = await idbNodeStorage(name)
+  t.absent(await storage.hasCore(CORE), 'the deleted core stays deleted')
+  file = storage.core(CORE, { lazy: ['data'], cachePages: 1 })('data')
+  t.is((await call(file, 'stat')).size, 0, 'it reopens empty')
+  await call(file, 'close')
+  await storage.close()
+})
+
+test('lazy file: close waits for an in-flight load, and the read still answers', async (t) => {
+  await testnet(t, 1)
+  const storage = await idbNodeStorage(dbName())
+  const file = storage.core('media/x', { lazy: ['data'], cachePages: 2 })('data')
+  const data = bytes(PAGE_SIZE + 7, 3)
+  await call(file, 'write', 0, data)
+  file.cache.clear()
+  const read = call(file, 'read', PAGE_SIZE - 3, 10)
+  const closed = call(file, 'close')
+  t.is(file.cache.size, 2, 'both pages are loading when close is asked')
+  t.alike(await read, data.subarray(PAGE_SIZE - 3, PAGE_SIZE + 7), 'the read answers with the data')
+  await closed
+  t.is(file.inflight.size, 0)
+  t.is(file.cache.size, 0, 'the cache is released by close')
+  await t.exception(call(file, 'read', 0, 1), /Closed/, 'and the file is closed')
+  await storage.close()
+})
+
+test('a Hypercore 10 core over a lazy data file: 200 blocks of 32 KiB in bursts, reopen, bounded cache', async (t) => {
+  await testnet(t, 1)
+  const name = dbName()
+  const CORE = 'media/' + 'cd'.repeat(32)
+  const CACHE = 8
+  const rnd = prng(7)
+  function tracked (storage) {
+    const files = {}
+    const inner = storage.core(CORE, { lazy: ['data'], cachePages: CACHE })
+    return { files, factory: (file) => (files[file] = inner(file)) }
+  }
+  let storage = await idbNodeStorage(name)
+  let { files, factory } = tracked(storage)
+  let core = new Hypercore(factory, { valueEncoding: 'binary' })
+  await core.ready()
+  t.ok(files.data.cache instanceof Map, 'the data file is lazy')
+  t.is(files.tree.cache, undefined, 'the tree is not')
+  const key = core.key
+  const hashes = []
+  let maxIdle = 0
+  for (let burst = 0; burst < 20; burst++) {
+    const blocks = []
+    for (let i = 0; i < 10; i++) {
+      const block = b4a.alloc(32768)
+      for (let j = 0; j < block.length; j += 4) block.writeUInt32LE(rnd(0x100000000), j)
+      blocks.push(block)
+      hashes.push(createHash('sha256').update(block).digest('hex'))
+    }
+    await Promise.all(blocks.map((block) => core.append(block)))
+    maxIdle = Math.max(maxIdle, idleCache(files.data))
+  }
+  t.is(core.length, 200)
+  t.ok(maxIdle <= CACHE, 'idle cache within ' + CACHE + ' pages while appending (' + maxIdle + ')')
+  await core.close()
+  await storage.close()
+
+  storage = await idbNodeStorage(name)
+  ;({ files, factory } = tracked(storage))
+  core = new Hypercore(factory, key, { valueEncoding: 'binary' })
+  await core.ready()
+  t.is(core.length, 200, 'same length after the reopen')
+  let mismatched = 0
+  for (let i = 0; i < 200; i += 10) {
+    const got = await Promise.all(Array.from({ length: 10 }, (_, j) => core.get(i + j)))
+    got.forEach((block, j) => { if (createHash('sha256').update(block).digest('hex') !== hashes[i + j]) mismatched++ })
+    maxIdle = Math.max(maxIdle, idleCache(files.data))
+  }
+  t.is(mismatched, 0, 'every block equal by hash')
+  t.ok(maxIdle <= CACHE, 'idle cache within ' + CACHE + ' pages while reading (' + maxIdle + ')')
+  await core.clear(0, 10)
+  t.absent(await core.has(5), 'cleared blocks are gone')
+  t.is(createHash('sha256').update(await core.get(10)).digest('hex'), hashes[10], 'the others stay')
+  await core.close()
+  await storage.close()
 })

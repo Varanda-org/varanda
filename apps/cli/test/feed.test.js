@@ -495,3 +495,19 @@ test('an invalid before throws', async (t) => {
     }
   }
 })
+
+test('media passes through as a copy; absent media is null', async (t) => {
+  await testnet(t)
+  const d = { core: KB, mime: 'image/png', start: 1, blocks: 1, bytes: 100, sha256: 'e'.repeat(64), width: 10, height: 20 }
+  const photo = { type: 'post', text: '', at: '2026-01-02T00:00:00.000Z', replyTo: null, media: [d] }
+  const logs = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('só texto', AT) }, { seq: 2, record: photo }] }]
+  const { items } = buildFeed({ logs, now: NOW })
+  t.is(items.length, 2)
+  t.is(items[0].media, null)
+  t.alike(items[1].media, [d])
+  t.is(items[1].text, '')
+  t.ok(items[1].media[0] !== d, 'a copy, not the log entry')
+  // An invalid media list drops the post, as any invalid record.
+  const broken = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...photo, media: [] } }] }]
+  t.alike(buildFeed({ logs: broken, now: NOW }).items, [])
+})

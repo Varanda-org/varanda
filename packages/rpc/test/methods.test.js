@@ -121,14 +121,14 @@ test('report.sign', (t) => {
   bad(t, 'report.sign', { ...account, text: '😀'.repeat(281) }, 'text of 281 code points')
   bad(t, 'report.sign', { ...account, text: null }, 'text null')
   bad(t, 'report.sign', { ...post, quote: 'x'.repeat(MAX_TEXT + 1) }, 'quote too long')
-  // Cross-field: a quote only with a seq, and always with one.
+  // Cross-field: a quote only with a seq; a seq with an empty quote is a
+  // photo-only post.
   const noSeq = validateParams('report.sign', { ...account, quote: 'x' })
   t.alike(noSeq, { ok: false, code: 'USAGE', message: 'quote só com seq' })
-  const noQuote = validateParams('report.sign', { ...post, quote: '' })
-  t.alike(noQuote, { ok: false, code: 'USAGE', message: 'parâmetro inválido: quote' })
+  ok(t, 'report.sign', { ...post, quote: '' }, { ...post, quote: '' })
   const absentQuote = { ...post }
   delete absentQuote.quote
-  t.alike(validateParams('report.sign', absentQuote), { ok: false, code: 'USAGE', message: 'parâmetro inválido: quote' }, 'quote absent with seq')
+  ok(t, 'report.sign', absentQuote, { ...post, quote: '' })
 })
 
 test('username.add', (t) => {
@@ -178,6 +178,53 @@ test('post.create and post.reply', (t) => {
   bad(t, 'post.reply', { to: KEY + ':1' })
   bad(t, 'post.reply', { text: 'x' })
   bad(t, 'post.reply', { to: { author: KEY, seq: 1 }, text: 'x' })
+})
+
+test('post.create and post.reply with media', (t) => {
+  const d = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 2, bytes: 32769, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  const msg = (method, params) => validateParams(method, params).message
+  ok(t, 'post.create', { text: '', media: [d] }, { text: '', media: [d] })
+  ok(t, 'post.create', { text: 'legenda', media: [d, d, d, d] })
+  ok(t, 'post.reply', { to: KEY + ':1', text: '', media: [d] })
+  ok(t, 'post.create', { text: 'x', media: [{ ...d, mime: 'image/gif', start: 8192 - 256, blocks: 256, bytes: 256 * 32768, width: 16384, height: 16384 }] })
+  ok(t, 'post.create', { text: 'x', media: [{ ...d, blocks: 1, bytes: 1 }] })
+  // Without media the text stays 1..MAX_TEXT.
+  t.is(msg('post.create', { text: '' }), 'parâmetro inválido: text')
+  t.is(msg('post.reply', { to: KEY + ':1', text: '' }), 'parâmetro inválido: text')
+  t.is(msg('post.create', { text: 'x'.repeat(MAX_TEXT + 1), media: [d] }), 'parâmetro inválido: text')
+  bad(t, 'post.create', { media: [d] }, 'text is required')
+  const badMedia = [
+    [], [d, d, d, d, d], null, d, 'x',
+    [{ ...d, extra: 1 }],
+    [{ ...d, core: KEY.toUpperCase() }],
+    [{ ...d, sha256: 'x' }],
+    [{ ...d, mime: 'video/mp4' }],
+    [{ ...d, mime: 'image/svg+xml' }],
+    [{ ...d, start: 0 }],
+    [{ ...d, start: 8192 }],
+    [{ ...d, start: 8191, blocks: 2 }],
+    [{ ...d, blocks: 0 }],
+    [{ ...d, blocks: 257, bytes: 257 * 32768 }],
+    [{ ...d, bytes: 32768 }],
+    [{ ...d, bytes: 2 * 32768 + 1 }],
+    [{ ...d, width: 0 }],
+    [{ ...d, height: 16385 }],
+    [{ ...d, width: 1.5 }]
+  ]
+  for (const media of badMedia) {
+    t.is(msg('post.create', { text: 'x', media }), 'parâmetro inválido: media', JSON.stringify(media))
+    t.is(msg('post.reply', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+  }
+  // Sparse arrays: a hole is never a descriptor.
+  const between = [d, d, d]
+  delete between[1]
+  for (const media of [new Array(1), new Array(4), between]) {
+    t.is(msg('post.create', { text: '', media }), 'parâmetro inválido: media', 'sparse media of length ' + media.length)
+    t.is(msg('post.reply', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+  }
+  const missing = { ...d }
+  delete missing.height
+  t.is(msg('post.create', { text: 'x', media: [missing] }), 'parâmetro inválido: media', 'missing key')
 })
 
 test('follow.*', (t) => {

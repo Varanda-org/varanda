@@ -19,13 +19,20 @@ const DEFAULT_TIMEOUT_MS = 30000
 const MAX_NAME = 80
 const MAX_BIO = 280
 const MAX_TEXT = 1000
+const MEDIA_BLOCK_BYTES = 32768
+const MAX_MEDIA_BLOCKS = 8192
+const MAX_MEDIA_PER_POST = 4
+const MAX_MEDIA_ITEM_BLOCKS = 256
+const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const MAX_MEDIA_DIMENSION = 16384
 
 const LOG_LIMIT_DEFAULT = 20
-// Page maxima: the largest pages whose worst case fits MAX_MESSAGE
-// (docs/rpc.md section 2, test/sizes.test.js).
-const LOG_LIMIT_MAX = 42
+// Page maxima: the largest pages whose worst case (every post with
+// MAX_MEDIA_PER_POST maximal descriptors) fits MAX_MESSAGE (docs/rpc.md
+// section 2, test/sizes.test.js).
+const LOG_LIMIT_MAX = 36
 const FEED_LIMIT_DEFAULT = 30
-const FEED_LIMIT_MAX = 35
+const FEED_LIMIT_MAX = 31
 // Authors per profile.read: its worst case fits MAX_MESSAGE with room to
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
@@ -118,6 +125,12 @@ module.exports = {
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,
+  MEDIA_BLOCK_BYTES,
+  MAX_MEDIA_BLOCKS,
+  MAX_MEDIA_PER_POST,
+  MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES,
+  MAX_MEDIA_DIMENSION,
   LOG_LIMIT_DEFAULT,
   LOG_LIMIT_MAX,
   FEED_LIMIT_DEFAULT,

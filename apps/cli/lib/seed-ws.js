@@ -29,6 +29,24 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // The seeder also caps external sockets at half its connection limit
 // (Seeder#maxExternal), so these clients never starve swarm peers. Nothing
 // is logged per connection and no address is ever logged.
+//
+// The same listener serves media blocks over plain HTTP (Caddy's
+// `handle /media/*` proxies here): GET|HEAD /media/<D>/<K>/<start>/<blocks>,
+// D the diary key and K the media core key (lower-case hex64), start >= 1 and
+// 1 <= blocks <= MEDIA_MAX_BLOCKS as canonical decimals, no query string.
+// The Host check runs first (421), any other method on /media is 405, and
+// anything that does not match exactly, or that Seeder#mediaRead declines
+// (no D <-> K binding, D blocked, a block not local, or no mediaRead at all),
+// is the same 404 'não encontrado': the answer never says why, and neither
+// the path nor any key is ever echoed or logged. A hit is 200, immutable
+// application/octet-stream with an exact Content-Length, streamed block by
+// block with backpressure (a write returning false waits for 'drain') and
+// abandoned when the client goes away. Load is bounded globally, never per
+// client address (the project does not handle addresses): at most
+// MEDIA_MAX_IN_FLIGHT responses at once and a token bucket of MEDIA_RATE
+// requests per second (burst MEDIA_BURST); beyond either, 503 'ocupado' with
+// Retry-After: 1. A response still running after MEDIA_DEADLINE_MS is
+// destroyed, so slow readers cannot hold the in-flight slots forever.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -37,6 +55,22 @@ const CHECK_INTERVAL_MS = 1000
 // How long a refused upgrade may take to flush its response before the
 // socket is destroyed anyway.
 const REFUSE_GRACE_MS = 1000
+
+const MEDIA_PREFIX = '/media'
+// Canonical decimals only (no sign, no leading zero); the digit caps keep the
+// values safe integers before the range checks.
+const MEDIA_RE = /^\/media\/([0-9a-f]{64})\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/([1-9][0-9]{0,2})$/
+const MEDIA_MAX_BLOCKS = 256
+const MEDIA_MAX_IN_FLIGHT = 16
+const MEDIA_RATE = 64
+const MEDIA_BURST = 128
+const MEDIA_DEADLINE_MS = 120000
+const MEDIA_HEADERS = {
+  'Content-Type': 'application/octet-stream',
+  'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'public, max-age=31536000, immutable',
+  'Accept-Ranges': 'none'
+}
 
 // The secret-stream's per-frame authentication overhead, read from the
 // sodium-secretstream that the installed @hyperswarm/secret-stream (the one
@@ -109,13 +143,103 @@ function originAllowed (origin, allowList) {
 
 const BASE_HEADERS = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }
 
-function send (res, code, body) {
+function send (res, code, body, extra = {}) {
   res.writeHead(code, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
-    ...BASE_HEADERS
+    ...BASE_HEADERS,
+    ...extra
   })
   res.end(body)
+}
+
+const NOT_FOUND = 'não encontrado\n'
+const BUSY = 'ocupado\n'
+
+// A global token bucket: rate tokens per second, at most burst stored.
+function tokenBucket (rate, burst) {
+  let tokens = burst
+  let last = Date.now()
+  return () => {
+    const now = Date.now()
+    tokens = Math.min(burst, tokens + ((now - last) / 1000) * rate)
+    last = now
+    if (tokens < 1) return false
+    tokens -= 1
+    return true
+  }
+}
+
+// Resolves on 'drain' or once the response is closed, whichever comes first.
+function drained (res) {
+  return new Promise((resolve) => {
+    const done = () => {
+      res.off('drain', done)
+      res.off('close', done)
+      resolve()
+    }
+    res.on('drain', done)
+    res.on('close', done)
+  })
+}
+
+const CLOSED = Symbol('closed')
+
+// Writes the blocks one at a time, waiting for 'drain' whenever the socket
+// buffer is full. The iterator is driven by hand so that each next() races
+// the response's close (client gone or deadline): a stalled read never keeps
+// the stream waiting, and the iterator's return() is called at once without
+// being awaited. Every next() and return() goes through track(), which keeps
+// the in-flight slot held until it settles, so a stalled read still counts
+// against MEDIA_MAX_IN_FLIGHT. More or fewer bytes than announced destroy
+// the response, so a client never takes a short or overlong body for a
+// complete one.
+async function streamBlocks ({ res, blocks, bytes, closed, isClosed, track }) {
+  let it
+  try {
+    it = blocks[Symbol.asyncIterator]()
+  } catch {
+    return res.destroy()
+  }
+  const cancel = () => {
+    try {
+      if (typeof it.return === 'function') track(it.return())
+    } catch {}
+  }
+  let sent = 0
+  while (true) {
+    let step
+    try {
+      step = track(it.next())
+    } catch {
+      res.destroy()
+      return cancel()
+    }
+    const result = await Promise.race([
+      step.then((value) => ({ value }), () => null),
+      closed
+    ])
+    if (result === CLOSED || isClosed()) return cancel()
+    if (result === null || !result.value || typeof result.value !== 'object') {
+      res.destroy()
+      return cancel()
+    }
+    if (result.value.done) break
+    const block = result.value.value
+    if (!(block instanceof Uint8Array)) {
+      res.destroy()
+      return cancel()
+    }
+    sent += block.byteLength
+    if (sent > bytes) {
+      res.destroy()
+      return cancel()
+    }
+    if (!res.write(block)) await drained(res)
+    if (isClosed()) return cancel()
+  }
+  if (sent !== bytes) return res.destroy()
+  res.end()
 }
 
 // Writes the refusal and then destroys the socket: end() alone only closes
@@ -141,9 +265,70 @@ function refuse (socket, code, reason) {
 // { host, port, close() } once listening; a listen error rejects (EADDRINUSE
 // carries its code). seeder is a Seeder (stats(), acceptStream()). origins:
 // optional array of exact browser origins allowed to connect (default: http
-// on a loopback hostname, any port).
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null }) {
+// on a loopback hostname, any port). The seeder's mediaRead(diaryHex,
+// coreHex, start, blocks) -> null | { bytes, blocks } backs /media. media:
+// optional overrides of the /media limits ({ maxInFlight, rate, burst,
+// deadlineMs }), for tests.
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {} }) {
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
+  const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
+  const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
+  const takeToken = tokenBucket(media.rate ?? MEDIA_RATE, media.burst ?? MEDIA_BURST)
+  let inFlight = 0
+
+  async function serveMedia (req, res, match) {
+    const start = Number(match[3])
+    const count = Number(match[4])
+    if (!Number.isSafeInteger(start) || count > MEDIA_MAX_BLOCKS) return send(res, 404, NOT_FOUND)
+    if (!takeToken() || inFlight >= maxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    // The slot is released once the response is closed AND every seeder
+    // call it started (mediaRead, next(), return()) has settled.
+    inFlight++
+    let resClosed = false
+    let pending = 0
+    let released = false
+    const release = () => {
+      if (released || !resClosed || pending > 0) return
+      released = true
+      inFlight--
+    }
+    const track = (value) => {
+      const promise = Promise.resolve(value)
+      pending++
+      promise.then(() => {}, () => {}).then(() => {
+        pending--
+        release()
+      })
+      return promise
+    }
+    const timer = setTimeout(() => res.destroy(), deadlineMs)
+    timer.unref()
+    const closed = new Promise((resolve) => res.once('close', () => {
+      resClosed = true
+      clearTimeout(timer)
+      release()
+      resolve(CLOSED)
+    }))
+    const isClosed = () => resClosed
+    let read = null
+    try {
+      if (typeof seeder.mediaRead === 'function') {
+        read = await Promise.race([track(seeder.mediaRead(match[1], match[2], start, count)), closed])
+      }
+    } catch {
+      read = null
+    }
+    if (read === CLOSED || resClosed) return
+    if (!read || !Number.isSafeInteger(read.bytes) || read.bytes < 0 || !read.blocks ||
+      typeof read.blocks[Symbol.asyncIterator] !== 'function') {
+      return send(res, 404, NOT_FOUND)
+    }
+    res.writeHead(200, { ...MEDIA_HEADERS, 'Content-Length': read.bytes })
+    if (req.method === 'HEAD') return res.end()
+    // Headers go out now, not with the first block, which may take a while.
+    res.flushHeaders()
+    await streamBlocks({ res, blocks: read.blocks, bytes: read.bytes, closed, isClosed, track })
+  }
   // Filled once listening (port 0 case); no request arrives before that.
   let hosts = new Set()
   const hostOk = (req) => typeof req.headers.host === 'string' && hosts.has(req.headers.host.toLowerCase())
@@ -157,8 +342,15 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null }) {
       res.setHeader('Connection', 'close')
       return send(res, 421, 'host inválido\n')
     }
-    if (req.url.split('?')[0] === PATH) return send(res, 426, 'atualização de protocolo necessária\n')
-    send(res, 404, 'não encontrado\n')
+    const pathname = req.url.split('?')[0]
+    if (pathname === PATH) return send(res, 426, 'atualização de protocolo necessária\n')
+    if (pathname === MEDIA_PREFIX || pathname.startsWith(MEDIA_PREFIX + '/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+      const match = MEDIA_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      return serveMedia(req, res, match).catch(() => res.destroy())
+    }
+    send(res, 404, NOT_FOUND)
   })
   server.maxConnections = MAX_SOCKETS
   server.headersTimeout = HEADERS_TIMEOUT_MS
@@ -227,4 +419,13 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null }) {
   })
 }
 
-module.exports = { startSeedWs, DEFAULT_HOST, MAX_PAYLOAD }
+module.exports = {
+  startSeedWs,
+  DEFAULT_HOST,
+  MAX_PAYLOAD,
+  MEDIA_MAX_BLOCKS,
+  MEDIA_MAX_IN_FLIGHT,
+  MEDIA_RATE,
+  MEDIA_BURST,
+  MEDIA_DEADLINE_MS
+}

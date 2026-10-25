@@ -146,11 +146,9 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (!feedRef.current.loading && !feedRef.current.refreshing) return loadNewest()
   }
 
-  // Moderation gets its own sentence; other skips and the truncated rest
-  // retain the generic wording. Only the newest page supplies this metadata.
+  // Only the association's blocklist gets a sentence (plain words); other
+  // skipped or future-dated entries are not shown to people.
   const blocked = meta.skipped.filter((s) => MODERATION_REASONS.includes(s.reason)).length
-  const skipped = meta.skipped.length + meta.skippedTruncated - blocked
-  const future = meta.future.length + meta.futureTruncated
   const footer = (
     <View>
       <ListFooter
@@ -161,12 +159,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         onRetry={loadOlder}
         pending={loadingMore || refreshing}
       />
-      {blocked > 0 || skipped > 0 || future > 0
+      {blocked > 0
         ? (
           <View style={styles.footer}>
-            {blocked > 0 ? <Soft>{String(blocked) + (blocked === 1 ? ' diário seguido não aparece (bloqueado pela associação)' : ' diários seguidos não aparecem (bloqueados pela associação)')}</Soft> : null}
-            {skipped > 0 ? <Soft>{String(skipped) + (skipped === 1 ? ' diário seguido não aparece (sem certificado válido ou com dados inválidos)' : ' diários seguidos não aparecem (sem certificado válido ou com dados inválidos)')}</Soft> : null}
-            {future > 0 ? <Soft>{String(future) + (future === 1 ? ' publicação com data futura foi ignorada' : ' publicações com data futura foram ignoradas')}</Soft> : null}
+            <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
           </View>
           )
         : null}
@@ -191,7 +187,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       <EmptyState
         icon='gente'
         title='Ainda não chegou nada'
-        body='As publicações de quem você segue chegam sozinhas quando a sincronização alcança o semeador.'
+        body='Quando as pessoas que você segue publicarem, aparece aqui.'
       />
     )
   }
@@ -207,6 +203,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       username={item.username}
       at={item.at}
       text={item.text}
+      media={item.media || null}
       replyToName={item.replyTo ? replyNameOf(names.profileOf(item.replyTo.author)) : null}
       now={now}
       onReply={typeof onReply === 'function'

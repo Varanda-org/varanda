@@ -4,6 +4,9 @@
 // applies displayText itself, so callers must not pre-escape them. Naming
 // follows whoOf (src/who.js): never a key-derived handle. `onReport`
 // (optional) adds a second action, 'denunciar', after the reply one.
+// `media` (an array of media descriptors, or null) adds the photos under the
+// text (./MediaGrid, which verifies every byte before showing it); a post
+// with photos may have no text.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -11,9 +14,11 @@ import { relativeTime } from '../format'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { MediaGrid } from './MediaGrid'
 import { colors, type } from './theme'
 
-export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onReport }) {
+export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onReport, media }) {
+  const hasMedia = Array.isArray(media) && media.length > 0
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
@@ -37,7 +42,10 @@ export function PostRow ({ author, name, username, at, text, replyToName, now, o
             </Text>
             )
           : null}
-        <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+        {text || !hasMedia
+          ? <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+          : null}
+        {hasMedia ? <MediaGrid author={author} media={media} /> : null}
         {onReply
           ? (
             <Pressable

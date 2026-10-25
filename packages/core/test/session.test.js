@@ -280,6 +280,19 @@ test('report.sign is refused by the node session (USAGE, not INTERNAL)', async (
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('post.create and post.reply with media are refused by the node session (USAGE), nothing opened', async (t) => {
+  const NO = { code: 'USAGE', message: 'mídia disponível só na versão web' }
+  const media = [{ core: 'dd'.repeat(32), mime: 'image/png', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 4, height: 4 }]
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('post.create', { text: '', media })), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('post.create', { text: 'foto', media })), NO)
+  t.alike(await failure(m.call('post.reply', { to: m.publicKey + ':1', text: '', media })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('username.add: a record that does not verify for the diary key is refused, nothing written', async (t) => {
   const issuerKp = crypto.keyPair()
   const fresh = await member(t)

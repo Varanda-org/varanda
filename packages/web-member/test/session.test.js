@@ -379,12 +379,24 @@ test('locked: reads work, writes and creation need the key pair', async (t) => {
     t.is(err && err.code, 'USAGE', method)
     t.is(err && err.message, LOCKED, method)
   }
-  t.alike(await locked.web.request('follow.add', { key: 'cd'.repeat(32) }), { changed: true, followCount: 1 }, 'follows are not diary writes')
+  // Follows are signed into the diary, so a change is refused while locked
+  // too: nothing a signed-out browser queues reaches the diary later.
+  for (const method of ['follow.add', 'follow.remove']) {
+    const err = await errorOf(locked.web.request(method, { key: 'cd'.repeat(32) }))
+    t.is(err && err.message, LOCKED, method)
+  }
   t.is((await locked.web.request('log.read', {})).entries.length, 2, 'nothing was appended')
+  t.is(await storage.readJson('followsPending'), null, 'nothing queued while locked')
+  t.alike(await locked.web.request('follow.list'), { follows: [], total: 0 })
 
-  // Unlocking the running node with the right pair, then locking it.
+  // Unlocking the running node with the right pair: a follow is queued
+  // (signed) and drained into the diary at once (seq 2); then locking it.
   await locked.node.setKeyPair(keyPair)
-  t.is((await locked.web.request('post.create', { text: 'destrancado' })).seq, 2)
+  t.alike(await locked.web.request('follow.add', { key: 'cd'.repeat(32) }), { changed: true, followCount: 1 })
+  t.is((await locked.web.request('post.create', { text: 'destrancado' })).seq, 3)
+  const drained = await locked.web.request('log.read', {})
+  t.alike(drained.entries.slice(2, 3).map((e) => [e.record.type, e.record.key, e.record.on]), [['follow', 'cd'.repeat(32), true]], 'the follow record was appended by the drain')
+  t.alike((await storage.readJson('followsPending')).ops, [], 'nothing pending')
   await locked.node.clearKeyPair()
   t.is((await errorOf(locked.web.request('post.create', { text: 'x' }))).message, LOCKED)
   t.is((await locked.node.identityStatus()).unlocked, false)

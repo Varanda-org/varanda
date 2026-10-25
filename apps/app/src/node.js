@@ -14,6 +14,12 @@
 // changed (the shell drops its node.info then). unlock(opts) and complete()
 // call the handle synchronously, so the WebAuthn ceremony stays inside the
 // click that triggered it: never await anything before calling them.
+// signOut() locks and forgets the session this browser keeps (the handle's
+// identity.signOut(); `lock` stays for compatibility and keeps it). The status
+// carries `resumed`: true when the identity was unlocked at load from that
+// kept session, without a ceremony. A resume is an unlock without a click: no
+// recovery runs for it unless the diary still lacks its member certificate
+// (then the same recovery as after a ceremony, under recoveryPolicy.js).
 // `recovering` is true from an unlock until the once sync that follows it
 // (recover()) has ended: one shared flag, so no screen sends a member request
 // meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
@@ -29,6 +35,24 @@
 // native). `hostedSource` is where the hosted configuration came from: 'live'
 // (the installation answered), 'remembered' (the installation did not answer
 // and the last valid configuration of this origin is used) or null.
+//
+// `legacyFollows` (browser node only, unlocked, handle has `follows`; null
+// otherwise): `{ keys, confirm(keys) }`. The provider calls the handle's
+// follows.legacy() itself, once per unlocked connection and passkey generation
+// (it marks a device done when nothing is left, so it cannot wait for a
+// screen); `keys` is null until it answered (or when it failed: silent, the
+// next unlock retries), else the string[] still to confirm. confirm(keys) ->
+// follows.confirmLegacy(keys) -> { published }; a success clears `keys` to []
+// and bumps `followsVersion`.
+// `media` (browser node only, while unlocked; null otherwise): `{ upload(args)
+// }`, a pass-through to the handle's media.upload({ bytes, mime, width,
+// height, onProgress }) -> Promise<descriptor>; the caller shows its errors
+// (errorText).
+//
+// `followsVersion` is bumped once per `follows.changed` event (the follows
+// of the own diary changed, possibly on another device) and `followCount` is
+// that event's `count` (null until one arrived on this connection): the
+// screens reload what depends on the follows.
 //
 // Sync is automatic. The APP owns the intent (`setAutoSync(wanted)`, decided
 // by the shell, never inferred here) because the node's `syncIntent` is lost
@@ -117,8 +141,18 @@ export function NodeProvider ({ children }) {
   const [pkStatus, setPkStatus] = useState(null)
   const [pkError, setPkError] = useState('')
   const [pkGeneration, setPkGeneration] = useState(0)
+  // The handle has media.upload (browser node).
+  const [hasMedia, setHasMedia] = useState(false)
+  // The handle has follows.legacy / confirmLegacy (browser node).
+  const [hasLegacy, setHasLegacy] = useState(false)
+  // follows.changed (see the header): the version never goes back.
+  const [follows, setFollows] = useState({ version: 0, count: null })
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
+  const recoveryRef = useRef(null)
+  recoveryRef.current = recovery
+  // The connection whose resumed session was already checked for a recovery.
+  const resumeCheckedRef = useRef(null)
   // The current sync state, for callbacks that must not depend on it.
   const syncRef = useRef(sync)
   syncRef.current = sync
@@ -221,6 +255,10 @@ export function NodeProvider ({ children }) {
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
+    if (name === 'follows.changed') {
+      setFollows((f) => ({ version: f.version + 1, count: data && Number.isInteger(data.count) ? data.count : null }))
+      return
+    }
     const now = Date.now()
     if (name === 'sync.started') {
       // The run came back (or a new one began): no restart is awaited.
@@ -266,6 +304,7 @@ export function NodeProvider ({ children }) {
     resetSignals()
     bumpEpoch()
     setRecovery(null)
+    setFollows((f) => ({ version: f.version, count: null }))
     const holder = {}
     try {
       const conn = await connectNode(cfg, {
@@ -300,6 +339,8 @@ export function NodeProvider ({ children }) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
       }
       setHasPasskey(identity !== null)
+      setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
+      setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       setPkStatus(pk)
       setPkError(pkErr)
       bumpGeneration()
@@ -466,7 +507,9 @@ export function NodeProvider ({ children }) {
     if (!conn || !conn.identity) return noConnection()
     let pending
     try {
-      pending = name === 'unlock' ? conn.identity.unlock(arg) : conn.identity[name]()
+      // A node script without signOut (an older build) locks instead.
+      const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
+      pending = op === 'unlock' ? conn.identity.unlock(arg) : conn.identity[op]()
     } catch (err) {
       pending = Promise.reject(err)
     }
@@ -475,10 +518,10 @@ export function NodeProvider ({ children }) {
         const changed = !(result && result.pending === true)
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
-        if ((name === 'lock' || name === 'reset') && connRef.current === conn) {
+        if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
           setPkStatus((st) => (st === null
             ? st
-            : { ...st, unlocked: false, synced: false, ...(name === 'reset' ? { exists: false, publicKey: null, legacy: false } : {}) }))
+            : { ...st, unlocked: false, synced: false, resumed: false, ...(name === 'reset' ? { exists: false, publicKey: null, legacy: false } : {}) }))
         }
         await readPasskey(conn, changed)
         if (changed) bumpEpoch()
@@ -498,6 +541,7 @@ export function NodeProvider ({ children }) {
   const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts), [passkeyOp])
   const pkComplete = useCallback(() => passkeyOp('complete'), [passkeyOp])
   const pkLock = useCallback(() => passkeyOp('lock'), [passkeyOp])
+  const pkSignOut = useCallback(() => passkeyOp('signOut'), [passkeyOp])
   const pkReset = useCallback(() => passkeyOp('reset'), [passkeyOp])
   const pkRefresh = useCallback(() => readPasskey(), [readPasskey])
 
@@ -553,6 +597,29 @@ export function NodeProvider ({ children }) {
     return false
   }, [request])
   const recover = useCallback(() => startRecoveryRun(false), [startRecoveryRun])
+
+  // A resumed session (see the header): once per connection, one local
+  // node.info read; only a diary without its member certificate, while the
+  // browser may be online, gets the recovery run a ceremony would start. Never
+  // when a recovery (a ceremony) or a run is already on, or the diary does not
+  // exist yet (the setup step creates it).
+  useEffect(() => {
+    if (phase !== 'ready' || pkStatus === null || pkStatus.unlocked !== true || pkStatus.resumed !== true) return
+    const conn = connRef.current
+    if (!conn || resumeCheckedRef.current === conn) return
+    resumeCheckedRef.current = conn
+    const gen = pkGenRef.current
+    ;(async () => {
+      let info = null
+      try { info = await request('node.info', {}) } catch {}
+      if (connRef.current !== conn || pkGenRef.current !== gen) return
+      if (info === null || info.publicKey === null) return
+      if (!blockingRecovery({ onLine: isOnline(), memberCert: info.memberCert === true })) return
+      if (recoveryRef.current !== null || syncRef.current.active !== null || startingRef.current > 0) return
+      setRecovery({ runId: null, restarted: false })
+      startRecoveryRun(false)
+    })()
+  }, [phase, pkStatus, request, startRecoveryRun])
 
   // Offline: the recovery stops blocking the screens, and its run (which
   // cannot reach the seeder now) is stopped too: Identidade holds its reads
@@ -741,12 +808,50 @@ export function NodeProvider ({ children }) {
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
-    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
-    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkReset, recovering, beginRecovery, endRecovery, recover])
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, recovering, beginRecovery, endRecovery, recover])
+
+  // Thin pass-through to the handle (see the header).
+  const mediaUpload = useCallback((args) => {
+    const conn = connRef.current
+    if (!conn || !conn.media) return noConnection()
+    return conn.media.upload(args)
+  }, [])
+  const unlocked = pkStatus !== null && pkStatus.unlocked === true
+  const media = useMemo(() => (hasPasskey && hasMedia && unlocked ? { upload: mediaUpload } : null), [hasPasskey, hasMedia, unlocked, mediaUpload])
+
+  const [legacyKeys, setLegacyKeys] = useState(null)
+  const legacyCheckedRef = useRef(null)
+  useEffect(() => {
+    const conn = connRef.current
+    if (phase !== 'ready' || !hasPasskey || !hasLegacy || !unlocked || !conn || !conn.follows) {
+      legacyCheckedRef.current = null
+      setLegacyKeys(null)
+      return
+    }
+    const gen = pkGenRef.current
+    const done = legacyCheckedRef.current
+    if (done !== null && done.conn === conn && done.gen === gen) return
+    legacyCheckedRef.current = { conn, gen }
+    setLegacyKeys(null)
+    conn.follows.legacy().then((r) => {
+      if (connRef.current !== conn || pkGenRef.current !== gen) return
+      setLegacyKeys(r && Array.isArray(r.keys) ? r.keys.filter((k) => typeof k === 'string') : [])
+    }, () => {})
+  }, [phase, hasPasskey, hasLegacy, unlocked, pkGeneration])
+  const legacyConfirm = useCallback(async (keys) => {
+    const conn = connRef.current
+    if (!conn || !conn.follows) return noConnection()
+    const r = await conn.follows.confirmLegacy(keys)
+    setLegacyKeys([])
+    setFollows((f) => ({ version: f.version + 1, count: f.count }))
+    return r
+  }, [])
+  const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, autoSync, signals, ackFresh, setAutoSync
-  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, autoSync, signals, ackFresh, setAutoSync])
+    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync
+  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

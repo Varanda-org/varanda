@@ -47,9 +47,76 @@
 // once runs (sync.started / sync.event / sync.stopped) with the lines
 // 'sincronizando antes de publicar' / 'enviando ao semeador', and never
 // touch the user's sync intent.
+//
+// The media key (web only, per device): the page derives this device's
+// media core key pair (passkey PRF output + the per-device nonce of kv
+// mediaDevice, web/node.js) and hands it in with the identity pair,
+// setKeyPair(pair, { media }); it lives in this closure only, reaches
+// member-ops as ctx.mediaKeyPair and is zero-filled with the identity pair.
+// Uploads go through the host control mediaUpload({ bytes, mime, width,
+// height, onProgress }) and never over the RPC channel (one request is
+// capped at 64 KiB, @varanda/rpc MAX_REQUEST): the bytes are validated and
+// copied synchronously, hashed (WebCrypto SHA-256) on the serial chain
+// outside withStore; the own media core is readied (member-ops
+// mediaPrepare, inside withStore: it opens a core) and, the first time a
+// core is used, declared in the diary through the write gate (`media-core`
+// record, gated and pushed like any diary write) BEFORE the bytes are
+// stored (member-ops mediaCommit), so a declaration the gate refuses keeps
+// the fixed-size core empty for the retry. The result is the descriptor a later
+// post.create / post.reply carries in `media`; member-ops verifies it
+// against the own cores before the post is appended ('mídia inválida').
+// Nothing about the bytes is logged.
+//
+// Follows are local-first (member-ops followChange: kv follows and kv
+// followsPending change at once; the handler's result is unchanged) but
+// UNLOCKED only: follow.add / follow.remove are USAGE 'identidade
+// bloqueada' while locked, each queued op is signed by the identity key and
+// the drain drops any op that does not verify, so nothing planted in a
+// signed-out browser profile (DevTools, IndexedDB) is ever signed into the
+// public diary (the rule the text outbox follows). The session appends the
+// pending changes as `follow` records with a DRAIN: one coalesced serial operation
+// (at most one queued) that runs the write gate, member-ops drainFollows
+// and the push, exactly as a diary write, without ever touching the user's
+// sync intent. It runs only when kv followsPending is non-empty, so a
+// member who never follows anyone never sees a run or an event from it.
+// The follows a device kept from before `follow` records existed are never
+// published on their own (kv follows is unauthenticated and the per-device
+// marker deletable): the host controls legacyFollows() / confirmLegacyFollows(keys)
+// let the person confirm the exact list once; the confirmed keys become
+// signed pending ops and drain like any change, the rest leave kv follows.
+// It is scheduled by
+// follow.add / follow.remove when something changed, after setKeyPair,
+// after cert.add wrote block 0, and on the first own-synced of a continuous run while a
+// previous drain failed (drainWanted; at most MAX_DRAIN_RETRIES in a row
+// without a new change, so a persistent failure cannot keep restarting the
+// run). A drain never fails an RPC: an error is the warning 'aviso:
+// seguidos ainda não enviados' and the records stay pending. The drain
+// defers (drainWanted) while a user's once run is alive: the app's recovery
+// run must not be preempted by it. The other way round, the sync folds the
+// own diary's `follow` records into kv follows (another device's follows)
+// and emits 'follows-changed { count, length }': the session relays it as
+// the RPC event follows.changed { count } (every event) and restarts the
+// continuous run once per distinct own length (lastFoldLength; a burst of
+// folds while a restart is queued costs one restart), so the run follows
+// the new set; a once run is never restarted. The sync's 'media-pushed'
+// event (this device's media core confirmed at the seeder) is diagnostic
+// and makes no line.
+//
+// reset() removes the diary, this device's media cores (kv mediaCores and
+// mediaDevice included), the pending follow changes and the per-device
+// migration marker (the kept follows are offered for confirmation again by
+// the next identity), and locks both keys; config and follows stay.
 const b4a = require('b4a')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
-const { validRecordCopy, validateRecord, parseRef } = require('@varanda/core/lib/records')
+const {
+  validRecordCopy,
+  validateRecord,
+  parseRef,
+  MEDIA_BLOCK_BYTES,
+  MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES,
+  MAX_MEDIA_DIMENSION
+} = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -57,6 +124,7 @@ const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport } = require('@varanda/core/lib/report')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
+const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync } = require('./sync')
 const store = require('./node-store')
@@ -73,8 +141,13 @@ const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
+const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
+const BAD_MEDIA_ARGS = 'mídia inválida'
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
+// Failed drains retried from own-synced without a new follow change.
+const MAX_DRAIN_RETRIES = 3
+const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 
 const noop = () => {}
 
@@ -90,6 +163,7 @@ const USAGE_MESSAGES = new Set([
   'associação diferente da configurada',
   store.LOCKED,
   store.MISMATCH,
+  store.MEDIA_INVALID,
   NOT_SYNCED_MESSAGE,
   BAD_USERNAME_RECORD,
   OLD_USERNAME_RECORD,
@@ -224,7 +298,7 @@ function createBrowserSession ({
   }
 
   function ctx () {
-    return { storage, association: cfg.association, keyPair, limits }
+    return { storage, association: cfg.association, keyPair, mediaKeyPair, limits }
   }
 
   let emitter = null
@@ -241,8 +315,17 @@ function createBrowserSession ({
   let ownKey = null
   let certKnown = false
   let diaryInfo = null // { publicKey, legacy } once the stored diary was looked at
-  // The identity key pair (session-owned copies, zero-filled when cleared).
+  // The identity key pair and this device's media key pair (session-owned
+  // copies, zero-filled together when cleared).
   let keyPair = null
+  let mediaKeyPair = null
+  // The follow drain: at most one operation queued; drainWanted after a
+  // failure (retried from own-synced, drainRetries times in a row).
+  let drainQueued = false
+  let drainWanted = false
+  let drainRetries = 0
+  // The own length of the last fold the continuous run was restarted for.
+  let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
   // seeder advertised (or the seeder held nothing for the key).
   let synced = false
@@ -307,7 +390,21 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced() } catch {}
+                  if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
+                return
+              case 'follows-changed':
+                // The sync folded the own diary's follow records into kv
+                // follows: the page learns the count; a continuous run is
+                // restarted once per own length so it follows the new set.
+                // A malformed event is dropped whole.
+                if (!Number.isSafeInteger(ev.count) || ev.count < 0 || !Number.isSafeInteger(ev.length) || ev.length < 0) return
+                send('follows.changed', { count: ev.count })
+                if (!once) scheduleFoldRestart(ev.length)
+                return
+              case 'media-pushed':
+                // Diagnostic (the seeder holds this device's media core up
+                // to `length`): no line for the page, nothing to format.
                 return
               case 'own-behind':
                 synced = false
@@ -338,6 +435,8 @@ function createBrowserSession ({
         error = err
       }
       if (run === r) run = null
+      // A drain deferred by this user's once run is due now.
+      if (once && !internal && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
       if (error !== null) {
         if (!internal) syncIntent = null
         warning('erro: ' + toRpcError(error, reportInternal).message)
@@ -456,6 +555,68 @@ function createBrowserSession ({
     return own
   }
 
+  // ---- the follow drain and the fold relay ----
+
+  // Appends the pending follow changes as a diary write: gate, member-ops
+  // drainFollows, push. Whether there is work is decided from the kv area
+  // alone, before any run or core open: kv followsPending non-empty;
+  // otherwise nothing runs and no event is emitted (a member who never
+  // follows anyone sees exactly the runs of a diary write, no more). Defers
+  // while a user's once run is alive (it would be preempted and never
+  // restarted). Never throws to a caller: a failure is a warning and
+  // drainWanted.
+  const drain = serial(async (_, epoch) => {
+    drainQueued = false
+    if (keyPair === null) return
+    if (!(await store.diaryExists(storage))) return
+    if ((await store.readFollowsPending(storage)).length === 0) return
+    if (run !== null && run.once) {
+      drainWanted = true
+      return
+    }
+    try {
+      await ensureCaughtUp(epoch)
+      const { seq } = await withStore((c) => member.drainFollows(c))
+      if (seq !== null) wrote(seq)
+      drainWanted = false
+      drainRetries = 0
+      await pushAfterWrite()
+    } catch (err) {
+      drainWanted = true
+      drainRetries++
+      warning(DRAIN_WARNING)
+    }
+  })
+
+  // Queues one drain (coalesced: a drain already queued covers this call).
+  function scheduleDrain () {
+    if (drainQueued || closed || keyPair === null) return
+    drainQueued = true
+    drain({}).catch(noop)
+  }
+
+  // Stops the continuous run once for the own length of a fold; the serial
+  // chain's restartWhenIdle restarts it with the folded follows (after any
+  // write or drain already queued). Coalesced: while a restart is queued, a
+  // new fold only updates the length it is for (foldLength), so a burst of
+  // folds costs one restart, and a length already restarted for costs none.
+  let foldQueued = false
+  let foldLength = null
+
+  const restartForFold = serial(async () => {
+    foldQueued = false
+    if (run === null || run.once || foldLength === lastFoldLength) return
+    lastFoldLength = foldLength
+    await stopRun('preempted')
+  })
+
+  function scheduleFoldRestart (length) {
+    foldLength = length
+    if (foldQueued || closed || length === lastFoldLength) return
+    foldQueued = true
+    restartForFold({}).catch(noop)
+  }
+
   function serial (fn) {
     return (params) => {
       const epoch = connection
@@ -537,6 +698,8 @@ function createBrowserSession ({
       certKnown = true
       if (r.appended) wrote(r.seq)
       await pushAfterWrite()
+      // Block 0 exists now: follows queued before it can reach the diary.
+      if (r.appended) followChanged()
       return { seq: r.seq }
     }),
 
@@ -629,33 +792,43 @@ function createBrowserSession ({
       return { changed: true, username: record.username, seq }
     }),
 
-    'post.create': serial(async ({ text }, epoch) => {
+    // `media` (optional): descriptors from mediaUpload, verified by
+    // member-ops against the own declared media cores before the append.
+    'post.create': serial(async ({ text, media }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text }))
+      const r = await withStore((c) => member.postCreate(c, { text, media }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text }, epoch) => {
+    'post.reply': serial(async ({ to, text, media }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postReply(c, { to: ref, text }))
+      const r = await withStore((c) => member.postReply(c, { to: ref, text, media }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
+    // Local-first, unlocked only (a change queued while signed out would be
+    // signed into the diary at the next sign-in by whoever had the browser);
+    // the diary write is the drain, scheduled and not awaited: its outcome
+    // never fails this request.
     'follow.add': serial(async ({ key }) => {
-      const r = await withStore((c) => member.followAdd(c, key))
+      await requireUnlocked()
+      const r = await withStore((c) => member.followChange(c, key, true))
+      if (r.changed) followChanged()
       return { changed: r.changed, followCount: r.follows.length }
     }),
 
     'follow.remove': serial(async ({ key }) => {
-      const r = await withStore((c) => member.followRemove(c, key))
+      await requireUnlocked()
+      const r = await withStore((c) => member.followChange(c, key, false))
+      if (r.changed) followChanged()
       return { changed: r.changed, followCount: r.follows.length }
     }),
 
@@ -740,38 +913,143 @@ function createBrowserSession ({
     return out
   }
 
-  function zeroKeyPair () {
-    if (keyPair === null) return
-    keyPair.secretKey.fill(0)
-    keyPair.publicKey.fill(0)
-    keyPair = null
+  function copyPair (pair) {
+    if (pair === null || typeof pair !== 'object') throw new TypeError('par de chaves inválido')
+    return { publicKey: copyKey(pair.publicKey, 32), secretKey: copyKey(pair.secretKey, 64) }
   }
 
-  // Unlocks the identity with the pair derived from the passkey. The pair is
-  // copied synchronously (the caller may zero its buffers right away); any
-  // previous pair is zero-filled. The cached identity is forgotten so a
-  // stored diary of another key surfaces on the next operation as USAGE
-  // 'passkey não corresponde ao diário guardado'. Nothing is written.
-  function setKeyPair (pair) {
-    if (pair === null || typeof pair !== 'object') throw new TypeError('par de chaves inválido')
-    const copy = { publicKey: copyKey(pair.publicKey, 32), secretKey: copyKey(pair.secretKey, 64) }
+  function zeroPair (pair) {
+    if (pair === null) return
+    pair.secretKey.fill(0)
+    pair.publicKey.fill(0)
+  }
+
+  // Both keys go together: a locked identity has no media key either.
+  function zeroKeyPair () {
+    zeroPair(keyPair)
+    keyPair = null
+    zeroPair(mediaKeyPair)
+    mediaKeyPair = null
+  }
+
+  // A follow change happened: a drain is due, retries start afresh.
+  function followChanged () {
+    drainRetries = 0
+    scheduleDrain()
+  }
+
+  // Unlocks the identity with the pair derived from the passkey, and this
+  // device's media key pair when the page derived one (`media`; without it
+  // uploads are refused as locked). Both are copied synchronously (the
+  // caller may zero its buffers right away); any previous pair is
+  // zero-filled. The cached identity is forgotten so a stored diary of
+  // another key surfaces on the next operation as USAGE 'passkey não
+  // corresponde ao diário guardado'. Nothing is written here; the follow
+  // drain is scheduled right after.
+  function setKeyPair (pair, { media } = {}) {
+    const copy = copyPair(pair)
+    let mediaCopy = null
+    try {
+      if (media !== undefined && media !== null) mediaCopy = copyPair(media)
+    } catch (err) {
+      zeroPair(copy)
+      throw err
+    }
     return serial(async () => {
       zeroKeyPair()
       keyPair = copy
+      mediaKeyPair = mediaCopy
       synced = false
       ownKey = null
       certKnown = false
+      followChanged()
     })().catch((err) => {
-      copy.secretKey.fill(0)
-      copy.publicKey.fill(0)
+      zeroPair(copy)
+      zeroPair(mediaCopy)
       throw err
     })
+  }
+
+  function isIntIn (value, min, max) {
+    return Number.isSafeInteger(value) && value >= min && value <= max
+  }
+
+  // Stores one image in this device's media core -> its descriptor (the
+  // `media` entry of a later post). Validated and copied synchronously
+  // (TypeError), then on the serial chain: unlocked with a media key (else
+  // USAGE 'identidade bloqueada'), hashed, the core readied (mediaPrepare,
+  // inside withStore), declared through the write gate and pushed like any
+  // diary write when the diary does not declare it yet, and only then
+  // stored (mediaCommit, inside withStore). onProgress (optional) hears
+  // 0.25 hashed, 0.75 stored, 1 done; errors reach the caller as RPC
+  // errors ({ code, message }). Nothing about the bytes is logged.
+  function mediaUpload ({ bytes, mime, width, height, onProgress } = {}) {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
+    return serial(async (_, epoch) => {
+      await requireUnlocked()
+      if (mediaKeyPair === null) throw new UsageError(store.LOCKED)
+      // The declaration needs block 0: checked before any byte is stored, so
+      // a diary without its certificate gets no orphan media core.
+      if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      const subtle = globalThis.crypto && globalThis.crypto.subtle
+      if (!subtle) throw new Error('WebCrypto indisponível')
+      const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
+      progress(0.25)
+      const blocks = []
+      for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
+        blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
+      }
+      // Declare BEFORE storing: a declaration the gate refuses (seeder
+      // unreachable) rejects with nothing appended, so a retry never fills
+      // the fixed-size core with another copy of the item.
+      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+      if (!declared) {
+        await ensureCaughtUp(epoch)
+        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+        wrote(seq)
+        await pushAfterWrite()
+      }
+      const descriptor = await withStore((c) => member.mediaCommit(c, { blocks, mime, width, height, sha256 }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
   }
 
   // Locks the identity: the pair is zero-filled. After close() it already is.
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
     return serial(async () => { zeroKeyPair() })()
+  }
+
+  // The follows kept from before `follow` records existed (member-ops
+  // legacyFollows) -> { keys }; unlocked only.
+  const legacyFollows = serial(async () => {
+    await requireUnlocked()
+    return withStore((c) => member.legacyFollows(c))
+  })
+
+  // Publishes exactly the confirmed legacy follows (member-ops
+  // confirmLegacyFollows: signed pending ops, the rest leave kv follows,
+  // the marker is set) -> { published }, and schedules the drain. keys:
+  // at most MAX_INVENTORY - 1 lowercase hex64 strings (TypeError otherwise).
+  function confirmLegacyFollows (keys) {
+    if (!Array.isArray(keys) || keys.length > MAX_INVENTORY - 1 ||
+        keys.some((k) => typeof k !== 'string' || !/^[0-9a-f]{64}$/.test(k))) {
+      throw new TypeError('chaves inválidas')
+    }
+    const copy = [...keys]
+    return serial(async () => {
+      await requireUnlocked()
+      const r = await withStore((c) => member.confirmLegacyFollows(c, copy))
+      followChanged()
+      return { published: r.published }
+    })({})
   }
 
   // -> { exists, publicKey (hex | null), legacy, unlocked, synced }, from the
@@ -790,13 +1068,18 @@ function createBrowserSession ({
   })
 
   // Removes the diary (every page, the oplog header slots of a legacy store
-  // included) and locks; 'config' and 'follows' stay. A sync in progress is
-  // stopped and not restarted.
+  // included), this device's media cores (kv mediaCores and mediaDevice
+  // with them), the pending follow changes and the per-device migration
+  // marker, and locks both keys; 'config' and 'follows' stay. A sync in
+  // progress is stopped and not restarted.
   const reset = serial(async () => {
     syncIntent = null
     await stopRun('stopped')
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
+    await store.deleteMediaCores(storage)
+    await store.writeFollowsPending(storage, [])
+    await store.clearFollowsMigrated(storage)
     zeroKeyPair()
     ownKey = null
     certKnown = false
@@ -804,6 +1087,10 @@ function createBrowserSession ({
     synced = false
     unpushed = true
     localLength = null
+    drainWanted = false
+    drainRetries = 0
+    lastFoldLength = null
+    foldLength = null
   })
 
   function attach (emit) {
@@ -844,6 +1131,9 @@ function createBrowserSession ({
     close,
     setKeyPair,
     clearKeyPair,
+    mediaUpload,
+    legacyFollows: () => legacyFollows({}),
+    confirmLegacyFollows,
     identityStatus: () => identityStatus({}),
     reset: () => reset({}),
     // 'open' | 'closed'

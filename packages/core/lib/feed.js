@@ -50,7 +50,9 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
         future.push({ author: key, seq })
         continue
       }
-      items.push({ author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo })
+      // `media`: a copy of the post's descriptors, or null when it has none.
+      const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
+      items.push({ author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo, media })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.

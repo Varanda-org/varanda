@@ -35,10 +35,11 @@
 	# se cura na carga seguinte. O service worker já serve os arquivos com
 	# hash do seu próprio cache conferido (instala com cache: 'reload'),
 	# então um cache HTTP longo renderia pouco. /varanda.json tem o seu
-	# próprio no-store, /seeder fica como está e /account/* vem do serviço
-	# de conta com o no-store dele.
+	# próprio no-store, /seeder fica como está, /account/* vem do serviço
+	# de conta com o no-store dele e /media/* vem do semeador com o cache
+	# longo dele.
 	@mutavel {
-		not path /varanda.json /seeder /account/*
+		not path /varanda.json /seeder /account/* /media/*
 	}
 	header @mutavel Cache-Control "no-cache"
 
@@ -55,7 +56,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /seeder /account/*
+		not path /seeder /account/* /media/*
 		not file /index.html {
 			root /srv/web
 		}
@@ -107,6 +108,24 @@
 	# Antes do handle abaixo: sem este, /account/* cairia no index.html.
 	handle /account/* {
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# As mídias das publicações (blocos de um núcleo de mídia, endereçados
+	# por conteúdo): GET|HEAD /media/<diário>/<núcleo>/<início>/<blocos>,
+	# servido pelo semeador na porta do WebSocket, em 127.0.0.1. Como o
+	# /seeder, ele só aceita o Host do destino, e os cabeçalhos com o endereço
+	# do cliente saem. O Cache-Control (longo) e o 404 vêm do próprio
+	# semeador: por isso /media/* fica fora do no-cache de @mutavel e do
+	# no-store de @ausenteApp acima, e este arquivo não repete esse valor.
+	# O CSP não muda (img-src já permite blob:). O service worker também
+	# deixa /media/* passar direto para a rede (apps/app/scripts/sw.js).
+	# Antes do handle abaixo: sem este, /media/* cairia no index.html.
+	handle /media/* {
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip

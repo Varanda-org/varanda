@@ -1,10 +1,12 @@
 // The app shell: the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then three tabs (A Rua, Seguindo, Diário) with the top bar and its sync
-// chip, the publish button and the sheets (Publicar, Ajustes). Sync is
-// automatic: this shell owns the intent (node.setAutoSync) and nothing else in
-// the UI starts or stops a run. Design: apps/site/artwork/app-design.md.
+// and then three tabs (A Rua, Seguindo, Diário) with the top bar, the
+// 'Sem internet' note under it (only while offline), the publish button and
+// the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
+// owns the intent (node.setAutoSync) and nothing else in the UI starts or
+// stops a run; its details live in Ajustes → Sincronização. Design:
+// apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
@@ -17,8 +19,8 @@ import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
+import { OfflineNote } from './src/ui/OfflineNote'
 import { loadIcons } from './src/ui/Icon'
-import { SyncChip } from './src/ui/SyncChip'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
 import { layout, type } from './src/ui/theme'
@@ -68,7 +70,7 @@ function Member () {
   const { width } = useWindowDimensions()
   const ready = node.phase === 'ready'
   // Once the node was ready the tree stays mounted for good: a disconnect,
-  // another tab taking over or a restart only changes the sync chip, so
+  // another tab taking over or a restart never unmounts the screens, so
   // drafts survive.
   const [seen, setSeen] = useState(false)
   useEffect(() => { if (ready) setSeen(true) }, [ready])
@@ -159,14 +161,14 @@ function Member () {
   }, [ready, locked, setupDone, recovering, setAutoSync])
 
   // Back from the Google step with a certificate already held: the tabs show
-  // after the unlock, so open Ajustes → Identidade once, where LinkCard offers
+  // after the unlock, so open Ajustes → Conta once, where the account card offers
   // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
   // handles the return.
   const linkReturnRef = useRef(LINK_RETURN)
   useEffect(() => {
     if (setupStep || !linkReturnRef.current) return
     linkReturnRef.current = false
-    setAjustes('identidade')
+    setAjustes('conta')
   }, [setupStep])
 
   // The own profile (one profile.read through the profiles cache): the
@@ -257,12 +259,20 @@ function Member () {
     if (lastSent.n === lastSentRef.current) return
     lastSentRef.current = lastSent.n
     setVersion((v) => v + 1)
-    showToast(lastSent.kind === 'reply' ? 'resposta publicada da fila de saída' : 'publicado da fila de saída')
+    showToast(lastSent.kind === 'reply' ? 'resposta publicada' : 'publicado')
   }, [lastSent])
 
-  // The chip always opens Sincronizar; that screen offers Conexão when the
-  // node is disconnected.
-  const openChip = () => setAjustes('sincronizar')
+  // The follows changed (here or on another device, node.followsVersion): A
+  // Rua and the follow count reload.
+  const followsVersion = node.followsVersion
+  const followsVersionRef = useRef(followsVersion)
+  useEffect(() => {
+    if (followsVersion === followsVersionRef.current) return
+    followsVersionRef.current = followsVersion
+    setVersion((v) => v + 1)
+  }, [followsVersion])
+  const followCount = typeof node.followCount === 'number' ? node.followCount : (info ? info.followCount : null)
+
   const startReply = (r) => setComposer({ open: true, reply: r })
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
@@ -286,18 +296,21 @@ function Member () {
     )
   }
 
-  const chip = <SyncChip onPress={openChip} />
-  const connectionLink = (
-    <Pressable
-      style={[styles.link, { paddingBottom: 14 + insets.bottom }]}
-      accessibilityRole='button'
-      accessibilityLabel='Conexão'
-      onPress={() => setAjustes('conexao')}
-      hitSlop={4}
-    >
-      <Text style={styles.linkText}>Conexão</Text>
-    </Pressable>
-  )
+  // The 'Conexão' footer of the setup steps: only where a person may have to
+  // configure the node (native, manual web setups), never on the hosted page.
+  const connectionLink = mode === 'hosted'
+    ? null
+    : (
+      <Pressable
+        style={[styles.link, { paddingBottom: 14 + insets.bottom }]}
+        accessibilityRole='button'
+        accessibilityLabel='Conexão'
+        onPress={() => setAjustes('conexao')}
+        hitSlop={4}
+      >
+        <Text style={styles.linkText}>Conexão</Text>
+      </Pressable>
+      )
 
   // On a wide web window the setup step and the tabs share one centred column.
   const wide = Platform.OS === 'web' && width > layout.column
@@ -321,7 +334,8 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={chip} />
+        <TopBar title={STEP_TITLES[step]} />
+        <OfflineNote />
         <View style={styles.flex}>{body}</View>
         {connectionLink}
       </View>
@@ -330,7 +344,8 @@ function Member () {
     // The own profile is being looked up (sync already runs in the background).
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={chip} />
+        <TopBar title={STEP_TITLES[step]} />
+        <OfflineNote />
         <View style={styles.center}>
           <Spinner size='large' />
           {slow
@@ -344,7 +359,8 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={chip} />
+        <TopBar title={STEP_TITLES[step]} />
+        <OfflineNote />
         <View style={styles.flex}>
           <Perfil
             page
@@ -369,8 +385,9 @@ function Member () {
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={tab === 'rua' ? 'A Rua' : 'Seguindo'} right={chip} />
+          ? <TopBar title={tab === 'rua' ? 'A Rua' : 'Seguindo'} />
           : null}
+        <OfflineNote inset={tab === 'diario'} />
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
@@ -380,7 +397,7 @@ function Member () {
               onReport={setReport}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
-              followCount={info ? info.followCount : null}
+              followCount={followCount}
               onFollowSomeone={() => setTab('seguindo')}
             />
           </View>
@@ -418,9 +435,10 @@ function Member () {
     name: ownProfile ? (ownProfile.name || null) : null,
     username: ownProfile ? (ownProfile.username || null) : null
   }
-  // Light over the Diário band. The sheets leave the status bar over the
-  // (dimmed) screen behind, so they keep it light there too.
-  const light = tab === 'diario' && step === 'pronto'
+  // Light over the Diário band (dark over the offline note above it). The
+  // sheets leave the status bar over the (dimmed) screen behind, so they keep
+  // it light there too.
+  const light = tab === 'diario' && step === 'pronto' && node.online !== false
 
   return (
     <View style={styles.root}>
@@ -435,7 +453,7 @@ function Member () {
           // The reply context is dropped only if it is still the one sent.
           setComposer((c) => ({ open: false, reply: c.reply && c.reply.ref === sentRef ? null : c.reply }))
           // Kept in the outbox: nothing new in the diary yet.
-          if (kind === 'queued-post' || kind === 'queued-reply') return showToast('guardado na fila de saída')
+          if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
           setVersion((v) => v + 1)
           showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
         }}

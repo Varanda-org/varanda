@@ -1,7 +1,9 @@
 'use strict'
 
-// TODO(later): media attachments are out of scope for phase 0 (moderation
-// lists are signed snapshots outside the diary: lib/blocklist.js).
+// Media attachments: a post may carry up to MAX_MEDIA_PER_POST descriptors
+// pointing into a media core (a separate Hypercore whose block 0 is a media
+// header, lib/media.js) that the diary declares with a `media-core` record.
+// Moderation lists are signed snapshots outside the diary (lib/blocklist.js).
 
 const b4a = require('b4a')
 
@@ -12,11 +14,25 @@ const MAX_TEXT = 1000
 const MAX_BLOCK_BYTES = 16384
 const MAX_LOG_BLOCKS = 100000
 const MAX_LOG_BYTES = 64 * 1024 * 1024
+// Media (lib/media.js): every media core block is MEDIA_BLOCK_BYTES except
+// the last block of an item (1..MEDIA_BLOCK_BYTES).
+const MEDIA_BLOCK_BYTES = 32768
+const MAX_MEDIA_BLOCKS = 8192 // blocks per media core, header included
+const MAX_MEDIA_BYTES = 268435456 // 256 MiB per media core
+const MAX_MEDIA_CORES = 4 // latest media-core declarations honoured per diary
+const MAX_MEDIA_PER_POST = 4
+const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
+const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const MAX_MEDIA_DIMENSION = 16384
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const PROFILE_KEYS = ['type', 'name', 'bio', 'at']
 const POST_KEYS = ['type', 'text', 'at', 'replyTo']
+const POST_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'media']
+const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
+const MEDIA_CORE_KEYS = ['type', 'key', 'at']
+const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); apps/cli/test/records.test.js checks parity.
@@ -144,10 +160,48 @@ function validReplyTo (r) {
   return isHex64(r.author) && Number.isSafeInteger(r.seq) && r.seq >= 1
 }
 
+function isIntIn (v, min, max) {
+  return Number.isSafeInteger(v) && v >= min && v <= max
+}
+
+// A media descriptor (exact keys): where an item lives in a media core and
+// what it is. Key-agnostic: "core is not the diary key" is checked by the
+// readers and writers (lib/media.js). Never throws.
+function validDescriptor (d) {
+  try {
+    if (!isPlainObject(d) || !hasExactKeys(d, DESCRIPTOR_KEYS)) return false
+    const { core, mime, start, blocks, bytes, sha256, width, height } = d
+    return isHex64(core) &&
+      typeof mime === 'string' && MEDIA_MIMES.includes(mime) &&
+      isIntIn(start, 1, MAX_MEDIA_BLOCKS - 1) &&
+      isIntIn(blocks, 1, MAX_MEDIA_ITEM_BLOCKS) &&
+      start + blocks <= MAX_MEDIA_BLOCKS &&
+      Number.isSafeInteger(bytes) &&
+      bytes > (blocks - 1) * MEDIA_BLOCK_BYTES &&
+      bytes <= blocks * MEDIA_BLOCK_BYTES &&
+      isHex64(sha256) &&
+      isIntIn(width, 1, MAX_MEDIA_DIMENSION) &&
+      isIntIn(height, 1, MAX_MEDIA_DIMENSION)
+  } catch {
+    return false
+  }
+}
+
+// By index, never every(): a hole in a sparse array is undefined and invalid.
+function validMediaList (media) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+  for (let i = 0; i < media.length; i++) {
+    if (!validDescriptor(media[i])) return false
+  }
+  return true
+}
+
+const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow']
+
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
   const type = record.type
-  if (type !== 'member-cert' && type !== 'profile' && type !== 'post' && type !== 'username') return 'malformed'
+  if (!TYPES.includes(type)) return 'malformed'
   if (seq === 0 && type !== 'member-cert') return 'genesis-required'
   if (type === 'member-cert') {
     if (seq !== 0) return 'cert-not-first'
@@ -165,9 +219,21 @@ function check (record, seq) {
     if (!isCanonicalIso(at)) return 'date-invalid'
     return null
   }
-  if (!hasExactKeys(record, POST_KEYS)) return 'malformed'
+  if (type === 'media-core') {
+    if (!hasExactKeys(record, MEDIA_CORE_KEYS) || !isHex64(record.key)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'follow') {
+    if (!hasExactKeys(record, FOLLOW_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  const withMedia = hasExactKeys(record, POST_MEDIA_KEYS)
+  if (!withMedia && !hasExactKeys(record, POST_KEYS)) return 'malformed'
+  if (withMedia && !validMediaList(record.media)) return 'media-invalid'
   const { text, at, replyTo } = record
-  if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+  // A post with media may have an empty text (a photo-only post).
+  const minText = withMedia ? 0 : 1
+  if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
   if (hasControlChars(text, true)) return 'control-chars'
   if (!isCanonicalIso(at)) return 'date-invalid'
   if (!validReplyTo(replyTo)) return 'reply-invalid'
@@ -197,8 +263,28 @@ function profileRecord ({ name, bio = '', at = nowIso() } = {}) {
   return build({ type: 'profile', name, bio, at }, 1)
 }
 
-function postRecord ({ text, replyTo = null, at = nowIso() } = {}) {
-  return build({ type: 'post', text, at, replyTo }, 1)
+// A copy with exactly the descriptor keys (anything else is passed through
+// for validation to reject).
+function copyDescriptor (d) {
+  if (!isPlainObject(d)) return d
+  const out = {}
+  for (const k of DESCRIPTOR_KEYS) out[k] = d[k]
+  return out
+}
+
+// `media` is added only when given.
+function postRecord ({ text, replyTo = null, at = nowIso(), media } = {}) {
+  const record = { type: 'post', text, at, replyTo }
+  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  return build(record, 1)
+}
+
+function mediaCoreRecord ({ key, at = nowIso() } = {}) {
+  return build({ type: 'media-core', key, at }, 1)
+}
+
+function followRecord ({ key, on, at = nowIso() } = {}) {
+  return build({ type: 'follow', key, on, at }, 1)
 }
 
 function parseRef (str) {
@@ -293,6 +379,14 @@ module.exports = {
   MAX_BLOCK_BYTES,
   MAX_LOG_BLOCKS,
   MAX_LOG_BYTES,
+  MEDIA_BLOCK_BYTES,
+  MAX_MEDIA_BLOCKS,
+  MAX_MEDIA_BYTES,
+  MAX_MEDIA_CORES,
+  MAX_MEDIA_PER_POST,
+  MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES,
+  MAX_MEDIA_DIMENSION,
   nowIso,
   isHex64,
   isCanonicalIso,
@@ -300,6 +394,9 @@ module.exports = {
   memberCertRecord,
   profileRecord,
   postRecord,
+  mediaCoreRecord,
+  followRecord,
+  validDescriptor,
   validateRecord,
   validRecordCopy,
   parseRef,

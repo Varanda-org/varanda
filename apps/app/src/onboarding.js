@@ -8,9 +8,10 @@ const TOTAL = 3
 
 export const STEP_TITLES = {
   entrar: 'Bem-vindo à Varanda',
-  recuperando: 'Recuperando seu diário',
-  vinculo: 'Sua conta e seu @nome',
+  recuperando: 'Buscando sua conta…',
+  vinculo: 'Escolha seu @nome',
   identidade: 'Sua identidade',
+  // Native and manual setups only.
   certificado: 'Certificado de membro',
   carregando: 'Um instante',
   perfil: 'Como você quer aparecer',
@@ -18,14 +19,14 @@ export const STEP_TITLES = {
 }
 
 export const STEP_HINTS = {
-  entrar: 'Sua identidade vem da passkey: sem senha, sem e-mail.',
-  recuperando: 'Buscando no semeador o que já existe desta identidade.',
-  vinculo: 'A associação liga sua chave a uma conta Google e emite seu certificado de membro.',
-  identidade: 'A identidade é a chave do seu diário, criada neste aparelho.',
+  entrar: 'Entre com a passkey do seu aparelho: sem senha, sem e-mail.',
+  recuperando: 'Estamos trazendo de volta o que já é seu.',
+  vinculo: 'Seu @nome é como as pessoas encontram você. Vamos confirmar sua conta Google uma única vez.',
+  identidade: 'Sua identidade é criada neste aparelho.',
   certificado: 'Cole o certificado emitido pela associação para publicar e sincronizar.',
-  carregando: 'Lendo seu diário.',
+  carregando: 'Só um instante.',
   perfil: 'Seu nome aparece em cada publicação; a bio é opcional.',
-  pronto: 'Seu diário está pronto.'
+  pronto: 'Tudo certo para começar.'
 }
 
 const at = (step, index) => ({ step, index, total: TOTAL })

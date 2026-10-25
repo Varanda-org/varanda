@@ -91,3 +91,64 @@ test('spinRemaining: keeps the spinner for the minimum time', async (t) => {
   t.is(spinRemaining({ startedAt: 1000, now: 9000 }), 0)
   t.is(spinRemaining({ startedAt: 0, now: 100, min: 150 }), 50)
 })
+
+const wheel = (over) => ({ deltaY: -30, atTop: true, refreshing: false, now: 0, ...over })
+
+test('wheelPullState: accumulates upward pixels and arms exactly at the threshold', async (t) => {
+  const { EMPTY_WHEEL, WHEEL_THRESHOLD, WHEEL_DECAY_MS, wheelPullState, pullDistance } = await load()
+  t.is(WHEEL_THRESHOLD, 120)
+  t.is(WHEEL_DECAY_MS, 250)
+  t.ok(Object.isFrozen(EMPTY_WHEEL))
+  t.alike(EMPTY_WHEEL, { acc: 0, lastAt: null, armed: false, active: false, distance: 0, progress: 0 })
+  const first = wheelPullState(EMPTY_WHEEL, wheel())
+  t.is(first.acc, 30)
+  t.is(first.lastAt, 0)
+  t.is(first.active, true)
+  t.is(first.armed, false)
+  t.is(first.distance, pullDistance(30))
+  t.is(first.progress, 0.25)
+  const below = wheelPullState(first, wheel({ deltaY: -89, now: 50 }))
+  t.is(below.acc, 119)
+  t.is(below.armed, false)
+  const at = wheelPullState(below, wheel({ deltaY: -1, now: 100 }))
+  t.is(at.armed, true)
+  t.is(at.progress, 1)
+  t.is(at.distance, pullDistance(120))
+  t.is(wheelPullState(at, wheel({ now: 150 })).progress, 1)
+})
+
+test('wheelPullState: decay restarts only after the idle limit', async (t) => {
+  const { EMPTY_WHEEL, WHEEL_DECAY_MS, wheelPullState } = await load()
+  const first = wheelPullState(EMPTY_WHEEL, wheel())
+  t.is(wheelPullState(first, wheel({ now: WHEEL_DECAY_MS })).acc, 60)
+  const expired = wheelPullState(first, wheel({ now: WHEEL_DECAY_MS + 1 }))
+  t.is(expired.acc, 30)
+  t.is(expired.lastAt, WHEEL_DECAY_MS + 1)
+  t.is(expired.armed, false)
+  const zero = wheelPullState(first, wheel({ deltaY: 0, now: 100 }))
+  t.alike(zero, first)
+  t.alike(wheelPullState(zero, wheel({ deltaY: 0, now: WHEEL_DECAY_MS + 1 })), EMPTY_WHEEL)
+})
+
+test('wheelPullState: downward motion, leaving the top and refreshing clear the pull', async (t) => {
+  const { EMPTY_WHEEL, wheelPullState } = await load()
+  const armed = wheelPullState(EMPTY_WHEEL, wheel({ deltaY: -120 }))
+  for (const over of [{ deltaY: 1 }, { atTop: false }, { refreshing: true }]) {
+    t.alike(wheelPullState(armed, wheel(over)), EMPTY_WHEEL)
+    t.alike(wheelPullState(EMPTY_WHEEL, wheel(over)), EMPTY_WHEEL)
+  }
+})
+
+test('wheelPullState: frozen inputs are never changed and results are new states', async (t) => {
+  const { EMPTY_WHEEL, wheelPullState } = await load()
+  const event = Object.freeze(wheel())
+  const state = Object.freeze(wheelPullState(EMPTY_WHEEL, event))
+  const snapshot = { ...state }
+  const next = wheelPullState(state, Object.freeze(wheel({ now: 10 })))
+  t.is(next.acc, 60)
+  t.alike(state, snapshot)
+  t.alike(event, wheel())
+  t.not(next, state)
+  t.not(wheelPullState(state, wheel({ deltaY: 0 })), state)
+  t.not(wheelPullState(state, wheel({ deltaY: 1 })), EMPTY_WHEEL)
+})

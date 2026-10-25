@@ -13,11 +13,33 @@ export { colors }
 
 export const UNCERTAIN = 'incerto: pode ter sido aplicado; confira antes de repetir'
 
+// Plain words for the technical messages the node and the app raise. Display
+// only: the logic keeps matching the original messages and codes.
+const PLAIN = {
+  'sincronize com o semeador antes de publicar': 'Sem conexão com o servidor agora. Tente de novo em instantes.',
+  'identidade bloqueada: entre com a passkey': 'Entre com sua passkey para continuar.',
+  'grave o certificado de membro antes de publicar': 'Sua conta ainda está sendo preparada. Tente de novo em instantes.',
+  'a conexão com o nó foi encerrada': 'A conexão foi interrompida. Tente de novo.',
+  'sem conexão com o nó': 'A conexão foi interrompida. Tente de novo.',
+  'mídia inválida': 'Não foi possível usar esta foto.',
+  'mídia disponível só na versão web': 'Fotos só podem ser publicadas na versão web.',
+  'esta conta Google já está vinculada a outra chave': 'Esta conta Google já está em uso por outra conta Varanda.',
+  'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
+  'o nó do navegador não carregou': 'Não foi possível carregar o app. Recarregue a página.',
+  'não foi possível carregar o nó do navegador': 'Não foi possível carregar o app. Recarregue a página.',
+  'nó local indisponível na web': 'Não foi possível carregar o app. Recarregue a página.'
+}
+
+// The plain words for a message, or the message itself.
+export function plainMessage (text) {
+  return typeof text === 'string' && Object.hasOwn(PLAIN, text) ? PLAIN[text] : text
+}
+
 // The text of an error for the person: never the raw message.
 export function errorText (err) {
   if (err && err.uncertain === true) return UNCERTAIN
   const message = err && typeof err.message === 'string' && err.message !== '' ? err.message : 'erro'
-  return displayText(message)
+  return displayText(plainMessage(message))
 }
 
 // One request at a time per action: `pending` disables the button and a
