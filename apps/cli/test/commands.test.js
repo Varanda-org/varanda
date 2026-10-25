@@ -207,7 +207,7 @@ test('member commands', async (t) => {
     await store.close()
   }
   const futureFeed = varanda(aDir, ['feed', '--json'])
-  const ref = A + ':5'
+  const ref = A + ':7' // blocks 5 and 6 are the follow and unfollow records above
   const fj = lastJson(futureFeed)
   t.alike(fj.future, [ref])
   t.absent(fj.items.some((i) => i.text === 'do futuro'), 'future post is not in items')
@@ -431,4 +431,73 @@ test('log never prints C1, DEL or bidi controls raw (H4)', async (t) => {
   }
   const entries = lastJson(varanda(dir, ['log', '--json'])).entries
   t.is(entries[entries.length - 1].record.text, hostile, 'escaped output parses back to the same text')
+})
+
+test('follow mirrors into the diary once block 0 exists; feed and log show photos', async (t) => {
+  await testnet(t)
+  const assocDir = tmpDir(t)
+  const dir = tmpDir(t)
+  const files = tmpDir(t)
+  const pub = lastJson(varanda(assocDir, ['assoc', 'init', '--json'])).publicKey
+  const A = lastJson(varanda(dir, ['id', 'create', '--association', pub, '--json'])).publicKey
+  const B = 'bb'.repeat(32)
+  const C = 'cc'.repeat(32)
+  const logRecords = () => lastJson(varanda(dir, ['log', '--json'])).entries.map((e) => e.record)
+
+  // before block 0: only follows.json changes
+  t.is(varanda(dir, ['follow', '--author', B]).code, 0)
+  t.alike(lastJson(varanda(dir, ['follows', '--json'])), { follows: [B] })
+
+  const certFile = path.join(files, 'a.json')
+  t.is(varanda(assocDir, ['assoc', 'certify', '--member', A, '--out', certFile]).code, 0)
+  t.is(varanda(dir, ['cert', 'add', '--cert-file', certFile]).code, 0)
+  t.is(logRecords().length, 1, 'no follow record was written before block 0')
+
+  t.is(varanda(dir, ['follow', '--author', C, '--json']).code, 0)
+  const afterFollow = logRecords()
+  t.is(afterFollow.length, 2)
+  t.alike({ type: afterFollow[1].type, key: afterFollow[1].key, on: afterFollow[1].on }, { type: 'follow', key: C, on: true })
+  t.is(varanda(dir, ['follow', '--author', C]).code, 0)
+  t.is(logRecords().length, 2, 'an unchanged follow writes nothing')
+  t.is(varanda(dir, ['unfollow', '--author', C]).code, 0)
+  const afterUnfollow = logRecords()
+  t.is(afterUnfollow.length, 3)
+  t.alike({ key: afterUnfollow[2].key, on: afterUnfollow[2].on }, { key: C, on: false })
+  t.is(varanda(dir, ['follow', '--author', C]).stdout.trim(), 'seguindo ' + C, 'output unchanged')
+
+  // retry after a failed append: follows.json already lists D, the diary has no record
+  const D = 'dd'.repeat(32)
+  fs.writeFileSync(path.join(dir, 'follows.json'), JSON.stringify({ v: 1, follows: [B, C, D] }))
+  const before = logRecords().length
+  t.is(varanda(dir, ['follow', '--author', D]).code, 0)
+  const retried = logRecords()
+  t.is(retried.length, before + 1, 'exactly one record on the retry')
+  t.alike({ key: retried[before].key, on: retried[before].on }, { key: D, on: true })
+  t.is(varanda(dir, ['follow', '--author', D]).stdout.trim(), 'já seguindo')
+  t.is(logRecords().length, before + 1, 'no second record')
+  t.alike(lastJson(varanda(dir, ['follows', '--json'])).follows.includes(D), true)
+
+  // photos: media posts are appended directly
+  const desc = (n) => ({ core: 'dd'.repeat(32), mime: 'image/png', start: n, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 4, height: 4 })
+  const store = await openStore(dir)
+  try {
+    const diary = await openDiary(store)
+    await diary.append({ type: 'post', text: { toString: null } })
+    await appendRecord(diary, postRecord({ text: '', media: [desc(1)] }))
+    await appendRecord(diary, postRecord({ text: 'duas', media: [desc(2), desc(3)] }))
+  } finally {
+    await store.close()
+  }
+  const feed = varanda(dir, ['feed'])
+  t.is(feed.code, 0)
+  t.ok(feed.stdout.includes('  [foto]'), 'one photo, empty text stays readable')
+  t.ok(feed.stdout.includes('  duas\n  [2 fotos]'), 'text and the photo count')
+  const items = lastJson(varanda(dir, ['feed', '--json'])).items
+  t.is(items[items.length - 1].media.length, 2, '--json passes media through')
+  const log = varanda(dir, ['log'])
+  t.ok(log.stdout.includes('segue ' + C.slice(0, 8)))
+  t.ok(log.stdout.includes('deixa de seguir ' + C.slice(0, 8)))
+  t.is(log.code, 0, 'a hostile record does not abort log')
+  t.ok(log.stdout.includes('inválido ('), 'invalid entries print a fixed line')
+  t.ok(log.stdout.includes('publicação [foto]'), 'later entries are still shown')
 })

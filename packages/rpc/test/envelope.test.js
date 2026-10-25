@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error'])
   t.ok(Object.isFrozen(EVENTS))
   t.ok(Object.isFrozen(STOP_REASONS))
@@ -92,4 +92,15 @@ test('event: shapes', (t) => {
   t.absent(validateEvent({ v: 1, event: 'nope', seq: 1, data: {} }).ok)
   t.absent(validateEvent({ v: 1, event: 'warning', seq: 1, data: [] }).ok)
   t.absent(validateEvent({ v: 1, event: 'warning', seq: 1, data: { line: 'x' }, id: 1 }).ok)
+})
+
+test('event: follows.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'follows.changed', seq: 1, data })
+  t.ok(ev({ count: 0 }).ok)
+  t.ok(ev({ count: 12 }).ok)
+  t.ok(ev({ count: Number.MAX_SAFE_INTEGER }).ok)
+  t.alike(ev({ count: 3 }).value, { v: 1, event: 'follows.changed', seq: 1, data: { count: 3 } })
+  for (const data of [{}, { count: -1 }, { count: 1.5 }, { count: '1' }, { count: null }, { count: 2 ** 53 }, { count: 1, extra: 1 }, { runId: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
 })

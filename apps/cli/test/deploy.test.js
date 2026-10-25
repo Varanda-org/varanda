@@ -254,6 +254,17 @@ test('Caddyfile: /account/* drops the client address headers', (t) => {
   t.ok(caddy.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
 })
 
+test('Caddyfile: /media/* drops the client address headers and keeps the upstream cache header', (t) => {
+  const caddy = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  const start = caddy.indexOf('handle /media/* {')
+  t.ok(start !== -1, 'handle /media/*')
+  const media = caddy.slice(start, caddy.indexOf('\n\t}', start))
+  t.ok(media.includes('header_up -X-Forwarded-For'), 'header_up -X-Forwarded-For')
+  t.ok(media.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
+  t.ok(media.includes('header_up Host {upstream_hostport}'), 'Host rewritten')
+  t.absent(caddy.includes('immutable'), 'the Caddyfile never sets immutable (it comes from the seeder)')
+})
+
 test('deploy.sh: bash -n and refusal to run as non-root', (t) => {
   const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
   if (probe.error || probe.status !== 0) {

@@ -2,7 +2,9 @@
 // 'Como você quer aparecer' (no Sheet: a Stepper with the same form, 'Continuar'
 // and 'Pular por enquanto'). Name (1..80 code points, not only whitespace) and
 // bio (0..280 code points), published with profile.set. The draft lives here,
-// outside the Sheet (its Modal unmounts the children when closed).
+// outside the Sheet (its Modal unmounts the children when closed). With
+// `embedded` (Ajustes) it renders as a plain page inside another sheet, with
+// its own 'Salvar'; `open` then tells when the form restarts from `current`.
 //
 // An uncertain save is never resent: the own profile is re-read with
 // profile.read (the whole log, verified name/bio) and only an equal result
@@ -32,7 +34,7 @@ async function readOwnProfile (node, ownKey) {
   return null
 }
 
-export default function Perfil ({ open, current, onClose, onSaved, ownKey, page = false, index, total, onSkip }) {
+export default function Perfil ({ open, current, onClose, onSaved, ownKey, page = false, embedded = false, index, total, onSkip }) {
   const node = useNode()
   const action = useAction()
   const [name, setName] = useState('')
@@ -94,6 +96,18 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
     </>
   )
 
+  if (embedded) {
+    return (
+      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Page>
+          {fields}
+          <Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid} />
+          <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
+        </Page>
+      </KeyboardAvoidingView>
+    )
+  }
+
   if (page) {
     return (
       <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -128,7 +142,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <Page>
           {fields}
-          <Soft>O perfil novo vale a partir do momento em que é publicado. É preciso ter o certificado de membro gravado.</Soft>
+          <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
         </Page>
       </KeyboardAvoidingView>
     </Sheet>

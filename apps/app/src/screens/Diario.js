@@ -1,11 +1,10 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
-// @nome from profile.read, bio, follow count, the public key behind 'mostrar
-// chave') over the own log (log.read), newest first, paged backwards with
-// infinite scroll and pull to refresh. Publications are PostRows; other valid
-// records are one compact line each, invalid blocks a short line with the
-// reason. Posts still in the outbox ('fila de saída', browser node) are
-// listed above them; they are not PostRows (no reply, no publication date
-// yet). A queued item this page session did not write waits for the person
+// @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
+// infinite scroll and pull to refresh. Only publications are listed (PostRows):
+// technical records and invalid blocks are not shown. Posts still in the
+// outbox ('Aguardando envio', browser node) are listed above them; they are
+// not PostRows (no reply, no publication date yet). The public key is shown
+// only in Ajustes > Avançado. A queued item this page session did not write waits for the person
 // ('enviar'). The 'ver novidades' pill (web only) follows the own-synced line
 // growing, i.e. another device published; the native node has no such
 // signal, so on native only the pull, the tab and the refresh prop reload.
@@ -21,8 +20,8 @@ import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
-import { atName, replyNameOf, whoOf } from '../who'
-import { ErrorText, Mono, SectionHeader, Soft, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { replyNameOf, whoOf } from '../who'
+import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -34,21 +33,21 @@ import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
 
 const BAND = 96
+const MAX_EMPTY_PAGES = 5
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
 function PendingState ({ item, held }) {
-  if (item.state === 'sending') return <Soft>publicando…</Soft>
-  if (held) return <Soft>guardado antes: confira o texto e toque em enviar</Soft>
+  if (item.state === 'sending') return <Soft>enviando…</Soft>
+  if (held) return <Soft>toque para enviar</Soft>
   if (item.state === 'uncertain') return <ErrorText>{UNCERTAIN_MESSAGE}</ErrorText>
-  if (item.state === 'failed') return <ErrorText>{displayText(item.lastError)}</ErrorText>
-  if (item.attempts === 0) return <Soft>aguardando conexão</Soft>
-  return <Soft>{'nova tentativa em breve · ' + displayText(item.lastError)}</Soft>
+  if (item.state === 'failed') return <ErrorText>{displayText(plainMessage(item.lastError))}</ErrorText>
+  return <Soft>vai sair quando a conexão voltar</Soft>
 }
 
-function TechRow ({ children }) {
-  return <View style={styles.tech}><Soft>{children}</Soft></View>
-}
+// Only publications are listed: records the person never wrote by hand (profile,
+// certificate, @nome, media) and invalid blocks stay out of the timeline.
+const isPostRow = (row) => !row.invalid && !!row.entry && !!row.entry.record && row.entry.record.type === 'post'
 
 export default function Diario ({ active, refresh, onSettings, onReply, onPublish, scrollToTop }) {
   const node = useNode()
@@ -62,7 +61,6 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [loadError, setLoadError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
-  const [showKey, setShowKey] = useState(false)
   const [editing, setEditing] = useState(false)
   const pull = useAction()
   const seqRef = useRef(0)
@@ -148,13 +146,32 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     // A refresh bump while hidden is consumed on the next activation.
     const refreshProfile = refresh !== lastRefresh.current || ownGrewRef.current
     lastRefresh.current = refresh
+    emptyPages.current = 0
     loadNewest(refreshProfile)
   }, [active, loadNewest, refresh])
 
   const reload = () => pull.run(() => loadNewest(true))
 
+  // Pages with no publication (only technical records) while older pages
+  // remain: load the next one by itself, at most MAX_EMPTY_PAGES in a row
+  // per trigger; then the footer's 'mostrar mais' takes over.
+  const emptyPages = useRef(0)
+  const postCount = data === null ? 0 : data.rows.filter(isPostRow).length
+  const dataAtEnd = data === null ? true : data.atEnd
+  useEffect(() => {
+    if (data === null) return
+    if (postCount > 0 || dataAtEnd) {
+      emptyPages.current = 0
+      return
+    }
+    if (loadingMore || olderError || olderBusy.current || emptyPages.current >= MAX_EMPTY_PAGES) return
+    emptyPages.current += 1
+    loadOlder()
+  }, [data, postCount, dataAtEnd, loadingMore, olderError, loadOlder])
+
   const info = data === null ? null : data.info
   const rows = data === null ? [] : data.rows
+  const posts = rows.filter(isPostRow)
   const publicKey = info && typeof info.publicKey === 'string' ? info.publicKey : null
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
@@ -181,11 +198,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const outboxList = pending.length > 0
     ? (
       <>
-        <SectionHeader>Fila de saída</SectionHeader>
+        <SectionHeader>Aguardando envio</SectionHeader>
         {heldIds.length > 0
           ? (
             <View style={styles.pendingAll}>
-              <Pill label='enviar todos' onPress={() => outbox.release(held)} />
+              <Pill label='enviar tudo' onPress={() => outbox.release(held)} />
             </View>
             )
           : null}
@@ -197,7 +214,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
               : null}
             <Soft>
               {'escrito ' + (relativeTime(item.writtenAt, now) ?? displayText(item.writtenAt)) +
-                ' · a data será a da publicação'}
+                ' · a data será a do envio'}
             </Soft>
             <PendingState item={item} held={heldIds.includes(item.id)} />
             {item.state !== 'sending'
@@ -209,7 +226,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
                   {item.state === 'uncertain' || item.state === 'failed'
                     ? <Pill label='tentar de novo' onPress={() => outbox.retry(item)} />
                     : null}
-                  <Pill label='descartar' onPress={() => outbox.discard(item.id)} />
+                  <Pill label='apagar' onPress={() => outbox.discard(item.id)} />
                 </View>
                 )
               : null}
@@ -218,14 +235,6 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       </>
       )
     : null
-
-  // Copy only where the clipboard exists; elsewhere the key stays selectable.
-  const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
-  const copyKey = () => {
-    try {
-      navigator.clipboard.writeText(publicKey).catch(() => {})
-    } catch {}
-  }
 
   const header = info === null
     ? (
@@ -262,33 +271,6 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
           </Text>
-          {info.memberCert === false
-            ? (
-              <Pressable accessibilityRole='button' onPress={() => onSettings('identidade')}>
-                <Text style={styles.warn}>certificado de membro ausente · abrir Identidade</Text>
-              </Pressable>
-              )
-            : null}
-          <View style={styles.keyRow}>
-            <Text style={styles.keyText}>chave pública</Text>
-            <Pressable
-              accessibilityRole='button'
-              accessibilityLabel={showKey ? 'esconder chave' : 'mostrar chave'}
-              onPress={() => setShowKey((v) => !v)}
-              style={styles.keyToggle}
-            >
-              <Icon name={showKey ? 'olho_fechado' : 'olho'} size={16} color={colors.soft} />
-              <Text style={styles.keyText}>{showKey ? 'esconder chave' : 'mostrar chave'}</Text>
-            </Pressable>
-          </View>
-          {showKey
-            ? (
-              <View style={styles.keyBox}>
-                <Mono>{displayText(info.publicKey)}</Mono>
-                {canCopy ? <Pill label='copiar' onPress={copyKey} /> : null}
-              </View>
-              )
-            : null}
         </View>
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
@@ -296,12 +278,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       </View>
       )
 
-  const footer = data !== null && rows.length > 0
+  const footer = data !== null && posts.length > 0
     ? (
       <ListFooter
         loading={loadingMore}
         atEnd={data.atEnd}
-        endText='Início do diário.'
+        endText='Isso é tudo por enquanto.'
         error={olderError}
         onRetry={loadOlder}
       />
@@ -315,47 +297,42 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       ? <ErrorState message={loadError} onRetry={reload} pending={pull.pending} />
       : <Skeleton />
   } else {
-    empty = (
-      <EmptyState
-        icon='lapis'
-        title='Seu diário está vazio'
-        body='Sua primeira publicação aparece aqui.'
-        actionLabel='Publicar'
-        onAction={onPublish}
-      />
-    )
+    empty = !data.atEnd
+      // Older pages remain and none shown so far held a publication: loading
+      // (or its error and retry), never the empty state.
+      ? <ListFooter loading={loadingMore} atEnd={false} error={olderError} onRetry={loadOlder} pending={loadingMore} />
+      : (
+        <EmptyState
+          icon='lapis'
+          title='Você ainda não publicou'
+          body='Sua primeira publicação aparece aqui.'
+          actionLabel='Publicar'
+          onAction={onPublish}
+        />
+        )
   }
 
   const renderItem = ({ item: row }) => {
-    const head = '#' + String(row.seq)
-    if (row.invalid) {
-      return <TechRow>{'bloco inválido (' + head + ': ' + displayText(row.invalid.reason) + ')'}</TechRow>
-    }
-    const record = row.entry.record || {}
-    if (record.type === 'post') {
-      const replyProfile = record.replyTo ? profileOf(record.replyTo.author) : undefined
-      return (
-        <PostRow
-          author={info.publicKey}
-          name={profile ? profile.name : null}
-          username={profile ? profile.username : null}
-          at={record.at}
-          text={record.text}
-          replyToName={record.replyTo ? replyNameOf(replyProfile) : null}
-          now={now}
-          onReply={() => onReply({
-            ref: info.publicKey + ':' + row.seq,
-            name: profile ? profile.name : null,
-            username: profile ? profile.username : null,
-            text: record.text
-          })}
-        />
-      )
-    }
-    if (record.type === 'profile') return <TechRow>perfil atualizado</TechRow>
-    if (record.type === 'member-cert') return <TechRow>certificado de membro</TechRow>
-    if (record.type === 'username') return <TechRow>{'@nome registrado ' + displayText(atName(record.username) || '')}</TechRow>
-    return <TechRow>registro desconhecido</TechRow>
+    const record = row.entry.record
+    const replyProfile = record.replyTo ? profileOf(record.replyTo.author) : undefined
+    return (
+      <PostRow
+        author={info.publicKey}
+        name={profile ? profile.name : null}
+        username={profile ? profile.username : null}
+        at={record.at}
+        text={record.text}
+        media={record.media || null}
+        replyToName={record.replyTo ? replyNameOf(replyProfile) : null}
+        now={now}
+        onReply={() => onReply({
+          ref: info.publicKey + ':' + row.seq,
+          name: profile ? profile.name : null,
+          username: profile ? profile.username : null,
+          text: record.text
+        })}
+      />
+    )
   }
 
   // Rows re-render when a name is learned or the clock ticks.
@@ -364,7 +341,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   return (
     <View style={styles.list}>
       <RefreshableList
-        data={rows}
+        data={posts}
         keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}
         renderItem={renderItem}
         extraData={extra}
@@ -428,13 +405,9 @@ const styles = StyleSheet.create({
   data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
   name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
-  keyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
-  keyToggle: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  keyBox: { gap: 8, alignItems: 'flex-start' },
   bio: { ...type.postText, color: colors.ink, marginTop: 8 },
   counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
   countsNum: { color: colors.ink, fontWeight: '700' },
-  warn: { fontSize: 14, lineHeight: 20, color: colors.warn, marginTop: 6 },
   pending: {
     paddingVertical: 10,
     paddingHorizontal: 16,
@@ -444,11 +417,5 @@ const styles = StyleSheet.create({
   },
   pendingText: { ...type.postText, color: colors.ink },
   pendingActions: { flexDirection: 'row', gap: 8, marginTop: 6 },
-  pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 },
-  tech: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
-  }
+  pendingAll: { flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 8 }
 })

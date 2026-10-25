@@ -41,7 +41,7 @@ export const MATCH_SLACK_MS = 2000
 // from another device).
 export const ATTEMPT_WINDOW_MS = 60000
 
-const FULL_MESSAGE = 'fila de saída cheia'
+const FULL_MESSAGE = 'Muitas publicações aguardando envio: envie ou apague algumas.'
 const INVALID_MESSAGE = 'publicação inválida'
 const TIME_MESSAGE = 'instante inválido'
 

@@ -7,6 +7,32 @@ export const PULL_THRESHOLD = 72
 export const PULL_MAX = 120
 export const DIRECTION_LOCK = 8
 export const MIN_SPIN_MS = 500
+export const WHEEL_THRESHOLD = 120
+export const WHEEL_DECAY_MS = 250
+export const EMPTY_WHEEL = Object.freeze({
+  acc: 0,
+  lastAt: null,
+  armed: false,
+  active: false,
+  distance: 0,
+  progress: 0
+})
+
+// Wheel deltas are pixels; only upward movement at the top builds a pull.
+export function wheelPullState (state = EMPTY_WHEEL, { deltaY, atTop, refreshing, now }) {
+  if (!atTop || refreshing || deltaY > 0 || !Number.isFinite(deltaY)) return { ...EMPTY_WHEEL }
+  const expired = state.lastAt === null || now - state.lastAt > WHEEL_DECAY_MS
+  if (deltaY === 0) return { ...(expired ? EMPTY_WHEEL : state) }
+  const acc = (expired ? 0 : state.acc) - deltaY
+  return {
+    acc,
+    lastAt: now,
+    armed: acc >= WHEEL_THRESHOLD,
+    active: true,
+    distance: pullDistance(acc),
+    progress: Math.min(1, acc / WHEEL_THRESHOLD)
+  }
+}
 
 // Rubber-band damping: monotonic, never above max.
 export function pullDistance (dy, max = PULL_MAX) {

@@ -72,11 +72,51 @@
 // by a revoked issuer is purged whatever its follow state. A replica
 // unfollowed before this index existed is not known here; ./member-ops.js
 // still hides it from log.read.
+//
+// Own media cores (kv 'mediaCores', ./node-store.js): each stored one is
+// opened read-only at run start through store.openMediaCoreReadOnly (lazy
+// 'data'; a listed core that is not stored is skipped, nothing is created)
+// and, like the own diary, replicated only on a VERIFIED seeder link. They
+// are ours: never announced on the admission channel (not in the hello's
+// have, no 'have' message), never downloaded into (no download range), and
+// never part of the follow goals or the 'replicas' index. Push confirmation:
+// Hypercore 10.38.2 has no core-level remoteContiguousLength; the seeder's
+// replicator Peer on this link's stream (found in core.peers) has
+// `peer.remoteContiguousLength`, what the seeder advertised it holds. A
+// block it downloads from us is NOT advertised back (Peer#broadcastRange
+// skips a range the remote already has), so a block counts as held when it
+// is below that length OR was served to that peer on this link (the core's
+// 'upload' event, whose `from` is the Peer): served means sent with its
+// proof, not proven stored; a later link's advertised length is the truth.
+// Checked on 'peer-add' and 'upload', and polled every mediaPollMs while
+// the link is verified and some core is not yet confirmed (a range update
+// from the seeder raises no event on our core). When blocks 0..length-1
+// are all held:
+//   media-pushed { key, length }  once per (key, length) per run
+// Once runs never wait for media (no goal): the app keeps a continuous run,
+// which is where the confirmation arrives.
+//
+// Follow fold: the own diary's valid `follow` records (decodeBlock +
+// validRecordCopy, seq >= 1, the last op per key wins, the own key ignored)
+// are replayed incrementally (a cursor from seq 1) at run start, before any
+// connection, and whenever the own diary is caught up (each own-synced, see
+// checkOwnSync), never per downloaded chunk while own-behind: the session
+// restarts the continuous run once per distinct follows-changed length, so
+// a fresh device's catch-up folds once at its end, and another device's
+// writes (small increments that each end own-synced) still fold promptly.
+// Once at least one follow record was seen, the derived set goes
+// to store.writeFoldedFollows (one call in flight, later growth coalesced;
+// tracked, so finish() waits; none started after `ending`), which keeps the
+// still-pending local ops on top; when kv follows changed:
+//   follows-changed { count, length }  count = the new number of follows,
+//                                      length = the own contiguous length folded
+// The run's own follow states are not changed live: the session restarts
+// the run on follows-changed.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, validateRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { certForKey, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
@@ -94,6 +134,8 @@ const MAX_PARALLEL_GATES = 8
 const CONNECT_TIMEOUT_MS = 15000
 const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
+// Push confirmation poll of the own media cores (see the header).
+const MEDIA_POLL_MS = 1000
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REPLICA_INDEX = 'replicas'
@@ -200,6 +242,7 @@ async function runSync ({
   connectTimeoutMs = CONNECT_TIMEOUT_MS,
   retryMinMs = RETRY_MIN_MS,
   retryMaxMs = RETRY_MAX_MS,
+  mediaPollMs = MEDIA_POLL_MS,
   blocklistMinIntervalMs // test-only: blocklist-net.js minIntervalMs
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
@@ -277,6 +320,9 @@ async function runSync ({
   const gateOpts = () => ({ revokedIssuers: blocklist.revokedIssuers() })
   let unfollowedReplicas = new Set() // index keys not followed in this run
   let sweepChain = Promise.resolve() // storage sweeps run one at a time
+  const media = [] // own media cores: { key, core, pushed, stop, uploaded }
+  let mediaTimer = null
+  const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
 
   function track (p, onOk, onErr) {
     const wrapped = p.then(onOk, onErr).catch(noop)
@@ -445,11 +491,14 @@ async function runSync ({
     failures = 0
     clearLater(l.timer)
     l.timer = null
-    // Verified: only now are the diary and the accepted replicas attached.
+    // Verified: only now are the diary, the own media cores (never
+    // announced) and the accepted replicas attached.
     diary.replicate(l.noise)
+    for (const m of media) m.core.replicate(l.noise)
     for (const e of follows.values()) {
       if ((e.state === 'active' || e.state === 'regate') && e.core) e.core.replicate(l.noise)
     }
+    pollMedia()
     // send() queues until the channel opens, right after hello.
     announceOwn()
     // Snapshots held since the channel opened may now be offered, and our
@@ -583,6 +632,8 @@ async function runSync ({
     lastOwnSynced = length
     lastOwnBehind = null
     emit({ event: 'own-synced', length })
+    // Caught up: fold now (never per downloaded chunk while behind).
+    scheduleFold()
   }
 
   // Block 0 arrived on a diary opened without a certificate (a fresh
@@ -1271,6 +1322,139 @@ async function runSync ({
     }
   }
 
+  // ---- own media cores: replicated, never announced; push confirmation ----
+
+  // The stored own media cores, read-only (see the header). A core that
+  // fails to open is skipped with a warning: media never fails a run.
+  async function openOwnMedia () {
+    let keys = []
+    try {
+      keys = await store.readMediaCores(storage)
+    } catch {
+      log('aviso: falha ao ler os núcleos de mídia')
+      return
+    }
+    for (const key of keys) {
+      if (ending) return
+      if (key === ownHex || media.some((m) => m.key === key)) continue
+      let core = null
+      try {
+        core = await store.openMediaCoreReadOnly(storage, key)
+      } catch {
+        log('aviso: falha ao abrir o núcleo de mídia ' + key8(key))
+        continue
+      }
+      if (core === null) continue
+      // uploaded: replicator Peer -> the block indexes served to it.
+      const m = { key, core, pushed: -1, stop: null, uploaded: new WeakMap() }
+      const onPeer = () => {
+        checkMedia()
+        pollMedia()
+      }
+      const onUpload = (index, byteLength, from) => {
+        if (from) {
+          let set = m.uploaded.get(from)
+          if (set === undefined) m.uploaded.set(from, (set = new Set()))
+          set.add(index)
+        }
+        onPeer()
+      }
+      core.on('peer-add', onPeer)
+      core.on('upload', onUpload)
+      m.stop = () => {
+        core.off('peer-add', onPeer)
+        core.off('upload', onUpload)
+      }
+      media.push(m)
+    }
+  }
+
+  // Whether the seeder peer of the verified link holds blocks 0..length-1
+  // of a media core: below its remoteContiguousLength (what it advertised,
+  // Hypercore 10.38.2: per replicator Peer) or served to it on this link
+  // (the 'upload' event; its range broadcast is skipped for a block we
+  // already have, so the advertised length alone never grows).
+  function seederHoldsMedia (m, l, length) {
+    for (const peer of m.core.peers) {
+      if (peer.stream !== l.noise) continue
+      const uploaded = m.uploaded.get(peer)
+      for (let i = peer.remoteContiguousLength; i < length; i++) {
+        if (uploaded === undefined || !uploaded.has(i)) return false
+      }
+      return true
+    }
+    return false
+  }
+
+  function checkMedia () {
+    const l = seederLink()
+    if (l === null || ended) return
+    for (const m of media) {
+      const length = m.core.length
+      if (length < 1 || m.pushed === length) continue
+      if (seederHoldsMedia(m, l, length)) {
+        m.pushed = length
+        emit({ event: 'media-pushed', key: m.key, length })
+      }
+    }
+  }
+
+  // The light poll runs only while the link is verified and some core is
+  // not yet confirmed at its length.
+  function pollMedia () {
+    if (mediaTimer !== null || ending) return
+    if (seederLink() === null) return
+    if (!media.some((m) => m.core.length > 0 && m.pushed !== m.core.length)) return
+    mediaTimer = later(() => {
+      mediaTimer = null
+      checkMedia()
+      pollMedia()
+    }, mediaPollMs)
+  }
+
+  // ---- the follow fold (see the header) ----
+
+  // Replays the own diary's follow records from the cursor up to its
+  // contiguous length -> the length replayed.
+  async function replayFollows () {
+    const length = diary.contiguousLength
+    for (let seq = fold.cursor; seq < length; seq++) {
+      const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
+      fold.cursor = seq + 1
+      if (record === null || record.type !== 'follow') continue
+      fold.seen = true
+      if (record.key === ownHex) continue
+      fold.ops.set(record.key, record.on)
+    }
+    return length
+  }
+
+  async function foldLoop () {
+    do {
+      fold.again = false
+      const length = await replayFollows()
+      if (!fold.seen) continue
+      const derived = [...fold.ops].filter(([, on]) => on).map(([key]) => key)
+      const r = await store.writeFoldedFollows(storage, derived, ownHex)
+      if (r && r.changed === true) emit({ event: 'follows-changed', count: r.follows.length, length })
+    } while (fold.again)
+  }
+
+  function scheduleFold () {
+    if (ending) return
+    if (fold.running) {
+      fold.again = true
+      return
+    }
+    fold.running = true
+    track(foldLoop(), () => {
+      fold.running = false
+    }, () => {
+      fold.running = false
+      if (!ended) log('aviso: falha ao atualizar os diários seguidos')
+    })
+  }
+
   try {
     diary = await store.openDiary(storage)
     ownHex = hex(diary.key)
@@ -1278,6 +1462,9 @@ async function runSync ({
     if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) cert = block0.cert
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
     ownRefused()
+    await openOwnMedia()
+    // What the own diary already holds is folded before any connection.
+    scheduleFold()
 
     if (once) deadlineTimer = setTimeout(onDeadline, Math.max(0, deadline - Date.now()))
     if (signal) {
@@ -1397,6 +1584,11 @@ async function runSync ({
       }
     }
     while (settling.size > 0) await Promise.allSettled([...settling])
+    mediaTimer = null
+    for (const m of media.splice(0)) {
+      m.stop()
+      await m.core.close().catch(noop)
+    }
     if (diary) await diary.close().catch(noop)
   }
 }

@@ -5,7 +5,7 @@ const { WIRE_CODES, MAX_ERROR_MESSAGE } = require('./errors')
 const { charLength } = require('./text')
 const { isMethod, validateParams, isPlainObject, hasOwn, isId } = require('./methods')
 
-const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning'])
+const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed'])
 const STOP_REASONS = Object.freeze(['done', 'stopped', 'preempted', 'timeout', 'error'])
 
 function fail (message) {
@@ -71,6 +71,8 @@ function validateEventData (event, data) {
   if (event === 'warning') return exactKeys(data, ['line']) && isLine(data.line)
   if (event === 'sync.event') return exactKeys(data, ['runId', 'line']) && isId(data.runId) && isLine(data.line)
   if (event === 'sync.started') return exactKeys(data, ['runId', 'once']) && isId(data.runId) && typeof data.once === 'boolean'
+  // The new number of follows.
+  if (event === 'follows.changed') return exactKeys(data, ['count']) && Number.isSafeInteger(data.count) && data.count >= 0
   // sync.stopped
   if (!exactKeys(data, ['runId', 'reason'], ['result'])) return false
   if (!isId(data.runId) || !STOP_REASONS.includes(data.reason)) return false

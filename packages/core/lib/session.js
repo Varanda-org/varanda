@@ -40,6 +40,8 @@ const INTERNAL_MESSAGE = 'erro interno'
 
 const noop = () => {}
 
+const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+
 // ---- error mapping (A6) ----
 
 // User-caused member errors that travel as USAGE with their own message.
@@ -510,12 +512,16 @@ function createSession ({
       return { changed: true, username: record.username, seq: r.seq }
     }),
 
-    'post.create': serial(async ({ text }) => {
+    // Photos live in media cores only the browser node writes: a post with
+    // `media` is refused before anything is opened (like account.sign).
+    'post.create': serial(async ({ text, media }) => {
+      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.postCreate(c, { text }))
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text }) => {
+    'post.reply': serial(async ({ to, text, media }) => {
+      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       const r = await withStore((c) => member.postReply(c, { to: ref, text }))

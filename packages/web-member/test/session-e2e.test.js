@@ -139,14 +139,24 @@ test('the web session and a CLI member exchange posts through the seeder', async
   const cliFeed = await run(t, bootstrap, ['feed', '--data', memberDir, '--json'])
   t.ok(cliFeed.items.some((i) => i.author === webKey && i.text === WEB_TEXT && i.name === 'Bia'), 'the CLI feed has the web post')
 
-  // The web session follows the CLI member and reads it from the seeder.
+  // The web session follows the CLI member (local-first: the answer is
+  // immediate and the unlocked session drains the change into its own diary
+  // as a `follow` record before the next request runs) and reads it from
+  // the seeder.
   t.alike(await web.request('follow.add', { key: cliKey }), { changed: true, followCount: 1 })
+  // The drain appends that one signed `on: true` record.
+  const ownLog = await web.request('log.read', {})
+  t.alike(ownLog.entries.map((e) => e.seq), [0, 1, 2, 3], 'the drain appended the record')
+  t.alike(ownLog.entries.slice(3).map((e) => [e.record.type, e.record.key, e.record.on]), [['follow', cliKey, true]], 'the web session\'s follow reached its diary')
   const second = await web.request('sync.start', { once: true, timeoutMs: 30000 })
   const stopped2 = await stoppedOf(web.events, second.runId)
   if (stopped2.reason !== 'done') t.comment(JSON.stringify(web.events))
   t.is(stopped2.reason, 'done', 'second web run done')
   t.is(stopped2.result.ok, true)
-  t.is(stopped2.result.downloaded[cliKey], 3, 'the web session downloaded the CLI diary')
+  t.is(stopped2.result.seederConfirmed, true, 'the seeder holds the follow record too')
+  // The CLI diary: certificate, profile, post, and the `follow` record its
+  // follow command appended.
+  t.is(stopped2.result.downloaded[cliKey], 4, 'the web session downloaded the CLI diary')
   t.alike(stopped2.result.skipped, [])
   const feed = await web.request('feed.read', { limit: 30 })
   const cliItem = feed.items.find((i) => i.author === cliKey)
@@ -154,8 +164,9 @@ test('the web session and a CLI member exchange posts through the seeder', async
   t.ok(feed.items.some((i) => i.author === webKey && i.text === WEB_TEXT), 'and its own post')
   const log = await web.request('log.read', { author: cliKey })
   t.is(log.key, cliKey)
-  t.is(log.entries.length, 3)
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2, 3])
   t.is(log.entries[0].record.type, 'member-cert')
+  t.alike([log.entries[3].record.type, log.entries[3].record.key, log.entries[3].record.on], ['follow', webKey, true], 'the CLI member\'s follow of the web key, as a record')
 
   // The names of the downloaded member, from local data; an author with no
   // local data is missing (and no core is created for it).
@@ -171,7 +182,7 @@ test('the web session and a CLI member exchange posts through the seeder', async
 
   // A reply from the web, read by the CLI member.
   const reply = await web.request('post.reply', { to: cliPost.ref, text: REPLY_TEXT })
-  t.is(reply.seq, 3)
+  t.is(reply.seq, 4, 'after the follow record')
   const third = await web.request('sync.start', { once: true, timeoutMs: 30000 })
   const stopped3 = await stoppedOf(web.events, third.runId)
   t.is(stopped3.reason, 'done', 'third web run done')

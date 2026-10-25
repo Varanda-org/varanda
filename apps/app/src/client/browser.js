@@ -8,7 +8,8 @@
 // IndexedDB but never its secret key: the member's key is derived from the
 // passkey (WebAuthn PRF) on 'entrar' and lives only in the page's memory,
 // through the handle's `identity` API (status, unlock, complete, lock,
-// reset). It syncs only through the seeder whose address comes from the
+// signOut, reset; status carries `resumed`), and its `media` API uploads
+// photos (media.upload). It syncs only through the seeder whose address comes from the
 // installation's /varanda.json (the page's own origin) or from Conectar.
 //
 // The client side is the same @varanda/rpc createClient the other web and
@@ -59,8 +60,10 @@ function loadNode () {
 }
 
 // config: { association, seederUrl } (src/config.js checkWebForm).
-// -> { request(method, params), close(), kind: 'browser', identity } after
-// session.open; `identity` is the node handle's passkey API (src/node.js).
+// -> { request(method, params), close(), kind: 'browser', identity, media, follows }
+// after session.open; `identity` is the node handle's passkey API and `media`
+// its media API, or null when the node script has none (src/node.js);
+// `follows` is its legacy-follows API ({ legacy(), confirmLegacy(keys) }) or null.
 // onClose({ code }) is called if the node ends the connection on its own
 // (never after close()).
 export async function connectBrowserNode (config, { onEvent, onClose } = {}) {
@@ -100,6 +103,8 @@ export async function connectBrowserNode (config, { onEvent, onClose } = {}) {
     kind: 'browser',
     request: (method, params = {}) => client.request(method, params),
     close,
-    identity: node.identity
+    identity: node.identity,
+    media: node.media || null,
+    follows: node.follows || null
   }
 }

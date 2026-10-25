@@ -127,7 +127,11 @@ O diário é uma sequência de blocos JSON. O índice do bloco é o `seq`, a par
 
 - Bloco 0: `{ "type": "member-cert", "cert": <certificado> }`. O campo `cert.member` é a chave pública do diário. Sem esse bloco o diário não recebe perfil, publicação nem resposta.
 - `profile`: nome (1 a 80 caracteres) e bio (0 a 280).
-- `post`: texto (1 a 1000 caracteres). Uma resposta é um `post` com `replyTo` apontando para `<chave>:<seq>` de outra publicação. O `seq` do alvo é um inteiro maior ou igual a 1, porque o bloco 0 é o certificado.
+- `post`: texto (1 a 1000 caracteres). Uma resposta é um `post` com `replyTo` apontando para `<chave>:<seq>` de outra publicação. O `seq` do alvo é um inteiro maior ou igual a 1, porque o bloco 0 é o certificado. Uma publicação pode ter `media`, até 4 fotos de um núcleo de fotos (só a versão web hospedada as grava); com fotos, o texto pode ficar vazio. A CLI mostra só `[foto]` ou `[N fotos]`.
+- `follow`: `follow` e `unfollow` também gravam no diário um registro `follow` (`on` verdadeiro ou falso) quando o bloco 0 já existe. A lista de seguidos fica pública e chega igual a todos os aparelhos do membro.
+- `media-core`: declara um núcleo de fotos do diário.
+
+`log` imprime uma linha por bloco: `#<seq> certificado`, `#<seq> perfil <nome>`, `#<seq> publicação <texto>`, `#<seq> segue <8 hex>`, `#<seq> deixa de seguir <8 hex>`, `#<seq> mídia <8 hex>` ou `#<seq> inválido (<motivo>)`. Com `--json`, uma linha JSON por bloco e o resultado no fim, como antes. Nós de antes dessa mudança pulam `follow`, `media-core` e a publicação com fotos inteira, sem recusar o diário.
 
 O nome não leva caractere de controle (código menor que 0x20). Em bio e texto o único controle permitido é a quebra de linha (LF).
 
@@ -334,7 +338,7 @@ node bin/varanda.js sync --data data/bob --once --timeout-ms 30000 --bootstrap "
 node bin/varanda.js feed --data data/bob
 ```
 
-`follow` imprime `seguindo ` e a chave da Alice. O `sync` do Bob baixa o diário dela pelo semeador (`downloaded <chave da Alice> <tamanho>`) e termina com `sync done`. `feed` lista a publicação, no formato `[<data>] Alice (<8 hex>) #<seq>` e o texto na linha seguinte. `feed` não abre a rede.
+`follow` imprime `seguindo ` e a chave da Alice, e grava no diário do Bob o registro `follow` (o Bob já tem o bloco 0). O `sync` do Bob baixa o diário dela pelo semeador (`downloaded <chave da Alice> <tamanho>`) e termina com `sync done`. `feed` lista a publicação, no formato `[<data>] Alice (<8 hex>) #<seq>` e o texto na linha seguinte. `feed` não abre a rede.
 
 ```sh
 node bin/varanda.js reply --data data/bob --to "$ALICE:$SEQ" --text 'também li'
@@ -394,9 +398,16 @@ estado: em execução
 
 Sem `seeder-key.json` a segunda linha é `chave do semeador: ausente (use seed key)`. Sem certificado: `certificado: ausente (use seed cert add)`; certificado que não confere: `certificado: inválido (<motivo>)`. O estado é `em execução` ou `parado`. Num diretório que não é de semeador: `erro: diretório não é de um semeador`. Com `--json`: `{ "association", "publicKey", "certificate", "admitted", "running" }`, com `certificate` igual a `ok`, `missing` ou o motivo.
 
-`seed list` mostra os diários admitidos, um por linha, na ordem de `admitted.json`: `<chave> <blocos> blocos <bytes> bytes`. O tamanho é o assinado, o mesmo que a cota confere. Sem diários: `nenhum diário admitido`. Com `--json`: `{ "admitted": [{ "key", "length", "byteLength" }] }`. Uma chave listada sem cópia guardada aparece com 0 e 0.
+`seed list` mostra os diários admitidos, um por linha, na ordem de `admitted.json`: `<chave> <blocos> blocos <bytes> bytes`, e embaixo de cada diário, recuados, os núcleos de fotos vinculados a ele:
 
-`seed drop <chave>` apaga a cópia de um diário e só depois tira a chave de `admitted.json`, a mesma ordem do descarte na partida. Imprime `diário removido do semeador: <chave>`. Chave que não está no semeador: `erro: diário não está no semeador` (código 1). Sem chave: `uso: informe a chave do diário`; chave malformada: `uso: chave inválida` (código 2).
+```
+<64 hex do diário> <blocos> blocos <bytes> bytes
+  mídia <64 hex do núcleo> <blocos> blocos <bytes> bytes
+```
+
+O tamanho é o assinado, o mesmo que a cota confere. Sem diários: `nenhum diário admitido`. Com `--json`: `{ "admitted": [{ "key", "length", "byteLength", "media": [{ "key", "length", "byteLength" }] }] }`. Uma chave listada sem cópia guardada aparece com 0 e 0.
+
+`seed drop <chave>` apaga a cópia de um diário (e antes os núcleos de fotos dele) e só depois tira a chave de `admitted.json`, a mesma ordem do descarte na partida. A chave pode ser também a de um núcleo de fotos, que sai sozinho (a próxima leitura do diário o vincula de novo). Imprime `diário removido do semeador: <chave>`. Chave que não está no semeador: `erro: diário não está no semeador` (código 1). Sem chave: `uso: informe a chave do diário`; chave malformada: `uso: chave inválida` (código 2).
 
 `seed list` e `seed drop` abrem o store e pegam o lock do diretório. Só funcionam com o semeador parado; com ele no ar saem com `erro: diretório de dados em uso` (código 1) e não mexem em nada. Pare o serviço, rode o comando e suba de novo.
 
@@ -406,8 +417,8 @@ Sem `seeder-key.json` a segunda linha é `chave do semeador: ausente (use seed k
 
 `seed --health-port <porta>` (ou `VARANDA_HEALTH_PORT`) abre um endpoint HTTP só de leitura em `127.0.0.1`. Outro endereço só com `--health-host` (ou `VARANDA_HEALTH_HOST`); `0.0.0.0` expõe o endpoint para fora da máquina. Sem a porta, nada escuta. A porta `0` escolhe uma livre, e a primeira linha da saída diz qual: `health http://127.0.0.1:<porta>`. Porta ocupada termina com `erro: porta em uso` (código 1) antes de abrir o diretório.
 
-- `GET /health` devolve `{ "status", "uptimeSeconds", "admitted", "dropping", "blocks", "bytes", "connections", "peers", "firewalled" }`. Código 200 com `status` igual a `ok`; 503 com `starting` (antes de `seed ready`) ou `closing` (encerrando).
-- `GET /metrics` devolve as mesmas contagens no formato de texto do Prometheus: `varanda_seeder_ready`, `varanda_seeder_admitted_diaries`, `varanda_seeder_dropping_diaries`, `varanda_seeder_blocks`, `varanda_seeder_bytes`, `varanda_seeder_connections`, `varanda_seeder_peers`, `varanda_seeder_firewalled` e `varanda_seeder_uptime_seconds`.
+- `GET /health` devolve `{ "status", "uptimeSeconds", "admitted", "dropping", "blocks", "bytes", "connections", "peers", "firewalled", "blocked", "blocklistSeq", "mediaCores", "mediaBytes" }`. Código 200 com `status` igual a `ok`; 503 com `starting` (antes de `seed ready`) ou `closing` (encerrando).
+- `GET /metrics` devolve as mesmas contagens no formato de texto do Prometheus: `varanda_seeder_ready`, `varanda_seeder_admitted_diaries`, `varanda_seeder_dropping_diaries`, `varanda_seeder_blocks`, `varanda_seeder_bytes`, `varanda_seeder_connections`, `varanda_seeder_peers`, `varanda_seeder_firewalled`, `varanda_seeder_blocked`, `varanda_seeder_blocklist_seq`, `varanda_seeder_media_cores`, `varanda_seeder_media_bytes` e `varanda_seeder_uptime_seconds`.
 
 ```sh
 curl -s http://127.0.0.1:8788/health
@@ -417,7 +428,9 @@ curl -s http://127.0.0.1:8788/health
 {"status":"ok","uptimeSeconds":42,"admitted":2,"dropping":0,"blocks":6,"bytes":1418,"connections":3,"peers":3,"firewalled":false}
 ```
 
-`admitted` são os diários servidos e `dropping` os que estão sendo apagados; `blocks` e `bytes` somam os diários servidos; `connections` são as conexões abertas e `peers` as que já abriram o canal de admissão. `firewalled: true` quer dizer que a DHT se vê atrás de firewall ou NAT: os membros só chegam ao semeador por hole punching.
+`admitted` são os diários servidos e `dropping` os que estão sendo apagados; `blocks` e `bytes` somam os diários servidos; `connections` são as conexões abertas e `peers` as que já abriram o canal de admissão. `firewalled: true` quer dizer que a DHT se vê atrás de firewall ou NAT: os membros só chegam ao semeador por hole punching. `mediaCores` são os núcleos de fotos vinculados a diários admitidos e `mediaBytes` o tamanho assinado deles.
+
+As fotos saem pela mesma porta da entrada WebSocket (`--ws-port`), em `GET` ou `HEAD /media/<diário>/<núcleo>/<início>/<blocos>`, que o Caddy da versão web encaminha. Só um núcleo vinculado a um diário admitido e não bloqueado, com todos os blocos já guardados, é servido; qualquer outra coisa é o mesmo `404` (`não encontrado`), sem dizer o motivo. No máximo 16 respostas ao mesmo tempo e 64 pedidos por segundo no total (senão `503 ocupado`), 256 blocos por pedido e 120 s por resposta. Nada é registrado. Detalhes em `docs/protocol.md` seção 7.
 
 O endpoint só tem contagens. Nenhuma chave, certificado, endereço ou conteúdo, e nenhuma requisição é registrada. Aceita só GET e HEAD (senão 405) em `/health` e `/metrics` (senão 404), sem cabeçalhos CORS.
 
@@ -808,7 +821,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `store/` — Corestore do diário e das réplicas seguidas.
 - `quarantine/` — Corestore só da busca do bloco 0 de um diário ainda não aceito. O `sync` apaga esse diretório ao abrir (depois do lock de `store/`) e de novo ao fechar. Não é estado.
 - `config.json` — `{ "v": 1, "role": "member", "association": "<hex64>" }`, escrito por `id create`.
-- `follows.json` — `{ "v": 1, "follows": ["<hex64>"] }`, chaves únicas em ordem.
+- `follows.json` — `{ "v": 1, "follows": ["<hex64>"] }`, chaves únicas em ordem. Com o bloco 0 gravado, cada mudança também vira um registro `follow` no diário.
 - `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a lista de bloqueio mais nova que este nó aceitou. Só chaves públicas.
 
 ### Semeador (`data/seeder`)
@@ -819,7 +832,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `seeder-key.json` — par Noise do semeador, modo `0600`: `v`, `publicKey` (hex64) e `secretKey`. Criado por `seed key`. O comando não imprime `secretKey`.
 - `seeder-cert.json` — certificado do semeador em JSON indentado, escrito por `seed cert add`.
 - `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita. Um arquivo ilegível impede a partida (`erro: lista de bloqueio ilegível`).
-- `admitted.json` — único arquivo de estado dos diários servidos: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> } }`. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
+- `admitted.json` — único arquivo de estado dos diários servidos: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> }, "media": { "<hex64 do núcleo>": { "diary": "<hex64>", "seq": <n> } } }`. Um arquivo antigo, sem `media`, continua valendo. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
 
 ### Associação (`data/assoc`)
 
@@ -858,7 +871,7 @@ Exemplo de linha em `members.jsonl` (a data real é a da emissão):
 
 `at` é `new Date().toISOString()` na hora da escrita e tem de ser canônico. Serve para ordenar. Quem lê pula bloco que não é um registro válido e não renumera os outros. A referência de uma publicação é `<hex64>:<seq>`.
 
-O feed ordena por `(at, autor, seq)`. `--limit <n>` fica com as últimas `n` depois de tirar as publicações futuras. Item: autor, nome (ou nulo), `seq`, `at`, texto e `replyTo`.
+O feed ordena por `(at, autor, seq)`. `--limit <n>` fica com as últimas `n` depois de tirar as publicações futuras. Item: autor, nome (ou nulo), @nome (ou nulo), `seq`, `at`, texto, `replyTo` e `media` (as descrições das fotos, ou nulo).
 
 Certificado do semeador (`seeder-cert.json`), também com exatamente estas chaves:
 
@@ -933,7 +946,7 @@ Limites desta fase:
 - Só a versão web hospedada denuncia: o app nativo e a CLI não têm como assinar ou enviar uma denúncia (a folha avisa), e só quem vinculou a conta Google denuncia, até 20 vezes a cada 24 horas. O trecho citado da publicação é o que quem denuncia enviou e não é conferido pelo serviço, e a pessoa denunciada não vê nada. Veja `docs/verification.md` seção 14.
 - As sessões do painel acabam quando o serviço `account` reinicia. A lista que o painel mostra como publicada é o espelho verificado da última lista que o operador confirmou com `mod apply`, e o `blocklist.json` do operador é a que vale; "aplicado" é a palavra do operador, e a propagação segue as regras do `varanda/blocklist/1`.
 - Certificados de membro individuais não são revogáveis (bloqueie a chave do diário). A chave do emissor do serviço de conta é revogada com `mod revoke-issuer`; depois disso gere outra (`account key`), certifique (`assoc certify-issuer`), `account cert add`, reinicie o serviço e peça que os membros vinculem de novo, porque os certificados v2 antigos deixam de valer. A reemissão automática fica para uma PR futura.
-- O app pagina para trás por cursor (`before` em `feed.read` e `log.read`: 30 e depois páginas de 35 publicações, páginas de 42 blocos no diário), mas os comandos `feed` e `log` da CLI continuam imprimindo só a página mais nova. Não há paginação para a frente (`since`); dados novos pedem recarregar a página mais nova.
+- O app pagina para trás por cursor (`before` em `feed.read` e `log.read`: 30 e depois páginas de 31 publicações, páginas de 36 blocos no diário), mas os comandos `feed` e `log` da CLI continuam imprimindo só a página mais nova. Não há paginação para a frente (`since`); dados novos pedem recarregar a página mais nova.
 - O app sincroniza sozinho sempre que está aberto e com rede, também com dados móveis; a preferência por Wi-Fi não existe (issue #48). Toda leitura de membro ainda interrompe e reinicia a rodada contínua (issue #66); o app reduz o efeito com leituras em lote (`profile.read` com até 100 chaves, no máximo um pedido por segundo), uma janela de 5 s antes das buscas de fundo e a pílula "ver novidades" no lugar de recarregar sozinho. A pílula é só uma dica das linhas `downloaded`, nunca uma contagem. Veja [docs/app.md](docs/app.md).
 
 Fora desta fase:
@@ -941,8 +954,8 @@ Fora desta fase:
 - Verificação de idade real. Hoje o operador de `assoc certify` afirma `--age-band`. Comentário `TODO(phase1): the real age-check vendor decides here; today the operator asserts the age band.` em `packages/core/lib/assoc.js`. O mesmo limite está em `docs/protocol.md` (certificados).
 - Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync).
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
-- Denúncias pelo app nativo e pela CLI, e uma tela de perfil de outro membro (a denúncia pela versão web, o painel e a lista de bloqueio assinada já existem). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista. O comentário `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js` ainda cita a moderação.
-- Mídia. Publicação é só texto, até 1000 caracteres. O comentário de `packages/core/lib/records.js` citado acima, e `docs/protocol.md` (registros), deixam anexos para uma fase posterior.
+- Denúncias pelo app nativo e pela CLI, e uma tela de perfil de outro membro (a denúncia pela versão web, o painel e a lista de bloqueio assinada já existem). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista.
+- Vídeo e a comparação de fotos com listas de hashes de material ilegal (`docs/design.md`, Moderação). Hoje só a versão web hospedada publica fotos e GIFs (até 4 por publicação, 8 MiB cada, 256 MiB por núcleo de fotos, um núcleo por aparelho sem troca); a CLI, o app nativo e o `varanda-serve` só mostram que a publicação tem fotos. Veja `docs/verification.md` seção 16.
 - Empacotamento Pear e distribuição fora das lojas. O aplicativo Expo (`apps/app`) já roda o núcleo no Bare (iOS e Android), e a versão web roda o nó no próprio navegador (sincronizando pelo semeador) ou usa o `varanda-serve` na máquina local; ver [docs/app.md](docs/app.md), [docs/verification.md](docs/verification.md) e [docs/development.md](docs/development.md). O CLI continua sendo um programa Node sem etapa de compilação.
 - Relay de certificados por seguidores. O `sync` anuncia só o próprio diário (`packages/core/lib/sync.js` envia `announce` da chave local e ignora `announce` recebido). Um seguidor não apresenta ao semeador o certificado de outra pessoa. Se a autora nunca sincronizou, o semeador não tem a cópia, mesmo que um seguidor já a tenha. Não há comentário `TODO` no código para esse relay. `docs/protocol.md` registra que o `announce` permanece sem autenticação de propósito: qualquer par pode pedir a admissão, e só entra o diário cujo bloco 0 passa na verificação.
 

@@ -2,8 +2,9 @@
 
 const fs = require('node:fs')
 const { formatFeedItem } = require('@varanda/core/lib/feed')
-const { jsonLine } = require('@varanda/core/lib/safe')
+const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
+const { validRecordCopy, validateRecord } = require('@varanda/core/lib/records')
 
 function usage (message) {
   const err = new Error(message)
@@ -112,10 +113,49 @@ async function followsRun (flags) {
 
 // ---- log ----
 
+// "[foto]" / "[N fotos]" for a post's media descriptors, '' when it has none.
+function mediaTag (media) {
+  if (!Array.isArray(media) || media.length === 0) return ''
+  return media.length === 1 ? '[foto]' : '[' + media.length + ' fotos]'
+}
+
+// A post's text with the media tag appended; a photo-only post shows just
+// the tag. Peer-derived text is escaped by formatFeedItem / safe().
+function withMediaTag (text, media) {
+  const tag = mediaTag(media)
+  if (tag === '') return text
+  return text === '' ? tag : text + '\n' + tag
+}
+
+// One short human line for a log entry. Only a validated copy of the record
+// is formatted; an invalid one prints a fixed line (raw peer fields are never
+// converted to strings). Peer-derived strings are escaped.
+function logLine ({ seq, record }) {
+  const r = validRecordCopy(record, seq)
+  if (r === null) {
+    let reason
+    try { reason = validateRecord(record, seq) } catch { reason = null }
+    return '#' + seq + ' inválido (' + safe(typeof reason === 'string' ? reason : 'malformed') + ')'
+  }
+  const short = (k) => safe(k.slice(0, 8))
+  let body
+  if (r.type === 'follow') body = (r.on ? 'segue ' : 'deixa de seguir ') + short(r.key)
+  else if (r.type === 'media-core') body = 'mídia ' + short(r.key)
+  else if (r.type === 'post') body = 'publicação ' + safe(withMediaTag(r.text, r.media)).replace(/\n/g, ' ')
+  else if (r.type === 'profile') body = 'perfil ' + safe(r.name)
+  else if (r.type === 'member-cert') body = 'certificado'
+  else body = safe(r.type)
+  return '#' + seq + ' ' + body
+}
+
 async function logRun (flags) {
   const { key, entries } = await member.logRead(ctxOf(flags), { author: flags.author || null })
-  for (const entry of entries) process.stdout.write(jsonLine({ seq: entry.seq, record: entry.record }) + '\n')
-  if (flags.json) process.stdout.write(jsonLine({ key, entries }) + '\n')
+  if (flags.json) {
+    for (const entry of entries) process.stdout.write(jsonLine({ seq: entry.seq, record: entry.record }) + '\n')
+    process.stdout.write(jsonLine({ key, entries }) + '\n')
+  } else {
+    for (const entry of entries) process.stdout.write(logLine(entry) + '\n')
+  }
 }
 
 // ---- feed ----
@@ -129,7 +169,7 @@ async function feedRun (flags) {
     process.stdout.write(jsonLine({ items, skipped, future }) + '\n')
   } else {
     const width = feedWidth(process.stdout)
-    for (const item of items) process.stdout.write(formatFeedItem(item, { width }) + '\n')
+    for (const item of items) process.stdout.write(formatFeedItem({ ...item, text: withMediaTag(item.text, item.media) }, { width }) + '\n')
   }
 }
 

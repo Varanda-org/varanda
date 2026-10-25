@@ -33,6 +33,8 @@ function eventLine (event) {
     case 'rejected': return 'rejected ' + safe(event.key) + ' ' + safe(event.reason)
     case 'have': return 'have ' + safe(event.key) + ' ' + safe(event.length)
     case 'fatal': return 'fatal ' + safe(event.key) + ' ' + safe(event.reason)
+    case 'media-admitted': return 'media admitted ' + safe(event.key) + ' ' + safe(event.diary) + ' ' + safe(event.length)
+    case 'media-rejected': return 'media rejected ' + safe(event.key) + ' ' + safe(event.diary) + ' ' + safe(event.reason)
     case 'blocklist': return 'blocklist ' + safe(event.seq)
     default: return safe(event.event)
   }
@@ -128,9 +130,15 @@ function statusLines (status) {
   ].join('\n')
 }
 
+// One line per diary, its media cores indented under it.
 function listLines ({ admitted }) {
   if (admitted.length === 0) return 'nenhum diário admitido'
-  return admitted.map((e) => e.key + ' ' + e.length + ' blocos ' + e.byteLength + ' bytes').join('\n')
+  const lines = []
+  for (const e of admitted) {
+    lines.push(e.key + ' ' + e.length + ' blocos ' + e.byteLength + ' bytes')
+    for (const m of e.media || []) lines.push('  mídia ' + m.key + ' ' + m.length + ' blocos ' + m.byteLength + ' bytes')
+  }
+  return lines.join('\n')
 }
 
 function diaryKey (value) {

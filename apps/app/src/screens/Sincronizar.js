@@ -1,10 +1,13 @@
-// Sincronizar: read-only diagnostics of the automatic sync. The app starts and
-// keeps the sync itself (node.js), so this screen sends no start or stop
-// request: it shows the state from the node's events (kept by the provider,
-// keyed by runId), the next retry and the last 200 event and warning lines.
+// Sincronizar (Ajustes > Avançado): read-only diagnostics of the automatic
+// sync. The app starts and keeps the sync itself (node.js), so this screen
+// sends no start or stop request: it shows the summary the top-bar chip used
+// to carry (syncSignals.js chipState), the state from the node's events (kept
+// by the provider, keyed by runId), the next retry and the last 200 event and
+// warning lines.
 
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { chipState, EMPTY_SIGNALS } from '../syncSignals'
 import { Body, Btn, Card, Mono, Page, Soft, Title, useNow } from '../ui'
 
 const REASONS = {
@@ -43,11 +46,21 @@ export default function Sincronizar ({ embedded = false, onOpenConnection }) {
   const now = useNow(1000)
   const running = sync.active !== null
   const { stopped: last } = sync
+  const summary = chipState({
+    online: node.online,
+    connected: node.phase === 'ready' && node.online !== false,
+    active: sync.active || null,
+    wanted: Boolean(autoSync && autoSync.wanted),
+    signals: node.signals || EMPTY_SIGNALS,
+    now,
+    recovering: Boolean(node.passkey && node.passkey.recovering)
+  })
   const retryIn = autoSync.backoffUntil > now ? Math.ceil((autoSync.backoffUntil - now) / 1000) : 0
   return (
     <Page>
       {embedded ? null : <Title>Sincronização</Title>}
       <Card>
+        <Body>{summary}</Body>
         {node.phase !== 'ready' ? <Soft>sem conexão com o nó</Soft> : null}
         {node.phase !== 'ready' && typeof onOpenConnection === 'function' ? <Btn label='abrir Conexão' secondary onPress={onOpenConnection} /> : null}
         <Body>{stateLine(sync.active, Boolean(node.passkey && node.passkey.recovering))}</Body>

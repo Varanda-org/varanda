@@ -157,8 +157,8 @@ test('per-author limit: the 51st throws, another author still enqueues', async (
   let items = []
   for (let i = 0; i < o.OUTBOX_MAX; i++) items = add(o, items, { id: idOf(i + 1) })
   t.is(items.length, 50)
-  t.exception(() => add(o, items, { id: idOf(100) }), /fila de saída cheia/)
-  t.exception(() => add(o, items, { id: idOf(100), association: OTHER_ASSOC }), /fila de saída cheia/)
+  t.exception(() => add(o, items, { id: idOf(100) }), /Muitas publicações aguardando envio/)
+  t.exception(() => add(o, items, { id: idOf(100), association: OTHER_ASSOC }), /Muitas publicações aguardando envio/)
   items = add(o, items, { id: idOf(100), author: B })
   t.is(items.length, 51)
 })

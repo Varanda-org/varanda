@@ -1,9 +1,17 @@
 // The one list A Rua, Diário and Seguindo use: a FlatList with
 // pull-to-refresh, infinite scroll, scroll-to-top on a signal and an optional
 // "new items" pill. Native refreshes through RefreshControl; on the web
-// (react-native-web's RefreshControl renders nothing) the gesture is read from
-// the touches on the wrapper View with the math in src/pull.js, and a quiet
-// 'Atualizar' action in the header serves keyboard and assistive users.
+// (react-native-web's RefreshControl renders nothing) there is no visible
+// refresh button: the touch pull is read from the touches on the wrapper View
+// (src/pull.js pullState), and a desktop wheel or trackpad pull from a PASSIVE
+// `wheel` listener on the list's scrollable DOM node (getScrollableNode(); no
+// listener when it is missing) fed to src/pull.js wheelPullState. Both show
+// the same indicator. A wheel pull fires on release: when it is armed and the
+// wheel then stays idle for WHEEL_DECAY_MS (trackpad inertia keeps it going
+// until it ends), onRefresh runs once; an idle pull that is not armed just
+// hides the indicator. A visually hidden 'Atualizar' button (web only; off
+// screen until it gets keyboard focus, then shown at the top right) serves
+// keyboard and screen-reader users.
 //
 // Invariants:
 // - never double-load: onLoadMore runs once per end reach, and never while
@@ -13,7 +21,8 @@
 //   a quiet 'mostrar mais' in the footer loads the next page by hand, so
 //   pagination can never stall;
 // - never call onRefresh while refreshing: one refresh at a time, whether it
-//   comes from the gesture, the header action or RefreshControl;
+//   comes from the touch pull, the wheel pull, the hidden action or
+//   RefreshControl;
 // - the pill never covers the first row's actions: it is centred and only
 //   the pill itself takes touches, while the row actions sit in the left
 //   column under the avatar;
@@ -25,7 +34,7 @@
 
 import { createElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
-import { MIN_SPIN_MS, PULL_THRESHOLD, pullDecision, pullState, spinRemaining } from '../pull'
+import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
@@ -35,6 +44,8 @@ const web = Platform.OS === 'web'
 const INDICATOR = 36
 // onEndReachedThreshold, in visible lengths from the end.
 const END_THRESHOLD = 0.6
+// WheelEvent.deltaMode: lines and pages are turned into pixels.
+const LINE_PX = 16
 
 // A touch that starts in a text field or inside a text selection is not a pull.
 function ignoredTarget (target) {
@@ -158,7 +169,7 @@ export function RefreshableList ({
   // Web pull-to-refresh state.
   const atTop = useRef(true)
   const touch = useRef(null) // { startX, startY, lock, armed } while a single touch is tracked
-  const busy = useRef(false) // a web refresh is running (gesture or header action)
+  const busy = useRef(false) // a web refresh is running (a pull or the hidden action)
   const mounted = useRef(true)
   const timer = useRef(null)
   const anim = useRef(null)
@@ -166,6 +177,11 @@ export function RefreshableList ({
   const progress = useRef(new Animated.Value(0)).current
   const [showIndicator, setShowIndicator] = useState(false)
   const [spinning, setSpinning] = useState(false)
+  // The hidden 'Atualizar' action has keyboard focus (it is shown then).
+  const [actionFocused, setActionFocused] = useState(false)
+  // Wheel pull: the wheelPullState state and its idle (release) timer.
+  const wheel = useRef(EMPTY_WHEEL)
+  const wheelTimer = useRef(null)
 
   useEffect(() => {
     mounted.current = true
@@ -173,6 +189,8 @@ export function RefreshableList ({
       mounted.current = false
       touch.current = null
       if (timer.current) clearTimeout(timer.current)
+      if (wheelTimer.current) clearTimeout(wheelTimer.current)
+      wheelTimer.current = null
       if (anim.current) anim.current.stop()
     }
   }, [])
@@ -217,6 +235,60 @@ export function RefreshableList ({
     }
     pending.then(settle, settle)
   }, [refreshing, onRefresh, distance, progress, hide])
+
+  // The wheel listener is attached once; it reads the current values here.
+  const live = useRef(null)
+  live.current = { refreshing: !!refreshing, runRefresh, hide }
+  useEffect(() => {
+    if (!web) return
+    const host = list.current
+    const node = host && typeof host.getScrollableNode === 'function' ? host.getScrollableNode() : null
+    if (!node || typeof node.addEventListener !== 'function') return
+    const reset = () => {
+      if (wheelTimer.current) clearTimeout(wheelTimer.current)
+      wheelTimer.current = null
+      const was = wheel.current.active
+      wheel.current = EMPTY_WHEEL
+      return was
+    }
+    const onIdle = () => {
+      wheelTimer.current = null
+      const s = wheel.current
+      wheel.current = EMPTY_WHEEL
+      if (!mounted.current || busy.current) return
+      const l = live.current
+      if (pullDecision({ armed: s.armed, refreshing: l.refreshing }) === 'refresh') l.runRefresh()
+      else l.hide()
+    }
+    const onWheel = (e) => {
+      // A pinch zoom (ctrlKey) or a touch pull in progress is not a wheel pull.
+      if (e.ctrlKey || touch.current !== null) return
+      const unit = e.deltaMode === 1 ? LINE_PX : (e.deltaMode === 2 ? (node.clientHeight || 1) : 1)
+      const l = live.current
+      const s = wheelPullState(wheel.current, {
+        deltaY: e.deltaY * unit,
+        atTop: node.scrollTop <= 0,
+        refreshing: l.refreshing || busy.current,
+        now: Date.now()
+      })
+      if (!s.active) {
+        if (reset() && !busy.current) l.hide()
+        return
+      }
+      wheel.current = s
+      if (anim.current) anim.current.stop()
+      distance.setValue(s.distance)
+      progress.setValue(s.progress)
+      setShowIndicator(true)
+      if (wheelTimer.current) clearTimeout(wheelTimer.current)
+      wheelTimer.current = setTimeout(onIdle, WHEEL_DECAY_MS)
+    }
+    node.addEventListener('wheel', onWheel, { passive: true })
+    return () => {
+      node.removeEventListener('wheel', onWheel, { passive: true })
+      reset()
+    }
+  }, [distance, progress])
 
   const onScroll = useCallback((e) => {
     const ne = e.nativeEvent
@@ -300,27 +372,6 @@ export function RefreshableList ({
     if (!busy.current) hide()
   }, [hide])
 
-  const header = web
-    ? (
-      <>
-        <View style={styles.webBar}>
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='Atualizar'
-            accessibilityState={{ disabled: !!refreshing || spinning }}
-            disabled={!!refreshing || spinning}
-            onPress={runRefresh}
-            style={({ pressed }) => [styles.webAction, pressed && styles.pressed]}
-          >
-            <Icon name='atualizar' size={16} color={colors.soft} />
-            <Text style={styles.webText}>Atualizar</Text>
-          </Pressable>
-        </View>
-        {renderSlot(ListHeaderComponent)}
-      </>
-      )
-    : ListHeaderComponent
-
   // The caller's footer (spinner, end text, error with retry), then the
   // by-hand 'mostrar mais' when another page exists and nothing is loading.
   const footer = (
@@ -354,6 +405,23 @@ export function RefreshableList ({
       onTouchEnd={web ? onTouchEnd : undefined}
       onTouchCancel={web ? onTouchCancel : undefined}
     >
+      {web
+        ? (
+          <Pressable
+            accessibilityRole='button'
+            accessibilityLabel='Atualizar'
+            accessibilityState={{ disabled: !!refreshing || spinning }}
+            disabled={!!refreshing || spinning}
+            onPress={runRefresh}
+            onFocus={() => setActionFocused(true)}
+            onBlur={() => setActionFocused(false)}
+            style={({ pressed }) => [actionFocused ? styles.webAction : styles.hiddenAction, pressed && styles.pressed]}
+          >
+            <Icon name='atualizar' size={16} color={colors.soft} />
+            <Text style={styles.webText}>Atualizar</Text>
+          </Pressable>
+          )
+        : null}
       <FlatList
         ref={setList}
         style={styles.list}
@@ -361,7 +429,7 @@ export function RefreshableList ({
         renderItem={renderItem}
         keyExtractor={keyExtractor}
         extraData={extraData}
-        ListHeaderComponent={header}
+        ListHeaderComponent={ListHeaderComponent}
         ListFooterComponent={footer}
         ListEmptyComponent={ListEmptyComponent}
         contentContainerStyle={contentContainerStyle}
@@ -406,8 +474,24 @@ export function RefreshableList ({
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: colors.bg },
   list: { flex: 1, backgroundColor: colors.bg },
-  webBar: { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: 8 },
+  // Off screen and invisible, yet focusable and read by screen readers.
+  hiddenAction: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 1,
+    height: 1,
+    overflow: 'hidden',
+    opacity: 0
+  },
   webAction: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 4,
+    borderRadius: 999,
+    backgroundColor: colors.card,
+    boxShadow: '0px 2px 8px rgba(0,0,0,0.15)',
     minHeight: 44,
     minWidth: 44,
     flexDirection: 'row',

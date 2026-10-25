@@ -13,7 +13,9 @@ const {
   MAX_NAME, MAX_BIO, MAX_TEXT, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES,
   nowIso, isHex64, isCanonicalIso, decodeBlock,
   memberCertRecord, profileRecord, postRecord, validateRecord, parseRef, formatRef,
-  latestProfile, genesisCert
+  latestProfile, genesisCert, mediaCoreRecord, followRecord,
+  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_CORES, MAX_MEDIA_PER_POST,
+  MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_MEDIA_DIMENSION
 } = records
 
 const K1 = 'a'.repeat(64)
@@ -185,7 +187,7 @@ test('records have exactly their keys (S3)', async (t) => {
   t.is(validateRecord(post, 1), null)
   t.is(validateRecord(profile, 1), null)
   t.is(validateRecord({ ...post, extra: 'x'.repeat(10) }, 1), 'malformed', 'post with an extra key')
-  t.is(validateRecord({ ...post, media: null }, 1), 'malformed')
+  t.is(validateRecord({ ...post, media: null }, 1), 'media-invalid')
   t.is(validateRecord({ ...profile, extra: 1 }, 1), 'malformed', 'profile with an extra key')
   const noReply = { ...post }
   delete noReply.replyTo
@@ -548,4 +550,136 @@ test('latestUsername: a record from a revoked issuer is invalid', async (t) => {
   const hidden = [entries[0], { seq: 1, record: bia }, { seq: 2, record: ana }]
   t.is(latestUsername(hidden, K1, assocHex), 'ana')
   t.is(latestUsername(hidden, K1, assocHex, { revokedIssuers }), null)
+})
+
+const DESC = { core: K2, mime: 'image/jpeg', start: 1, blocks: 2, bytes: 32769, sha256: 'd'.repeat(64), width: 640, height: 480 }
+
+test('media constants', async (t) => {
+  await testnet(t)
+  t.is(MEDIA_BLOCK_BYTES, 32768)
+  t.is(MAX_MEDIA_BLOCKS, 8192)
+  t.is(MAX_MEDIA_BYTES, 268435456)
+  t.is(MAX_MEDIA_CORES, 4)
+  t.is(MAX_MEDIA_PER_POST, 4)
+  t.is(MAX_MEDIA_ITEM_BLOCKS, 256)
+  t.alike([...MEDIA_MIMES], ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  t.is(MAX_MEDIA_DIMENSION, 16384)
+})
+
+test('validateRecord: posts with media', async (t) => {
+  await testnet(t)
+  const post = (over) => ({ type: 'post', text: 'oi', at: AT, replyTo: null, ...over })
+  const withMedia = (media, over) => post({ media, ...over })
+  // Exactly 4 keys, or exactly those plus media.
+  t.is(validateRecord(post(), 1), null)
+  t.is(validateRecord(withMedia([DESC]), 1), null)
+  t.is(validateRecord(withMedia([DESC, DESC, DESC, DESC]), 1), null)
+  t.is(validateRecord(withMedia([DESC], { extra: 1 }), 1), 'malformed', 'media plus an extra key')
+  const noReply = withMedia([DESC])
+  delete noReply.replyTo
+  t.is(validateRecord(noReply, 1), 'malformed', 'media without replyTo')
+  // Text: 0..MAX_TEXT with media, 1..MAX_TEXT without.
+  t.is(validateRecord(withMedia([DESC], { text: '' }), 1), null)
+  t.is(validateRecord(post({ text: '' }), 1), 'text-length')
+  t.is(validateRecord(withMedia([DESC], { text: 'x'.repeat(MAX_TEXT + 1) }), 1), 'text-length')
+  t.is(validateRecord(withMedia([DESC], { text: 'a\u202eb' }), 1), 'control-chars')
+  t.is(validateRecord(withMedia([DESC], { at: 'x' }), 1), 'date-invalid')
+  t.is(validateRecord(withMedia([DESC], { replyTo: 'x' }), 1), 'reply-invalid')
+  t.is(validateRecord(withMedia([DESC]), 0), 'genesis-required')
+  // The media list.
+  for (const media of [null, [], [DESC, DESC, DESC, DESC, DESC], DESC, 'x', 1, {}, [null], [[]]]) {
+    t.is(validateRecord(withMedia(media), 1), 'media-invalid', 'media ' + JSON.stringify(media))
+  }
+  // Sparse arrays: a hole is never a descriptor.
+  const holed = [DESC, DESC]
+  delete holed[0]
+  const between = [DESC, DESC, DESC]
+  delete between[1]
+  for (const media of [new Array(1), new Array(4), holed, between]) {
+    t.is(validateRecord(withMedia(media), 1), 'media-invalid', 'sparse media of length ' + media.length)
+    t.is(records.validRecordCopy(withMedia(media), 1), null)
+  }
+  await t.exception.all(async () => postRecord({ text: '', at: AT, media: new Array(1) }), /media-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: between }), /media-invalid/)
+  // Descriptor edge cases.
+  const maxItem = { ...DESC, mime: 'image/gif', start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS, blocks: MAX_MEDIA_ITEM_BLOCKS, bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES, width: MAX_MEDIA_DIMENSION, height: MAX_MEDIA_DIMENSION }
+  for (const d of [maxItem, { ...DESC, blocks: 1, bytes: 1 }, { ...DESC, blocks: 1, bytes: 32768 }, { ...DESC, bytes: 65536 }, { ...DESC, start: 8191, blocks: 1, bytes: 1 }, { ...DESC, mime: 'image/png' }, { ...DESC, mime: 'image/webp' }, { ...DESC, width: 1, height: 1 }]) {
+    t.is(validateRecord(withMedia([d]), 1), null, 'valid ' + JSON.stringify(d))
+  }
+  const missing = { ...DESC }
+  delete missing.sha256
+  const bad = [
+    missing,
+    { ...DESC, extra: 1 },
+    { ...DESC, core: 'A'.repeat(64) },
+    { ...DESC, core: K2.slice(1) },
+    { ...DESC, sha256: 'D'.repeat(64) },
+    { ...DESC, mime: 'video/mp4' },
+    { ...DESC, mime: 'image/svg+xml' },
+    { ...DESC, mime: 'IMAGE/JPEG' },
+    { ...DESC, start: 0 },
+    { ...DESC, start: MAX_MEDIA_BLOCKS },
+    { ...DESC, start: 1.5 },
+    { ...DESC, start: '1' },
+    { ...DESC, blocks: 0 },
+    { ...DESC, blocks: MAX_MEDIA_ITEM_BLOCKS + 1, bytes: (MAX_MEDIA_ITEM_BLOCKS + 1) * MEDIA_BLOCK_BYTES },
+    { ...DESC, start: MAX_MEDIA_BLOCKS - 1, blocks: 2 },
+    { ...DESC, start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS + 1, blocks: MAX_MEDIA_ITEM_BLOCKS, bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES },
+    { ...DESC, bytes: 32768 },
+    { ...DESC, bytes: 65537 },
+    { ...DESC, blocks: 1, bytes: 0 },
+    { ...DESC, bytes: 40000.5 },
+    { ...DESC, width: 0 },
+    { ...DESC, height: MAX_MEDIA_DIMENSION + 1 },
+    { ...DESC, width: null }
+  ]
+  for (const d of bad) t.is(validateRecord(withMedia([DESC, d]), 1), 'media-invalid', 'invalid ' + JSON.stringify(d))
+  // Hostile getters never throw.
+  const hostile = { ...DESC }
+  Object.defineProperty(hostile, 'core', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(withMedia([hostile]), 1), 'media-invalid')
+})
+
+test('postRecord with media', async (t) => {
+  await testnet(t)
+  const rec = postRecord({ text: '', at: AT, media: [DESC] })
+  t.alike(Object.keys(rec), ['type', 'text', 'at', 'replyTo', 'media'])
+  t.alike(rec.media, [DESC])
+  t.ok(rec.media[0] !== DESC, 'a copy of each descriptor')
+  t.alike(Object.keys(rec.media[0]), ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
+  t.alike(Object.keys(postRecord({ text: 'oi', at: AT })), ['type', 'text', 'at', 'replyTo'], 'no media key when absent')
+  await t.exception.all(async () => postRecord({ text: '', at: AT }), /text-length/)
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: [] }), /media-invalid/)
+  t.alike(postRecord({ text: 'x', at: AT, media: [{ ...DESC, extra: 1 }] }).media, [DESC], 'only the descriptor keys are copied')
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: [{ ...DESC, bytes: 0 }] }), /media-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: null }), /media-invalid/)
+})
+
+test('media-core and follow records', async (t) => {
+  await testnet(t)
+  const mc = { type: 'media-core', key: K2, at: AT }
+  const fo = { type: 'follow', key: K2, on: true, at: AT }
+  t.is(validateRecord(mc, 1), null)
+  t.is(validateRecord(fo, 1), null)
+  t.is(validateRecord({ ...fo, on: false }, 1), null)
+  t.is(validateRecord(mc, 0), 'genesis-required')
+  t.is(validateRecord(fo, 0), 'genesis-required')
+  for (const key of ['A'.repeat(64), K2.slice(1), 1, null]) {
+    t.is(validateRecord({ ...mc, key }, 1), 'malformed', 'media-core key ' + key)
+    t.is(validateRecord({ ...fo, key }, 1), 'malformed', 'follow key ' + key)
+  }
+  for (const on of [1, 'true', null, undefined]) t.is(validateRecord({ ...fo, on }, 1), 'malformed', 'on ' + on)
+  t.is(validateRecord({ ...mc, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ ...fo, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ ...mc, on: true }, 1), 'malformed')
+  const noOn = { ...fo }
+  delete noOn.on
+  t.is(validateRecord(noOn, 1), 'malformed')
+  t.is(validateRecord({ ...mc, at: '2026-01-01' }, 1), 'date-invalid')
+  t.is(validateRecord({ ...fo, at: null }, 1), 'date-invalid')
+  t.alike(mediaCoreRecord({ key: K2, at: AT }), mc)
+  t.alike(followRecord({ key: K2, on: true, at: AT }), fo)
+  t.ok(isCanonicalIso(followRecord({ key: K2, on: false }).at))
+  await t.exception.all(async () => mediaCoreRecord({ key: 'x', at: AT }), /malformed/)
+  await t.exception.all(async () => followRecord({ key: K2, on: 'yes', at: AT }), /malformed/)
 })

@@ -5,16 +5,29 @@
 //
 //   VarandaWebNode = { version: 1, start(config) }
 //   start({ association, seederUrl }) -> Promise<handle>, a frozen
-//   { connect(send, { onClose }), close(), identity }:
+//   { connect(send, { onClose }), close(), identity, media, follows }:
 //
 //   identity.status()   -> Promise<{ exists, publicKey, legacy, unlocked, synced,
 //                          webauthn, prf: 'yes'|'no'|'unknown', rpId,
-//                          rpIdError?, passkeyKnown }>
+//                          rpIdError?, passkeyKnown, resumed }>
 //   identity.unlock({ register = false } = {})
-//                       -> Promise<{ publicKey, created } | { pending: true }>
-//   identity.complete() -> Promise<{ publicKey, created }>
-//   identity.lock()     -> Promise   (the key is zero-filled; reads still work)
-//   identity.reset()    -> Promise   (the diary and the passkey record are gone)
+//                       -> Promise<{ publicKey, created, sessionSaved? } | { pending: true }>
+//   identity.complete() -> Promise<{ publicKey, created, sessionSaved? }>
+//   identity.lock()     -> Promise   (the keys are zero-filled; reads still
+//                                     work; the stored session SURVIVES it)
+//   identity.signOut()  -> Promise   ('Sair': lock AND forget the stored
+//                                     session; rejects SIGNOUT_INCOMPLETE when
+//                                     it could not be deleted, still locked)
+//   identity.reset()    -> Promise   (the diary, the passkey record and the
+//                                     stored session are gone)
+//   media.upload({ bytes, mime, width, height, onProgress })
+//                       -> Promise<descriptor>  (lib/node.js mediaUpload;
+//                          errors keep their .code and .message)
+//   follows.legacy()    -> Promise<{ keys }>  (the follows kept from before
+//                          `follow` records existed, awaiting confirmation)
+//   follows.confirmLegacy(keys)
+//                       -> Promise<{ published }>  (publishes exactly those;
+//                          the rest leave the list; errors keep .code)
 //
 // start() opens the node over IndexedDB (database 'varanda-node') and
 // returns the lib/node.js handle; nothing else of the node (session,
@@ -22,7 +35,13 @@
 //
 // The diary's key pair is derived from the PRF output of the member's
 // passkey (../lib/passkey.js) and lives only in the session's memory: it is
-// never stored, and no getter or signing call hands it to the page. The kv
+// never stored, and no getter or signing call hands it to the page. The
+// media key pair (the signer of this DEVICE's media cores) comes from the
+// same PRF output and a random 32-byte nonce drawn once per device and kept
+// in kv 'mediaDevice' ({ v: 1, nonce }, not a secret: useless without the
+// PRF output); it lives in the session's memory beside the identity pair and
+// is zeroed with it. A reset forgets the nonce, so the next identity's media
+// cores have new keys. The kv
 // entry 'passkey' holds only { v: 1, credentialId, rpId, userId } (no
 // secret, no email); it is read ONCE at start() so unlock() reaches
 // navigator.credentials.create/get without any await, inside the click that
@@ -38,6 +57,31 @@
 // passkey is excluded from the next creation; MISMATCH (the stored diary belongs to another key) also
 // carries `.legacy` (a store from before the passkeys: only reset() leaves it).
 //
+// Stay signed in until 'Sair': after a successful unlock (and only then: a
+// MISMATCH or any other failure saves nothing) the 32-byte PRF output is
+// kept by ../lib/session-store.js in its own IndexedDB database
+// ('varanda-session'), sealed with AES-GCM-256 under a non-extractable
+// CryptoKey and bound to this rp.id and the identity's public key. start()
+// reopens it, with no WebAuthn call, when the stored passkey record is for
+// this rp.id, the stored diary exists (not legacy) and the stored session
+// names the same passkey and public key; then status().resumed is true.
+// Anything else (another passkey, a tampered record, a key that does not
+// open the diary) clears the stored session and leaves the node locked;
+// start() never fails because of it. What this protects: no secret is on
+// disk in clear, and a copied record opens nowhere else. What it does NOT:
+// a script on this origin can use the stored CryptoKey and so act as the
+// member, and anyone holding the unlocked device (or the browser profile)
+// can post until 'Sair'. signOut() ('Sair') and reset() erase it; lock()
+// does not (a memory-only lock, the next start() resumes). A failure to save
+// still unlocks: the result then carries sessionSaved: false.
+// Two independent barriers make 'Sair' stick: signOut() and reset() first
+// write the kv marker 'signedOut' (node storage), which makes start() refuse
+// (and clear again) any stored session until the next successful ceremony
+// saves a new one; then they delete the record (sessionStore.clear(), and
+// failing that the whole 'varanda-session' database). When both deletions
+// fail they reject SIGNOUT_INCOMPLETE ('não foi possível sair por completo
+// neste aparelho: tente de novo'); the node is locked either way.
+//
 // One node per browser profile: start() takes the exclusive Web Lock
 // 'varanda-node' (ifAvailable) and holds it until close(), so a second tab
 // is refused with LOCKED instead of two tabs rewriting the same diary. A
@@ -46,10 +90,15 @@ const b4a = require('b4a')
 const { createBrowserNode } = require('../lib/node')
 const { idbNodeStorage } = require('../lib/node-storage')
 const passkey = require('../lib/passkey')
+const store = require('../lib/node-store')
+const { createSessionStore } = require('../lib/session-store')
 
 const DB_NAME = 'varanda-node'
 const LOCK_NAME = 'varanda-node'
 const PASSKEY_KEY = 'passkey'
+const NONCE_BYTES = 32
+const SIGNED_OUT_KEY = 'signedOut'
+const SESSION_DB = 'varanda-session'
 
 let current = null
 
@@ -100,7 +149,30 @@ function webauthnPresent () {
     credentialsContainer() !== null
 }
 
-function createIdentity (node, storage) {
+function zeroPair (kp) {
+  if (kp === null) return
+  kp.secretKey.fill(0)
+  kp.publicKey.fill(0)
+}
+
+// -> true once the database is deleted; false on an error, a block (another
+// connection holds it) or no IndexedDB.
+function deleteDatabase (idb, name) {
+  return new Promise((resolve) => {
+    let req
+    try {
+      req = idb.deleteDatabase(name)
+    } catch {
+      resolve(false)
+      return
+    }
+    req.onsuccess = () => resolve(true)
+    req.onerror = () => resolve(false)
+    req.onblocked = () => resolve(false)
+  })
+}
+
+function createIdentity (node, storage, sessionStore, idb) {
   let rpId = null
   let rpIdError = null
   try {
@@ -119,8 +191,9 @@ function createIdentity (node, storage) {
   // from the next creation so the manager does not offer them again.
   const unusable = new Set()
   let generation = 0
-  let finishing = Promise.resolve() // the post-ceremony part in flight
+  let finishing = Promise.resolve() // the post-ceremony part (or the resume) in flight
   let busy = false
+  let resumed = false // the current unlock came from the stored session
 
   function invalidate () {
     generation++
@@ -163,21 +236,38 @@ function createIdentity (node, storage) {
     }
   }
 
-  // The PRF output of a finished ceremony -> the unlocked node. Zeroes prf.
-  async function finish (gen, prf, { credentialId, userId, created }) {
+  // This device's media nonce (kv 'mediaDevice'), drawn and written once.
+  async function mediaNonce () {
+    const device = await store.readMediaDevice(storage)
+    if (device !== null) return new Uint8Array(b4a.from(device.nonce, 'hex'))
+    const nonce = new Uint8Array(NONCE_BYTES)
+    globalThis.crypto.getRandomValues(nonce)
+    await store.writeMediaDevice(storage, b4a.toString(nonce, 'hex'))
+    return nonce
+  }
+
+  // A PRF output -> the unlocked node, for a finished ceremony (resumed
+  // false: the passkey record is bound) and for the stored session (resumed
+  // true). Saves the session only once everything else succeeded; any
+  // failure leaves the node locked. Zeroes prf.
+  async function install (gen, prf, { credentialId, userId, created, resumed: fromSession }) {
     let kp = null
+    let media = null
+    let nonce = null
     let installed = false
     let done = false
     try {
       if (gen !== generation) throw cancelled()
       kp = await passkey.keyPairFromPrf(prf)
-      prf.fill(0)
+      if (gen !== generation) throw cancelled()
+      nonce = await mediaNonce()
+      media = await passkey.mediaKeyPairFromPrf(prf, nonce)
       if (gen !== generation) throw cancelled()
       const publicKey = b4a.toString(kp.publicKey, 'hex')
-      // setKeyPair copies the pair synchronously: the local copy is zeroed below.
-      const setting = node.setKeyPair(kp)
-      kp.secretKey.fill(0)
-      kp.publicKey.fill(0)
+      // setKeyPair copies both pairs synchronously: the local copies are zeroed below.
+      const setting = node.setKeyPair(kp, { media })
+      zeroPair(kp)
+      zeroPair(media)
       installed = true
       await setting
       const status = await node.identityStatus()
@@ -185,22 +275,82 @@ function createIdentity (node, storage) {
       if (status.exists && (status.publicKey !== publicKey || status.legacy)) {
         const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
         err.legacy = status.legacy === true
-        chosen = credentialId
+        if (!fromSession) chosen = credentialId
         throw err
       }
       if (gen !== generation) throw cancelled()
-      await bind(gen, { v: 1, credentialId, rpId, userId })
-      chosen = null
+      if (!fromSession) {
+        await bind(gen, { v: 1, credentialId, rpId, userId })
+        chosen = null
+      }
+      let sessionSaved = true
+      try {
+        await sessionStore.save(prf, { rpId, credentialId, publicKey })
+      } catch {
+        sessionSaved = false
+      }
+      // A ceremony that saved a new session lifts the sign-out barrier (a
+      // failed save keeps it: an older record may still be there).
+      if (!fromSession && sessionSaved) await storage.writeJson(SIGNED_OUT_KEY, null).catch(() => {})
+      // A lock/signOut/reset during the save: still locked (signOut and
+      // reset wait for this to settle before they clear the stored session).
+      if (gen !== generation) throw cancelled()
+      resumed = fromSession === true
       done = true
-      return { publicKey, created }
+      const out = { publicKey, created }
+      if (!sessionSaved) out.sessionSaved = false
+      return out
     } finally {
-      // Any failure after the pair went in leaves the node locked.
+      // Any failure after the pairs went in leaves the node locked.
       if (installed && !done) await node.clearKeyPair().catch(() => {})
       prf.fill(0)
-      if (kp !== null) {
-        kp.secretKey.fill(0)
-        kp.publicKey.fill(0)
+      if (nonce !== null) nonce.fill(0)
+      zeroPair(kp)
+      zeroPair(media)
+    }
+  }
+
+  // The PRF output of a finished ceremony -> the unlocked node. Zeroes prf.
+  function finish (gen, prf, details) {
+    return install(gen, prf, { ...details, resumed: false })
+  }
+
+  // start(): reopens the stored session without WebAuthn, when it names the
+  // stored passkey and the stored diary's key. Never rejects; any failure
+  // clears the stored session and leaves the node locked.
+  async function resume () {
+    if (known === null) return
+    const gen = generation
+    busy = true
+    const attempt = (async () => {
+      let opened = null
+      try {
+        const mark = await storage.readJson(SIGNED_OUT_KEY)
+        if (mark !== null && mark !== undefined) {
+          // Signed out: whatever record survived is never used.
+          await forgetSession()
+          return
+        }
+        const status = await node.identityStatus()
+        if (!status.exists || status.legacy || typeof status.publicKey !== 'string') return
+        opened = await sessionStore.load({ rpId, publicKey: status.publicKey })
+        if (opened === null) return
+        if (gen !== generation || known === null || opened.credentialId !== known.credentialId) {
+          throw cancelled()
+        }
+        const prf = opened.prf
+        opened = null
+        await install(gen, prf, { credentialId: known.credentialId, userId: known.userId, created: false, resumed: true })
+      } catch {
+        if (opened !== null) opened.prf.fill(0)
+        await sessionStore.clear().catch(() => {})
       }
+    })()
+    finishing = attempt.then(noop, noop)
+    try {
+      await attempt
+    } finally {
+      busy = false
     }
   }
 
@@ -295,25 +445,70 @@ function createIdentity (node, storage) {
       webauthn: support.webauthn && rpIdError === null && credentialsContainer() !== null,
       prf: support.prf,
       rpId,
-      passkeyKnown: known !== null
+      passkeyKnown: known !== null,
+      resumed: resumed && stored.unlocked === true
     }
     if (rpIdError !== null) out.rpIdError = rpIdError.message
     return out
   }
 
+  // A memory-only lock: the stored session survives it (the next start()
+  // resumes). 'Sair' is signOut().
   function lock () {
     invalidate()
+    resumed = false
     return node.clearKeyPair()
+  }
+
+  // Deletes the stored session: the record, or failing that the database.
+  // -> true when one of them is gone.
+  async function forgetSession () {
+    try {
+      await sessionStore.clear()
+      return true
+    } catch {}
+    if (idb === undefined || idb === null) return false
+    return deleteDatabase(idb, SESSION_DB)
+  }
+
+  // The barrier first, then the record.
+  async function forgetSignedOut () {
+    await storage.writeJson(SIGNED_OUT_KEY, { v: 1 }).catch(() => {})
+    return forgetSession()
+  }
+
+  function incomplete () {
+    return codedError('SIGNOUT_INCOMPLETE', 'não foi possível sair por completo neste aparelho: tente de novo')
+  }
+
+  // 'Sair': lock and forget the stored session. The node is locked even when
+  // the session store fails; then it rejects SIGNOUT_INCOMPLETE.
+  async function signOut () {
+    invalidate()
+    resumed = false
+    let forgotten = false
+    try {
+      // A post-ceremony part in flight may still save: let it settle first.
+      await finishing
+      forgotten = await forgetSignedOut()
+    } finally {
+      await node.clearKeyPair()
+    }
+    if (!forgotten) throw incomplete()
   }
 
   async function reset () {
     invalidate()
+    resumed = false
     known = null
     pending = null
     stored = null
+    await finishing
+    const forgotten = await forgetSignedOut()
     await node.reset()
     // readJson parses the stored 'null' back to null: no record.
     await storage.writeJson(PASSKEY_KEY, null)
+    if (!forgotten) throw incomplete()
   }
 
   return {
@@ -323,11 +518,13 @@ function createIdentity (node, storage) {
       const record = passkeyRecord(stored)
       known = record !== null && record.rpId === rpId ? record : null
     },
+    resume,
     invalidate,
     // Resolves once a ceremony's post-WebAuthn part (key, diary check, kv
-    // record or its restore) has settled; never waits on the browser.
+    // record or its restore, session save) or the resume has settled; never
+    // waits on the browser.
     settled: () => finishing,
-    api: Object.freeze({ status, unlock, complete, lock, reset })
+    api: Object.freeze({ status, unlock, complete, lock, signOut, reset })
   }
 }
 
@@ -344,8 +541,10 @@ async function start ({ association, seederUrl } = {}) {
       seederUrl,
       createSocket: (url) => new WebSocket(url)
     })
-    const identity = createIdentity(node, storage)
+    const sessionStore = createSessionStore({ indexedDB: globalThis.indexedDB, crypto: globalThis.crypto })
+    const identity = createIdentity(node, storage, sessionStore, globalThis.indexedDB)
     await identity.load()
+    await identity.resume()
     let closing = null
     const handle = Object.freeze({
       connect: (send, options) => node.connect(send, options),
@@ -358,7 +557,29 @@ async function start ({ association, seederUrl } = {}) {
         })
         return closing
       },
-      identity: identity.api
+      identity: identity.api,
+      media: Object.freeze({
+        // Called synchronously so the node copies the bytes at once.
+        upload (args) {
+          try {
+            return Promise.resolve(node.mediaUpload(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        }
+      }),
+      // The follows kept from before `follow` records existed: listed, and
+      // published only for the keys the person confirms (lib/node.js).
+      follows: Object.freeze({
+        legacy: () => node.legacyFollows(),
+        confirmLegacy (keys) {
+          try {
+            return Promise.resolve(node.confirmLegacyFollows(keys))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        }
+      })
     })
     current = handle
     return handle

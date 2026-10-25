@@ -14,6 +14,12 @@ const {
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,
+  MAX_MEDIA_BLOCKS,
+  MAX_MEDIA_ITEM_BLOCKS,
+  MAX_MEDIA_PER_POST,
+  MAX_MEDIA_DIMENSION,
+  MEDIA_BLOCK_BYTES,
+  MEDIA_MIMES,
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
@@ -28,13 +34,31 @@ const AT = new Date(8.64e15).toISOString() // '+275760-09-13T00:00:00.000Z', the
 // A 4-byte UTF-8 character (4 bytes) and '"' or '\\' (2 bytes) are cheaper,
 // and every other JSON-escaped character is forbidden in names and texts.
 const WORST = ['\ud800', '\u{1f600}', '"', '\\', '\n']
+// MAX_MEDIA_PER_POST descriptors with the longest allowed mime and the widest
+// number in every field.
+const MIME = MEDIA_MIMES.reduce((a, b) => (b.length > a.length ? b : a))
+const DESCRIPTOR = {
+  core: HEX,
+  mime: MIME,
+  start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS,
+  blocks: MAX_MEDIA_ITEM_BLOCKS,
+  bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES,
+  sha256: HEX,
+  width: MAX_MEDIA_DIMENSION,
+  height: MAX_MEDIA_DIMENSION
+}
+const MEDIA = Array(MAX_MEDIA_PER_POST).fill(DESCRIPTOR)
+
+function worstPost (ch) {
+  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
+}
 
 function size (result) {
   return utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
 }
 
 function feedResult (n, ch) {
-  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ } }
+  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -45,8 +69,7 @@ function feedResult (n, ch) {
 }
 
 function logResult (n, ch) {
-  const post = { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ } }
-  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: post }), invalid: [], entriesTruncated: SEQ }
+  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstPost(ch) }), invalid: [], entriesTruncated: SEQ }
 }
 
 function profileResult (n, ch) {
@@ -58,13 +81,13 @@ function profileResult (n, ch) {
 
 test('the worst-case records are valid records', (t) => {
   for (const ch of WORST) {
-    t.is(validateRecord({ type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ } }, 1), null)
+    t.is(validateRecord(worstPost(ch), 1), null)
     if (ch !== '\n') t.is(validateRecord({ type: 'profile', name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), at: AT }, 1), null)
   }
 })
 
 test('a post outweighs a profile and a certificate in a log page', (t) => {
-  const post = JSON.stringify({ type: 'post', text: '\ud800'.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ } })
+  const post = JSON.stringify(worstPost('\ud800'))
   const profile = JSON.stringify({ type: 'profile', name: '\ud800'.repeat(MAX_NAME), bio: '\ud800'.repeat(MAX_BIO), at: AT })
   t.ok(utf8ByteLength(post) > utf8ByteLength(profile))
   // A certificate has fixed-size fields (hex64, hex128, <= 32-char tokens, ISO).
@@ -72,16 +95,18 @@ test('a post outweighs a profile and a certificate in a log page', (t) => {
 })
 
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
-  t.is(FEED_LIMIT_MAX, 35)
+  // With MAX_MEDIA_PER_POST maximal descriptors in every item.
+  t.is(FEED_LIMIT_MAX, 31)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800'))
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
   t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')
-  t.ok(size(feedResult(50, '\u{1f600}')) <= MAX_MESSAGE, '50 items of 4-byte characters would fit')
-  t.ok(size(feedResult(50, '\ud800')) > MAX_MESSAGE, '50 items of lone surrogates would not')
+  // Lone surrogates are the worst case: one more item of 4-byte characters fits.
+  t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}')) <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
 })
 
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
+  t.is(LOG_LIMIT_MAX, 36)
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('log worst case at ' + LOG_LIMIT_MAX + ' entries: ' + size(logResult(LOG_LIMIT_MAX, '\ud800')) + ' bytes')
   t.ok(size(logResult(LOG_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')

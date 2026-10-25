@@ -15,7 +15,7 @@ const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
-const { startSeedWs, MAX_PAYLOAD } = require('../lib/seed-ws')
+const { startSeedWs, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 
@@ -460,4 +460,354 @@ test('--ws-origin and VARANDA_WS_ORIGIN are validated as usage errors', async (t
   const variable = run(['seed'], { VARANDA_WS_ORIGIN: ' , ' })
   t.is(variable.status, 2)
   t.ok(variable.stderr.includes('ws-origin inválido (vazio)'))
+})
+
+// --- /media/<D>/<K>/<start>/<blocks> ---------------------------------------
+
+const D = 'a'.repeat(64)
+const K = 'b'.repeat(64)
+
+// A stub seeder whose mediaRead serves `count` blocks of `size` bytes for
+// D/K, counting the blocks the server pulled from the iterator and whether
+// the iterator was closed. gate: optional promise awaited before each block.
+function mediaSeeder ({ size = 4, gate = null } = {}) {
+  const stub = stubSeeder('ok')
+  stub.calls = []
+  stub.pulled = 0
+  stub.finished = false
+  stub.mediaRead = (diary, core, start, count) => {
+    stub.calls.push([diary, core, start, count])
+    if (diary !== D || core !== K) return null
+    async function * blocks () {
+      try {
+        for (let i = 0; i < count; i++) {
+          if (gate) await gate
+          stub.pulled++
+          yield b4a.alloc(size, (start + i) % 256)
+        }
+      } finally {
+        stub.finished = true
+      }
+    }
+    return { bytes: size * count, blocks: blocks() }
+  }
+  return stub
+}
+
+// A plain HTTP request with its own connection; the body is a Buffer.
+function mediaRequest (port, url, { method = 'GET', host = '127.0.0.1:' + port } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: url, headers: { Host: host }, agent: false }, (res) => {
+      const chunks = []
+      res.on('data', (d) => chunks.push(d))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b4a.concat(chunks) }))
+      res.on('error', reject)
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+// Starts a request and resolves { req, res } once the headers arrived; the
+// body is left unread (paused).
+function openMedia (port, url) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: url, agent: false }, (res) => {
+      res.pause()
+      resolve({ req, res })
+    })
+    req.on('error', () => {})
+    req.once('error', reject)
+    req.end()
+  })
+}
+
+test('startSeedWs /media: limits are exported with their documented values', async (t) => {
+  t.is(MEDIA_MAX_BLOCKS, 256)
+  t.is(MEDIA_MAX_IN_FLIGHT, 16)
+  t.is(MEDIA_RATE, 64)
+  t.is(MEDIA_BURST, 128)
+})
+
+test('startSeedWs /media: GET streams the exact bytes with immutable headers, HEAD sends headers only', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder({ size: 5 })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const url = '/media/' + D + '/' + K + '/3/4'
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(seeder.calls[0], [D, K, 3, 4], 'mediaRead called with the parsed values')
+  const expected = b4a.concat([3, 4, 5, 6].map((v) => b4a.alloc(5, v)))
+  t.alike(got.body, expected, 'exact bytes in order')
+  t.is(got.headers['content-type'], 'application/octet-stream')
+  t.is(got.headers['content-length'], '20')
+  t.is(got.headers['x-content-type-options'], 'nosniff')
+  t.is(got.headers['cache-control'], 'public, max-age=31536000, immutable')
+  t.is(got.headers['accept-ranges'], 'none')
+  t.is(got.headers['access-control-allow-origin'], undefined, 'no CORS header')
+
+  const pulledBefore = seeder.pulled
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], '20')
+  t.is(head.headers['cache-control'], 'public, max-age=31536000, immutable')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.is(seeder.pulled, pulledBefore, 'HEAD pulls no block')
+
+  const max = await mediaRequest(server.port, '/media/' + D + '/' + K + '/1/256')
+  t.is(max.status, 200, '256 blocks accepted')
+  t.is(max.body.byteLength, 5 * 256)
+})
+
+test('startSeedWs /media: malformed paths, a refused read and a missing mediaRead are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const bad = [
+    '/media',
+    '/media/',
+    '/media/' + D + '/' + K + '/1',
+    '/media/' + D + '/' + K + '/1/1/',
+    '/media/' + D + '/' + K + '/1/1/extra',
+    '/media/' + 'g'.repeat(64) + '/' + K + '/1/1',
+    '/media/' + D.slice(1) + '/' + K + '/1/1',
+    '/media/' + D + 'a/' + K + '/1/1',
+    '/media/' + 'A'.repeat(64) + '/' + K + '/1/1',
+    '/media/' + D + '/' + 'B'.repeat(64) + '/1/1',
+    '/media/' + D + '/' + K + '/0/1',
+    '/media/' + D + '/' + K + '/1/0',
+    '/media/' + D + '/' + K + '/1/257',
+    '/media/' + D + '/' + K + '/1/999',
+    '/media/' + D + '/' + K + '/01/1',
+    '/media/' + D + '/' + K + '/1/01',
+    '/media/' + D + '/' + K + '/-1/1',
+    '/media/' + D + '/' + K + '/+1/1',
+    '/media/' + D + '/' + K + '/1.0/1',
+    '/media/' + D + '/' + K + '/1e3/1',
+    '/media/' + D + '/' + K + '/' + '9'.repeat(16) + '/1',
+    '/media/' + D + '/' + K + '/1/1?x=1',
+    '/media/' + D + '/' + K + '/1/1?',
+    '/media//' + D + '/' + K + '/1/1',
+    '/media/' + D + '/' + K + '/%31/1'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 24) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach mediaRead')
+
+  const refused = await mediaRequest(server.port, '/media/' + 'c'.repeat(64) + '/' + K + '/1/1')
+  t.is(refused.status, 404, 'mediaRead null -> 404')
+  t.is(refused.body.toString(), 'não encontrado\n')
+  t.is(seeder.calls.length, 1)
+
+  const throwing = mediaSeeder()
+  throwing.mediaRead = () => { throw new Error('secret ' + D) }
+  const s2 = await startSeedWs({ port: 0, seeder: throwing })
+  t.teardown(() => s2.close(), { force: true })
+  const thrown = await mediaRequest(s2.port, '/media/' + D + '/' + K + '/1/1')
+  t.is(thrown.status, 404, 'a throwing mediaRead -> 404')
+  t.absent(thrown.body.toString().includes('secret'))
+
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  const missing = await mediaRequest(old.port, '/media/' + D + '/' + K + '/1/1')
+  t.is(missing.status, 404, 'a seeder without mediaRead -> 404')
+
+  const other = await mediaRequest(server.port, '/some/path?x=1')
+  t.is(other.status, 404, 'other paths still 404')
+})
+
+test('startSeedWs /media: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/media/' + D + '/' + K + '/1/1'
+
+  const evil = await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })
+  t.is(evil.status, 421, 'foreign Host -> 421')
+  const evilPost = await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })
+  t.is(evilPost.status, 421, 'the Host check runs before the method check')
+
+  for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  const badPathPost = await mediaRequest(server.port, '/media/x', { method: 'POST' })
+  t.is(badPathPost.status, 405, 'any other method on /media -> 405')
+  t.is(seeder.calls.length, 0, 'refused requests never reach mediaRead')
+})
+
+test('startSeedWs /media: a slow reader applies backpressure (the server does not buffer ahead)', async (t) => {
+  t.timeout(30000)
+  const size = 1024 * 1024
+  const seeder = mediaSeeder({ size })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const { req, res } = await openMedia(server.port, '/media/' + D + '/' + K + '/1/64')
+  t.teardown(() => req.destroy(), { force: true })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const pulledWhilePaused = seeder.pulled
+  t.ok(pulledWhilePaused < 16, 'only a few blocks pulled while the client reads nothing (' + pulledWhilePaused + ' of 64)')
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.is(seeder.pulled, pulledWhilePaused, 'no further block pulled while paused')
+
+  let received = 0
+  res.on('data', (d) => { received += d.byteLength })
+  const ended = new Promise((resolve) => res.once('end', resolve))
+  res.resume()
+  await within(ended, 20000, 'fim do corpo')
+  t.is(received, 64 * size, 'the whole body arrives once the client reads')
+  t.is(seeder.pulled, 64)
+})
+
+test('startSeedWs /media: a client that goes away stops the iteration', async (t) => {
+  t.timeout(30000)
+  const size = 1024 * 1024
+  const seeder = mediaSeeder({ size })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const { req, res } = await openMedia(server.port, '/media/' + D + '/' + K + '/1/256')
+  res.on('error', () => {})
+  await new Promise((resolve) => res.once('readable', resolve))
+  req.destroy()
+  await until(() => seeder.finished, { name: 'iterador fechado', timeoutMs: 5000 })
+  t.ok(seeder.finished, 'the iterator was closed')
+  t.ok(seeder.pulled < 256, 'not every block was pulled (' + seeder.pulled + ')')
+})
+
+test('startSeedWs /media: the in-flight cap answers 503 ocupado with Retry-After', async (t) => {
+  t.timeout(30000)
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const seeder = mediaSeeder({ gate })
+  const server = await startSeedWs({ port: 0, seeder, media: { maxInFlight: 2 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/media/' + D + '/' + K + '/1/2'
+
+  const held = [await openMedia(server.port, url), await openMedia(server.port, url)]
+  for (const h of held) t.teardown(() => h.req.destroy(), { force: true })
+  const busy = await mediaRequest(server.port, url)
+  t.is(busy.status, 503, 'third concurrent response refused')
+  t.is(busy.body.toString(), 'ocupado\n')
+  t.is(busy.headers['retry-after'], '1')
+  t.is(busy.headers['cache-control'], 'no-store')
+
+  const done = held.map(({ res }) => new Promise((resolve) => { res.on('end', resolve); res.resume() }))
+  release()
+  await within(Promise.all(done), 5000, 'fim das respostas retidas')
+  await until(async () => (await mediaRequest(server.port, url)).status === 200, { name: 'slots liberados', timeoutMs: 5000 })
+  t.pass('slots are released once the responses close')
+
+  // An aborted response releases its slot too (once its pending read settles).
+  let release2
+  const gate2 = new Promise((resolve) => { release2 = resolve })
+  const s2 = await startSeedWs({ port: 0, seeder: mediaSeeder({ gate: gate2 }), media: { maxInFlight: 1 } })
+  t.teardown(() => s2.close(), { force: true })
+  const one = await openMedia(s2.port, url)
+  one.res.on('error', () => {})
+  t.is((await mediaRequest(s2.port, url)).status, 503)
+  one.req.destroy()
+  release2()
+  await until(async () => (await mediaRequest(s2.port, url, { method: 'HEAD' })).status === 200, { name: 'slot liberado', timeoutMs: 5000 })
+  t.pass('an aborted response frees its slot')
+})
+
+// A seeder whose first mediaRead returns a hand-written iterator whose
+// next() stalls until stub.unstall() (so return() is observable while a
+// next() is pending, unlike an async generator); later reads are normal.
+function stallingSeeder () {
+  const stub = mediaSeeder()
+  const normal = stub.mediaRead
+  stub.returned = false
+  let first = true
+  let unstall
+  const stalled = new Promise((resolve) => { unstall = resolve })
+  stub.unstall = () => unstall({ done: false, value: b4a.alloc(4, 1) })
+  stub.mediaRead = (diary, core, start, count) => {
+    if (!first) return normal(diary, core, start, count)
+    first = false
+    const it = {
+      next: () => stalled,
+      return: () => {
+        stub.returned = true
+        return Promise.resolve({ done: true })
+      },
+      [Symbol.asyncIterator] () { return it }
+    }
+    return { bytes: 4 * count, blocks: it }
+  }
+  return stub
+}
+
+async function stalledSlotHeld (t, seeder, server, url) {
+  await until(() => seeder.returned, { name: 'return() chamado', timeoutMs: 5000 })
+  t.ok(seeder.returned, "the iterator's return() is called while next() is still pending")
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is((await mediaRequest(server.port, url)).status, 503, 'the stalled read still holds its slot')
+  seeder.unstall()
+  await until(async () => (await mediaRequest(server.port, url)).status === 200, { name: 'slot liberado', timeoutMs: 5000 })
+  t.pass('the slot is freed once the stalled next() settles')
+}
+
+test('startSeedWs /media: a client abort during a stalled read closes the iterator; the slot waits for the read', async (t) => {
+  t.timeout(20000)
+  const seeder = stallingSeeder()
+  const server = await startSeedWs({ port: 0, seeder, media: { maxInFlight: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/media/' + D + '/' + K + '/1/1'
+  const { req, res } = await openMedia(server.port, url)
+  res.on('error', () => {})
+  req.destroy()
+  await stalledSlotHeld(t, seeder, server, url)
+})
+
+test('startSeedWs /media: the deadline during a stalled read closes the iterator; the slot waits for the read', async (t) => {
+  t.timeout(20000)
+  const seeder = stallingSeeder()
+  const server = await startSeedWs({ port: 0, seeder, media: { maxInFlight: 1, deadlineMs: 200 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/media/' + D + '/' + K + '/1/1'
+  const { req, res } = await openMedia(server.port, url)
+  t.teardown(() => req.destroy(), { force: true })
+  res.on('error', () => {})
+  res.resume()
+  await within(new Promise((resolve) => res.once('close', resolve)), 5000, 'close após o prazo')
+  await stalledSlotHeld(t, seeder, server, url)
+})
+
+test('startSeedWs /media: the global token bucket answers 503 beyond the burst', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder()
+  const server = await startSeedWs({ port: 0, seeder, media: { rate: 0.001, burst: 3 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/media/' + D + '/' + K + '/1/1'
+  for (let i = 0; i < 3; i++) t.is((await mediaRequest(server.port, url)).status, 200, 'within the burst')
+  const over = await mediaRequest(server.port, url)
+  t.is(over.status, 503, 'beyond the burst')
+  t.is(over.headers['retry-after'], '1')
+  t.is(seeder.calls.length, 3, 'a refused request never reaches mediaRead')
+})
+
+test('startSeedWs /media: a response past the deadline is destroyed', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder({ gate: new Promise(() => {}) })
+  const server = await startSeedWs({ port: 0, seeder, media: { deadlineMs: 200 } })
+  t.teardown(() => server.close(), { force: true })
+  const { req, res } = await openMedia(server.port, '/media/' + D + '/' + K + '/1/1')
+  t.teardown(() => req.destroy(), { force: true })
+  res.on('error', () => {})
+  res.resume()
+  await within(new Promise((resolve) => res.once('close', resolve)), 5000, 'close após o prazo')
+  t.absent(res.complete, 'the body was cut short, not completed')
 })

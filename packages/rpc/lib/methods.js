@@ -70,6 +70,44 @@ function isFeedCursor (v) {
   return isCanonicalIso(v.at) && isKey(v.author) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
+// post.create / post.reply `media`: 1..MAX_MEDIA_PER_POST descriptors.
+// Duplicated from validDescriptor in @varanda/core lib/records.js, which this
+// package cannot import (same rules, exact keys).
+const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
+
+function isDescriptor (d) {
+  if (!isPlainObject(d)) return false
+  const own = Object.keys(d)
+  if (own.length !== DESCRIPTOR_KEYS.length || !DESCRIPTOR_KEYS.every((k) => hasOwn(d, k))) return false
+  const { core, mime, start, blocks, bytes, sha256, width, height } = d
+  return isKey(core) &&
+    typeof mime === 'string' && L.MEDIA_MIMES.includes(mime) &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(blocks) &&
+    start + blocks <= L.MAX_MEDIA_BLOCKS &&
+    Number.isSafeInteger(bytes) &&
+    bytes > (blocks - 1) * L.MEDIA_BLOCK_BYTES &&
+    bytes <= blocks * L.MEDIA_BLOCK_BYTES &&
+    isKey(sha256) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(width) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(height)
+}
+
+// By index, never every(): a hole in a sparse array is undefined and invalid.
+function isMediaList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  for (let i = 0; i < v.length; i++) {
+    if (!isDescriptor(v[i])) return false
+  }
+  return true
+}
+
+// With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
+function postCross (given, value) {
+  if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
+  return null
+}
+
 // account.sign (docs/rpc.md 5.18). Duplicated from
 // @varanda/core lib/account-link.js, which this package cannot import.
 const ACCOUNT_PHASES = ['reserve', 'finish', 'rename']
@@ -147,7 +185,8 @@ const SPECS = {
   // Signs a report statement with the identity key; the node fills in
   // member and association itself and hashes text and quote into the
   // payload, so a caller never chooses the bytes. `seq` absent = a report of
-  // the whole account (no quote); present = a report of that post, quoting it.
+  // the whole account (no quote); present = a report of that post, quoting
+  // its text (empty for a photo-only post).
   'report.sign': {
     fields: {
       nonce: req(isNonce),
@@ -159,7 +198,6 @@ const SPECS = {
     },
     cross (given, value) {
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
-      if (hasOwn(value, 'seq') && value.quote === '') return 'parâmetro inválido: quote'
       return null
     }
   },
@@ -167,10 +205,15 @@ const SPECS = {
     fields: { name: req(str(1, L.MAX_NAME)), bio: opt(str(0, L.MAX_BIO), '') },
     mutating: true
   },
-  'post.create': { fields: { text: req(str(1, L.MAX_TEXT)) }, mutating: true },
+  'post.create': {
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
+    mutating: true,
+    cross: postCross
+  },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)) },
-    mutating: true
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
+    mutating: true,
+    cross: postCross
   },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },

@@ -8,23 +8,49 @@
 // ctx = { storage, association = null, keyPair = null, limits } (keyPair: the
 // session's in-memory key pair, null while the identity is locked; reads
 // work locked, writes need it, ./node-store.js openDiary; limits: test-only
-// overrides of the diary limits, ./node-store.js appendRecord). Nothing here
-// talks to the network.
+// overrides of the diary limits, ./node-store.js appendRecord;
+// mediaKeyPair: this device's media key pair, null while locked). Nothing
+// here talks to the network.
+//
+// Media: mediaPrepare readies this device's media core (header, kv mediaCores,
+// whether the diary declares it), mediaCommit stores an item there and returns
+// its descriptor; a post may carry descriptors only into an own media core
+// the own diary declared (`media-core` records), with every block local and
+// the bytes matching (verifyMedia). Follows are local-first: followChange
+// (unlocked only) updates kv follows at once and queues the change, signed
+// by the identity key, in kv followsPending (one op per key); drainFollows
+// appends the verified pending changes as `follow` records (one per key,
+// the newest, and only when the diary holds no follow record for that key
+// after the op's time or an identical one at the same instant, so a copied
+// or re-inserted signed op is a no-op) and drops the rest; foldFollows
+// derives kv follows back from the
+// own diary; the follows
+// kept from before `follow` records existed are published only through
+// legacyFollows / confirmLegacyFollows (the person confirms the list).
 //
 // Moderation: reads consult the blocklist snapshot ./sync.js stored (kept
 // only if it still verifies for the trust root), so a blocked followed
 // diary is hidden at once, even before a sync run purges its replica.
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const { certForKey } = require('@varanda/core/lib/cert')
 const {
   decodeBlock,
   memberCertRecord,
   profileRecord,
   postRecord,
+  mediaCoreRecord,
+  followRecord,
   validateRecord,
   formatRef,
-  latestProfile
+  latestProfile,
+  nowIso,
+  isHex64,
+  MEDIA_BLOCK_BYTES,
+  MAX_MEDIA_PER_POST,
+  MAX_MEDIA_ITEM_BLOCKS
 } = require('@varanda/core/lib/records')
+const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
@@ -178,9 +204,11 @@ function buildRecord (make) {
   }
 }
 
-async function publish (ctx, record) {
+// check(ownHex), optional: a rule on the own key, run before the append.
+async function publish (ctx, record, check = null) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (check !== null) check(ownHex)
     try {
       const seq = await store.appendRecord(diary, record, ctx.limits)
       return { seq, ref: formatRef({ author: ownHex, seq }) }
@@ -197,14 +225,149 @@ async function profileSet (ctx, { name, bio }) {
   return { seq }
 }
 
-async function postCreate (ctx, { text }) {
-  return publish(ctx, buildRecord(() => postRecord({ text })))
+function hasMedia (media) {
+  return media !== undefined && media !== null
+}
+
+async function postCreate (ctx, { text, media }) {
+  if (hasMedia(media)) await verifyMedia(ctx, media)
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media } : { text })))
 }
 
 // to is the parsed { author, seq } reference.
-async function postReply (ctx, { to, text }) {
+async function postReply (ctx, { to, text, media }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to })))
+  if (hasMedia(media)) await verifyMedia(ctx, media)
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media } : { text, replyTo: to })))
+}
+
+// ---- media ----
+
+function badMedia () {
+  return new UsageError(store.MEDIA_INVALID)
+}
+
+// SHA-256 (WebCrypto) of the concatenated chunks, lowercase hex.
+async function sha256Hex (chunks) {
+  const subtle = globalThis.crypto && globalThis.crypto.subtle
+  if (!subtle) throw new Error('WebCrypto indisponível')
+  const digest = await subtle.digest('SHA-256', b4a.concat(chunks))
+  return hex(new Uint8Array(digest))
+}
+
+function mediaKeyPairOf (ctx) {
+  return ctx.mediaKeyPair === undefined ? null : ctx.mediaKeyPair
+}
+
+// This device's media core, open and unlocked for `fn`: created with the
+// header naming the own diary when new, checked to name it when not, and
+// recorded in kv mediaCores. Never the diary key.
+async function withOwnMediaCore (ctx, fn) {
+  const mediaKeyPair = mediaKeyPairOf(ctx)
+  if (keyPairOf(ctx) === null || mediaKeyPair === null) throw new UsageError(store.LOCKED)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const core = await store.openMediaCore(ctx.storage, mediaKeyPair)
+    try {
+      const coreHex = hex(core.key)
+      if (coreHex === ownHex) throw badMedia()
+      if (core.length === 0) {
+        await store.writeMediaHeader(core, ownHex)
+      } else {
+        const header = decodeBlock(await core.get(0, { wait: false }))
+        if (header === null || validateMediaHeader(header) !== null || header.diary !== ownHex) {
+          throw new Error('núcleo de mídia de outro diário')
+        }
+      }
+      await store.addMediaCore(ctx.storage, coreHex)
+      return await fn({ core, coreHex, diary, ownHex })
+    } finally {
+      await core.close()
+    }
+  })
+}
+
+// Readies this device's media core for an upload (header, kv mediaCores)
+// without storing any item -> { core: hex, declared }: declared is false
+// when the own diary does not list the core among its latest `media-core`
+// records yet, so the caller declares it (declareMediaCore, through the
+// write gate) BEFORE mediaCommit appends the bytes: a declaration that
+// fails (seeder unreachable) leaves the core without the item, and a retry
+// appends it once.
+async function mediaPrepare (ctx) {
+  return withOwnMediaCore(ctx, async ({ coreHex, diary, ownHex }) => {
+    const declared = latestMediaCores(await store.readAll(diary), ownHex)
+    return { core: coreHex, declared: declared.some((c) => c.key === coreHex) }
+  })
+}
+
+// Stores one item (its blocks: MEDIA_BLOCK_BYTES each, the last 1..) in
+// this device's media core (readied by mediaPrepare; the header is written
+// here too when missing) -> the descriptor.
+async function mediaCommit (ctx, { blocks, mime, width, height, sha256 } = {}) {
+  if (keyPairOf(ctx) === null || mediaKeyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > MAX_MEDIA_ITEM_BLOCKS) throw badMedia()
+  let bytes = 0
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    if (!(block instanceof Uint8Array)) throw badMedia()
+    const n = block.byteLength
+    if (i < blocks.length - 1 ? n !== MEDIA_BLOCK_BYTES : (n < 1 || n > MEDIA_BLOCK_BYTES)) throw badMedia()
+    bytes += n
+  }
+  if (typeof sha256 !== 'string' || !isHex64(sha256) || (await sha256Hex(blocks)) !== sha256) throw badMedia()
+  // The shape is checked before anything is stored (start is provisional).
+  const shape = { core: '0'.repeat(64), mime, start: 1, blocks: blocks.length, bytes, sha256, width, height }
+  if (validateDescriptor(shape) !== null) throw badMedia()
+  return withOwnMediaCore(ctx, async ({ core, coreHex }) => {
+    const start = await store.appendMediaBlocks(core, blocks)
+    const descriptor = { core: coreHex, mime, start, blocks: blocks.length, bytes, sha256, width, height }
+    if (validateDescriptor(descriptor) !== null) throw badMedia()
+    return descriptor
+  })
+}
+
+// Appends the `media-core` record declaring coreHex (publish rules: block 0
+// first) -> { seq }. The own diary key is never a media core.
+async function declareMediaCore (ctx, coreHex) {
+  if (!isHex64(coreHex)) throw new UsageError('chave inválida')
+  const record = buildRecord(() => mediaCoreRecord({ key: coreHex }))
+  const { seq } = await publish(ctx, record, (ownHex) => {
+    if (coreHex === ownHex) throw new UsageError('chave inválida')
+  })
+  return { seq }
+}
+
+// Every descriptor must point into an own media core (kv mediaCores) that
+// the own diary declares among its latest `media-core` records, with every
+// block local and the bytes matching; else 'mídia inválida'.
+async function verifyMedia (ctx, media) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) throw badMedia()
+  const own = new Set(await store.readMediaCores(ctx.storage))
+  const { ownHex, declared } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
+    ownHex,
+    declared: new Set(latestMediaCores(await store.readAll(diary), ownHex).map((c) => c.key))
+  }))
+  for (const descriptor of media) {
+    if (validateDescriptor(descriptor) !== null) throw badMedia()
+    const { core: coreHex, start, blocks, bytes, sha256 } = descriptor
+    if (coreHex === ownHex || !own.has(coreHex) || !declared.has(coreHex)) throw badMedia()
+    const core = await store.openMediaCoreReadOnly(ctx.storage, coreHex)
+    if (core === null) throw badMedia()
+    try {
+      if (start + blocks > core.length) throw badMedia()
+      const chunks = []
+      let total = 0
+      for (let i = start; i < start + blocks; i++) {
+        const block = await core.get(i, { wait: false })
+        if (block === null) throw badMedia()
+        chunks.push(block)
+        total += block.byteLength
+      }
+      if (total !== bytes || (await sha256Hex(chunks)) !== sha256) throw badMedia()
+    } finally {
+      await core.close()
+    }
+  }
 }
 
 // ---- username ----
@@ -233,20 +396,229 @@ async function ownEntries (ctx) {
 
 // ---- follows ----
 
+// Every pending follow op is signed by the identity key over a
+// domain-separated statement of its fields and the own key, so an op
+// written straight into the storage (IndexedDB) or left by an older build
+// is never signed into the public diary: drainFollows verifies each op and
+// drops what does not verify.
+const FOLLOW_OP_PREFIX = 'varanda-follow-op-v1\n'
+const HEX128 = /^[0-9a-f]{128}$/
+
+function followOpPayload ({ key, on, at }, ownHex) {
+  return b4a.from(FOLLOW_OP_PREFIX + key + '\n' + (on ? '1' : '0') + '\n' + at + '\n' + ownHex)
+}
+
+// -> the op with its `sig` (hex128) for the own key.
+function signFollowOp (op, ownHex, keyPair) {
+  return { ...op, sig: hex(crypto.sign(followOpPayload(op, ownHex), keyPair.secretKey)) }
+}
+
+// Shape and signature of a pending op for the own key; never throws.
+function verifyFollowOp (op, ownHex) {
+  if (op === null || typeof op !== 'object' || !isHex64(op.key) || typeof op.on !== 'boolean' ||
+      typeof op.at !== 'string' || typeof op.sig !== 'string' || !HEX128.test(op.sig)) return false
+  try {
+    return crypto.verify(followOpPayload(op, ownHex), b4a.from(op.sig, 'hex'), b4a.from(ownHex, 'hex'))
+  } catch {
+    return false
+  }
+}
+
+// Local-first: kv follows changes at once and the change is queued, signed,
+// in kv followsPending (drainFollows appends it); needs the identity key (a
+// change planted while signed out would otherwise be signed into the diary
+// at the next sign-in). The queue keeps one op per key (the newest replaces
+// an older one, at the end) and at most MAX_INVENTORY - 1 ops.
 async function followChange (ctx, author, follow) {
+  const keyPair = keyPairOf(ctx)
+  if (keyPair === null) throw new UsageError(store.LOCKED)
   return withIdentity(ctx, async ({ ownHex, association }) => {
     if (author === ownHex) throw new Error('não é possível seguir a própria chave')
     if (follow && (await moderation(ctx.storage, association)).blocked.has(String(author).toLowerCase())) {
       throw new UsageError('autor bloqueado')
     }
-    const current = await store.readFollows(ctx.storage)
-    const has = current.includes(author)
-    if (follow === has) return { follows: current, changed: false }
-    // The inventory (own diary + follows) must fit a hello (MAX_INVENTORY).
-    if (follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
-    const next = follow ? [...current, author] : current.filter((k) => k !== author)
-    await store.writeFollows(ctx.storage, next)
-    return { follows: await store.readFollows(ctx.storage), changed: true }
+    return store.withFollowsLock(ctx.storage, async () => {
+      const current = await store.readFollows(ctx.storage)
+      const has = current.includes(author)
+      if (follow === has) return { follows: current, changed: false }
+      // The inventory (own diary + follows) must fit a hello (MAX_INVENTORY).
+      if (follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
+      const next = follow ? [...current, author] : current.filter((k) => k !== author)
+      // The op is queued BEFORE kv follows changes: kv follows only ever
+      // reaches the target state once the op is queued, so a retry that
+      // finds it there (changed: false) never hides an op that was never
+      // queued. A failed pending write changes nothing and propagates; a
+      // failed follows write after it leaves the op queued (the retry
+      // queues it again, harmless: the last op per key wins).
+      const key = String(author).toLowerCase()
+      if (isHex64(key) && key !== ownHex) {
+        const pending = (await store.readFollowsPending(ctx.storage)).filter((op) => op.key !== key)
+        pending.push(signFollowOp({ key, on: follow, at: nowIso() }, ownHex, keyPair))
+        await store.writeFollowsPending(ctx.storage, pending.slice(-(MAX_INVENTORY - 1)))
+      }
+      await store.writeFollows(ctx.storage, next)
+      return { follows: await store.readFollows(ctx.storage), changed: true }
+    })
+  })
+}
+
+// Appends the VERIFIED pending follow changes (verifyFollowOp for the own
+// key; the rest is dropped from the queue, never appended) as `follow`
+// records, in order -> { appended, seq } (seq: that of the last record
+// appended, null when none), at most one per key (the newest `at`) and
+// none the diary already decided after the op's `at` or at the same
+// instant with the same `on` (replayed or copied ops are no-ops). Needs
+// the key pair and block 0, else does
+// nothing. Nothing else is ever appended here: the follows this device
+// kept from before `follow` records existed reach the diary only through
+// confirmLegacyFollows (the person confirms the exact list once). The
+// pending ops appended are removed only once every append succeeded; ops
+// queued meanwhile stay.
+async function drainFollows (ctx) {
+  if (keyPairOf(ctx) === null) return { appended: 0, seq: null }
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) return { appended: 0, seq: null }
+    let seq = null
+    let appended = 0
+    // Every op read now leaves the queue at the end, appended or not (the
+    // read is capped at MAX_INVENTORY - 1 ops, ./node-store.js).
+    const read = await store.readFollowsPending(ctx.storage)
+    const verified = read.filter((op) => op.key !== ownHex && verifyFollowOp(op, ownHex))
+    // Replay protection. Signed ops can be copied or re-inserted by anyone
+    // with the profile, so: one op per key, the newest `at` (canonical ISO,
+    // so strings compare as instants; equal copies collapse to one), and
+    // nothing the caught-up diary already decided: a key whose latest valid
+    // follow record is AFTER the op's `at`, or at the same instant with the
+    // same `on` (the drain writes records with the op's own `at`, so a
+    // consumed op matches its record exactly), is skipped; an older op can
+    // never override a newer record, while a same-millisecond op with the
+    // other `on` is a real change and goes through.
+    const newest = new Map()
+    for (const op of verified) {
+      const current = newest.get(op.key)
+      if (current === undefined || op.at > current.at) newest.set(op.key, op)
+    }
+    const decided = new Map()
+    for (const { seq: s, record } of await store.readAll(diary)) {
+      if (record === null || record.type !== 'follow' || validateRecord(record, s) !== null) continue
+      const latest = decided.get(record.key)
+      if (latest === undefined || record.at >= latest.at) decided.set(record.key, { at: record.at, on: record.on })
+    }
+    const consumed = (op) => {
+      const latest = decided.get(op.key)
+      return latest !== undefined && (latest.at > op.at || (latest.at === op.at && latest.on === op.on))
+    }
+    const kept = new Set(newest.values())
+    const pending = verified.filter((op) => kept.has(op) && !consumed(op))
+    for (const op of pending) {
+      seq = await store.appendRecord(diary, followRecord({ key: op.key, on: op.on, at: op.at }), ctx.limits)
+      appended++
+    }
+    if (read.length > 0) {
+      const id = (op) => op.key + ':' + op.at + ':' + op.sig
+      const done = new Set(read.map(id))
+      await store.withFollowsLock(ctx.storage, async () => {
+        const now = await store.readFollowsPending(ctx.storage)
+        await store.writeFollowsPending(ctx.storage, now.filter((op) => !done.has(id(op))))
+      })
+    }
+    return { appended, seq }
+  })
+}
+
+// ---- legacy follows (from before `follow` records existed) ----
+//
+// kv follows is unauthenticated (anyone with the browser profile can write
+// it) and the per-device marker kv followsMigrated can be deleted, so the
+// follows a device kept before `follow` records existed are NEVER published
+// automatically: legacyFollows lists them and confirmLegacyFollows publishes
+// exactly the keys the person confirmed (as signed pending ops, appended by
+// the drain), drops the rest from kv follows and sets the marker. While the
+// marker is unset and kv follows is non-empty the sync's fold leaves kv
+// follows alone (./node-store.js writeFoldedFollows): the device keeps its
+// old list locally until the person decides.
+
+// The kv follows that no valid diary `follow` record mentions and no
+// verified pending op covers: valid hex64, not the own key, sorted, at most
+// MAX_INVENTORY - 1.
+async function legacySet (ctx, diary, ownHex) {
+  const mentioned = new Set()
+  for (const { seq, record } of await store.readAll(diary)) {
+    if (record !== null && record.type === 'follow' && validateRecord(record, seq) === null) mentioned.add(record.key)
+  }
+  for (const op of await store.readFollowsPending(ctx.storage)) {
+    if (verifyFollowOp(op, ownHex)) mentioned.add(op.key)
+  }
+  const keys = new Set()
+  for (const raw of await store.readFollows(ctx.storage)) {
+    const key = String(raw).toLowerCase()
+    if (isHex64(key) && key !== ownHex && !mentioned.has(key)) keys.add(key)
+  }
+  return [...keys].sort().slice(0, MAX_INVENTORY - 1)
+}
+
+// Needs the key pair (USAGE LOCKED) and block 0 (GENESIS_REQUIRED).
+async function withLegacy (ctx, fn) {
+  if (keyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    return fn({ diary, ownHex })
+  })
+}
+
+// -> { keys }: the legacy follows awaiting the person's decision; [] once
+// this device's marker is set. An EMPTY set with the marker unset (every
+// local follow is already the diary's or pending) leaves nothing to decide:
+// the marker is set right here, so the fold is not blocked for good on a
+// device the person never sees a card for (nothing is published).
+async function legacyFollows (ctx) {
+  return withLegacy(ctx, async ({ diary, ownHex }) => {
+    return store.withFollowsLock(ctx.storage, async () => {
+      if (await store.readFollowsMigrated(ctx.storage)) return { keys: [] }
+      const keys = await legacySet(ctx, diary, ownHex)
+      if (keys.length === 0) await store.writeFollowsMigrated(ctx.storage)
+      return { keys }
+    })
+  })
+}
+
+// Publishes the legacy follows the person confirmed -> { published }: for
+// each key in BOTH `keys` and the (recomputed) legacy set a signed `on:
+// true` pending op is queued (the drain appends it); every legacy key not
+// confirmed leaves kv follows; then the marker is set. Keys outside the set
+// are ignored.
+async function confirmLegacyFollows (ctx, keys) {
+  const keyPair = keyPairOf(ctx)
+  return withLegacy(ctx, async ({ diary, ownHex }) => {
+    const wanted = new Set((Array.isArray(keys) ? keys : []).filter((k) => typeof k === 'string').map((k) => k.toLowerCase()))
+    return store.withFollowsLock(ctx.storage, async () => {
+      const set = (await store.readFollowsMigrated(ctx.storage)) ? [] : await legacySet(ctx, diary, ownHex)
+      const confirmed = set.filter((key) => wanted.has(key))
+      const dropped = new Set(set.filter((key) => !wanted.has(key)))
+      if (confirmed.length > 0) {
+        const pending = (await store.readFollowsPending(ctx.storage)).filter((op) => !confirmed.includes(op.key))
+        const at = nowIso()
+        for (const key of confirmed) pending.push(signFollowOp({ key, on: true, at }, ownHex, keyPair))
+        await store.writeFollowsPending(ctx.storage, pending.slice(-(MAX_INVENTORY - 1)))
+      }
+      if (dropped.size > 0) {
+        const follows = (await store.readFollows(ctx.storage)).filter((k) => !dropped.has(String(k).toLowerCase()))
+        await store.writeFollows(ctx.storage, follows)
+      }
+      await store.writeFollowsMigrated(ctx.storage)
+      return { published: confirmed.length }
+    })
+  })
+}
+
+// kv follows derived from the own diary's `follow` records with the pending
+// ops on top (./node-store.js writeFoldedFollows) -> { follows, changed };
+// a diary with no `follow` record leaves kv follows as it is.
+async function foldFollows (ctx) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const entries = await store.readAll(diary)
+    if (!hasFollowRecords(entries)) return { follows: await store.readFollows(ctx.storage), changed: false }
+    return store.writeFoldedFollows(ctx.storage, followSet(entries, ownHex), ownHex)
   })
 }
 
@@ -442,6 +814,18 @@ module.exports = {
   followAdd,
   followRemove,
   followList,
+  followChange,
+  followOpPayload,
+  signFollowOp,
+  verifyFollowOp,
+  drainFollows,
+  legacyFollows,
+  confirmLegacyFollows,
+  foldFollows,
+  mediaPrepare,
+  mediaCommit,
+  declareMediaCore,
+  verifyMedia,
   logRead,
   feedRead,
   profileRead,

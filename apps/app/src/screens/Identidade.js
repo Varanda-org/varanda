@@ -1,10 +1,13 @@
 // Identidade: create the identity, show the public key and the member
-// certificate status, add the certificate the association issued.
+// certificate status, add the certificate the association issued. Ajustes
+// shows it in two parts (`view`): 'conta' is the account link and @nome in
+// plain words, 'tecnica' the technical card (public key behind a reveal,
+// association, certificate) under Avançado. The setup uses 'all'.
 //
 // On the web's browser node (node.passkey !== null) the identity comes from
 // a passkey: the first card is 'Entrar' (entrar com a passkey, criar passkey,
 // concluir a criação when the PRF only arrives on a second ceremony,
-// recomeçar for a diary of another identity), a blocking notice when the
+// recomeçar for an account of another identity), a blocking notice when the
 // browser cannot derive it (no PRF), and after a successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
 // the certificate and the posts back from the seeder). The native node and
@@ -28,11 +31,11 @@ import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
 import { atName } from '../who'
 
-const WELCOME_TEXT = 'Uma rede social que roda nos aparelhos das pessoas.'
-const ENTRAR_TEXT = 'Sua identidade vem da passkey: guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador. Perder a passkey é perder a identidade; outra passkey é outra identidade.'
+const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
+const ENTRAR_TEXT = 'Você entra com uma passkey. Guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador. Se perder a passkey, perde a conta; outra passkey é outra conta.'
 // Shown wherever the own key is shown during the setup (the association
 // issues the certificate for it).
-const KEY_NOTE = 'Sua chave é mostrada aqui e no seu perfil; ela nunca aparece para outras pessoas.'
+const KEY_NOTE = 'Esta chave é só sua; a associação usa ela para emitir o certificado.'
 const NO_NAME = 'ainda sem @nome'
 // A passkey created but unusable (no PRF) is named so it can be deleted.
 function staleText (userId) {
@@ -41,14 +44,14 @@ function staleText (userId) {
     : ''
 }
 
-const NO_PRF_TEXT = 'Este navegador ou gerenciador de passkeys não oferece o recurso necessário (PRF). Use o Chrome ou o Edge com o Gerenciador de Senhas do Google, ou o Safari 18 com as Chaves do iCloud.'
-const EXISTS_TEXT = 'Já existe um diário neste navegador; outra passkey é outra identidade.'
-const RESET_TEXT = 'A identidade antiga não pode ser reconstruída; ela precisa de um certificado novo. As publicações dela que ainda estão na fila de saída são apagadas.'
-const PENDING_TEXT = 'A passkey foi criada. Conclua a criação para derivar a sua identidade.'
+const NO_PRF_TEXT = 'Este navegador não consegue usar passkeys com o Varanda. Use o Chrome ou o Edge, ou o Safari 18 ou mais novo.'
+const EXISTS_TEXT = 'Já existe uma conta neste navegador; outra passkey é outra conta.'
+const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
+const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
 
 function mismatchText (legacy) {
-  return 'O diário guardado neste navegador é de outra identidade' +
-    (legacy ? ', de uma versão anterior, com a chave gravada no navegador' : '') + '.'
+  return 'A conta guardada neste navegador é de outra passkey' +
+    (legacy ? ' (de uma versão anterior do app)' : '') + '.'
 }
 
 // The certificate step: the public key to send to the association (copy or
@@ -133,14 +136,14 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // to a Google account. Only same-origin /account/* calls (../account.js) and
 // the RPCs account.sign, cert.add and username.add; the Google page opens in
 // this same tab, so nothing is kept in the browser across the reload.
-const LINK_TEXT = 'Para receber o certificado de membro, vincule esta chave a uma conta Google e escolha um @nome. A associação registra o vínculo entre esta chave e a conta Google para poder responder a um pedido judicial ou bloquear a conta; nada mais é coletado. Esta etapa não verifica a idade. Você poderá trocar o @nome depois, uma vez a cada 7 dias.'
-const RELOAD_TEXT = 'A página vai abrir o Google e, na volta, recarregar e pedir a passkey de novo.'
+const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda só para atender uma ordem judicial ou bloquear a conta; nada mais é coletado e a idade não é verificada. Você pode trocar o @nome depois, uma vez a cada 7 dias.'
+const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
-const NAME_RULE = 'nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
+const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const LINK_FAILED = 'não foi possível vincular a conta'
 const CERT_KEPT_ERROR = 'certificado já gravado'
-const CERT_KEPT_TEXT = 'vínculo registrado; o certificado atual foi mantido'
-const CERT_RECEIVED = 'certificado recebido'
+const CERT_KEPT_TEXT = 'Conta vinculada.'
+const CERT_RECEIVED = 'Conta vinculada.'
 // Finish errors (account.js ERROR_MESSAGES) after which the pending row is
 // useless: the member may pick another Google account.
 const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
@@ -392,11 +395,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const typed = isUsername(newName)
     body = (
       <>
-        <Label>nome de usuário</Label>
+        <Label>seu @nome</Label>
         <Body>{displayText(atName(status.username) || NO_NAME)}</Body>
         {/* After the one automatic try (certTried), whatever else cleared the error. */}
-        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='receber o certificado' onPress={receive} /> : null}
-        {memberCert && nameFailed && !busy ? <Btn label='enviar o @nome de novo' onPress={retryName} /> : null}
+        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='tentar de novo' onPress={receive} /> : null}
+        {memberCert && nameFailed && !busy ? <Btn label='tentar enviar o @nome de novo' onPress={retryName} /> : null}
         {!renameOpen
           ? <Btn label='trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} />
           : blocked
@@ -432,7 +435,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Body>
                 {setup
                   ? 'Quase lá: confirme o vínculo com ' + displayText(atName(row.username) || NO_NAME) + '.'
-                  : 'Conta Google escolhida. Confirme o vínculo com o nome ' + displayText(atName(row.username) || NO_NAME) + '.'}
+                  : 'Conta Google escolhida. Confirme o vínculo com ' + displayText(atName(row.username) || NO_NAME) + '.'}
               </Body>
               {confirmFailed
                 // The mapped message is the card's error line below.
@@ -449,11 +452,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         {showForm && setup
           ? (
             <>
-              <Field label='Escolha seu @nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              <Soft>Começa com @: de 3 a 20 letras minúsculas, números ou _.</Soft>
+              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+              <Soft>De 3 a 20 letras minúsculas, números ou _.</Soft>
               <Body>{LINK_TEXT}</Body>
               <Soft>{RELOAD_TEXT}</Soft>
-              <Btn label='Vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+              <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
             </>
             )
           : null}
@@ -476,7 +479,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
   return (
     <Card>
-      {setup ? null : <Label>conta Google</Label>}
+      {setup ? null : <Label>conta</Label>}
       <Notice>{returned || ''}</Notice>
       {body}
       <ErrorText>{acctError || error}</ErrorText>
@@ -488,7 +491,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
 // setup: the first run (App.js). The cards render inside the Stepper of
 // `step` (src/onboarding.js) at `index` of `total`.
-export default function Identidade ({ active, embedded = false, setup = false, step, index = 0, total = 3, onInfo }) {
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo }) {
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -517,6 +520,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
   const [mismatch, setMismatch] = useState(null)
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmCreate, setConfirmCreate] = useState(false)
+  const [showKey, setShowKey] = useState(false)
   const [awaitingComplete, setAwaitingComplete] = useState(false)
   // The once sync after an unlock (node.passkey.recovering, shared by every
   // mounted Identidade): no instance sends a request while it runs (any
@@ -596,7 +600,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
     const r = await add.run(() => node.request('cert.add', { cert }))
     if (r.ok) {
       setCertText('')
-      setDone('certificado gravado')
+      setDone('Certificado gravado.')
       refresh()
     }
   }
@@ -688,13 +692,13 @@ export default function Identidade ({ active, embedded = false, setup = false, s
     if (!pkStart()) return
     const oldKey = pkStatus !== null ? pkStatus.publicKey : null
     if (typeof oldKey === 'string' && !outbox.forgetAuthor(oldKey)) {
-      setPkError('não foi possível apagar a fila de saída deste aparelho')
+      setPkError('não foi possível apagar as publicações que aguardam envio neste aparelho')
       return pkEnd()
     }
     passkey.reset().then(() => {
       setMismatch(null)
       setAwaitingComplete(false)
-      setPkNote('O diário antigo foi apagado deste navegador. Entre com a passkey para recomeçar.')
+      setPkNote('A conta antiga foi apagada deste navegador. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
 
@@ -766,7 +770,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
                     <>
                       <Notice>{RESET_TEXT}</Notice>
                       <Row>
-                        <Btn label='apagar o diário e recomeçar' danger onPress={doReset} pending={pkPending} />
+                        <Btn label='apagar e recomeçar' danger onPress={doReset} pending={pkPending} />
                         <Btn label='cancelar' secondary onPress={() => setConfirmReset(false)} disabled={pkPending} />
                       </Row>
                     </>
@@ -818,37 +822,41 @@ export default function Identidade ({ active, embedded = false, setup = false, s
   // Hosted page with a passkey: the account link replaces the pasted
   // certificate. Native and varanda-serve keep CertificateStep / the field.
   const linkMode = node.hosted === true && withPasskey
+  // Which parts render (Ajustes: 'conta' and 'tecnica'; everything else 'all').
+  const showLink = view !== 'tecnica' || needsCert
+  const showTech = view !== 'conta'
 
   return frame('Identidade', (
     <>
       <ErrorText>{loadError}</ErrorText>
       <ErrorText>{withPasskey ? pkError : ''}</ErrorText>
-      {recovering ? <Notice>sincronizando com o semeador…</Notice> : null}
+      {recovering ? <Notice>Buscando sua conta…</Notice> : null}
       {info === null && !loadError ? <Soft>carregando…</Soft> : null}
       {info !== null && info.publicKey === null
         ? (
           <Card>
-            <Body>Você ainda não tem identidade neste nó. A identidade é a chave do seu diário; crie uma para começar.</Body>
+            <Body>Você ainda não tem uma conta neste aparelho. Crie uma para começar.</Body>
             <ErrorText>{create.error}</ErrorText>
-            <Btn label='criar identidade' onPress={doCreate} pending={create.pending} />
+            <Btn label='criar conta' onPress={doCreate} pending={create.pending} />
           </Card>
           )
         : null}
       {/* The technical card stays in Ajustes › Identidade; the setup shows
           the key only where the certificate step needs it (below). */}
-      {!setup && info !== null && info.publicKey !== null
+      {showTech && !setup && info !== null && info.publicKey !== null
         ? (
           <Card>
-            <Label>sua chave pública</Label>
-            <Mono>{displayText(info.publicKey)}</Mono>
+            <Label>chave pública</Label>
+            {showKey ? <Mono>{displayText(info.publicKey)}</Mono> : null}
+            <Btn label={showKey ? 'esconder chave' : 'mostrar chave'} secondary onPress={() => setShowKey((v) => !v)} />
             {identity ? <Label>associação</Label> : null}
             {identity ? <Mono>{displayText(identity.association)}</Mono> : null}
             <Body>{'certificado de membro: ' + (info.memberCert ? 'válido' : 'ausente')}</Body>
           </Card>
           )
         : null}
-      {needsCert ? <Soft>Sem o certificado, o nó não publica nem sincroniza.</Soft> : null}
-      {linkMode && info !== null && info.publicKey !== null
+      {needsCert && showTech ? <Soft>Sem o certificado, este aparelho não publica nem sincroniza.</Soft> : null}
+      {showLink && linkMode && info !== null && info.publicKey !== null
         ? (
           <LinkCard
             publicKey={info.publicKey}
@@ -860,7 +868,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
           />
           )
         : null}
-      {needsCert && withPasskey && !linkMode
+      {showTech && needsCert && withPasskey && !linkMode
         ? (
           <CertificateStep
             publicKey={info.publicKey}
@@ -872,7 +880,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
           />
           )
         : null}
-      {needsCert && !withPasskey
+      {showTech && needsCert && !withPasskey
         ? (
           <Card>
             {/* The setup hides the technical card: the association issues
@@ -888,7 +896,7 @@ export default function Identidade ({ active, embedded = false, setup = false, s
           )
         : null}
       <Notice>{done}</Notice>
-      {!setup && info !== null && info.publicKey !== null ? <Soft>{'diários seguidos: ' + String(info.followCount)}</Soft> : null}
+      {showTech && !setup && info !== null && info.publicKey !== null ? <Soft>{'pessoas seguidas: ' + String(info.followCount)}</Soft> : null}
     </>
   ))
 }

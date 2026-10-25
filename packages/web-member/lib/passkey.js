@@ -10,7 +10,16 @@
 //                       info = utf8('varanda/member-identity/ed25519/v1'), 32)
 //   keyPair = hypercore-crypto.keyPair(seed)   (crypto_sign_seed_keypair)
 // Nothing else (challenge, credential id, rp.id, device, association) enters
-// it. The labels are raw UTF-8 bytes, not hashes, so every option is built
+// it.
+//
+// The media key pair (per DEVICE: each device signs its own media cores),
+// version 1, from the same PRF output and a random 32-byte nonce the device
+// keeps in kv 'mediaDevice' (web/node.js):
+//   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-media/hkdf/v1'),
+//                       info = utf8('varanda/member-media/ed25519/v1') || nonce, 32)
+//   mediaKeyPair = hypercore-crypto.keyPair(seed)
+// Other labels than the identity's, so the two keys are unrelated; the
+// identity derivation above is unchanged by it. The labels are raw UTF-8 bytes, not hashes, so every option is built
 // synchronously and the WebAuthn call stays inside the user's click.
 //
 // Browser-bundleable: no Node builtin, only globalThis.crypto (subtle and
@@ -27,8 +36,11 @@ const hypercoreCrypto = require('hypercore-crypto')
 const PRF_EVAL = b4a.from('varanda/member-identity/prf/v1', 'utf8')
 const HKDF_SALT = b4a.from('varanda/member-identity/hkdf/v1', 'utf8')
 const HKDF_INFO = b4a.from('varanda/member-identity/ed25519/v1', 'utf8')
+const MEDIA_HKDF_SALT = b4a.from('varanda/member-media/hkdf/v1', 'utf8')
+const MEDIA_HKDF_INFO = b4a.from('varanda/member-media/ed25519/v1', 'utf8')
 
 const PRF_BYTES = 32
+const NONCE_BYTES = 32
 const USER_ID_BYTES = 32
 const CHALLENGE_BYTES = 32
 const TIMEOUT_MS = 120000
@@ -119,24 +131,32 @@ function prfExtension () {
   return { prf: { eval: { first: new Uint8Array(PRF_EVAL) } } }
 }
 
-// HKDF-SHA-256 of a 32-byte PRF output -> the 32-byte Ed25519 seed.
-async function seedFromPrf (prf) {
+function checkPrf (prf) {
   if (!(prf instanceof Uint8Array) || prf.byteLength !== PRF_BYTES) throw new TypeError('resultado PRF inválido')
+}
+
+// HKDF-SHA-256(ikm = prf, salt, info, 32 bytes) -> a fresh Uint8Array.
+async function hkdf (prf, salt, info) {
   const ikm = new Uint8Array(prf)
   try {
     const subtle = globalThis.crypto.subtle
     const key = await subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits'])
-    const bits = await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: HKDF_SALT, info: HKDF_INFO }, key, 256)
+    const bits = await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, 256)
     return new Uint8Array(bits)
   } finally {
     ikm.fill(0)
   }
 }
 
-// -> { publicKey: Uint8Array(32), secretKey: Uint8Array(64) } in fresh buffers.
-// The seed and the key pair hypercore-crypto allocated are zeroed after.
-async function keyPairFromPrf (prf) {
-  const seed = await seedFromPrf(prf)
+// HKDF-SHA-256 of a 32-byte PRF output -> the 32-byte Ed25519 seed.
+async function seedFromPrf (prf) {
+  checkPrf(prf)
+  return hkdf(prf, HKDF_SALT, HKDF_INFO)
+}
+
+// -> { publicKey: Uint8Array(32), secretKey: Uint8Array(64) } in fresh
+// buffers. The seed and the key pair hypercore-crypto allocated are zeroed.
+function keyPairFromSeed (seed) {
   let kp = null
   try {
     kp = hypercoreCrypto.keyPair(seed)
@@ -144,6 +164,27 @@ async function keyPairFromPrf (prf) {
   } finally {
     seed.fill(0)
     if (kp) kp.secretKey.fill(0)
+  }
+}
+
+// -> { publicKey: Uint8Array(32), secretKey: Uint8Array(64) } in fresh buffers.
+// The seed and the key pair hypercore-crypto allocated are zeroed after.
+async function keyPairFromPrf (prf) {
+  return keyPairFromSeed(await seedFromPrf(prf))
+}
+
+// The device's media key pair: prf (32 bytes) and the device's nonce (32
+// bytes), neither kept nor changed. Same buffer discipline as keyPairFromPrf.
+async function mediaKeyPairFromPrf (prf, nonce) {
+  checkPrf(prf)
+  if (!(nonce instanceof Uint8Array) || nonce.byteLength !== NONCE_BYTES) throw new TypeError('nonce inválido')
+  const info = new Uint8Array(MEDIA_HKDF_INFO.byteLength + NONCE_BYTES)
+  info.set(MEDIA_HKDF_INFO, 0)
+  info.set(nonce, MEDIA_HKDF_INFO.byteLength)
+  try {
+    return keyPairFromSeed(await hkdf(prf, MEDIA_HKDF_SALT, info))
+  } finally {
+    info.fill(0)
   }
 }
 
@@ -315,9 +356,12 @@ module.exports = {
   PRF_EVAL,
   HKDF_SALT,
   HKDF_INFO,
+  MEDIA_HKDF_SALT,
+  MEDIA_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
+  mediaKeyPairFromPrf,
   rpIdFor,
   supportStatus,
   createOptions,

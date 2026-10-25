@@ -14,10 +14,25 @@
 //
 // The identity key (./session.js host controls, all serialized with the
 // RPC handlers; none is reachable over the channel):
-//   await node.setKeyPair({ publicKey, secretKey })  // unlock, in memory only
-//   await node.clearKeyPair()                        // lock (zero-filled)
+//   await node.setKeyPair({ publicKey, secretKey }, { media })  // unlock, in memory only;
+//                                // media: this device's media core pair (optional)
+//   await node.clearKeyPair()    // lock (both pairs zero-filled)
 //   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
-//   await node.reset()           // delete the diary and lock; config and follows stay
+//   await node.reset()           // delete the diary, the media cores and the pending
+//                                // follows, and lock; config and follows stay
+//   await node.mediaUpload({ bytes, mime, width, height, onProgress }) // -> descriptor
+// Uploads are a host control, not an RPC method: one request on the channel
+// is capped at 64 KiB (@varanda/rpc MAX_REQUEST) and an image is up to 8 MiB.
+// The page hands the bytes straight to the session, which stores them in
+// this device's media core and returns the descriptor a post then carries.
+// Follows are local-first: follow.add / follow.remove (unlocked only)
+// answer at once and the session appends the `follow` records itself
+// (./session.js, the drain); the event follows.changed { count } tells the
+// page the set changed from the diary (another device's follows folded in
+// by the sync). The follows kept from before `follow` records existed are
+// published only once the person confirms the list:
+//   await node.legacyFollows()             // -> { keys } (unlocked only)
+//   await node.confirmLegacyFollows(keys)  // -> { published }; the rest leave the list
 //
 // A second connect() replaces the first (its port is closed and its onClose
 // called, as when another varanda-serve socket takes over). node.close()
@@ -89,8 +104,11 @@ function createBrowserNode ({ storage, ...options } = {}) {
   return {
     connect,
     close,
-    setKeyPair: (keyPair) => session.setKeyPair(keyPair),
+    setKeyPair: (keyPair, options) => session.setKeyPair(keyPair, options),
     clearKeyPair: () => session.clearKeyPair(),
+    mediaUpload: (args) => session.mediaUpload(args),
+    legacyFollows: () => session.legacyFollows(),
+    confirmLegacyFollows: (keys) => session.confirmLegacyFollows(keys),
     identityStatus: () => session.identityStatus(),
     reset: () => session.reset(),
     get state () {

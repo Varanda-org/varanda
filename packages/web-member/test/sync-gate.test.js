@@ -231,6 +231,7 @@ test('an endpoint whose seeder certificate does not verify gets nothing', async 
     syncOptions: { retryMinMs: 100, retryMaxMs: 200 }
   })
   t.teardown(() => node.close(), { force: true })
+  await node.setKeyPair(nodeShell.keyPair) // follows need the key (signed ops)
   const web = await connectClient(node, { timeoutMs: 30000 })
   await web.request('follow.add', { key: hex(served.key) })
   const stopped = await onceRun(web, 2000)

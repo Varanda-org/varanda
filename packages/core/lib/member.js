@@ -19,10 +19,12 @@ const {
   memberCertRecord,
   profileRecord,
   postRecord,
+  followRecord,
   validateRecord,
   formatRef,
   latestProfile
 } = require('./records')
+const { followSet } = require('./media')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -302,7 +304,7 @@ async function usernameAdd (ctx, record) {
 // ---- follows ----
 
 async function followChange (ctx, author, follow) {
-  return withIdentity(ctx, ({ ownHex, association }) => {
+  return withIdentity(ctx, async ({ diary, ownHex, association }) => {
     if (author === ownHex) throw new Error('não é possível seguir a própria chave')
     // A blocked author cannot be followed (B2); unfollowing one stays possible.
     // An existing follow of an author blocked later is kept in follows.json,
@@ -311,12 +313,17 @@ async function followChange (ctx, author, follow) {
       throw new UsageError(BLOCKED_AUTHOR)
     }
     const current = readFollows(ctx.dataDir)
-    const has = current.includes(author)
-    if (follow === has) return { follows: current, changed: false }
+    const listAgrees = follow === current.includes(author)
+    // Block 0 exists: the diary must agree too. A retry after a failed
+    // append finds follows.json already right and still writes the record.
+    const diaryAgrees = diary.length === 0 || follow === followSet(await readAll(diary), ownHex).includes(author)
+    if (listAgrees && diaryAgrees) return { follows: current, changed: false }
     // The inventory (own diary + follows) must fit a hello (MAX_INVENTORY).
-    if (follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
-    const next = follow ? [...current, author] : current.filter((k) => k !== author)
-    writeFollows(ctx.dataDir, next)
+    if (!listAgrees && follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
+    // Append first, then follows.json: a failed append leaves the local state
+    // untouched, so a retry writes the record exactly once.
+    if (!diaryAgrees) await appendRecord(diary, followRecord({ key: author, on: follow }))
+    if (!listAgrees) writeFollows(ctx.dataDir, follow ? [...current, author] : current.filter((k) => k !== author))
     return { follows: readFollows(ctx.dataDir), changed: true }
   })
 }

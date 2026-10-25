@@ -108,7 +108,9 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 1. O app assina a publicação e a acrescenta ao diário da pessoa, no aparelho.
 2. O app anuncia o diário numa tabela distribuída (DHT) e entrega as novidades a seguidores online e aos semeadores.
-3. Fotos e vídeos ficam em arquivos separados, baixados só quando alguém abre.
+3. Fotos e vídeos ficam em arquivos separados, baixados só quando alguém abre. Hoje: só fotos e GIFs, só pela versão web, num núcleo de fotos por aparelho; o semeador as serve por HTTP (vídeo espera a comparação com listas de hashes, em Moderação).
+
+**Quem a pessoa segue é público.** A lista de seguidos fica no próprio diário (registros `follow`), para chegar igual a todos os aparelhos da pessoa. Por isso qualquer um que tenha o diário vê quem ela segue; o app diz isso em Seguindo.
 
 **Ler e sincronizar**
 
@@ -136,6 +138,7 @@ A chave de cada pessoa é dividida em três partes e quaisquer duas assinam: nin
 - **Como o guardião confirma que é você:** passkey, e-mail e o registro da verificação de idade. Nunca só SMS, porque golpes de troca de chip são comuns no Brasil.
 - **Técnica:** assinatura por limiar FROST ([RFC 9591](https://www.rfc-editor.org/rfc/rfc9591)), que suporta o tipo de chave (Ed25519) usado pelo Hypercore. O [FROSTR](https://opensats.org/projects/frostr) já aplica a mesma ideia a chaves Nostr.
 - **No MVP:** só o backup cifrado por passkey. O guardião entra na fase 2.
+- **Continuar conectado na versão web (troca consciente).** Na web, a chave vem da passkey. Antes ela ficava só na memória da página e cada recarga pedia a passkey de novo; agora a página guarda o resultado da passkey cifrado (AES-GCM com uma chave do navegador que não pode ser exportada, preso ao endereço e à identidade) e a pessoa continua conectada até tocar "Sair" ou ficar 30 dias sem abrir o app (aí a passkey é pedida de novo; cada abertura renova o prazo). Ganha-se uso de rede social de verdade (abrir e já estar dentro). Perde-se isto: a chave que cifra a sessão fica no mesmo perfil do navegador que a sessão cifrada, então uma cópia do perfil dá a identidade até "Sair" ou os 30 dias sem uso; um script que rode na origem da página pode usar a sessão guardada e agir como o membro; e quem pega o aparelho desbloqueado publica em nome dele. A cifra impede só que o resultado da passkey fique gravado em claro e que o registro, copiado sozinho, abra em outro endereço ou para outra identidade. Detalhes em `docs/rpc.md` seção 11.
 - **Limite:** dois guardiões juntos poderiam assinar. Por isso a pessoa sempre guarda uma parte, e os guardiões são organizações independentes.
 
 ## Verificação de idade
@@ -197,6 +200,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
 | Publicações e perfil | Celulares de quem segue e semeadores no Brasil | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
+| Lista de quem a pessoa segue (registros `follow` no diário) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
 | Mensagens diretas | Só nos aparelhos dos participantes, cifradas de ponta a ponta | Execução de contrato | Até apagarem |
 | Certificado de membro (chave, faixa etária, método, data) | Serviço de idade, no Brasil | Obrigação legal, ECA Digital (Art. 7º, II) | Enquanto a conta existir |
 | Imagem do rosto, só na estimativa de idade | Processada e apagada na hora | Dado sensível: consentimento específico ou obrigação legal (Art. 11), a definir | Nenhuma |
@@ -256,7 +260,7 @@ Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a mo
 - A lista traz só chaves públicas, um número de sequência e datas: nunca o motivo da decisão, o nome, o e-mail ou a conta Google.
 - Isto não é revogação de certificado de membro: o certificado individual continua válido, e o que sai é o diário, pelo bloqueio da chave. A revogação existe só para a chave de emissor do serviço de conta (`mod revoke-issuer`): se ela vazar, os certificados v2 e os @nomes que ela assinou deixam de valer em todos os nós atualizados.
 
-- **Mídia ilegal:** antes de exibir ou repassar, o app compara fotos e vídeos com listas de hashes de material ilegal conhecido, obtidas com organizações especializadas (a definir). Abuso sexual infantil é denunciado à SaferNet Brasil e à Polícia Federal.
+- **Mídia ilegal:** antes de exibir ou repassar, o app compara fotos e vídeos com listas de hashes de material ilegal conhecido, obtidas com organizações especializadas (a definir). Abuso sexual infantil é denunciado à SaferNet Brasil e à Polícia Federal. **Isso ainda não existe.** A versão atual publica fotos e GIFs sem nenhuma comparação com listas de hashes; por esse motivo ela aceita só imagens e nenhum vídeo. Até a comparação existir, o que segura mídia ilegal é a denúncia e o bloqueio da conta: um diário bloqueado tem as fotos apagadas do semeador junto com ele, e o semeador deixa de servi-las.
 - **Prazos:** desde a decisão do STF sobre o Art. 19 (junho de 2025), a plataforma responde por crimes e atos ilícitos que não remover após notificação, sem precisar de ordem judicial (lógica do Art. 21). Para crimes contra a honra vale o Art. 19: a responsabilidade depende de ordem judicial. Anúncios pagos e circulação em massa de crimes graves exigem cuidado ainda maior. A associação publica seus prazos de resposta.
 - **Ordens judiciais:** cumpridas pela mesma lista. Mensagens cifradas e conteúdo que só existe nos aparelhos a associação não tem como entregar, e a política de privacidade diz isso.
 - **Proteção de quem hospeda:** cada celular guarda só diários de quem a pessoa segue, e semeadores são organizações, não pessoas físicas. Isso reduz o risco de alguém guardar sem saber material ilegal, cuja posse é crime (ECA, Art. 241-B).

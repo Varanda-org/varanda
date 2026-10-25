@@ -2,6 +2,26 @@
 // sections 1, 3, 4 and 5). A log is kept only when its block 0 is a valid
 // member certificate for the trusted association; until then its block 0 is
 // fetched through the quarantine store and never opened in the main store.
+//
+// Media cores (lib/media.js) ride on the same invariants through a TWO-WAY
+// binding: a media core K is kept only while (1) an admitted, gated,
+// non-blocked diary D names K in one of its latest MAX_MEDIA_CORES
+// `media-core` records (the seeder scans D's own blocks for them, never
+// trusting a peer's word) AND (2) K's block 0 is a valid media header naming
+// that same D (fetched through the quarantine like a diary's block 0). Either
+// side alone admits nothing: a diary cannot pull in a core it does not own,
+// and a core cannot attach itself to a diary that never declared it. Every
+// stored media core is listed in admitted.json (`media: { K: { diary, seq } }`,
+// written by the same serialized writer) and purged exactly like a diary:
+// persisted before it is opened in the main store, purged before it leaves
+// the file, dropped with its diary, on a fork, over the media quota, or when
+// it falls out of the diary's latest set. Media keys NEVER travel on the
+// admission channel ('varanda/admission/1'): no announce, no `have`, no new
+// message type. A new type would be a bad message for every peer from before
+// this change (they disconnect on it) and the `have` inventory is capped at
+// MAX_INVENTORY entries that members read as diaries; readers fetch media
+// over HTTP (apps/cli/lib/seed-ws.js) through mediaRead, and the swarm serves
+// K's discovery key like any other admitted core.
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
@@ -32,6 +52,7 @@ const {
   openStore,
   lockHeld,
   openReplica,
+  openMediaReplica,
   openQuarantine,
   removeQuarantine,
   purgeReplica,
@@ -44,7 +65,17 @@ const {
 } = require('./store')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateRecord, decodeBlock, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
+const {
+  validateRecord,
+  validRecordCopy,
+  decodeBlock,
+  MAX_LOG_BLOCKS,
+  MAX_LOG_BYTES,
+  MAX_MEDIA_BLOCKS,
+  MAX_MEDIA_BYTES,
+  MAX_MEDIA_CORES
+} = require('./records')
+const { validateMediaHeader, latestMediaCores } = require('./media')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 
@@ -273,8 +304,54 @@ function configuredAssociation (config, given) {
 // admitted.json as the operator commands read it: the listed entries (any
 // key; the caller filters hex64), never throwing on a malformed shape.
 function readAdmitted (dataDir) {
+  return readAdmittedFile(dataDir).admitted
+}
+
+// A persisted media binding { diary, seq } as written by _persist, or null
+// for any other shape: a listed core with no usable binding is still a
+// stored core to purge at start (reason 'unbound'), never one to serve.
+function mediaBinding (value) {
+  if (!isPlainObject(value)) return null
+  const { diary, seq } = value
+  if (typeof diary !== 'string' || !HEX64.test(diary)) return null
+  if (!Number.isSafeInteger(seq) || seq < 1) return null
+  return { diary, seq }
+}
+
+// Both maps of admitted.json: `admitted` (diaries) and `media` (media cores,
+// values normalized through mediaBinding; absent before this version).
+function readAdmittedFile (dataDir) {
   const data = readJson(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: {} })
-  return isPlainObject(data) && isPlainObject(data.admitted) ? data.admitted : {}
+  const admitted = isPlainObject(data) && isPlainObject(data.admitted) ? data.admitted : {}
+  const media = {}
+  if (isPlainObject(data) && isPlainObject(data.media)) {
+    for (const [key, value] of Object.entries(data.media)) media[key] = mediaBinding(value)
+  }
+  return { admitted, media }
+}
+
+// Block-0 verdict of a media core (lib/media.js): null when the raw block is
+// a valid media header naming diaryHex, else 'header-invalid' (not a header,
+// or oversized: decodeBlock refuses it) or 'wrong-diary'.
+function mediaVerdict (raw, diaryHex) {
+  try {
+    const header = decodeBlock(raw)
+    if (header === null || validateMediaHeader(header) !== null) return 'header-invalid'
+    return header.diary === diaryHex ? null : 'wrong-diary'
+  } catch {
+    return 'header-invalid'
+  }
+}
+
+// LOCAL media gate (block 0 already in the main store); any error is
+// 'header-invalid', so a failure can never skip the purge.
+async function localMediaVerdict (core, diaryHex) {
+  try {
+    const raw = await core.get(0, { wait: false, raw: true })
+    return mediaVerdict(raw, diaryHex)
+  } catch {
+    return 'header-invalid'
+  }
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -321,8 +398,10 @@ class Seeder {
   // storeHook() (awaited right after the main store, and
   // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
-  // maxAnnounces, announceRate, announceBurst, maxBadAnnounces; defaults =
-  // the constants, maxExternal = half of maxConnections, at least 1).
+  // maxAnnounces, announceRate, announceBurst, maxBadAnnounces, maxMedia,
+  // maxMediaBlocks, maxMediaBytes; defaults = the constants, maxExternal =
+  // half of maxConnections, at least 1, maxMedia = maxServed). admitHook and
+  // purgeHook also see media keys (admission steps 'persist' / 'open').
   constructor ({
     dataDir,
     associationKey = null,
@@ -343,9 +422,15 @@ class Seeder {
     maxAnnounces = MAX_INVENTORY,
     announceRate = ANNOUNCE_RATE,
     announceBurst = ANNOUNCE_BURST,
-    maxBadAnnounces = MAX_BAD_ANNOUNCES
+    maxBadAnnounces = MAX_BAD_ANNOUNCES,
+    maxMedia = null,
+    maxMediaBlocks = MAX_MEDIA_BLOCKS,
+    maxMediaBytes = MAX_MEDIA_BYTES
   } = {}) {
     this.maxServed = maxServed
+    this.maxMedia = maxMedia === null ? maxServed : maxMedia
+    this.maxMediaBlocks = maxMediaBlocks
+    this.maxMediaBytes = maxMediaBytes
     this.maxAnnounces = maxAnnounces
     this.announceRate = announceRate
     this.announceBurst = announceBurst
@@ -388,6 +473,17 @@ class Seeder {
     this._inflight = new Map() // key -> the admission step currently running
     this._reserved = new Set() // keys holding a capacity slot mid-admission (M1)
     this._drops = new Map() // key -> promise of the drop (purge) in progress
+    // Media cores (header comment): bound (served) and dropping bindings,
+    // key -> { diary, seq }; admitted.json `media` is the union of both.
+    // Admission steps and drops of media keys share _inflight and _drops
+    // (a diary key and a media key are never the same core), so close()
+    // and the per-key waits cover both kinds alike.
+    this._media = new Map()
+    this._mediaDropping = new Map()
+    this._mediaServed = new Map() // key -> { core, diary, download, stopFork, stopGrow, stopQuota, dropped }
+    this._mediaReserved = new Set() // media keys holding a media slot mid-admission
+    this._mediaFetches = new Map() // media key -> quarantine fetch in flight (new peers are attached to it)
+    this._scanQueue = Promise.resolve() // diary scans for media-core records run one at a time
     this._writeQueue = Promise.resolve()
     // The signed moderation snapshot (blocklist.js createBlocklistState),
     // created in start() once the data-dir lock is held, and the open
@@ -461,24 +557,36 @@ class Seeder {
     return { association, publicKey, certificate, admitted, blocklist, running: lockHeld(dataDir) }
   }
 
-  // `seed list`: the admitted logs and their signed sizes. It takes the
-  // data-dir lock (opens the main store) before reading admitted.json, as
-  // start() does, so it runs only while the seeder is stopped. A listed key
-  // with no stored core is reported empty and never opened: listing creates
-  // no core in the main store.
+  // `seed list`: the admitted logs and their signed sizes, each with the
+  // media cores bound to it (`media: [{ key, length, byteLength }]`). It
+  // takes the data-dir lock (opens the main store) before reading
+  // admitted.json, as start() does, so it runs only while the seeder is
+  // stopped. A listed key with no stored core is reported empty and never
+  // opened: listing creates no core in the main store. A listed media core
+  // whose diary is not listed is not shown (the next start purges it).
   static async list (dataDir, associationKey) {
     Seeder.checkConfig(dataDir, associationKey)
     const store = await openStore(dataDir)
+    const sizes = async (key, open) => {
+      const entry = { key, length: 0, byteLength: 0 }
+      if (await storedCore(store, key)) {
+        const core = await open(store, key)
+        entry.length = core.length
+        entry.byteLength = core.byteLength
+        await core.close()
+      }
+      return entry
+    }
     try {
+      const file = readAdmittedFile(dataDir)
       const admitted = []
-      for (const key of Object.keys(readAdmitted(dataDir))) {
+      for (const key of Object.keys(file.admitted)) {
         if (!HEX64.test(key)) continue
-        const entry = { key, length: 0, byteLength: 0 }
-        if (await storedCore(store, key)) {
-          const core = await openReplica(store, key)
-          entry.length = core.length
-          entry.byteLength = core.byteLength
-          await core.close()
+        const entry = await sizes(key, openReplica)
+        entry.media = []
+        for (const [k, binding] of Object.entries(file.media)) {
+          if (!HEX64.test(k) || binding === null || binding.diary !== key) continue
+          entry.media.push(await sizes(k, openMediaReplica))
         }
         admitted.push(entry)
       }
@@ -491,23 +599,36 @@ class Seeder {
   // `seed drop <key>`: removes one log while the seeder is stopped (under
   // the data-dir lock), in the startup-drop order of R6.1: the replica is
   // purged FIRST, and only then the key leaves admitted.json, so every core
-  // in the main store stays listed. A purge failure throws and leaves the
-  // file untouched. It is not a block: the author's next announce runs the
-  // full gate again (to keep an author out, block the key with `mod block`).
+  // in the main store stays listed. A diary's media cores go first, the same
+  // way (purge, then un-list); a media key itself may also be dropped. A
+  // purge failure throws and leaves the file untouched. It is not a block:
+  // the author's next announce runs the full gate again (to keep an author
+  // out, block the key with `mod block`), and a dropped media core is bound
+  // again by the next scan of its diary.
   static async drop (dataDir, associationKey, key) {
     Seeder.checkConfig(dataDir, associationKey)
     if (typeof key !== 'string' || !HEX64.test(key)) throw new UsageError('chave inválida')
     const store = await openStore(dataDir)
     try {
-      const admitted = readAdmitted(dataDir)
+      const { admitted, media } = readAdmittedFile(dataDir)
       const listed = Object.prototype.hasOwnProperty.call(admitted, key)
+      const listedMedia = Object.prototype.hasOwnProperty.call(media, key)
       const stored = await storedCore(store, key)
-      if (!listed && !stored) throw new Error('diário não está no semeador')
+      if (!listed && !listedMedia && !stored) throw new Error('diário não está no semeador')
+      const gone = new Set([key])
+      for (const [k, binding] of Object.entries(media)) {
+        if (HEX64.test(k) && binding !== null && binding.diary === key) gone.add(k)
+      }
+      for (const k of gone) {
+        if (k !== key && await storedCore(store, k)) await purgeReplica(store, k)
+      }
       if (stored) await purgeReplica(store, key)
-      if (listed) {
+      if (listed || listedMedia || gone.size > 1) {
         const rest = {}
         for (const [k, cert] of Object.entries(admitted)) if (k !== key) rest[k] = cert
-        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: rest })
+        const restMedia = {}
+        for (const [k, binding] of Object.entries(media)) if (!gone.has(k)) restMedia[k] = binding
+        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: rest, media: restMedia })
       }
       return { key }
     } finally {
@@ -569,8 +690,13 @@ class Seeder {
 
     try {
       if (this.storeHook) await this.storeHook()
-      for (const [key, cert] of Object.entries(readAdmitted(this.dataDir))) {
+      const file = readAdmittedFile(this.dataDir)
+      for (const [key, cert] of Object.entries(file.admitted)) {
         if (HEX64.test(key)) this._admitted.set(key, cert)
+      }
+      // Media bindings (null for an unusable one: purged below as 'unbound').
+      for (const [key, binding] of Object.entries(file.media)) {
+        if (HEX64.test(key) && !this._admitted.has(key)) this._media.set(key, binding)
       }
       // The stored moderation snapshot, read under the lock like
       // admitted.json and kept only when it verifies for the association
@@ -620,14 +746,55 @@ class Seeder {
         await this._persist()
       }
 
-      // Step 4: watchers and live downloads (no swarm yet).
+      // Step 3b: re-gate every listed media core the same way, once the
+      // diaries are settled: its diary must have survived (else 'unbound'),
+      // the core must not be forked, must hold its header, be within the
+      // media quota and its block 0 must be a header naming that diary.
+      // Failures are purged BEFORE they leave the file (R6.1 order).
+      const mediaSurvivors = []
+      const kept = new Set(survivors.map(([key]) => key))
+      for (const [key, binding] of [...this._media]) {
+        const diary = binding === null ? null : binding.diary
+        let reason = null
+        let core = null
+        if (diary === null || !kept.has(diary)) reason = 'unbound'
+        else {
+          core = await openMediaReplica(this.store, key)
+          if (core.fork !== 0) reason = 'fork'
+          else if (core.contiguousLength === 0) reason = 'no-header'
+          else if (this._overMediaQuota(core)) reason = 'quota'
+          else reason = await localMediaVerdict(core, diary)
+        }
+        if (reason === null && mediaSurvivors.length < this.maxMedia) {
+          mediaSurvivors.push([key, diary, core])
+          continue
+        }
+        if (reason === null) this.log({ event: 'warning', key, reason: 'media-full' })
+        else this.log({ event: 'media-rejected', key, diary, reason })
+        try {
+          await this._purge(key)
+        } catch {
+          throw new Error('falha ao limpar mídia rejeitada: ' + key8(key))
+        }
+        this._media.delete(key)
+        await this._persist()
+      }
+
+      // Step 4: watchers and live downloads (no swarm yet). A persisted
+      // binding is served right away: the scan of its diary (after ready)
+      // only confirms or drops it, it never has to rediscover it.
       for (const [key, core] of survivors) this._serve(key, core, { regate: false })
+      for (const [key, diary, core] of mediaSurvivors) this._serveMedia(key, diary, core, { headerOk: true })
 
       // Step 5: the swarm, with the seeder's Noise key pair.
       this.topic = topicFor(this.association)
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
       this.swarm.on('connection', (socket) => this._onConnection(socket))
-      const topics = [this.topic, ...survivors.map(([, core]) => core.discoveryKey)]
+      const topics = [
+        this.topic,
+        ...survivors.map(([, core]) => core.discoveryKey),
+        ...mediaSurvivors.filter(([key]) => this._mediaServed.has(key)).map(([, , core]) => core.discoveryKey)
+      ]
       const done = this.store.findingPeers()
       try {
         await joinAndFlush(this.swarm, topics)
@@ -648,7 +815,14 @@ class Seeder {
     const admitted = this.admittedKeys()
     this._ready = true
     this.log({ event: 'ready', topic, admitted })
+    // Background pass (never inside start()): scan every served diary for
+    // media-core records, one diary at a time (_scanQueue).
+    for (const [key, entry] of this._served) this._scanDiary(key, entry)
     return { topic, admitted }
+  }
+
+  mediaKeys () {
+    return [...this._media.keys()]
   }
 
   // Aggregate state for the health endpoint: counts and sizes only, never a
@@ -661,6 +835,8 @@ class Seeder {
       blocks += entry.core.contiguousLength
       bytes += entry.core.byteLength
     }
+    let mediaBytes = 0
+    for (const entry of this._mediaServed.values()) mediaBytes += entry.core.byteLength
     return {
       status: this._closing ? 'closing' : (this._ready ? 'ok' : 'starting'),
       admitted: this._admitted.size,
@@ -671,7 +847,9 @@ class Seeder {
       peers: this._peers.size,
       firewalled: this.swarm ? this.swarm.dht.firewalled : null,
       blocked: this._blocklist ? this._blocklist.blocked().size : 0,
-      blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0
+      blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0,
+      mediaCores: this._media.size,
+      mediaBytes
     }
   }
 
@@ -766,6 +944,13 @@ class Seeder {
     // Being purged with no drop to wait on: the purge failed and the seeder
     // is closing (fatal); never re-admit over it.
     if (this._dropping.has(key) || this._admitted.has(key)) return
+    // A bound (or binding) media core is never a diary: its block 0 is a
+    // media header, not a certificate. Refusing here (instead of letting the
+    // gate find out) keeps the two admission paths from fetching the same
+    // key through the quarantine at once (_admitMedia checks the reverse).
+    if (this._media.has(key) || this._mediaDropping.has(key) || this._mediaReserved.has(key)) {
+      return this._reject(peer, key, 'not-in-log')
+    }
     if (!this._peers.has(peer)) return
     // Inventory cap (review item 4a): a seeder serving MAX_INVENTORY logs
     // could no longer send a valid hello, so it refuses further admissions.
@@ -916,7 +1101,27 @@ class Seeder {
   }
 
   _serve (key, core, { regate }) {
-    const entry = { core, download: null, stopFork: noop, stopGrow: noop, stopQuota: noop, gated: !regate, gating: false, dropped: false }
+    // Media scan state (header comment): `scanned` is the next block to read
+    // for media-core records (block 0 is the certificate), `decls` the
+    // declared cores seen so far (key -> { seq, at }, newest seq; a seq/key
+    // list, never the entries), `latest` the current binding set and
+    // `refused` the declarations whose block 0 failed the media gate (retried
+    // only when re-declared at a newer seq).
+    const entry = {
+      core,
+      download: null,
+      stopFork: noop,
+      stopGrow: noop,
+      stopQuota: noop,
+      gated: !regate,
+      gating: false,
+      dropped: false,
+      scanned: 1,
+      scanQueued: false,
+      decls: new Map(),
+      latest: [],
+      refused: new Map()
+    }
     // Log quota on growth (S3): length/byteLength advance on the signed
     // upgrade ('append' fires) before the blocks arrive, so an admitted log
     // that grows past a limit is dropped before it is fetched. Registered
@@ -950,6 +1155,7 @@ class Seeder {
       return
     }
     this._broadcastHave(key, length)
+    this._scanDiary(key, entry)
   }
 
   // Local gate of a served, not yet gated replica. The verdict is computed
@@ -975,6 +1181,7 @@ class Seeder {
       if (reason !== null) return this._drop(key, reason)
       entry.gated = true
       this._broadcastHave(key, entry.core.contiguousLength)
+      this._scanDiary(key, entry)
     }).catch(() => {
       // Only a throwing test hook gets here: fail closed (never gated).
       entry.gating = false
@@ -1009,6 +1216,11 @@ class Seeder {
     this._admitted.delete(key)
     this._dropping.set(key, cert)
     this._stopEntry(entry)
+    // A diary's media cores go with it (one side of the binding is gone); a
+    // media admission in flight for it rolls itself back (_mediaStillWanted).
+    for (const [k, m] of [...this._mediaServed]) {
+      if (m.diary === key) this._dropMedia(k, reason)
+    }
     if (this.swarm) {
       try {
         this.swarm.leave(entry.core.discoveryKey).catch(noop)
@@ -1034,6 +1246,372 @@ class Seeder {
     this._drops.set(key, tracked)
   }
 
+  // ---- Media cores (header comment) ------------------------------------
+
+  _overMediaQuota ({ length, byteLength }) {
+    return length > this.maxMediaBlocks || byteLength > this.maxMediaBytes
+  }
+
+  // Queues a scan of a gated diary for media-core records. Scans run one at
+  // a time across all diaries (_scanQueue) and at most one is queued per
+  // diary; a scan reads from the diary's cursor to its contiguous length
+  // (checking again before it ends), so growth during a scan is not lost.
+  _scanDiary (key, entry) {
+    if (entry.scanQueued || entry.dropped || !entry.gated || this._closing) return
+    entry.scanQueued = true
+    const run = () => this._runScan(key, entry)
+    this._scanQueue = this._scanQueue.then(run, run).catch(noop)
+  }
+
+  async _runScan (key, entry) {
+    entry.scanQueued = false
+    const core = entry.core
+    while (!entry.dropped && !this._closing && entry.scanned < core.contiguousLength) {
+      const i = entry.scanned
+      let raw
+      try {
+        raw = await core.get(i, { wait: false, raw: true })
+      } catch {
+        return
+      }
+      if (raw === null) return
+      entry.scanned = i + 1
+      const block = decodeBlock(raw)
+      if (block === null || block.type !== 'media-core') continue
+      const record = validRecordCopy(block, i)
+      if (record === null || record.key === key) continue
+      const prev = entry.decls.get(record.key)
+      if (prev === undefined || i > prev.seq) entry.decls.set(record.key, { seq: i, at: record.at })
+    }
+    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+    const entries = [...entry.decls].map(([k, { seq, at }]) => ({ seq, record: { type: 'media-core', key: k, at } }))
+    entry.latest = latestMediaCores(entries, key, MAX_MEDIA_CORES)
+    for (const k of [...entry.refused.keys()]) {
+      if (!entry.latest.some((b) => b.key === k)) entry.refused.delete(k)
+    }
+    this._reconcileMedia(key, entry)
+  }
+
+  // Brings the media cores of a diary in line with its latest set: cores
+  // that fell out of it are dropped (purge before un-listing), wanted ones
+  // not yet bound are admitted. A core bound to ANOTHER diary is left alone
+  // (its header can name only one diary; a declaration for someone else's
+  // core binds nothing).
+  _reconcileMedia (diary, entry) {
+    if (entry.dropped || !entry.gated || this._closing) return
+    const wanted = new Map(entry.latest.map(({ key, seq }) => [key, seq]))
+    for (const [k, binding] of [...this._media]) {
+      if (binding === null || binding.diary !== diary) continue
+      if (!wanted.has(k)) this._dropMedia(k, 'unbound')
+      else if (binding.seq !== wanted.get(k)) {
+        binding.seq = wanted.get(k)
+        this._persist().catch(noop)
+      }
+    }
+    if (this._isBlocked(diary)) return
+    for (const [k, seq] of wanted) {
+      if (this._media.has(k) || this._mediaDropping.has(k)) continue
+      if (this._inflight.has(k) || this._mediaReserved.has(k)) continue
+      const refused = entry.refused.get(k)
+      if (refused !== undefined && refused === seq) continue
+      this._admitMedia(diary, entry, k, seq).catch(noop)
+    }
+  }
+
+  // A new peer may be the one holding a wanted core: its socket joins every
+  // quarantine fetch in flight (addSocket refuses a closed or already
+  // attached socket by itself), and every served, gated diary with pending
+  // bindings tries them again.
+  _retryMedia (peer) {
+    if (peer && peer.socket && !peer.seederDropped) {
+      for (const fetch of this._mediaFetches.values()) fetch.addSocket(peer.socket)
+    }
+    for (const [key, entry] of this._served) {
+      if (entry.gated && entry.latest.length > 0) this._reconcileMedia(key, entry)
+    }
+  }
+
+  // Whether admitting K for D still makes sense after an await: D served and
+  // gated, not blocked, still naming K in its latest set, and K not a diary
+  // (admitted, dropping or being gated as one).
+  _mediaStillWanted (diary, entry, key) {
+    if (entry.dropped || !entry.gated || this._served.get(diary) !== entry) return false
+    if (this._isBlocked(diary)) return false
+    if (!entry.latest.some((b) => b.key === key)) return false
+    return !(this._admitted.has(key) || this._dropping.has(key) || this._reserved.has(key) || this._chains.has(key))
+  }
+
+  // Open sockets of every connected peer (swarm and external): the quarantine
+  // fetch of a media core is attached to all of them, since nothing on the
+  // admission channel says who holds it.
+  _peerSockets () {
+    const sockets = []
+    for (const peer of this._peers) {
+      const s = peer.socket
+      if (s && !s.destroyed && !s.destroying && !peer.seederDropped && !sockets.includes(s)) sockets.push(s)
+    }
+    return sockets
+  }
+
+  _rejectMedia (key, diary, reason) {
+    this.log({ event: 'media-rejected', key, diary, reason })
+  }
+
+  // Admission of media core K declared by diary D (header comment, "two-way
+  // binding"), mirroring _admitGated/_admitReserved: synchronous checks and
+  // slot reservation first, then the quarantine gate, then persist BEFORE
+  // open, then serve and join. A failure here is never fatal for D: the
+  // declaration is retried on D's next growth or the next peer (bounded by
+  // those triggers), except a block 0 that failed the header gate, which is
+  // retried only when re-declared.
+  async _admitMedia (diary, entry, key, seq) {
+    if (this._closing) return
+    if (!this._mediaStillWanted(diary, entry, key)) return
+    if (this._mediaServed.size + this._mediaReserved.size >= this.maxMedia) return this._rejectMedia(key, diary, 'media-full')
+    const sockets = this._peerSockets()
+    if (sockets.length === 0) return this._rejectMedia(key, diary, 'no-peers')
+    this._mediaReserved.add(key)
+    const work = this._admitMediaReserved(diary, entry, key, seq, sockets)
+    this._inflight.set(key, work)
+    try {
+      return await work
+    } finally {
+      this._mediaReserved.delete(key)
+      if (this._inflight.get(key) === work) this._inflight.delete(key)
+    }
+  }
+
+  async _admitMediaReserved (diary, entry, key, seq, sockets) {
+    // A drop of K in progress (it fell out and came back) completes first.
+    while (this._drops.has(key)) await this._drops.get(key)
+    if (this._closing || !this._mediaStillWanted(diary, entry, key)) return
+    // Peers that connect while the fetch runs are attached to it
+    // (_retryMedia): the holder of K may arrive after D's declaration.
+    let res
+    try {
+      const fetch = startQuarantineFetch(this.qstore, key, sockets, GATE_TIMEOUT_MS)
+      this._mediaFetches.set(key, fetch)
+      try {
+        res = await fetch.promise
+      } finally {
+        if (this._mediaFetches.get(key) === fetch) this._mediaFetches.delete(key)
+      }
+    } catch {
+      if (!this._closing) this._fatal(key)
+      return
+    }
+    if (this._closing) return
+    if (res.error) return this._rejectMedia(key, diary, 'timeout')
+    if (!this._mediaStillWanted(diary, entry, key)) return
+    const verdict = mediaVerdict(res.raw, diary)
+    if (verdict !== null) {
+      entry.refused.set(key, seq)
+      return this._rejectMedia(key, diary, verdict)
+    }
+    // Media quota at the gate: the signed sizes the quarantine learned with
+    // block 0. (The fetch does not expose the fork; it is checked right
+    // after the open below, before anything is served.)
+    if (this._overMediaQuota(res)) return this._rejectMedia(key, diary, 'quota')
+    if (this._mediaServed.size >= this.maxMedia) return this._rejectMedia(key, diary, 'media-full')
+
+    // Persist the binding BEFORE the main store opens K; roll back exactly
+    // like a diary admission (a stored core is purged before un-listing; a
+    // purge failure is fatal and keeps K listed for the next start).
+    this._media.set(key, { diary, seq })
+    let core
+    let opening = false
+    try {
+      if (this.admitHook) await this.admitHook(key, 'persist')
+      await this._persist()
+      if (this._closing) return
+      opening = true
+      if (this.admitHook) await this.admitHook(key, 'open')
+      core = await openMediaReplica(this.store, key)
+    } catch {
+      if (opening) {
+        try {
+          if (await this._stored(key)) await this._purge(key)
+        } catch {
+          if (!this._closing) this._fatal(key)
+          return
+        }
+      }
+      this._media.delete(key)
+      await this._persist().catch(noop)
+      if (this._closing) return
+      return this._rejectMedia(key, diary, 'admission-failed')
+    }
+    if (this._closing) return
+    let late = null
+    if (!this._mediaStillWanted(diary, entry, key)) late = 'unbound'
+    else if (core.fork !== 0) late = 'fork'
+    else if (this._overMediaQuota(core)) late = 'quota'
+    if (late !== null) {
+      await core.close().catch(noop)
+      try {
+        if (await this._stored(key)) await this._purge(key)
+      } catch {
+        if (!this._closing) this._fatal(key)
+        return
+      }
+      this._media.delete(key)
+      await this._persist().catch(noop)
+      if (this._closing) return
+      return this._rejectMedia(key, diary, late)
+    }
+    this._serveMedia(key, diary, core, { expected: res.raw })
+    const served = this._mediaServed.get(key)
+    if (!served || served.dropped) return
+    this.swarm.join(core.discoveryKey, { server: true, client: true })
+    this.log({ event: 'media-admitted', key, diary, length: core.contiguousLength })
+  }
+
+  // Serving a media core: live download, fork watcher and media quota on
+  // growth, no growth broadcast (media keys never reach the admission
+  // channel). _stopEntry stops it like a diary entry. `expected` is the
+  // block 0 the quarantine fetched (a fresh admission); `headerOk` is true
+  // only for a core whose STORED block 0 passed the local gate (a startup
+  // survivor), and mediaRead serves nothing before it is (_gateMedia).
+  _serveMedia (key, diary, core, { expected = null, headerOk = false } = {}) {
+    const entry = {
+      core,
+      diary,
+      download: null,
+      stopFork: noop,
+      stopGrow: noop,
+      stopQuota: noop,
+      dropped: false,
+      headerOk,
+      gating: false,
+      expected
+    }
+    const checkQuota = () => {
+      if (entry.dropped || this._closing) return
+      if (this._overMediaQuota(core)) this._dropMedia(key, 'quota')
+    }
+    core.on('append', checkQuota)
+    entry.stopQuota = () => core.off('append', checkQuota)
+    entry.stopFork = watchFork(core, (reason) => this._dropMedia(key, reason))
+    entry.download = core.download({ start: 0, end: -1 })
+    entry.stopGrow = watchContiguous(core, () => this._gateMedia(key, entry))
+    this._mediaServed.set(key, entry)
+    checkQuota()
+    if (entry.dropped) return
+    if (!entry.headerOk && core.contiguousLength >= 1) this._gateMedia(key, entry)
+  }
+
+  // Local re-gate of a served media core, the twin of _gate for diaries: the
+  // holder of K's key may have served one block 0 to the quarantine and a
+  // different signed fork-0 history to the empty main-store replica
+  // (equivocation is invisible until conflicting proofs meet, so the fork
+  // watcher cannot see it). Once block 0 is local it must be byte-identical
+  // to what the quarantine fetched (else 'fork') and a valid header naming D
+  // (else 'header-invalid' / 'wrong-diary'); any failure drops K with the
+  // usual purge-before-unlist rules. Only then mediaRead serves K.
+  _gateMedia (key, entry) {
+    if (entry.dropped || entry.headerOk || entry.gating || this._closing) return
+    if (entry.core.contiguousLength < 1) return
+    entry.gating = true
+    const check = async () => {
+      let raw
+      try {
+        raw = await entry.core.get(0, { wait: false, raw: true })
+      } catch {
+        return 'header-invalid'
+      }
+      if (raw === null) return 'header-invalid'
+      if (entry.expected !== null && !b4a.equals(raw, entry.expected)) return 'fork'
+      return mediaVerdict(raw, entry.diary)
+    }
+    check().then((reason) => {
+      entry.gating = false
+      if (entry.dropped || this._closing || this._mediaServed.get(key) !== entry) return
+      if (reason !== null) return this._dropMedia(key, reason)
+      entry.headerOk = true
+      entry.expected = null
+    }, () => {
+      entry.gating = false
+      if (!entry.dropped && !this._closing) this._dropMedia(key, 'header-invalid')
+    })
+  }
+
+  // Runtime drop of a media core (R6.1 order, as _drop): the binding stays
+  // persisted (mediaDropping) until the purge succeeds; a purge failure is
+  // fatal and keeps it listed for the next start.
+  _dropMedia (key, reason) {
+    const entry = this._mediaServed.get(key)
+    if (!entry || entry.dropped || this._closing) return
+    entry.dropped = true
+    this._mediaServed.delete(key)
+    const binding = this._media.get(key)
+    this._media.delete(key)
+    this._mediaDropping.set(key, binding)
+    this._stopEntry(entry)
+    if (this.swarm) {
+      try {
+        this.swarm.leave(entry.core.discoveryKey).catch(noop)
+      } catch {}
+    }
+    this.log({ event: 'media-rejected', key, diary: entry.diary, reason })
+    const inflight = this._inflight.get(key) || null
+    const drop = (async () => {
+      if (inflight) await inflight.catch(noop)
+      try {
+        await this._purge(key)
+      } catch {
+        if (!this._closing) this._fatal(key)
+        return
+      }
+      this._mediaDropping.delete(key)
+      await this._persist()
+    })()
+    const tracked = drop.catch(noop).then(() => {
+      if (this._drops.get(key) === tracked) this._drops.delete(key)
+    })
+    this._drops.set(key, tracked)
+  }
+
+  // Blocks start..start+blocks-1 of media core K bound to diary D, for the
+  // HTTP route: null unless the binding exists, D is admitted and not
+  // blocked, start >= 1, the range is within K's signed length and EVERY
+  // block is local. `bytes` is the exact total (summed from a first local
+  // read, since hypercore exposes no per-block sizes), `blocks` yields each
+  // block with { wait: false }: nothing here ever waits on the network, and
+  // a block gone meanwhile (K purged or closed mid-stream) makes next()
+  // reject promptly instead of stalling the response.
+  async mediaRead (diaryHex, coreHex, start, blocks) {
+    try {
+      if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
+      if (typeof coreHex !== 'string' || !HEX64.test(coreHex)) return null
+      const binding = this._media.get(coreHex)
+      if (!binding || binding.diary !== diaryHex) return null
+      if (!this._admitted.has(diaryHex) || this._isBlocked(diaryHex)) return null
+      const entry = this._mediaServed.get(coreHex)
+      if (!entry || entry.dropped || !entry.headerOk || this._closing) return null
+      const core = entry.core
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(blocks)) return null
+      if (start < 1 || blocks < 1 || start + blocks > core.length) return null
+      const end = start + blocks
+      let bytes = 0
+      for (let i = start; i < end; i++) {
+        if (!(await core.has(i))) return null
+        const raw = await core.get(i, { wait: false, raw: true })
+        if (raw === null) return null
+        bytes += raw.byteLength
+      }
+      const read = async function * () {
+        for (let i = start; i < end; i++) {
+          const raw = await core.get(i, { wait: false, raw: true })
+          if (raw === null) throw new Error('bloco indisponível')
+          yield raw
+        }
+      }
+      return { bytes, blocks: read() }
+    } catch {
+      return null
+    }
+  }
+
   _fatal (key) {
     this.fatal = true
     this.log({ event: 'fatal', key, reason: 'purge-failed' })
@@ -1057,13 +1635,17 @@ class Seeder {
     }
   }
 
-  // ONE serialized writer: admitted.json = admitted ∪ dropping.
+  // ONE serialized writer: admitted.json = admitted ∪ dropping, and
+  // media = media ∪ mediaDropping (same file, same write).
   _persist () {
     const write = () => {
       const admitted = {}
       for (const [key, cert] of this._admitted) admitted[key] = cert
       for (const [key, cert] of this._dropping) admitted[key] = cert
-      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), { v: 1, admitted })
+      const media = {}
+      for (const [key, binding] of this._media) media[key] = binding
+      for (const [key, binding] of this._mediaDropping) media[key] = binding
+      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), { v: 1, admitted, media })
     }
     const next = this._writeQueue.then(write, write)
     this._writeQueue = next.catch(noop)
@@ -1373,6 +1955,9 @@ class Seeder {
       return
     }
     this._peers.add(peer)
+    // A new socket may be the one that can supply a wanted media core's
+    // block 0: retry the pending bindings (bounded: one attempt per trigger).
+    this._retryMedia(peer)
     // hello resolves null when the peer leaves first: never block on it.
     Promise.resolve(peer.hello).then((hello) => {
       if (!hello || this._closing || !this._peers.has(peer)) return
@@ -1391,6 +1976,8 @@ class Seeder {
       if (this._stopRediscovery) this._stopRediscovery()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
+      for (const entry of this._mediaServed.values()) this._stopEntry(entry)
+      this._mediaServed.clear()
       for (const socket of [...this._external]) {
         try { socket.destroy() } catch {}
       }

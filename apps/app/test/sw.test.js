@@ -384,6 +384,19 @@ test('/account/* is never intercepted: the OAuth callback navigation and the API
   t.ok((await dispatch(w, ORIGIN + '/', { mode: 'navigate' })).responded, '/ is the shell')
 })
 
+// Post media is proxied by Caddy to the seeder (long-lived Cache-Control, real
+// 404s): the worker must not cache it or turn a failure into a 503.
+test('/media/* is never intercepted', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  for (const p of ['/media/x/y/1/2', '/media/' + 'a'.repeat(64) + '/' + 'b'.repeat(64) + '/0/4']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/medias', { mode: 'navigate' })).responded, '/medias is an app route')
+})
+
 test('nothing cached and offline: 503 sem conexão', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))
