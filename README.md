@@ -98,12 +98,14 @@ Comandos:
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
+  account reports            exporta as denúncias com os e-mails do vínculo (--member)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
   mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
+  mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -114,7 +116,7 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -680,6 +682,43 @@ Se a chave do emissor do serviço de conta vazar, `mod revoke-issuer <chave>` p�
 
 Uma chave da moderação nova (outro `mod init` em outro diretório, certificada depois da atual) substitui a anterior: os nós aceitam a lista dela como mais nova mesmo começando de `seq` 1. Para trocar a chave sem perder nada, copie o `blocklist.json` da moderação anterior para o diretório novo antes do primeiro comando: o código continua dessa lista (mantém todos os bloqueios e emissores revogados) e assina a próxima com a chave nova. Sem a cópia, o diretório novo recusa sem `--new-list`, que só serve para a primeira lista da associação.
 
+#### Ligar o painel de moderação e as denúncias (serviço `account`)
+
+As denúncias dos membros e o painel dos moderadores rodam no mesmo serviço `account`. As denúncias não pedem configuração nova (só quem tem a conta Google vinculada pode denunciar, pela versão web hospedada); o painel só liga se houver moderadores configurados:
+
+1. No cliente OAuth do Google Cloud, em "URIs de redirecionamento autorizados", acrescente um SEGUNDO URI, `https://<domínio>/account/mod/callback`, sem tirar o `https://<domínio>/account/callback` do vínculo. O mesmo `VARANDA_GOOGLE_CLIENT_ID` e o mesmo segredo servem aos dois.
+2. Em `deploy/seeder/.env`, ponha em `VARANDA_MODERATOR_EMAILS` os e-mails Google dos moderadores, separados por vírgula, em minúsculas (no máximo 32). Só esses e-mails entram no painel; vazio mantém o painel desligado e o vínculo e as denúncias seguem funcionando. O `deploy.sh` confere o formato sem imprimir os valores.
+3. O contêiner lê o `.env` só ao ser criado: depois de editar a lista, recrie o serviço (`docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --force-recreate account`). Reiniciar não basta.
+4. O painel fica em `https://<domínio>/account/mod/`. A sessão do moderador é guardada só na memória do serviço (8 horas): reiniciar ou recriar o contêiner desconecta todos, e basta entrar de novo.
+
+Os moderadores marcam cada denúncia como bloquear ou descartar, e desbloqueiam em "Bloqueadas". Descartar vale na hora e não muda a lista; bloquear e desbloquear só viram lista depois do `mod apply` abaixo. O painel mostra chaves e @nomes, nunca e-mails; um moderador não vê, decide nem desbloqueia nada sobre a própria conta vinculada. O arquivo `moderation.json` (denúncias, decisões e mudanças pendentes, modo `0600`) fica no volume `account-data`, junto do diretório de contas: inclua-o no backup do volume.
+
+Para um pedido legal, `account reports [--member <chave>]` (rodado no servidor, como `account status`, por exemplo `docker compose ... run --rm account account reports --member <hex>`) imprime uma linha JSON por denúncia, com `reporterContact` e `targetContact` (`{ email, username }` ou `null`). É o único caminho pelo qual o e-mail do vínculo sai do serviço: não rode em outra máquina nem cole a saída em chamados, e não está nos registros. Sem `--member` lista todas; com ele, as feitas contra aquela chave.
+
+#### Aplicar as decisões do painel
+
+Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.
+
+```sh
+node bin/varanda.js mod apply --server https://<domínio> --data <modDir>
+```
+
+`--server` é a origem pública do serviço (`https://<domínio>`, sem caminho nem barra no fim; `http://` só vale para `127.0.0.1`, nos testes; outra coisa é `uso: server inválido`, código 2). O comando faz dois pedidos assinados pela chave da moderação, cada um com um desafio de uso único do servidor e presos a essa origem (uma assinatura para um domínio não vale em outro):
+
+1. busca as decisões pendentes (`api/pull`) e a última lista que o painel confirmou;
+2. confere a lista local: se `blocklist.json` está atrás da publicada, sai com `erro: lista local atrás da publicada; restaure o backup da moderação` (código 1) sem gravar nada;
+3. aplica as decisões na ordem em que foram tomadas e mostra, antes de assinar, uma linha por chave com o efeito final: `bloquear <chave>`, `desbloquear <chave>`, `já estava bloqueada <chave>` ou `não estava bloqueada <chave>`. Um desbloqueio de chave cujo bloqueio não veio do painel (feito com `mod block`, ou sem registro em `moderation.jsonl`) aparece como `desbloquear <chave> (bloqueada pela operação)`;
+4. pede a revisão (abaixo), assina UMA lista nova (`seq` + 1, uma linha por chave em `moderation.jsonl`) e a publica no semeador como `mod block`;
+5. só com a lista entregue, confirma ao painel (`api/ack`) as decisões aplicadas e a lista assinada: `aplicado: seq <n>, <k> chaves bloqueadas`.
+
+Nada que o servidor devolve é assinado sem revisão. Num terminal, o comando pergunta `Assinar e publicar estas mudanças? [s/N] ` e só segue com `s` ou `sim`; outra resposta sai com `erro: nada assinado` (código 1), sem assinar, publicar nem confirmar nada. Se houver desbloqueios de chaves bloqueadas pela operação, pergunta de novo, `Desbloquear também as chaves bloqueadas pela operação? [s/N] `; recusando, só essas chaves ficam de fora e seguem pendentes no painel. Sem terminal (cron, pipe) e sem `--yes`, sai com `erro: rode num terminal para revisar, ou use --yes para aplicar só os bloqueios` (código 1) antes de qualquer pedido ao servidor.
+
+`--yes` é para o agendamento: aplica só os bloqueios, no máximo 100 chaves novas por execução (mais que isso sai com `erro: muitos bloqueios de uma vez; rode no terminal para revisar`, código 1, nada assinado). Toda chave cujo efeito final é um desbloqueio fica retida: nenhuma decisão dela é assinada nem confirmada, e a saída diz `desbloqueios aguardando revisão no terminal: <n>`. As decisões retidas continuam pendentes no painel até a próxima execução num terminal, que as mostra e pede a confirmação. Assim, quem roubar o login Google de um moderador (ou controlar o servidor de conta) pode enfileirar decisões e fazer o cron bloquear até 100 chaves por execução, mas não desbloqueia ninguém sem o operador revisar no terminal; nenhum dos dois publica nada sem a chave da moderação, que fica na máquina do operador.
+
+Se a publicação falhar (`erro: não foi possível publicar a lista`, código 1), nada é confirmado e a lista nova fica gravada; a próxima execução reenvia exatamente a mesma lista antes de confirmar (`confirmado: seq <n>`). Sem decisões pendentes e com a lista já confirmada, imprime `nada a aplicar`. Se o painel já confirmou uma lista mais nova, sai com `erro: o servidor tem uma lista mais nova; restaure o backup`. Uma resposta fora do formato esperado é `erro: resposta inválida do servidor`. Num diretório sem `blocklist.json`, aplicar decisões exige `--new-list`, como em `mod block`. `--no-publish` é recusado (código 2); `--json` imprime na última linha a lista pública, os identificadores das decisões confirmadas e quantos desbloqueios ficaram retidos (`held`); nenhuma saída traz a chave secreta, e-mail ou endereço de par.
+
+O "Pendentes" do painel só esvazia depois de um `mod apply` bem-sucedido, então rode-o com `--yes` num agendamento (por exemplo, a cada hora pelo cron) na máquina do operador, e rode-o num terminal, sem `--yes`, para revisar e aplicar os desbloqueios retidos. Depois do primeiro deploy do painel, rode-o uma vez sem nenhuma decisão: ele confirma a lista que `mod block` já tinha publicado, e "Bloqueadas" passa a mostrar a mesma lista. Se o diretório da moderação ainda não tem lista (nenhum `mod block` antes), a primeira execução é `node bin/varanda.js mod apply --server https://<domínio> --data <modDir> --new-list`; depois disso, nunca mais com `--new-list`. Faça uma cópia do diretório da moderação (`blocklist.json`, `moderation.jsonl`, a chave e o certificado) antes de cada execução: é dela que vem o `blocklist.json` para "restaurar o backup". `mod apply` segura o mesmo bloqueio do diretório que os outros comandos `mod` (`erro: outra operação de moderação em andamento`).
+
 ## Servidor local para a interface web (varanda-serve)
 
 `node bin/varanda-serve.js` roda um nó Varanda (a sessão do núcleo) neste computador e o expõe a uma interface no navegador por um WebSocket local. As chaves ficam nesta máquina. É um programa separado: `node bin/varanda.js` não muda.
@@ -798,7 +837,7 @@ Fica na máquina do operador, como a associação.
 - `moderator.json` — par de chaves da moderação, modo `0600`. `mod init` imprime só a chave pública.
 - `moderator-cert.json` — certificado da moderação assinado pela associação, escrito por `mod cert add`.
 - `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a última lista gravada. Ao trocar a chave da moderação, copie este arquivo para o diretório novo.
-- `moderation.jsonl` — uma linha JSON por mudança, modo `0600`: `{"op":"block","member":"<hex64>","seq":<n>,"date":"<ISO>"}` (`op` `block` ou `unblock`; em `revoke-issuer` e `unrevoke-issuer` o campo é `issuer`). Sem assinatura e sem segredo.
+- `moderation.jsonl` — uma linha JSON por mudança, modo `0600`: `{"op":"block","member":"<hex64>","seq":<n>,"date":"<ISO>","source":"operacao"}` (`op` `block` ou `unblock`; em `revoke-issuer` e `unrevoke-issuer` o campo é `issuer`; `source` é `painel` para as linhas de `mod apply` e `operacao` para os outros comandos `mod`, e uma linha antiga sem o campo conta como `operacao`). Sem assinatura e sem segredo.
 
 Exemplo de linha em `members.jsonl` (a data real é a da emissão):
 
@@ -891,6 +930,8 @@ Limites desta fase:
 - O @nome troca no máximo uma vez a cada 7 dias e um nome já usado por um membro não vai para outro; um nó antigo ou um seguidor que ainda não sincronizou pode mostrar por um tempo o nome anterior.
 - A lista de bloqueio é obedecida só por nós atualizados e honestos: um nó de antes da PR B2 não a aplica, um app modificado ainda pode falar direto com a conta bloqueada, e o app oficial da própria conta bloqueada guarda o diário e pode servi-lo a quem já conhece a chave de descoberta. A versão web sem rede aplica a lista que já guardou e só recebe uma nova pelo semeador. Bloquear não apaga nada do aparelho do autor. Veja `docs/verification.md` seção 13.
 - A lista tem no máximo 4096 contas bloqueadas e 64 emissores revogados. Cada conexão troca no máximo uma lista a cada 10 s e é derrubada depois de 5 mensagens inválidas no canal `varanda/blocklist/1`.
+- Só a versão web hospedada denuncia: o app nativo e a CLI não têm como assinar ou enviar uma denúncia (a folha avisa), e só quem vinculou a conta Google denuncia, até 20 vezes a cada 24 horas. O trecho citado da publicação é o que quem denuncia enviou e não é conferido pelo serviço, e a pessoa denunciada não vê nada. Veja `docs/verification.md` seção 14.
+- As sessões do painel acabam quando o serviço `account` reinicia. A lista que o painel mostra como publicada é o espelho verificado da última lista que o operador confirmou com `mod apply`, e o `blocklist.json` do operador é a que vale; "aplicado" é a palavra do operador, e a propagação segue as regras do `varanda/blocklist/1`.
 - Certificados de membro individuais não são revogáveis (bloqueie a chave do diário). A chave do emissor do serviço de conta é revogada com `mod revoke-issuer`; depois disso gere outra (`account key`), certifique (`assoc certify-issuer`), `account cert add`, reinicie o serviço e peça que os membros vinculem de novo, porque os certificados v2 antigos deixam de valer. A reemissão automática fica para uma PR futura.
 
 Fora desta fase:
@@ -898,7 +939,7 @@ Fora desta fase:
 - Verificação de idade real. Hoje o operador de `assoc certify` afirma `--age-band`. Comentário `TODO(phase1): the real age-check vendor decides here; today the operator asserts the age band.` em `packages/core/lib/assoc.js`. O mesmo limite está em `docs/protocol.md` (certificados).
 - Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync).
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
-- Denúncias e painel da moderação (a lista de bloqueio assinada já existe: `mod block`). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista. O comentário `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js` ainda cita a moderação.
+- Denúncias pelo app nativo e pela CLI, e uma tela de perfil de outro membro (a denúncia pela versão web, o painel e a lista de bloqueio assinada já existem). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista. O comentário `TODO(later): media attachments and moderation lists are out of scope for phase 0.` em `packages/core/lib/records.js` ainda cita a moderação.
 - Mídia. Publicação é só texto, até 1000 caracteres. O comentário de `packages/core/lib/records.js` citado acima, e `docs/protocol.md` (registros), deixam anexos para uma fase posterior.
 - Empacotamento Pear e distribuição fora das lojas. O aplicativo Expo (`apps/app`) já roda o núcleo no Bare (iOS e Android), e a versão web roda o nó no próprio navegador (sincronizando pelo semeador) ou usa o `varanda-serve` na máquina local; ver [docs/app.md](docs/app.md), [docs/verification.md](docs/verification.md) e [docs/development.md](docs/development.md). O CLI continua sendo um programa Node sem etapa de compilação.
 - Relay de certificados por seguidores. O `sync` anuncia só o próprio diário (`packages/core/lib/sync.js` envia `announce` da chave local e ignora `announce` recebido). Um seguidor não apresenta ao semeador o certificado de outra pessoa. Se a autora nunca sincronizou, o semeador não tem a cópia, mesmo que um seguidor já a tenha. Não há comentário `TODO` no código para esse relay. `docs/protocol.md` registra que o `announce` permanece sem autenticação de propósito: qualquer par pode pedir a admissão, e só entra o diário cujo bloco 0 passa na verificação.

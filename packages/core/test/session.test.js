@@ -187,6 +187,20 @@ test('account.sign is refused by the node session (USAGE, not INTERNAL)', async 
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('report.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const account = { nonce: 'n'.repeat(43), target: 'ef'.repeat(32), reason: 'spam' }
+  const post = { ...account, seq: 3, reason: 'assedio', text: 'ofensivo', quote: 'linha' }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('report.sign', account)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('report.sign', account)), NO, 'account report')
+  t.alike(await failure(m.call('report.sign', post)), NO, 'post report')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('username.add: a record that does not verify for the diary key is refused, nothing written', async (t) => {
   const issuerKp = crypto.keyPair()
   const fresh = await member(t)

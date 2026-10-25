@@ -79,6 +79,12 @@ services:
       VARANDA_PUBLIC_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
       VARANDA_GOOGLE_CLIENT_ID: "${VARANDA_GOOGLE_CLIENT_ID:?defina VARANDA_GOOGLE_CLIENT_ID em deploy/seeder/.env}"
       VARANDA_GOOGLE_CLIENT_SECRET: "${VARANDA_GOOGLE_CLIENT_SECRET:?defina VARANDA_GOOGLE_CLIENT_SECRET em deploy/seeder/.env}"
+      # E-mails Google dos moderadores (painel em /account/mod/). Opcional:
+      # vazio mantém o painel desligado e o vínculo e as denúncias seguem
+      # funcionando, então um .env sem esta linha continua subindo. Só o
+      # serviço account a recebe (nem o semeador nem o web); moderation.json
+      # fica em account-data.
+      VARANDA_MODERATOR_EMAILS: "${VARANDA_MODERATOR_EMAILS:-}"
     # Volume próprio: o diretório de contas e a chave do emissor nunca ficam
     # no volume do semeador.
     volumes:

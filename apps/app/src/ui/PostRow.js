@@ -1,7 +1,8 @@
 // One line of a timeline (no card): avatar, name, handle and time, an
 // optional reply mark, the text and the reply action. It receives the RAW
 // peer strings (author key, name, at, text, replyToName) and applies
-// displayText itself, so callers must not pre-escape them.
+// displayText itself, so callers must not pre-escape them. `onReport`
+// (optional) adds a second action, 'denunciar', after the reply one.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -10,7 +11,7 @@ import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { colors, type } from './theme'
 
-export function PostRow ({ author, name, username, at, text, replyToName, now, onReply }) {
+export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onReport }) {
   const time = relativeTime(at, now) ?? displayText(at)
   const hasName = typeof name === 'string' && name.trim() !== ''
   const handle = displayText(atHandle(username, author))
@@ -45,6 +46,19 @@ export function PostRow ({ author, name, username, at, text, replyToName, now, o
               style={({ pressed }) => [styles.action, pressed && styles.pressed]}
             >
               <Icon name='resposta' size={19} color={colors.soft} />
+            </Pressable>
+            )
+          : null}
+        {typeof onReport === 'function'
+          ? (
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel={'denunciar ' + shown}
+              hitSlop={8}
+              onPress={onReport}
+              style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+            >
+              <Icon name='bandeira' size={19} color={colors.soft} />
             </Pressable>
             )
           : null}

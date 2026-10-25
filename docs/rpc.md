@@ -89,7 +89,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign` signs but writes nothing, 5.18).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign` and `report.sign` sign but write nothing, 5.18 and 5.20).
 
 Params have an exact key set: every key not listed for the method -> `USAGE` `'parâmetro desconhecido'`; a missing required key -> `'parâmetro obrigatório: <name>'`; a wrong type or bound -> `'parâmetro inválido: <name>'`. Defaults listed below are filled in by `validateRequest` / `validateParams(method, params)` before the handler runs; the client sends the params exactly as given.
 
@@ -223,6 +223,29 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 - Order: the newest `username` record by seq is the displayed name, so the record is compared with the diary's latest verified username record (`latestUsernameRecord` over the own entries, `packages/core/lib/username.js`), after the write gate in the browser node (below). Deep-equal to the latest -> `{ changed: false, username }`, nothing written (the browser node still retries an outstanding push, below). `date` earlier than the latest record's `date`, or the same `date` with a different record (two records of the same instant cannot be ordered) -> `USAGE` `'registro de nome antigo'`, nothing written: an earlier name would revert a rename. Otherwise a plain copy of the record (exactly its nine keys) is appended at the next seq (a `username` record is valid only at seq >= 1: before the member certificate, `USAGE` `'grave o certificado de membro antes de publicar'`) and the result is `{ changed: true, username, seq }`; a rename is a newer record appended this way.
 - Browser node (`packages/web-member/lib/session.js`): a diary write like `profile.set` (section 11): no identity -> `NOT_FOUND` `'identidade não encontrada'`; locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; then the catch-up through the write gate (with the gate on and no seeder reachable, `USAGE` `'sincronize com o semeador antes de publicar'`), so a record another device already published arrives before the comparison and is not appended again; then the comparison, the append and the push. A record equal to the latest is not written, but while the seeder is not known to hold the local length a push runs anyway: a push that failed after the append is retried by handing the same record in again.
 - Node session (`packages/core/lib/session.js`): the same verification, idempotence and `'registro de nome antigo'`, an identity required (`NOT_FOUND` without one), no write gate. A Hypercore 11 diary key is not the account-link signer (5.18), so the account service normally issues no record for it and the answer is `USAGE` `'registro de nome inválido'`.
+
+### 5.20 `report.sign`
+
+- Params: `{ nonce, target, seq?, reason, text?, quote? }`, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce); `target` the reported diary key (lowercase hex64); `seq` optional, an integer `1..99999` (`MAX_LOG_BLOCKS - 1`: seq 0 is the member certificate), present for a report of that post and absent for a report of the whole account; `reason` one of `'spam'`, `'assedio'`, `'ilegal'`, `'outro'`; `text` the reporter's own words, `0..280` code points (default `''`); `quote` the reported post's text, `0..MAX_TEXT` (1000) code points (default `''`). A quote without `seq` -> `USAGE` `'quote só com seq'`; `seq` with an empty (or absent) quote -> `USAGE` `'parâmetro inválido: quote'`. Not mutating.
+- The caller never passes the member, the association, a digest or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these nine lines joined by LF (`0x0a`), no trailing LF (`reportPayload`, `packages/core/lib/report.js`):
+
+  ```
+  varanda-report-v1
+  <nonce>
+  <member hex64>
+  <association hex64>
+  <target hex64>
+  <seq>          (canonical decimal, no leading zero; '' for an account report)
+  <reason>
+  <digest(text)>
+  <digest(quote)>
+  ```
+
+  `digest(s)` is the lowercase hex of the plain BLAKE2b-256 hash (`hypercore-crypto` `hash`) of the UTF-8 bytes of `s`; `''` hashes too (`0e5751c0…`). The digests keep any LF inside a post out of the framing. The prefix separates this statement from every other signature of the protocol (certificates, account links, moderation requests, Hypercore blocks).
+- `report.js` refuses (`TypeError`) more than the RPC layer: `member === target`; a control character, DEL, C1, U+2028/U+2029 or a bidi control in `text` (and in `quote`, where LF is allowed); and a `text` or `quote` that is not well formed (`String.prototype.isWellFormed()` false: a lone surrogate encodes to the same UTF-8 bytes as U+FFFD, so the digest would not bind the exact string). The app therefore sends `quote = post.text.toWellFormed()`, and the same for the report text.
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyReport(fields, signature)`, using `member` as the public key. The signature proves that the reporter attested this text and this quote to the association's account service; it does NOT prove that the reported diary contains the quote (the moderator checks the diary).
+- Browser node (`packages/web-member/lib/session.js`): signs like `account.sign` (5.18): it opens no diary, does not preempt or start a sync, appends nothing and contacts no one. No identity -> `NOT_FOUND` `'identidade não encontrada'`; locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; a pair for another diary -> `USAGE` `'passkey não corresponde ao diário guardado'`; `target` = the own key -> `USAGE` `'não é possível denunciar a própria chave'`; a statement `report.js` refuses -> `USAGE` `'denúncia inválida'`.
+- Node session (`packages/core/lib/session.js`): as 5.18, always `USAGE` `'assinatura disponível só no navegador'`, with or without an identity, and nothing is opened.
 
 ### Errors common to every method
 

@@ -1,0 +1,57 @@
+/* Moderation panel. Served with style-src 'self' (mod-routes.js and the
+   Caddy CSP): no inline style anywhere, every rule lives here. */
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.45 system-ui, sans-serif; }
+main { max-width: 32rem; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.25em; margin: 0 0 12px; }
+h2 { font-size: 1.05em; margin: 0; }
+p { margin: 0; }
+button {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid #8888;
+  background: transparent;
+  color: inherit;
+}
+button:disabled { opacity: 0.5; }
+button.primary { font-weight: 600; }
+button.danger { color: #b00020; border-color: #b00020; }
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 4.5em;
+  margin-top: 4px;
+  padding: 8px;
+  font: inherit;
+}
+label { display: block; font-size: 0.9em; }
+.header { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.email { overflow-wrap: anywhere; font-size: 0.9em; }
+.tabs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+.tabs button[aria-pressed="true"] { font-weight: 700; border-width: 2px; }
+.list { display: flex; flex-direction: column; gap: 12px; }
+.card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #8888; border-radius: 8px; }
+.meta { font-size: 0.85em; opacity: 0.8; }
+.label { font-size: 0.85em; font-weight: 600; }
+/* Untrusted text (quotes, comments, notes): inserted with textContent only;
+   isolated so bidi controls cannot reorder the labels around it. */
+.untrusted {
+  unicode-bidi: isolate;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 8px;
+  border-left: 3px solid #8888;
+}
+.notice, .error, .banner, .warning, .waiting { padding: 8px; border-radius: 8px; }
+.notice { border: 1px solid #2e7d32; }
+.error { border: 1px solid #b00020; color: #b00020; }
+.banner { border: 1px dashed #8888; margin-bottom: 12px; }
+.warning { font-size: 0.9em; border: 1px solid #b26a00; }
+.waiting { font-size: 0.9em; border: 1px solid #8888; }
+.change { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #8884; }

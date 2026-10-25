@@ -10,6 +10,8 @@ const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir } = require('@varanda
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
+const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
+const { parseModEmails } = require('../account/mod-routes')
 const {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -33,7 +35,14 @@ const {
 // before any issuer exists, answering health and 503 'indisponivel' on the
 // link routes, then `account key`, `assoc certify-issuer` on the operator's
 // machine, `account cert add` and a restart make it configured.
-const USAGE = 'node bin/varanda.js account [key|cert add|status|export]'
+//
+// The same dir holds the moderation desk (moderation.json,
+// apps/cli/lib/account/moderation-store.js): reports from the app, the
+// moderators' decisions and the pending blocklist changes. The panel's
+// sign-in is open only to the e-mails in VARANDA_MODERATOR_EMAILS (empty:
+// disabled); its sessions live in memory, so a restart signs every
+// moderator out.
+const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [--member <hex>]]'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
 const MAX_SECRET = 256
@@ -142,12 +151,35 @@ function certificateState (dataDir, association) {
   return checkIssuerCert(cert, keyPair, association) ?? 'ok'
 }
 
+// The moderation store of an existing moderation.json, or null when there is
+// none yet (the service creates it at start): the read-only commands never
+// create the file. Opening an existing one writes no file (it only
+// re-applies the 0o700 mode of the data dir, as the service does).
+function existingModeration (dataDir, association) {
+  if (!fs.existsSync(path.join(dataDir, MODERATION_FILE))) return null
+  return openModerationStore(dataDir, { association })
+}
+
+// { open, pending, publishedSeq } of the desk; zeros before the first start;
+// null when moderation.json cannot be read (the store answers 'indisponivel').
+function moderationStatus (dataDir, association) {
+  try {
+    const moderation = existingModeration(dataDir, association)
+    if (moderation === null) return { open: 0, pending: 0, publishedSeq: null }
+    const { open, pending, publishedSeq } = moderation.stats()
+    return { open, pending, publishedSeq }
+  } catch {
+    return null
+  }
+}
+
 function status (dataDir, given) {
   const association = checkConfig(dataDir, given)
   const publicKey = issuerPublicKey(dataDir)
   const certificate = certificateState(dataDir, association)
   const links = openAccountStore(dataDir, { readOnly: true }).exportLinks().length
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, running: lockHeld(dataDir) }
+  const moderation = moderationStatus(dataDir, association)
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, moderation, running: lockHeld(dataDir) }
 }
 
 function certificateLine (certificate) {
@@ -163,7 +195,17 @@ function statusLines (s) {
     certificateLine(s.certificate)
   ]
   if (!s.configured) lines.push('emissor não certificado')
-  lines.push('vínculos: ' + s.links, 'estado: ' + (s.running ? 'em execução' : 'parado'))
+  lines.push('vínculos: ' + s.links)
+  if (s.moderation === null) {
+    lines.push('moderação: indisponível (moderation.json inválido)')
+  } else {
+    lines.push(
+      'denúncias abertas: ' + s.moderation.open,
+      'mudanças pendentes: ' + s.moderation.pending,
+      'lista publicada: ' + (s.moderation.publishedSeq === null ? 'nenhuma' : 'seq ' + s.moderation.publishedSeq)
+    )
+  }
+  lines.push('estado: ' + (s.running ? 'em execução' : 'parado'))
   return lines.join('\n')
 }
 
@@ -177,7 +219,33 @@ function readEnv (env) {
   if (typeof clientSecret !== 'string' || clientSecret.length === 0 || clientSecret.length > MAX_SECRET) {
     throw new UsageError('VARANDA_GOOGLE_CLIENT_SECRET inválido')
   }
-  return { origin, clientId, clientSecret }
+  const modEmails = parseModEmails(env.VARANDA_MODERATOR_EMAILS)
+  // Not a usage error (exit 1), and never the value.
+  if (modEmails === null) throw new Error('VARANDA_MODERATOR_EMAILS inválido')
+  return { origin, clientId, clientSecret, modEmails }
+}
+
+// For the operator (LGPD access requests, legal orders): every report row
+// (optionally only those about `member`), with the reporter's and the
+// target's directory contact ({ email, username } | null). Reads only
+// directory.json and moderation.json, never the issuer key; safe while the
+// service runs (both files are replaced whole by rename).
+function reportRows (dataDir, given, member) {
+  const association = checkConfig(dataDir, given)
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  const moderation = existingModeration(dataDir, association)
+  if (moderation === null) return []
+  const contactOf = (key) => {
+    const c = accounts.contact(key)
+    return c === null ? null : { email: c.email, username: c.username }
+  }
+  let rows
+  try {
+    rows = moderation.exportRows(member === null ? {} : { member })
+  } catch {
+    throw new Error('moderação indisponível (moderation.json inválido)')
+  }
+  return rows.map((row) => ({ ...row, reporterContact: contactOf(row.reporter), targetContact: contactOf(row.target) }))
 }
 
 function eventLine (event) {
@@ -192,12 +260,13 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret } = readEnv(env)
+  const { origin, clientId, clientSecret, modEmails } = readEnv(env)
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
   }
   const google = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/callback' })
+  const googleMod = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/mod/callback' })
 
   // The lock comes first (single writer), the store after it. Its heartbeat
   // keeps the lock live; once the lock is no longer ours (removed, or
@@ -219,8 +288,9 @@ async function serve (flags, env) {
   process.once('SIGTERM', onSignal)
   try {
     const store = openAccountStore(flags.dataDir)
+    const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
-    const server = createAccountServer({ association, origin, google, store, issuer, log })
+    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails })
     try {
       listener = await server.listen({ host, port })
     } catch (err) {
@@ -272,6 +342,13 @@ async function run (flags) {
     if (lockHeld(flags.dataDir)) throw new Error('serviço de conta em execução')
     for (const link of openAccountStore(flags.dataDir, { readOnly: true }).exportLinks()) {
       process.stdout.write(jsonLine(link) + '\n')
+    }
+    return 0
+  }
+
+  if (sub === 'reports' && subsub === undefined) {
+    for (const row of reportRows(flags.dataDir, flags.association, flags.member ?? null)) {
+      process.stdout.write(jsonLine(row) + '\n')
     }
     return 0
   }

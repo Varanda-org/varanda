@@ -22,7 +22,7 @@ const RELOAD_REASONS = ['done', 'timeout', 'stopped']
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
 
-export default function ARua ({ active, refresh, onReply }) {
+export default function ARua ({ active, refresh, onReply, onReport, ownKey }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -106,6 +106,11 @@ export default function ARua ({ active, refresh, onReply }) {
   // Rows re-render when a name is learned or the clock ticks.
   const extra = useMemo(() => ({ nameOf: names.nameOf, now }), [names.nameOf, now])
 
+  // The feed includes the viewer's own diary (core member.js and web
+  // member-ops.js feedRead start with the own key): no report action there.
+  // Only once the own key is known: before that, the own posts would look
+  // reportable for a moment.
+  const reportable = (item) => typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
   const renderItem = ({ item }) => (
     <PostRow
       author={item.author}
@@ -116,6 +121,9 @@ export default function ARua ({ active, refresh, onReply }) {
       replyToName={item.replyTo ? (names.nameOf(item.replyTo.author) || handleOf(item.replyTo.author)) : null}
       now={now}
       onReply={() => onReply({ ref: item.author + ':' + item.seq, name: item.name || atHandle(item.username, item.author), text: item.text })}
+      onReport={reportable(item)
+        ? () => onReport({ author: item.author, name: item.name || atHandle(item.username, item.author), seq: item.seq, text: item.text })
+        : undefined}
     />
   )
 

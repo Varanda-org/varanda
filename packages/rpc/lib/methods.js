@@ -56,6 +56,15 @@ const isNonce = (v) => typeof v === 'string' && NONCE_RE.test(v)
 const isUsername = (v) => typeof v === 'string' && USERNAME_RE.test(v) && !HEX6.test(v)
 const isSub = (v) => v === '' || (typeof v === 'string' && SUB_RE.test(v))
 
+// report.sign (docs/rpc.md 5.20). Duplicated from @varanda/core
+// lib/report.js (REASONS, TEXT_MAX, SEQ_MAX = MAX_LOG_BLOCKS - 1), which this
+// package cannot import.
+const REPORT_REASONS = ['spam', 'assedio', 'ilegal', 'outro']
+const REPORT_TEXT_MAX = 280
+const REPORT_SEQ_MAX = 99999
+
+const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -108,6 +117,25 @@ const SPECS = {
   // Appends an issuer-signed username record to the own diary; the node
   // verifies it against its own key and the association.
   'username.add': { fields: { record: req(isUsernameRecord) }, mutating: true },
+  // Signs a report statement with the identity key; the node fills in
+  // member and association itself and hashes text and quote into the
+  // payload, so a caller never chooses the bytes. `seq` absent = a report of
+  // the whole account (no quote); present = a report of that post, quoting it.
+  'report.sign': {
+    fields: {
+      nonce: req(isNonce),
+      target: req(isKey),
+      seq: opt(int(1, REPORT_SEQ_MAX)),
+      reason: req(isReason),
+      text: opt(str(0, REPORT_TEXT_MAX), ''),
+      quote: opt(str(0, L.MAX_TEXT), '')
+    },
+    cross (given, value) {
+      if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
+      if (hasOwn(value, 'seq') && value.quote === '') return 'parâmetro inválido: quote'
+      return null
+    }
+  },
   'profile.set': {
     fields: { name: req(str(1, L.MAX_NAME)), bio: opt(str(0, L.MAX_BIO), '') },
     mutating: true

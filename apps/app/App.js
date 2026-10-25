@@ -22,6 +22,7 @@ import { layout, type } from './src/ui/theme'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
+import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Identidade from './src/screens/Identidade'
 import Publicar from './src/screens/Publicar'
@@ -61,6 +62,8 @@ function Member () {
   const [tab, setTab] = useState('rua')
   const [composer, setComposer] = useState({ open: false, reply: null })
   const [ajustes, setAjustes] = useState(null)
+  // The report sheet's target: null | { author, name, seq, text }.
+  const [report, setReport] = useState(null)
   const [version, setVersion] = useState(0)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
@@ -113,6 +116,9 @@ function Member () {
   const confirmed = setupComplete(info) &&
     (passkey === null || (!locked && pkStatus !== null && info.publicKey === pkStatus.publicKey))
   useEffect(() => { if (confirmed) setSetupDone(true) }, [confirmed])
+  // A lock, unlock or reset discards the report sheet (and with it any
+  // signature still held in its memory).
+  useEffect(() => setReport(null), [generation, locked])
   useEffect(() => {
     if (!locked) return
     setSetupDone(false)
@@ -243,8 +249,8 @@ function Member () {
           ? <TopBar title={tab === 'rua' ? 'A Rua' : 'Seguindo'} right={chip} />
           : null}
         <View style={styles.flex}>
-          <View style={shown('rua')}><ARua active={on('rua')} refresh={version} onReply={startReply} /></View>
-          <View style={shown('seguindo')}><Seguindo active={on('seguindo')} /></View>
+          <View style={shown('rua')}><ARua active={on('rua')} refresh={version} onReply={startReply} onReport={setReport} ownKey={ownKey} /></View>
+          <View style={shown('seguindo')}><Seguindo active={on('seguindo')} onReport={setReport} /></View>
           <View style={shown('diario')}>
             <Diario active={on('diario')} refresh={version} onSettings={setAjustes} onReply={startReply} />
           </View>
@@ -286,6 +292,15 @@ function Member () {
           if (kind === 'queued-post' || kind === 'queued-reply') return showToast('guardado na fila de saída')
           setVersion((v) => v + 1)
           showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
+        }}
+      />
+      <Denunciar
+        open={report !== null}
+        target={report}
+        onClose={() => setReport(null)}
+        onSent={(text) => {
+          setReport(null)
+          showToast(text)
         }}
       />
       <Ajustes screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={takeInfo} />

@@ -27,12 +27,14 @@ Comandos:
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
+  account reports            exporta as denúncias com os e-mails do vínculo (--member)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
   mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
+  mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -43,15 +45,15 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
-  '--issuer', '--account-port', '--account-host', '--moderator'
+  '--issuer', '--account-port', '--account-host', '--moderator', '--server'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -184,6 +186,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     once: get('once') === true,
     noPublish: get('no-publish') === true,
     newList: get('new-list') === true,
+    yes: get('yes') === true,
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
@@ -210,6 +213,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     to: replyTo(get('to')),
     author: key(get('author')),
     limit: integer(get('limit'), 'limit'),
+    // Raw: `mod apply` checks it is an origin (mod-apply.js).
+    server: get('server'),
     cwd
   }
 }
