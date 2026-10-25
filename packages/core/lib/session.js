@@ -537,10 +537,14 @@ function createSession ({
       return { follows: follows.slice(offset, offset + limit), total: follows.length }
     }),
 
-    'log.read': serial(async ({ author, limit }) => {
+    // `before` is an exclusive block-seq bound (docs/rpc.md 5.12); a bound
+    // past the length clamps to the newest page. readAll entries are
+    // contiguous with seq === index, so the window is a slice.
+    'log.read': serial(async ({ author, limit, before }) => {
       const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
-      const window = all.slice(Math.max(0, all.length - limit))
+      const end = before === undefined ? all.length : Math.min(before, all.length)
+      const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
       for (const { seq, record } of window) {
@@ -552,12 +556,14 @@ function createSession ({
         if (copy !== null) entries.push({ seq, record: copy })
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
-      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, all.length - limit) }
+      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
     }),
 
-    'feed.read': serial(async ({ limit }) => {
+    // `before` (a { at, author, seq } cursor, docs/rpc.md 5.13) pages
+    // backwards; moderation is re-checked on every request.
+    'feed.read': serial(async ({ limit, before }) => {
       // The feed warnings are not events: the lists carry the same information.
-      const r = await withStore((c) => member.feedRead(c, { limit }))
+      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       return {
@@ -567,6 +573,13 @@ function createSession ({
         future: future.list,
         futureTruncated: future.truncated
       }
+    }),
+
+    // Names, bios and handles of a batch of authors (docs/rpc.md 5.21), local
+    // data only, with feed.read's admission rules; never creates a core.
+    'profile.read': serial(async ({ authors }) => {
+      const r = await withStore((c) => member.profileRead(c, { authors }))
+      return { profiles: r.profiles, missing: r.missing }
     }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {

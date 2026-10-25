@@ -1,31 +1,33 @@
 // One line of a timeline (no card): avatar, name, handle and time, an
 // optional reply mark, the text and the reply action. It receives the RAW
-// peer strings (author key, name, at, text, replyToName) and applies
-// displayText itself, so callers must not pre-escape them. `onReport`
+// peer strings (author key, name, username, at, text, replyToName) and
+// applies displayText itself, so callers must not pre-escape them. Naming
+// follows whoOf (src/who.js): never a key-derived handle. `onReport`
 // (optional) adds a second action, 'denunciar', after the reply one.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { atHandle, relativeTime } from '../format'
+import { relativeTime } from '../format'
+import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { colors, type } from './theme'
 
 export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onReport }) {
   const time = relativeTime(at, now) ?? displayText(at)
-  const hasName = typeof name === 'string' && name.trim() !== ''
-  const handle = displayText(atHandle(username, author))
-  const shown = hasName ? displayText(name) : handle
+  const who = whoOf({ name, username })
+  const title = displayText(who.title)
+  const meta = who.subtitle ? displayText(who.subtitle) + ' · ' + time : time
   return (
     <View style={styles.row}>
-      <Avatar name={name} publicKey={author} size={44} />
+      <Avatar name={who.avatarName} publicKey={author} size={44} />
       <View style={styles.body}>
         <View style={styles.head}>
           <Text style={styles.name} numberOfLines={1}>
-            {shown}
+            {title}
           </Text>
           <Text style={styles.meta} numberOfLines={1}>
-            {hasName ? handle + ' · ' + time : time}
+            {meta}
           </Text>
         </View>
         {replyToName
@@ -40,7 +42,7 @@ export function PostRow ({ author, name, username, at, text, replyToName, now, o
           ? (
             <Pressable
               accessibilityRole='button'
-              accessibilityLabel={'responder a ' + shown}
+              accessibilityLabel={'responder a ' + title}
               hitSlop={8}
               onPress={onReply}
               style={({ pressed }) => [styles.action, pressed && styles.pressed]}
@@ -53,7 +55,7 @@ export function PostRow ({ author, name, username, at, text, replyToName, now, o
           ? (
             <Pressable
               accessibilityRole='button'
-              accessibilityLabel={'denunciar ' + shown}
+              accessibilityLabel={'denunciar ' + title}
               hitSlop={8}
               onPress={onReport}
               style={({ pressed }) => [styles.action, pressed && styles.pressed]}

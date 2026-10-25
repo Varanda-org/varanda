@@ -1,6 +1,6 @@
 /* global navigator */
 
-// Ajustes: a sheet with a grouped list (Conexão, Sincronizar, Identidade)
+// Ajustes: a sheet with a grouped list (Conexão, Sincronização, Identidade)
 // over the technical screens, which render embedded inside the sheet. On the
 // web's browser node it also offers 'bloquear identidade': the key derived
 // from the passkey is dropped from memory and the shell returns to Entrar.
@@ -17,11 +17,11 @@ import Conexao from './Conexao'
 import Identidade from './Identidade'
 import Sincronizar from './Sincronizar'
 
-const TITLES = { lista: 'Ajustes', conexao: 'Conexão', sincronizar: 'Sincronizar', identidade: 'Identidade' }
+const TITLES = { lista: 'Ajustes', conexao: 'Conexão', sincronizar: 'Sincronização', identidade: 'Identidade' }
 
 const ITEMS = [
   { id: 'conexao', label: 'Conexão', icon: 'rede' },
-  { id: 'sincronizar', label: 'Sincronizar', icon: 'sinc' },
+  { id: 'sincronizar', label: 'Sincronização', icon: 'sinc' },
   { id: 'identidade', label: 'Identidade', icon: 'pessoa' }
 ]
 
@@ -127,7 +127,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
                 )
               : null}
             <ErrorText>{lockAction.error}</ErrorText>
-            <Soft>As telas técnicas de hoje: a conexão com o nó, a sincronização com os pares e a identidade do diário.</Soft>
+            <Soft>A sincronização é automática: aqui ficam só o estado e o registro de eventos, para diagnóstico.</Soft>
           </Page>
         </View>
         <View style={shown('conexao')}>

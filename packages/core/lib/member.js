@@ -1,7 +1,7 @@
 'use strict'
 
-// Member operations (identity, certificate, profile, posts, follows, log and
-// feed) over a member data directory. Each operation takes a context
+// Member operations (identity, certificate, profile, posts, follows, log,
+// feed and profile reads) over a member data directory. Each operation takes a context
 // ctx = { dataDir, association = null, storeOptions } and returns the result
 // object; nothing here writes to stdout or stderr (feedRead reports its
 // warnings through onWarn).
@@ -12,7 +12,7 @@ const process = require('#process')
 const b4a = require('b4a')
 const { discoveryKey, randomBytes } = require('hypercore-crypto')
 const { certForKey, verifyUsernameRecord } = require('./cert')
-const { latestUsernameRecord } = require('./username')
+const { latestUsernameRecord, latestUsername } = require('./username')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('./blocklist')
 const {
   decodeBlock,
@@ -20,7 +20,8 @@ const {
   profileRecord,
   postRecord,
   validateRecord,
-  formatRef
+  formatRef,
+  latestProfile
 } = require('./records')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
@@ -404,7 +405,7 @@ function skipReason (core, entries, key, association, blocked = null, revokedIss
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, onWarn = () => {} } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => {} } = {}) {
   const skipLog = (skippedLogs, key, reason) => {
     skippedLogs.push({ key, reason })
     onWarn('aviso: diário ' + shortKey(key) + ' ignorado (' + safe(reason) + ')')
@@ -447,9 +448,66 @@ async function feedRead (ctx, { limit = Infinity, onWarn = () => {} } = {}) {
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers })
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future }
+  })
+}
+
+// ---- profiles ----
+
+// Profiles of `authors` (docs/rpc.md 5.21) -> { profiles, missing }, one entry
+// per distinct lowercase key in first-occurrence order. An author is readable
+// exactly when feedRead would show its diary: the own key always (even when
+// blocked); any other key only with local data that passes skipReason (not
+// blocked, no fork, a valid block-0 certificate, issuer not revoked). The
+// admission is feedRead's, NOT logRead's: logRead keeps raw reads of forked or
+// uncertified diaries as a diagnostic view, which must never become a source
+// of names. `missing` never says why. One store open and one lock for the
+// whole batch; a key with no local data never gets a core (R5.4 a).
+async function profileRead (ctx, { authors }) {
+  return withIdentity(ctx, async ({ store, diary, ownHex, association }) => {
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    const keys = []
+    const seen = new Set()
+    for (const raw of authors) {
+      const key = raw.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      keys.push(key)
+    }
+    const profiles = []
+    const missing = []
+    for (const key of keys) {
+      let entries
+      if (key === ownHex) {
+        entries = await readAll(diary)
+      } else {
+        if (blocked.has(key) || !(await store.storage.hasCore(discoveryKey(b4a.from(key, 'hex'))))) {
+          missing.push(key)
+          continue
+        }
+        const replica = await openReplica(store, key)
+        entries = await readAll(replica)
+        // The reason (fork check included) is computed BEFORE an empty core
+        // is purged, as feedRead does.
+        const reason = skipReason(replica, entries, key, association, blocked, revokedIssuers)
+        // An empty core must not linger in the main store.
+        if (replica.contiguousLength === 0) await purgeReplica(store, key)
+        if (reason !== null) {
+          missing.push(key)
+          continue
+        }
+      }
+      const profile = latestProfile(entries)
+      profiles.push({
+        author: key,
+        name: profile === null ? null : profile.name,
+        bio: profile === null ? null : profile.bio,
+        username: latestUsername(entries, key, association, { revokedIssuers })
+      })
+    }
+    return { profiles, missing }
   })
 }
 
@@ -475,5 +533,6 @@ module.exports = {
   followRemove,
   followList,
   logRead,
-  feedRead
+  feedRead,
+  profileRead
 }

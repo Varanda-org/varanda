@@ -22,8 +22,10 @@ const {
   profileRecord,
   postRecord,
   validateRecord,
-  formatRef
+  formatRef,
+  latestProfile
 } = require('@varanda/core/lib/records')
+const { latestUsername } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -321,7 +323,7 @@ function skipReason (core, entries, key, association, mod = {}) {
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
@@ -359,8 +361,68 @@ async function feedRead (ctx, { limit = Infinity } = {}) {
     if (reason === null) kept.push({ key, entries })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers, before })
   return { items: built.items, skipped, future: built.future }
+}
+
+// ---- profile.read ----
+
+// The entries of a non-own diary when feedRead would show it, else null:
+// the admission rules of feedRead (blocked, no local data, skipReason), not
+// those of logRead. Never creates a replica; an empty one is purged.
+async function admittedEntries (ctx, key, association, mod) {
+  if (mod.blocked.has(key)) return null
+  if (!(await store.replicaExists(ctx.storage, key))) return null
+  const replica = await store.openReplica(ctx.storage, key)
+  let entries
+  let reason
+  let empty
+  try {
+    entries = await store.readAll(replica)
+    reason = skipReason(replica, entries, key, association, mod)
+    empty = replica.contiguousLength === 0
+  } finally {
+    await replica.close()
+  }
+  if (empty) await store.purgeReplica(ctx.storage, key)
+  return reason === null ? entries : null
+}
+
+// Names of the given authors from local data only (docs/rpc.md 5.21) ->
+// { profiles: [{ author, name, bio, username }], missing: [hex64] }, one entry
+// per distinct (lowercased) author in first-occurrence order. Works locked.
+async function profileRead (ctx, { authors }) {
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  const keys = []
+  const seen = new Set()
+  for (const raw of authors) {
+    const key = String(raw).toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    keys.push(key)
+  }
+  const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({
+    key: ownHex,
+    entries: seen.has(ownHex) ? await store.readAll(diary) : null
+  }))
+  const profiles = []
+  const missing = []
+  for (const key of keys) {
+    const entries = key === own.key ? own.entries : (HEX64.test(key) ? await admittedEntries(ctx, key, association, mod) : null)
+    if (entries === null) {
+      missing.push(key)
+      continue
+    }
+    const profile = latestProfile(entries)
+    profiles.push({
+      author: key,
+      name: profile === null ? null : profile.name,
+      bio: profile === null ? null : profile.bio,
+      username: latestUsername(entries, key, association, { revokedIssuers: mod.revokedIssuers })
+    })
+  }
+  return { profiles, missing }
 }
 
 module.exports = {
@@ -382,5 +444,6 @@ module.exports = {
   followList,
   logRead,
   feedRead,
+  profileRead,
   skipReason
 }

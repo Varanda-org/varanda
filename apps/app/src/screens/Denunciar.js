@@ -6,7 +6,7 @@
 // report (the account service refuses 'nao-vinculado').
 // Flow: /account/status -> /account/report/start (nonce) -> report.sign ->
 // /account/report. Nothing is stored: no localStorage, no diary write.
-// `target` = { author, name, seq, text } with the RAW peer strings; they are
+// `target` = { author, name, username, seq, text } with the RAW peer strings; they are
 // rendered through displayText here (the PostRow rule).
 
 import { useEffect, useRef, useState } from 'react'
@@ -15,7 +15,8 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
 import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, reportSend, reportStart, validateReportText, wellFormed } from '../report'
-import { countChars, handleOf } from '../format'
+import { countChars } from '../format'
+import { whoOf } from '../who'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -59,7 +60,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   const noteText = validateReportText(wellFormed(note))
   const shownName = target === null
     ? ''
-    : displayText(typeof target.name === 'string' && target.name.trim() !== '' ? target.name : handleOf(target.author))
+    : displayText(whoOf({ name: target.name, username: target.username }).title)
 
   const submit = async () => {
     if (reason === null || noteText === null || target === null || typeof member !== 'string') return

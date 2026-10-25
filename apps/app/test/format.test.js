@@ -7,46 +7,9 @@ const test = require('brittle')
 const load = () => import('../src/format.js')
 const NOW = new Date(2026, 9, 23, 12).getTime()
 
-test('handleOf and shortKey lowercase the key', async (t) => {
-  const { handleOf, shortKey } = await load()
-  t.is(handleOf('E905A4FFFF'), '@e905a4')
-  t.is(handleOf(''), '@')
-  t.is(handleOf(null), '@')
+test('shortKey lowercases the key', async (t) => {
+  const { shortKey } = await load()
   t.is(shortKey('E905A4FFFF'), 'e905a4ff')
-})
-
-test('atHandle shows a username or falls back to the six-hex key', async (t) => {
-  const { atHandle } = await load()
-  for (const username of ['ana', 'ana_123', 'u'.repeat(20), 'abcdefg', 'abc12_']) {
-    t.is(atHandle(username, 'E905A4FFFF'), '@' + username)
-  }
-  for (const username of [null, undefined, '', 'an', 'a'.repeat(21), 'Ana', '1ana', 'ana-maria', 'ana maria', '@ana', 'abc123', 'abcdef', '123456', 'josé', '\u001b[31m', 123, {}, ['ana']]) {
-    t.is(atHandle(username, 'E905A4FFFF'), '@e905a4')
-  }
-  t.is(atHandle(null, null), '@')
-})
-
-test('initialsOf', async (t) => {
-  const { initialsOf } = await load()
-  t.is(initialsOf('Marília Prado', 'e9'), 'MP')
-  t.is(initialsOf('Seu Nelson', '0f'), 'SN')
-  t.is(initialsOf('Bia Carvalho', '16'), 'BC')
-  t.is(initialsOf('Helena Dias', 'eb'), 'HD')
-  t.is(initialsOf('Bia', '16'), 'BI')
-  t.is(initialsOf('ana maria de souza', 'ab'), 'AS')
-  t.is(initialsOf('', 'e905a4'), 'E9')
-  t.is(initialsOf('   ', 'e905a4'), 'E9')
-  t.is(initialsOf(null, 'e905a4'), 'E9')
-  t.is(initialsOf('', ''), '?')
-})
-
-test('initialsOf keeps an astral first character whole', async (t) => {
-  const { initialsOf } = await load()
-  const a = initialsOf('\u{1D49C}na Souza', 'ab')
-  t.is(a, '\u{1D49C}S')
-  t.is(Array.from(a).length, 2)
-  // A cased astral letter (Deseret) is upper-cased as one code point.
-  t.is(initialsOf('\u{10428}na souza', 'ab'), '\u{10400}S')
 })
 
 test('avatarColorOf', async (t) => {

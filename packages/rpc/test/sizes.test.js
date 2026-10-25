@@ -16,6 +16,7 @@ const {
   MAX_TEXT,
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
+  PROFILE_LIMIT_MAX,
   FOLLOW_LIMIT_MAX
 } = require('..')
 
@@ -48,6 +49,13 @@ function logResult (n, ch) {
   return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: post }), invalid: [], entriesTruncated: SEQ }
 }
 
+function profileResult (n, ch) {
+  return {
+    profiles: Array(n).fill({ author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), bio: ch.repeat(MAX_BIO) }),
+    missing: []
+  }
+}
+
 test('the worst-case records are valid records', (t) => {
   for (const ch of WORST) {
     t.is(validateRecord({ type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ } }, 1), null)
@@ -77,6 +85,16 @@ test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('log worst case at ' + LOG_LIMIT_MAX + ' entries: ' + size(logResult(LOG_LIMIT_MAX, '\ud800')) + ' bytes')
   t.ok(size(logResult(LOG_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')
+})
+
+test('profile.read: PROFILE_LIMIT_MAX fits', (t) => {
+  for (const ch of WORST) t.ok(size(profileResult(PROFILE_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('profile.read worst case at ' + PROFILE_LIMIT_MAX + ' authors: ' + size(profileResult(PROFILE_LIMIT_MAX, '\ud800')) + ' bytes')
+  let n = PROFILE_LIMIT_MAX
+  while (size(profileResult(n + 1, '\ud800')) <= MAX_MESSAGE) n++
+  t.comment('profile.read largest that fits: ' + n + ' authors')
+  t.ok(n >= PROFILE_LIMIT_MAX)
+  t.ok(size(profileResult(n + 1, '\ud800')) > MAX_MESSAGE)
 })
 
 test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {

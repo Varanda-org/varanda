@@ -1,10 +1,11 @@
-// Sincronizar: sync.start (once or continuous), sync.stop, the state from
-// the node's events (kept by the provider, keyed by runId) and the last 200
-// event and warning lines.
+// Sincronizar: read-only diagnostics of the automatic sync. The app starts and
+// keeps the sync itself (node.js), so this screen sends no start or stop
+// request: it shows the state from the node's events (kept by the provider,
+// keyed by runId), the next retry and the last 200 event and warning lines.
 
 import { displayText } from '@varanda/rpc'
-import { useNode, useNotice } from '../node'
-import { Body, Btn, Card, ErrorText, Mono, Notice, Page, Row, Soft, Title, useAction } from '../ui'
+import { useNode } from '../node'
+import { Body, Btn, Card, Mono, Page, Soft, Title, useNow } from '../ui'
 
 const REASONS = {
   done: 'concluída',
@@ -26,50 +27,34 @@ function endTime (at) {
   }
 }
 
+// The state line: a continuous run is the automatic sync; a once run is the
+// recovery after an unlock while `recovering`, otherwise a short run the
+// node makes around a publish.
+function stateLine (active, recovering) {
+  if (active === null) return 'parada'
+  const kind = active.once ? (recovering ? 'recuperando (única, ' : 'sincronizando (única, ') : 'sincronizando (contínua, '
+  return kind + 'execução ' + String(active.runId) + ')'
+}
+
 export default function Sincronizar ({ embedded = false, onOpenConnection }) {
   const node = useNode()
-  const { sync } = node
-  // "iniciada" lasts as long as that run; "nenhuma ... em andamento" until
-  // a run starts.
-  const [note, setNote] = useNotice(sync.active !== null ? sync.active.runId : null)
-  const start = useAction()
-  const stop = useAction()
-
-  const doStart = async (once) => {
-    setNote('')
-    // Never resent: after an uncertain failure the state below (events) and
-    // sync.status are what the person checks first.
-    const r = await start.run(() => node.request('sync.start', once ? { once: true } : {}))
-    if (r.ok) setNote(once ? 'sincronização única iniciada' : 'sincronização contínua iniciada', r.value.runId)
-  }
-
-  const doStop = async () => {
-    setNote('')
-    const r = await stop.run(() => node.request('sync.stop', {}))
-    if (r.ok && !r.value.stopped) setNote('nenhuma sincronização em andamento', null)
-  }
-
+  const { sync, autoSync } = node
+  // Ticks each second while a retry is waited for (the countdown).
+  const now = useNow(1000)
   const running = sync.active !== null
-  const stopped = sync.stopped
+  const { stopped: last } = sync
+  const retryIn = autoSync.backoffUntil > now ? Math.ceil((autoSync.backoffUntil - now) / 1000) : 0
   return (
     <Page>
-      {embedded ? null : <Title>Sincronizar</Title>}
+      {embedded ? null : <Title>Sincronização</Title>}
       <Card>
         {node.phase !== 'ready' ? <Soft>sem conexão com o nó</Soft> : null}
         {node.phase !== 'ready' && typeof onOpenConnection === 'function' ? <Btn label='abrir Conexão' secondary onPress={onOpenConnection} /> : null}
-        <Body>
-          {running
-            ? 'sincronizando (' + (sync.active.once ? 'uma vez' : 'contínuo') + ', execução ' + String(sync.active.runId) + ')'
-            : 'parado'}
-        </Body>
-        {!running && stopped ? <Soft>{'última execução ' + String(stopped.runId) + ': ' + (REASONS[stopped.reason] || displayText(stopped.reason)) + (endTime(stopped.at) ? ', às ' + endTime(stopped.at) : '')}</Soft> : null}
-        <ErrorText>{start.error || stop.error}</ErrorText>
-        <Notice>{note}</Notice>
-        <Row>
-          <Btn label='sincronizar uma vez' onPress={() => doStart(true)} pending={start.pending} disabled={running || stop.pending} />
-          <Btn label='sincronizar sempre' onPress={() => doStart(false)} pending={start.pending} disabled={running || stop.pending} />
-          <Btn label='parar' onPress={doStop} pending={stop.pending} disabled={!running || start.pending} danger />
-        </Row>
+        <Body>{stateLine(sync.active, Boolean(node.passkey && node.passkey.recovering))}</Body>
+        {!running && last ? <Soft>{'última execução ' + String(last.runId) + ': ' + (REASONS[last.reason] || displayText(last.reason)) + (endTime(last.at) ? ', às ' + endTime(last.at) : '')}</Soft> : null}
+        {retryIn > 0 ? <Soft>{'nova tentativa em ' + String(retryIn) + ' s'}</Soft> : null}
+        {autoSync.reconciling ? <Soft>conferindo o estado…</Soft> : null}
+        <Soft>Atualiza sozinho enquanto o app está aberto e com rede.</Soft>
       </Card>
       <Card>
         <Soft>{'linhas (as últimas ' + String(sync.lines.length) + ')'}</Soft>

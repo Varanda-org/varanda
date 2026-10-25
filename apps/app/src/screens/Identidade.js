@@ -9,18 +9,31 @@
 // is created if missing and a once sync runs (on a second device it brings
 // the certificate and the posts back from the seeder). The native node and
 // varanda-serve keep the plain identity card.
+//
+// With `setup` (the first run, App.js) the same cards render inside the
+// onboarding Stepper (src/onboarding.js decides the step) with welcome copy,
+// and the technical card (key, association, certificate state) stays for
+// Ajustes › Identidade. The setup changes presentation only: every ceremony,
+// link, certificate, reset and rename path is the one Ajustes uses.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, TextInput } from 'react-native'
+import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
-import { atHandle } from '../format'
+import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
-import { colors, fonts } from '../ui/theme'
+import { Stepper } from '../ui/Stepper'
+import { colors, fonts, type } from '../ui/theme'
+import { atName } from '../who'
 
-const ENTRAR_TEXT = 'A sua identidade é derivada da passkey. Guarde-a no Gerenciador de Senhas do Google para entrar com a mesma identidade no celular e no computador. A chave fica só na memória enquanto a página está aberta; perder a passkey perde a identidade. O sistema pode oferecer outro gerenciador (um iPhone pode usar as Chaves do iCloud): outra passkey é outra identidade.'
+const WELCOME_TEXT = 'Uma rede social que roda nos aparelhos das pessoas.'
+const ENTRAR_TEXT = 'Sua identidade vem da passkey: guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador. Perder a passkey é perder a identidade; outra passkey é outra identidade.'
+// Shown wherever the own key is shown during the setup (the association
+// issues the certificate for it).
+const KEY_NOTE = 'Sua chave é mostrada aqui e no seu perfil; ela nunca aparece para outras pessoas.'
+const NO_NAME = 'ainda sem @nome'
 // A passkey created but unusable (no PRF) is named so it can be deleted.
 function staleText (userId) {
   return typeof userId === 'string' && /^[0-9a-f]{6,}$/i.test(userId)
@@ -84,6 +97,7 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
     <Card>
       <Label>sua chave pública</Label>
       <Mono>{key}</Mono>
+      <Soft>{KEY_NOTE}</Soft>
       {manual
         ? (
           <TextInput
@@ -172,7 +186,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged }) {
   const node = useNode()
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
@@ -379,7 +393,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
     body = (
       <>
         <Label>nome de usuário</Label>
-        <Body>{displayText(atHandle(status.username, publicKey))}</Body>
+        <Body>{displayText(atName(status.username) || NO_NAME)}</Body>
         {/* After the one automatic try (certTried), whatever else cleared the error. */}
         {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='receber o certificado' onPress={receive} /> : null}
         {memberCert && nameFailed && !busy ? <Btn label='enviar o @nome de novo' onPress={retryName} /> : null}
@@ -415,7 +429,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
         {confirmable
           ? (
             <>
-              <Body>{'Conta Google escolhida. Confirme o vínculo com o nome ' + displayText(atHandle(row.username, publicKey)) + '.'}</Body>
+              <Body>
+                {setup
+                  ? 'Quase lá: confirme o vínculo com ' + displayText(atName(row.username) || NO_NAME) + '.'
+                  : 'Conta Google escolhida. Confirme o vínculo com o nome ' + displayText(atName(row.username) || NO_NAME) + '.'}
+              </Body>
               {confirmFailed
                 // The mapped message is the card's error line below.
                 ? <Btn label='usar outra conta Google' onPress={restartLink} disabled={busy} />
@@ -428,7 +446,18 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
             </>
             )
           : null}
-        {showForm
+        {showForm && setup
+          ? (
+            <>
+              <Field label='Escolha seu @nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+              <Soft>Começa com @: de 3 a 20 letras minúsculas, números ou _.</Soft>
+              <Body>{LINK_TEXT}</Body>
+              <Soft>{RELOAD_TEXT}</Soft>
+              <Btn label='Vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+            </>
+            )
+          : null}
+        {showForm && !setup
           ? (
             <>
               <Body>{LINK_TEXT}</Body>
@@ -447,7 +476,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
 
   return (
     <Card>
-      <Label>conta Google</Label>
+      {setup ? null : <Label>conta Google</Label>}
       <Notice>{returned || ''}</Notice>
       {body}
       <ErrorText>{acctError || error}</ErrorText>
@@ -457,7 +486,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, onChanged }) {
   )
 }
 
-export default function Identidade ({ active, embedded = false, onInfo }) {
+// setup: the first run (App.js). The cards render inside the Stepper of
+// `step` (src/onboarding.js) at `index` of `total`.
+export default function Identidade ({ active, embedded = false, setup = false, step, index = 0, total = 3, onInfo }) {
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -694,9 +725,38 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
         </Card>
       )
     } else {
+      // The welcome. The first ceremony leads: 'Criar passkey' for a browser
+      // with no passkey known, 'Entrar com a passkey' otherwise; the other is
+      // secondary. Same handlers as before (doUnlock, onCreatePress, doRegister,
+      // doComplete): only the order and the labels changed.
+      const createFirst = !pkStatus.passkeyKnown && !awaitingComplete
+      const entrarBtn = (
+        <Btn
+          label='Entrar com a passkey'
+          secondary={awaitingComplete || createFirst}
+          onPress={doUnlock}
+          pending={pkPending && !awaitingComplete}
+          disabled={pkPending}
+        />
+      )
+      const criarBtn = !createFirst
+        ? null
+        : confirmCreate
+          ? (
+            <>
+              <Notice>{EXISTS_TEXT}</Notice>
+              <Row>
+                <Btn label='criar mesmo assim' secondary onPress={doRegister} disabled={pkPending} />
+                <Btn label='cancelar' secondary onPress={() => setConfirmCreate(false)} disabled={pkPending} />
+              </Row>
+            </>
+            )
+          : <Btn label='Criar passkey' onPress={onCreatePress} disabled={pkPending} />
       entrar = (
         <Card>
-          <Body>{ENTRAR_TEXT}</Body>
+          <Text style={styles.brand}>Varanda</Text>
+          <Body>{WELCOME_TEXT}</Body>
+          <Soft>{ENTRAR_TEXT}</Soft>
           {shownMismatch
             ? (
               <>
@@ -723,20 +783,8 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
               </>
               )
             : null}
-          <Btn label='entrar com a passkey' secondary={awaitingComplete} onPress={doUnlock} pending={pkPending && !awaitingComplete} disabled={pkPending} />
-          {!pkStatus.passkeyKnown && !awaitingComplete
-            ? (confirmCreate
-                ? (
-                  <>
-                    <Notice>{EXISTS_TEXT}</Notice>
-                    <Row>
-                      <Btn label='criar mesmo assim' secondary onPress={doRegister} disabled={pkPending} />
-                      <Btn label='cancelar' secondary onPress={() => setConfirmCreate(false)} disabled={pkPending} />
-                    </Row>
-                  </>
-                  )
-                : <Btn label='criar passkey' secondary onPress={onCreatePress} disabled={pkPending} />)
-            : null}
+          {createFirst ? criarBtn : null}
+          {entrarBtn}
           <ErrorText>{pkError}</ErrorText>
           <Notice>{pkNote}</Notice>
           {node.hosted === true ? <Notice>{takeReturnNotice() || ''}</Notice> : null}
@@ -745,14 +793,25 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
     }
   }
 
-  if (entrar !== null) {
-    return (
-      <Page>
-        {embedded ? null : <Title>Entrar</Title>}
-        {entrar}
+  // The frame: in the setup the Stepper of the current step (the Page is
+  // flush: the Stepper carries the column and its padding); otherwise the
+  // plain page with its title (none when the top bar already shows one).
+  const frame = (title, children) => (setup
+    ? (
+      <Page flush padBottom={16}>
+        <Stepper index={index} total={total} title={STEP_TITLES[step] || title} hint={STEP_HINTS[step] || ''}>
+          {children}
+        </Stepper>
       </Page>
-    )
-  }
+      )
+    : (
+      <Page>
+        {embedded ? null : <Title>{title}</Title>}
+        {children}
+      </Page>
+      ))
+
+  if (entrar !== null) return frame('Entrar', entrar)
 
   const withPasskey = passkey !== null
   const needsCert = info !== null && info.publicKey !== null && !info.memberCert
@@ -760,9 +819,8 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
   // certificate. Native and varanda-serve keep CertificateStep / the field.
   const linkMode = node.hosted === true && withPasskey
 
-  return (
-    <Page>
-      {embedded ? null : <Title>Identidade</Title>}
+  return frame('Identidade', (
+    <>
       <ErrorText>{loadError}</ErrorText>
       <ErrorText>{withPasskey ? pkError : ''}</ErrorText>
       {recovering ? <Notice>sincronizando com o semeador…</Notice> : null}
@@ -776,7 +834,9 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
           </Card>
           )
         : null}
-      {info !== null && info.publicKey !== null
+      {/* The technical card stays in Ajustes › Identidade; the setup shows
+          the key only where the certificate step needs it (below). */}
+      {!setup && info !== null && info.publicKey !== null
         ? (
           <Card>
             <Label>sua chave pública</Label>
@@ -795,6 +855,7 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
             memberCert={info.memberCert === true}
             active={active}
             quiet={recovering || onceActive}
+            setup={setup}
             onChanged={refresh}
           />
           )
@@ -814,6 +875,11 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
       {needsCert && !withPasskey
         ? (
           <Card>
+            {/* The setup hides the technical card: the association issues
+                the certificate for this key, so it is shown here. */}
+            {setup ? <Label>sua chave pública</Label> : null}
+            {setup ? <Mono>{displayText(info.publicKey)}</Mono> : null}
+            {setup ? <Soft>{KEY_NOTE}</Soft> : null}
             <Label>certificado de membro (JSON emitido pela associação)</Label>
             <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
             <ErrorText>{certLocal || add.error}</ErrorText>
@@ -822,12 +888,13 @@ export default function Identidade ({ active, embedded = false, onInfo }) {
           )
         : null}
       <Notice>{done}</Notice>
-      {info !== null && info.publicKey !== null ? <Soft>{'diários seguidos: ' + String(info.followCount)}</Soft> : null}
-    </Page>
-  )
+      {!setup && info !== null && info.publicKey !== null ? <Soft>{'diários seguidos: ' + String(info.followCount)}</Soft> : null}
+    </>
+  ))
 }
 
 const styles = StyleSheet.create({
+  brand: { ...type.profileName, color: colors.accent, fontFamily: fonts.title },
   manual: {
     backgroundColor: colors.card,
     borderWidth: 1,

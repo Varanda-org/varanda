@@ -1,35 +1,44 @@
-// The sync state chip of the top bar: no network (the browser says it is
-// offline), offline (no node), syncing, last sync or a call to sync. Pressing it opens the sync screen (onPress).
+// The sync state chip of the top bar: what the automatic sync is doing, from
+// the folded sync signals (syncSignals.js chipState). There is no call to
+// sync (sync is automatic) and no last-synced time: the node has no such fact
+// (the own-sync signal is separate). Pressing it opens the sync screen
+// (onPress).
 
 import { Pressable, StyleSheet, Text } from 'react-native'
-import { sinceText } from '../format'
 import { useNode } from '../node'
+import { chipState, EMPTY_SIGNALS } from '../syncSignals'
 import { Icon } from './Icon'
 import { useNow } from './index'
 import { colors, type } from './theme'
 
+const SYNCING = ['sincronização automática', 'sincronizando…', 'conectando…', 'reconectando…', 'recuperando…']
+const ACCENT = ['sincronização automática', 'sincronizando…']
+
 export function SyncChip ({ onPress }) {
-  const { phase, sync, online } = useNode()
-  const now = useNow(30000)
-  const offline = online === false
-  const connected = phase === 'ready' && !offline
-  const stopped = sync && sync.stopped
-  let text
-  if (offline) text = 'sem rede'
-  else if (!connected) text = 'sem conexão'
-  else if (sync && sync.active) text = 'sincronizando…'
-  else if (stopped && stopped.reason === 'done' && !(stopped.result && stopped.result.ok === false)) text = 'sincronizado ' + sinceText(stopped.at, now)
-  else text = 'sincronizar'
-  const tint = connected ? colors.accent : colors.soft
+  const { phase, sync, online, autoSync, signals, passkey } = useNode()
+  // 'sincronizando…' lasts 5 s after a download: re-render often enough.
+  const now = useNow(2000)
+  const text = chipState({
+    online,
+    connected: phase === 'ready' && online !== false,
+    active: (sync && sync.active) || null,
+    wanted: Boolean(autoSync && autoSync.wanted),
+    signals: signals || EMPTY_SIGNALS,
+    now,
+    recovering: Boolean(passkey && passkey.recovering)
+  })
+  const on = SYNCING.includes(text)
+  const accent = ACCENT.includes(text)
+  const tint = accent ? colors.accent : colors.soft
   return (
     <Pressable
       accessibilityRole='button'
       accessibilityLabel={'sincronização: ' + text}
       onPress={onPress}
       hitSlop={4}
-      style={[styles.chip, connected ? styles.on : styles.off]}
+      style={[styles.chip, accent ? styles.on : styles.off]}
     >
-      <Icon name={connected ? 'sinc' : 'semconexao'} size={13} color={tint} />
+      <Icon name={on ? 'sinc' : 'semconexao'} size={13} color={tint} />
       <Text style={[styles.text, { color: tint }]} numberOfLines={1}>{text}</Text>
     </Pressable>
   )

@@ -12,7 +12,8 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE } from '../outbox'
-import { countChars, handleOf } from '../format'
+import { countChars } from '../format'
+import { whoOf } from '../who'
 import { ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Pill } from '../ui/Pill'
@@ -182,9 +183,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     }
   }
 
-  const replyName = reply
-    ? (typeof reply.name === 'string' && reply.name !== '' ? reply.name : handleOf(String(reply.ref).split(':')[0]))
-    : ''
+  const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''
 
   return (
     <Sheet
@@ -200,7 +199,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
                 <View style={styles.markRow}>
                   <Text style={styles.mark}>
                     {'respondendo a '}
-                    <Text style={styles.markName}>{displayText(replyName)}</Text>
+                    <Text style={styles.markName}>{replyName}</Text>
                   </Text>
                   <Pressable
                     accessibilityRole='button'
@@ -217,7 +216,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
               )
             : null}
           <View style={styles.compose}>
-            <Avatar name={self.name} publicKey={self.publicKey || ''} size={40} />
+            <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} />
             <TextInput
               style={styles.input}
               value={text}

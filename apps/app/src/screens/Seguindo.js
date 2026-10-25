@@ -1,60 +1,62 @@
-// Seguindo: follow.add, follow.remove, follow.list (offset paging). Rows show
-// the avatar, the name (learned through the names cache) and the handle, with
-// a "Seguindo" pill to unfollow. Design: apps/site/artwork/app-design.md.
+// Seguindo: follow.add, follow.remove, follow.list (offset paging, 50 per
+// page). Rows show the avatar and the name (or @nome) the member chose, read
+// from the profiles cache; never a key. A "Seguindo" pill unfollows. Design:
+// apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useState } from 'react'
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
-import { handleOf } from '../format'
-import { ErrorText, Field, Mono, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
+import { whoOf } from '../who'
+import { ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Pill } from '../ui/Pill'
+import { RefreshableList } from '../ui/RefreshableList'
+import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { colors, type } from '../ui/theme'
 
 const PAGE = 50
 
-// One followed diary. Tapping the name column shows the whole key;
-// 'denunciar' opens the report sheet for the whole account (the list never
-// holds the own key: follow.add refuses it).
-function FollowRow ({ followKey, name, onRemove, onReport, pending, disabled }) {
-  const [open, setOpen] = useState(false)
-  const handle = displayText(handleOf(followKey))
-  const named = typeof name === 'string' && name !== ''
+// One followed diary. The name column is not pressable yet; 'denunciar' opens
+// the report sheet for the whole account (the list never holds the own key:
+// follow.add refuses it). `profile` is undefined while it is being looked up.
+function FollowRow ({ followKey, profile, onRemove, onReport, pending, disabled }) {
+  const who = whoOf(profile)
+  const title = displayText(who.title)
+  const subtitle = who.subtitle ? displayText(who.subtitle) : null
   return (
     <View style={styles.row}>
-      <Avatar name={named ? name : null} publicKey={followKey} size={44} />
-      <Pressable
-        style={styles.who}
-        accessibilityRole='button'
-        accessibilityLabel='mostrar a chave inteira'
-        accessibilityState={{ expanded: open }}
-        onPress={() => setOpen((v) => !v)}
-      >
-        {named
+      <Avatar name={who.avatarName} publicKey={followKey} size={44} />
+      <View style={styles.who}>
+        {who.known
           ? (
             <>
-              <Text style={styles.name} numberOfLines={1}>{displayText(name)}</Text>
-              <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
+              <Text style={styles.name} numberOfLines={1}>{title}</Text>
+              {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
             </>
             )
-          : <Text style={styles.name} numberOfLines={1}>{handle}</Text>}
-        {open ? <Mono>{displayText(followKey)}</Mono> : null}
-      </Pressable>
+          : <View style={styles.skeleton} accessible={false} />}
+      </View>
       <Pill
         label='Seguindo'
         onPress={() => onRemove(followKey)}
         pending={pending}
         disabled={disabled}
-        accessibilityLabel={'deixar de seguir ' + handle}
+        accessibilityLabel={who.known ? 'deixar de seguir ' + title : 'deixar de seguir'}
       />
       <Pressable
         accessibilityRole='button'
-        accessibilityLabel={'denunciar ' + handle}
+        accessibilityLabel={who.known ? 'denunciar ' + title : 'denunciar'}
         hitSlop={8}
-        onPress={() => onReport({ author: followKey, name: named ? name : null, seq: null, text: null })}
+        onPress={() => onReport({
+          author: followKey,
+          name: profile ? profile.name : null,
+          username: profile ? profile.username : null,
+          seq: null,
+          text: null
+        })}
       >
         <Text style={styles.handle}>denunciar</Text>
       </Pressable>
@@ -62,7 +64,9 @@ function FollowRow ({ followKey, name, onRemove, onReport, pending, disabled }) 
   )
 }
 
-export default function Seguindo ({ active, onReport }) {
+// `onFollowsChanged` (optional): called after a follow or unfollow that
+// changed the list, so the shell refreshes A Rua, Diário and the follow count.
+export default function Seguindo ({ active, onReport, onFollowsChanged, scrollToTop }) {
   const node = useNode()
   const names = useNames()
   const bottomPad = useBottomPad()
@@ -79,20 +83,39 @@ export default function Seguindo ({ active, onReport }) {
   const [done, setDone] = useNotice()
   const add = useAction()
   const remove = useAction()
-  const more = useAction()
+  // Paging state, set together with the new items (one render per page).
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreError, setMoreError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+
+  // One sequence for every list read: a reload supersedes an older page in
+  // flight (its offset came from the list being replaced, so applying it
+  // would skip entries), no older page starts while a reload runs, and only
+  // the latest reload is applied.
+  const seqRef = useRef(0)
+  const reloadingRef = useRef(false)
 
   // Reads from the start; keeps at least as many entries as were shown.
+  const { profileOf, resolveMany } = names
   const reload = useCallback(async (want) => {
+    const mine = ++seqRef.current
+    reloadingRef.current = true
+    setLoadingMore(false)
+    setMoreError('')
     try {
       const r = await node.request('follow.list', { offset: 0, limit: Math.min(FOLLOW_LIMIT_MAX, Math.max(PAGE, want)) })
+      if (mine !== seqRef.current) return
       setKeys(r.follows)
       setTotal(r.total)
       setLoaded(true)
       setLoadError('')
+      resolveMany(r.follows)
     } catch (err) {
-      setLoadError(errorText(err))
+      if (mine === seqRef.current) setLoadError(errorText(err))
+    } finally {
+      if (mine === seqRef.current) reloadingRef.current = false
     }
-  }, [node.request])
+  }, [node.request, resolveMany])
 
   // After any follow change (success or failure, uncertain included) the list
   // is re-read before the person can act again; the error text stays.
@@ -107,14 +130,15 @@ export default function Seguindo ({ active, onReport }) {
 
   useEffect(() => { if (active) reload(PAGE) }, [active, reload])
 
-  // Looks up the names of the keys not in the cache yet (one log.read at a
-  // time, paused during a sync); rows re-render as names arrive.
-  const { nameOf, resolve } = names
-  useEffect(() => {
-    for (const key of keys) {
-      if (nameOf(key) === undefined) resolve(key)
+  // Pull-to-refresh re-reads the first page; the list never calls it twice.
+  const refresh = async () => {
+    setRefreshing(true)
+    try {
+      await reload(PAGE)
+    } finally {
+      setRefreshing(false)
     }
-  }, [keys, nameOf, resolve])
+  }
 
   // A 64-hex key, or '@nome' on a hosted page: the account service names the
   // key, and the follow is still that key (follows stay keys).
@@ -138,11 +162,17 @@ export default function Seguindo ({ active, onReport }) {
         if (found === null || !isKey(found.member) || !usernameMatches(found.usernameRecord, found.member, name)) throw new Error('nome não encontrado')
         target = found.member
       }
-      return node.request('follow.add', { key: target })
+      const res = await node.request('follow.add', { key: target })
+      return { target, changed: res.changed }
     })
     if (r.ok) {
       setInput('')
-      setDone(r.value.changed ? 'seguindo' : 'você já seguia esta chave')
+      names.resolve(r.value.target)
+      // Names the person once the profile is known; never by key.
+      const profile = profileOf(r.value.target)
+      const named = profile && (profile.name || profile.username) ? ' ' + displayText(whoOf(profile).title) : ''
+      setDone(r.value.changed ? 'seguindo' + named : 'você já seguia esta chave')
+      if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
     }
     await reread()
   }
@@ -153,17 +183,43 @@ export default function Seguindo ({ active, onReport }) {
     try {
       const r = await remove.run(() => node.request('follow.remove', { key }))
       if (r.ok) setDone(r.value.changed ? 'deixou de seguir' : 'esta chave não estava na lista')
+      if (r.ok && r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
       await reread()
     } finally {
       setRemoving(null)
     }
   }
 
+  // Older pages only after the first read landed (an end reach on the empty
+  // list must not ask offset 0 a second time), one at a time; a key already
+  // shown is never appended twice.
   const doMore = async () => {
-    const r = await more.run(() => node.request('follow.list', { offset: keys.length, limit: PAGE }))
-    if (r.ok) {
-      setKeys((prev) => prev.concat(r.value.follows))
-      setTotal(r.value.total)
+    if (!loaded || loadingMore || reloadingRef.current) return
+    const mine = seqRef.current
+    setLoadingMore(true)
+    setMoreError('')
+    try {
+      const r = await node.request('follow.list', { offset: keys.length, limit: PAGE })
+      if (mine !== seqRef.current) return
+      // Offsets drift if the list changed underneath (a follow added
+      // elsewhere sorts before the loaded rows): a page with nothing new while
+      // entries are missing re-reads from the start instead of stalling.
+      const shown = new Set(keys)
+      if (r.follows.length > 0 && r.follows.every((k) => shown.has(k)) && keys.length < r.total) {
+        setLoadingMore(false)
+        return reload(keys.length + PAGE)
+      }
+      setKeys((prev) => {
+        const seen = new Set(prev)
+        return prev.concat(r.follows.filter((k) => !seen.has(k)))
+      })
+      setTotal(r.total)
+      setLoadingMore(false)
+      resolveMany(r.follows)
+    } catch (err) {
+      if (mine !== seqRef.current) return
+      setMoreError(errorText(err))
+      setLoadingMore(false)
     }
   }
 
@@ -172,7 +228,7 @@ export default function Seguindo ({ active, onReport }) {
   const header = (
     <View style={styles.header}>
       <Field
-        placeholder={node.hosted ? 'chave pública do diário (64 dígitos hexadecimais) ou @nome' : 'chave pública do diário (64 dígitos hexadecimais)'}
+        placeholder={node.hosted ? 'chave pública ou @nome' : 'chave pública (64 dígitos hexadecimais)'}
         value={input}
         onChangeText={setInput}
         mono
@@ -188,22 +244,37 @@ export default function Seguindo ({ active, onReport }) {
     </View>
   )
 
-  const footer = loaded && keys.length < total
-    ? (
-      <View style={styles.footer}>
-        <ErrorText>{more.error}</ErrorText>
-        <Pill label='mais' onPress={doMore} pending={more.pending} />
-      </View>
-      )
+  // Nothing to page before the first read: the list stays "at the end".
+  const atEnd = !loaded || keys.length >= total
+  const footer = loaded
+    ? <ListFooter loading={loadingMore} atEnd={atEnd && keys.length > 0} error={moreError} onRetry={doMore} pending={loadingMore} />
     : null
 
+  const empty = !loaded
+    ? (loadError ? null : <Skeleton rows={3} />)
+    : total === 0
+      ? (
+        <EmptyState
+          icon='gente'
+          title='Você ainda não segue ninguém'
+          body='Cole a chave pública de alguém (ou um @nome, na versão web) para ver as publicações dessa pessoa na Rua.'
+        />
+        )
+      : null
+
   return (
-    <FlatList
-      style={styles.list}
+    <RefreshableList
+      scrollToTopSignal={scrollToTop}
       contentContainerStyle={{ paddingBottom: bottomPad }}
-      keyboardShouldPersistTaps='handled'
       data={keys}
+      extraData={[profileOf, removing, changing]}
       keyExtractor={(key) => key}
+      onRefresh={refresh}
+      refreshing={refreshing}
+      onLoadMore={doMore}
+      loadingMore={loadingMore}
+      loadMoreError={moreError !== ''}
+      atEnd={atEnd}
       ListHeaderComponent={
         <>
           {header}
@@ -212,13 +283,11 @@ export default function Seguindo ({ active, onReport }) {
           </SectionHeader>
         </>
       }
-      ListEmptyComponent={loaded && total === 0
-        ? <View style={styles.empty}><Soft>Você ainda não segue ninguém.</Soft></View>
-        : null}
+      ListEmptyComponent={empty}
       renderItem={({ item }) => (
         <FollowRow
           followKey={item}
-          name={nameOf(item)}
+          profile={profileOf(item)}
           onRemove={doRemove}
           onReport={onReport}
           pending={removing === item}
@@ -231,7 +300,6 @@ export default function Seguindo ({ active, onReport }) {
 }
 
 const styles = StyleSheet.create({
-  list: { flex: 1, backgroundColor: colors.bg },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end' },
   row: {
@@ -246,6 +314,5 @@ const styles = StyleSheet.create({
   who: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
   handle: { ...type.postMeta, color: colors.soft },
-  empty: { paddingVertical: 16, paddingHorizontal: 16 },
-  footer: { paddingVertical: 12, paddingHorizontal: 16, gap: 8, alignItems: 'center' }
+  skeleton: { height: 14, width: '55%', borderRadius: 7, backgroundColor: colors.line }
 })

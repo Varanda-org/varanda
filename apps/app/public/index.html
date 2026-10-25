@@ -30,6 +30,18 @@
         height: 100%;
         flex: 1;
       }
+      /* Stop the browser's own pull-to-refresh and the document bounce (the
+         app's lists refresh themselves) */
+      html,
+      body {
+        overscroll-behavior-y: none;
+      }
+      [data-pull=y] {
+        overscroll-behavior-y: contain;
+      }
+      body {
+        -webkit-tap-highlight-color: transparent;
+      }
     </style>
   </head>
 
