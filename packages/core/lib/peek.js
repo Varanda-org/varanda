@@ -6,8 +6,9 @@
 // diary means the publication with the highest seq (last written): a post,
 // a reply, a quote or a repost still in effect (likes are never shown).
 // Within a round, only the author's own `at` orders them, as in A Rua. The same
-// seeder inventory gives every member the same page except for their own key,
-// follows and blocks; anyone can recompute it from hello inventory and diaries.
+// seeder inventory gives every member the same page except for their follows
+// and blocks (the own diary is a candidate too: the person sees their own
+// publications here); anyone can recompute it from hello inventory and diaries.
 // Known limit: `at` is untrusted presentation data; a date up to 24 hours ahead
 // sorts first in its round, just as in A Rua.
 
@@ -33,17 +34,16 @@ function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
-function peekCandidates ({ inventory, ownKey, follows, blocked }) {
+function peekCandidates ({ inventory, follows, blocked }) {
   const candidates = []
   const seen = new Set()
-  const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : ownKey
   for (const [rawKey, length] of inventory) {
     const key = typeof rawKey === 'string' ? rawKey.toLowerCase() : null
     if (!isHex64(key) || seen.has(key)) continue
     // The first spelling of a key wins, whatever its length.
     seen.add(key)
     if (!Number.isSafeInteger(length) || length < 2) continue
-    if (key === own || follows.has(key) || blocked.has(key)) continue
+    if (follows.has(key) || blocked.has(key)) continue
     candidates.push({ key, length })
   }
   return candidates.sort((a, b) => cmp(a.key, b.key))

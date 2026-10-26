@@ -1,5 +1,6 @@
 // Espiadinha: up to three publications (posts, replies, quotes, reposts) of
-// each diary the person does not follow, one round at a time, newest first.
+// each diary the person does not follow, their own included, one round at a
+// time, newest first.
 // No algorithm. Hosted web only: on native and varanda-serve the tab explains
 // that and never calls peek.read. The rows live in memory only; nothing is
 // persisted (their photos are fetched no-store: these authors are not
@@ -264,6 +265,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
+  // The own diary shows here too; its rows offer no 'seguir'.
+  const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
   const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
     ? () => onOpenMember(item.author, { name: item.name, username: item.username })
@@ -295,7 +298,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     return (
       <PostRow
         {...row}
-        onFollow={() => follow(item.author, item.name, item.username)}
+        onFollow={isOwn(item) ? undefined : () => follow(item.author, item.name, item.username)}
         followPending={following.has(item.author)}
         onReport={reportable(item) ? row.onReport : undefined}
       />
