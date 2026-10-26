@@ -106,6 +106,16 @@
 // mediaDevice included), the pending follow changes and the per-device
 // migration marker (the kept follows are offered for confirmation again by
 // the next identity), and locks both keys; config and follows stay.
+//
+// The Espiadinha (web only, docs/rpc.md 5.22): peek.read is answered by
+// ./peek.js from a dedicated short-lived seeder link and memory cores, in
+// browser memory only (a snapshot of at most 5 minutes, nothing written).
+// Unlike every other read it is NOT run inside withStore and does not
+// preempt a running sync: it opens no storage core (the preemption exists
+// only because two Hypercore instances on one storage corrupt it) and a page
+// may take up to 25 s, which must not block the serial chain. Only the
+// own-key lookup runs on the chain. One peek at a time ('espiadinha já em
+// andamento'); detach, close, reset and setKeyPair abort a running one.
 const b4a = require('b4a')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const {
@@ -127,6 +137,7 @@ const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync } = require('./sync')
+const { createPeeker } = require('./peek')
 const store = require('./node-store')
 const { checkSeederUrl } = require('./seeder-url')
 
@@ -143,6 +154,8 @@ const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+const NO_SEEDER = 'sem conexão com o semeador'
+const PEEK_BUSY = 'espiadinha já em andamento'
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
 // Failed drains retried from own-synced without a new follow change.
@@ -168,7 +181,9 @@ const USAGE_MESSAGES = new Set([
   BAD_USERNAME_RECORD,
   OLD_USERNAME_RECORD,
   SELF_REPORT,
-  BAD_REPORT
+  BAD_REPORT,
+  NO_SEEDER,
+  PEEK_BUSY
 ])
 const USAGE_PATTERNS = [
   /^certificado inválido \([a-z0-9-]{1,40}\)$/,
@@ -336,6 +351,13 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  // The Espiadinha: its peeker and the one peek.read in flight (its promise;
+  // never the promise of a refused call). `peeking` is the slot, released at
+  // once by detach/reset/setKeyPair; `unwinding` keeps every read that has
+  // not settled yet, aborted ones included, so close() still awaits them
+  // before ./node.js closes the storage.
+  let peeking = null
+  const unwinding = new Set()
 
   function send (event, data) {
     const fn = emitter
@@ -346,6 +368,16 @@ function createBrowserSession ({
   function warning (text) {
     send('warning', { line: line(text) })
   }
+
+  const peeker = createPeeker({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    ownKey: () => requireOwnKey(),
+    log: (text) => warning(safe(text)),
+    limits: syncOptions.peek
+  })
 
   // ---- sync runs ----
 
@@ -876,6 +908,40 @@ function createBrowserSession ({
       return { profiles: r.profiles, missing: r.missing }
     }),
 
+    // The Espiadinha (docs/rpc.md 5.22), works locked. NOT wrapped in
+    // serial as a whole, on purpose: the peeker opens no storage core (it
+    // reads kv and fetches into memory cores over its own link), so it has
+    // no reason to preempt a running sync, and a page may take up to 25 s,
+    // which must not hold every other request on the chain. Only the
+    // own-key lookup runs serialized (NOT_FOUND 'identidade não encontrada'
+    // as the other reads; it may preempt once when the key is not cached).
+    // One at a time: the check runs BEFORE anything starts and the promise
+    // of a refused call is never tracked.
+    // The connection epoch is captured on arrival: a client that detached
+    // while the lookup was queued (detach's abort found no peek to end)
+    // gets 'conexão encerrada' and no link is ever opened for it; a read
+    // that did start is aborted by detach and frees the slot at once.
+    'peek.read': async (params) => {
+      const epoch = connection
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (peeking !== null) throw rpcError('USAGE', PEEK_BUSY)
+      await serial(async () => requireOwnKey())(params)
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+      if (peeking !== null) throw rpcError('USAGE', PEEK_BUSY)
+      const p = peeker.read(params)
+      peeking = p
+      unwinding.add(p)
+      p.then(() => unwinding.delete(p), () => unwinding.delete(p))
+      try {
+        return await p
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      } finally {
+        if (peeking === p) peeking = null
+      }
+    },
+
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection
       if (gone()) throw rpcError('USAGE', 'conexão encerrada')
@@ -956,6 +1022,9 @@ function createBrowserSession ({
       throw err
     }
     return serial(async () => {
+      // A peek in flight belongs to the previous identity.
+      peeker.abort()
+      peeking = null
       zeroKeyPair()
       keyPair = copy
       mediaKeyPair = mediaCopy
@@ -1073,6 +1142,8 @@ function createBrowserSession ({
   // marker, and locks both keys; 'config' and 'follows' stay. A sync in
   // progress is stopped and not restarted.
   const reset = serial(async () => {
+    peeker.abort()
+    peeking = null
     syncIntent = null
     await stopRun('stopped')
     await storage.deleteCore(store.DIARY)
@@ -1098,8 +1169,14 @@ function createBrowserSession ({
     emitter = emit
   }
 
-  // The connection closed: no more events, and a running sync stops.
+  // The connection closed: no more events, and a running sync and a
+  // running peek stop.
   function detach () {
+    // The slot is released at once (the aborted read, still unwinding, sees
+    // it was aborted and throws; its finally only clears its own promise),
+    // so a reconnected client's peek.read starts immediately.
+    peeker.abort()
+    peeking = null
     connection++
     emitter = null
     syncIntent = null
@@ -1108,17 +1185,25 @@ function createBrowserSession ({
 
   // Stops accepting requests (later ones -> LOCKED 'sessão encerrada'),
   // stops the sync (a gate run a write is waiting on included: that write
-  // fails instead of holding the close for its deadline), awaits every
-  // queued operation and zero-fills the key. Idempotent. The storage stays
-  // open: its owner (./node.js) closes it after this.
+  // fails instead of holding the close for its deadline) and the peek,
+  // awaits every queued operation and the peek in flight (settled either
+  // way: ./node.js closes the storage right after), and zero-fills the key.
+  // Idempotent. The storage stays open: its owner (./node.js) closes it
+  // after this.
   function close () {
     if (closing !== null) return closing
     closed = true
     syncIntent = null
+    peeker.abort()
+    peeking = null
     closing = (async () => {
       await stopRun('stopped')
       await chain
+      // Every read still unwinding, also one a detach (node.close closes the
+      // port first) already released the slot of.
+      await Promise.allSettled([...unwinding])
       await stopRun('stopped')
+      peeker.close()
       zeroKeyPair()
     })()
     return closing

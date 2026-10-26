@@ -33,6 +33,12 @@ const LOG_LIMIT_DEFAULT = 20
 const LOG_LIMIT_MAX = 36
 const FEED_LIMIT_DEFAULT = 30
 const FEED_LIMIT_MAX = 31
+// A PeekItem is a FeedItem (with up to MAX_MEDIA_PER_POST maximal media
+// descriptors, hence FEED_LIMIT_MAX) with replyTo null plus `round` (<= 100000);
+// the envelope adds a cursor and three counts, so the same maximum fits
+// MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const PEEK_LIMIT_DEFAULT = 30
+const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
 // Authors per profile.read: its worst case fits MAX_MESSAGE with room to
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
@@ -135,6 +141,8 @@ module.exports = {
   LOG_LIMIT_MAX,
   FEED_LIMIT_DEFAULT,
   FEED_LIMIT_MAX,
+  PEEK_LIMIT_DEFAULT,
+  PEEK_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
   FOLLOW_LIMIT_DEFAULT,
   FOLLOW_LIMIT_MAX,

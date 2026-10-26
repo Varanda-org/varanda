@@ -7,14 +7,20 @@
 // same factory must hand out a fresh instance; it shares the closed one's
 // pages and length, which is what makes the second open see the same files
 // (random-access-memory's own RAM.reusable() copies them instead).
+// pageSize (optional): the RAM page size in bytes, carried over on reopen.
+// Without it random-access-memory's default (1 MiB pages) applies, as the
+// sync's quarantine core expects; the Espiadinha's memory cores (./peek.js)
+// pass 64 KiB so a short-lived core holding a few blocks never pins a
+// megabyte per file.
 const RAM = require('random-access-memory')
 
-function memoryStorage () {
+function memoryStorage ({ pageSize } = {}) {
   const files = new Map()
+  const options = pageSize === undefined ? {} : { pageSize }
   return function createStorage (name) {
     const existing = files.get(name)
     if (existing && !existing.closed) return existing
-    const ram = new RAM()
+    const ram = new RAM(options)
     if (existing) {
       ram.length = existing.length
       ram.pageSize = existing.pageSize

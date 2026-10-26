@@ -28,12 +28,24 @@ A rede se chama Varanda, no domínio varanda.app, e cada parte do app leva um no
 
 | Nome no app | O que é | O que muda no desenho |
 | --- | --- | --- |
-| A Rua | O feed principal: o que está acontecendo fora da bolha, não uma linha do tempo feita só para o gosto de cada um | Hoje o app só baixa os diários que a pessoa segue; A Rua também precisa trazer publicações de quem ela não segue, sem algoritmo de engajamento |
+| A Rua | O feed dos diários que a pessoa segue | Continua com os diários seguidos; a descoberta fica na Espiadinha |
 | Cadeiras de Praia (Cadeiras) | Conversas em grupo e salas de áudio ao vivo, como as cadeiras de plástico puxadas para a calçada | Fica fora do piloto: grupo pede um diário com vários autores, e áudio ao vivo pede transmissão em tempo real entre aparelhos |
-| Espiadinha | A aba de descobrir: espiar o que outras cidades, estados ou pontos de vista opostos estão discutindo | Precisa saber a cidade ou o estado de quem publica; para coletar o mínimo (LGPD), a pessoa informaria só a cidade, nunca a localização exata |
+| Espiadinha | Espiar o que quem você não segue está publicando | No piloto web: uma publicação por diário por rodada, até três rodadas, sem algoritmo de engajamento; cidade e estado ficam para depois |
 | Gente da Gente | O selo de membro real e construtivo, no lugar do selo azul corporativo | "Real" já vem do certificado de membro; "construtivo" precisa de critério e de quem concede, e o selo não deve revelar a faixa etária |
 
 Os pontos em aberto de cada nome estão em Perguntas em aberto.
+
+### Espiadinha: regra democrática
+
+A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.
+
+"Mais recente" é a publicação que não é resposta com maior `seq`, a última escrita. Dentro de cada rodada, vale a data `at` informada pelo autor, com desempate pela chave do diário. A igualdade é por diário certificado, não por pessoa: publicar mais não dá mais lugares na rodada, e cada diário tem no máximo três publicações. A regra está em [packages/core/lib/peek.js](../packages/core/lib/peek.js). A lista exclui o diário próprio, os bloqueados e o conjunto efetivo de seguidos, vindo dos registros `follow` do diário mais as operações pendentes. Não se coleta cidade nem estado.
+
+O navegador calcula a página a partir do inventário já enviado pelo semeador. Uma conexão curta, anônima no sentido de usar uma chave Noise efêmera e não anunciar a identidade, busca os outros diários; o semeador vê o mesmo IP pedindo o complemento dos seguidos, que já conhece pelo inventário da sincronização, e pode correlacionar as conexões. Ele registra uma linha `peer` por conexão; os logs têm rotação por tamanho em [deploy/seeder/compose.yaml](../deploy/seeder/compose.yaml). A leitura não chama a associação nem o serviço de conta. Nenhuma página de descoberta ou nova cópia de conteúdo é guardada em servidor; continuam existindo as réplicas e os logs normais do semeador. No aparelho, os registros dos diários espiados ficam só na memória do navegador: recarregar descarta; no nó, o retrato vence em 5 minutos, com descarte por temporizador mesmo sem outra leitura. As linhas já exibidas podem permanecer na interface até atualizar ou recarregar. Fotos usam a mesma rota `/media` de A Rua, sob demanda, conferidas por SHA-256, com endereços `blob:` mantidos só em memória; os bytes das imagens podem continuar no cache HTTP do navegador.
+
+O semeador pode omitir inventário, blocos ou um estado assinado mais novo, mas não forjar nem escolher a publicação dentro do histórico verificado. A janela usa o comprimento assinado que Hypercore verifica com o bloco 0, nunca o anunciado. Cada janela posterior precisa reproduzir o mesmo comprimento e `treeHash`; se mudou, seus blocos são descartados e o diário para de avançar nesse retrato, com a página incompleta. Certificados e registros de @nome são verificados de novo contra os emissores revogados em toda página. Qualquer nó pode refazer a regra com o mesmo inventário, históricos e filtros ([protocol.md](protocol.md), seção 6).
+
+Limites do piloto: 30 itens na primeira página e 31 nas seguintes, custo linear no número de diários, até 64 blocos examinados por diário (registros que não são publicações podem esconder posts antigos). As buscas seguem ordem aleatória por retrato para distribuir o efeito dos cortes. Inventário que não completa em 5 s, corte pelo prazo de 25 s, orçamento de 16 MiB por página ou de 32 MiB de registros retidos deixam a lista incompleta; os núcleos em RAM usam páginas de 64 KiB. Os nomes são a melhor informação nos blocos lidos, podendo faltar ou estar antigos. A data vem do autor (mais de 24 h no futuro é ignorada), e um bloqueio novo só retira linhas já mostradas na próxima carga. Há uma conexão externa curta extra por página que precisa buscar dados, além da sincronização: ela disputa as 32 vagas externas do semeador, e cada membro hospedado já ocupa uma com sua sincronização. A Espiadinha não interrompe essa sincronização; só a consulta inicial da chave própria pode interromper uma vez quando ainda não está no cache. Só uma leitura da Espiadinha roda por vez, e desconectar libera a vaga imediatamente.
 
 ## Arquitetura
 
@@ -199,7 +211,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
-| Publicações e perfil | Celulares de quem segue e semeadores no Brasil | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
+| Publicações e perfil | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos |
 | Lista de quem a pessoa segue (registros `follow` no diário) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
 | Mensagens diretas | Só nos aparelhos dos participantes, cifradas de ponta a ponta | Execução de contrato | Até apagarem |
 | Certificado de membro (chave, faixa etária, método, data) | Serviço de idade, no Brasil | Obrigação legal, ECA Digital (Art. 7º, II) | Enquanto a conta existir |
@@ -263,7 +275,7 @@ Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a mo
 - **Mídia ilegal:** antes de exibir ou repassar, o app compara fotos e vídeos com listas de hashes de material ilegal conhecido, obtidas com organizações especializadas (a definir). Abuso sexual infantil é denunciado à SaferNet Brasil e à Polícia Federal. **Isso ainda não existe.** A versão atual publica fotos e GIFs sem nenhuma comparação com listas de hashes; por esse motivo ela aceita só imagens e nenhum vídeo. Até a comparação existir, o que segura mídia ilegal é a denúncia e o bloqueio da conta: um diário bloqueado tem as fotos apagadas do semeador junto com ele, e o semeador deixa de servi-las.
 - **Prazos:** desde a decisão do STF sobre o Art. 19 (junho de 2025), a plataforma responde por crimes e atos ilícitos que não remover após notificação, sem precisar de ordem judicial (lógica do Art. 21). Para crimes contra a honra vale o Art. 19: a responsabilidade depende de ordem judicial. Anúncios pagos e circulação em massa de crimes graves exigem cuidado ainda maior. A associação publica seus prazos de resposta.
 - **Ordens judiciais:** cumpridas pela mesma lista. Mensagens cifradas e conteúdo que só existe nos aparelhos a associação não tem como entregar, e a política de privacidade diz isso.
-- **Proteção de quem hospeda:** cada celular guarda só diários de quem a pessoa segue, e semeadores são organizações, não pessoas físicas. Isso reduz o risco de alguém guardar sem saber material ilegal, cuja posse é crime (ECA, Art. 241-B).
+- **Proteção de quem hospeda:** além do diário próprio, o aparelho mantém como réplicas persistentes só diários de quem a pessoa segue, e semeadores são organizações, não pessoas físicas. A Espiadinha lê outros diários pelo semeador sem gravá-los: ficam só em memória e somem ao recarregar. Conteúdo de quem a pessoa não segue, portanto, passa pela RAM do navegador. A limitação das cópias persistentes reduz o risco de guardar sem saber material ilegal, mas não elimina essa exposição durante a leitura; a avaliação jurídica continua necessária.
 - **Limite:** um app modificado pode ignorar as listas. A associação responde pelos apps e serviços que publica; o alcance dessa responsabilidade precisa de parecer jurídico.
 
 ## Riscos e limitações
@@ -279,7 +291,7 @@ O maior risco é escala: nenhuma rede social P2P chegou a milhões de usuários 
 | Parceiros não aparecem | Conteúdo some quando os celulares desligam | Começar com 1–2 semeadores da associação no plano gratuito da Oracle em São Paulo |
 | Equipe de moderação pequena | Prazos legais estourados | Ondas de convite só quando houver moderação para elas |
 | Holepunch muda as APIs | Retrabalho | Fixar versões e acompanhar a documentação oficial |
-| Busca e assuntos do momento são difíceis sem servidor | Descoberta pobre | Índice de publicações públicas montado pelos semeadores |
+| Busca e assuntos do momento são difíceis sem servidor | Descoberta pobre | O inventário do `hello` do semeador já é um índice de diários; a Espiadinha usa esse índice e ordena no navegador, sem classificação no servidor |
 
 ## Fases
 
@@ -323,9 +335,9 @@ As seis primeiras precisam de advogado antes do piloto; as demais, da comunidade
 - [ ] Quando a credencial etária do gov.br fica pronta, e plataformas privadas vão poder usá-la?
 - [x] Nome da rede: Varanda, no domínio varanda.app.
 - [ ] Registrar varanda.app, se ainda não estiver registrado, e verificar a marca Varanda no INPI.
-- [ ] A Rua: quais publicações de fora dos seguidos entram, e em que ordem (cronológica, por cidade, por curadoria)?
+- [x] A Rua mantém os seguidos; a Espiadinha mostra uma publicação de cada diário não seguido por rodada, até três rodadas, da mais nova para a mais antiga dentro de cada rodada.
 - [ ] Gente da Gente: qual o critério de "construtivo", quem concede o selo e como ele é retirado?
-- [ ] Em que fase entram Cadeiras de Praia e Espiadinha?
+- [ ] Em que fase entra Cadeiras de Praia? (a Espiadinha entrou no piloto, só na versão web)
 
 ## Fontes
 

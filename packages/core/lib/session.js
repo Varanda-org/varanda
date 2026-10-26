@@ -494,6 +494,13 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // Espiadinha reads diaries this node does not store through the browser
+    // node's seeder WebSocket link (packages/web-member/lib/peek.js).
+    // Nothing is opened.
+    'peek.read': serial(async () => {
+      throw new UsageError('Espiadinha disponível só no navegador')
+    }),
+
     'profile.set': serial(async ({ name, bio }) => {
       const own = await requireOwnKey()
       const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))

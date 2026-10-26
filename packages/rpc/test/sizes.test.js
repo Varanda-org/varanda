@@ -22,6 +22,7 @@ const {
   MEDIA_MIMES,
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
+  PEEK_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
   FOLLOW_LIMIT_MAX
 } = require('..')
@@ -68,6 +69,18 @@ function feedResult (n, ch) {
   }
 }
 
+// A PeekItem is the feed worst-case item with replyTo null plus `round`.
+function peekResult (n, ch) {
+  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, media: MEDIA, round: 100000 }
+  return {
+    items: Array(n).fill(item),
+    next: { round: 100000, at: AT, author: HEX, seq: SEQ },
+    diaries: 4096,
+    skipped: 4096,
+    incomplete: true
+  }
+}
+
 function logResult (n, ch) {
   return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstPost(ch) }), invalid: [], entriesTruncated: SEQ }
 }
@@ -103,6 +116,12 @@ test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
   t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')
   // Lone surrogates are the worst case: one more item of 4-byte characters fits.
   t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}')) <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
+})
+
+test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
+  // With MAX_MEDIA_PER_POST maximal descriptors in every item.
+  for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800')) + ' bytes')
 })
 
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
