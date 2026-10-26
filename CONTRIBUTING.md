@@ -16,7 +16,7 @@ is:open no:assignee label:"dificuldade:pequena" -label:só-mantenedores
 ```
 
 - Prefira issues sem responsável (`no:assignee`) e sem o rótulo `só-mantenedores`.
-- Evite issues marcadas como Blocked no quadro (elas têm "bloqueada por" outras issues): espere as bloqueadoras fecharem.
+- Evite issues com o selo "Blocked" (aparece quando a issue é "bloqueada por" outra ainda aberta): espere as bloqueadoras fecharem.
 - Issues grandes são divididas em sub-issues; pegue uma sub-issue, não a issue-mãe.
 - Cada issue segue o mesmo roteiro: Contexto, Escopo, Critérios de aceite, Depende de e Fontes, com "Fase" e "Dificuldade" no rodapé. Quando parte do trabalho já foi entregue, as seções Já feito e Falta dizem o que os PRs fizeram e o que resta. Os critérios de aceite dizem como verificar que o trabalho terminou.
 
