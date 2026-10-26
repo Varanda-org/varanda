@@ -423,7 +423,6 @@ function createBrowserSession ({
     association: cfg.association,
     seederUrl: cfg.seederUrl,
     createSocket,
-    ownKey: () => requireOwnKey(),
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
   })

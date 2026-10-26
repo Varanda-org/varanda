@@ -143,13 +143,11 @@ async function pool (items, n, fn) {
   await Promise.all(workers)
 }
 
-// ownKey: () => Promise<lowercase hex64> (the session's requireOwnKey).
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel).
-function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, log = noop, limits = {} } = {}) {
+function createPeeker ({ storage, association, seederUrl, createSocket, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
-  if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
   const L = {
     connectTimeoutMs: PEEK_CONNECT_TIMEOUT_MS,
     pageTimeoutMs: PEEK_PAGE_TIMEOUT_MS,
@@ -290,10 +288,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     }
   }
 
-  async function buildSnapshot (run, { own, follows, blocked }) {
+  async function buildSnapshot (run, { follows, blocked }) {
     const link = await openLink(run)
     checkAborted(run)
-    const candidates = peekCandidates({ inventory: link.peer.remoteHave, ownKey: own, follows, blocked })
+    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
     const order = shuffle(candidates.map(newDiary))
     return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0 }
   }
@@ -523,7 +521,6 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   async function readWith (run, { limit, cursor, first }) {
     const deadline = Date.now() + L.pageTimeoutMs
     // Preparation: kv reads only, no core is opened.
-    const own = await ownKey()
     const follows = new Set()
     for (const raw of await store.readFollows(storage)) {
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
@@ -533,7 +530,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     checkAborted(run)
     if (first || snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs) {
       snapshot = null
-      const built = await buildSnapshot(run, { own, follows, blocked: mod.blocked })
+      const built = await buildSnapshot(run, { follows, blocked: mod.blocked })
       checkAborted(run)
       snapshot = built
     }

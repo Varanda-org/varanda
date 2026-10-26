@@ -996,7 +996,6 @@ test('regression: an idle snapshot is released after its TTL and the next contin
       ws.on('error', () => {})
       return ws
     },
-    ownKey: async () => 'c'.repeat(64),
     limits: { snapshotTtlMs: 300 }
   })
   t.teardown(() => peeker.close(), { force: true })
@@ -1079,4 +1078,20 @@ test('regression: a get cut by the page deadline is no verdict: the delayed diar
   t.is(second.skipped, 0, 'B was never marked unavailable')
   t.is(seeder.connections, 2, 'the continuation fetched over a fresh link')
   t.alike(internal, [])
+})
+
+test('the own diary shows in the Espiadinha like any unfollowed diary', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const keyPair = crypto.keyPair()
+  const mine = await diary(t, author(assoc, 'Eu', [now - HOUR]), keyPair)
+  const other = await diary(t, author(assoc, 'Outro', [now - 2 * HOUR]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine, other] })
+  const { web, internal, key } = await webNode(t, assoc, seeder.url, { keyPair })
+  t.is(key, hex(mine.key), 'the member is the author of `mine`')
+  const page = await web.request('peek.read', {})
+  t.alike(internal, [])
+  t.is(page.diaries, 2, 'the own diary is a candidate')
+  t.alike(page.items.map((i) => [i.author, i.text]), [[hex(mine.key), 'Eu 1'], [hex(other.key), 'Outro 1']], 'the own post (newer) first')
 })

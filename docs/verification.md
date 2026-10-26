@@ -1292,3 +1292,28 @@ None of these was performed for this change.
 - The Caddy image is now built (`deploy/seeder/Dockerfile.caddy`): the official `caddy:2.11.6-builder-alpine` (sha256:096ec6e8...) builds `xcaddy build --with github.com/mholt/caddy-ratelimit@v0.1.0` (commit 12435ecef5dbb1b137eb68002b85d775a9d5cdb2, Apache-2.0; its README calls it work in progress), and the binary is copied over `caddy:2.11.6-alpine` (sha256:d44355d3...). The module is third-party code compiled into the process that terminates TLS: bump it deliberately. `deploy.sh` builds it with the seeder image, keeps the previous Caddy image as `varanda-caddy:anterior` and restores it on rollback.
 - Verified (2026-10-26, Docker 29.5.3, local): `docker build -f deploy/seeder/Dockerfile.caddy` succeeds (Caddy v2.11.6 with caddy-ratelimit v0.1.0); `caddy list-modules` shows `http.handlers.rate_limit`; the production Caddyfile passes `caddy adapt`; against a local upstream, 25 requests in a burst gave 20 x 200 and 5 x 429 (`Retry-After: 10`), and a request 11 s later gave 200; with the `log` exclusion, the 429s produced no log line containing the client address (without it, each 429 logged `remote_ip`). Not verified: behaviour behind real TLS and a real client address on the production host (the Docker Desktop test sees one gateway address for every request).
 - Likes, reposts and quotes are public; old readers skip them (and a quote is not shown there at all).
+
+## 19. Own publications in the Espiadinha (2026-10-26)
+
+### Summary
+
+- At the owner's request ("quando posto na rua não sobe na espiadinha"), the own diary is now an Espiadinha candidate like any unfollowed diary: a post made in A Rua shows up in the person's own Espiadinha. Followed diaries stay out (they are already in A Rua).
+- `packages/core/lib/peek.js`: `peekCandidates` no longer excludes the own key (the `ownKey` parameter is gone). `packages/web-member/lib/peek.js`: `createPeeker` no longer takes `ownKey`; `peek.read` still checks the identity on the serial chain first (`packages/web-member/lib/session.js`).
+- App: own rows in the Espiadinha offer no 'seguir' (following oneself is refused) and, as before, no 'denunciar'.
+- The own diary is read like any other candidate: from the seeder, over the short-lived peek link, into memory cores (never the node storage), so it shows once the seeder holds the post (the browser's write gate pushes it before `post.create` answers).
+
+### Automated (CI)
+
+CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order):
+
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 113 test files, 0 failures (core 18, rpc 8, web-member 25, app 26, cli 34, site 2). New: the core candidate test includes the own diary; `packages/web-member/test/peek.test.js` "the own diary shows in the Espiadinha like any unfollowed diary" (28 tests, 275 asserts).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 11 tests, 64 asserts, all pass (no size change).
+- `npm run pack:worklet -w apps/app`: bundle 1956863 bytes, 350 files, 38 linked addon entries; 'node scan: clean'.
+- `npm run export:web -w apps/app`: `NODE_BUNDLE 659292 GZIP 201561`; service worker with 11 files.
+- `node apps/cli/test/readme-help.test.js`: passes. The whitespace check on the diff: clean.
+
+### Human verification
+
+- [ ] Hosted web: publish in A Rua, open the Espiadinha: the post is there, without 'seguir' (not performed yet).

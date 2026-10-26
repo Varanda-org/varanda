@@ -66,7 +66,8 @@ test('peekCandidates filters inventory, lowercases keys and sorts without mutati
   const follows = new Set(['dd'.repeat(32)])
   const blocked = new Set(['ee'.repeat(32)])
   const before = Array.from(inventory)
-  t.alike(peekCandidates({ inventory, ownKey: B.toUpperCase(), follows, blocked }), [{ key: A, length: 5 }, { key: C, length: 12 }])
+  // The own diary is not excluded: B (length 2) is a candidate like any other.
+  t.alike(peekCandidates({ inventory, follows, blocked }), [{ key: A, length: 5 }, { key: B, length: 2 }, { key: C, length: 12 }])
   t.alike(Array.from(inventory), before)
   t.alike(Array.from(follows), ['dd'.repeat(32)])
   t.alike(Array.from(blocked), ['ee'.repeat(32)])
@@ -75,7 +76,7 @@ test('peekCandidates filters inventory, lowercases keys and sorts without mutati
 test('peekCandidates keeps one candidate per key whatever its spelling', (t) => {
   const inventory = new Map([[A.toUpperCase(), 5], [A, 9], [B, 3]])
   const none = new Set()
-  t.alike(peekCandidates({ inventory, ownKey: C, follows: none, blocked: none }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
+  t.alike(peekCandidates({ inventory, follows: none, blocked: none }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
 })
 
 test('peekWindow starts with the head and newest eight, then descends with a strict cap', (t) => {
