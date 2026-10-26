@@ -7,6 +7,19 @@
 {
 	# Sem a API de administração (ela escutaria em 127.0.0.1:2019 do host).
 	admin off
+	# A ordem do rate_limit (módulo caddy-ratelimit, na imagem de
+	# Dockerfile.caddy) é declarada à mão, como o README do módulo pede: dentro
+	# de cada handle ele roda antes do reverse_proxy, então um cliente acima do
+	# limite leva 429 sem chegar ao semeador.
+	order rate_limit before reverse_proxy
+	# O módulo registra "rate limit exceeded" com o remote_ip a cada 429 (nível
+	# info), e o endereço do cliente não pode ir para registro algum: este é o
+	# único log do arquivo, e só EXCLUI esse logger do registro padrão. Não
+	# existe registro de acesso (nenhum log dentro do site) e os demais
+	# registros do Caddy seguem como estavam.
+	log {
+		exclude http.handlers.rate_limit
+	}
 }
 
 {$VARANDA_DOMAIN} {
@@ -36,10 +49,10 @@
 	# hash do seu próprio cache conferido (instala com cache: 'reload'),
 	# então um cache HTTP longo renderia pouco. /varanda.json tem o seu
 	# próprio no-store, /seeder fica como está, /account/* vem do serviço
-	# de conta com o no-store dele e /media/* vem do semeador com o cache
-	# longo dele.
+	# de conta com o no-store dele, /media/* vem do semeador com o cache
+	# longo dele e /index/* vem do semeador com o no-store dele.
 	@mutavel {
-		not path /varanda.json /seeder /account/* /media/*
+		not path /varanda.json /seeder /account/* /media/* /index/*
 	}
 	header @mutavel Cache-Control "no-cache"
 
@@ -56,7 +69,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /seeder /account/* /media/*
+		not path /seeder /account/* /media/* /index/*
 		not file /index.html {
 			root /srv/web
 		}
@@ -124,7 +137,58 @@
 	# O CSP não muda (img-src já permite blob:). O service worker também
 	# deixa /media/* passar direto para a rede (apps/app/scripts/sw.js).
 	# Antes do handle abaixo: sem este, /media/* cairia no index.html.
+	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 120
+	# requisições a cada 10 s por endereço. As fotos de um diário carregam em
+	# rajada (vários blocos por foto, várias fotos por tela), então o teto é
+	# folgado; passou dele, 429 com Retry-After (o módulo o calcula). O
+	# semeador só tem um limite GLOBAL, que um único cliente esgotaria para
+	# todos (503). O endereço do cliente ({remote_host}) existe só na memória do
+	# Caddy, durante a janela de 10 s: não vai para registro algum (este
+	# arquivo não tem a diretiva log, e o módulo só registra a chave com
+	# log_key, que fica desligado) nem para o semeador (os cabeçalhos abaixo o
+	# tiram).
 	handle /media/* {
+		rate_limit {
+			zone media {
+				key {remote_host}
+				events 120
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# O índice de engajamento do semeador (respostas, citações, curtidas,
+	# republicações e as publicações de cada membro, só como referências e
+	# contagens: o conteúdo o app busca e confere no próprio diário):
+	# GET|HEAD /index/post/..., /index/counts/... e /index/member/...,
+	# servido pelo semeador na porta do WebSocket, em 127.0.0.1, como o
+	# /media/*. Só aceita o Host do destino, e os cabeçalhos com o endereço do
+	# cliente saem. O Cache-Control (no-store) e o 404 vêm do próprio
+	# semeador: por isso /index/* fica fora do no-cache de @mutavel e do
+	# no-store de @ausenteApp acima. O CSP não muda (fetch na mesma origem).
+	# O service worker também deixa /index/* passar direto para a rede
+	# (apps/app/scripts/sw.js). Antes do handle abaixo: sem este, /index/*
+	# cairia no index.html.
+	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 20
+	# requisições a cada 10 s por endereço. O app consulta o índice por
+	# publicação visível (contagens e respostas), então o uso normal é de
+	# poucas consultas por tela; o teto é mais apertado que o de /media/*
+	# porque cada consulta custa mais ao semeador. Passou dele, 429 com
+	# Retry-After. Mesmo cuidado com o endereço: só na memória do Caddy,
+	# durante a janela, nunca em registro nem enviado ao semeador.
+	handle /index/* {
+		rate_limit {
+			zone index {
+				key {remote_host}
+				events 20
+				window 10s
+			}
+		}
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For

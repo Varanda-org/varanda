@@ -41,6 +41,7 @@ const INTERNAL_MESSAGE = 'erro interno'
 const noop = () => {}
 
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 
 // ---- error mapping (A6) ----
 
@@ -54,7 +55,9 @@ const USAGE_MESSAGES = new Set([
   'diretório não é de um membro',
   'associação diferente da configurada',
   'registro de nome inválido',
-  'registro de nome antigo'
+  'registro de nome antigo',
+  MEDIA_WEB_ONLY,
+  PEEK_WEB_ONLY
 ])
 // Reason codes are lowercase ASCII tokens (cert.js and records.js).
 const USAGE_PATTERNS = [
@@ -526,6 +529,38 @@ function createSession ({
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       const r = await withStore((c) => member.postReply(c, { to: ref, text }))
       return { seq: r.seq, ref: r.ref }
+    }),
+
+    'post.quote': serial(async ({ to, text, media }) => {
+      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text }))
+      return { seq: r.seq }
+    }),
+
+    'like.set': serial(async ({ to, on }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.likeSet(c, { to: ref, on }))
+    }),
+
+    'repost.set': serial(async ({ to, on }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.repostSet(c, { to: ref, on }))
+    }),
+
+    // Which refs the own diary likes / reposts (docs/rpc.md), local data only.
+    'engagement.read': serial(async ({ refs }) => {
+      const r = await withStore((c) => member.engagementRead(c, { refs }))
+      return { liked: r.liked, reposted: r.reposted }
+    }),
+
+    // On-demand reads of another diary need the browser's seeder link: refused
+    // before anything is opened (like account.sign).
+    'diary.peek': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
     }),
 
     'follow.add': serial(async ({ key }) => {

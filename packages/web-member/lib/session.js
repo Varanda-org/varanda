@@ -102,12 +102,39 @@
 // event (this device's media core confirmed at the seeder) is diagnostic
 // and makes no line.
 //
+// Engagement: like.set / repost.set / post.quote are diary writes on the
+// post.reply path (unlocked, gate, append, push); a toggle already in the
+// requested state writes nothing (changed: false) and pushes only while the
+// seeder is not known to hold the current length. engagement.read reads the
+// own diary like profile.read (works locked).
+//
+// On-demand reads (diary.peek, docs/rpc.md): the ONE handler outside the
+// serial chain. It is served by the running sync (./sync.js, through the
+// `peeker` this session owns: the run publishes its peek function once its
+// seeder link verified and withdraws it when the link closes or the run
+// ends), never by withStore: it opens no storage core, never preempts a
+// run, never restarts one itself (a restart beside a withStore write would
+// corrupt the storage) and stores nothing. At most MAX_PEEKS peeks are in
+// flight (USAGE 'ocupado' beyond). When no verified run is live it queues a
+// serial no-op, whose restartWhenIdle restarts a wanted continuous run
+// safely, and waits for the run's peek up to peekTimeoutMs; otherwise
+// NOT_FOUND 'semeador indisponível', which the caller may retry. A peek the
+// run drops while stopping (preempted by a write) is retried once on the
+// next verified run within the same deadline. Trust: the own key and the
+// followed keys are read from the cores the run holds; any other key is
+// gated like a quarantine fetch (block 0 certificate, revoked issuers,
+// quota, blocklist) on an in-memory core that is closed afterwards, and
+// every block is verified by Hypercore against the signed tree; a hidden
+// diary answers NOT_FOUND 'diário indisponível', never why. The username
+// and profile hints are verified records of the peeked block only (no
+// fallback to an earlier record): freshness is the seeder's claim.
+//
 // reset() removes the diary, this device's media cores (kv mediaCores and
 // mediaDevice included), the pending follow changes and the per-device
 // migration marker (the kept follows are offered for confirmation again by
 // the next identity), and locks both keys; config and follows stay.
 const b4a = require('b4a')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -126,7 +153,7 @@ const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
-const { runSync } = require('./sync')
+const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const store = require('./node-store')
 const { checkSeederUrl } = require('./seeder-url')
 
@@ -143,6 +170,9 @@ const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+const PEEK_BUSY = 'ocupado'
+// diary.peek requests in flight at once.
+const MAX_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
 // Failed drains retried from own-synced without a new follow change.
@@ -176,7 +206,9 @@ const USAGE_PATTERNS = [
 ]
 const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
-  'sem dados locais para este diário'
+  'sem dados locais para este diário',
+  SEEDER_UNAVAILABLE,
+  DIARY_UNAVAILABLE
 ])
 
 function messageOf (err) {
@@ -281,6 +313,7 @@ function redactLogLine (text) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 function createBrowserSession ({
   storage,
   association,
@@ -290,7 +323,8 @@ function createBrowserSession ({
   syncOptions = {},
   limits,
   writeGate = true,
-  writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS
+  writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  peekTimeoutMs = PEEK_TIMEOUT_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -336,6 +370,21 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  // diary.peek: the running sync publishes its peek function here once its
+  // seeder link verified (runSync `peeker`) and withdraws it when the link
+  // closes or the run ends; set() wakes the handlers waiting for one.
+  const peeker = {
+    peek: null,
+    waiters: new Set(),
+    set (fn) {
+      this.peek = fn
+      for (const wake of [...this.waiters]) wake(fn)
+    },
+    clear (fn) {
+      if (this.peek === fn) this.peek = null
+    }
+  }
+  let peeksInFlight = 0
 
   function send (event, data) {
     const fn = emitter
@@ -373,6 +422,7 @@ function createBrowserSession ({
           createSocket,
           once,
           timeoutMs: once ? timeoutMs : undefined,
+          peeker,
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -617,6 +667,60 @@ function createBrowserSession ({
     restartForFold({}).catch(noop)
   }
 
+  // ---- on-demand reads: diary.peek (see the header) ----
+
+  // Resolves with a live peek function other than `not` (the one a dropped
+  // attempt used) before `deadline`, else null. Never starts a run here: a
+  // queued serial no-op lets restartWhenIdle restart a wanted continuous
+  // run once nothing else is on the chain.
+  function awaitPeek (not, deadline) {
+    if (peeker.peek !== null && peeker.peek !== not) return Promise.resolve(peeker.peek)
+    if (!closed) serial(async () => {})({}).catch(noop)
+    return new Promise((resolve) => {
+      let timer = null
+      const wake = (fn) => {
+        if (fn === not) return
+        peeker.waiters.delete(wake)
+        clearTimeout(timer)
+        resolve(fn)
+      }
+      peeker.waiters.add(wake)
+      timer = setTimeout(() => {
+        peeker.waiters.delete(wake)
+        resolve(null)
+      }, Math.max(0, deadline - Date.now()))
+    })
+  }
+
+  // NOT a serial handler: runs beside the chain, inside the running sync.
+  async function diaryPeek ({ author, seqs, profileSeq, usernameSeq }) {
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    if (peeksInFlight >= MAX_PEEKS) throw rpcError('USAGE', PEEK_BUSY)
+    peeksInFlight++
+    try {
+      const deadline = Date.now() + peekTimeoutMs
+      const key = author.toLowerCase()
+      let dropped = null
+      // Two attempts: a run that stops under the first (preempted by a
+      // write) drops it; the next verified run serves the second.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const peek = await awaitPeek(dropped, deadline)
+        if (peek === null) throw new Error(SEEDER_UNAVAILABLE)
+        try {
+          return await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline)
+        } catch (err) {
+          if (messageOf(err) !== SEEDER_UNAVAILABLE || Date.now() >= deadline) throw err
+          dropped = peek
+        }
+      }
+      throw new Error(SEEDER_UNAVAILABLE)
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
+    } finally {
+      peeksInFlight--
+    }
+  }
+
   function serial (fn) {
     return (params) => {
       const epoch = connection
@@ -656,6 +760,18 @@ function createBrowserSession ({
 
   function syncState () {
     return run === null ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
+  }
+
+  // like.set / repost.set: the post.reply path around member-ops' toggle.
+  async function engagementSet (toggle, { to, on }, epoch) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    await requireUnlocked()
+    await ensureCaughtUp(epoch)
+    const r = await withStore((c) => toggle(c, { to: ref, on }))
+    if (r.changed) wrote(r.seq)
+    await pushAfterWrite()
+    return { seq: r.seq, on: r.on, changed: r.changed }
   }
 
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
@@ -813,6 +929,33 @@ function createBrowserSession ({
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
+
+    // A quote: the post.reply path with a `quote` target.
+    'post.quote': serial(async ({ to, text, media }, epoch) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq }
+    }),
+
+    // Idempotent toggles on the post.reply path: a state already held
+    // writes nothing (changed: false) and only pushes an outstanding length.
+    'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
+
+    'repost.set': serial(async ({ to, on }, epoch) => engagementSet(member.repostSet, { to, on }, epoch)),
+
+    // Which of the refs the own diary likes / reposts; local data only,
+    // works locked (as profile.read).
+    'engagement.read': serial(async ({ refs }) => {
+      const r = await withStore((c) => member.engagementRead(c, { refs }))
+      return { liked: r.liked, reposted: r.reposted }
+    }),
+
+    'diary.peek': diaryPeek,
 
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);

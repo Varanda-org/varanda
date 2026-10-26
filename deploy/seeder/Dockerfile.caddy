@@ -1,0 +1,26 @@
+# Imagem do Caddy do Varanda: o Caddy oficial mais o módulo de limite de taxa
+# por cliente (github.com/mholt/caddy-ratelimit), usada pelo serviço web de
+# deploy/seeder/compose.web.yaml (Caddyfile: rate_limit em /index/* e /media/*).
+#
+# Por quê: o semeador só tem um limite GLOBAL nessas rotas (apps/cli/lib/
+# seed-ws.js) e nunca recebe o endereço do cliente (o Caddy tira
+# X-Forwarded-For e X-Real-Ip). Sem um limite por cliente, um único anônimo
+# faria as rotas responderem 503 para todos. A imagem oficial do Caddy não traz
+# o módulo, então ele entra por um build em dois estágios.
+#
+# Tudo fixo, nada flutuante: as duas imagens por digest sha256 (a etiqueta
+# 2.11.6 é só legibilidade) e o módulo por versão exata.
+#   - construtor: caddy:2.11.6-builder-alpine
+#   - execução:   caddy:2.11.6-alpine (a mesma de antes; só o binário muda)
+#   - módulo:     caddy-ratelimit v0.1.0 (commit 12435ecef5dbb1b137eb68002b85d775a9d5cdb2)
+# Para atualizar: troque o Caddy nos DOIS FROM (mesma versão e os digests
+# novos, lidos de um docker pull) e/ou o módulo (outra etiqueta ou o SHA
+# completo de um commit), rode
+#   docker build -f deploy/seeder/Dockerfile.caddy -t varanda-caddy:test deploy/seeder
+#   docker run --rm varanda-caddy:test caddy list-modules | grep rate_limit
+# e o Caddyfile precisa continuar passando em `caddy adapt`.
+FROM caddy:2.11.6-builder-alpine@sha256:096ec6e825e219175bd5be64b5e7a4000977f701a2bcaab825621d9fb1e1154b AS builder
+RUN xcaddy build --with github.com/mholt/caddy-ratelimit@v0.1.0
+
+FROM caddy:2.11.6-alpine@sha256:d44355d3c2149dc580ce2cac735955d1c08d3d00882c30489c241aa51a5c10d9
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

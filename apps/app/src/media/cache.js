@@ -5,6 +5,11 @@
 // (callers share its promise), at most `concurrency` loads run at once (the
 // rest wait in order), and the least recently used URL is revoked when the
 // cache grows past `max`. A failed load is not cached: the next get retries.
+// One entry per content key serves both persisting and transient (persist:
+// false, authors the device does not follow) loads: both produce the same
+// verified bytes and only the network fetch mode differs (the caller's load
+// passes persist to fetchMedia). This in-memory LRU is not persistent storage:
+// its blob: URLs die with the page and are revoked on eviction.
 
 const noopRevoke = (url) => {
   try { URL.revokeObjectURL(url) } catch {}

@@ -31,6 +31,14 @@
 // Moderation: reads consult the blocklist snapshot ./sync.js stored (kept
 // only if it still verifies for the trust root), so a blocked followed
 // diary is hidden at once, even before a sync run purges its replica.
+//
+// Engagement (likes, reposts, quotes): likeSet / repostSet are idempotent
+// toggles of one `like` / `repost` record about a target ref, decided from
+// the own diary's current state (@varanda/core lib/engagement.js: the last
+// operation per target wins) so a repeated request writes nothing; a
+// self-target is allowed. postQuote is a `post` with a `quote` target (media
+// verified as for a reply); engagementRead answers which of the given refs
+// the own diary currently likes / reposts.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { certForKey } = require('@varanda/core/lib/cert')
@@ -41,7 +49,10 @@ const {
   postRecord,
   mediaCoreRecord,
   followRecord,
+  likeRecord,
+  repostRecord,
   validateRecord,
+  validRecordCopy,
   formatRef,
   latestProfile,
   nowIso,
@@ -54,6 +65,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const store = require('./node-store')
@@ -204,18 +216,23 @@ function buildRecord (make) {
   }
 }
 
+// Appends to the open own diary -> seq (the genesis rule as a usage error).
+async function appendOwn (ctx, diary, record) {
+  try {
+    return await store.appendRecord(diary, record, ctx.limits)
+  } catch (err) {
+    if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+    throw err
+  }
+}
+
 // check(ownHex), optional: a rule on the own key, run before the append.
 async function publish (ctx, record, check = null) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (check !== null) check(ownHex)
-    try {
-      const seq = await store.appendRecord(diary, record, ctx.limits)
-      return { seq, ref: formatRef({ author: ownHex, seq }) }
-    } catch (err) {
-      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
-      throw err
-    }
+    const seq = await appendOwn(ctx, diary, record)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
   })
 }
 
@@ -239,6 +256,66 @@ async function postReply (ctx, { to, text, media }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   if (hasMedia(media)) await verifyMedia(ctx, media)
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media } : { text, replyTo: to })))
+}
+
+// to is the parsed { author, seq } reference of the quoted post; media as
+// for a reply.
+async function postQuote (ctx, { to, text, media }) {
+  if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  if (hasMedia(media)) await verifyMedia(ctx, media)
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media } : { text, quote: to })))
+}
+
+// ---- likes / reposts ----
+
+// The seq of the effective `type` record about `ref` (the last valid one,
+// as engagementState replays them), or null when there never was one.
+function lastEngagementSeq (entries, type, ref) {
+  let last = null
+  for (const { seq, record } of entries) {
+    if (!(seq >= 1)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === type && formatRef(copy.to) === ref && (last === null || seq > last)) last = seq
+  }
+  return last
+}
+
+// Idempotent toggle of one engagement -> { seq, on, changed }: when the own
+// diary is already in the requested state nothing is written and seq is that
+// of the existing effective record (null if none ever). A self-target is
+// allowed. `to` is the parsed { author, seq } reference.
+async function engagementSet (ctx, type, make, { to, on }) {
+  if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const entries = await store.readAll(diary)
+    const ref = formatRef(to)
+    const state = engagementState(entries)
+    const current = type === 'like' ? isLiked(state, ref) : isReposted(state, ref)
+    if (current === on) return { seq: lastEngagementSeq(entries, type, ref), on, changed: false }
+    const record = buildRecord(() => make({ to, on }))
+    return { seq: await appendOwn(ctx, diary, record), on, changed: true }
+  })
+}
+
+function likeSet (ctx, params) {
+  return engagementSet(ctx, 'like', likeRecord, params)
+}
+
+function repostSet (ctx, params) {
+  return engagementSet(ctx, 'repost', repostRecord, params)
+}
+
+// Which of `refs` the own diary currently likes / reposts -> { liked,
+// reposted }, each a subset of refs in request order. Works locked.
+async function engagementRead (ctx, { refs }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const state = engagementState(await store.readAll(diary))
+    return {
+      liked: refs.filter((ref) => state.liked.has(ref.toLowerCase())),
+      reposted: refs.filter((ref) => state.reposted.has(ref.toLowerCase()))
+    }
+  })
 }
 
 // ---- media ----
@@ -809,6 +886,10 @@ module.exports = {
   profileSet,
   postCreate,
   postReply,
+  postQuote,
+  likeSet,
+  repostSet,
+  engagementRead,
   usernameAdd,
   ownEntries,
   followAdd,

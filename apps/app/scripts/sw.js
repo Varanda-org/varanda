@@ -24,7 +24,7 @@ const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/..., /account/... and /media/...):
+// Paths that are never intercepted (besides /seeder/..., /account/..., /media/... and /index/...):
 // live configuration, the worker script itself and the seeder's own pages.
 const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder'])
 // The account service (Google link, @username; a later moderation panel under
@@ -39,6 +39,11 @@ const ACCOUNT_PREFIX = '/account/'
 // through Caddy with its own long-lived Cache-Control and real 404s. Like the
 // account service, the worker never answers it: no cache lookup, no 503.
 const MEDIA_PREFIX = '/media/'
+// The seeder's engagement index (/index/post/..., /index/counts/...,
+// /index/member/...) is proxied by Caddy the same way, with its own no-store
+// and real 404s: never answered by the worker either (an app route such as
+// /indexes keeps the shell: only the '/index/' prefix is bypassed).
+const INDEX_PREFIX = '/index/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 
 const abs = (p) => new URL(p, self.location.origin).href
@@ -249,7 +254,7 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return
   const pathname = url.pathname
   if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith(ACCOUNT_PREFIX) ||
-    pathname.startsWith(MEDIA_PREFIX)) return
+    pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(INDEX_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {

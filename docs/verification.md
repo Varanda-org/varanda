@@ -1152,3 +1152,65 @@ None of these was performed for this change.
 - Device-count limit: `MAX_MEDIA_CORES` = 4 with one media core per device and no rotation. A member who posts photos from a 5th device makes the seeder drop the oldest device's core (`unbound`); its photos answer 404 for everyone until that device declares its core again by uploading a new photo, and are lost for good if that device is gone.
 - Core node and CLI follows: `follow` / `unfollow` append `follow` records once block 0 exists, but an existing `follows.json` is never migrated into the diary unless the follow is run again, and the core node never folds another device's `follow` records into `follows.json`.
 - Follow changes made on another device take effect on this device's next sync run (the continuous run restarts once per change); the core node and `varanda-serve` do not fold another device's follows into `follows.json`.
+
+## 17. Profiles, threads, likes, reposts and quotes (2026-10-26)
+
+### Summary
+
+- Likes, reposts and quotes are signed records in the engager's own diary: `like` and `repost` (`{ type, to: { author, seq }, on, at }`, the last operation per (type, target) wins, self-engagement allowed) and a quote, a `post` with a `quote` target and no `replyTo` (`'quote-with-reply'`, `'quote-invalid'`). Old readers skip them as invalid; the diary is never rejected. FeedItems gain `kind` ('post' | 'repost') and `quote`. Contract: `docs/protocol.md` section 2 and "FeedItem".
+- The seeder keeps an in-memory engagement index (replies, quotes, likes, reposts, each member's posts, profile / username seq hints), rebuilt at start on its own scan cursor, capped (the cursor pauses at the cap, never skips) and honest (`indexing`, `complete`), served over `GET|HEAD /index/post/...`, `/index/counts/...` and `/index/member/...`. It only says where to look; counts and completeness are the seeder's claims (`docs/protocol.md` sections 5 and 7).
+- The browser node reads any admitted diary on demand with `diary.peek`, inside the running sync, in memory only, gated like a quarantine fetch and verified block by block; the core node answers 'leitura sob demanda só na versão web' (`docs/rpc.md` 5.26, `docs/protocol.md` section 6).
+- RPC: `post.quote`, `like.set`, `repost.set`, `engagement.read`, `diary.peek`; limits `ENGAGEMENT_LIMIT_MAX` 62, `PEEK_SEQS_MAX` 36, `PEEK_TIMEOUT_MS` 8000; worst cases re-measured (`docs/rpc.md` section 2).
+- App: a screen stack above the tabs with Conversa (parent, post, every reply paged) and Membro (anyone's profile: header, Seguir/Seguindo, 'denunciar a conta', posts and reposts); browser Back, Escape and Android Back close screens; PostRow gets pressable author / parent / reposter / quote and an action bar (responder, republicar, citar, curtir, counts when known); A Rua and Diário show reposts and quote cards; Publicar has a quote mode; strangers' photos are fetched with `cache: 'no-store'`. Screens: `docs/app.md`; design: `apps/site/artwork/app-design.md`.
+
+### What changed, per area
+
+- `packages/core`: `lib/records.js` (`like`, `repost`, quote posts, `likeRecord` / `repostRecord`, `postRecord({ quote })`), `lib/engagement.js` (new, `engagementState`), `lib/feed.js` (`kind`, `quote`, repost items, CLI lines), `lib/engagement-index.js` (new), `lib/seeder.js` (index scan, cap and pause, flags, removal on drop, `indexPost` / `indexCounts` / `indexMember`, `stats()` `indexRecords` / `indexSaturated`), `lib/member.js` and `lib/session.js` (core node toggles, quote without media, `engagement.read`, `diary.peek` web-only).
+- `packages/rpc`: the five methods, the three limits, size proofs for quote records, `diary.peek` and `engagement.read`.
+- `packages/web-member`: `lib/member-ops.js` (toggles, quote, `engagementRead`), `lib/session.js` (the write path for the new writes, `diary.peek` outside the serial chain with a waiting restart and one retry), `lib/sync.js` (peek served by the run, a shared refcounted link core per key, the gate, reads bounded by the seeder's advertised length, fork / blocklist / issuer re-check before answering), `lib/node.js` (header).
+- `apps/cli`: `/index` routes on the WebSocket listener (`lib/seed-ws.js`), index metrics (`lib/health.js`), `log` lines for the new records (`lib/commands/member.js`).
+- `deploy/seeder/Caddyfile`: `handle /index/*`, excluded from `@mutavel` and `@ausenteApp`; CSP unchanged. `apps/app/scripts/sw.js`: never intercepts `/index/`.
+- `apps/app`: `App.js` (screen stack, Back handling), `src/nav.js`, `src/history.web.js` / `history.native.js`, `src/indexClient.js` (strict validation, 64 KiB body cap, 8 s timeout), `src/thread.js`, `src/engagement.js`, `src/screens/Conversa.js`, `src/screens/Membro.js`, `src/ui/QuoteCard.js` (new); `src/ui/PostRow.js`, `TopBar.js`, `Icon.js`, `MediaGrid.js`, `MediaView.js`, `src/media/fetch.js`, `cache.js`, `src/screens/ARua.js`, `Diario.js`, `Seguindo.js`, `Publicar.js`, `src/outbox.js` (quotes never reconcile a queued post or reply).
+
+### Automated (CI)
+
+CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order):
+
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 110 test files, 0 failures (core 17, rpc 8, web-member 24, app 25, cli 34, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 10 tests, 59 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): feed page of 31 items 260838 bytes (32 = 268628), log page of 36 entries 259414 bytes (37 = 266615), `diary.peek` at 36 entries with profile and username 261642 bytes, `engagement.read` at 62 + 62 refs 10483 bytes, `profile.read` at 100 authors 229170 bytes, `follow.list` at 500 keys 33581 bytes.
+- `npm run pack:worklet -w apps/app`: bundle 1955400 bytes, 350 files, 38 linked addon entries; 'node scan: clean'.
+- `npm run export:web -w apps/app`: `NODE_BUNDLE 645396 GZIP 196665`; exported to `apps/app/dist` (ignored by git); service worker with 11 files.
+- `node apps/cli/test/readme-help.test.js`: passes.
+- the whitespace check on the diff (`git diff --check`): clean.
+
+New test files: `packages/core/test/engagement.test.js`, `engagement-session.test.js`, `packages/web-member/test/engagement.test.js`, `peek.test.js`, `e2e-social.test.js`, `apps/cli/test/seeder-index.test.js`, `apps/app/test/engagement.test.js`, `indexClient.test.js`, `nav.test.js`, `thread.test.js`; extended: the records, feed, seed-ws, seed-ops, caddyfile, deploy, rpc methods and sizes, sw, outbox, mediaFetch and mediaCache tests. The end-to-end test `packages/web-member/test/e2e-social.test.js` passes (5 runs in a row): 66 replies from three authors paged exactly once in order (50 + 16), counts equal an independent reducer, peeks of unfollowed diaries never create replicas, a like reaches the seeder count in ~29 ms, a block removes the author from the index in ~45 ms, the CLI shows quotes and reposts.
+
+### Human verification
+
+None of these was performed for this change.
+
+- [ ] Tap "respondendo a X": the parent post opens (not performed yet).
+- [ ] Browser Back, Android Back and Escape each close the screen (not performed yet).
+- [ ] A thread with many replies, including from people you don't follow, pages through all of them (not performed yet).
+- [ ] Like, then undo: the heart and the count update and survive a reload (not performed yet).
+- [ ] Repost, then undo: "Fulano republicou" appears in a follower's A Rua, then goes away (not performed yet).
+- [ ] A quote shows the quoted card (not performed yet).
+- [ ] Tap any name: the profile opens, and Seguir, denunciar and their posts all work (not performed yet).
+- [ ] Once a blocklist arrives, a blocked author's replies disappear (not performed yet).
+
+### Residual risks
+
+- Index memory: the engagement index lives in memory, bounded by records (default 1,000,000), distinct targets (default 500,000) and a per-diary quota (default 50,000 records); the worst case was measured at about 436 MiB with both global caps full. At a cap the affected diary's cursor pauses (never skips) and every answer says `complete: false`; it resumes when room frees (an unlike that empties a target, a dropped diary or a dropped post author) and a failed block read is retried with backoff. A large deployment can stay incomplete (the app shows "Algumas respostas podem faltar."). It is rebuilt at every start (`indexing: true` meanwhile). Reads cost O(log n + page) (incremental counters, binary-search cursor).
+- Reading on demand tells the seeder which diaries you open: `diary.peek` fetches the requested blocks of an unfollowed diary from the seeder, so the seeder can see which members' posts a device reads (it already serves those diaries to anyone; nothing is stored on the device).
+- Counts, completeness and the freshness of the "latest" profile / username record are trusted to the seeder: a lying seeder can hide or inflate counts, hide replies or point at an older name record. It cannot invent content: every post, name and bio shown is fetched from the author's diary and verified by the node.
+- `diary.peek` depends on the live verified seeder link: with no run live within 8 s it answers 'semeador indisponível' (retried once by the screens), and a write that preempts the run makes a peek retry on the next run.
+- Strangers' content is read in memory only (never stored as a replica, photos with `no-store`): opening the same thread again reads it again.
+- Quotes, likes and reposts need a connection on the browser node (write gate); quotes never enter the outbox.
+- The native app and `varanda-serve` have no remote browsing: Conversa shows the tapped row and Membro the header, with a note; A Rua's reposts and quotes resolve only from local diaries there, and there are no counts.
+- The filled heart is a glyph overlay on the Feather outline (Feather has outline glyphs only), not a dedicated icon.
+- Per-client limit on `/index/*` and `/media/*` (replaces the earlier "global caps only" risk). Caddy answers 429 with `Retry-After` above 20 requests per 10 s per client address on `/index/*` and 120 per 10 s on `/media/*` (zones keyed on `{remote_host}`), so one client can no longer exhaust the seeder's global caps (16 in flight, 32 or 64 requests/s) alone. The address lives only in Caddy's memory for the window: no access log, the module's `rate limit exceeded` log line (it prints `remote_ip`) excluded by `log { exclude http.handlers.rate_limit }`, `X-Forwarded-For` / `X-Real-Ip` still removed upstream. Residual: clients behind one shared address (CGNAT, an office) share a window, and an attacker with many addresses can still drain the global caps.
+- The Caddy image is now built (`deploy/seeder/Dockerfile.caddy`): the official `caddy:2.11.6-builder-alpine` (sha256:096ec6e8...) builds `xcaddy build --with github.com/mholt/caddy-ratelimit@v0.1.0` (commit 12435ecef5dbb1b137eb68002b85d775a9d5cdb2, Apache-2.0; its README calls it work in progress), and the binary is copied over `caddy:2.11.6-alpine` (sha256:d44355d3...). The module is third-party code compiled into the process that terminates TLS: bump it deliberately. `deploy.sh` builds it with the seeder image, keeps the previous Caddy image as `varanda-caddy:anterior` and restores it on rollback.
+- Verified (2026-10-26, Docker 29.5.3, local): `docker build -f deploy/seeder/Dockerfile.caddy` succeeds (Caddy v2.11.6 with caddy-ratelimit v0.1.0); `caddy list-modules` shows `http.handlers.rate_limit`; the production Caddyfile passes `caddy adapt`; against a local upstream, 25 requests in a burst gave 20 x 200 and 5 x 429 (`Retry-After: 10`), and a request 11 s later gave 200; with the `log` exclusion, the 429s produced no log line containing the client address (without it, each 429 logged `remote_ip`). Not verified: behaviour behind real TLS and a real client address on the production host (the Docker Desktop test sees one gateway address for every request).
+- Likes, reposts and quotes are public; old readers skip them (and a quote is not shown there at all).

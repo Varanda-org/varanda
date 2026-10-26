@@ -49,6 +49,24 @@ function isKeyList (v) {
   return Array.isArray(v) && v.length >= 1 && v.length <= L.PROFILE_LIMIT_MAX && v.every(isKey)
 }
 
+function isRefList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.ENGAGEMENT_LIMIT_MAX) return false
+  const seen = new Set()
+  for (let i = 0; i < v.length; i++) {
+    if (!isRef(v[i], 1) || seen.has(v[i])) return false
+    seen.add(v[i])
+  }
+  return true
+}
+
+function isPeekSeqs (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.PEEK_SEQS_MAX) return false
+  for (let i = 0; i < v.length; i++) {
+    if (!Number.isSafeInteger(v[i]) || v[i] < 1 || (i > 0 && v[i] <= v[i - 1])) return false
+  }
+  return true
+}
+
 // The isCanonicalIso rule of @varanda/core lib/records.js, which this package
 // cannot import: a string that round-trips through Date unchanged.
 const MAX_ISO = 32
@@ -70,7 +88,7 @@ function isFeedCursor (v) {
   return isCanonicalIso(v.at) && isKey(v.author) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
-// post.create / post.reply `media`: 1..MAX_MEDIA_PER_POST descriptors.
+// post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
@@ -214,6 +232,21 @@ const SPECS = {
     fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
     mutating: true,
     cross: postCross
+  },
+  'post.quote': {
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList) },
+    mutating: true
+  },
+  'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
+  'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
+  'engagement.read': { fields: { refs: req(isRefList) } },
+  'diary.peek': {
+    fields: {
+      author: req(isKey),
+      seqs: req(isPeekSeqs),
+      profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER))
+    }
   },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },

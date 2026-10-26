@@ -59,8 +59,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /seeder, /account/* and /media/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /seeder, /account/*, /media/* and /index/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -73,6 +73,12 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /account/* alone')
   t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/media/*')),
     '@ausenteApp leaves /media/* alone')
+  t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/index/*')),
+    '@ausenteApp leaves /index/* alone')
+  const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
+  t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/index/*', '/media/*', '/seeder'],
+    '@ausenteApp excludes exactly /seeder, /account/*, /media/* and /index/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -115,6 +121,62 @@ test('Caddyfile: /media/* goes to the seeder, before the SPA handle', (t) => {
   const start = lines.findIndex((l) => l.trim() === 'handle /media/* {')
   const spa = lines.findIndex((l) => l.trim() === 'handle {')
   t.ok(start !== -1 && spa > start, 'handle /media/* comes before the catch-all handle')
+})
+
+// The engagement index is served by the seeder on the WebSocket port, before
+// the SPA catch-all, without the client address; Cache-Control (no-store)
+// comes from upstream and the CSP is unchanged (same-origin fetch).
+test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
+  const index = block('handle /index/* {')
+  t.ok(index.length > 0, 'handle /index/*')
+  t.ok(index.some((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'),
+    'reverse proxy to VARANDA_WS_PORT on loopback')
+  t.ok(index.some((l) => l.trim() === 'header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(index.some((l) => l.trim() === 'header_up -X-Forwarded-For'), 'X-Forwarded-For stripped')
+  t.ok(index.some((l) => l.trim() === 'header_up -X-Real-Ip'), 'X-Real-Ip stripped')
+  t.absent(index.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /index/*')
+  const start = lines.findIndex((l) => l.trim() === 'handle /index/* {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(start !== -1 && spa > start, 'handle /index/* comes before the catch-all handle')
+  t.is(count('handle /index/* {'), 1, 'exactly one /index/* handle')
+})
+
+// Per-client rate limit (caddy-ratelimit, built by Dockerfile.caddy) on the
+// two public seeder routes, keyed on the client address, which lives only in
+// Caddy's memory: never logged, never sent upstream.
+test('Caddyfile: /index/* and /media/* have a per-client rate limit', (t) => {
+  t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
+  t.is(count('rate_limit {'), 2, 'exactly two rate_limit blocks')
+  const limits = { 'handle /index/* {': ['index', '20'], 'handle /media/* {': ['media', '120'] }
+  for (const [head, [zone, events]] of Object.entries(limits)) {
+    const b = block(head)
+    const text = b.map((l) => l.trim())
+    t.ok(text.includes('rate_limit {'), head + ' has rate_limit')
+    t.ok(text.includes('zone ' + zone + ' {'), head + ' zone ' + zone)
+    t.ok(text.includes('key {remote_host}'), head + ' keyed exactly on {remote_host}')
+    t.ok(text.includes('events ' + events), head + ' events ' + events)
+    t.ok(text.includes('window 10s'), head + ' window 10s')
+    t.absent(text.some((l) => /^key\s/.test(l) && l !== 'key {remote_host}'), head + ' has no other key')
+    const rl = text.indexOf('rate_limit {')
+    const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
+    t.ok(rl !== -1 && rp > rl, head + ' rate_limit comes before reverse_proxy')
+    t.ok(text.includes('header_up -X-Forwarded-For') && text.includes('header_up -X-Real-Ip'), head + ' still strips client address headers')
+  }
+  t.absent(lines.some((l) => /^\s*log_key\b/.test(l)), 'log_key is never enabled')
+})
+
+// No access log. The only log block is the global one that EXCLUDES the
+// rate_limit logger (it prints remote_ip on every 429); it must not set an
+// output or any other option, and no site block has a log directive.
+test('Caddyfile: no access log, and the rate_limit logger (client IP) is excluded', (t) => {
+  const logLines = lines.map((l, i) => [l, i]).filter(([l]) => /^\s*log(\s|$)/.test(l))
+  t.is(logLines.length, 1, 'exactly one log block in the file')
+  t.is(logLines[0][0], '\tlog {', 'it is the global-options log block (one tab deep)')
+  const b = block('log {')
+  t.alike(b.slice(1, -1).map((l) => l.trim()), ['exclude http.handlers.rate_limit'], 'it only excludes http.handlers.rate_limit')
+  const siteStart = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
+  t.ok(siteStart > logLines[0][1], 'it sits in the global options, before the site block')
+  t.absent(/\baccess\b|log_name|output\s/.test(code), 'no access log or log output')
 })
 
 test('Caddyfile: SPA only for paths without an extension, real 404s otherwise', (t) => {

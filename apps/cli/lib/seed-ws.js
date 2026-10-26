@@ -47,6 +47,27 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // requests per second (burst MEDIA_BURST); beyond either, 503 'ocupado' with
 // Retry-After: 1. A response still running after MEDIA_DEADLINE_MS is
 // destroyed, so slow readers cannot hold the in-flight slots forever.
+//
+// The same listener also answers the seeder's engagement index (Caddy's
+// `handle /index/*` proxies here; packages/core/lib/engagement-index.js), an
+// in-memory index rebuilt at start that only says WHERE TO LOOK (refs, seq
+// hints, counts) and carries honest `indexing` / `complete` flags; nodes
+// fetch and verify every post from the diary itself. GET|HEAD only, on the
+// same discipline as /media: Host first (421), other methods 405, a strict
+// regex on the raw URL, and anything else, a seeder without the index
+// methods, a null answer or a throw, the same generic 404. Routes:
+// - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
+//   the last reply of the previous page) -> Seeder#indexPost;
+// - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
+// - /index/member/<author>[/<before>] -> indexMember.
+// Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
+// construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
+// proves the worst case); HEAD sends the headers only. Load has its own
+// global caps: INDEX_MAX_IN_FLIGHT answers at once (a slot is held until the
+// response closes) and INDEX_RATE requests per second (burst INDEX_BURST),
+// else 503 'ocupado'; a response still open after INDEX_DEADLINE_MS is
+// destroyed. Duplicate refs in /index/counts collapse before the seeder is
+// asked. Nothing is logged and nothing of the path is echoed.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -70,6 +91,23 @@ const MEDIA_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': 'public, max-age=31536000, immutable',
   'Accept-Ranges': 'none'
+}
+
+const INDEX_PREFIX = '/index'
+const INDEX_MAX_REFS = 31
+const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
+const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
+const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+const INDEX_MAX_IN_FLIGHT = 16
+const INDEX_RATE = 32
+const INDEX_BURST = 64
+const INDEX_DEADLINE_MS = 30000
+const INDEX_MAX_BODY = 65536
+const INDEX_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'no-store'
 }
 
 // The secret-stream's per-frame authentication overhead, read from the
@@ -268,13 +306,88 @@ function refuse (socket, code, reason) {
 // on a loopback hostname, any port). The seeder's mediaRead(diaryHex,
 // coreHex, start, blocks) -> null | { bytes, blocks } backs /media. media:
 // optional overrides of the /media limits ({ maxInFlight, rate, burst,
-// deadlineMs }), for tests.
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {} }) {
+// deadlineMs }), for tests; index: the same for the /index limits
+// ({ maxInFlight, rate, burst }). The seeder's indexPost(authorHex, seq,
+// cursor), indexCounts(refs) and indexMember(authorHex, before) -> null |
+// plain object back /index.
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {} }) {
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
   const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
   const takeToken = tokenBucket(media.rate ?? MEDIA_RATE, media.burst ?? MEDIA_BURST)
   let inFlight = 0
+  const indexMaxInFlight = index.maxInFlight ?? INDEX_MAX_IN_FLIGHT
+  const indexDeadlineMs = index.deadlineMs ?? INDEX_DEADLINE_MS
+  const takeIndexToken = tokenBucket(index.rate ?? INDEX_RATE, index.burst ?? INDEX_BURST)
+  let indexInFlight = 0
+
+  // The index call for a matched /index URL, or null when the URL matches no
+  // route: [method name, arguments]. Numbers are canonical decimals of at
+  // most 15 digits, so Number() is exact.
+  function indexCall (url) {
+    let m = INDEX_POST_RE.exec(url)
+    if (m) return ['indexPost', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]]]
+    m = INDEX_COUNTS_RE.exec(url)
+    if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
+    m = INDEX_MEMBER_RE.exec(url)
+    if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
+    return null
+  }
+
+  // A null or non-object answer, a missing method, a throw or a rejection,
+  // and a body over INDEX_MAX_BODY (never, by construction) are all 404.
+  // The in-flight slot is held until the response is CLOSED (finished or
+  // torn down) and the seeder call has settled, as for /media, so a client
+  // that stops draining cannot let later requests past the cap; a response
+  // still open after indexDeadlineMs is destroyed.
+  async function serveIndex (req, res, call) {
+    if (!takeIndexToken() || indexInFlight >= indexMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    indexInFlight++
+    let resClosed = false
+    let pending = true
+    let released = false
+    const release = () => {
+      if (released || !resClosed || pending) return
+      released = true
+      indexInFlight--
+    }
+    const timer = setTimeout(() => res.destroy(), indexDeadlineMs)
+    timer.unref()
+    const closed = new Promise((resolve) => res.once('close', () => {
+      resClosed = true
+      clearTimeout(timer)
+      release()
+      resolve(CLOSED)
+    }))
+    const settled = () => {
+      pending = false
+      release()
+    }
+    let body = null
+    try {
+      const [name, args] = call
+      if (typeof seeder[name] === 'function') {
+        // The slot follows the call's OWN settlement, not the race below: a
+        // response destroyed at the deadline frees nothing while the seeder
+        // is still working on it.
+        const work = Promise.resolve().then(() => seeder[name](...args))
+        work.then(settled, settled)
+        const answer = await Promise.race([work, closed])
+        if (answer !== CLOSED && answer !== null && typeof answer === 'object' && !Array.isArray(answer)) {
+          const text = JSON.stringify(answer) + '\n'
+          if (Buffer.byteLength(text) <= INDEX_MAX_BODY) body = text
+        }
+      } else {
+        settled()
+      }
+    } catch {
+      body = null
+    }
+    if (resClosed || res.destroyed || res.writableEnded) return
+    if (body === null) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, { ...INDEX_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
 
   async function serveMedia (req, res, match) {
     const start = Number(match[3])
@@ -349,6 +462,12 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const match = MEDIA_RE.exec(req.url)
       if (!match) return send(res, 404, NOT_FOUND)
       return serveMedia(req, res, match).catch(() => res.destroy())
+    }
+    if (pathname === INDEX_PREFIX || pathname.startsWith(INDEX_PREFIX + '/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+      const call = indexCall(req.url)
+      if (call === null) return send(res, 404, NOT_FOUND)
+      return serveIndex(req, res, call).catch(() => res.destroy())
     }
     send(res, 404, NOT_FOUND)
   })
@@ -427,5 +546,14 @@ module.exports = {
   MEDIA_MAX_IN_FLIGHT,
   MEDIA_RATE,
   MEDIA_BURST,
-  MEDIA_DEADLINE_MS
+  MEDIA_DEADLINE_MS,
+  INDEX_POST_RE,
+  INDEX_COUNTS_RE,
+  INDEX_MEMBER_RE,
+  INDEX_MAX_REFS,
+  INDEX_MAX_IN_FLIGHT,
+  INDEX_RATE,
+  INDEX_BURST,
+  INDEX_DEADLINE_MS,
+  INDEX_MAX_BODY
 }
