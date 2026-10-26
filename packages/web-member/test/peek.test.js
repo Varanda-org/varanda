@@ -20,7 +20,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, postRecord, likeRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -291,38 +291,41 @@ test('(1) against the real seeder: the newest post of every unfollowed diary, ro
   t.is(page.skipped, 0)
   t.is(page.incomplete, false)
   t.is(page.next, null)
+  // A reply is a publication: Caio's reply is his newest.
   const expected = [
-    { author: C.key, name: 'Caio', seq: 2, text: 'caio 1', round: 0 },
+    { author: C.key, name: 'Caio', seq: 4, text: 'caio responde', round: 0 },
     { author: B.key, name: 'Bia', seq: 3, text: 'bia 2', round: 0 },
+    { author: C.key, name: 'Caio', seq: 2, text: 'caio 1', round: 1 },
     { author: B.key, name: 'Bia', seq: 2, text: 'bia 1', round: 1 }
   ]
   t.alike(page.items.map(({ author, name, seq, text, round }) => ({ author, name, seq, text, round })), expected)
   for (const item of page.items) {
-    t.is(item.replyTo, null)
+    t.alike(item.replyTo, item.seq === 4 ? { author: C.key, seq: 2 } : null)
+    t.is(item.kind, 'post')
     t.is(item.username, null)
     t.is(item.media, null)
   }
   t.absent(page.items.some((i) => i.author === A.key), 'the followed diary is absent')
-  t.absent(page.items.some((i) => i.text === 'caio futuro' || i.text === 'caio responde'), 'the future post and the reply are absent')
+  t.absent(page.items.some((i) => i.text === 'caio futuro'), 'the future post is absent')
 
   // limit 1: disjoint pages that concatenate to the full order and end with next null.
   const pages = await allPages(web, 1)
-  t.is(pages.length, 4)
-  t.alike(pages.map((p) => p.items.length), [1, 1, 1, 0])
+  t.is(pages.length, 5)
+  t.alike(pages.map((p) => p.items.length), [1, 1, 1, 1, 0])
   t.alike(pages.flatMap((p) => p.items), page.items, 'the pages concatenate to the full order')
-  t.is(pages[3].next, null)
-  for (const p of pages.slice(0, 3)) t.alike(p.next, { round: p.items[0].round, at: p.items[0].at, author: p.items[0].author, seq: p.items[0].seq })
+  t.is(pages[4].next, null)
+  for (const p of pages.slice(0, 4)) t.alike(p.next, { round: p.items[0].round, at: p.items[0].at, author: p.items[0].author, seq: p.items[0].seq })
   t.alike(internal, [])
 })
 
-test('(2)(16) one slot per diary per round, the tail window extends past replies, at most 3 per diary', async (t) => {
+test('(2)(16) one slot per diary per round, the tail window extends past likes, at most 3 per diary', async (t) => {
   t.timeout(90000)
   const assoc = association()
   const now = Date.now()
-  // 50 posts then 8 replies: the first tail window holds replies only.
+  // 50 posts then 8 likes: the first tail window holds likes only (never shown).
   const big = await diary(t, [
     ...author(assoc, 'Grande', Array.from({ length: 50 }, (_, i) => now - 20 * HOUR + i * 1000)),
-    ...Array.from({ length: 8 }, (_, i) => (key) => postRecord({ text: 'resposta ' + i, at: iso(now - HOUR + i * 1000), replyTo: { author: key, seq: 2 + i } }))
+    ...Array.from({ length: 8 }, (_, i) => (key) => likeRecord({ to: { author: key, seq: 2 + i }, on: true, at: iso(now - HOUR + i * 1000) }))
   ])
   t.is(big.length, 60)
   const s1 = await diary(t, author(assoc, 'Um', [now - 2 * HOUR]))
@@ -339,7 +342,7 @@ test('(2)(16) one slot per diary per round, the tail window extends past replies
   t.is(page.next, null)
   t.is(page.items.length, 5, 'three in round 0, the big diary alone in rounds 1 and 2')
   const bigItems = page.items.filter((i) => i.author === hex(big.key))
-  t.alike(bigItems.map((i) => i.seq), [51, 50, 49], 'the newest top-level posts, behind the replies')
+  t.alike(bigItems.map((i) => i.seq), [51, 50, 49], 'the newest posts, behind the likes')
   t.alike(bigItems.map((i) => i.round), [0, 1, 2])
   const secondBig = page.items.indexOf(bigItems[1])
   for (const key of [hex(s1.key), hex(s2.key)]) {
@@ -808,7 +811,7 @@ test('regression: a detach while the own-key lookup is queued opens no link and 
 
 // Two fork-0 histories signed by the SAME key: H1 (certified by the
 // association) and H2 (certified by another one), both 13 blocks: posts at
-// seqs 2..4, 7 replies, one post at the tail (seq 12). The first window
+// seqs 2..4, 7 likes, one post at the tail (seq 12). The first window
 // (0, 1, 2, 5..12) yields exactly one post (seq 12; seq 2 sits below the
 // floor), so with limit 1 the first two pages need no more and the second
 // window (seqs 4, 3) is requested only by the page that reaches round 1:
@@ -819,7 +822,7 @@ async function twoHistories (t, assoc, other, now) {
     (key) => memberCertRecord(createCert({ member: key }, signer.kp)),
     () => profileRecord({ name: label, bio: '' }),
     ...[2, 3, 4].map((seq) => () => postRecord({ text: label + ' ' + seq, at: iso(now - 10 * HOUR + seq * 1000) })),
-    ...Array.from({ length: 7 }, (_, i) => (key) => postRecord({ text: label + ' resposta ' + i, at: iso(now - HOUR + i * 1000), replyTo: { author: key, seq: 2 } })),
+    ...Array.from({ length: 7 }, (_, i) => (key) => likeRecord({ to: { author: key, seq: 2 }, on: i % 2 === 0, at: iso(now - HOUR + i * 1000) })),
     () => postRecord({ text: label + ' 12', at: iso(now - 9 * HOUR) })
   ]
   const H1 = await diary(t, history(assoc, 'h1'), keyPair)
