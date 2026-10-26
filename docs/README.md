@@ -24,3 +24,4 @@ O README da raiz ([../README.md](../README.md)) descreve o programa de linha de 
 | `apps/site` | `@varanda/site`: o site estático, o logotipo e os scripts de ícones | [apps/site/README.md](../apps/site/README.md) |
 | `packages/core` | `@varanda/core`: registros, certificados, armazenamento, rede, sincronização e a sessão do nó | [packages/core/README.md](../packages/core/README.md) |
 | `packages/rpc` | `@varanda/rpc`: o contrato JSON entre interface e nó | [packages/rpc/README.md](../packages/rpc/README.md) |
+| `packages/web-member` | `@varanda/web-member`: o membro no navegador (Hypercore 10), o nó da versão web, e o spike | sem README; veja [development.md](development.md) |
