@@ -34,6 +34,16 @@
 //   await node.legacyFollows()             // -> { keys } (unlocked only)
 //   await node.confirmLegacyFollows(keys)  // -> { published }; the rest leave the list
 //
+// Engagement and on-demand reads (docs/rpc.md; no new host control): the
+// session also serves like.set / repost.set / post.quote (diary writes on
+// the post.reply path, idempotent toggles), engagement.read (the own
+// diary's likes / reposts among the given refs; works locked) and
+// diary.peek, which reads any admitted diary's requested blocks through
+// the RUNNING sync (./session.js, ./sync.js): it never opens a storage
+// core, stores nothing, and answers NOT_FOUND 'semeador indisponível' when
+// no verified seeder link is reachable within PEEK_TIMEOUT_MS and NOT_FOUND
+// 'diário indisponível' for a blocked, ungated or unknown author.
+//
 // A second connect() replaces the first (its port is closed and its onClose
 // called, as when another varanda-serve socket takes over). node.close()
 // closes the session (any sync stopped and awaited, the key zero-filled)

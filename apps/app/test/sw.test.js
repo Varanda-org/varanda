@@ -397,6 +397,24 @@ test('/media/* is never intercepted', async (t) => {
   t.ok((await dispatch(w, ORIGIN + '/medias', { mode: 'navigate' })).responded, '/medias is an app route')
 })
 
+// The seeder's engagement index is proxied by Caddy (no-store, real 404s):
+// the worker must not cache it, answer it from the shell or turn a failure
+// into a 503, for GET or HEAD, online or offline.
+test('/index/* is never intercepted', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const A = 'a'.repeat(64)
+  for (const p of ['/index/post/' + A + '/1', '/index/post/' + A + '/1/1700000000000.' + 'b'.repeat(64) + '.2',
+    '/index/counts/' + A + ':1,' + 'b'.repeat(64) + ':2', '/index/member/' + A, '/index/member/' + A + '/10', '/index/x']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+    t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/indexes', { mode: 'navigate' })).responded, '/indexes is an app route')
+  t.ok((await dispatch(w, ORIGIN + '/index', { mode: 'navigate' })).responded, '/index (no slash) is an app route')
+})
+
 test('nothing cached and offline: 503 sem conexão', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))

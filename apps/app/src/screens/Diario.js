@@ -8,6 +8,11 @@
 // ('enviar'). The 'ver novidades' pill (web only) follows the own-synced line
 // growing, i.e. another device published; the native node has no such
 // signal, so on native only the pull, the tab and the refresh prop reload.
+// Own posts carry the action bar (counts on the hosted web; liking and
+// reposting the own posts is allowed), quotes show the quoted post, and the
+// own reposts still on show the original under 'Você republicou' (only the
+// newest repost record per target counts; likes are not listed). Originals,
+// counts and the own state come from A Rua's useSocial.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -20,7 +25,7 @@ import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
-import { replyNameOf, whoOf } from '../who'
+import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -31,6 +36,7 @@ import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
 import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
+import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 
 const BAND = 96
 const MAX_EMPTY_PAGES = 5
@@ -46,10 +52,70 @@ function PendingState ({ item, held }) {
 }
 
 // Only publications are listed: records the person never wrote by hand (profile,
-// certificate, @nome, media) and invalid blocks stay out of the timeline.
+// certificate, @nome, media, likes) and invalid blocks stay out of the timeline.
 const isPostRow = (row) => !row.invalid && !!row.entry && !!row.entry.record && row.entry.record.type === 'post'
+const isRepostRow = (row) => !row.invalid && !!row.entry && !!row.entry.record && row.entry.record.type === 'repost'
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, scrollToTop }) {
+// The seqs of the repost records still on: the newest record per target, when
+// it is `on`. Rows are loaded newest first, so a newer record of the same
+// target is always already loaded.
+function liveReposts (rows) {
+  const latest = new Map()
+  for (const row of rows) {
+    if (!isRepostRow(row)) continue
+    const ref = refOf(row.entry.record.to)
+    if (ref === null) continue
+    const known = latest.get(ref)
+    if (!known || row.seq > known.seq) latest.set(ref, { seq: row.seq, on: row.entry.record.on === true })
+  }
+  const live = new Set()
+  for (const v of latest.values()) if (v.on) live.add(v.seq)
+  return live
+}
+
+// What a page of own rows needs: counts and own state of the own posts and
+// the originals of the reposts; originals and quoted posts to resolve.
+function rowNeeds (rows, publicKey) {
+  const local = new Map()
+  const shown = []
+  const need = []
+  for (const row of rows) {
+    if (row.invalid || !row.entry || !row.entry.record) continue
+    const record = row.entry.record
+    if (record.type === 'post') {
+      const ref = publicKey + ':' + row.seq
+      shown.push(ref)
+      local.set(ref, postOf(publicKey, row.seq, record))
+      const q = refOf(record.quote)
+      if (q !== null) need.push(q)
+    } else if (record.type === 'repost' && record.on === true) {
+      const ref = refOf(record.to)
+      if (ref !== null) {
+        shown.push(ref)
+        need.push(ref)
+      }
+    }
+  }
+  return { local, shown, need, authors: [publicKey] }
+}
+
+// A post item (the feed shape) of an own post record.
+function postOf (author, seq, record) {
+  return {
+    kind: 'post',
+    author,
+    seq,
+    at: record.at,
+    text: record.text,
+    replyTo: record.replyTo || null,
+    quote: record.quote || null,
+    media: Array.isArray(record.media) && record.media.length > 0 ? record.media : null,
+    name: null,
+    username: null
+  }
+}
+
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onQuote, onToast, ownKey, scrollToTop }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -71,6 +137,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const { learn, resolve, invalidate, profileOf } = names
   const { request, ackFresh } = node
+  const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
+  const social = useSocial({ ownKey: ownPublicKey, onToast })
+  const { ingest } = social
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
@@ -99,10 +168,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
+      if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(rows, info.publicKey), reset: true })
     } catch (err) {
       if (mine === seqRef.current) setLoadError(errorText(err))
     }
-  }, [request, ackFresh, resolve, invalidate])
+  }, [request, ackFresh, resolve, invalidate, ingest])
 
   // Appends the next older page; never while one is loading.
   const loadOlder = useCallback(async () => {
@@ -127,13 +197,14 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
+      if (typeof base.info.publicKey === 'string') ingest(rowNeeds(logRows(log), base.info.publicKey))
     } catch (err) {
       if (mine !== seqRef.current) return
       setOlderError(errorText(err))
       setLoadingMore(false)
       olderBusy.current = false
     }
-  }, [request, resolve])
+  }, [request, resolve, ingest])
 
   // The own-diary growth signal at this render: an activation that is about
   // to acknowledge it re-reads the profile too, or a change made on another
@@ -156,7 +227,13 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   // remain: load the next one by itself, at most MAX_EMPTY_PAGES in a row
   // per trigger; then the footer's 'mostrar mais' takes over.
   const emptyPages = useRef(0)
-  const postCount = data === null ? 0 : data.rows.filter(isPostRow).length
+  // Publications: posts (quotes included) and the reposts still on.
+  const shownRows = useMemo(() => {
+    if (data === null) return []
+    const live = liveReposts(data.rows)
+    return data.rows.filter((row) => isPostRow(row) || (isRepostRow(row) && live.has(row.seq)))
+  }, [data])
+  const postCount = shownRows.length
   const dataAtEnd = data === null ? true : data.atEnd
   useEffect(() => {
     if (data === null) return
@@ -170,8 +247,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   }, [data, postCount, dataAtEnd, loadingMore, olderError, loadOlder])
 
   const info = data === null ? null : data.info
-  const rows = data === null ? [] : data.rows
-  const posts = rows.filter(isPostRow)
+  const posts = shownRows
   const publicKey = info && typeof info.publicKey === 'string' ? info.publicKey : null
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
@@ -274,6 +350,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         </View>
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
+        <CountsNote social={social} />
         <ErrorText>{loadError}</ErrorText>
       </View>
       )
@@ -312,31 +389,25 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         )
   }
 
+  const handlers = { onOpenThread, onOpenMember, onReply, onQuote }
+  // An own repost is the ORIGINAL post under 'Você republicou' (every action
+  // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {
     const record = row.entry.record
-    const replyProfile = record.replyTo ? profileOf(record.replyTo.author) : undefined
-    return (
-      <PostRow
-        author={info.publicKey}
-        name={profile ? profile.name : null}
-        username={profile ? profile.username : null}
-        at={record.at}
-        text={record.text}
-        media={record.media || null}
-        replyToName={record.replyTo ? replyNameOf(replyProfile) : null}
-        now={now}
-        onReply={() => onReply({
-          ref: info.publicKey + ':' + row.seq,
-          name: profile ? profile.name : null,
-          username: profile ? profile.username : null,
-          text: record.text
-        })}
-      />
-    )
+    if (record.type === 'repost') {
+      const ref = refOf(record.to)
+      const repostedBy = { author: info.publicKey, name: 'Você', username: null }
+      const post = social.original(ref)
+      if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
+    }
+    const post = postOf(info.publicKey, row.seq, record)
+    return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
   }
 
-  // Rows re-render when a name is learned or the clock ticks.
-  const extra = useMemo(() => ({ profileOf, now, profile }), [profileOf, now, profile])
+  // Rows re-render when a name is learned, the clock ticks or the originals,
+  // counts or own state change.
+  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social }), [profileOf, now, profile, social.social])
 
   return (
     <View style={styles.list}>
@@ -377,6 +448,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           pull.run(loadNewest)
         }}
       />
+      <SocialToast text={social.toast} />
     </View>
   )
 }

@@ -42,6 +42,9 @@ const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
 // Authors per profile.read: its worst case fits MAX_MESSAGE with room to
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
+const ENGAGEMENT_LIMIT_MAX = 62
+const PEEK_SEQS_MAX = 36
+const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500
 const SYNC_TIMEOUT_MIN = 1000
@@ -144,6 +147,9 @@ module.exports = {
   PEEK_LIMIT_DEFAULT,
   PEEK_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
+  ENGAGEMENT_LIMIT_MAX,
+  PEEK_SEQS_MAX,
+  PEEK_TIMEOUT_MS,
   FOLLOW_LIMIT_DEFAULT,
   FOLLOW_LIMIT_MAX,
   SYNC_TIMEOUT_MIN,

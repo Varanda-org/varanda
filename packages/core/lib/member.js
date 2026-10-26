@@ -20,6 +20,9 @@ const {
   profileRecord,
   postRecord,
   followRecord,
+  likeRecord,
+  repostRecord,
+  validRecordCopy,
   validateRecord,
   formatRef,
   latestProfile
@@ -41,6 +44,7 @@ const {
   readBlocklist
 } = storeLib
 const { buildFeed, shortKey } = require('./feed')
+const { engagementState } = require('./engagement')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
 
@@ -269,6 +273,68 @@ async function postCreate (ctx, { text }) {
 async function postReply (ctx, { to, text }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to })))
+}
+
+// to is the parsed { author, seq } reference of the quoted post (text only:
+// the caller refuses media before anything opens).
+async function postQuote (ctx, { to, text }) {
+  if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  return publish(ctx, buildRecord(() => postRecord({ text, quote: to })))
+}
+
+// ---- likes / reposts ----
+
+// The seq and `on` of the last valid `type` record about `ref` (replayed in
+// seq order, as engagementState does), or null when there never was one.
+function lastEngagement (entries, type, ref) {
+  let last = null
+  for (const { seq, record } of entries) {
+    if (record === null || typeof seq !== 'number' || seq < 1) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy === null || copy.type !== type || formatRef(copy.to) !== ref) continue
+    if (last === null || seq > last.seq) last = { seq, on: copy.on }
+  }
+  return last
+}
+
+// Idempotent toggle of one engagement -> { seq, on, changed }: when the own
+// diary is already in the requested state nothing is written and seq is that
+// of the existing effective record (null if none ever). Self-engagement is
+// allowed. `to` is the parsed { author, seq } reference.
+async function engagementSet (ctx, type, make, { to, on }) {
+  if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const last = lastEngagement(await readAll(diary), type, formatRef(to))
+    if ((last !== null && last.on) === on) return { seq: last === null ? null : last.seq, on, changed: false }
+    const record = buildRecord(() => make({ to, on }))
+    try {
+      return { seq: await appendRecord(diary, record), on, changed: true }
+    } catch (err) {
+      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+      throw err
+    }
+  })
+}
+
+function likeSet (ctx, params) {
+  return engagementSet(ctx, 'like', likeRecord, params)
+}
+
+function repostSet (ctx, params) {
+  return engagementSet(ctx, 'repost', repostRecord, params)
+}
+
+// Which of `refs` the own diary currently likes / reposts -> { liked,
+// reposted }, each a subset of refs in request order.
+async function engagementRead (ctx, { refs }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const state = engagementState(await readAll(diary))
+    return {
+      liked: refs.filter((ref) => state.liked.has(ref.toLowerCase())),
+      reposted: refs.filter((ref) => state.reposted.has(ref.toLowerCase()))
+    }
+  })
 }
 
 // ---- username ----
@@ -535,6 +601,10 @@ module.exports = {
   profileSet,
   postCreate,
   postReply,
+  postQuote,
+  likeSet,
+  repostSet,
+  engagementRead,
   usernameAdd,
   followAdd,
   followRemove,

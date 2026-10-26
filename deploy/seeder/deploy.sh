@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Implanta no servidor a versão atual de origin/main: atualiza o checkout,
-# gera o app web, reconstrói e sobe o semeador e o Caddy, confere a saúde e,
+# gera o app web, reconstrói e sobe o semeador e o Caddy (com o módulo de limite por cliente), confere a saúde e,
 # se algo falhar, volta sozinho para a versão anterior (commit, imagem e www),
 # sem reconstruir nada. Rode como root, da raiz do repositório ou não:
 #   bash deploy/seeder/deploy.sh </dev/null       # implanta a ponta de main
@@ -61,6 +61,7 @@ target=''
 previous=''
 sem_registro=0
 image_anterior=''
+caddy_anterior=''
 isolado=0
 # O que a implantação já mexeu: a volta só desfaz o que mudou (uma falha no
 # build não reinicia o semeador nem o Caddy).
@@ -110,6 +111,14 @@ conteiner_semeador() {
   docker ps -a -q \
     --filter label=com.docker.compose.project=varanda-seeder \
     --filter label=com.docker.compose.service=seeder \
+    --filter label=com.docker.compose.oneoff=False
+}
+
+# O contêiner do serviço web (o Caddy), do mesmo jeito e pelo mesmo motivo.
+conteiner_caddy() {
+  docker ps -a -q \
+    --filter label=com.docker.compose.project=varanda-seeder \
+    --filter label=com.docker.compose.service=web \
     --filter label=com.docker.compose.oneoff=False
 }
 
@@ -323,6 +332,30 @@ guardar_snapshots() {
     exit 1
   fi
 
+  # O Caddy, igual ao semeador: a imagem do contêiner, não a etiqueta
+  # varanda-caddy:local (que o compose build move sem reiniciar nada).
+  cid=$(conteiner_caddy)
+  case "$cid" in
+    '')
+      log 'não há contêiner do Caddy: suba-o uma vez à mão (README)'
+      exit 1
+      ;;
+    *[!0-9a-f]*)
+      log "mais de um contêiner do serviço web: $(printf '%s' "$cid" | tr '\n' ' ')"
+      exit 1
+      ;;
+  esac
+  caddy_anterior=$(docker inspect -f '{{.Image}}' "$cid")
+  if [ -z "$caddy_anterior" ]; then
+    log 'não foi possível ler a imagem do Caddy em execução'
+    exit 1
+  fi
+  docker image tag "$caddy_anterior" varanda-caddy:anterior
+  if [ "$(docker image inspect -f '{{.Id}}' varanda-caddy:anterior)" != "$caddy_anterior" ]; then
+    log 'a cópia da imagem anterior do Caddy não confere'
+    exit 1
+  fi
+
   if [ ! -f "$www/index.html" ] || [ ! -f "$www/varanda-node.js" ]; then
     log 'deploy/seeder/www sem o app publicado: rode build-web.sh uma vez à mão (README)'
     exit 1
@@ -336,7 +369,7 @@ guardar_snapshots() {
   fi
   rm -rf "$state/www-anterior"
   mv "$tmp" "$state/www-anterior"
-  log "snapshot: commit $previous, imagem $image_anterior, www"
+  log "snapshot: commit $previous, imagens $image_anterior e $caddy_anterior, www"
 }
 
 # Saúde do semeador pelo endpoint local: 200 só depois de seed ready.
@@ -581,7 +614,7 @@ conferir_dono() {
 # implantação chegou a mexer.
 # shellcheck disable=SC2329 # chamada pelos traps ERR, INT e TERM.
 voltar() {
-  local falhas=0 motivo cid image_rodando
+  local falhas=0 motivo cid image_rodando caddy_rodando
   if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
     exit 1
   fi
@@ -630,6 +663,10 @@ voltar() {
       falhas=$((falhas + 1))
       log 'volta: restaurar a imagem varanda-seeder:anterior falhou'
     fi
+    if ! docker image tag varanda-caddy:anterior varanda-caddy:local; then
+      falhas=$((falhas + 1))
+      log 'volta: restaurar a imagem varanda-caddy:anterior falhou'
+    fi
   fi
   if [ "$servicos_trocados" = 0 ]; then
     log 'volta: o semeador e o Caddy não chegaram a ser trocados'
@@ -650,6 +687,15 @@ voltar() {
     if [ "$image_rodando" != "$image_anterior" ]; then
       falhas=$((falhas + 1))
       log "volta: o semeador roda a imagem ${image_rodando:-nenhuma}, não $image_anterior"
+    fi
+    cid=$(conteiner_caddy)
+    caddy_rodando=''
+    if [ -n "$cid" ]; then
+      caddy_rodando=$(docker inspect -f '{{.Image}}' "$cid")
+    fi
+    if [ "$caddy_rodando" != "$caddy_anterior" ]; then
+      falhas=$((falhas + 1))
+      log "volta: o Caddy roda a imagem ${caddy_rodando:-nenhuma}, não $caddy_anterior"
     fi
   fi
 
@@ -714,8 +760,10 @@ main() {
   trap 'voltar sinal' INT TERM
   git reset -q --hard "$target"
   construir_web
-  # Primeiro só a imagem: se o build dela falhar, nada que roda foi tocado.
-  # Mas a etiqueta varanda-seeder:local já pode ter mudado: a volta a restaura.
+  # Primeiro só as imagens (o semeador e o Caddy com o módulo de limite por
+  # cliente, Dockerfile.caddy): se o build delas falhar, nada que roda foi
+  # tocado. Mas as etiquetas varanda-seeder:local e varanda-caddy:local já
+  # podem ter mudado: a volta as restaura.
   imagem_trocada=1
   compose build
   publicar_web

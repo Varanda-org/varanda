@@ -12,7 +12,7 @@ A rede precisa funcionar sem servidor central, nos celulares dos brasileiros, e 
 
 | Requisito | O que significa na prática |
 | --- | --- |
-| Roda nos aparelhos dos brasileiros | Cada celular guarda e repassa as próprias publicações e as de quem a pessoa segue; nenhum servidor tem todos os dados |
+| Roda nos aparelhos dos brasileiros | Cada celular guarda e repassa as próprias publicações e as de quem a pessoa segue; os semeadores guardam cópias dos diários públicos admitidos, e nenhum servidor tem os demais dados |
 | Funciona com o celular desligado | Semeadores sempre ligados, mantidos por parceiros no Brasil, guardam cópias e ajudam nas conexões |
 | Verificação de idade (ECA Digital) | A faixa etária é confirmada antes de a identidade existir; autodeclaração não basta |
 | LGPD | Coleta mínima, dados no Brasil sempre que possível, direitos dos titulares atendidos, encarregado nomeado |
@@ -49,7 +49,9 @@ Limites do piloto: 30 itens na primeira página e 31 nas seguintes, custo linear
 
 ## Arquitetura
 
-Nenhum componente tem todos os dados: os celulares guardam e trocam as publicações, e parceiros e serviços no Brasil só dão apoio.
+Os celulares guardam e trocam as publicações, e parceiros e serviços no Brasil dão apoio. Cada celular guarda só o próprio diário e os de quem a pessoa segue; o semeador guarda a cópia de todo diário que admitiu (os diários públicos dos membros). Fora desses diários públicos, nenhum componente tem todos os dados.
+
+**Índice de engajamento do semeador.** Como o semeador já guarda todo diário admitido, ele monta em memória, a cada início, um índice de respostas, citações, curtidas, republicações e das publicações de cada membro, para que a conversa completa e as contagens apareçam mesmo de quem a pessoa não segue. O índice só diz onde procurar e quantos são; cada publicação, nome ou bio mostrado é lido do diário do autor e conferido pelo nó (na versão web, uma leitura sob demanda na memória, sem guardar nada). Os celulares continuam guardando só os diários seguidos. Contagens e completude são afirmações do semeador; o índice tem limite de memória e avisa quando está incompleto. Detalhes em [protocol.md](protocol.md), seções 5 e 7.
 
 ```mermaid
 flowchart TB
@@ -127,7 +129,7 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 **Ler e sincronizar**
 
 1. O app conecta direto aos aparelhos de quem a pessoa segue. Se o CGNAT da operadora impedir, passa por um semeador.
-2. Baixa só as novidades dos diários seguidos, de preferência no Wi-Fi, para poupar o plano de dados.
+2. Baixa só as novidades dos diários seguidos, de preferência no Wi-Fi, para poupar o plano de dados. Uma conversa ou um perfil de quem a pessoa não segue é lido sob demanda (hoje só na versão web), na memória, pelo índice do semeador (acima), e não fica guardado.
 3. Apps e semeadores só aceitam diários com certificado de membro válido.
 
 **Notificações**

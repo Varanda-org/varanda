@@ -368,6 +368,31 @@ test('reconcile: two identical texts, only the sending one is consumed', async (
   t.alike(r.items.map((i) => [i.id, i.state]), [[idOf(2), 'queued']])
 })
 
+test('reconcile: a quote with the same text as a queued post leaves the post queued', async (t) => {
+  const o = await load()
+  const quoteOf = (seq, text) => ({ seq, record: { type: 'post', text, replyTo: null, quote: { author: B, seq: 4 }, at: new Date(T0).toISOString() } })
+  const post = o.claim(add(o, [], { text: 'olá' }), idOf(1), { now: T0, floorSeq: 5 })
+  const r = o.reconcile(post, A, ASSOC, page([quoteOf(6, 'olá')]), T0)
+  t.is(r.status, 'absent', 'a quote never counts as the post')
+  t.is(r.sent, null)
+  t.is(r.items[0].state, 'queued')
+  // The quote also hides nothing: the real post next to it is still found.
+  const both = o.reconcile(post, A, ASSOC, page([quoteOf(7, 'olá'), entry(6, 'olá')]), T0)
+  t.is(both.status, 'sent')
+  t.is(both.sent.seq, 6)
+  const reply = o.claim(add(o, [], { kind: 'reply', to: B + ':4', text: 'oi' }), idOf(1), { now: T0, floorSeq: 5 })
+  const replyQuote = { seq: 6, record: { type: 'post', text: 'oi', replyTo: { author: B, seq: 4 }, quote: { author: B, seq: 4 }, at: new Date(T0).toISOString() } }
+  t.is(o.reconcile(reply, A, ASSOC, page([replyQuote]), T0).status, 'absent', 'a record with a quote never matches a reply')
+})
+
+test('isQuoteRecord', async (t) => {
+  const o = await load()
+  t.ok(o.isQuoteRecord({ type: 'post', text: 'a', replyTo: null, quote: { author: B, seq: 1 } }))
+  t.absent(o.isQuoteRecord({ type: 'post', text: 'a', replyTo: null }))
+  t.absent(o.isQuoteRecord({ type: 'post', text: 'a', replyTo: null, quote: null }))
+  t.absent(o.isQuoteRecord(null))
+})
+
 test('markRetry backoff', async (t) => {
   const o = await load()
   let items = add(o, [], {})

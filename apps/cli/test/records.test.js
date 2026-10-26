@@ -683,3 +683,119 @@ test('media-core and follow records', async (t) => {
   await t.exception.all(async () => mediaCoreRecord({ key: 'x', at: AT }), /malformed/)
   await t.exception.all(async () => followRecord({ key: K2, on: 'yes', at: AT }), /malformed/)
 })
+
+test('like and repost records', async (t) => {
+  await testnet(t)
+  const { likeRecord, repostRecord } = records
+  for (const type of ['like', 'repost']) {
+    const rec = (over) => ({ type, to: { author: K1, seq: 3 }, on: true, at: AT, ...over })
+    t.is(validateRecord(rec(), 1), null, type)
+    t.is(validateRecord(rec({ on: false }), 1), null, type + ' off')
+    t.is(validateRecord(rec({ to: { author: K2, seq: 1 } }), 5), null, type + ' seq 1 target')
+    t.is(validateRecord(rec(), 0), 'genesis-required', type + ' never at seq 0')
+    t.is(validateRecord(rec({ extra: 1 }), 1), 'malformed', type + ' with an extra key')
+    const noOn = rec()
+    delete noOn.on
+    t.is(validateRecord(noOn, 1), 'malformed', type + ' without on')
+    const noTo = rec()
+    delete noTo.to
+    t.is(validateRecord(noTo, 1), 'malformed', type + ' without to')
+    t.is(validateRecord({ ...rec(), key: K1 }, 1), 'malformed', type + ' with a follow key')
+    for (const on of [1, 0, 'true', null, undefined]) t.is(validateRecord(rec({ on }), 1), 'malformed', type + ' on ' + on)
+    const badTo = [
+      null, 'x', 1, [], [K1, 3], K1 + ':3',
+      { author: K1, seq: 3, extra: 1 },
+      { author: 'A'.repeat(64), seq: 3 },
+      { author: K1.slice(1), seq: 3 },
+      { author: K1, seq: 0 },
+      { author: K1, seq: -1 },
+      { author: K1, seq: 1.5 },
+      { author: K1, seq: '3' },
+      { author: K1, seq: Number.MAX_SAFE_INTEGER + 1 },
+      { author: K1 },
+      { seq: 3 }
+    ]
+    for (const to of badTo) t.is(validateRecord(rec({ to }), 1), 'malformed', type + ' to ' + JSON.stringify(to))
+    t.is(validateRecord(rec({ at: '2026-01-01' }), 1), 'date-invalid')
+    t.is(validateRecord(rec({ at: null }), 1), 'date-invalid')
+    t.is(records.validRecordCopy(rec({ to: { author: K1, seq: 0 } }), 1), null)
+  }
+  // Builders: exact keys, a copy of `to` with only its keys.
+  const to = { author: K1, seq: 3, extra: 'x' }
+  const like = likeRecord({ to, on: true, at: AT })
+  t.alike(like, { type: 'like', to: { author: K1, seq: 3 }, on: true, at: AT })
+  t.alike(Object.keys(like), ['type', 'to', 'on', 'at'])
+  t.ok(like.to !== to, 'to is copied')
+  t.alike(repostRecord({ to, on: false, at: AT }), { type: 'repost', to: { author: K1, seq: 3 }, on: false, at: AT })
+  t.ok(isCanonicalIso(likeRecord({ to, on: false }).at))
+  await t.exception.all(async () => likeRecord({ to: { author: K1, seq: 0 }, on: true, at: AT }), /malformed/)
+  await t.exception.all(async () => repostRecord({ to: { author: K1, seq: 1 }, on: 'yes', at: AT }), /malformed/)
+  await t.exception.all(async () => repostRecord({ to: null, on: true, at: AT }), /malformed/)
+  await t.exception.all(async () => likeRecord(), /malformed/)
+})
+
+test('quote posts', async (t) => {
+  await testnet(t)
+  const Q = { author: K2, seq: 4 }
+  const quote = (over) => ({ type: 'post', text: 'olha isso', at: AT, replyTo: null, quote: Q, ...over })
+  t.is(validateRecord(quote(), 1), null)
+  t.is(validateRecord(quote({ media: [DESC] }), 1), null, 'quote with media')
+  t.is(validateRecord(quote({ media: [DESC, DESC, DESC, DESC] }), 1), null)
+  t.is(validateRecord(quote({ quote: { author: K1, seq: 1 } }), 2), null, 'quoting an own post')
+  t.is(validateRecord(quote(), 0), 'genesis-required')
+  // replyTo must be null.
+  t.is(validateRecord(quote({ replyTo: { author: K1, seq: 1 } }), 1), 'quote-with-reply')
+  t.is(validateRecord(quote({ replyTo: { author: K1, seq: 1 }, media: [DESC] }), 1), 'quote-with-reply')
+  t.is(validateRecord(quote({ replyTo: 'x' }), 1), 'quote-with-reply')
+  // Key sets: exactly the quote keys, optionally plus media.
+  t.is(validateRecord(quote({ extra: 1 }), 1), 'malformed')
+  t.is(validateRecord(quote({ media: [DESC], extra: 1 }), 1), 'malformed')
+  const noReply = quote()
+  delete noReply.replyTo
+  t.is(validateRecord(noReply, 1), 'malformed', 'quote without replyTo')
+  // The quote target: never null, exactly { author, seq }.
+  const badQuote = [null, undefined, 'x', 1, [], K2 + ':4', { author: K2, seq: 4, extra: 1 }, { author: 'B'.repeat(64), seq: 4 }, { author: K2, seq: 0 }, { author: K2, seq: 1.5 }, { author: K2 }]
+  for (const q of badQuote) {
+    t.is(validateRecord(quote({ quote: q }), 1), 'quote-invalid', 'quote ' + JSON.stringify(q))
+    t.is(validateRecord(quote({ quote: q, media: [DESC] }), 1), 'quote-invalid', 'quote with media ' + JSON.stringify(q))
+  }
+  // Text: 1..MAX_TEXT, even with media.
+  t.is(validateRecord(quote({ text: '' }), 1), 'text-length')
+  t.is(validateRecord(quote({ text: '', media: [DESC] }), 1), 'text-length', 'empty quote text refused even with media')
+  t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT) }), 1), null)
+  t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT + 1) }), 1), 'text-length')
+  t.is(validateRecord(quote({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(quote({ at: 'x' }), 1), 'date-invalid')
+  t.is(validateRecord(quote({ media: [] }), 1), 'media-invalid')
+  t.is(validateRecord(quote({ media: [{ ...DESC, extra: 1 }] }), 1), 'media-invalid')
+  // Photo-only plain posts keep their empty text.
+  t.is(validateRecord({ type: 'post', text: '', at: AT, replyTo: null, media: [DESC] }, 1), null)
+  // postRecord: quote only when given, copied with only its keys.
+  const given = { author: K2, seq: 4, extra: 'x' }
+  const rec = postRecord({ text: 'oi', at: AT, quote: given })
+  t.alike(Object.keys(rec), ['type', 'text', 'at', 'replyTo', 'quote'])
+  t.alike(rec.quote, Q)
+  t.ok(rec.quote !== given, 'quote is copied')
+  const withMedia = postRecord({ text: 'oi', at: AT, quote: Q, media: [DESC] })
+  t.alike(Object.keys(withMedia), ['type', 'text', 'at', 'replyTo', 'quote', 'media'])
+  t.absent('quote' in postRecord({ text: 'oi', at: AT }))
+  await t.exception.all(async () => postRecord({ text: 'oi', at: AT, quote: null }), /quote-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'oi', at: AT, quote: Q, replyTo: { author: K1, seq: 1 } }), /quote-with-reply/)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, quote: Q, media: [DESC] }), /text-length/)
+})
+
+test('old readers: unknown types stay malformed', async (t) => {
+  await testnet(t)
+  // A record of a future type is skipped exactly as before.
+  t.is(validateRecord({ type: 'bookmark', to: { author: K1, seq: 1 }, on: true, at: AT }, 1), 'malformed')
+  t.is(validateRecord({ type: 'reaction', to: { author: K1, seq: 1 }, on: true, at: AT }, 1), 'malformed')
+  t.is(validateRecord({ type: 'like', to: { author: K1, seq: 1 }, on: true, at: AT, emoji: 'x' }, 1), 'malformed', 'like with an extra key')
+  t.is(records.validRecordCopy({ type: 'bookmark', at: AT }, 1), null)
+  // Hostile getters on the new shapes never throw.
+  const hostile = { type: 'like', on: true, at: AT }
+  Object.defineProperty(hostile, 'to', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 1), 'malformed')
+  const hostileQuote = { type: 'post', text: 'oi', at: AT, replyTo: null }
+  Object.defineProperty(hostileQuote, 'quote', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostileQuote, 1), 'malformed')
+})

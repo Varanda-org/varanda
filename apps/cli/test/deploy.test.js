@@ -134,6 +134,12 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     '127.0.0.1:8788/health',
     'www-anterior',
     'varanda-seeder:anterior',
+    // The Caddy image (with the per-client rate limit) is kept and restored
+    // the same way as the seeder image.
+    'varanda-caddy:anterior',
+    'varanda-caddy:local',
+    'conteiner_caddy',
+    'com.docker.compose.service=web',
     'implantado',
     'exit 3',
     '[0-9a-f]{40}',
@@ -263,6 +269,32 @@ test('Caddyfile: /media/* drops the client address headers and keeps the upstrea
   t.ok(media.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
   t.ok(media.includes('header_up Host {upstream_hostport}'), 'Host rewritten')
   t.absent(caddy.includes('immutable'), 'the Caddyfile never sets immutable (it comes from the seeder)')
+})
+
+test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned and restorable', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const start = webLines.findIndex((l) => /^ {2}web:\s*$/.test(l))
+  t.ok(start !== -1, 'web service found')
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  const web = webLines.slice(start, end).join('\n')
+  t.ok(/^ {4}build:\s*\n {6}context: \.\s*\n {6}dockerfile: Dockerfile\.caddy\s*$/m.test(web), 'web builds from Dockerfile.caddy')
+  t.ok(/^ {4}image: varanda-caddy:local\s*$/m.test(web), 'web image is varanda-caddy:local')
+  for (const k of ['network_mode: host', 'read_only: true', 'no-new-privileges:true']) t.ok(web.includes(k), 'web keeps ' + k)
+
+  const df = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/Dockerfile.caddy'), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const froms = df.filter((l) => /^FROM\s/.test(l))
+  t.is(froms.length, 2, 'two stages')
+  for (const f of froms) t.ok(/^FROM caddy:2\.11\.6[a-z-]*@sha256:[0-9a-f]{64}( AS \w+)?$/.test(f), 'image pinned by sha256 digest: ' + f)
+  const build = df.filter((l) => /xcaddy build/.test(l))
+  t.is(build.length, 1, 'one xcaddy build')
+  const mod = build[0].match(/--with (\S+)/)
+  t.ok(mod && /^github\.com\/mholt\/caddy-ratelimit@(v\d+\.\d+\.\d+|[0-9a-f]{40})$/.test(mod[1]), 'module pinned to an exact version or commit')
+  t.absent(df.join('\n').includes('@latest'), 'no @latest')
+  t.absent(/--with\s+\S+\s*(\\|$)/m.test(df.join('\n').replace(/--with \S+@\S+/g, '')), 'no unpinned --with')
+  t.ok(df.some((l) => l.trim() === 'COPY --from=builder /usr/bin/caddy /usr/bin/caddy'), 'the built binary replaces the runtime one')
 })
 
 test('deploy.sh: bash -n and refusal to run as non-root', (t) => {

@@ -7,7 +7,8 @@
 // photo, moves between items with swipes, the arrow buttons or the keyboard
 // arrows (web, only while open), closes with its button or Escape, and labels
 // each photo 'foto N de M'. Descriptors are passed through untouched:
-// MediaView validates them before any request.
+// MediaView validates them before any request. persist (default true) goes to
+// every tile and the viewer: false for authors the device does not follow.
 
 import { useEffect, useRef, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -24,7 +25,7 @@ function ratioOf (d) {
   return Number.isFinite(r) ? Math.max(0.5, Math.min(2, r)) : 1
 }
 
-function Viewer ({ author, media, index, onIndex, onClose }) {
+function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const insets = useSafeAreaInsets()
   const open = index !== null
   const count = media.length
@@ -44,7 +45,13 @@ function Viewer ({ author, media, index, onIndex, onClose }) {
     const onKey = (event) => {
       if (event.key === 'ArrowLeft') goRef.current(-1)
       else if (event.key === 'ArrowRight') goRef.current(1)
-      else if (event.key === 'Escape') closeRef.current()
+      else if (event.key === 'Escape') {
+        // Handled here: the app's own Escape (closing a pushed screen) must
+        // not also run.
+        event.preventDefault()
+        event.stopPropagation()
+        closeRef.current()
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -84,6 +91,7 @@ function Viewer ({ author, media, index, onIndex, onClose }) {
             label={label}
             fit='contain'
             dark
+            persist={persist}
             style={styles.viewerImage}
           />
           {index > 0
@@ -106,7 +114,7 @@ function Viewer ({ author, media, index, onIndex, onClose }) {
   )
 }
 
-export function MediaGrid ({ author, media }) {
+export function MediaGrid ({ author, media, persist = true }) {
   const [viewing, setViewing] = useState(null)
   if (!Array.isArray(media) || media.length === 0) return null
   const items = media.slice(0, MAX_MEDIA_PER_POST)
@@ -117,6 +125,7 @@ export function MediaGrid ({ author, media }) {
       key={i}
       author={author}
       descriptor={items[i]}
+      persist={persist}
       label={'foto ' + (i + 1) + ' de ' + n}
       style={[styles.cell, style]}
       onPress={() => setViewing(i)}
@@ -145,7 +154,7 @@ export function MediaGrid ({ author, media }) {
   return (
     <View style={styles.grid}>
       {body}
-      <Viewer author={author} media={items} index={viewing} onIndex={setViewing} onClose={() => setViewing(null)} />
+      <Viewer author={author} media={items} index={viewing} onIndex={setViewing} onClose={() => setViewing(null)} persist={persist} />
     </View>
   )
 }

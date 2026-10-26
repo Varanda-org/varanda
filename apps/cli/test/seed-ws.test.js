@@ -15,7 +15,10 @@ const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
-const { startSeedWs, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST } = require('../lib/seed-ws')
+const {
+  startSeedWs, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
+} = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 
@@ -810,4 +813,403 @@ test('startSeedWs /media: a response past the deadline is destroyed', async (t) 
   res.resume()
   await within(new Promise((resolve) => res.once('close', resolve)), 5000, 'close após o prazo')
   t.absent(res.complete, 'the body was cut short, not completed')
+})
+
+// --- /index/post, /index/counts, /index/member ------------------------------
+
+const A = 'c'.repeat(64)
+const B = 'd'.repeat(64)
+const CURSOR = '1700000000000.' + B + '.7'
+
+function pageOf (ref) {
+  return {
+    ref,
+    parent: null,
+    replies: [B + ':7'],
+    next: null,
+    quotes: [],
+    likes: 1,
+    reposts: 0,
+    repliesTotal: 1,
+    quotesTotal: 0,
+    authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3 } },
+    indexing: false,
+    complete: true
+  }
+}
+
+// A stub seeder with the three index methods, recording every call. gate:
+// optional promise awaited inside each call (holds the in-flight slot).
+function indexSeeder ({ gate = null } = {}) {
+  const stub = stubSeeder('ok')
+  stub.calls = []
+  const wait = async () => { if (gate) await gate }
+  stub.indexPost = async (author, seq, cursor) => {
+    stub.calls.push(['indexPost', author, seq, cursor])
+    await wait()
+    return author === A ? pageOf(author + ':' + seq) : null
+  }
+  stub.indexCounts = async (refs) => {
+    stub.calls.push(['indexCounts', refs])
+    await wait()
+    const counts = {}
+    for (const ref of refs) if (ref.startsWith(A)) counts[ref] = { replies: 1, likes: 2, reposts: 3, quotes: 4 }
+    return { counts, indexing: true, complete: false }
+  }
+  stub.indexMember = async (author, before) => {
+    stub.calls.push(['indexMember', author, before])
+    await wait()
+    return author === A ? { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true } : null
+  }
+  return stub
+}
+
+function jsonHeaders (t, got) {
+  t.is(got.headers['content-type'], 'application/json; charset=utf-8')
+  t.is(got.headers['cache-control'], 'no-store')
+  t.is(got.headers['x-content-type-options'], 'nosniff')
+  t.is(got.headers['access-control-allow-origin'], undefined, 'no CORS header')
+}
+
+test('startSeedWs /index: limits and regexes are exported with their documented values', async (t) => {
+  t.is(INDEX_MAX_REFS, 31)
+  t.is(INDEX_MAX_IN_FLIGHT, 16)
+  t.is(INDEX_RATE, 32)
+  t.is(INDEX_BURST, 64)
+  t.is(INDEX_DEADLINE_MS, 30000)
+  t.is(INDEX_MAX_BODY, 65536)
+  t.is(INDEX_POST_RE.source, '^\\/index\\/post\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
+  t.is(INDEX_MEMBER_RE.source, '^\\/index\\/member\\/([0-9a-f]{64})(?:\\/([1-9][0-9]{0,14}))?$')
+  t.ok(INDEX_COUNTS_RE.test('/index/counts/' + A + ':1'), 'one ref')
+  t.ok(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)).join(',')), '31 refs')
+  t.absent(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 32 }, (_, i) => A + ':' + (i + 1)).join(',')), '32 refs')
+})
+
+test('startSeedWs /index: GET answers JSON with the parsed arguments, HEAD sends the headers only', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const post = await mediaRequest(server.port, '/index/post/' + A + '/12')
+  t.is(post.status, 200)
+  jsonHeaders(t, post)
+  t.is(post.headers['content-length'], String(post.body.byteLength))
+  t.alike(JSON.parse(post.body.toString()), pageOf(A + ':12'))
+  t.alike(seeder.calls[0], ['indexPost', A, 12, null], 'no cursor -> null')
+
+  const paged = await mediaRequest(server.port, '/index/post/' + A + '/12/' + CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[1], ['indexPost', A, 12, CURSOR], 'the cursor is passed as a string')
+
+  const maxSeq = await mediaRequest(server.port, '/index/post/' + A + '/' + '9'.repeat(15))
+  t.is(maxSeq.status, 200)
+  t.is(seeder.calls[2][2], 999999999999999, '15 digits stay an exact safe integer')
+
+  const counts = await mediaRequest(server.port, '/index/counts/' + A + ':1,' + B + ':2,' + A + ':3')
+  t.is(counts.status, 200)
+  jsonHeaders(t, counts)
+  t.alike(JSON.parse(counts.body.toString()), { counts: { [A + ':1']: { replies: 1, likes: 2, reposts: 3, quotes: 4 }, [A + ':3']: { replies: 1, likes: 2, reposts: 3, quotes: 4 } }, indexing: true, complete: false })
+  t.alike(seeder.calls[3], ['indexCounts', [A + ':1', B + ':2', A + ':3']], 'refs split in order')
+
+  const member = await mediaRequest(server.port, '/index/member/' + A)
+  t.is(member.status, 200)
+  jsonHeaders(t, member)
+  t.alike(JSON.parse(member.body.toString()), { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true })
+  t.alike(seeder.calls[4], ['indexMember', A, null], 'no before -> null')
+  const before = await mediaRequest(server.port, '/index/member/' + A + '/5')
+  t.is(before.status, 200)
+  t.alike(seeder.calls[5], ['indexMember', A, 5])
+
+  const head = await mediaRequest(server.port, '/index/post/' + A + '/12', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], post.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.is(seeder.calls.length, 7, 'HEAD still asks the seeder (it needs the length)')
+})
+
+test('startSeedWs /index: malformed paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const refs32 = Array.from({ length: 32 }, (_, i) => A + ':' + (i + 1)).join(',')
+  const bad = [
+    '/index',
+    '/index/',
+    '/index/post',
+    '/index/post/' + A,
+    '/index/post/' + A + '/',
+    '/index/post/' + A + '/1/',
+    '/index/post/' + A.toUpperCase() + '/1',
+    '/index/post/' + A.slice(1) + '/1',
+    '/index/post/' + A + 'c/1',
+    '/index/post/' + A + '/0',
+    '/index/post/' + A + '/01',
+    '/index/post/' + A + '/-1',
+    '/index/post/' + A + '/1.0',
+    '/index/post/' + A + '/' + '9'.repeat(16),
+    '/index/post/' + A + '/1?x=1',
+    '/index/post/' + A + '/1?',
+    '/index/post/' + A + '/%31',
+    '/index/post/' + A + '/1/' + CURSOR + '/',
+    '/index/post/' + A + '/1/' + CURSOR + '/x',
+    '/index/post/' + A + '/1/' + '1700000000000.' + B,
+    '/index/post/' + A + '/1/' + '1700000000000.' + B.toUpperCase() + '.7',
+    '/index/post/' + A + '/1/' + '1700000000000.' + B + '.0',
+    '/index/post/' + A + '/1/' + '1700000000000.' + B + '.07',
+    '/index/post/' + A + '/1/' + '1'.repeat(17) + '.' + B + '.7',
+    '/index/post/' + A + '/1/' + '.' + B + '.7',
+    '/index/post/' + A + '/1/' + '-1.' + B + '.7',
+    '/index/post/' + A + '/1/' + '1700000000000:' + B + ':7',
+    '/index/counts',
+    '/index/counts/',
+    '/index/counts/' + A,
+    '/index/counts/' + A + ':0',
+    '/index/counts/' + A + ':01',
+    '/index/counts/' + A + ':1,',
+    '/index/counts/,' + A + ':1',
+    '/index/counts/' + A + ':1,,' + B + ':2',
+    '/index/counts/' + A + ':1,%20' + B + ':2',
+    '/index/counts/' + A + ':1;' + B + ':2',
+    '/index/counts/' + A.toUpperCase() + ':1',
+    '/index/counts/' + A + ':' + '9'.repeat(16),
+    '/index/counts/' + refs32,
+    '/index/counts/' + A + ':1?x=1',
+    '/index/member',
+    '/index/member/',
+    '/index/member/' + A + '/',
+    '/index/member/' + A + '/0',
+    '/index/member/' + A + '/01',
+    '/index/member/' + A + '/' + '9'.repeat(16),
+    '/index/member/' + A.toUpperCase(),
+    '/index/member/' + A + '/1/2',
+    '/index/member/' + A + '?x=1',
+    '/index/other/' + A,
+    '/index//post/' + A + '/1',
+    '/INDEX/post/' + A + '/1',
+    '/indexes/post/' + A + '/1'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 40) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.is(got.headers['x-content-type-options'], 'nosniff')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  const refs31 = Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)).join(',')
+  t.is((await mediaRequest(server.port, '/index/counts/' + refs31)).status, 200, '31 refs accepted')
+  t.is(seeder.calls.length, 1)
+})
+
+test('startSeedWs /index: a null answer, a throw, a rejection, a non-object and a seeder without the methods are 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  for (const url of ['/index/post/' + B + '/1', '/index/member/' + B]) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, 'null answer -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['content-type'], 'text/plain; charset=utf-8')
+  }
+  t.is(seeder.calls.length, 2, 'the seeder was asked')
+
+  const throwing = indexSeeder()
+  throwing.indexPost = () => { throw new Error('secret ' + A) }
+  throwing.indexCounts = () => Promise.reject(new Error('secret ' + A))
+  throwing.indexMember = () => [1, 2, 3]
+  const s2 = await startSeedWs({ port: 0, seeder: throwing })
+  t.teardown(() => s2.close(), { force: true })
+  for (const url of ['/index/post/' + A + '/1', '/index/counts/' + A + ':1', '/index/member/' + A]) {
+    const got = await mediaRequest(s2.port, url)
+    t.is(got.status, 404, url.slice(0, 20) + ' -> 404')
+    t.absent(got.body.toString().includes('secret'), 'nothing of the error is echoed')
+    t.absent(got.body.toString().includes(A.slice(0, 8)), 'no key is echoed')
+  }
+
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  for (const url of ['/index/post/' + A + '/1', '/index/counts/' + A + ':1', '/index/member/' + A]) {
+    t.is((await mediaRequest(old.port, url)).status, 404, 'a seeder without the index methods -> 404')
+  }
+})
+
+test('startSeedWs /index: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/post/' + A + '/1'
+
+  const evil = await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })
+  t.is(evil.status, 421, 'foreign Host -> 421')
+  const evilPost = await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })
+  t.is(evilPost.status, 421, 'the Host check runs before the method check')
+
+  for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+    t.is(got.headers['cache-control'], 'no-store')
+  }
+  t.is((await mediaRequest(server.port, '/index/x', { method: 'POST' })).status, 405, 'any other method under /index -> 405')
+  t.is((await mediaRequest(server.port, '/index', { method: 'POST' })).status, 405, 'POST /index -> 405')
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index: its own in-flight cap and token bucket answer 503 ocupado with Retry-After', async (t) => {
+  t.timeout(30000)
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const seeder = indexSeeder({ gate })
+  const server = await startSeedWs({ port: 0, seeder, index: { maxInFlight: 2 }, media: { maxInFlight: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/counts/' + A + ':1'
+
+  const held = [mediaRequest(server.port, url), mediaRequest(server.port, '/index/member/' + A)]
+  await until(() => seeder.calls.length === 2, { name: 'duas chamadas retidas', timeoutMs: 5000 })
+  const busy = await mediaRequest(server.port, url)
+  t.is(busy.status, 503, 'third concurrent answer refused')
+  t.is(busy.body.toString(), 'ocupado\n')
+  t.is(busy.headers['retry-after'], '1')
+  t.is(busy.headers['cache-control'], 'no-store')
+  t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
+  // The caps are separate from /media's: a media read still has its slot.
+  seeder.mediaRead = mediaSeeder().mediaRead
+  t.is((await mediaRequest(server.port, '/media/' + D + '/' + K + '/1/1')).status, 200, '/media is not held by /index')
+  release()
+  const done = await Promise.all(held)
+  t.alike(done.map((r) => r.status), [200, 200])
+  await until(async () => (await mediaRequest(server.port, url)).status === 200, { name: 'slots liberados', timeoutMs: 5000 })
+  t.pass('slots are released once the answers settle')
+
+  const s2 = await startSeedWs({ port: 0, seeder: indexSeeder(), index: { rate: 0.001, burst: 3 } })
+  t.teardown(() => s2.close(), { force: true })
+  for (let i = 0; i < 3; i++) t.is((await mediaRequest(s2.port, url)).status, 200, 'within the burst')
+  const over = await mediaRequest(s2.port, url)
+  t.is(over.status, 503, 'beyond the burst')
+  t.is(over.headers['retry-after'], '1')
+  t.is((await mediaRequest(s2.port, url, { method: 'HEAD' })).status, 503, 'HEAD spends a token too')
+})
+
+test('startSeedWs /index: duplicate refs collapse before the seeder is asked', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const refs = Array.from({ length: 31 }, () => A + ':1')
+  refs[1] = B + ':2'
+  const got = await mediaRequest(server.port, '/index/counts/' + refs.join(','))
+  t.is(got.status, 200)
+  t.alike(seeder.calls[0], ['indexCounts', [A + ':1', B + ':2']], '31 refs with duplicates -> two distinct refs, first occurrence order')
+  t.alike(Object.keys(JSON.parse(got.body.toString()).counts), [A + ':1'])
+})
+
+test('startSeedWs /index: the slot is held until the response closes and the call settles; a stalled answer hits the deadline', async (t) => {
+  t.timeout(20000)
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const seeder = indexSeeder({ gate })
+  const server = await startSeedWs({ port: 0, seeder, index: { maxInFlight: 1, deadlineMs: 200 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/member/' + A
+
+  // A raw client: a stalled call sends no headers, so at the deadline the
+  // client only sees its connection closed.
+  const stalled = await new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port: server.port })
+    socket.on('error', () => {})
+    const closed = new Promise((resolve) => socket.once('close', resolve))
+    socket.once('connect', () => {
+      socket.write('GET ' + url + ' HTTP/1.1\r\nHost: 127.0.0.1:' + server.port + '\r\n\r\n')
+      resolve({ socket, closed })
+    })
+    socket.once('error', reject)
+  })
+  t.teardown(() => stalled.socket.destroy(), { force: true })
+  await until(() => seeder.calls.length === 1, { name: 'chamada retida', timeoutMs: 5000 })
+  t.is((await mediaRequest(server.port, url)).status, 503, 'the stalled call holds the only slot')
+  await within(stalled.closed, 5000, 'close no prazo')
+  t.pass('the stalled response is destroyed at the deadline')
+  t.is((await mediaRequest(server.port, url)).status, 503, 'past the deadline the response is gone but the call still holds the slot')
+  t.is(seeder.calls.length, 1, 'refused requests never reach the seeder')
+  release()
+  await until(async () => (await mediaRequest(server.port, url)).status === 200, { name: 'slot liberado', timeoutMs: 5000 })
+  t.pass('the slot is freed once the call settles and the response is closed')
+
+  // A client that never reads: the small answer still completes (it fits
+  // the socket buffers), so the slot is released on the response close.
+  const slow = await openMedia(server.port, url)
+  t.teardown(() => slow.req.destroy(), { force: true })
+  t.is(slow.res.statusCode, 200)
+  await until(async () => (await mediaRequest(server.port, url)).status === 200, { name: 'slot após resposta completa', timeoutMs: 5000 })
+  t.pass('a completed answer frees its slot even while the client has not read it')
+})
+
+// The largest answer the contract allows: a full reply page and a full quote
+// page from 100 distinct authors, a target and a parent from two more, every
+// seq at 15 digits, a 16-digit cursor and the largest counts. It must fit in
+// INDEX_MAX_BODY, and an answer that does not (never built by the index) is
+// refused rather than sent.
+test('startSeedWs /index: the worst-case answer stays within 64 KiB; an oversize answer is 404', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const seq = '9'.repeat(15)
+  const authors = {}
+  const replies = []
+  const quotes = []
+  for (let i = 0; i < 50; i++) {
+    replies.push(hex(i) + ':' + seq)
+    quotes.push(hex(100 + i) + ':' + seq)
+    authors[hex(i)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+    authors[hex(100 + i)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+  }
+  authors[hex(200)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+  authors[hex(201)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+  const worst = {
+    ref: hex(200) + ':' + seq,
+    parent: hex(201) + ':' + seq,
+    replies,
+    next: '9'.repeat(16) + '.' + hex(49) + '.' + seq,
+    quotes,
+    likes: Number.MAX_SAFE_INTEGER,
+    reposts: Number.MAX_SAFE_INTEGER,
+    repliesTotal: Number.MAX_SAFE_INTEGER,
+    quotesTotal: Number.MAX_SAFE_INTEGER,
+    authors,
+    indexing: false,
+    complete: false
+  }
+  t.is(Object.keys(authors).length, 102, '102 author hints')
+  const seeder = indexSeeder()
+  seeder.indexPost = async () => worst
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/post/' + A + '/1')
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.ok(got.body.byteLength > 16384, 'the worst case is a real page (' + got.body.byteLength + ' bytes)')
+  t.alike(JSON.parse(got.body.toString()), worst)
+
+  const posts = Array.from({ length: 100 }, (_, i) => Number(seq) - i)
+  seeder.indexMember = async () => ({ length: Number(seq), profileSeq: Number(seq), usernameSeq: Number(seq), posts, postsTotal: Number.MAX_SAFE_INTEGER, indexing: true, complete: false })
+  const member = await mediaRequest(server.port, '/index/member/' + A)
+  t.is(member.status, 200)
+  t.ok(member.body.byteLength <= INDEX_MAX_BODY, 'member worst case is ' + member.body.byteLength + ' bytes')
+
+  const counts = {}
+  for (let i = 0; i < 31; i++) counts[hex(i) + ':' + seq] = { replies: Number.MAX_SAFE_INTEGER, likes: Number.MAX_SAFE_INTEGER, reposts: Number.MAX_SAFE_INTEGER, quotes: Number.MAX_SAFE_INTEGER }
+  seeder.indexCounts = async () => ({ counts, indexing: true, complete: false })
+  const c = await mediaRequest(server.port, '/index/counts/' + A + ':1')
+  t.is(c.status, 200)
+  t.ok(c.body.byteLength <= INDEX_MAX_BODY, 'counts worst case is ' + c.body.byteLength + ' bytes')
+
+  seeder.indexPost = async () => ({ ...worst, replies: Array.from({ length: 1000 }, (_, i) => hex(i) + ':' + seq) })
+  const over = await mediaRequest(server.port, '/index/post/' + A + '/1')
+  t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
+  t.is(over.body.toString(), 'não encontrado\n')
 })
