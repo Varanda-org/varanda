@@ -75,8 +75,8 @@ function feedResult (n, ch) {
   }
 }
 
-// A PeekItem is a FeedItem with replyTo null plus `round`; its worst case is
-// a quote (a quote ref is larger than the null replyTo it rules out).
+// A PeekItem is a FeedItem plus `round`; its worst case is a post with a
+// reply or a quote ref (never both; a repost item is smaller).
 function peekResult (n, ch) {
   const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000 }
   return {

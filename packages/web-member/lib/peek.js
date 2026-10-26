@@ -49,7 +49,7 @@
 // before the link is destroyed.
 //
 // Memory: between pages a diary keeps only retainRecords(entries) (block 0,
-// profile and username records, top-level posts) plus the set of fetched
+// profile and username records, posts and reposts) plus the set of fetched
 // seqs, within PEEK_SNAPSHOT_MAX_BYTES of retained JSON per snapshot; raw
 // buffers and the memory cores (64 KiB pages) are released after every
 // window. The snapshot is replaced on every after-less read, dropped on TTL,
@@ -596,7 +596,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // Skipped = left out by a problem the person should know about (block 0
     // or certificate, blocklist, revoked issuer, unavailable, fork, quota,
     // oversized block) or a scan that ended before finding any post. A diary
-    // with nothing to show (only a profile, only replies, too short) and one
+    // with nothing to show (only a profile or likes, too short) and one
     // followed after this snapshot was built are not problems.
     const skipped = snap.order.filter((d) =>
       (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short') ||

@@ -34,7 +34,7 @@ const LOG_LIMIT_MAX = 36
 const FEED_LIMIT_DEFAULT = 30
 const FEED_LIMIT_MAX = 31
 // A PeekItem is a FeedItem (with up to MAX_MEDIA_PER_POST maximal media
-// descriptors, hence FEED_LIMIT_MAX) with replyTo null plus `round` (<= 100000);
+// descriptors, hence FEED_LIMIT_MAX) plus `round` (<= 100000);
 // the envelope adds a cursor and three counts, so the same maximum fits
 // MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
 const PEEK_LIMIT_DEFAULT = 30

@@ -84,8 +84,7 @@ const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 // - persistOf(author): true only for own or followed authors.
 // - toast: the text of the last failed toggle for a moment (when the shell
 //   gives no `onToast`).
-// counts: false never asks the index for counts (the Espiadinha shows none).
-export function useSocial ({ ownKey, onToast, counts: withCounts = true }) {
+export function useSocial ({ ownKey, onToast }) {
   const node = useNode()
   const names = useNames()
   const { request, hosted } = node
@@ -314,7 +313,7 @@ export function useSocial ({ ownKey, onToast, counts: withCounts = true }) {
       } catch {}
       if (!mountedRef.current) return
     }
-    if (withCounts && hosted && online) {
+    if (hosted && online) {
       for (const chunk of chunks(refs, COUNTS_MAX)) {
         const r = await fetchCounts(chunk)
         if (!mountedRef.current) return
@@ -333,7 +332,7 @@ export function useSocial ({ ownKey, onToast, counts: withCounts = true }) {
     const first = await resolve([...new Set(need.filter((r) => typeof r === 'string'))])
     const second = first.map((item) => refOf(item.quote)).filter(Boolean)
     if (second.length > 0 && mountedRef.current) await resolve([...new Set(second)])
-  }, [request, hosted, online, withCounts, change, resolve, loadFollows])
+  }, [request, hosted, online, change, resolve, loadFollows])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
   // run uses the latest ingestNow.
@@ -441,6 +440,15 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   }
   const s = social.social
   const parentRef = refOf(post.replyTo)
+  // The reply mark: the names cache, else the parent when it was resolved
+  // (verified by the node: the Espiadinha asks for the parents of its
+  // replies); null (unavailable) reads 'sem nome', undefined '…'.
+  let replyToName = null
+  if (parentRef !== null) {
+    const pp = profileOf(post.replyTo.author)
+    const parent = pp ? undefined : social.original(parentRef)
+    replyToName = replyNameOf(parent ? { name: parent.name, username: parent.username } : (parent === null && pp === undefined ? null : pp))
+  }
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   return {
     author: post.author,
@@ -449,7 +457,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     at: post.at,
     text: post.text,
     media: post.media || null,
-    replyToName: post.replyTo ? replyNameOf(profileOf(post.replyTo.author)) : null,
+    replyToName,
     // Feed posts pass persist: true (own or followed by construction).
     persistMedia: persist === true ? true : social.persistOf(post.author),
     now,
