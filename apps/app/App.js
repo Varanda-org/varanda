@@ -5,16 +5,23 @@
 // 'Sem internet' note under it (only while offline), the publish button and
 // the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
-// stops a run; its details live in Ajustes → Sincronização. Design:
-// apps/site/artwork/app-design.md.
+// stops a run; its details live in Ajustes → Sincronização. Above the tabs a
+// small screen stack (src/nav.js) opens Conversa (a post and its replies) and
+// Membro (a profile) as full-screen layers; the tabs stay mounted below.
+// Back: the browser Back button (src/history.web.js; an in-app back calls
+// history.back() so the history and the stack never drift), Escape on the
+// web, the Android Back button (BackHandler); an open sheet closes first.
+// Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
-import { Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
 import { parseReturn } from './src/account'
+import * as nav from './src/nav'
+import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
@@ -27,10 +34,12 @@ import { layout, type } from './src/ui/theme'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
+import Conversa from './src/screens/Conversa'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
 import Identidade from './src/screens/Identidade'
+import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
@@ -80,7 +89,11 @@ function Member () {
   const [tab, setTab] = useState('rua')
   // Per tab, bumped when its tab is selected again: the screen scrolls to top.
   const [scrollSignal, setScrollSignal] = useState({})
-  const [composer, setComposer] = useState({ open: false, reply: null })
+  // reply and quote are mutually exclusive.
+  const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
+  // The screens pushed above the tabs (src/nav.js), oldest first.
+  const [stack, setStack] = useState(nav.EMPTY)
+  const stackRef = useRef(stack)
   const [ajustes, setAjustes] = useState(null)
   // The report sheet's target: null | { author, name, username, seq, text }.
   const [report, setReport] = useState(null)
@@ -275,7 +288,115 @@ function Member () {
   }, [followsVersion])
   const followCount = typeof node.followCount === 'number' ? node.followCount : (info ? info.followCount : null)
 
-  const startReply = (r) => setComposer({ open: true, reply: r })
+  const startReply = (r) => setComposer({ open: true, reply: r, quote: null })
+  const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
+
+  // --- the screen stack ---
+  const historyRef = useRef(null)
+  const commitStack = useCallback((next) => {
+    stackRef.current = next
+    setStack(next)
+  }, [])
+  // Web: the browser Back button pops (one history entry per pushed screen).
+  useEffect(() => {
+    if (Platform.OS !== 'web') return
+    const binding = bindHistory({
+      depthOf: () => nav.depth(stackRef.current),
+      onBack: (n) => {
+        if (sheetOpenRef.current) {
+          // A sheet is open: Back closes it first and the screen stays. The
+          // popstate already stepped the history back, so the entries it
+          // dropped are pushed again (history depth stays equal to the stack).
+          setComposer((c) => ({ ...c, open: false }))
+          setReport(null)
+          setAjustes(null)
+          const h = globalThis.history
+          const d = nav.depth(stackRef.current)
+          if (h && typeof h.pushState === 'function') {
+            for (let k = d - n + 1; k <= d; k++) {
+              try { h.pushState({ varanda: k }, '') } catch {}
+            }
+          }
+          return
+        }
+        let s = stackRef.current
+        for (let i = 0; i < n; i++) s = nav.pop(s)
+        commitStack(s)
+      }
+    })
+    historyRef.current = binding
+    return () => {
+      binding.unbind()
+      historyRef.current = null
+    }
+  }, [commitStack])
+  const pushScreen = useCallback((entry) => {
+    const next = nav.push(stackRef.current, entry)
+    if (next === stackRef.current) return
+    commitStack(next)
+    if (historyRef.current) historyRef.current.pushed()
+  }, [commitStack])
+  // The history entry on top is ours (tagged with the stack depth).
+  const historyInStep = () => {
+    const h = Platform.OS === 'web' ? globalThis.history : null
+    const d = nav.depth(stackRef.current)
+    return !!h && typeof h.back === 'function' && d > 0 && h.state && h.state.varanda === d ? h : null
+  }
+  // In-app back (the top bar, Escape): on the web through history.back(), so
+  // the popstate handler pops and both stay in step; otherwise directly.
+  const goBack = useCallback(() => {
+    if (nav.depth(stackRef.current) === 0) return
+    const h = historyInStep()
+    if (h) h.back()
+    else commitStack(nav.pop(stackRef.current))
+  }, [commitStack])
+  // Empties the stack (and, on the web, steps back over its history entries).
+  const clearStack = useCallback(() => {
+    const d = nav.depth(stackRef.current)
+    if (d === 0) return
+    const h = historyInStep()
+    commitStack(nav.reset())
+    if (h && typeof h.go === 'function') {
+      try { h.go(-d) } catch {}
+    }
+  }, [commitStack])
+  const openThread = useCallback(({ ref, seed } = {}) => {
+    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
+  }, [pushScreen])
+  const openMember = useCallback((author, seed) => {
+    const key = typeof author === 'string' ? author.toLowerCase() : author
+    if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
+      clearStack()
+      setTab('diario')
+      return
+    }
+    pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
+  }, [pushScreen, clearStack, ownKey])
+  // A lock, unlock or reset closes the pushed screens too.
+  useEffect(() => clearStack(), [generation, locked, clearStack])
+
+  // A sheet open over the screens closes first (its Modal handles Back and
+  // Escape itself).
+  const sheetOpen = composer.open || report !== null || ajustes !== null
+  const sheetOpenRef = useRef(sheetOpen)
+  sheetOpenRef.current = sheetOpen
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        if (sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
+        commitStack(nav.pop(stackRef.current))
+        return true
+      })
+      return () => sub.remove()
+    }
+    if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
+    const onKey = (event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
+      goBack()
+    }
+    globalThis.addEventListener('keydown', onKey)
+    return () => globalThis.removeEventListener('keydown', onKey)
+  }, [commitStack, goBack])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
 
@@ -384,6 +505,18 @@ function Member () {
     // when the connection comes back.
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
+    const stacked = nav.depth(stack) > 0
+    const screenProps = {
+      ownKey,
+      onBack: goBack,
+      onReply: startReply,
+      onQuote: startQuote,
+      onReport: setReport,
+      onOpenThread: openThread,
+      onOpenMember: openMember,
+      onToast: showToast,
+      onFollowsChanged: () => setVersion((v) => v + 1)
+    }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
@@ -397,6 +530,9 @@ function Member () {
               refresh={version}
               onReply={startReply}
               onReport={setReport}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
+              onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
@@ -409,6 +545,9 @@ function Member () {
               refresh={version}
               onReply={startReply}
               onReport={setReport}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
+              onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.espiadinha}
               onFollowsChanged={() => setVersion((v) => v + 1)}
@@ -416,7 +555,15 @@ function Member () {
             />
           </View>
           <View style={shown('seguindo')}>
-            <Seguindo active={on('seguindo')} onReport={setReport} scrollToTop={scrollSignal.seguindo} onFollowsChanged={() => setVersion((v) => v + 1)} />
+            <Seguindo
+              active={on('seguindo')}
+              onReport={setReport}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
+              onQuote={startQuote}
+              scrollToTop={scrollSignal.seguindo}
+              onFollowsChanged={() => setVersion((v) => v + 1)}
+            />
           </View>
           <View style={shown('diario')}>
             <Diario
@@ -425,19 +572,37 @@ function Member () {
               onSettings={setAjustes}
               onReply={startReply}
               onPublish={openComposer}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
+              onQuote={startQuote}
+              ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
             />
           </View>
         </View>
+        {stacked
+          ? (
+            <View style={styles.layer}>
+              {stack.map((entry, i) => {
+                const Screen = entry.screen === 'conversa' ? Conversa : Membro
+                return (
+                  <View key={i + ':' + entry.screen + ':' + entry.key} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                    <Screen entry={entry} {...screenProps} />
+                  </View>
+                )
+              })}
+            </View>
+            )
+          : null}
         {toast
           ? (
-            <View style={[styles.toast, { bottom: layout.tabBar + insets.bottom + 12 }]} pointerEvents='none'>
+            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='none'>
               <Text style={styles.toastText} accessibilityRole='alert'>{toast}</Text>
             </View>
             )
           : null}
         <Fab onPress={openComposer} />
-        <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} />
+        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} />}
       </View>
     )
   }
@@ -452,7 +617,7 @@ function Member () {
   // Light over the Diário band (dark over the offline note above it). The
   // sheets leave the status bar over the (dimmed) screen behind, so they keep
   // it light there too.
-  const light = tab === 'diario' && step === 'pronto' && node.online !== false
+  const light = tab === 'diario' && step === 'pronto' && node.online !== false && nav.depth(stack) === 0
 
   return (
     <View style={styles.root}>
@@ -460,12 +625,19 @@ function Member () {
       <Publicar
         open={composer.open}
         reply={composer.reply}
+        quote={composer.quote}
         me={me}
         onClose={() => setComposer((c) => ({ ...c, open: false }))}
         onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
+        onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
         onPublished={(kind, sentRef) => {
-          // The reply context is dropped only if it is still the one sent.
-          setComposer((c) => ({ open: false, reply: c.reply && c.reply.ref === sentRef ? null : c.reply }))
+          // The reply context is dropped only if it is still the one sent; a
+          // sent quote always drops the quote context.
+          setComposer((c) => ({
+            open: false,
+            reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
+            quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
+          }))
           // Kept in the outbox: nothing new in the diary yet.
           if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
           setVersion((v) => v + 1)
@@ -514,6 +686,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
+  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg },
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   brand: { fontSize: 18, fontWeight: '700', color: colors.accent },
   soft: { fontSize: 14, color: colors.soft },

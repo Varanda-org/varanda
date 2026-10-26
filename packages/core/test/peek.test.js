@@ -234,8 +234,10 @@ test('buildPeekPage: one slot per diary per round, numerical date then author or
   t.alike(page.needs, [])
   t.is(page.next, null)
   t.is(JSON.stringify(diaries), before)
-  t.alike(Object.keys(page.items[0]), ['author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.is(page.items[0].kind, 'post')
   t.is(page.items[0].replyTo, null)
+  t.is(page.items[0].quote, null)
   t.is(page.items[0].media, null)
   const tied = buildPeekPage({ diaries: [diary(C, 1), diary(B, 1), diary(A, 1)], limit: 35 })
   t.alike(tied.items.map((i) => i.author), [A, B, C])
@@ -403,6 +405,22 @@ test('diaryPeek and retainRecords never throw on hostile records, entries or con
   t.alike(diaryPeek({ ...input, entries: retainRecords(entries) }), diaryPeek(input))
   t.execution(() => diaryPeek({ get entries () { throw new Error('hostile') } }))
   t.execution(() => diaryPeek({ ...input, fetched: { has () { throw new Error('hostile') } } }))
+})
+
+test('a quote post keeps its quote ref; likes and reposts are not posts', (t) => {
+  const f = fixture()
+  const quote = { author: B, seq: 1 }
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: { type: 'post', text: 'olha isso', at: AT, replyTo: null, quote } },
+    { seq: 4, record: { type: 'like', to: quote, on: true, at: AT } },
+    { seq: 5, record: { type: 'repost', to: quote, on: true, at: AT } }
+  ]
+  const result = diaryPeek({ ...f, length: 6, entries, fetched: new Set(entries.map((e) => e.seq)) })
+  t.alike(result.posts.map((p) => [p.seq, p.quote]), [[3, quote]])
+  t.not(result.posts[0].quote, quote, 'a copy')
+  const page = buildPeekPage({ diaries: [{ key: A, name: result.name, username: result.username, posts: result.posts, exhausted: true }], limit: 35 })
+  t.alike(page.items.map((i) => [i.kind, i.seq, i.replyTo, i.quote]), [['post', 3, null, quote]])
 })
 
 test('peek loads without the node-only network or storage stack', (t) => {

@@ -511,3 +511,75 @@ test('media passes through as a copy; absent media is null', async (t) => {
   const broken = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...photo, media: [] } }] }]
   t.alike(buildFeed({ logs: broken, now: NOW }).items, [])
 })
+
+const repost = (author, seq, on, at) => ({ type: 'repost', to: { author, seq }, on, at })
+const like = (author, seq, on, at) => ({ type: 'like', to: { author, seq }, on, at })
+const T1 = '2026-01-01T00:00:00.000Z'
+const T2 = '2026-01-02T00:00:00.000Z'
+const T3 = '2026-01-03T00:00:00.000Z'
+
+test('every item has a kind; post items carry quote', async (t) => {
+  await testnet(t)
+  const q = { type: 'post', text: 'olha', at: T2, replyTo: null, quote: { author: KB, seq: 1 } }
+  const logs = [
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: post('b1', T1) }] },
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: profile('Ana') }, { seq: 2, record: q }, { seq: 3, record: post('re', T3, { author: KB, seq: 1 }) }] }
+  ]
+  const { items } = buildFeed({ logs, now: NOW })
+  t.alike(items.map((i) => i.kind), ['post', 'post', 'post'])
+  t.alike(items[0], { kind: 'post', author: KB, name: null, username: null, seq: 1, at: T1, text: 'b1', replyTo: null, quote: null, media: null })
+  t.alike(items[1], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 2, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 1 }, media: null })
+  t.ok(items[1].quote !== q.quote, 'quote is a copy')
+  t.alike(items[2].replyTo, { author: KB, seq: 1 })
+  t.is(items[2].quote, null)
+  for (const it of items) t.ok(it.replyTo === null || it.quote === null, 'never both replyTo and quote')
+  // A quote with a replyTo is invalid and dropped.
+  const bad = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: { ...q, replyTo: { author: KB, seq: 1 } } }] }]
+  t.alike(buildFeed({ logs: bad, now: NOW }).items, [])
+})
+
+test('repost items appear and disappear with on/off', async (t) => {
+  await testnet(t)
+  const base = [{ seq: 0, record: cert(KA) }, { seq: 1, record: profile('Ana') }]
+  const feed = (entries) => buildFeed({ logs: [{ key: KA, entries: base.concat(entries) }], now: NOW }).items
+  t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }]), [
+    { kind: 'repost', author: KA, name: 'Ana', username: null, seq: 2, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null }
+  ])
+  t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }, { seq: 3, record: repost(KB, 4, false, T3) }]), [], 'off removes it')
+  const again = feed([{ seq: 2, record: repost(KB, 4, true, T1) }, { seq: 3, record: repost(KB, 4, false, T2) }, { seq: 4, record: repost(KB, 4, true, T3) }])
+  t.is(again.length, 1)
+  t.is(again[0].seq, 4, 'seq of the latest on record')
+  t.is(again[0].at, T3, 'at of the latest on record')
+  t.is(feed([{ seq: 2, record: repost(KB, 4, true, T1) }, { seq: 3, record: repost(KB, 4, true, T2) }]).length, 1, 'one item per target')
+  t.alike(feed([{ seq: 2, record: repost(KB, 4, false, T2) }]), [], 'off alone is nothing')
+  // Likes never become feed items; self-reposts do.
+  t.alike(feed([{ seq: 2, record: like(KB, 4, true, T2) }]), [])
+  const self = feed([{ seq: 2, record: post('meu', T1) }, { seq: 3, record: repost(KA, 2, true, T2) }])
+  t.alike(self.map((i) => [i.kind, i.seq]), [['post', 2], ['repost', 3]])
+  // Invalid repost records are ignored.
+  t.alike(feed([{ seq: 2, record: { ...repost(KB, 4, true, T2), extra: 1 } }, { seq: 3, record: repost(KB, 0, true, T2) }]), [])
+})
+
+test('repost items share ordering, before, limit and the future rule', async (t) => {
+  await testnet(t)
+  const logs = [
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: post('b1', T1) }, { seq: 2, record: post('b2', T3) }] },
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', T2) }, { seq: 2, record: repost(KB, 1, true, T2) }, { seq: 3, record: repost(KB, 2, true, iso(NOW + 25 * HOUR)) }] }
+  ]
+  const label = (i) => i.kind === 'repost' ? 'r' + i.seq : i.text
+  const all = buildFeed({ logs, now: NOW })
+  t.alike(all.items.map(label), ['b1', 'a1', 'r2', 'b2'])
+  t.alike(all.future, [KA + ':3'], 'a future repost is reported, not shown')
+  t.alike(buildFeed({ logs, now: NOW, limit: 2 }).items.map(label), ['r2', 'b2'])
+  t.alike(buildFeed({ logs, now: NOW, before: { at: T2, author: KA, seq: 2 } }).items.map(label), ['b1', 'a1'])
+  t.alike(buildFeed({ logs, now: NOW, before: { at: T3, author: KB, seq: 2 }, limit: 1 }).items.map(label), ['r2'])
+})
+
+test('formatFeedItem: repost one-liner and quote marker', async (t) => {
+  await testnet(t)
+  const r = { kind: 'repost', author: KA, name: 'Ana\u001b[2J', username: null, seq: 5, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null }
+  t.is(formatFeedItem(r), '[' + T2 + '] Ana\\u{1b}[2J (aaaaaaaa) #5 republicou bbbbbbbb#4')
+  t.is(formatFeedItem(r, { width: 80 }).split('\n').length, 1)
+  const q = { kind: 'post', author: KA, name: 'Ana', username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null }
+  t.is(formatFeedItem(q), '[' + T2 + '] Ana (aaaaaaaa) #6 cita bbbbbbbb#4\n  olha')
+})

@@ -4,6 +4,10 @@
 // pointing into a media core (a separate Hypercore whose block 0 is a media
 // header, lib/media.js) that the diary declares with a `media-core` record.
 // Moderation lists are signed snapshots outside the diary (lib/blocklist.js).
+// Engagement: `like` and `repost` records toggle a target post ({ author,
+// seq }, seq >= 1) on or off, the last operation per (type, target) wins
+// (lib/engagement.js); a quote is a `post` with a `quote` target and no
+// `replyTo`. Older readers skip these as invalid; the diary stays valid.
 
 const b4a = require('b4a')
 
@@ -30,6 +34,10 @@ const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association',
 const PROFILE_KEYS = ['type', 'name', 'bio', 'at']
 const POST_KEYS = ['type', 'text', 'at', 'replyTo']
 const POST_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'media']
+const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
+const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
+const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
+const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
@@ -154,10 +162,14 @@ function validUsernameShape (record) {
     isCanonicalIso(record.date)
 }
 
-function validReplyTo (r) {
-  if (r === null) return true
-  if (!isPlainObject(r) || !hasExactKeys(r, ['author', 'seq'])) return false
+// A post reference: exactly { author: lowercase hex64, seq: safe int >= 1 }.
+function validTarget (r) {
+  if (!isPlainObject(r) || !hasExactKeys(r, TARGET_KEYS)) return false
   return isHex64(r.author) && Number.isSafeInteger(r.seq) && r.seq >= 1
+}
+
+function validReplyTo (r) {
+  return r === null || validTarget(r)
 }
 
 function isIntIn (v, min, max) {
@@ -196,7 +208,7 @@ function validMediaList (media) {
   return true
 }
 
-const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow']
+const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost']
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -227,15 +239,25 @@ function check (record, seq) {
     if (!hasExactKeys(record, FOLLOW_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
-  const withMedia = hasExactKeys(record, POST_MEDIA_KEYS)
-  if (!withMedia && !hasExactKeys(record, POST_KEYS)) return 'malformed'
+  if (type === 'like' || type === 'repost') {
+    if (!hasExactKeys(record, ENGAGEMENT_KEYS) || !validTarget(record.to) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
+  const withMedia = hasExactKeys(record, POST_MEDIA_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
+  if (!isQuote && !withMedia && !hasExactKeys(record, POST_KEYS)) return 'malformed'
   if (withMedia && !validMediaList(record.media)) return 'media-invalid'
   const { text, at, replyTo } = record
-  // A post with media may have an empty text (a photo-only post).
-  const minText = withMedia ? 0 : 1
+  // A post with media may have an empty text (a photo-only post); a quote
+  // always has text, with or without media.
+  const minText = withMedia && !isQuote ? 0 : 1
   if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
   if (hasControlChars(text, true)) return 'control-chars'
   if (!isCanonicalIso(at)) return 'date-invalid'
+  if (isQuote) {
+    if (replyTo !== null) return 'quote-with-reply'
+    return validTarget(record.quote) ? null : 'quote-invalid'
+  }
   if (!validReplyTo(replyTo)) return 'reply-invalid'
   return null
 }
@@ -272,11 +294,27 @@ function copyDescriptor (d) {
   return out
 }
 
-// `media` is added only when given.
-function postRecord ({ text, replyTo = null, at = nowIso(), media } = {}) {
+// A copy with exactly the target keys (anything else is passed through for
+// validation to reject).
+function copyTarget (r) {
+  if (!isPlainObject(r)) return r
+  return { author: r.author, seq: r.seq }
+}
+
+// `quote` and `media` are added only when given.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote } = {}) {
   const record = { type: 'post', text, at, replyTo }
+  if (quote !== undefined) record.quote = copyTarget(quote)
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
   return build(record, 1)
+}
+
+function likeRecord ({ to, on, at = nowIso() } = {}) {
+  return build({ type: 'like', to: copyTarget(to), on, at }, 1)
+}
+
+function repostRecord ({ to, on, at = nowIso() } = {}) {
+  return build({ type: 'repost', to: copyTarget(to), on, at }, 1)
 }
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
@@ -396,6 +434,8 @@ module.exports = {
   postRecord,
   mediaCoreRecord,
   followRecord,
+  likeRecord,
+  repostRecord,
   validDescriptor,
   validateRecord,
   validRecordCopy,

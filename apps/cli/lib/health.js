@@ -27,6 +27,8 @@ const METRICS = [
   ['blocklist_seq', 'seq da lista de bloqueio adotada; 0 sem lista', (s) => s.blocklistSeq],
   ['media_cores', 'núcleos de mídia vinculados a diários admitidos', (s) => s.mediaCores],
   ['media_bytes', 'bytes dos núcleos de mídia (tamanho assinado)', (s) => s.mediaBytes],
+  ['index_records', 'registros no índice de engajamento (em memória)', (s) => s.indexRecords],
+  ['index_saturated', '1 quando o índice de engajamento atingiu o limite e há diários pausados', (s) => (s.indexSaturated ? 1 : 0)],
   ['uptime_seconds', 'segundos desde o início do semeador', (s) => s.uptimeSeconds]
 ]
 

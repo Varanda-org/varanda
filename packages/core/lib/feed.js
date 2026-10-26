@@ -1,8 +1,13 @@
 'use strict'
 
+// The merged feed of several diaries: post items (replies and quotes
+// included) and repost items (one per target its author still reposts,
+// lib/engagement.js), in (at, author, seq) order, plus the CLI text format.
+
 const { safe, cpWidth, displayWidth } = require('./safe')
-const { validRecordCopy, latestProfile, formatRef } = require('./records')
+const { validRecordCopy, latestProfile, formatRef, parseRef } = require('./records')
 const { latestUsername } = require('./username')
+const { engagementState } = require('./engagement')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -32,6 +37,9 @@ function feedCursor (before) {
 // seq } of an item, or null) keeps only the items strictly before it in feed
 // order, so a caller pages backwards from the oldest item it holds; the
 // `limit` newest of those are returned. `future` is never paged.
+// Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
+// both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
+// quote: null, media: null }, seq/at of the latest `on` record for `to`).
 function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
@@ -52,7 +60,16 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       }
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
-      items.push({ author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo, media })
+      const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
+      items.push({ kind: 'post', author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
+    }
+    for (const [ref, { seq, at }] of engagementState(copied).reposted) {
+      if (Date.parse(at) - now > MAX_FUTURE_MS) {
+        future.push({ author: key, seq })
+        continue
+      }
+      const to = parseRef(ref)
+      items.push({ kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
@@ -95,8 +112,14 @@ function wrapLine (line, max, first = max) {
 // width is given, is at most `width` columns, so no line of a post can start
 // at column 0 (not even through the terminal's soft wrap) and pass for a
 // '[date]' header (security audit S5, L1). Peer-derived strings are escaped.
+// A repost item is the header alone, ending in 'republicou <key8>#<seq>'.
 function formatFeedItem (item, { width } = {}) {
-  const reply = item.replyTo ? ' ↳ ' + shortKey(item.replyTo.author) + '#' + item.replyTo.seq : ''
+  const target = (r) => safe(shortKey(r.author)) + '#' + r.seq
+  const repost = item.kind === 'repost'
+  let reply = ''
+  if (repost) reply = ' republicou ' + target(item.to)
+  else if (item.replyTo) reply = ' ↳ ' + target(item.replyTo)
+  else if (item.quote) reply = ' cita ' + target(item.quote)
   const total = width === undefined ? Infinity : Math.max(MIN_WIDTH, width)
   const max = total - 2
   const name = safe(item.name || 'anônimo')
@@ -132,6 +155,7 @@ function formatFeedItem (item, { width } = {}) {
     rows = wrapLine(head + tail.slice(1), max, total).map((seg, i) => (i === 0 ? seg : '  ' + seg))
     for (const seg of wrapLine(name, max)) rows.push('  ' + seg)
   }
+  if (repost) return rows.join('\n')
   for (const line of String(item.text).split('\n')) {
     for (const seg of wrapLine(safe(line), max)) rows.push('  ' + seg)
   }

@@ -141,7 +141,9 @@ function logLine ({ seq, record }) {
   let body
   if (r.type === 'follow') body = (r.on ? 'segue ' : 'deixa de seguir ') + short(r.key)
   else if (r.type === 'media-core') body = 'mídia ' + short(r.key)
-  else if (r.type === 'post') body = 'publicação ' + safe(withMediaTag(r.text, r.media)).replace(/\n/g, ' ')
+  else if (r.type === 'like') body = (r.on ? 'curtiu ' : 'descurtiu ') + short(r.to.author) + '#' + r.to.seq
+  else if (r.type === 'repost') body = (r.on ? 'republicou ' : 'desfez republicação ') + short(r.to.author) + '#' + r.to.seq
+  else if (r.type === 'post') body = 'publicação ' + safe(withMediaTag(r.text, r.media)).replace(/\n/g, ' ') + (r.quote ? ' cita ' + short(r.quote.author) + '#' + r.quote.seq : '')
   else if (r.type === 'profile') body = 'perfil ' + safe(r.name)
   else if (r.type === 'member-cert') body = 'certificado'
   else body = safe(r.type)

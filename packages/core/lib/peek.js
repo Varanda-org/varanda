@@ -1,6 +1,6 @@
 'use strict'
 
-// Why democratic: the network has no engagement signals (likes, reposts or
+// Why democratic: the order uses no engagement signal (likes, reposts or
 // follower counts; docs/protocol.md section 2). Each diary gets one slot per
 // round regardless of volume, for at most three rounds. "Most recent" in a
 // diary means the top-level post with the highest seq (last written). Within
@@ -116,7 +116,8 @@ function diaryPeek (input) {
         continue
       }
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
-      result.posts.push({ seq, at: post.at, text: post.text, media })
+      const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
+      result.posts.push({ seq, at: post.at, text: post.text, quote, media })
     }
     result.posts.sort((a, b) => b.seq - a.seq)
     result.posts = result.posts.slice(0, PEEK_MAX_ROUNDS)
@@ -167,7 +168,9 @@ function buildPeekPage ({ diaries, limit, after = null }) {
       }
       const { seq, at, text } = post
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
-      const item = { author: key, name, username, seq, at, text, replyTo: null, media, round }
+      const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
+      // A FeedItem (lib/feed.js) with replyTo null, plus round.
+      const item = { kind: 'post', author: key, name, username, seq, at, text, replyTo: null, quote, media, round }
       if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
     }
     slots.sort(pageOrder)

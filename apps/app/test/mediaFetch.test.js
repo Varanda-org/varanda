@@ -116,6 +116,20 @@ test('only a 404 or a network error is retryable; mismatches are not', async (t)
   t.alike(seen, ['no-cache'], 'a retry revalidates')
 })
 
+test('fetchMedia: persist false is no-store on the first attempt and on retries', async (t) => {
+  const { fetchMedia } = await load()
+  const bytes = new Uint8Array(100).fill(3)
+  const d = descriptor(bytes)
+  const seen = []
+  const fetch = async (url, opts) => { seen.push(opts.cache); return response([bytes]) }
+  const subtle = webcrypto.subtle
+  await fetchMedia(AUTHOR, d, { fetch, subtle, persist: false })
+  await fetchMedia(AUTHOR, d, { fetch, subtle, persist: false, fresh: true })
+  await fetchMedia(AUTHOR, d, { fetch, subtle, persist: true })
+  await fetchMedia(AUTHOR, d, { fetch, subtle })
+  t.alike(seen, ['no-store', 'no-store', 'force-cache', 'force-cache'])
+})
+
 test('fetchMedia: request options, status and sha checks', async (t) => {
   const { fetchMedia, loadMediaUrl } = await load()
   const bytes = new Uint8Array(70000)

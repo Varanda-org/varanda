@@ -100,3 +100,19 @@ test('at most four loads run at once', async (t) => {
   t.alike(await Promise.all(all), ['blob:0', 'blob:1', 'blob:2', 'blob:3', 'blob:4', 'blob:5'])
   t.is(peak, 4)
 })
+
+test('a transient load is stored once per key and evicted and revoked as usual', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const cache = createMediaCache({ max: 2, revoke: (u) => revoked.push(u) })
+  let loads = 0
+  const transient = (u) => () => { loads++; return Promise.resolve(u) }
+  t.is(await cache.get('a', transient('blob:a')), 'blob:a')
+  t.is(await cache.get('a', transient('blob:a2')), 'blob:a', 'same key, one entry')
+  t.is(loads, 1)
+  t.is(cache.size, 1)
+  await cache.get('b', transient('blob:b'))
+  await cache.get('c', transient('blob:c'))
+  t.alike(revoked, ['blob:a'], 'oldest evicted and revoked')
+  t.is(cache.peek('a'), null)
+})
