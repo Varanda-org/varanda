@@ -27,6 +27,7 @@ const GLYPHS = {
   atualizar: 'rotate-cw',
   olho: 'eye',
   olho_fechado: 'eye-off',
+  seguir: 'user-plus',
   coracao: 'heart',
   republicar: 'repeat',
   citar: 'edit-3'

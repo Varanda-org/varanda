@@ -21,7 +21,8 @@
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
-//   onReport (each button shows only with its handler).
+//   onFollow ('seguir', disabled while followPending), onReport (each button
+//   shows only with its handler).
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -80,7 +81,7 @@ export function PostRow ({
   author, name, username, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter,
-  onReply, onQuote, onLike, onRepost, onReport
+  onReply, onQuote, onLike, onRepost, onFollow, followPending, onReport
 }) {
   const hasMedia = Array.isArray(media) && media.length > 0
   const hasText = typeof text === 'string' && text !== ''
@@ -94,7 +95,7 @@ export function PostRow ({
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = fn(onOpenReposter)
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onReport)
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
   return (
     <View style={styles.row}>
       {reposter
@@ -217,6 +218,13 @@ export function PostRow ({
                       count={countOf(counts, 'likes')}
                     >
                       <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                    </Action>
+                    )
+                  : null}
+                {fn(onFollow)
+                  ? (
+                    <Action label={'seguir ' + title} onPress={onFollow} disabled={!!followPending}>
+                      <Icon name='seguir' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}

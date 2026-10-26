@@ -1,7 +1,7 @@
 // The app shell: the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then three tabs (A Rua, Seguindo, Diário) with the top bar, the
+// and then four tabs (A Rua, Espiadinha, Seguindo, Diário) with the top bar, the
 // 'Sem internet' note under it (only while offline), the publish button and
 // the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
@@ -37,6 +37,7 @@ import Conexao from './src/screens/Conexao'
 import Conversa from './src/screens/Conversa'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
+import Espiadinha from './src/screens/Espiadinha'
 import Identidade from './src/screens/Identidade'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
@@ -48,6 +49,7 @@ import Seguindo from './src/screens/Seguindo'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -498,7 +500,7 @@ function Member () {
       </View>
     )
   } else {
-    // The three tabs stay mounted (drafts and scroll survive a tab change);
+    // The four tabs stay mounted (drafts and scroll survive a tab change);
     // `active` makes a screen reload its data when it is shown, and again
     // when the connection comes back.
     const on = (id) => tab === id && ready
@@ -518,7 +520,7 @@ function Member () {
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={tab === 'rua' ? 'A Rua' : 'Seguindo'} />
+          ? <TopBar title={TAB_TITLES[tab]} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
         <View style={styles.flex}>
@@ -535,6 +537,21 @@ function Member () {
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
               onFollowSomeone={() => setTab('seguindo')}
+            />
+          </View>
+          <View style={shown('espiadinha')}>
+            <Espiadinha
+              active={on('espiadinha')}
+              refresh={version}
+              onReply={startReply}
+              onReport={setReport}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
+              onQuote={startQuote}
+              ownKey={ownKey}
+              scrollToTop={scrollSignal.espiadinha}
+              onFollowsChanged={() => setVersion((v) => v + 1)}
+              onToast={showToast}
             />
           </View>
           <View style={shown('seguindo')}>

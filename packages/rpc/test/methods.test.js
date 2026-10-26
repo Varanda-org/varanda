@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -18,7 +18,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'post.create', 'post.quote', 'post.reply', 'profile.read',
+    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
     'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
@@ -396,6 +396,35 @@ test('feed.read before', (t) => {
   bad(t, 'feed.read', { before: 'x' })
   const r = validateParams('feed.read', { before: { ...before, at: '2026-10-24T12:00:00Z' } })
   t.is(r.message, 'parâmetro inválido: before')
+})
+
+test('peek.read', (t) => {
+  t.absent(isMutating('peek.read'))
+  ok(t, 'peek.read', {}, { limit: 30 })
+  ok(t, 'peek.read', { limit: PEEK_LIMIT_MAX }, { limit: PEEK_LIMIT_MAX })
+  bad(t, 'peek.read', { limit: 0 })
+  bad(t, 'peek.read', { limit: PEEK_LIMIT_MAX + 1 })
+  bad(t, 'peek.read', { limit: null })
+  bad(t, 'peek.read', { x: 1 })
+})
+
+test('peek.read after', (t) => {
+  const after = { round: 0, at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
+  ok(t, 'peek.read', { limit: 5, after }, { limit: 5, after })
+  ok(t, 'peek.read', { after }, { limit: 30, after })
+  ok(t, 'peek.read', { after: { ...after, round: 2 } })
+  bad(t, 'peek.read', { after: { at: after.at, author: KEY, seq: 1 } }, 'missing round')
+  bad(t, 'peek.read', { after: { round: 0, author: KEY, seq: 1 } }, 'missing at')
+  bad(t, 'peek.read', { after: { round: 0, at: after.at, seq: 1 } }, 'missing author')
+  bad(t, 'peek.read', { after: { round: 0, at: after.at, author: KEY } }, 'missing seq')
+  bad(t, 'peek.read', { after: { ...after, x: 1 } }, 'extra key in the cursor')
+  bad(t, 'peek.read', { after: { ...after, round: -1 } }, 'round -1')
+  bad(t, 'peek.read', { after: { ...after, round: 1.5 } }, 'round 1.5')
+  bad(t, 'peek.read', { after: { ...after, at: '2026-10-24T12:00:00Z' } }, 'non-canonical at')
+  bad(t, 'peek.read', { after: { ...after, author: KEY.toUpperCase() } }, 'uppercase author')
+  bad(t, 'peek.read', { after: { ...after, seq: 0 } }, 'seq 0')
+  bad(t, 'peek.read', { after: null })
+  bad(t, 'peek.read', { after: 'x' })
 })
 
 test('profile.read', (t) => {

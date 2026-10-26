@@ -1153,7 +1153,84 @@ None of these was performed for this change.
 - Core node and CLI follows: `follow` / `unfollow` append `follow` records once block 0 exists, but an existing `follows.json` is never migrated into the diary unless the follow is run again, and the core node never folds another device's `follow` records into `follows.json`.
 - Follow changes made on another device take effect on this device's next sync run (the continuous run restarts once per change); the core node and `varanda-serve` do not fold another device's follows into `follows.json`.
 
-## 17. Profiles, threads, likes, reposts and quotes (2026-10-26)
+## 17. Espiadinha: the discovery tab without an algorithm (PR feat/espiadinha, 2026-10-26)
+
+### Summary
+
+- The fourth tab ("Espiadinha", provisional label; second in the tab bar, after A Rua) shows what the diaries the person does NOT follow are publishing, by one public rule (`PEEK_RULE`, `packages/core/lib/peek.js`): "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos." Definition: round r (0, 1, 2; `PEEK_MAX_ROUNDS` = 3) holds the (r+1)-th highest-`seq` top-level post of every candidate diary ("most recent" = last written in the diary, not the newest `at`); replies are excluded; page order is (`round` asc, `at` desc, `author` asc); posts carry their `media`, shown through the existing `/media` route as in A Rua.
+- Files: `packages/core/lib/peek.js` (the pure rule: candidates, window, per-diary result, page), `packages/web-member/lib/peek.js` (transport and memory, in the browser node), `packages/web-member/lib/session.js` (the `peek.read` handler) and `lib/storage.js` (64 KiB memory pages), `packages/rpc` (`peek.read`, `PEEK_LIMIT_DEFAULT` 30, `PEEK_LIMIT_MAX` 31; `docs/rpc.md` 5.22 and 13), `packages/core/lib/session.js` (the node session answers that it is web only), `apps/app/src/screens/Espiadinha.js` and `apps/app/src/peek.js` (screen and pure helpers), `apps/app/App.js`, `ui/TabBar.js`, `ui/Icon.js`, `ui/PostRow.js`.
+- Trust model: nothing is gained by the seeder compared with A Rua. It can withhold (an inventory entry, a block, a shorter length, an older signed state it kept); it cannot forge (Hypercore verifies every block against the author key), cannot choose which post is shown (the client reads the signed tail: the window comes from the length Hypercore verified with block 0, never from the length advertised in the hello), cannot bypass the block-0 gate (checked locally with the stored revoked-issuer set, block 0 alone, before any other block of that diary) and cannot unblock anyone (the stored signed blocklist is re-applied on every read). Later windows are accepted only if their core has the same verified length and the same `treeHash` as the first window.
+- Data flows and retention: browser memory only. The node keeps one snapshot for at most 5 minutes (`PEEK_SNAPSHOT_TTL_MS`, retained records capped at 32 MiB); the UI keeps the page until the list is refreshed. Nothing is written to storage, the account service learns nothing, and the only server-side trace is one `peer` log line per link at the seeder (ephemeral Noise key; the seeder log is size-rotated).
+- Questions decided by default (no owner answer was available): (1) rounds rule, 3 rounds of one post per diary, not "all posts newest first" (keeps one prolific diary from filling the tab); (2) replies are excluded; (3) the tab is second in the bar; (4) no extra transport guards on the browser side beyond the ones the sync link already has (see residual risk 12).
+- The two riskiest assumptions from the objection round: (a) external socket capacity: the seeder admits 32 external sockets and each hosted member already holds one, so many members online can starve the peek link (item 17); (b) cutoffs causing unequal exposure: the 5 s inventory cut, the 25 s page deadline and the 16 MiB budget can leave some diaries out; mitigated by a random fetch order per snapshot (a cut falls on random diaries) and by the `incomplete` flag the app shows.
+- Pages: the first page has 30 items, continuation pages up to 31. `next` is the cursor of the last item exactly when the page is full; a page cut by the deadline or the byte budget still carries a cursor (diaries still pending count as exhausted for that read only) and is `incomplete`. Unavailable block 0 skips the diary and marks the page incomplete. One peek runs at a time; a disconnect frees the slot at once; a read never preempts the sync.
+
+### Automated (CI)
+
+CI result on the final tree, Node 24.22.1 (run from the worktree root, in the order of `.github/workflows/ci.yml`):
+
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 103 test files, 0 failures (core 16, rpc 8, web-member 22, app 22, cli 33, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 8 tests, 42 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): peek page of 31 items 238402 bytes, feed page of 31 items 260001 bytes, log page of 36 entries 258946 bytes, `profile.read` at 100 authors 229170 bytes, `follow.list` at 500 keys 33581 bytes.
+- `node packages/core/test/peek.test.js`: 20 tests, 818 asserts, all pass.
+- `node packages/web-member/test/peek.test.js`: 26 tests, 259 asserts, all pass (about 36 s; includes a 50-diary page in 36 ms against a real in-process seeder).
+- `npm run build:node -w apps/app`: `NODE_BUNDLE 650004 GZIP 198790`.
+- `npm run pack:worklet -w apps/app`: bundle 1945790 bytes, 349 files, 38 linked addon entries; 'node scan: clean'.
+- `npm run export:web -w apps/app`: exported to `apps/app/dist` (ignored by git); `sw.js` 12783 bytes, 11 files.
+- `node apps/cli/test/readme-help.test.js`: 2 asserts, passes.
+- the whitespace check on the diff (`git diff --check`): clean. It covers tracked files only; the new untracked files were not covered by it.
+
+Not run: the same battery under Node 20 (Node 20.20.2 is installed but was not used), `npm ci` (installing was out of bounds; dependencies were already in the worktree). Nothing was run against production, a real browser or the pilot seeder.
+
+New test files: `packages/core/test/peek.test.js`, `packages/web-member/test/peek.test.js`, `apps/app/test/peek.test.js`; `packages/rpc/test/methods.test.js`, `sizes.test.js`, `packages/core/test/session.test.js` and `packages/web-member/test/session.test.js` were extended. The test runner discovers the new files by pattern (`scripts/run-tests.js`); there is no CI, deploy or Caddy change, and the transport stays on `/seeder`, which the CSP already allows.
+
+### Limits
+
+- Constants (`packages/core/lib/peek.js`, `packages/rpc/lib/limits.js`): `PEEK_HEAD_BLOCKS` 3, `PEEK_TAIL_BLOCKS` 8, `PEEK_MAX_BLOCKS_PER_DIARY` 64, `PEEK_MAX_ROUNDS` 3, `PEEK_PARALLEL` 16, `PEEK_FETCH_TIMEOUT_MS` 10000, `PEEK_PAGE_TIMEOUT_MS` 25000, `PEEK_CONNECT_TIMEOUT_MS` 15000, `PEEK_SNAPSHOT_TTL_MS` 300000, `PEEK_PAGE_MAX_BYTES` 16777216 (16 MiB), page 30 / 31.
+- Cost per page (`docs/rpc.md` 5.22 and 13): one WebSocket, Noise and hello (1 round trip each at the start), the inventory at about 85 bytes per entry (4096 entries about 340 KB), then per candidate one channel and at most 11 block requests in two phases (block 0, then the window), 16 diaries in parallel. Documented estimate: about 3-5 s for 300 diaries at 50 ms RTT (an estimate, not measured on the pilot). Memory in the browser: raw buffers released after every window, between pages only retained records (at most 32 MiB per snapshot) and 64 KiB memory pages per open core. At the seeder: one extra short-lived external socket and reads of blocks it already holds; no new state.
+- Theoretical maximum: 4096 diaries x 11 blocks x 16 KiB = 738,197,504 bytes (704 MiB), against the 16 MiB page budget; with a random order the budget (or the 25 s deadline) cuts the page and marks it incomplete rather than fetching it all.
+- Known limits: replies do not appear; names come only from the first blocks and the fetched tail ("sem nome" otherwise); `at` is author-supplied (up to 24 h ahead is accepted); rows already shown are removed only on the next load; no city or state; up to 3 posts per diary; native app and `varanda-serve` answer that the Espiadinha is web only.
+
+### Security audit
+
+Checked by reading the final code and the tests named (not a multi-vendor audit run):
+
+1. No storage write. `grep` over `packages/web-member/lib/peek.js` finds only reads (`store.readFollows`, the stored blocklist) and the memory storage; it opens no storage core. Verdict: pass; test 5 also checks that nothing is stored.
+2. An unverified endpoint never gets a core (test 4): no replication before the verified hello (role `seeder` and `seederCertForKey` on the Noise key). Pass.
+3. A blocked key and a revoked issuer are hidden without any sync, also on continuation pages (test 3). Pass.
+4. The gate runs before content, fork and quota are handled (tests 9 and 10): block 0 alone is requested first and a failing block 0 never gets a second request. Pass.
+5. No key shown as text in the screen: the screen renders names, @names and "sem nome"; the author key only keys the list and the report action. Pass (by reading `apps/app/src/screens/Espiadinha.js`).
+6. `displayText` on every peer string, through `PostRow` for name, @name and text. Pass.
+7. Sockets: one extra short-lived external socket per page against `maxExternal` (`packages/core/lib/seeder.js`, 32 by default) and `MAX_SOCKETS` 128 (`apps/cli/lib/seed-ws.js`). Accepted; see 17.
+8. Privacy: the seeder sees an anonymous link from the same IP asking for the complement of the follows, which it already learns from the sync link; one `peer` log line per link (`packages/core/lib/seeder.js` `_attachPeer`, printed by `apps/cli/lib/commands/seed.js`); nothing new on the account service. Pass.
+9. The client timeout (30 s, `DEFAULT_TIMEOUT_MS`) is above the page deadline (25 s). Pass.
+10. A concurrent `peek.read` is refused (`'espiadinha já em andamento'`, test 13). Pass.
+11. `close()` during a read ends it and closes the socket (test 8). Pass.
+12. Residual: no frame guard on the browser side beyond what the sync link has (Question 4): at most `PEEK_PARALLEL` oversized frames can be received past the budget before the link is destroyed.
+13. The window comes from the verified length, not the advertised one (test 11). Pass.
+14. Revocation is re-verified on continuation pages served from the snapshot (test 12). Pass.
+15. Concurrent read and shutdown (test 13, plus the detach regression tests). Pass.
+16. Memory pages and budgets (tests 14 and 15, and the regression tests for the byte budget, the oversized block and the TTL). Pass.
+17. Capacity: the seeder admits 32 external sockets and every hosted member holds one, so with about 30 hosted members online a peek can be refused with `'sem conexão com o semeador'`; the person retries. Estimated from the constants, NOT measured on the pilot seeder.
+
+### Human verification
+
+None of these was performed for this change.
+
+- [ ] Hosted build, 320 px wide: four tabs fit and nothing overflows (not performed yet).
+- [ ] Round order with three test accounts: all first posts, then all second posts, with the separator between rounds (not performed yet).
+- [ ] "seguir" on a row moves that diary to A Rua and the row leaves the Espiadinha on the next load (not performed yet).
+- [ ] "denunciar" opens the sheet for a row (not performed yet).
+- [ ] Pull-to-refresh rebuilds the list (not performed yet).
+- [ ] Last page: no further loading and the end state shows (not performed yet).
+- [ ] Offline: the "Sem internet" notice shows and "tentar de novo" works when back online (not performed yet).
+- [ ] Native app and `varanda-serve`: the tab explains it is web only and never errors (not performed yet).
+- [ ] An old PWA bundle against a new node (or the reverse) answers "método desconhecido" and the tab shows the web-only notice (not performed yet).
+- [ ] Caddy logs show no new route and no new error (not performed yet).
+- [ ] Browser heap observed during a page against the pilot seeder (not performed yet).
+
+## 18. Profiles, threads, likes, reposts and quotes (2026-10-26)
 
 ### Summary
 
@@ -1171,21 +1248,22 @@ None of these was performed for this change.
 - `apps/cli`: `/index` routes on the WebSocket listener (`lib/seed-ws.js`), index metrics (`lib/health.js`), `log` lines for the new records (`lib/commands/member.js`).
 - `deploy/seeder/Caddyfile`: `handle /index/*`, excluded from `@mutavel` and `@ausenteApp`; CSP unchanged. `apps/app/scripts/sw.js`: never intercepts `/index/`.
 - `apps/app`: `App.js` (screen stack, Back handling), `src/nav.js`, `src/history.web.js` / `history.native.js`, `src/indexClient.js` (strict validation, 64 KiB body cap, 8 s timeout), `src/thread.js`, `src/engagement.js`, `src/screens/Conversa.js`, `src/screens/Membro.js`, `src/ui/QuoteCard.js` (new); `src/ui/PostRow.js`, `TopBar.js`, `Icon.js`, `MediaGrid.js`, `MediaView.js`, `src/media/fetch.js`, `cache.js`, `src/screens/ARua.js`, `Diario.js`, `Seguindo.js`, `Publicar.js`, `src/outbox.js` (quotes never reconcile a queued post or reply).
+- Merged with the Espiadinha (section 17, PR #120): a PeekItem is now a FeedItem with `replyTo: null` plus `round`, so it gained `kind: 'post'` and `quote` (`packages/core/lib/peek.js`; a quote post is a top-level post and shows; likes and reposts are not posts); the `peek.read` worst case was re-measured at 242,215 bytes for 31 items (19,929 to spare). The Espiadinha rows use A Rua's `useSocial` / `socialRowProps` without counts (`useSocial({ counts: false })` never asks `/index/counts`): they open the conversation and the author's profile, offer curtir, republicar and citar, show the quoted card, and fetch photos `no-store` (their authors are not followed); `PostRow` keeps the Espiadinha's 'seguir' action (`onFollow`, `followPending`). The rows' `engagement.read` (and `follow.list` on refresh) are member reads and preempt the sync as A Rua's do; `peek.read` itself still never does. In the browser session the two peeks keep separate names (`peek.read`: `PEEK_BUSY` 'espiadinha já em andamento'; `diary.peek`: `DIARY_PEEK_BUSY` 'ocupado', `MAX_DIARY_PEEKS` 2, `diaryPeeker`); this change's browser test moved to `packages/web-member/test/diary-peek.test.js`. RPC sections shifted: `post.quote` 5.23, `like.set` / `repost.set` 5.24 / 5.25, `engagement.read` 5.26, `diary.peek` 5.27.
 
 ### Automated (CI)
 
-CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order):
+CI result on the final tree after merging `main` with the Espiadinha, Node 24.22.1 (run from the worktree root, in this order):
 
 - `npm run lint`: clean (`standard`), exit 0.
-- `npm test` (all workspaces): 110 test files, 0 failures (core 17, rpc 8, web-member 24, app 25, cli 34, site 2).
+- `npm test` (all workspaces): 113 test files, 0 failures (core 18, rpc 8, web-member 25, app 26, cli 34, site 2).
 - `npm run demo`: DEMO OK.
-- `node packages/rpc/test/sizes.test.js`: 10 tests, 59 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): feed page of 31 items 260838 bytes (32 = 268628), log page of 36 entries 259414 bytes (37 = 266615), `diary.peek` at 36 entries with profile and username 261642 bytes, `engagement.read` at 62 + 62 refs 10483 bytes, `profile.read` at 100 authors 229170 bytes, `follow.list` at 500 keys 33581 bytes.
-- `npm run pack:worklet -w apps/app`: bundle 1955400 bytes, 350 files, 38 linked addon entries; 'node scan: clean'.
-- `npm run export:web -w apps/app`: `NODE_BUNDLE 645396 GZIP 196665`; exported to `apps/app/dist` (ignored by git); service worker with 11 files.
+- `node packages/rpc/test/sizes.test.js`: 11 tests, 64 asserts, all pass. Measured worst cases against `MAX_MESSAGE` (262144 bytes): feed page of 31 items 260838 bytes (32 = 268628), `peek.read` page of 31 items 242215 bytes, log page of 36 entries 259414 bytes (37 = 266615), `diary.peek` at 36 entries with profile and username 261642 bytes, `engagement.read` at 62 + 62 refs 10483 bytes, `profile.read` at 100 authors 229170 bytes, `follow.list` at 500 keys 33581 bytes.
+- `npm run pack:worklet -w apps/app`: bundle 1956881 bytes, 350 files, 38 linked addon entries; 'node scan: clean'.
+- `npm run export:web -w apps/app`: `NODE_BUNDLE 658965 GZIP 201473`; exported to `apps/app/dist` (ignored by git); service worker with 11 files.
 - `node apps/cli/test/readme-help.test.js`: passes.
 - the whitespace check on the diff (`git diff --check`): clean.
 
-New test files: `packages/core/test/engagement.test.js`, `engagement-session.test.js`, `packages/web-member/test/engagement.test.js`, `peek.test.js`, `e2e-social.test.js`, `apps/cli/test/seeder-index.test.js`, `apps/app/test/engagement.test.js`, `indexClient.test.js`, `nav.test.js`, `thread.test.js`; extended: the records, feed, seed-ws, seed-ops, caddyfile, deploy, rpc methods and sizes, sw, outbox, mediaFetch and mediaCache tests. The end-to-end test `packages/web-member/test/e2e-social.test.js` passes (5 runs in a row): 66 replies from three authors paged exactly once in order (50 + 16), counts equal an independent reducer, peeks of unfollowed diaries never create replicas, a like reaches the seeder count in ~29 ms, a block removes the author from the index in ~45 ms, the CLI shows quotes and reposts.
+New test files: `packages/core/test/engagement.test.js`, `engagement-session.test.js`, `packages/web-member/test/engagement.test.js`, `diary-peek.test.js`, `e2e-social.test.js`, `apps/cli/test/seeder-index.test.js`, `apps/app/test/engagement.test.js`, `indexClient.test.js`, `nav.test.js`, `thread.test.js`; extended: the records, feed, seed-ws, seed-ops, caddyfile, deploy, rpc methods and sizes, sw, outbox, mediaFetch and mediaCache tests. The end-to-end test `packages/web-member/test/e2e-social.test.js` passes (5 runs in a row): 66 replies from three authors paged exactly once in order (50 + 16), counts equal an independent reducer, peeks of unfollowed diaries never create replicas, a like reaches the seeder count in ~29 ms, a block removes the author from the index in ~45 ms, the CLI shows quotes and reposts.
 
 ### Human verification
 

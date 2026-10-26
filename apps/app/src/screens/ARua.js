@@ -16,7 +16,8 @@
 // per call) and the own like/repost state from engagement.read (62 refs per
 // call); like and repost taps are optimistic (../engagement.js), then
 // like.set / repost.set; a failure reverts and shows the error for a moment.
-// `useSocial`, `socialRowProps` and `RepostPlaceholder` are shared with Diário.
+// `useSocial`, `socialRowProps` and `RepostPlaceholder` are shared with Diário
+// (and the first two with the Espiadinha).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -83,7 +84,8 @@ const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 // - persistOf(author): true only for own or followed authors.
 // - toast: the text of the last failed toggle for a moment (when the shell
 //   gives no `onToast`).
-export function useSocial ({ ownKey, onToast }) {
+// counts: false never asks the index for counts (the Espiadinha shows none).
+export function useSocial ({ ownKey, onToast, counts: withCounts = true }) {
   const node = useNode()
   const names = useNames()
   const { request, hosted } = node
@@ -312,7 +314,7 @@ export function useSocial ({ ownKey, onToast }) {
       } catch {}
       if (!mountedRef.current) return
     }
-    if (hosted && online) {
+    if (withCounts && hosted && online) {
       for (const chunk of chunks(refs, COUNTS_MAX)) {
         const r = await fetchCounts(chunk)
         if (!mountedRef.current) return
@@ -331,7 +333,7 @@ export function useSocial ({ ownKey, onToast }) {
     const first = await resolve([...new Set(need.filter((r) => typeof r === 'string'))])
     const second = first.map((item) => refOf(item.quote)).filter(Boolean)
     if (second.length > 0 && mountedRef.current) await resolve([...new Set(second)])
-  }, [request, hosted, online, change, resolve, loadFollows])
+  }, [request, hosted, online, withCounts, change, resolve, loadFollows])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
   // run uses the latest ingestNow.

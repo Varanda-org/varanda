@@ -12,7 +12,7 @@
 //    the read and fail, fewer fail;
 // 4. the SHA-256 of the bytes (WebCrypto) equals descriptor.sha256;
 // Persistence: the device keeps nothing of members it does not follow. With
-// deps.persist === false (authors the device does not follow: threads,
+// deps.persist === false (authors the device does not follow: the Espiadinha, threads,
 // profiles, reposts, quotes) every attempt uses cache: 'no-store', so not even
 // the browser HTTP cache keeps the photo; otherwise the first attempt may use
 // the long cache (force-cache) and retries revalidate (no-cache).

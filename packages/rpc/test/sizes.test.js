@@ -22,6 +22,7 @@ const {
   MEDIA_MIMES,
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
+  PEEK_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
@@ -74,13 +75,26 @@ function feedResult (n, ch) {
   }
 }
 
+// A PeekItem is a FeedItem with replyTo null plus `round`; its worst case is
+// a quote (a quote ref is larger than the null replyTo it rules out).
+function peekResult (n, ch) {
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000 }
+  return {
+    items: Array(n).fill(item),
+    next: { round: 100000, at: AT, author: HEX, seq: SEQ },
+    diaries: 4096,
+    skipped: 4096,
+    incomplete: true
+  }
+}
+
 function logResult (n, ch) {
   // Quote records retain replyTo: null and add quote, costing 13 bytes more
   // than plain reply records (FeedItems always carry both fields).
   return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch) }), invalid: [], entriesTruncated: SEQ }
 }
 
-function peekResult (entries, invalid, missing, ch) {
+function diaryPeekResult (entries, invalid, missing, ch) {
   return {
     key: HEX,
     length: SEQ,
@@ -140,6 +154,12 @@ test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
   t.ok(fourByte <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
 })
 
+test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
+  // With MAX_MEDIA_PER_POST maximal descriptors in every item.
+  for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800')) + ' bytes')
+})
+
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
   t.is(LOG_LIMIT_MAX, 36)
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
@@ -151,15 +171,15 @@ test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
 
 test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and username', (t) => {
   t.is(PEEK_SEQS_MAX, 36)
-  const worst = size(peekResult(PEEK_SEQS_MAX, 0, 0, '\ud800'))
-  for (const ch of WORST) t.ok(size(peekResult(PEEK_SEQS_MAX, 0, 0, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, '\ud800'))
+  for (const ch of WORST) t.ok(size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   // Each requested seq contributes to exactly one of entries/invalid/missing.
   // Maximum-width integers conservatively bound every distinct requested seq.
   let largest = 0
   for (let entries = 0; entries <= PEEK_SEQS_MAX; entries++) {
     for (let invalid = 0; invalid <= PEEK_SEQS_MAX - entries; invalid++) {
       const missing = PEEK_SEQS_MAX - entries - invalid
-      largest = Math.max(largest, size(peekResult(entries, invalid, missing, '\ud800')))
+      largest = Math.max(largest, size(diaryPeekResult(entries, invalid, missing, '\ud800')))
     }
   }
   t.is(largest, worst, '36 quote records dominate all partitions, including 36 invalid or missing seqs')
@@ -167,7 +187,7 @@ test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and usernam
   t.comment('diary.peek worst case at ' + PEEK_SEQS_MAX + ' entries with profile and username: ' + largest + ' bytes')
   // All three arrays full would describe 108 requests, outside the contract.
   // Keep this counterexample explicit: it cannot be used as a fits proof.
-  const impossible = size(peekResult(PEEK_SEQS_MAX, PEEK_SEQS_MAX, PEEK_SEQS_MAX, '\ud800'))
+  const impossible = size(diaryPeekResult(PEEK_SEQS_MAX, PEEK_SEQS_MAX, PEEK_SEQS_MAX, '\ud800'))
   t.comment('diary.peek synthetic 36 entries + 36 invalid + 36 missing: ' + impossible + ' bytes (outside contract)')
   t.ok(impossible > MAX_MESSAGE)
 })

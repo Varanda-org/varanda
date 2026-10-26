@@ -879,6 +879,7 @@ module.exports = {
   deepEqual,
   trustRoot,
   withIdentity,
+  moderation,
   idCreate,
   idShow,
   identityState,
