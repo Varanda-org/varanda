@@ -1,7 +1,7 @@
 name: Proposta
 description: Sugira uma mudança ou uma ideia nova.
 title: "[proposta] "
-labels: [enhancement]
+labels: ["tipo:funcionalidade"]
 body:
   - type: markdown
     attributes:

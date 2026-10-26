@@ -1,7 +1,7 @@
 name: Bug
 description: Algo não funciona como deveria.
 title: "[bug] "
-labels: [bug]
+labels: ["tipo:correção"]
 body:
   - type: markdown
     attributes:
@@ -43,6 +43,7 @@ body:
         - App Android
         - App web
         - Site varanda.app
+        - Serviço de contas / painel de moderação
         - Núcleo/protocolo
         - Outro
     validations:
