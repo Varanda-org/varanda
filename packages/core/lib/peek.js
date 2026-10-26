@@ -3,14 +3,16 @@
 // Why democratic: the order uses no engagement signal (likes, reposts or
 // follower counts; docs/protocol.md section 2). Each diary gets one slot per
 // round regardless of volume, for at most three rounds. "Most recent" in a
-// diary means the top-level post with the highest seq (last written). Within
-// a round, only the author's own `at` orders posts, as in A Rua. The same
+// diary means the publication with the highest seq (last written): a post,
+// a reply, a quote or a repost still in effect (likes are never shown).
+// Within a round, only the author's own `at` orders them, as in A Rua. The same
 // seeder inventory gives every member the same page except for their own key,
 // follows and blocks; anyone can recompute it from hello inventory and diaries.
 // Known limit: `at` is untrusted presentation data; a date up to 24 hours ahead
 // sorts first in its round, just as in A Rua.
 
-const { validRecordCopy, latestProfile, isHex64, isCanonicalIso } = require('./records')
+const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
+const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
 const { MAX_FUTURE_MS } = require('./feed')
@@ -81,7 +83,7 @@ function retainRecords (entries) {
         const copy = validRecordCopy(record, seq)
         if (copy === null) continue
         if (seq === 0 || copy.type === 'profile' || copy.type === 'username' ||
-          (copy.type === 'post' && copy.replyTo === null)) {
+          copy.type === 'post' || copy.type === 'repost') {
           kept.push({ seq, record: copy })
         }
       } catch {}
@@ -109,15 +111,27 @@ function diaryPeek (input) {
     }
     result.name = (latestProfile(copies) || {}).name || null
     result.username = latestUsername(copies, key, association, { revokedIssuers })
-    for (const { seq, record: post } of copies) {
-      if (post.type !== 'post' || seq < floor || seq >= length) continue
+    const tail = copies.filter(({ seq }) => seq >= floor && seq < length)
+    for (const { seq, record: post } of tail) {
+      if (post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         result.future++
         continue
       }
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
+      const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ seq, at: post.at, text: post.text, quote, media })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media })
+    }
+    // Reposts in effect (the last operation per target wins, as in the feed).
+    // The tail is contiguous up to the top, so an undo of a repost in it is in
+    // it too; repost records below the floor are never used.
+    for (const [ref, { seq, at }] of engagementState(tail).reposted) {
+      if (Date.parse(at) - now > MAX_FUTURE_MS) {
+        result.future++
+        continue
+      }
+      result.posts.push({ kind: 'repost', seq, at, to: parseRef(ref) })
     }
     result.posts.sort((a, b) => b.seq - a.seq)
     result.posts = result.posts.slice(0, PEEK_MAX_ROUNDS)
@@ -166,11 +180,18 @@ function buildPeekPage ({ diaries, limit, after = null }) {
         if (!exhausted) needs.add(key)
         continue
       }
-      const { seq, at, text } = post
-      const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
-      const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      // A FeedItem (lib/feed.js) with replyTo null, plus round.
-      const item = { kind: 'post', author: key, name, username, seq, at, text, replyTo: null, quote, media, round }
+      const { seq, at } = post
+      // A FeedItem (lib/feed.js), plus round.
+      let item
+      if (post.kind === 'repost') {
+        const to = { author: post.to.author, seq: post.to.seq }
+        item = { kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
+      } else {
+        const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
+        const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
+        const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
+        item = { kind: 'post', author: key, name, username, seq, at, text: post.text, replyTo, quote, media, round }
+      }
       if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
     }
     slots.sort(pageOrder)
