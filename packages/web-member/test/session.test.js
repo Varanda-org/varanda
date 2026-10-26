@@ -190,7 +190,7 @@ test('before an identity exists', async (t) => {
     sync: { state: 'idle' },
     publicDht: false
   })
-  for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }]]) {
+  for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }], ['peek.read', {}]]) {
     const err = await errorOf(web.request(method, params))
     t.is(err && err.code, 'NOT_FOUND', method)
     t.is(err && err.message, 'identidade não encontrada', method)

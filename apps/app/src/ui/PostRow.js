@@ -2,8 +2,10 @@
 // optional reply mark, the text and the reply action. It receives the RAW
 // peer strings (author key, name, username, at, text, replyToName) and
 // applies displayText itself, so callers must not pre-escape them. Naming
-// follows whoOf (src/who.js): never a key-derived handle. `onReport`
-// (optional) adds a second action, 'denunciar', after the reply one.
+// follows whoOf (src/who.js): never a key-derived handle. `onFollow`
+// (optional) adds an action, 'seguir', after the reply one; `followPending`
+// disables it while the follow is being written. `onReport` (optional) adds
+// the last action, 'denunciar'. The order is reply, follow, report.
 // `media` (an array of media descriptors, or null) adds the photos under the
 // text (./MediaGrid, which verifies every byte before showing it); a post
 // with photos may have no text.
@@ -17,7 +19,7 @@ import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
 import { colors, type } from './theme'
 
-export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onReport, media }) {
+export function PostRow ({ author, name, username, at, text, replyToName, now, onReply, onFollow, followPending, onReport, media }) {
   const hasMedia = Array.isArray(media) && media.length > 0
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
@@ -56,6 +58,21 @@ export function PostRow ({ author, name, username, at, text, replyToName, now, o
               style={({ pressed }) => [styles.action, pressed && styles.pressed]}
             >
               <Icon name='resposta' size={19} color={colors.soft} />
+            </Pressable>
+            )
+          : null}
+        {typeof onFollow === 'function'
+          ? (
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel={'seguir ' + title}
+              accessibilityState={{ disabled: !!followPending }}
+              disabled={!!followPending}
+              hitSlop={8}
+              onPress={onFollow}
+              style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+            >
+              <Icon name='seguir' size={19} color={colors.soft} />
             </Pressable>
             )
           : null}

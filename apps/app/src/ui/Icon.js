@@ -26,7 +26,8 @@ const GLYPHS = {
   ok: 'check',
   atualizar: 'rotate-cw',
   olho: 'eye',
-  olho_fechado: 'eye-off'
+  olho_fechado: 'eye-off',
+  seguir: 'user-plus'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

@@ -70,6 +70,15 @@ function isFeedCursor (v) {
   return isCanonicalIso(v.at) && isKey(v.author) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
+// peek.read `after` (docs/rpc.md 5.22): exactly { round, at, author, seq }, the
+// peek-order position of the last item the caller holds.
+function isPeekCursor (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 4) return false
+  if (!hasOwn(v, 'round') || !hasOwn(v, 'at') || !hasOwn(v, 'author') || !hasOwn(v, 'seq')) return false
+  return Number.isSafeInteger(v.round) && v.round >= 0 && isCanonicalIso(v.at) && isKey(v.author) &&
+    Number.isSafeInteger(v.seq) && v.seq >= 1
+}
+
 // post.create / post.reply `media`: 1..MAX_MEDIA_PER_POST descriptors.
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
@@ -240,6 +249,14 @@ const SPECS = {
   },
   // Names of the given authors from local data only (docs/rpc.md 5.21).
   'profile.read': { fields: { authors: req(isKeyList) } },
+  // Espiadinha page: diaries the person does not follow (docs/rpc.md 5.22).
+  'peek.read': {
+    fields: {
+      limit: opt(int(1, L.PEEK_LIMIT_MAX), L.PEEK_LIMIT_DEFAULT),
+      // Exclusive peek-order cursor; absent = the first page (rebuilds the snapshot).
+      after: opt(isPeekCursor)
+    }
+  },
   'sync.start': {
     fields: {
       once: opt(isBool, false),

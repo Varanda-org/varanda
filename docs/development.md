@@ -67,7 +67,7 @@ One file, from the repo root:
 node apps/cli/test/serve.test.js
 ```
 
-`apps/app` runs its pure helper tests with `npm test -w apps/app`: the form rules of `src/config.js` (`apps/app/test/config.test.js`, the web Conectar rules included, checked against `@varanda/web-member`'s seeder address rule) and the display helpers of `src/format.js` (`apps/app/test/format.test.js`); the modules are loaded with `import()` through Node's module syntax detection, which prints a `MODULE_TYPELESS_PACKAGE_JSON` warning. There are no UI tests: the screens are checked by hand on the simulator and on the web. Network tests use an in-process local DHT bound to `127.0.0.1`. No test uses the public DHT.
+`apps/app` runs its pure helper tests with `npm test -w apps/app`: the form rules of `src/config.js` (`apps/app/test/config.test.js`, the web Conectar rules included, checked against `@varanda/web-member`'s seeder address rule), the display helpers of `src/format.js` (`apps/app/test/format.test.js`) and the Espiadinha helpers of `src/peek.js` (`apps/app/test/peek.test.js`: rule text, page merging, round separators and web-only/offline notices); the modules are loaded with `import()` through Node's module syntax detection, which prints a `MODULE_TYPELESS_PACKAGE_JSON` warning. There are no UI tests: the screens are checked by hand on the simulator and on the web. Network tests use an in-process local DHT bound to `127.0.0.1`. No test uses the public DHT.
 
 ### Bare desktop smoke test
 

@@ -1,5 +1,6 @@
-// The bottom tab bar: A Rua, Seguindo and Diário. Pressing the tab that is
-// already current calls onReselect (scroll to top / refresh), not onSelect.
+// The bottom tab bar: A Rua, Espiadinha, Seguindo and Diário. Pressing the tab
+// that is already current calls onReselect (scroll to top / refresh), not
+// onSelect.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -8,6 +9,7 @@ import { colors, layout, type } from './theme'
 
 export const TABS = [
   { id: 'rua', label: 'A Rua', icon: 'casa' },
+  { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
   { id: 'seguindo', label: 'Seguindo', icon: 'gente' },
   { id: 'diario', label: 'Diário', icon: 'pessoa' }
 ]
