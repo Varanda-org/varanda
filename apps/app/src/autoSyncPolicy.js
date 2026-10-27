@@ -10,16 +10,21 @@ export const MAX_BACKOFF_MS = 60000
 export const HEALTHY_RUN_MS = 60000
 export const PREEMPT_GRACE_MS = 10000
 
-export function wantsStart ({ wanted, phase, online, active, starting, recovering, reconciling, backoffUntil, awaitingRestartUntil, now }) {
+export function wantsStart ({ wanted, phase, online, visible, active, starting, recovering, reconciling, backoffUntil, awaitingRestartUntil, now }) {
   return Boolean(wanted) &&
     phase === 'ready' &&
     online !== false &&
+    visible !== false &&
     active === null &&
     !starting &&
     !recovering &&
     !reconciling &&
     now >= (backoffUntil || 0) &&
     !(awaitingRestartUntil && now < awaitingRestartUntil)
+}
+
+export function shouldStopForHidden ({ active, visible }) {
+  return active !== null && active.once === false && visible === false
 }
 
 export function afterPreempt ({ once, wanted, now }) {

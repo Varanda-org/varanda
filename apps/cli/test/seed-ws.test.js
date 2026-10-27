@@ -16,7 +16,7 @@ const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForK
 const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
 const {
-  startSeedWs, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
+  startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
   INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
 } = require('../lib/seed-ws')
 
@@ -255,6 +255,39 @@ function within (promise, ms, name) {
     new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(name + ' não terminou em ' + ms + ' ms')), ms) })
   ]).finally(() => clearTimeout(timer))
 }
+
+test('socketCap: the listener cap follows the external, /media and /index caps', async (t) => {
+  // What startSeedWs computes for a seeder without maxExternal (the stub) and
+  // the default /media and /index limits: today's 128.
+  const stub = stubSeeder('ok')
+  t.is(stub.maxExternal, undefined, 'the stub has no maxExternal')
+  const defaults = { mediaInFlight: MEDIA_MAX_IN_FLIGHT, indexInFlight: INDEX_MAX_IN_FLIGHT }
+  t.is(socketCap({ maxExternal: 32, ...defaults }), 128)
+  t.is(socketCap({ maxExternal: 32, ...defaults }), MAX_SOCKETS)
+  t.is(socketCap({ maxExternal: 32, ...defaults, sockets: 512 }), 512, 'VARANDA_MAX_SOCKETS wins')
+  t.is(socketCap({ maxExternal: 512, ...defaults }), 608, 'a seeder with maxExternal 512')
+  t.is(socketCap({ maxExternal: 32, ...defaults, sockets: null }), 128)
+  t.is(socketCap({ maxExternal: 32, ...defaults, sockets: 0 }), 128, 'sockets below 1 is ignored')
+  t.is(socketCap({ maxExternal: 1, ...defaults }), MAX_SOCKETS, 'never below MAX_SOCKETS')
+})
+
+test('startSeedWs: sockets caps the connections of the listener', async (t) => {
+  t.timeout(20000)
+  const ws = await startSeedWs({ port: 0, seeder: stubSeeder('ok'), sockets: 1 })
+  t.teardown(() => ws.close(), { force: true })
+  const first = net.connect({ host: '127.0.0.1', port: ws.port })
+  first.on('error', () => {})
+  t.teardown(() => first.destroy(), { force: true })
+  await new Promise((resolve) => first.once('connect', resolve))
+  // Let the server accept the first socket before the second arrives.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const second = net.connect({ host: '127.0.0.1', port: ws.port })
+  second.on('error', () => {})
+  t.teardown(() => second.destroy(), { force: true })
+  await within(new Promise((resolve) => second.once('close', resolve)), 2000, 'close da segunda conexão')
+  t.pass('the connection beyond the cap is dropped')
+  t.ok(!first.destroyed, 'the first connection stays open')
+})
 
 test('startSeedWs: refused upgrades are closed even if the client never ends its side', async (t) => {
   t.timeout(20000)

@@ -32,7 +32,8 @@
 // reads while a once run is active).
 //
 // `online` (web) is the browser's network hint (online.web.js; always true on
-// native). `hostedSource` is where the hosted configuration came from: 'live'
+// native). `visible` is the page visibility (always true on native).
+// `hostedSource` is where the hosted configuration came from: 'live'
 // (the installation answered), 'remembered' (the installation did not answer
 // and the last valid configuration of this origin is used) or null.
 //
@@ -65,20 +66,25 @@
 // `sync.start` response is uncertain (@varanda/rpc client.js) and may have
 // started the run, so it is reconciled through `sync.status` too, never
 // retried blindly. A run that ends by itself is restarted after a backoff.
-// This logic never sends `sync.stop` (locking stops nothing). Every awaited
-// continuation re-checks the connection, the epoch and the passkey
-// generation. `signals` folds the sync events into UI hints (syncSignals.js).
+// A hidden web page sends `sync.stop` once to release its continuous run;
+// once runs and starts in flight are left alone. An uncertain stop is
+// reconciled too: sync.status can restart a run, so a confirmed continuous
+// run gets at most one more stop in that hidden period. Showing the page
+// lets the start gate resume sync (locking alone stops nothing). Every
+// awaited continuation re-checks the connection, epoch and passkey generation.
+// `signals` folds the sync events into UI hints (syncSignals.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } from './configStore'
 import { isOnline, subscribeOnline } from './online'
+import { isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
 import { EMPTY_SIGNALS, foldSignal, ackFresh as ackFreshSignals } from './syncSignals'
-import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, graceExpired, nextBackoff, startFailure, wantsStart } from './autoSyncPolicy'
+import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, graceExpired, nextBackoff, shouldStopForHidden, startFailure, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
 
 const MAX_SYNC_LINES = 200
@@ -124,6 +130,10 @@ export function NodeProvider ({ children }) {
   // 'live' | 'remembered' | null (see the header).
   const [hostedSource, setHostedSource] = useState(null)
   const [online, setOnline] = useState(() => isOnline())
+  const [visible, setVisible] = useState(() => isVisible())
+  const visibleRef = useRef(visible)
+  // Replaced on visibility transitions, never by a late stop response.
+  const hiddenStopRef = useRef({ attempts: 0, retry: false })
   const [sync, setSync] = useState({ active: null, lines: [], stopped: null })
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
@@ -178,7 +188,7 @@ export function NodeProvider ({ children }) {
   // setAutoSync(true) clears it.
   const [gaveUp, setGaveUp] = useState(false)
   const gaveUpRef = useRef(false)
-  // true from an uncertain start (or an expired preemption grace) until an
+  // true from an uncertain start/stop (or an expired preemption grace) until an
   // authoritative sync.status answer; a failed read keeps it until the next
   // connection or epoch.
   const [reconciling, setReconciling] = useState(false)
@@ -251,6 +261,11 @@ export function NodeProvider ({ children }) {
   }, [])
 
   useEffect(() => subscribeOnline(setOnline), [])
+  useEffect(() => subscribeVisible((next) => {
+    if (visibleRef.current !== next) hiddenStopRef.current = { attempts: 0, retry: false }
+    visibleRef.current = next
+    setVisible(next)
+  }), [])
   // The service worker (hosted browser-node page only); never awaited.
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
@@ -684,7 +699,7 @@ export function NodeProvider ({ children }) {
     connRef.current === conn && epochRef.current === ep && pkGenRef.current === gen
   ), [])
 
-  // Did a run start? Asks sync.status on the same connection (it never
+  // Is a run active? Asks sync.status on the same connection (it never
   // preempts, the pattern of startRecoveryRun): a running run is adopted;
   // only an authoritative idle answer lets the auto-start fire again (after
   // FIRST_BACKOFF_MS). A failed read keeps `reconciling` until the next
@@ -700,13 +715,15 @@ export function NodeProvider ({ children }) {
     try { st = await request('sync.status', {}) } catch { return }
     if (!stillCurrent(conn, ep, gen) || !reconcilingRef.current) return
     if (st && st.state === 'running') {
-      setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: st.runId, once: st.once } }))
+      setSync((prev) => (prev.active && prev.active.runId === st.runId && prev.active.once === st.once ? prev : { ...prev, active: { runId: st.runId, once: st.once } }))
       adoptSignals(st.runId, st.once)
       setRecon(false)
     } else if (st && st.state === 'idle') {
+      setSync((prev) => (prev.active ? { ...prev, active: null } : prev))
       setBackoff(Date.now() + FIRST_BACKOFF_MS)
       setRecon(false)
     }
+    return st
   }, [request, stillCurrent, setWait, setRecon, setBackoff, adoptSignals])
 
   // The one auto-start: sync.start {} and the handling of its outcome.
@@ -745,8 +762,33 @@ export function NodeProvider ({ children }) {
       const ms = Math.min(MAX_BACKOFF_MS, backoffMsRef.current ? backoffMsRef.current * 2 : FIRST_BACKOFF_MS)
       backoffMsRef.current = ms
       setBackoff(Date.now() + ms)
-    })
+    }).finally(() => setAutoTick((t) => t + 1))
   }, [request, stillCurrent, reconcile, setBackoff])
+
+  // The only visibility stop path. Reserve each attempt synchronously, even
+  // if React evaluates again before rendering. Only an authoritative status
+  // after an uncertain stop permits the second attempt in this hidden period.
+  useEffect(() => {
+    if (phase !== 'ready' || startingRef.current > 0 || autoInflightRef.current || reconcilingRef.current) return
+    if (!shouldStopForHidden({ active: syncRef.current.active, visible: visibleRef.current })) return
+    const period = hiddenStopRef.current
+    if (period.attempts >= 2 || (period.attempts > 0 && !period.retry)) return
+    const conn = connRef.current
+    if (!conn) return
+    const ep = epochRef.current
+    const gen = pkGenRef.current
+    period.attempts += 1
+    period.retry = false
+    request('sync.stop', {}).catch(async (err) => {
+      if (!stillCurrent(conn, ep, gen) || !err || err.uncertain !== true) return
+      const st = await reconcile()
+      if (!stillCurrent(conn, ep, gen) || hiddenStopRef.current !== period || visibleRef.current !== false) return
+      if (period.attempts < 2 && st && st.state === 'running' && st.once === false) {
+        period.retry = true
+        setAutoTick((t) => t + 1)
+      }
+    })
+  }, [phase, visible, sync.active, starting, reconciling, autoTick, request, reconcile, stillCurrent])
 
   // Re-evaluated on every relevant change and by the one timer. Decisions read
   // the refs (always current), so two evaluations before a re-render can never
@@ -766,6 +808,7 @@ export function NodeProvider ({ children }) {
       wanted,
       phase,
       online,
+      visible: visibleRef.current,
       active,
       starting: startingRef.current > 0 || autoInflightRef.current,
       recovering: recovery !== null,
@@ -786,7 +829,7 @@ export function NodeProvider ({ children }) {
         setAutoTick((t) => t + 1)
       }, at - now)
     }
-  }, [autoWanted, gaveUp, phase, online, sync.active, starting, recovery, reconciling, backoffUntil, awaitingRestartUntil, autoTick, reconcile, autoStart])
+  }, [autoWanted, gaveUp, phase, online, visible, sync.active, starting, recovery, reconciling, backoffUntil, awaitingRestartUntil, autoTick, reconcile, autoStart])
 
   // The shell's decision; true also clears a give-up.
   const setAutoSync = useCallback((wanted) => {
@@ -850,8 +893,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync
-  }), [phase, config, error, hosted, hostedSource, online, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync])
+    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync
+  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }
