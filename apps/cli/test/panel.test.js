@@ -685,6 +685,43 @@ test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', asy
   t.is(buttons(doc, 'Descartar').length, 0)
 })
 
+test('Histórico: mostrar mais appends the next page without reading the other lists again', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  const row = (id) => report({ id, status: 'descartar', decidedAt: '2026-10-22T00:00:00.000Z' })
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, { reports: [row('d1abcdefghijklmnopqrst'), row('d2abcdefghijklmnopqrst')], truncated: true }]
+  routes['GET /account/mod/api/reports?estado=decidida&antes=d2abcdefghijklmnopqrst'] = () => [200, { reports: [row('d2abcdefghijklmnopqrst'), row('d3abcdefghijklmnopqrst')], truncated: false }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  t.is(cardsOf(doc).length, 2)
+  t.ok(doc.main.textContent.includes('Há mais decisões antes destas.'))
+  const before = calls.length
+  buttons(doc, 'mostrar mais')[0].click()
+  await p.settled()
+  t.is(cardsOf(doc).length, 3, 'a repeated row is not shown twice')
+  t.absent(doc.main.textContent.includes('Há mais decisões antes destas.'))
+  t.is(buttons(doc, 'mostrar mais').length, 0, 'no button on the last page')
+  t.alike(calls.slice(before).map((c) => c.url), ['/account/mod/api/reports?estado=decidida&antes=d2abcdefghijklmnopqrst'])
+})
+
+test('Histórico: a failed mostrar mais keeps the rows and shows the error', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, { reports: [report({ id: 'd1abcdefghijklmnopqrst', status: 'descartar', decidedAt: '2026-10-22T00:00:00.000Z' })], truncated: true }]
+  routes['GET /account/mod/api/reports?estado=decidida&antes=d1abcdefghijklmnopqrst'] = () => [400, { error: 'pedido-invalido' }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  buttons(doc, 'mostrar mais')[0].click()
+  await p.settled()
+  t.is(cardsOf(doc).length, 1)
+  t.ok(doc.main.textContent.includes('pedido inválido'))
+  t.is(buttons(doc, 'mostrar mais')[0].disabled, false, 'it can be tried again')
+})
+
 test('Pendentes marks a change requested by the AI; cancel still undoes it', async (t) => {
   const doc = fakeDocument()
   const routes = signedIn([], {

@@ -576,6 +576,10 @@ function createModRoutes ({
   async function reports (req, res, session, url) {
     const estado = url.searchParams.get('estado') ?? 'aberta'
     if (estado !== 'aberta' && estado !== 'decidida') throw refuse('pedido-invalido')
+    // `antes`, only for the history: the id of the last row the caller holds;
+    // the page starts right after it.
+    const antes = url.searchParams.get('antes')
+    if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
     // Every row first, then the moderator's own cases (as target or as
     // reporter) out, then the page:
     // truncating before the filter could hide every actionable report
@@ -583,10 +587,16 @@ function createModRoutes ({
     const { reports: rows } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS }))
     const own = ownMember(session)
     const visible = rows.filter((r) => !ownCase(r, own))
+    let start = 0
+    if (antes !== null) {
+      const at = visible.findIndex((r) => r.id === antes)
+      if (at === -1) throw refuse('pedido-invalido')
+      start = at + 1
+    }
     const cache = new Map()
     send(res, 200, {
-      reports: visible.slice(0, REPORTS_PAGE).map((r) => projectReport(r, cache)),
-      truncated: visible.length > REPORTS_PAGE
+      reports: visible.slice(start, start + REPORTS_PAGE).map((r) => projectReport(r, cache)),
+      truncated: visible.length > start + REPORTS_PAGE
     })
   }
 

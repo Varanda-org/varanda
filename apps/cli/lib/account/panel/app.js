@@ -107,6 +107,7 @@ const TEXT = {
   noOpen: 'Nenhuma denúncia aberta.',
   moreOpen: 'Há mais denúncias depois destas.',
   moreDecided: 'Há mais decisões antes destas.',
+  showMore: 'mostrar mais',
   noDecided: 'Nenhuma decisão ainda.',
   pendingBanner: 'As decisões só valem depois que a associação rodar `varanda mod apply` e publicar a lista.',
   noPending: 'Nenhuma mudança pendente.',
@@ -598,7 +599,32 @@ function createPanel (env) {
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       r.note !== '' ? untrusted('p', r.note) : null
     ))
-    return h('div', { className: 'list' }, ...cards, truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null)
+    return h('div', { className: 'list' }, ...cards,
+      truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,
+      truncated ? button(TEXT.showMore, showMoreDecided, { disabled: busy }) : null)
+  }
+
+  // The next page of the history, appended to what is shown; the other
+  // lists are not read again.
+  function showMoreDecided () {
+    if (busy) return last
+    const mine = gen
+    const shown = state.decided.reports
+    const cursor = shown[shown.length - 1].id
+    busy = true
+    error = ''
+    render()
+    return run(async () => {
+      try {
+        const page = reportList(await call('GET', API + 'reports?estado=decidida&antes=' + cursor))
+        if (mine !== gen) return
+        const seen = new Set(shown.map((r) => r.id))
+        state.decided = { reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))], truncated: page.truncated }
+      } finally {
+        busy = false
+        if (state) render()
+      }
+    })
   }
 
   function logout () {
