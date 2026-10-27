@@ -414,7 +414,13 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const label = starts.has(index) ? roundLabel(item.round) : null
     return (
       <View>
-        {label ? <View style={[styles.separator, index > 0 && styles.separatorLine]}><Soft>{label}</Soft></View> : null}
+        {label
+          ? (
+            <View style={[styles.separator, index > 0 && styles.separatorLine]}>
+              <Text accessibilityRole='header' style={styles.separatorText}>{label}</Text>
+            </View>
+            )
+          : null}
         {rowOf(item)}
       </View>
     )
@@ -447,5 +453,6 @@ const styles = StyleSheet.create({
   header: { padding: 16, gap: 8 },
   footer: { padding: 16, gap: 8 },
   separator: { paddingHorizontal: 16, paddingVertical: 10 },
-  separatorLine: { borderTopWidth: 1, borderTopColor: colors.line }
+  separatorLine: { borderTopWidth: 1, borderTopColor: colors.line },
+  separatorText: { fontSize: 14, lineHeight: 20, color: colors.soft }
 })

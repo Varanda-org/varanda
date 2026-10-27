@@ -642,7 +642,12 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
   return (
     <View style={styles.placeholder}>
       <View style={styles.repostedLine}>
-        <Text style={styles.reposted} onPress={onOpenReposter} accessibilityRole={onOpenReposter ? 'link' : 'text'}>
+        <Text
+          style={styles.reposted}
+          onPress={onOpenReposter}
+          accessibilityRole={onOpenReposter ? 'link' : 'text'}
+          accessibilityLabel={who + ' republicou'}
+        >
           <Icon name='republicar' size={14} color={colors.soft} />
           {' ' + who + ' republicou'}
         </Text>

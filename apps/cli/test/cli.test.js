@@ -73,7 +73,7 @@ function usage (t, argv, message, env = {}) {
 
 function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
-  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN']) delete env[name]
+  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -141,6 +141,11 @@ test('CLI parser, R5 help and command router', async (t) => {
     wsOrigins: null,
     accountPort: null,
     accountHost: null,
+    maxExternal: null,
+    maxSockets: null,
+    frameMemory: null,
+    media: { maxInFlight: null, rate: null, burst: null },
+    index: { maxInFlight: null, rate: null, burst: null },
     ageBand: null,
     method: null,
     out: null,
@@ -314,6 +319,39 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])
   }
+  // The seeder's web limits: environment only, empty means unset, the value is
+  // never echoed.
+  for (const [name, read, ok, bad] of [
+    ['VARANDA_MAX_EXTERNAL', flags => flags.maxExternal, ['64', 64], ['abc', '0', '5000']],
+    ['VARANDA_MEDIA_MAX_IN_FLIGHT', flags => flags.media.maxInFlight, ['64', 64], ['abc', '0', '1025']],
+    ['VARANDA_INDEX_RATE', flags => flags.index.rate, ['64', 64], ['abc', '0', '100001']],
+    ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']]
+  ]) {
+    t.is(read(parse([], { [name]: ok[0] })), ok[1], name + ' set')
+    t.is(read(parse([], { [name]: ' ' + ok[0] + ' ' })), ok[1], name + ' trimmed')
+    t.is(read(parse([], { [name]: '' })), null, name + ' empty is unset')
+    t.is(read(parse([], { [name]: '  ' })), null, name + ' blank is unset')
+    for (const value of [...bad, '1.5', '-1', '1e3', '0x10', '064']) usage(t, [], name + ' inválido', { [name]: value })
+  }
+  t.alike(parse([], {
+    VARANDA_MAX_EXTERNAL: '512',
+    VARANDA_MAX_SOCKETS: '8192',
+    VARANDA_FRAME_MEMORY: '8454144',
+    VARANDA_MEDIA_MAX_IN_FLIGHT: '1',
+    VARANDA_MEDIA_RATE: '100000',
+    VARANDA_MEDIA_BURST: '2',
+    VARANDA_INDEX_MAX_IN_FLIGHT: '1024',
+    VARANDA_INDEX_RATE: '3',
+    VARANDA_INDEX_BURST: '4'
+  }), {
+    ...parse(),
+    maxExternal: 512,
+    maxSockets: 8192,
+    frameMemory: 8454144,
+    media: { maxInFlight: 1, rate: 100000, burst: 2 },
+    index: { maxInFlight: 1024, rate: 3, burst: 4 }
+  }, 'every web limit')
+  usage(t, [], 'VARANDA_MAX_SOCKETS inválido', { VARANDA_MAX_SOCKETS: '8193' })
   usage(t, ['--to', upperKey + ':0'], 'referência inválida')
   for (const ref of [
     '', upperKey, upperKey + ':', upperKey + ':00', upperKey + ':02', upperKey + ':-1',
