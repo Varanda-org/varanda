@@ -10,7 +10,8 @@
 //    api/pull { cert, nonce, signature } where the signature binds the
 //    public origin, the association, the moderator, the nonce, the op and
 //    the body bytes (packages/core/lib/mod-request.js). The answer is
-//    exactly { changes: [{ id, op, member, at }], published: { snapshot } }.
+//    exactly { changes: [{ id, op, member, at, actor }], published:
+//    { snapshot } }, actor 'ia' (the AI triage decided) or 'pessoa'.
 // 2. reconcile: the local blocklist.json must not be behind the published
 //    snapshot (a restored old backup would otherwise sign a seq peers ignore
 //    as stale, or undo newer blocks); the changes are walked in `at` order
@@ -18,13 +19,20 @@
 // 2b. review: nothing the server returns is signed unseen. The net change of
 //    each member is printed ('bloquear <k>' / 'desbloquear <k>', an unblock
 //    of a key whose block was not made in the panel marked ' (bloqueada pela
-//    operação)'). At a terminal the operator confirms (and confirms those
-//    marked unblocks a second time); without one only --yes runs, and it
-//    applies blocks only (at most MAX_UNATTENDED_BLOCKS): every member whose
-//    net effect is an unblock is held, none of its change ids signed or
-//    acknowledged, so they stay pending on the server for the next run at a
-//    terminal. A phished panel session or a compromised server can thus
-//    queue unblocks, but no cron run publishes them.
+//    operação)', a block every block change of which the AI made marked
+//    ' (ia)'; the AI never queues an unblock). At a terminal the operator
+//    confirms (and confirms those marked unblocks a second time); without
+//    one only --yes runs, and it applies human blocks only (at most
+//    MAX_UNATTENDED_BLOCKS of them): every member whose net effect is an
+//    unblock, and every block no person made (all its block changes 'ia'),
+//    is held, none of its change ids signed or acknowledged, so they stay
+//    pending on the server for the next run at a terminal. A phished panel
+//    session or a compromised server can thus queue unblocks, but no cron
+//    run publishes them; and a cron run never publishes a block nobody read:
+//    the AI learns from human blocks as if they judged the post, so sybil
+//    accounts can poison its precedents into queueing a whole-account block
+//    of an innocent member. A block with at least one human block change is
+//    a human block and goes through --yes as before.
 // 3. one snapshot (commands/mod.js applySet, seq + 1), published to the
 //    seeder by its Noise key (mod-publish.js). Only a delivered publish is
 //    acknowledged: the panel's queue empties only for a list the seeder
@@ -49,7 +57,7 @@ const BODY_CAP = 524288
 // up to MAX_SNAPSHOT_BYTES (393216) bytes.
 const PULL_BODY_CAP = 1048576
 const MAX_CHANGES = 1000
-// --yes (cron) signs at most this many new blocks per run.
+// --yes (cron) signs at most this many new (human) blocks per run.
 const MAX_UNATTENDED_BLOCKS = 100
 const HEX64_RE = /^[0-9a-f]{64}$/
 const ISO_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/
@@ -60,6 +68,10 @@ const NOT_INTERACTIVE = 'rode num terminal para revisar, ou use --yes para aplic
 const TOO_MANY_BLOCKS = 'muitos bloqueios de uma vez; rode no terminal para revisar'
 const REFUSED = 'nada assinado'
 const OPERATOR_MARK = ' (bloqueada pela operação)'
+// A block whose every change the AI triage made (actor 'ia').
+const AI_MARK = ' (ia)'
+// Appended under --yes to an AI block it holds for a terminal.
+const AI_HELD = ' — aguarda revisão no terminal'
 const CONFIRM = 'Assinar e publicar estas mudanças? [s/N] '
 const CONFIRM_OPERATOR = 'Desbloquear também as chaves bloqueadas pela operação? [s/N] '
 const NO_LIST_NET = 'há decisões pendentes que se anulam e este diretório não tem lista; rode mod apply uma vez com --new-list para assinar a primeira lista e confirmá-las'
@@ -200,7 +212,8 @@ function sign (ctx, nonce, op, body) {
 }
 
 function validChange (c) {
-  return exactKeys(c, ['id', 'op', 'member', 'at']) &&
+  return exactKeys(c, ['id', 'op', 'member', 'at', 'actor']) &&
+    (c.actor === 'ia' || c.actor === 'pessoa') &&
     typeof c.id === 'string' && CHANGE_ID_RE.test(c.id) &&
     (c.op === 'block' || c.op === 'unblock') &&
     typeof c.member === 'string' && HEX64_RE.test(c.member) &&
@@ -208,7 +221,7 @@ function validChange (c) {
 }
 
 // D1: exactly { changes, published: { snapshot } }, every change exactly
-// { id, op, member, at }, unique ids, a snapshot that is null or verifies
+// { id, op, member, at, actor }, unique ids, a snapshot that is null or verifies
 // for this association.
 function checkPull (value, association) {
   if (!exactKeys(value, ['changes', 'published']) || !exactKeys(value.published, ['snapshot'])) return null
@@ -314,17 +327,20 @@ async function apply ({
   // The net effect of each member's changes, walked in the SERVER's order
   // (the store's insertion order, which its ack checks): never re-sorted by
   // `at`, since a wall clock that steps back would reverse a block and its
-  // cancellation. member -> { blocked (final state), ids }, in the order
-  // members first appear.
+  // cancellation. member -> { blocked (final state), ids, ai (no block
+  // change made by a person: every block is the AI triage's) }, in the
+  // order members first appear. A person's unblock between two AI blocks
+  // endorses no block, so it leaves `ai` set.
   const ordered = changes
   const members = new Map()
   for (const c of ordered) {
     let entry = members.get(c.member)
     if (!entry) {
-      entry = { blocked: base.has(c.member), ids: [] }
+      entry = { blocked: base.has(c.member), ids: [], ai: true }
       members.set(c.member, entry)
     }
     entry.blocked = c.op === 'block'
+    if (c.op === 'block' && c.actor !== 'ia') entry.ai = false
     entry.ids.push(c.id)
   }
   const blocks = []
@@ -335,24 +351,29 @@ async function apply ({
   }
   const sources = unblocks.length > 0 ? mod.blockSources(dir, unblocks) : new Map()
   const byOperator = unblocks.filter((k) => sources.get(k) !== mod.SOURCE_PANEL)
+  // Unattended, the AI's blocks wait for a terminal (header 2b).
+  const aiBlocks = yes ? blocks.filter((k) => members.get(k).ai) : []
 
   // The review: one line per member.
   for (const [member, entry] of members) {
-    if (entry.blocked) say((base.has(member) ? 'já estava bloqueada ' : 'bloquear ') + member)
-    else if (base.has(member)) say('desbloquear ' + member + (byOperator.includes(member) ? OPERATOR_MARK : ''))
+    if (entry.blocked) {
+      if (base.has(member)) say('já estava bloqueada ' + member)
+      else say('bloquear ' + member + (entry.ai ? AI_MARK : '') + (aiBlocks.includes(member) ? AI_HELD : ''))
+    } else if (base.has(member)) say('desbloquear ' + member + (byOperator.includes(member) ? OPERATOR_MARK : ''))
     else say('não estava bloqueada ' + member)
   }
 
   if (yes) {
-    // Unattended: blocks only, a bounded number; every unblock waits for a
-    // terminal.
-    if (blocks.length > MAX_UNATTENDED_BLOCKS) throw new Error(TOO_MANY_BLOCKS)
-    held = unblocks
+    // Unattended: human blocks only, a bounded number of them; every unblock
+    // and every AI block waits for a terminal.
+    if (blocks.length - aiBlocks.length > MAX_UNATTENDED_BLOCKS) throw new Error(TOO_MANY_BLOCKS)
+    held = [...unblocks, ...aiBlocks]
   } else if (blocks.length + unblocks.length > 0) {
     if (!accepted(await ask(CONFIRM))) throw new Error(REFUSED)
     if (byOperator.length > 0 && !accepted(await ask(CONFIRM_OPERATOR))) held = byOperator
   }
-  if (held.length > 0) say('desbloqueios aguardando revisão no terminal: ' + held.length)
+  const heldUnblocks = held.length - aiBlocks.length
+  if (heldUnblocks > 0) say('desbloqueios aguardando revisão no terminal: ' + heldUnblocks)
   const holding = new Set(held)
 
   const next = new Set(base)

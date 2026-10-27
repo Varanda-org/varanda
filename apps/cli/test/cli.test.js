@@ -139,6 +139,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     wsPort: null,
     wsHost: null,
     wsOrigins: null,
+    triageToken: null,
     accountPort: null,
     accountHost: null,
     ageBand: null,
@@ -311,6 +312,13 @@ test('CLI parser, R5 help and command router', async (t) => {
     usage(t, ['--ws-origin', value], 'ws-origin inválido (vazio)')
     usage(t, [], 'ws-origin inválido (vazio)', { VARANDA_WS_ORIGIN: value })
   }
+  const triageToken = 'ab'.repeat(32)
+  t.is(parse([], { VARANDA_TRIAGE_TOKEN: triageToken }).triageToken, triageToken)
+  t.is(parse([], { VARANDA_TRIAGE_TOKEN: '' }).triageToken, null)
+  for (const value of [' ', 'AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), 'zz'.repeat(32), triageToken + '\n', ' ' + triageToken]) {
+    usage(t, [], 'VARANDA_TRIAGE_TOKEN inválido', { VARANDA_TRIAGE_TOKEN: value })
+  }
+  usage(t, ['--triage-token', triageToken], 'opção desconhecida --triage-token')
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])
   }

@@ -53,7 +53,7 @@ async function listenWs (flags, seeder) {
   // Loaded only with --ws-port: without it the ws module is never touched.
   const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
   try {
-    return await startSeedWs({ host: flags.wsHost || WS_HOST, port: flags.wsPort, seeder, origins: flags.wsOrigins })
+    return await startSeedWs({ host: flags.wsHost || WS_HOST, port: flags.wsPort, seeder, origins: flags.wsOrigins, triageToken: flags.triageToken })
   } catch (err) {
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
     throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')

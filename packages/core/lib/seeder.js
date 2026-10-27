@@ -1742,6 +1742,52 @@ class Seeder {
     }
   }
 
+  // Raw blocks 0 and `seq` of diary D, for the token-gated loopback route
+  // the account service uses to judge a reported post (apps/cli/lib/
+  // seed-ws.js, /moderation-post/). A report carries only the reporter's
+  // quote; triage must look at what the author actually signed, and this
+  // seeder already holds it. Purely local and read-only: nothing here
+  // replicates, admits, downloads, decodes, joins the swarm or touches the
+  // engagement index. null unless D is admitted, not blocked, served, gated
+  // and not dropped, its core is on fork 0, 1 <= seq < length and BOTH
+  // blocks are already local ({ wait: false }). Every await may interleave
+  // with a drop, a re-gate, a close or a new blocklist snapshot, so after
+  // each one the same conditions (plus an unchanged _moderationGen) are
+  // checked again; any change answers null. Trust boundary: these are the
+  // raw bytes this seeder's own Hypercore verified on arrival, not a
+  // portable proof; the caller trusts this process plus its authenticated
+  // loopback for authenticity and re-validates only the record's shape.
+  async postBlock (diaryHex, seq) {
+    try {
+      if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
+      if (!Number.isSafeInteger(seq) || seq < 1) return null
+      const entry = this._served.get(diaryHex)
+      const gen = this._moderationGen
+      const live = () => !this._closing && this._served.get(diaryHex) === entry &&
+        entry.gated && !entry.dropped && this._admitted.has(diaryHex) &&
+        !this._isBlocked(diaryHex) && this._moderationGen === gen
+      if (!entry || !live()) return null
+      const core = entry.core
+      if (core.fork !== 0 || seq >= core.length) return null
+      const read = async (i) => {
+        if (!(await core.has(i)) || !live()) return null
+        const raw = await core.get(i, { wait: false, raw: true })
+        return raw && live() ? raw : null
+      }
+      const block0 = await read(0)
+      if (block0 === null) return null
+      const block = await read(seq)
+      if (block === null) return null
+      // Re-check after the last await (a drop or adoption can run between
+      // read() resolving and this line) and re-read the length: it only
+      // grows on fork 0, and the answer must describe the core as handed out.
+      if (!live() || core.fork !== 0 || seq >= core.length) return null
+      return { fork: 0, length: core.length, block0, block }
+    } catch {
+      return null
+    }
+  }
+
   // ---- Engagement index (header comment) --------------------------------
 
   // Queues an index pass over a gated diary, on the index queue (one diary

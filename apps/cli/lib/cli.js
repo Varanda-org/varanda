@@ -178,6 +178,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const wsOrigins = originList(originSource)
   if (originSource.length > 0 && wsOrigins.length === 0) throw new UsageError('ws-origin inválido (vazio)')
 
+  // Secret of the seeder's loopback /moderation-post route (seed-ws.js),
+  // shared with the account service. Environment only: a flag would show up
+  // in `ps` and shell history. Unset or empty disables the route; anything
+  // else must be 64 lower-case hex, and the error never echoes the value.
+  const triageToken = env.VARANDA_TRIAGE_TOKEN === undefined || env.VARANDA_TRIAGE_TOKEN === '' ? null : env.VARANDA_TRIAGE_TOKEN
+  if (triageToken !== null && !/^[0-9a-f]{64}$/.test(triageToken)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -201,6 +208,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     wsPort: port(get('ws-port') ?? env.VARANDA_WS_PORT ?? null, 'ws-port'),
     wsHost,
     wsOrigins: wsOrigins.length ? wsOrigins : null,
+    triageToken,
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
     ageBand: get('age-band'),

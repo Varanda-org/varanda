@@ -44,6 +44,45 @@ const API_ERRORS = {
   defasado: 'a lista mudou, recarregue o painel e tente de novo'
 }
 
+// The AI triage (apps/cli/lib/account/ai) explains every abstention, and an
+// exact-match suggestion, with one of these tokens. Only these fixed
+// Portuguese labels are ever shown; an unknown token falls back to the
+// generic one and is never echoed.
+const AI_REASONS = {
+  frio: 'ainda há poucas decisões para comparar',
+  'sem-exemplo': 'nenhum caso decidido parecido',
+  margem: 'casos parecidos com decisões diferentes',
+  divergente: 'os casos mais parecidos discordam entre si',
+  conta: 'denúncia de conta, não de publicação',
+  ilegal: 'conteúdo possivelmente ilegal pede uma pessoa',
+  contexto: 'depende de contexto',
+  midia: 'a publicação tem fotos, que a IA não vê',
+  citacao: 'a publicação cita outra',
+  recurso: 'há um pedido de revisão',
+  truncado: 'a publicação foi cortada para a leitura',
+  curto: 'texto curto demais para comparar',
+  'sem-vetor': 'a publicação não pôde ser comparada',
+  'teto-bloquear': 'limite de bloqueios automáticos atingido',
+  'teto-descartar': 'limite de descartes automáticos atingido',
+  'ja-bloqueado': 'a conta já está bloqueada',
+  'ja-decidida': 'a denúncia já foi decidida',
+  sombra: 'modo de observação: a IA só registra, não decide',
+  erro: 'erro na triagem',
+  timeout: 'a triagem demorou demais',
+  ausente: 'a publicação não foi encontrada no semeador',
+  recusado: 'o semeador recusou a leitura',
+  certificado: 'a publicação não pôde ser conferida',
+  config: 'a triagem não está configurada',
+  'humano-revisou': 'esta conta tem uma mudança pendente ou uma pessoa já desfez um bloqueio dela',
+  motivo: 'a IA não decide sozinha este motivo de denúncia',
+  modelo: 'o modelo da IA mudou; a triagem está parada',
+  'falha-ia': 'a IA falhou ao ler a publicação; nova tentativa mais tarde',
+  lotado: 'a lista de bloqueio está cheia',
+  exato: 'igual a um caso já decidido'
+}
+const AI_FALLBACK = 'sem precedente suficiente'
+const VERIFIED_MAX = 1000
+
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const NOTE_MAX = 280
@@ -52,7 +91,13 @@ const TEXT = {
   title: 'Moderação',
   login: 'Entrar com Google',
   logout: 'Sair',
-  quoteLabel: 'Texto enviado por quem denunciou, não conferido. O servidor não abre o diário.',
+  quoteLabel: 'Texto enviado por quem denunciou, não conferido.',
+  verifiedLabel: 'Publicação lida no semeador',
+  verifiedMedia: 'A publicação tem fotos; a IA não vê imagens.',
+  verifiedQuote: 'A publicação cita outra; confira no app.',
+  aiSuggest: 'Sugestão da IA:',
+  aiAbstain: 'A IA não sugeriu nada:',
+  byAi: 'pedido pela IA',
   commentLabel: 'Comentário de quem denunciou',
   noteLabel: 'motivo da decisão (opcional)',
   blockWarning: 'O bloqueio vale para a conta inteira, incluindo suas publicações.',
@@ -109,6 +154,55 @@ function who (member, username) {
   return typeof username === 'string' && username !== '' ? '@' + username : shortKey(member)
 }
 
+function aiReasonLabel (motivo) {
+  return has(AI_REASONS, motivo) ? AI_REASONS[motivo] : AI_FALLBACK
+}
+
+// A cosine similarity as '0,93': a comma and two decimals, never a
+// percentage (it is not a probability). '' for anything out of [-1, 1].
+function formatSimilarity (v) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < -1 || v > 1) return ''
+  return v.toFixed(2).replace('.', ',')
+}
+
+// report.ia -> { sugestao, semelhanca, motivo } or null. Anything that is
+// not the documented shape is ignored (an old server sends no field at all).
+function aiOf (ia) {
+  if (ia === null || typeof ia !== 'object' || Array.isArray(ia)) return null
+  return {
+    sugestao: ia.sugestao === 'bloquear' || ia.sugestao === 'descartar' ? ia.sugestao : null,
+    semelhanca: formatSimilarity(ia.semelhanca),
+    motivo: typeof ia.motivo === 'string' ? ia.motivo : '',
+    sombra: ia.modo === 'sombra'
+  }
+}
+
+// The one fixed line an open card shows for report.ia.
+function aiLine (ai) {
+  if (ai.sugestao === null) return TEXT.aiAbstain + ' ' + aiReasonLabel(ai.motivo)
+  return TEXT.aiSuggest + ' ' + ai.sugestao +
+    (ai.semelhanca !== '' ? ' (semelhança ' + ai.semelhanca + ')' : '') +
+    (ai.motivo === 'exato' ? ' · ' + AI_REASONS.exato : '') +
+    (ai.sombra || ai.motivo === 'sombra' ? ' · ' + AI_REASONS.sombra : '')
+}
+
+// report.publicacao: the post text the server read from the seeder for the
+// AI. Used only when it is a plain object with a string texto of at most
+// VERIFIED_MAX code points and two boolean flags; anything else -> null.
+function verifiedOf (p) {
+  if (p === null || typeof p !== 'object' || Object.getPrototypeOf(p) !== Object.prototype) return null
+  if (typeof p.texto !== 'string' || Array.from(p.texto).length > VERIFIED_MAX) return null
+  if (typeof p.midia !== 'boolean' || typeof p.citacao !== 'boolean') return null
+  return { texto: p.texto, midia: p.midia, citacao: p.citacao }
+}
+
+// report.actor: who decided. A decided report from an older server has no
+// field: it was a person.
+function actorOf (r) {
+  if (r.actor === 'ia' || r.actor === 'pessoa') return r.actor
+  return str(r.status) !== 'aberta' ? 'pessoa' : null
+}
+
 // HTTP status -> what the panel does next.
 function nextAction (status) {
   if (status === 401) return 'login'
@@ -135,7 +229,10 @@ function reportRow (r) {
     reported: { ...reported, linked: has(r.reported, 'linked') ? r.reported.linked !== false : true },
     status: str(r.status),
     decidedAt: str(r.decidedAt),
-    note: str(r.note)
+    note: str(r.note),
+    actor: actorOf(r),
+    ai: has(r, 'ia') ? aiOf(r.ia) : null,
+    verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null
   }
 }
 
@@ -174,7 +271,8 @@ function buildState ({ me, open, decided, blocked } = {}) {
       member: c.member,
       username: str(c.username),
       at: str(c.at),
-      claimed: has(c, 'claimedAt') && typeof c.claimedAt === 'string' && c.claimedAt !== ''
+      claimed: has(c, 'claimedAt') && typeof c.claimedAt === 'string' && c.claimedAt !== '',
+      byAi: has(c, 'byAi') && c.byAi === true
     })
   }
   const listed = new Set(list.map((b) => b.member))
@@ -240,6 +338,18 @@ function createPanel (env) {
 
   function untrusted (tag, text) {
     return h(tag, { className: 'untrusted', dir: 'auto', text })
+  }
+
+  // The post as the seeder holds it (amendment 1), next to the reporter's
+  // unverified quote; nothing when the server did not read it.
+  function verifiedBlock (v) {
+    if (v === null) return null
+    return h('div', { className: 'verified' },
+      h('p', { className: 'label', text: TEXT.verifiedLabel }),
+      untrusted('blockquote', v.texto),
+      v.midia ? h('p', { className: 'ai', text: TEXT.verifiedMedia }) : null,
+      v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null
+    )
   }
 
   function mount (...nodes) {
@@ -409,6 +519,8 @@ function createPanel (env) {
         h('h2', { text: reasonLabel(r.reason) }),
         h('p', { className: 'meta', text: formatDate(r.at) + ' · ' + (r.kind === 'account' ? 'conta' : 'publicação' + (r.seq !== null ? ' nº ' + r.seq : '')) }),
         h('p', { text: 'denunciada: ' + target }),
+        r.ai !== null ? h('p', { className: 'ai', text: aiLine(r.ai) }) : null,
+        verifiedBlock(r.verified),
         r.quote !== '' ? h('p', { className: 'label', text: TEXT.quoteLabel }) : null,
         r.quote !== '' ? untrusted('blockquote', r.quote) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
@@ -434,6 +546,7 @@ function createPanel (env) {
         : n.blocked ? 'efeito: fica bloqueada' : 'efeito: fica desbloqueada'
       const changes = n.changes.map((c) => h('div', { className: 'change' },
         h('p', { text: (c.op === 'block' ? 'bloquear' : 'desbloquear') + ' · ' + formatDate(c.at) }),
+        c.byAi ? h('p', { className: 'ai', text: TEXT.byAi }) : null,
         c.claimed ? h('p', { className: 'waiting', text: TEXT.claimed }) : null,
         button('cancelar', () => mutate(
           c.claimed ? 'Cancelar? ' + TEXT.cancelClaimed + '.' : 'Cancelar esta mudança?',
@@ -479,8 +592,9 @@ function createPanel (env) {
     if (reports.length === 0) return h('p', { text: TEXT.noDecided })
     const cards = reports.map((r) => h('div', { className: 'card' },
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
-      h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + (r.kind === 'account' ? 'conta' : 'publicação') }),
+      h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + (r.kind === 'account' ? 'conta' : 'publicação') + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
+      verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       r.note !== '' ? untrusted('p', r.note) : null
     ))
@@ -528,7 +642,7 @@ function createPanel (env) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { reasonLabel, formatDate, buildState, nextAction, shortKey, who, createPanel, REASON_LABELS, LOGIN_ERRORS, TEXT }
+  module.exports = { reasonLabel, aiReasonLabel, formatSimilarity, aiLine, formatDate, buildState, nextAction, shortKey, who, createPanel, REASON_LABELS, LOGIN_ERRORS, AI_REASONS, TEXT }
 } else {
   createPanel({
     document,

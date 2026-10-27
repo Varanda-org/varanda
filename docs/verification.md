@@ -925,7 +925,7 @@ Auditors: Claude (opus; fable was out of credits) and GPT (gpt-6-astra, max); Gr
 ### Threat limits
 
 - Whoever serves the PWA can change the report sheet (what it shows and what it signs); an XSS on the origin can call `report.sign` while the passkey is unlocked and report any account on the member's behalf, within the caps.
-- The report signature proves the web key only: that the reporter attested this text and this quote to the account service. The quote is reporter-supplied and unverified, because the account service cannot read the seeder's RocksDB (`docs/protocol.md` section 1); the moderator checks the diary separately. A modified client can flood the service within the caps (20 reports per key per 24 h; a report needs a Google link, which costs one Google account per key).
+- The report signature proves the web key only: that the reporter attested this text and this quote to the account service. The quote is reporter-supplied and is never verified by the report itself. The account service does not open the seeder's RocksDB (`docs/protocol.md` section 1). With the triage on (`VARANDA_AI`), it reads block 0 and the reported block from the local seeder over `GET /moderation-post/<D>/<seq>` and re-checks them (section 21); without the triage, the moderator checks the diary separately. A modified client can flood the service within the caps (20 reports per key per 24 h; a report needs a Google link, which costs one Google account per key).
 - Reports come only from the hosted web app; the native app and the CLI cannot sign one (the sheet says so), and a `varanda-serve` page is not hosted.
 - A stolen moderator Google login (or a compromised account server) can queue decisions and make a `--yes` cron publish up to 100 BLOCKS per run, but cannot get an unblock published without the operator's review at a terminal. Side effect: under a `--yes` cron, a block the panel cancelled after a failed publish is republished until someone reviews at a terminal.
 - A stolen account server can read reports, the directory and all e-mails, but cannot forge a snapshot (the moderator key is not there) nor make `mod apply` sign anything beyond the changes it pulled, applied over the operator's own local list and subject to the review above.
@@ -1351,3 +1351,49 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+
+## 21. Triagem de denúncias com IA (PR feat/ai-report-triage, 2026-10-27)
+
+### O que mudou
+
+- O serviço de conta, com a triagem ligada, lê o bloco 0 e o bloco denunciado no semeador local, reconfere os dois e compara o texto verificado com precedentes humanos. Decide sozinha só com folga; senão a denúncia fica `aberta`. Roda no servidor: um veredito calculado no aparelho poderia ser forjado. Um bloqueio da IA fica pendente até o `mod apply` do operador. A chave secreta da moderação não vai para o servidor. O trecho citado da denúncia continua sem ser conferido pela própria denúncia.
+- Modelo `Xenova/paraphrase-multilingual-MiniLM-L12-v2` (exportação ONNX de `paraphrase-multilingual-MiniLM-L12-v2`: cerca de 118 milhões de parâmetros, vetores de 384 dimensões, português incluído, até 128 wordpieces), quantizado q8, revisão `2c4055b12046f11709e9df2c122e59ffbdc2f900`, num processo filho com ambiente vazio e saída descartada (`apps/cli/lib/account/ai/embed-child.js`, IPC; prazos de 60 s para carregar e 10 s por texto, recriação no máximo a cada 5 s), com `@huggingface/transformers` 3.8.1 e o binário de CPU do `onnxruntime-node` 1.21.0. Os pesos ficam no volume `account-data` (`/data/ai-model` no contêiner). O operador baixa uma vez com `node apps/cli/scripts/fetch-ai-model.js --dir <diretório fora do repositório>`, que confere o sha256 dos cinco arquivos. Em execução não há download nem texto para API externa. Acima de 128 wordpieces a IA não decide. `npm ci --ignore-scripts` em `.github/workflows/ci.yml`, `.github/workflows/deploy.yml` e `deploy/seeder/build-web.sh`; a imagem Docker instala com `--ignore-scripts`. Uma checagem com o modelo real: cosseno 0,86 entre duas paráfrases em português e 0,09 contra uma frase sem relação.
+- `VARANDA_AI` vazio ou ausente desliga; `sombra` só sugere no painel; `1` decide. Sem o modelo (`sem-modelo`) o serviço sobe sem triagem e a checagem de saúde continua verde. Regra, aprendizado, painel e operador: `docs/design.md` (Moderação, item Triagem automática) e `docs/protocol.md` (rota e pull). `account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`.
+- Arquivos: `apps/cli/lib/account/ai/triage.js`, `exemplar-store.js`, `ledger.js`, `embedder.js`, `read-post.js`, `worker.js`; `apps/cli/scripts/fetch-ai-model.js`; `packages/core/lib/seeder.js` (`postBlock`); `apps/cli/lib/seed-ws.js` (a rota); `apps/cli/lib/cli.js` e `apps/cli/lib/commands/seed.js` (o token); `apps/cli/lib/account/moderation-store.js` (`actor`, `humanReversed`); `apps/cli/lib/mod-apply.js` (a marca `(ia)`); `apps/cli/lib/account/mod-routes.js` (ganchos e projeção); `apps/cli/lib/commands/account.js` (ambiente, subida e `status`); `apps/cli/lib/account/panel/app.js`; `deploy/seeder/compose.web.yaml`, `deploy/seeder/build-web.sh` e os exemplos de ambiente do semeador; `npm ci --ignore-scripts` no CI.
+
+### Testes automatizados
+
+Cobertura no repositório:
+
+- `apps/cli/test/ai-triage.test.js`: a regra pura (limiares, partida a frio, motivos, texto idêntico).
+- `apps/cli/test/ai-exemplar-store.test.js`: `exemplars.json` (validação total, teto, modelo).
+- `apps/cli/test/ai-ledger.test.js`: `triage.json` (marcas, cache, arquivo corrompido posto de lado).
+- `apps/cli/test/ai-embedder.test.js`: o embedder com tokenizer e modelo injetados; o modelo real só quando `VARANDA_AI_MODEL_DIR` aponta para um diretório do `fetch-ai-model.js` (não definido no CI).
+- `apps/cli/test/ai-post-route.test.js`: `GET /moderation-post/<D>/<seq>` e `Seeder#postBlock`.
+- `apps/cli/test/ai-read-post.test.js`: a reconferência no serviço de conta.
+- `apps/cli/test/ai-worker.test.js`: modos, tetos, espera crescente, aprendizado.
+- `apps/cli/test/ai-hooks.test.js`: ganchos em `mod-routes.js`; a projeção do painel e do pull traz `actor` e não traz e-mail.
+- `apps/cli/test/ai-e2e.test.js`: o laço em loopback, da denúncia assinada ao bloqueio no semeador, com embedder falso no lugar do MiniLM.
+- Estendidos: `apps/cli/test/moderation-store.test.js` (`humanReversed`), `mod-apply.test.js` (a marca `(ia)` e a recusa do formato antigo), `account-mod.test.js`, `account.test.js` (ambiente, subida, `status`), `panel.test.js`, `deploy.test.js`, `caddyfile.test.js` (a rota não entra no Caddy) e `cli.test.js`.
+
+### Limites
+
+- A autenticidade do texto depende do semeador local mais a rota com token. O JSON não é uma prova portátil. A reconferência no serviço de conta pega resposta malformada, tipo errado, fork errado, certificado ruim e emissor revogado. Não pega um semeador malicioso.
+- Leituras além de 2000 perdem o texto em cache: uma decisão humana depois disso pode não virar precedente.
+- O registro de eventos tem teto de 10000. Um desbloqueio pelo painel de uma chave bloqueada fora do painel pode ser esquecido depois que o evento sai do registro.
+- Cancelar um desbloqueio também conta como "uma pessoa já mexeu nesta conta". A IA só se abstém.
+- Os limiares (0,92, 0,90, 0,12, 20 precedentes de cada lado, 5 diários) são iniciais e devem ser revistos com o Histórico. A checagem com o modelo real (cosseno 0,86 entre paráfrases) indica que a IA age sobretudo em textos quase idênticos.
+- A IA não vê imagens. A comparação com listas de hashes de mídia ilegal (issue #79) continua não existindo.
+- `exemplars.json` inválido (uma linha basta) fica indisponível e nunca é regravado. `triage.json` corrompido é renomeado para `triage.json.corrupt-<ms>` e recriado.
+
+### Verificação humana
+
+- [ ] Baixar o modelo com `node apps/cli/scripts/fetch-ai-model.js --dir <diretório fora do repositório>`.
+- [ ] Gerar o token (`openssl rand -hex 32`) e pôr o mesmo `VARANDA_TRIAGE_TOKEN` no semeador e no serviço de conta.
+- [ ] Subir com `VARANDA_AI=sombra` e conferir as sugestões no painel (`/account/mod/`).
+- [ ] Passar a `VARANDA_AI=1`.
+- [ ] Uma denúncia de spam quase idêntica a 5 bloqueios humanos de 5 diários, com 20 precedentes de cada lado, fica pendente com "pedido pela IA".
+- [ ] `mod apply --yes` (o agendamento) NÃO assina o bloqueio da IA: mostra `bloquear <hex> (ia) — aguarda revisão no terminal` e a mudança continua em Pendentes; um `mod apply` num terminal mostra `(ia)`, pede confirmação e só então publica.
+- [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
+- [ ] O log do serviço não tem texto de publicação.
+- [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.

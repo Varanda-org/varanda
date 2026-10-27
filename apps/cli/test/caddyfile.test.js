@@ -46,6 +46,13 @@ test('Caddyfile: existing blocks kept', (t) => {
   t.ok(json.some((l) => l.trim() === 'header Cache-Control "no-store"'), '/varanda.json is no-store')
 })
 
+// The AI triage route on the seeder is loopback-only (the account service
+// calls it directly on 127.0.0.1): Caddy never exposes it.
+test('Caddyfile: the triage route is not exposed', (t) => {
+  t.absent(lines.some((l) => /^\s*handle\s+\/moderation-post/.test(l)), 'no handle /moderation-post')
+  t.is(count('moderation-post'), 0, 'moderation-post never mentioned outside comments')
+})
+
 test('Caddyfile: cache headers', (t) => {
   // No long-lived cache anywhere: the deploy replaces www in place while
   // Caddy serves, so a torn file must never be pinned by the browser.
