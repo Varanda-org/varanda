@@ -186,8 +186,12 @@ export function acceptInvite (rec, recipient, now) {
 // The shell's decision table, evaluated in order. 'accept' records consent
 // only for a card the visitor saw in this load (cardShown, not resumed) and a
 // known key; 'follow' only fires for the key that accepted, so another
-// account unlocking in the same tab just gets the profile opened.
-export function inviteAction ({ invite, hosted, statusKnown, locked, resumed, cardShown, unlockedKey, ownKey, atTabs } = {}) {
+// account unlocking in the same tab just gets the profile opened. It also
+// needs that consent to have been given in this page load (acceptedHere): an
+// accepted record found after a reload (the Google return) could have been
+// written by any same-origin writer of tab storage, so it only 'confirm's —
+// the profile opens and the visitor taps Seguir.
+export function inviteAction ({ invite, hosted, statusKnown, locked, resumed, cardShown, unlockedKey, ownKey, atTabs, acceptedHere } = {}) {
   if (!invite) return 'none'
   if (!statusKnown) return 'wait'
   if (hosted !== true) return 'drop'
@@ -198,7 +202,9 @@ export function inviteAction ({ invite, hosted, statusKnown, locked, resumed, ca
   if (fromCard && !isAuthorKey(unlockedKey)) return 'wait'
   if (fromCard && !(invite.state === 'accepted' && invite.recipient === unlockedKey)) return 'accept'
   if (atTabs !== true) return 'wait'
-  if (invite.state === 'accepted' && isAuthorKey(ownKey) && invite.recipient === ownKey) return 'follow'
+  if (invite.state === 'accepted' && isAuthorKey(ownKey) && invite.recipient === ownKey) {
+    return acceptedHere === true ? 'follow' : 'confirm'
+  }
   return 'open'
 }
 
@@ -225,4 +231,10 @@ export function followedText ({ username, changed } = {}) {
   const name = isUsername(username)
   const who = name ? '@' + name : 'esta pessoa'
   return changed ? 'Agora você segue ' + who + '.' : 'Você já segue ' + who + '.'
+}
+
+// 'confirm': the profile is open and the follow is one tap away.
+export function confirmText ({ username } = {}) {
+  const name = isUsername(username)
+  return 'Para seguir ' + (name ? '@' + name : 'esta pessoa') + ', toque em Seguir.'
 }

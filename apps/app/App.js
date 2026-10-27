@@ -15,8 +15,10 @@
 // web, the Android Back button (BackHandler); an open sheet closes first.
 // A profile link (/@ana, /m/<key>; hosted web only, src/profileLink.js) is
 // captured at load: Entrar shows the invite, a passkey ceremony from that card
-// records consent, and once the newcomer reaches the tabs the inviter is
-// followed (a visitor already signed in only gets the profile opened).
+// records consent, and once the tabs show the inviter is followed when that
+// consent was given in this page load; after a reload (the Google return) the
+// profile opens for one tap on Seguir, and a visitor already signed in only
+// gets the profile opened.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -30,7 +32,7 @@ import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
+import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
@@ -148,6 +150,11 @@ function Member () {
   // True once the invite card was on screen in this page load: only then can
   // a ceremony record consent.
   const [cardShown, setCardShown] = useState(false)
+  // True once this page load recorded that consent (the 'accept' step): only
+  // then is the follow automatic. An accepted record found after a reload
+  // (the Google return) could have been planted in tab storage, so it opens
+  // the profile for one tap on Seguir instead.
+  const [acceptedHere, setAcceptedHere] = useState(false)
   const inviteBusy = useRef(false)
   const offlineShown = useRef(false)
   const [inviteTick, setInviteTick] = useState(0)
@@ -452,7 +459,8 @@ function Member () {
     cardShown,
     unlockedKey: !locked && pkStatus ? pkStatus.publicKey : null,
     ownKey,
-    atTabs
+    atTabs,
+    acceptedHere
   })
   actionRef.current = action
   // The record is untrusted and may have changed in another render: every
@@ -492,9 +500,10 @@ function Member () {
       else if (!saveInvite(next)) inviteMemoryOnly.current = true
       inviteRef.current = next
       setInvite(next)
+      if (next !== null) setAcceptedHere(true)
       return
     }
-    if (action !== 'follow' && action !== 'open') return
+    if (action !== 'follow' && action !== 'confirm' && action !== 'open') return
     // One attempt at a time; a wake (online, retry timer) that arrives
     // meanwhile runs again once this attempt ends.
     if (inviteBusy.current) {
@@ -553,9 +562,10 @@ function Member () {
         openMember(key)
         return
       }
-      // The only follow.add of an invite: consent recorded for exactly this
-      // key. 'open' (a visitor already signed in) never follows.
-      if (action === 'follow' && rec.state === 'accepted' && rec.recipient === ownKey) {
+      // The only follow.add of an invite: consent recorded in this page load
+      // for exactly this key. 'open' (a visitor already signed in) and
+      // 'confirm' (an accepted record found after a reload) never follow.
+      if (action === 'follow' && acceptedHere && rec.state === 'accepted' && rec.recipient === ownKey) {
         try {
           const res = await node.request('follow.add', { key })
           setVersion((v) => v + 1)
@@ -571,6 +581,8 @@ function Member () {
         if (gen !== generationRef.current) return
       }
       openMember(key)
+      // The newcomer back from Google: the profile is open, Seguir is one tap.
+      if (action === 'confirm') showToast(confirmText({ username: rec.username }))
     }
     attempt().catch(() => {}).finally(() => {
       inviteBusy.current = false

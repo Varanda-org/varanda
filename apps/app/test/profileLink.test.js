@@ -283,8 +283,19 @@ test('inviteAction decision table', async (t) => {
 
   t.is(at({ cardShown: true, unlockedKey: A }), 'accept')
   t.is(at({ invite: newRec({ state: 'accepted', recipient: B }), cardShown: true, unlockedKey: A }), 'accept')
-  t.is(at({ invite: accA, cardShown: true, unlockedKey: A, ownKey: A }), 'follow')
+  t.is(at({ invite: accA, cardShown: true, unlockedKey: A, ownKey: A, acceptedHere: true }), 'follow')
+  t.is(at({ invite: accA, cardShown: true, unlockedKey: A, ownKey: A }), 'confirm')
   t.is(at({ invite: accA, cardShown: true, unlockedKey: A, ownKey: A, atTabs: false }), 'wait')
+
+  // Without consent given in this page load, never 'follow' (an accepted
+  // record after a reload may be planted): at most 'confirm'.
+  for (const resumed of [true, false]) {
+    for (const cardShown of [true, false]) {
+      const r = at({ invite: accA, resumed, cardShown, unlockedKey: A, ownKey: A })
+      t.ok(r !== 'follow', 'not accepted here -> ' + r)
+    }
+  }
+  t.is(at({ invite: accA, ownKey: A, acceptedHere: 'yes' }), 'confirm')
 
   // cardShown false: never accept.
   for (const unlockedKey of [null, A, B]) {
@@ -302,9 +313,9 @@ test('inviteAction decision table', async (t) => {
   }
   t.is(at({ resumed: true, cardShown: true, unlockedKey: A, ownKey: A }), 'open')
 
-  // resumed + accepted for the same key + atTabs -> follow.
-  t.is(at({ invite: accA, resumed: true, cardShown: true, unlockedKey: A, ownKey: A }), 'follow')
-  t.is(at({ invite: accA, resumed: true, ownKey: A }), 'follow')
+  // resumed + accepted for the same key + atTabs (the Google return) -> confirm.
+  t.is(at({ invite: accA, resumed: true, cardShown: true, unlockedKey: A, ownKey: A }), 'confirm')
+  t.is(at({ invite: accA, resumed: true, ownKey: A }), 'confirm')
   t.is(at({ invite: accA, resumed: true, ownKey: A, atTabs: false }), 'wait')
 
   // Accepted for A, signed in as B -> open.
@@ -343,6 +354,9 @@ test('pt-BR copy', async (t) => {
   t.is(m.followedText({ username: 'ana', changed: false }), 'Você já segue @ana.')
   t.is(m.followedText({ username: null, changed: true }), 'Agora você segue esta pessoa.')
   t.is(m.followedText({ username: null, changed: false }), 'Você já segue esta pessoa.')
+  t.is(m.confirmText({ username: 'ana' }), 'Para seguir @ana, toque em Seguir.')
+  t.is(m.confirmText({ username: null }), 'Para seguir esta pessoa, toque em Seguir.')
+  t.is(m.confirmText({ username: 'Bad Name' }), 'Para seguir esta pessoa, toque em Seguir.')
   t.is(m.NOT_FOUND_TEXT, 'Não encontramos esse @nome.')
   t.is(m.OFFLINE_TEXT, 'Sem conexão: o perfil abre quando a conexão voltar.')
   t.is(m.OPEN_IN_BROWSER_TEXT, 'Para entrar e seguir, abra este link no Chrome ou no Safari.')
