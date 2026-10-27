@@ -1786,3 +1786,63 @@ Cobertura no repositório:
 - [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
 - [ ] O log do serviço não tem texto de publicação.
 - [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.
+
+## 28. Termos de Uso e Política de Privacidade (PR feat/terms-privacy, 2026-10-27)
+
+### O que mudou
+
+- Antes de Entrar (web hospedada) ou Conectar (nativo), o app mostra os Termos de Uso e a Política de Privacidade (versão 1, `apps/app/src/legal.js`) e só segue depois do aceite. O aceite é por aparelho e por membro: pergunta de novo a cada conta nova e a cada versão nova. Na web hospedada, o portão aparece antes de Entrar sempre que a conta está bloqueada e ainda não houve aceite nesta carga da página (um toque por Entrar depois de Sair ou de a sessão expirar), porque o aparelho não sabe quem vai entrar; uma sessão retomada de um membro que já está no registro do aparelho passa direto. No nativo e no `varanda-serve`, passa enquanto não existe identidade e pergunta quando aparece uma identidade que não está no registro. A decisão é a função pura `termsDecision` (`apps/app/src/terms.js`, com `hosted` e `identityKnown`); o aceite dado na página fica preso à próxima identidade que desbloqueia nessa carga (limite de navegador compartilhado).
+- Declaração assinada `varanda-terms-v1` (`packages/core/lib/terms.js`): `'varanda-terms-v1'`, nonce, membro, associação e versão, unidos por LF, sem LF final e sem data. A data é a do serviço de conta. Assinada pela chave do diário do membro; nenhuma outra assinatura do protocolo usa o prefixo.
+- RPC `terms.sign` `{ nonce, version }` -> `{ signature }` (`docs/rpc.md` 5.29): só no nó do navegador; os nós nativo, `varanda-serve` e CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- Serviço de conta (`apps/cli/lib/account/server.js`): `POST /account/terms/start` `{ member, version }` -> `{ nonce }` e `POST /account/terms/finish` `{ member, nonce, signature }` -> `{ version, acceptedAt }`. Recusas: `pedido-invalido`, `nao-vinculado`, `expirado`, `assinatura-invalida`, `indisponivel` e `limite`. Só membro com vínculo Google aceita no servidor; o nonce vale 10 minutos, uma vez, no máximo 1000 pendentes.
+- `terms.json` (`apps/cli/lib/account/terms-store.js`, volume `account-data`, modo 0600): `{ v: 1, members: { <hex64>: [{ version, acceptedAt, nonce, signature }] } }`. Cada aceite relê e une o arquivo; o teto por membro é 32 (guarda as MAIORES versões); `MAX_MEMBERS` (100000) limita só admissões novas; um membro com lista vazia torna o arquivo inválido (indisponível, nunca regravado). Uma recusa da guarda (`lock.owned()`) recusa só aquele pedido; a indisponibilidade permanente só vem de `fail()` quando o batimento confirma a perda do bloqueio, ou de um arquivo malformado. Um reparo (`heal()`) roda a cada 10 s no `serve` (`startTermsHeal`, registro `{ event: 'terms', reason: 'reparado' }`) e uma vez numa parada limpa.
+- Aparelho: um registro por aparelho (chave `varanda-terms` no `localStorage` da web, arquivo `varanda-terms.json` no nativo): `{ v: 1, version, members: { <hex64>: { acceptedAt, synced } } }`, no máximo 16 membros, lido sempre como não confiável (`termsRecordOf`); um registro recusado significa "perguntar de novo".
+- Sincronização com o servidor: no máximo 3 tentativas por membro e versão em cada carga da página (falhas de verdade), rearmadas ao voltar a rede, depois de mudar a geração da passkey e depois de um vínculo confirmado em Ajustes › Conta; `nao-vinculado` vale como "só neste aparelho".
+- Ajustes › Termos e privacidade mostra os dois documentos em todos os modos e o estado do aceite (registrado, pendente, só neste aparelho). Recomeçar tira aquele membro do registro do aparelho; Sair não tira.
+- `account export` ganha o campo `terms` por membro (`{ version, acceptedAt }`, nunca a assinatura); `account status` ganha a linha `aceites dos termos: <n>` (ou `aceites dos termos: indisponível (terms.json inválido)`).
+- A frase do passo da conta (`LINK_TEXT` em `Identidade.js`) agora aponta para a Política de Privacidade e não diz mais "nada mais é coletado". Contato nos textos: issues do GitHub (sem dados pessoais) e o formulário de aviso de segurança só para segurança.
+- Os textos v1 têm o hash sha256 fixado em `apps/app/test/legal.test.js`: qualquer mudança de texto obriga a subir a versão (`LEGAL_VERSION` e `TERMS_VERSION` em `packages/core/lib/terms.js`, que `apps/app/test/terms-version.test.js` mantém iguais).
+
+### Testes automatizados
+
+Cobertura no repositório:
+
+- `packages/core/test/terms.test.js`: a declaração (bytes exatos, campos, verificação, separação de prefixo).
+- `packages/rpc/test/methods.test.js`: o esquema de `terms.sign` (`nonce`, `version`, nada mais).
+- `packages/core/test/session.test.js`: o nó nativo responde `USAGE`.
+- `packages/web-member/test/session.test.js`: `terms.sign` assina com o membro e a associação do nó; recusa sem identidade, bloqueado e parâmetros a mais.
+- `apps/cli/test/terms-store.test.js`: `terms.json` (validação, união, teto por membro, reparo, guarda, modo 0600).
+- `apps/cli/test/account-terms.test.js`: as duas rotas e todos os motivos de recusa.
+- `apps/cli/test/account.test.js` e `apps/cli/test/account-e2e.test.js`: `export`, a linha de `status` e o ciclo completo.
+- `apps/app/test/terms.test.js`: `termsDecision`, o registro do aparelho e a fila de tentativas.
+- `apps/app/test/legal.test.js` e `apps/app/test/terms-version.test.js`: os textos fixados por hash e a versão igual à do núcleo.
+- `apps/app/test/account.test.js`: as chamadas do app às rotas.
+- Executados na CI local, em ordem: `npm run lint`, `npm test`, `npm run demo` (resultado na descrição do PR).
+
+### Verificação ao vivo
+
+Ainda não feita; marcar na hora de verificar, fora dos testes acima.
+
+- [ ] Na web hospedada, sem sessão: o portão aparece antes de Entrar, com os dois documentos abrindo no lugar; "Li e aceito os Termos de Uso e a Política de Privacidade" libera Entrar; sem tocar nele não se entra.
+- [ ] Sair e Entrar de novo: pergunta de novo (um toque); recarregar com a sessão retomada de um membro já aceito não pergunta.
+- [ ] Entrar com uma conta nova no mesmo aparelho: pergunta de novo.
+- [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
+- [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
+- [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para 2 num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Recomeçar tira o membro do registro; Sair não.
+- [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
+
+### Limites
+
+- O aceite é por aparelho e por membro. Membros nativos e membros sem vínculo Google ficam só no aparelho.
+- Armazenamento recusado: o aceite vale só para a carga e é pedido a cada carga.
+- A sincronização com o servidor tenta até 3 vezes por carga da página; depois, nas cargas seguintes.
+- Um `terms.json` restaurado de uma cópia mais antiga perde aceites, e aparelhos que já sincronizaram não reenviam.
+- Janela que sobra: um titular que cai dentro de um intervalo de reparo (10 s) depois do rename de um escritor atrasado perde os aceites que confirmou nesse intervalo.
+- O nó pode subir, retomar a sessão e fazer a sincronização de recuperação do certificado antes do aceite; a sincronização contínua, a fila de saída, o convite e as chamadas à conta esperam.
+- Subir a versão substitui o registro do aparelho (aceites antigos ainda não sincronizados se perdem).
+- Textos v1 pendentes de revisão jurídica; o encarregado não está nomeado; ainda não há URL pública dos textos.
+- O portão pertence ao app oficial: um cliente modificado ou outro cliente do protocolo não passa por ele, e o aceite no servidor é um registro, não uma barreira.
+- Na web hospedada, antes de o nó conectar o modo ainda não é "hospedado": quem tem o registro do aparelho em dia pode ver a tela de erro de conexão antes do portão. Nada sai dessa tela; o portão aparece assim que o nó conecta.
+- Num navegador compartilhado, o aceite dado antes de Entrar vale para a próxima conta que entrar naquela carga da página.

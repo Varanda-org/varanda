@@ -142,3 +142,37 @@ test('error tokens become coded errors; bad bodies are ignored', async (t) => {
   stub(t, () => { throw new Error('rede') })
   try { await a.accountStatus(M); t.fail() } catch (e) { t.is(e.message, 'serviço indisponível') }
 })
+
+test('termsStart/termsFinish: same-origin no-store POSTs with exactly those keys', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1', version: 2, acceptedAt: '2026-10-27T12:00:00.000Z' }))
+  t.alike(await a.termsStart({ member: M, version: 2 }), { nonce: 'n1' })
+  t.alike(await a.termsFinish({ member: M, nonce: 'n1', signature: 'ff' }), { version: 2, acceptedAt: '2026-10-27T12:00:00.000Z' })
+  t.alike(calls.map(c => c.init.method + ' ' + c.url), ['POST /account/terms/start', 'POST /account/terms/finish'])
+  for (const c of calls) {
+    t.is(c.init.credentials, 'same-origin')
+    t.is(c.init.cache, 'no-store')
+    t.is(c.init.headers['content-type'], 'application/json')
+    t.ok(c.init.signal)
+  }
+  t.alike(JSON.parse(calls[0].init.body), { member: M, version: 2 })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce: 'n1', signature: 'ff' })
+})
+
+test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) => {
+  const a = await load()
+  stub(t, json(403, { error: 'nao-vinculado' }))
+  try { await a.termsStart({ member: M, version: 1 }); t.fail() } catch (e) {
+    t.is(e.code, 'nao-vinculado')
+    t.is(e.message, 'esta conta não tem vínculo com uma conta Google')
+  }
+  try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
+  stub(t, json(200, { nonce: 5 }))
+  try { await a.termsStart({ member: M, version: 1 }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  stub(t, json(200, { version: '1', acceptedAt: '2026-10-27T12:00:00.000Z' }))
+  try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  stub(t, json(200, { version: 1.5, acceptedAt: 'x' }))
+  try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  stub(t, json(200, { version: 1, acceptedAt: null }))
+  try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})

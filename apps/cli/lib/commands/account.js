@@ -10,6 +10,7 @@ const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir } = require('@varanda
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
+const { openTermsStore } = require('../account/terms-store')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -24,7 +25,8 @@ const {
   loadIssuer,
   checkIssuerCert,
   takeLock,
-  lockHeld
+  lockHeld,
+  LOCK_HEARTBEAT_MS
 } = require('../account/server')
 
 // `account`: the Google account-link service (README "Vínculo de conta Google
@@ -224,7 +226,20 @@ function status (dataDir, given) {
   const links = accounts.exportLinks().length
   const moderation = moderationStatus(dataDir, association)
   const triage = triageStatus(dataDir)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, running: lockHeld(dataDir) }
+  const terms = termsCount(dataDir)
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, terms, running: lockHeld(dataDir) }
+}
+
+// The number of members with a recorded acceptance of the terms, or
+// 'indisponivel' when terms.json is not one the store would have written.
+function termsCount (dataDir) {
+  const terms = openTermsStore(dataDir, { readOnly: true })
+  return terms.available() ? terms.count() : 'indisponivel'
+}
+
+function termsLine (count) {
+  if (count === 'indisponivel') return 'aceites dos termos: indisponível (terms.json inválido)'
+  return 'aceites dos termos: ' + count
 }
 
 function triageLine (triage) {
@@ -268,6 +283,7 @@ function statusLines (s) {
     )
   }
   lines.push(triageLine(s.triage))
+  lines.push(termsLine(s.terms))
   lines.push('estado: ' + (s.running ? 'em execução' : 'parado'))
   return lines.join('\n')
 }
@@ -434,10 +450,12 @@ async function serve (flags, env) {
   let lost = false
   let unavailable = false
   let store = null
+  let terms = null
+  let stopHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop)
+      loseLock(store, log, stop, terms)
     }
   })
   let listener = null
@@ -462,6 +480,12 @@ async function serve (flags, env) {
       if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
       throw err
     }
+    // The terms acceptances (terms.json): every write asks the lock again.
+    // An invalid file leaves the routes answering 'indisponivel'; the rest
+    // of the service still runs.
+    terms = openTermsStore(flags.dataDir, { guard: () => lock.owned() })
+    if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
+    stopHeal = startTermsHeal(terms, log)
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -472,7 +496,7 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, triage: triage === null ? null : triage.worker, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, triage: triage === null ? null : triage.worker, terms, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -499,6 +523,10 @@ async function serve (flags, env) {
         new Promise((resolve) => setTimeout(resolve, EMBEDDER_CLOSE_MS).unref())
       ])
     }
+    // The terms file is healed one last time (a stale writer's rename may
+    // have dropped acknowledged entries) while the lock is still held.
+    if (stopHeal !== null) stopHeal()
+    if (terms !== null && terms.available()) await terms.heal()
     // A failed store has nothing it could fold safely (close() would only
     // answer 'indisponivel'), so it is skipped like a lost lock.
     closing = await closeIfOwned(store, lock, lost || unavailable, log)
@@ -519,11 +547,32 @@ function storeUnavailable (log, stop) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops.
-function loseLock (store, log, stop) {
+// stops. The terms store too: its next accept must not write either.
+function loseLock (store, log, stop, terms = null) {
   if (store !== null) store.fail()
+  if (terms !== null) terms.fail()
   log({ event: 'lock', reason: 'perdido' })
   stop()
+}
+
+// A stale writer's rename can replace terms.json after a takeover and drop
+// acceptances this holder acknowledged; nothing else rewrites the file until
+// the next accept. So the holder merge-writes it on the lock heartbeat's
+// interval (terms-store.js heal(): a no-op unless the file lacks something).
+// -> stop(), which clears the interval.
+function startTermsHeal (terms, log, ms = LOCK_HEARTBEAT_MS) {
+  let running = false
+  const timer = setInterval(async () => {
+    if (running) return
+    running = true
+    try {
+      if (await terms.heal()) log({ event: 'terms', reason: 'reparado' })
+    } finally {
+      running = false
+    }
+  }, ms)
+  timer.unref()
+  return () => clearInterval(timer)
 }
 
 // A clean stop folds the journal into a complete v1 directory.json, so the
@@ -570,15 +619,18 @@ async function run (flags) {
   }
 
   // One JSON object per line, for the operator (LGPD access requests):
-  // member, sub, e-mail, username and date; never a signature, certificate
+  // member, sub, e-mail, username and date, plus the member's terms
+  // acceptances ({ version, acceptedAt }); never a signature, certificate
   // or secret. Refused while the service runs (its copy is the live one).
   if (sub === 'export' && subsub === undefined) {
     checkConfig(flags.dataDir, flags.association)
     if (lockHeld(flags.dataDir)) throw new Error('serviço de conta em execução')
     const accounts = openAccountStore(flags.dataDir, { readOnly: true })
     warnRestored(accounts)
+    const terms = openTermsStore(flags.dataDir, { readOnly: true })
+    if (!terms.available()) throw new Error('terms.json inválido')
     for (const link of accounts.exportLinks()) {
-      process.stdout.write(jsonLine(link) + '\n')
+      process.stdout.write(jsonLine({ ...link, terms: terms.list(link.member) }) + '\n')
     }
     return 0
   }
@@ -603,5 +655,6 @@ module.exports = {
   readEnv,
   closeIfOwned,
   loseLock,
+  startTermsHeal,
   storeUnavailable
 }

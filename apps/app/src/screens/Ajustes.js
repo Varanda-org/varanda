@@ -2,16 +2,20 @@
 
 // Ajustes: the cog area, a sheet with a grouped list over sub-screens that
 // render embedded inside the sheet. The main list is for people: Editar
-// perfil, Conta e @nome, Guardar dados neste aparelho, Instalar o app and,
-// apart, Sair. Everything technical sits behind a collapsed 'Avançado' row:
-// Conexão, Sincronização (state, log and the old top-bar chip text),
-// Identidade técnica (public key behind a reveal, association, certificate)
-// and Recomeçar. Rows that only exist on the browser node (passkey) hide when
-// `node.passkey === null`. Sair drops the key derived from the passkey from
-// memory (signOut, or lock on a provider without it) and the shell returns to
-// Entrar. Instalar o app shows an 'Instalar' button that opens the browser's
-// install dialog whenever the browser offers installation, above the text that
-// stays as the fallback.
+// perfil, Conta e @nome, Termos e privacidade, Guardar dados neste aparelho,
+// Instalar o app and, apart, Sair. Everything technical sits behind a
+// collapsed 'Avançado' row: Conexão, Sincronização (state, log and the old
+// top-bar chip text), Identidade técnica (public key behind a reveal,
+// association, certificate) and Recomeçar. Rows that only exist on the
+// browser node (passkey) hide when `node.passkey === null`. Termos e
+// privacidade stays in every mode and shows the record in `termsInfo`. Sair
+// drops the key derived from the passkey from memory (signOut, or lock on a
+// provider without it) and the shell returns to Entrar; it does not touch
+// that record. Recomeçar, once the account is actually gone, calls
+// onTermsReset with the old key so the shell can drop its acceptance too.
+// Instalar o app shows an 'Instalar' button that opens the browser's install
+// dialog whenever the browser offers installation, above the text that stays
+// as the fallback.
 
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -20,6 +24,7 @@ import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
+import { LEGAL_VERSION } from '../legal'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -28,11 +33,13 @@ import Conexao from './Conexao'
 import Identidade from './Identidade'
 import Perfil from './Perfil'
 import Sincronizar from './Sincronizar'
+import Termos from './Termos'
 
 const TITLES = {
   lista: 'Ajustes',
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
+  termos: 'Termos e privacidade',
   instalar: 'Instalar o app',
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
@@ -60,7 +67,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', pending
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -118,6 +125,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
     }
     const r = await reset.run(() => passkey.reset())
     if (r.ok) {
+      // The old key is gone from this device. Sair does not come through here.
+      if (typeof oldKey === 'string' && typeof onTermsReset === 'function') onTermsReset(oldKey)
       setConfirm(null)
       onClose()
     }
@@ -169,6 +178,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
+              <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               {hasPasskey
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
@@ -259,6 +269,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
         </View>
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
+        </View>
+        <View style={shown('termos')}>
+          <Termos
+            version={termsInfo ? termsInfo.version : LEGAL_VERSION}
+            acceptedAt={termsInfo ? termsInfo.acceptedAt : null}
+            saved={termsInfo ? termsInfo.saved : true}
+            syncState={termsInfo ? termsInfo.syncState : null}
+          />
         </View>
         <View style={shown('instalar')}>
           <Page>

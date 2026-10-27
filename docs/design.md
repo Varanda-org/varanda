@@ -226,6 +226,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Denúncias de membros (chave de quem denuncia e de quem é denunciado, publicação, motivo, texto de quem denuncia, trecho citado, data, assinatura) e registro de decisões dos moderadores (e-mail do moderador, decisão, data) | Serviço de conta, no Brasil (`moderation.json`) | Moderação e pedido legal (a base legal ainda precisa de parecer) | Em aberto (issue #38); nada é apagado automaticamente |
 | Precedentes humanos da triagem (texto verificado, motivo, decisão, hash e vetor quantizado; no máximo 4000) | Serviço de conta, no Brasil (`exemplars.json`, modo 0600, volume `account-data`) | Moderação (a base legal ainda precisa de parecer) | Em aberto (issue #38); uma linha inválida torna o arquivo indisponível e ele nunca é regravado |
 | Marcas da triagem e leituras verificadas em cache (no máximo 2000) | Serviço de conta, no Brasil (`triage.json`, modo 0600, volume `account-data`) | Dado derivado da moderação (a base legal ainda precisa de parecer) | Se corrompido, renomeado para `triage.json.corrupt-<ms>` e recriado |
+| Registro de aceite dos Termos de Uso e da Política de Privacidade (versão e data; no serviço de conta também chave do membro, nonce e assinatura) | Aparelho; serviço de conta, no Brasil (`terms.json`, modo 0600, volume `account-data`), só para membros com vínculo Google | Execução de contrato (a confirmar em parecer) | Em aberto (issue #38) |
 | E-mail de recuperação | Guardião, no Brasil | Execução de contrato | Enquanto a conta existir |
 | Token de push | Serviço de push no Brasil; passa por Apple e Google | Execução de contrato | Até a pessoa desligar os avisos |
 | Registros de acesso (IP, data, hora) | Semeadores e serviços | Obrigação legal, se o Art. 15 do Marco Civil se aplicar | 6 meses, se aplicável |
@@ -261,7 +262,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 - [ ] Nomear o encarregado (Art. 41) e publicar o canal de contato
 - [ ] Fazer o relatório de impacto (RIPD, Art. 38): há dado biométrico, menores e grande escala
-- [ ] Política de privacidade em português simples
+- [ ] Política de privacidade em português simples (versão 1 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
 - [ ] Plano de resposta a incidentes, com aviso à ANPD e aos titulares (Art. 48)
 
 ## Moderação e obrigações legais
