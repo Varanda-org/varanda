@@ -405,7 +405,7 @@ test('/index/* is never intercepted', async (t) => {
   w.server = offline
   const A = 'a'.repeat(64)
   for (const p of ['/index/post/' + A + '/1', '/index/post/' + A + '/1/1700000000000.' + 'b'.repeat(64) + '.2',
-    '/index/counts/' + A + ':1,' + 'b'.repeat(64) + ':2', '/index/member/' + A, '/index/member/' + A + '/10', '/index/x']) {
+    '/index/counts/' + A + ':1,' + 'b'.repeat(64) + ':2', '/index/member/' + A, '/index/member/' + A + '/10', '/index/search/ana-silva', '/index/x']) {
     t.absent((await dispatch(w, ORIGIN + p)).responded, p)
     t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
     t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)

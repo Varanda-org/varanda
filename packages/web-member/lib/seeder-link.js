@@ -11,13 +11,17 @@
 // The diary's replication channel is opened only AFTER that verification:
 // before it, the stream carries the Protomux and the admission channel alone,
 // so an endpoint impersonating a seeder can never request a diary block.
+// The transport runs behind a frame guard (./ws-stream.js guardedWsStream,
+// MAX_EXTERNAL_FRAME: a member's legitimate batches reach 8 MiB): a frame
+// declaring more is cut at its header, before the secret stream allocates
+// it, and the link then fails through the ordinary close path.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
-const { wsStream } = require('./ws-stream')
+const { guardedWsStream } = require('./ws-stream')
 
 function noop () {}
 
@@ -28,7 +32,7 @@ function hex (buf) {
 function connectSeeder ({ member, socket, association, seederPublicKey = null, onEvent = noop, timeoutMs = 20000, admitTimeoutMs = timeoutMs }) {
   const core = member.core
   const key = member.key
-  const duplex = wsStream(socket)
+  const { stream: duplex } = guardedWsStream(socket)
   const noise = new NoiseSecretStream(true, duplex, { keyPair: crypto.keyPair() })
   noise.on('error', noop)
 

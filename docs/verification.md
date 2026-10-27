@@ -439,7 +439,7 @@ Verified findings, after merging duplicates and an upgrade-only triage (five wer
 | high | relay page: the diary's signing key was also the Noise and DHT key (cross-protocol reuse, non-constant-time DH with attacker-chosen points) | Claude, verifier | fixed: an ephemeral key pair per relay session |
 | high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; resolved in section 10: the key is derived from a passkey and never stored) |
 | high | the browser member replicated its diary before the seeder's certificate was verified | Grok | fixed: replication starts only after a verified seeder hello (tests with an impostor endpoint) |
-| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | deferred to the hardening PR: a frame-completion deadline that body bytes do not refresh, and a lower frame limit until the peer has an admitted diary |
+| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | amplified vector fixed in the seeder capacity PR (section 21): a frame-completion deadline that body bytes do not refresh, `min(120 s, 10 s + 1 s per 64 KiB)` of declared length, a 64 KiB/s minimum throughput (after 10 s of grace) for frames over 64 KiB left incomplete, and a 64 MiB budget charged only by those frames, which evicts the slowest stalled reservation instead of refusing a newcomer (reasons `frame-deadline` and `frame-budget`); a non-amplified, time-bounded ws buffer remains (see the residual bullet below). A lower frame limit until the peer has an admitted diary was not pursued |
 | high (re-audit) | the page hook's facade still let a page script reach the key pair through `replicate()` with its own muxer, contrary to its comment | Claude (re-audit) | same impact as the accepted key-at-rest risk (a same-origin script can read the key from IndexedDB): the comment now says the hook is not a security boundary; the hook goes away in PR 4, when the relay entry joins the page bundle |
 | low (re-audit) | an external socket that sends a hello and goes silent kept a WebSocket slot for good | Claude (re-audit) | fixed: a 30 s inactivity deadline on external sockets after the handshake (live peers send keep-alives every 5 s) |
 | medium (re-audit) | upstream dht-relay defect 2 above (`lib/server-proxy.js:91-93` sends `destroy` without `paired`, the encoder throws inside an `'error'` listener): any DHT peer that fails a relayed handshake stops the relay process; the script's `unhandledRejection` net does not catch a synchronous throw | Grok (re-audit) | deferred with the relay decision to the hardening PR (same reason as the next row) |
@@ -457,8 +457,8 @@ Deferred, not fixed in this PR:
 - `member.post()` does not enforce the diary quota (100,000 blocks / 64 MiB); the seeder would reject and purge on `quota`. The real browser session must enforce it.
 - `ws-stream` drops buffered bytes on `end()` or `destroy()` before the socket opens.
 - Relay page: "apagar tudo" does not leave the relay swarm, and the relay path does not announce to seeders (only direct member to member).
-- A handshaken client can hold a declared frame of up to `MAX_EXTERNAL_FRAME` open without sending its body (no frame-completion deadline yet).
-- Seeder WebSocket entry: a peer that completes a Noise handshake can make the seeder allocate up to about 8 MiB per frame (swarm sockets keep secret-stream's own 16 MiB behaviour); a concurrent swarm accept and `acceptStream` can both pass the cap (no lock); the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR.
+- Frame pinning (section 21): fixed for the amplified vector. FrameGuard gives each incomplete frame `frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` from its header (body bytes do not refresh it). Only a frame over `SMALL_FRAME_BYTES` (64 KiB) still incomplete at the end of a chunk is charged to the seeder's single `maxFrameMemory` budget (default `MAX_FRAME_MEMORY`, 64 MiB): it reserves its declared length until it completes or the guard is destroyed, and is checked every 10 s for 64 KiB/s on average after a 10 s grace (a drip dies at 20 s, not 120 s). When a reservation does not fit, the slowest reservation older than 1 s is evicted (`frame-budget`) and the reservation retried once; only then is the requester refused. Handshake frames, keep-alives and frames that arrive whole are never charged, so a filled budget can neither refuse new members nor drop admitted ones (re-audit HIGH, CWE-400: 8 stalled 8 MiB declarations used to fill the budget for ~40 bytes and drop everyone at their next frame for up to 120 s). The caps are independent (`maxConnections` for swarm sockets, `maxExternal` for external ones), so the shared-sum race is gone. Remaining, bounded but not zero: `ws` buffers a whole WebSocket message, up to `MAX_PAYLOAD` (about 8 MiB), before FrameGuard sees it. Those are bytes the client really sent (not amplified), the 10 s handshake and 30 s idle deadlines drop a socket that stalls, and a partial message delivers nothing to the secret stream, so a stalled message pins at most `MAX_PAYLOAD` per socket for 30 s. Worst-case receive memory is about `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory`; size them together (section 21).
+- Seeder WebSocket entry: swarm sockets keep secret-stream's own 16 MiB behaviour; the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR. (The per-frame allocation by a handshaken peer and the shared-cap race are addressed in section 21.)
 - The shim's scalar multiplication is not constant-time; it mirrors libsodium's subgroup check, which accepts order-2L points (as libsodium itself does).
 - dht-relay 0.4.3: the two upstream defects above, plus a third found by the security audit (a duplicate `noiseReply` stops the relay process); experimental; custodial mode leaks the secret key.
 - A hosted PWA keeps the key on the device only as long as the served JavaScript is honest (whoever serves the page can change it).
@@ -466,7 +466,7 @@ Deferred, not fixed in this PR:
 
 ### Go/no-go and estimates per later PR
 
-**GO for the seeder path.** G1 and G2 passed; the browser-held key never leaves the device; the seeder admits and serves a Hypercore 10 diary to Hypercore 11 members. **The relay is not production-ready** with dht-relay 0.4.3 (two defects, one needing an adapter, one crashing the relay). That decision belongs to the hardening PR: fix upstream or fork, or keep the seeder-only path for the pilot.
+**GO for the seeder path.** G1 and G2 passed; the browser-held key never leaves the device; the seeder admits and serves a Hypercore 10 diary to Hypercore 11 members. **The relay is not production-ready** with dht-relay 0.4.3 (two defects, one needing an adapter, one crashing the relay). Decision (seeder capacity PR, section 21): the relay is not pursued for this launch (dht-relay 0.4.3 defects; the spike is loopback-only). The seeder WebSocket path is the production entry, and the relay spike script stays a documented experiment.
 
 The estimates below are rough, not measured (person-days with agent assistance):
 
@@ -476,7 +476,7 @@ The estimates below are rough, not measured (person-days with agent assistance):
 | 3 | PWA manifest, service worker, icons | small, 1-2 d; shipped, with an offline outbox, in section 11 |
 | 4 | Identity derived from a passkey (WebAuthn PRF): no key at rest, nothing to wrap or back up; write gate, push and own-diary recovery; hosted `/varanda.json` auto-connect. Built as section 10; export/import of a wrapped key and the passphrase fallback were dropped by that design | done, section 10 |
 | 5 | Caddy (automatic TLS) and compose serving the PWA and `wss:///seeder` on one origin, CSP with `'wasm-unsafe-eval'` | small, 1-2 d, plus the user's DNS and hosting steps |
-| 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision | medium, 3-5 d |
+| 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision (decided: not pursued for this launch, see above) | medium, 3-5 d |
 
 ### Shipped: the key from a passkey (supersedes the PR 4 wrap design of 2026-10-23)
 
@@ -1065,6 +1065,7 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
   - `node apps/cli/test/readme-help.test.js`: passes.
   - the whitespace check on the diff (`git diff --check`): clean.
   - `npm ci` was not run (installing was out of bounds for this run); the dependencies were already in the worktree.
+- Hidden web tab (PWA PR): a hidden page (`visibilitychange`, `pagehide`; `pageshow` shows it again) sends one `sync.stop` and releases its continuous run and its seeder connection slot; the run restarts as soon as the tab is visible again. An uncertain stop is reconciled through `sync.status`, and a run that is still continuous gets at most one more stop in that hidden period. Continuous sync while visible is unchanged, and the outbox does not send while hidden (the `node.visible` gate in `apps/app/App.js`). The Avisos screen already paused its notices poll while hidden before this change (`shouldPoll` in `apps/app/src/notices.js` gates the interval in `apps/app/src/screens/Avisos.js`); it is unchanged. Code: `apps/app/src/visibility.web.js`, `apps/app/src/node.js` (the hidden stop effect, next to the start gate), `apps/app/src/autoSyncPolicy.js` (`shouldStopForHidden`, `wantsStart`).
 - Not verified: anything in a real browser, on a phone, in the iOS simulator, against production or with two devices. See "Human verification"; nothing in that list is marked done.
 
 ### Automated (CI)
@@ -1095,6 +1096,7 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
 - The name step is skippable per session: skipping is not remembered across sessions.
 - `varanda-serve` has no automatic transport reconnection.
 - Stages 2-4 (other people's profiles, likes and reposts, media) are not in this change; Seguindo rows are not pressable yet.
+- Hidden web tab, not done: no periodic once runs while the tab is hidden, so the seeder slot stays released for the whole hidden period and nothing syncs in the background. Why: `apps/app/src/names.js:84-92` and `:126-130` wait for a continuous run before the name lookups flush (`quietOk`); `packages/web-member/lib/session.js:600` (`restartIfWanted`) revives only a continuous intent; `packages/web-member/lib/sync.js:96-97` says once runs never wait for media, and the media confirmation only arrives in a continuous run. Releasing the slot while a visible page sits idle (holding the seeder link only while catching up, then a pause) is a separate follow-up PR that keeps the continuous run and adds that release inside the browser node.
 
 ### Security audit
 
@@ -1223,11 +1225,11 @@ None of these was performed for this change.
 
 ### Summary
 
-- The fourth tab ("Espiadinha", provisional label; second in the tab bar, after A Rua) shows what the diaries the person does NOT follow are publishing, by one public rule (`PEEK_RULE`, `packages/core/lib/peek.js`): "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos." Definition: round r (0, 1, 2; `PEEK_MAX_ROUNDS` = 3) holds the (r+1)-th highest-`seq` top-level post of every candidate diary ("most recent" = last written in the diary, not the newest `at`); replies are excluded; page order is (`round` asc, `at` desc, `author` asc); posts carry their `media`, shown through the existing `/media` route as in A Rua.
+- The fourth tab ("Espiadinha", provisional label; second in the tab bar, after A Rua) shows what the diaries the person does NOT follow are publishing, by one public rule (`PEEK_RULE`, `packages/core/lib/peek.js`): "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos." Definition: round r (0, 1, 2; `PEEK_MAX_ROUNDS` = 3) holds the (r+1)-th highest-`seq` top-level post of every candidate diary ("most recent" = last written in the diary, not the newest `at`); replies are excluded [superseded 2026-10-27: sections 18 and 19 include replies, quotes, reposts and the own diary; the rule text now ends the first clause with "o seu incluído"]; page order is (`round` asc, `at` desc, `author` asc); posts carry their `media`, shown through the existing `/media` route as in A Rua.
 - Files: `packages/core/lib/peek.js` (the pure rule: candidates, window, per-diary result, page), `packages/web-member/lib/peek.js` (transport and memory, in the browser node), `packages/web-member/lib/session.js` (the `peek.read` handler) and `lib/storage.js` (64 KiB memory pages), `packages/rpc` (`peek.read`, `PEEK_LIMIT_DEFAULT` 30, `PEEK_LIMIT_MAX` 31; `docs/rpc.md` 5.22 and 13), `packages/core/lib/session.js` (the node session answers that it is web only), `apps/app/src/screens/Espiadinha.js` and `apps/app/src/peek.js` (screen and pure helpers), `apps/app/App.js`, `ui/TabBar.js`, `ui/Icon.js`, `ui/PostRow.js`.
 - Trust model: nothing is gained by the seeder compared with A Rua. It can withhold (an inventory entry, a block, a shorter length, an older signed state it kept); it cannot forge (Hypercore verifies every block against the author key), cannot choose which post is shown (the client reads the signed tail: the window comes from the length Hypercore verified with block 0, never from the length advertised in the hello), cannot bypass the block-0 gate (checked locally with the stored revoked-issuer set, block 0 alone, before any other block of that diary) and cannot unblock anyone (the stored signed blocklist is re-applied on every read). Later windows are accepted only if their core has the same verified length and the same `treeHash` as the first window.
 - Data flows and retention: browser memory only. The node keeps one snapshot for at most 5 minutes (`PEEK_SNAPSHOT_TTL_MS`, retained records capped at 32 MiB); the UI keeps the page until the list is refreshed. Nothing is written to storage, the account service learns nothing, and the only server-side trace is one `peer` log line per link at the seeder (ephemeral Noise key; the seeder log is size-rotated).
-- Questions decided by default (no owner answer was available): (1) rounds rule, 3 rounds of one post per diary, not "all posts newest first" (keeps one prolific diary from filling the tab); (2) replies are excluded; (3) the tab is second in the bar; (4) no extra transport guards on the browser side beyond the ones the sync link already has (see residual risk 12).
+- Questions decided by default (no owner answer was available): (1) rounds rule, 3 rounds of one post per diary, not "all posts newest first" (keeps one prolific diary from filling the tab); (2) replies are excluded [superseded 2026-10-27: replies, quotes and reposts are included since section 18]; (3) the tab is second in the bar; (4) no extra transport guards on the browser side beyond the ones the sync link already has (see residual risk 12).
 - The two riskiest assumptions from the objection round: (a) external socket capacity: the seeder admits 32 external sockets and each hosted member already holds one, so many members online can starve the peek link (item 17); (b) cutoffs causing unequal exposure: the 5 s inventory cut, the 25 s page deadline and the 16 MiB budget can leave some diaries out; mitigated by a random fetch order per snapshot (a cut falls on random diaries) and by the `incomplete` flag the app shows.
 - Pages: the first page has 30 items, continuation pages up to 31. `next` is the cursor of the last item exactly when the page is full; a page cut by the deadline or the byte budget still carries a cursor (diaries still pending count as exhausted for that read only) and is `incomplete`. Unavailable block 0 skips the diary and marks the page incomplete. One peek runs at a time; a disconnect frees the slot at once; a read never preempts the sync.
 
@@ -1256,7 +1258,7 @@ New test files: `packages/core/test/peek.test.js`, `packages/web-member/test/pee
 - Constants (`packages/core/lib/peek.js`, `packages/rpc/lib/limits.js`): `PEEK_HEAD_BLOCKS` 3, `PEEK_TAIL_BLOCKS` 8, `PEEK_MAX_BLOCKS_PER_DIARY` 64, `PEEK_MAX_ROUNDS` 3, `PEEK_PARALLEL` 16, `PEEK_FETCH_TIMEOUT_MS` 10000, `PEEK_PAGE_TIMEOUT_MS` 25000, `PEEK_CONNECT_TIMEOUT_MS` 15000, `PEEK_SNAPSHOT_TTL_MS` 300000, `PEEK_PAGE_MAX_BYTES` 16777216 (16 MiB), page 30 / 31.
 - Cost per page (`docs/rpc.md` 5.22 and 13): one WebSocket, Noise and hello (1 round trip each at the start), the inventory at about 85 bytes per entry (4096 entries about 340 KB), then per candidate one channel and at most 11 block requests in two phases (block 0, then the window), 16 diaries in parallel. Documented estimate: about 3-5 s for 300 diaries at 50 ms RTT (an estimate, not measured on the pilot). Memory in the browser: raw buffers released after every window, between pages only retained records (at most 32 MiB per snapshot) and 64 KiB memory pages per open core. At the seeder: one extra short-lived external socket and reads of blocks it already holds; no new state.
 - Theoretical maximum: 4096 diaries x 11 blocks x 16 KiB = 738,197,504 bytes (704 MiB), against the 16 MiB page budget; with a random order the budget (or the 25 s deadline) cuts the page and marks it incomplete rather than fetching it all.
-- Known limits: replies do not appear; names come only from the first blocks and the fetched tail ("sem nome" otherwise); `at` is author-supplied (up to 24 h ahead is accepted); rows already shown are removed only on the next load; no city or state; up to 3 posts per diary; native app and `varanda-serve` answer that the Espiadinha is web only.
+- Known limits [superseded 2026-10-27: replies appear since section 18; the own diary is included since section 19]: replies do not appear; names come only from the first blocks and the fetched tail ("sem nome" otherwise); `at` is author-supplied (up to 24 h ahead is accepted); rows already shown are removed only on the next load; no city or state; up to 3 posts per diary; native app and `varanda-serve` answer that the Espiadinha is web only.
 
 ### Security audit
 
@@ -1417,3 +1419,175 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+
+## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
+
+### Summary
+
+- The WebSocket entry has its own cap, independent of the swarm: `maxExternal` (`VARANDA_MAX_EXTERNAL`, 1 to 4096; default half of `maxConnections`, that is 32) bounds external sockets, in-flight handshakes included, and `maxConnections` bounds swarm sockets only. `/health` and `/metrics` report `swarm`, `external`, `maxConnections` and `maxExternal`.
+- Frame pinning, amplified vector: see the residual bullet in section 8 (`frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` for every incomplete frame; frames over 64 KiB left incomplete are charged to the 64 MiB `maxFrameMemory` budget and must keep 64 KiB/s after a 10 s grace; a full budget evicts the slowest stalled reservation older than 1 s; drop reasons `frame-deadline` and `frame-budget`). The shared budget cannot be used to drop active members or refuse new ones. Tests in `apps/cli/test/seeder-stream.test.js`: `a charged frame that drips is dropped at the first throughput check after the grace`, `stalled declarations filling the budget cannot keep members out or drop them`, `a full budget evicts the stalled reservation for a member frame that makes progress`, `charged declarations over the frame memory budget are refused when nothing can be evicted`.
+- The HTTP listener (`/seeder`, `/media`, `/index`, Caddy keep-alives) has a socket cap that only bounds file descriptors: `max(128, maxExternal + media in flight + index in flight + 64)`, or `VARANDA_MAX_SOCKETS` (1 to 8192) when set (then used as given); the computed value is never below 128.
+- Operator variables (all optional, read by `seed`; empty in `deploy/seeder/.env` means the default): `VARANDA_MAX_EXTERNAL`, `VARANDA_MAX_SOCKETS`, `VARANDA_FRAME_MEMORY` (bytes, 8454144 to 1073741824; the minimum is `MAX_EXTERNAL_FRAME`, so one legal frame always fits), `VARANDA_MEDIA_MAX_IN_FLIGHT`, `VARANDA_MEDIA_RATE`, `VARANDA_MEDIA_BURST`, `VARANDA_INDEX_MAX_IN_FLIGHT`, `VARANDA_INDEX_RATE`, `VARANDA_INDEX_BURST` (1 to 1024, 1 to 100000 and 1 to 100000 respectively). Defaults: media 16 in flight, 64/s, burst 128; index 16 in flight, 32/s, burst 64.
+- Besides the long WebSocket of each member, two features open short extra seeder connections per member while they run: the Espiadinha (`peek.read`) and the follow notices (`notices.list`, polled every 5 minutes by the Avisos screen, `packages/web-member/lib/notices.js`). Count them when choosing `VARANDA_MAX_EXTERNAL`; at the cap the seeder refuses with `connection-limit` and the feature answers "sem conexão com o semeador" or tries again at the next poll.
+
+### Capacidade medida
+
+`apps/cli/scripts/load-ws.js` is a development-only, loopback-only measurement. It opens idle, admitted connections (Noise handshake done, nothing else), holds them, and reports how many were opened and refused and the handshake latency. It does not generate real traffic.
+
+```sh
+# terminal 1: a local seeder (see section 8 for the association and seeder certificate setup)
+VARANDA_MAX_EXTERNAL=64 VARANDA_FRAME_MEMORY=134217728 \
+  node bin/varanda.js seed --data ./data --association <hex> --ws-port 8789 --health-port 8788
+# terminal 2: the load
+node apps/cli/scripts/load-ws.js --port 8789 --health-port 8788 --clients 64 --hold-ms 10000 --json
+```
+
+Flags: `--port` (required), `--clients` 1 to 4096 (default 32), `--hold-ms` 0 to 25000 (default 10000), `--health-port` (optional), `--json`. Read the seeder's resident memory (RSS) from the host (`ps`, `docker stats`) while the clients are held.
+
+Caveat: the numbers are idle admissions, not real traffic. A member that uploads a diary, an Espiadinha read or a notices read costs more memory than an idle socket, and none of that is measured here. No production capacity is claimed.
+
+Operator table (fill it in on the machine that will host the seeder, one row per run; nothing is filled in by this PR):
+
+| Clients | Opened | Refused | p95 handshake (ms) | Seeder RSS (MiB) | `VARANDA_MAX_EXTERNAL` | `VARANDA_FRAME_MEMORY` |
+|---|---|---|---|---|---|---|
+| | | | | | | |
+
+Rule of thumb: `VARANDA_FRAME_MEMORY` >= 8 MiB x the number of members expected to upload at the same time (a legitimate frame can be about 8 MiB, `MAX_EXTERNAL_FRAME`). Raise `VARANDA_FRAME_MEMORY` together with `VARANDA_MAX_EXTERNAL`, and keep the host memory above `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory` plus the seeder's baseline.
+
+### dht-relay decision
+
+Not pursued for this launch: dht-relay 0.4.3 has defects (section 8, G3) and the relay is a loopback-only spike. The seeder WebSocket path is the production entry; `packages/web-member/scripts/dht-relay.js` spike script stays a documented experiment.
+
+### Not verified
+
+- No production capacity: the load test measures idle admissions only.
+- The memory bound of a stalled WebSocket message (`MAX_PAYLOAD` per socket for 30 s) is derived from the code and the `ws` buffering, not measured under load.
+
+## 22. Account search (2026-10-26)
+
+### Summary
+
+- A member can find people by name or @nome in Seguindo and follow them. The seeder keeps an in-memory name index (folded tokens and the verified @nome only) fed by the existing index scan, and answers `GET|HEAD /index/search/<segment>` with at most 20 `{ author, profileSeq, usernameSeq }` rows (`docs/protocol.md` sections 5 "Seeder name index" and 7 "Seeder index route"). No RPC change: the app reads and verifies each row's name and @nome with `diary.peek`.
+- Contract: query of 1..4 folded words joined by `-`, at least 2 characters; order 0 exact @nome, 1 @nome equal ignoring `_`, 2 @nome prefix, 3 every typed word starts a word of the name or @nome; ties by member key; at most 20 results, no cursor. Body exactly `{ members, more, indexing, complete }`; a valid query with no hit answers `members: []`; a segment under 2 characters is the generic 404.
+- Moderation: blocked, dropped and ungated authors never appear; an @nome from a revoked issuer stops matching at the next query without a rescan; a diary whose re-gate after a newly revoked issuer is pending is held out of results until block 0's verdict clears it; the name index is cleared on rebuild.
+- Scope: hosted web only ("Buscar" field in Seguindo, 400 ms after typing stops). Native and `varanda-serve` are unchanged. No opt-out in this version.
+- Files: `packages/core/lib/search-text.js`, `packages/core/lib/name-index.js`, `packages/core/lib/seeder.js` (`indexSearch`, wiring), `apps/cli/lib/seed-ws.js` (`INDEX_SEARCH_RE`), `deploy/seeder/Caddyfile`, `apps/app/src/indexClient.js` (`fetchSearch`), `apps/app/src/search.js`, `apps/app/scripts/sw.js`, and the Seguindo screen with `useMemberSearch`.
+
+### Automated (CI)
+
+- `packages/core/test/search-text.test.js` (the fold and the query grammar).
+- `packages/core/test/name-index.test.js` (the pure index: newest record wins with no fallback, one verification per candidate, bounded candidate copy, unusable issuers and visibility at query time, `remove`, `maxAuthors`, ordering and `more`).
+- `apps/app/test/search.test.js` (the app-side copy: parity with core, the `diary.peek` plan, verification through `diary.peek`, dropped and unconfirmed rows, own account). The follow state of search rows lives in `Seguindo.js` and has no automated test (CI renders no React).
+- Extended: `apps/cli/test/seed-ws.test.js` (the route, 200 body, 404 / 405 / 421 policy, shared caps), `apps/cli/test/seeder-index.test.js` (the seeder wiring: removal on drop, cap pause and resume, revocation without a rescan, the re-gate hold, blocked authors, one loopback request), `apps/app/test/indexClient.test.js` (`fetchSearch`) and `apps/app/test/sw.test.js` (the service worker still bypasses `/index/`).
+
+### Human verification
+
+None of these was performed for this change. Use two or three hosted accounts against the same seeder.
+
+- [ ] An author blocked by the operator is absent from a search for their name and for their @nome.
+- [ ] An author whose @nome record has a bad signature is not found by that @nome (the display name can still match).
+- [ ] An author who renamed themselves is found only under the new name, not the old one.
+- [ ] A request for `/index/search/<query>` that fails (unknown path, one-letter segment) answers the generic 404 and does not echo the query; the seeder and Caddy logs show no query.
+- [ ] Rows appear only after `diary.peek` verified them (a throttled network shows no row before its name and @nome are read); a row whose name no longer matches the query is dropped.
+- [ ] The own account never appears in the results.
+- [ ] Someone followed past the first page of the follow list shows "Seguindo", not "Seguir".
+- [ ] Typing one letter shows "Digite pelo menos 2 letras."; offline shows "A busca precisa de internet."; a name with no hit shows "Ninguém encontrado com esse nome.".
+- [ ] The exact "@nome ou chave" field below still follows by @nome or key through the account service.
+
+### Residual risks
+
+- The seeder sees the folded query in the path (neither the seeder nor Caddy logs it).
+- An anonymous client learns at most 20 keys per probe, keys already in the seeder's hello inventory.
+- Ordering, omissions and completeness are seeder claims, and the seeder may point at an older authentic profile / username record (a stale name; the same trust model as the member profile screen, `docs/rpc.md` `diary.peek`).
+- A member blocked while a search is on screen can stay in the rows already shown until the next search.
+- No opt-out in this version; names in other scripts are found only by @nome; matching is by word prefix only; no topic search.
+
+## 23. Espiadinha: republicações, orçamento do índice, expiração e aviso de nova versão (2026-10-27)
+
+### Summary
+
+- Report: reposts of diaries the person does not follow did not show in the Espiadinha. T1 wrote a regression test (`packages/web-member/test/peek-repost.test.js`, 8 tests / 65 asserts, all pass) that follows an unfollowed repost through every layer: record, engagement state, `retainRecords` / `diaryPeek`, the window walk past likes, `buildPeekPage` with a cursor, the session (`peek.read`, `repost.set`, `diary.peek`) and the app (`mergePage`, `peekKey`). It was green from the start, so the cause of the report is UNPROVEN in code: every layer is clean. The most likely cause is a window running an old release (`apps/app/scripts/sw.js` waits until every window closes), which the release banner below addresses.
+- `PEEK_RULE` (`packages/core/lib/peek.js`) now reads exactly: "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos."
+- Expiration: `packages/web-member/lib/peek.js` refuses a continuation (`after`) on a missing or expired snapshot with USAGE 'A lista expirou; atualize para continuar.' before any link is opened; an `after`-less read keeps the previous snapshot until the new one exists, so a failed refresh does not strand the list. Docs: `docs/rpc.md` 5.22.
+- Index budget (`apps/app/src/indexClient.js`): shared pacer (at most 2 in flight, at most 18 starts per rolling 10 s, under Caddy's 20 per 10 s zone); a 429 with Retry-After sets a shared cooldown honoured in full (cap 10 min); up to 3 retries within 45 s of waiting per call, then 'rate-limited' with the remaining `retryAfterMs`; member cache (complete pages only, 5 min, 256 entries, in-flight dedupe); `resetIndexClient()` and `invalidateMember(author)` (used by Membro's pull-to-refresh).
+- App (`screens/ARua.js`, `engagement.js`, `ui/PostRow.js`): the second pass resolves the quote and the `replyTo` of resolved originals (a reposted reply names its parent); 'seguir' on the 'Nome republicou' line (Espiadinha only); follows changed elsewhere reset `useSocial`'s follow cache; a failed member lookup retries the nameless originals once (after `retryAfterMs`, else 10 s); a failed counts call shows the 'incompletos' note.
+- App (`App.js`, `screens/Espiadinha.js`, `src/peek.js`, `screens/Membro.js`): the Espiadinha reloads only on publishes (`peekVersion`), not on follows; 'seguir' removes the author's rows without reload or scroll loss and a late page cannot bring them back; follows made elsewhere drop rows without reload (all `follow.list` pages); no 'seguir' on own rows or before the own key is known; round labels on all three rounds; the texts include the own diary; the skipped note lists the real causes; empty states offer 'publicar' / 'atualizar'; reply marks of own or followed parents show their names; an expired list keeps its rows and asks for a pull.
+- Core tests (`packages/core/test/peek.test.js`): 4 repost cases (head/tail window, undo in the tail with `on` below the floor, `MAX_FUTURE_MS`, two reposters).
+- Release banner (`apps/app/src/release.js`, `pwa.web.js`, `ui/UpdateNote.js`, `App.js`): 'Nova versão disponível.' with 'atualizar' (reload) when the release the server serves now (the `VERSION` in `/sw.js`, which the worker never intercepts) differs from the open page's `varanda-release` marker, so the notice disappears once the reload lands on the new release even while the old worker still controls the page; checked on focus/visibility (at least 60 s apart), every 30 min and when a new worker starts installing; a failed check leaves the state unchanged; native shows nothing.
+- Docs: strangers' photos are fetched `no-store` (`apps/app/src/media/fetch.js`; own and followed keep the long cache); `ownKey` is gone from `peekCandidates` and `createPeeker`; the own diary is part of the rule.
+
+### Automated (CI)
+
+Commands (from the worktree root, in this order): `npm run lint`; `cd packages/core && node ../../scripts/run-tests.js`; `cd packages/rpc && node ../../scripts/run-tests.js`; `cd packages/web-member && node ../../scripts/run-tests.js`; `cd apps/app && node ../../scripts/run-tests.js`.
+
+Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across the six workspaces, 126 test files (with main through #169 merged in), 0 failures (changed suites: web-member `peek-repost` 8/8 and `peek` 30/30, core `peek` 25/25, app `indexClient` 18/18, `peek` 14/14, `engagement` 4/4, `release` 7/7); `npm run demo` ends with `DEMO OK`. Security audit of the change: 0 verified findings (auditors: Claude, Claude built-in review, GPT, Grok).
+
+### Human verification (none performed yet)
+
+If the reposts are still missing on the hosted web:
+
+1. [ ] In the browser devtools, read the open page's `<meta name="varanda-release">` and compare it with the `VERSION` in the deployed `/sw.js` (a PWA window opened before a deploy keeps running the old shell: `apps/app/scripts/sw.js` waits until every window closes) (not performed yet).
+2. [ ] Close every Varanda window/tab (or use the new 'Nova versão disponível · atualizar' banner) and reopen (not performed yet).
+3. [ ] In the browser console of the hosted web, run a `peek.read` and count items with `kind === 'repost'`. Above zero with none on screen means the screen; zero for a diary whose newest block is a repost means compare its blocks and the seeder's `have` length with `peek-repost.test.js` cases (b) and (d) (not performed yet).
+
+Shipped behaviours:
+
+- [ ] 'seguir' on a row keeps the scroll position, removes that author's rows and the rows do not come back (not performed yet).
+- [ ] Own rows have no 'seguir', and there is none before the own key is known (not performed yet).
+- [ ] Round 1 is labelled '1ª publicação de cada diário', like rounds 2 and 3 (not performed yet).
+- [ ] The skipped note lists the real causes (not performed yet).
+- [ ] A reposted reply names its parent ('respondendo a Nome') (not performed yet).
+- [ ] 'seguir' on a 'Nome republicou' line follows the reposter (not performed yet).
+- [ ] With 30 rows, names and counts survive the index limit (no 'incompletos' note on a normal load) (not performed yet).
+- [ ] After 5 minutes on the list, scrolling to the end shows 'A lista expirou; puxe para atualizar.' and keeps the rows (not performed yet).
+- [ ] The 'Nova versão disponível.' banner appears after a deploy with a window left open, and 'atualizar' reloads into the new release (not performed yet).
+
+### Residual risks
+
+- `at` is author-supplied (up to 24 h ahead is accepted), so ordering inside a round can be gamed within that bound.
+- Names can be absent (`packages/web-member/lib/who.js`, around lines 60-66): a profile or @name outside blocks 1-2 and the fetched tail reads as 'sem nome'.
+- The cause of the repost report is unproven; if the checklist finds a real defect it needs a new fix.
+- Hardening of the seeder link (frame guard and capacity) was not part of this change; it is section 24.
+
+## 24. Ligação com o semeador: guarda de quadros no cliente e semeador lotado (2026-10-27)
+
+### Summary
+
+- Issue #130 (seeder-link hardening and capacity), stacked on the Espiadinha reposts PR. No production default changed (64 swarm, 32 external; since #168 the external cap is independent of the swarm cap and the operator sets it with `VARANDA_MAX_EXTERNAL`); what changed is what a client sees and how much it will accept.
+- T8: `packages/core/lib/frame-guard.js` holds `FrameGuard`, moved out of `seeder.js` unchanged in behaviour, plus `handshakeFrames` (Noise XX responder receives 2 handshake frames, the initiator 1), option validation, and a throwing `onLimit` can no longer skip the destroy. It depends on streamx only (browser-safe, checked by `packages/core/test/browser-safe.test.js`).
+- T10: `Seeder#acceptStream(raw, { onRefuse })` hands a capacity refusal to the caller without destroying the stream; `apps/cli/lib/seed-ws.js` closes the WebSocket with 1013 `'lotado'` and terminates it after `REFUSE_GRACE_MS` = 1 s. Callers without `onRefuse` keep destroy-on-cap.
+- T11: `packages/web-member/lib/ws-stream.js` `guardedWsStream` (FrameGuard with `handshakeFrames` 1, records the close code). Peek and notices links: `PEEK_MAX_FRAME` = 1 MiB; sync and seeder-link: `MAX_EXTERNAL_FRAME` (8 MiB + 64 KiB). Over the bound the link is cut (peek: incomplete page and 'aviso: quadro grande demais do semeador'; sync reconnects). A 1013 close gives USAGE 'Semeador ocupado; tente novamente em instantes.' (peek, notices) and the sync warning 'aviso: semeador ocupado; tente novamente em instantes'.
+- Considered and NOT done: link reuse (a peek over the sync link) collides with the peeker's destroy-on-budget/abort model; an anonymous sub-cap would be post-handshake and spoofable.
+- Docs: `docs/design.md`, `docs/protocol.md` (section 4 "External transports", Peek link), `docs/rpc.md` (5.22 and 13), `README.md`, `CHANGELOG.md`.
+
+### Measurements
+
+`packages/web-member/test/peek-capacity.test.js`, Apple M4 Pro, Node 24, loopback, real in-process Seeder behind `startSeedWs`; the header comment of the test holds the full numbers.
+
+- Largest legitimate frame, against a real seeder with 64 diaries x 200 posts and a media core: 11,665 bytes; a 4096-key inventory stand-in: 9,031 bytes. Hence the 1 MiB bound for peek and notices.
+- Production caps 64/32, 40 member sync links: 40 attempted, 40 connected, 32 admitted, 8 refused. With the 32 slots held, a peek or notices read fails with USAGE 'Semeador ocupado; tente novamente em instantes.' in 2-5 ms (peek) and 1-3 ms (notices); a bare 33rd socket closes 0-1 ms after its refusal log line, far inside the 1 s grace.
+- Test-only caps (maxConnections 64, `seeder.maxExternal` 40): 40 admitted; the 41st peek or notices read is refused with the busy message in 3-7 ms; with `maxExternal` 41 the 41st peek reads a 10-diary page in 11-14 ms.
+- A peek link holds a slot about 10-20 ms on loopback (a notices read 2-3 ms); each network round-trip adds to that over a real network.
+- Not measured: whether held member links survive the 30 s external idle deadline with no traffic.
+- Hostile-frame result: a frame declaring more than the bound is cut at its 3-byte header: `frame-guard-client.test.js` drives a hostile seeder against the peek, sync and seeder links, and `ws-stream.test.js` covers the shared `guardedWsStream`; the notices link uses that same call and has no hostile-seeder test of its own; `frame-guard.test.js` covers the guard itself.
+
+Test-only overrides: `seeder.maxExternal` (40 / 41) in the capacity test; `maxFrame` and the guard options in the frame tests. Production code carries no such switch.
+
+### Automated (CI)
+
+Commands (from the worktree root, in this order): `npm run lint`; `npm test`; `npm run demo`.
+
+Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across the six workspaces, 129 test files (with main through #169 merged in), 0 failures (new or changed suites: core `frame-guard` 23 tests, `browser-safe`; cli `seed-ws`, `seeder-stream`; web-member `frame-guard-client` 8 tests, `ws-stream`, `bundle`, `peek-capacity` 43 asserts); `npm run demo` ends with `DEMO OK`. Security audit of the change: 0 verified findings (auditors: Claude, Claude built-in review, GPT, Grok).
+
+### Human verification (none performed yet)
+
+- [ ] Oversized frame cut: against a test seeder or a stub that sends a frame declaring more than 1 MiB on the peek link, the Espiadinha page is incomplete with 'aviso: quadro grande demais do semeador' and the app keeps working (not performed yet).
+- [ ] Seeder full: with the seeder's external slots held, opening the Espiadinha and the Avisos shows 'Semeador ocupado; tente novamente em instantes.' and works again after a retry once a slot frees (not performed yet).
+- [ ] Normal reads unaffected: with free slots, the Espiadinha, the Avisos and the sync behave as before (not performed yet).
+
+### Residual risks
+
+- The browser has already allocated the whole WebSocket message before the guard sees it; the guard bounds the secret-stream copy and cuts early.
+- On the sync link frames up to `MAX_EXTERNAL_FRAME` are still accepted (legitimate replication frames can be that large).
+- With about 32 hosted members online the 32 external slots are all taken by syncs and every peek or notices read is refused until a slot frees; the message is now accurate; raising `VARANDA_MAX_EXTERNAL` (#168) is how an operator adds room. Sub-cap and link reuse were rejected (see above).
+- Numbers are from loopback on one machine, not from the pilot seeder; no deploy claim is made.

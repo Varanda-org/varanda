@@ -17,6 +17,20 @@ services:
       VARANDA_WS_HOST: 127.0.0.1
       # O navegador manda Origin https://<domínio>; só ele é aceito.
       VARANDA_WS_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
+      # Limites do semeador web, todos opcionais: vazio usa o padrão do
+      # semeador (a CLI ignora valor vazio), então um .env sem estas linhas
+      # continua subindo. Os valores vêm de apps/cli/scripts/load-ws.js e de
+      # docs/verification.md; suba VARANDA_FRAME_MEMORY junto com
+      # VARANDA_MAX_EXTERNAL.
+      VARANDA_MAX_EXTERNAL: "${VARANDA_MAX_EXTERNAL:-}"
+      VARANDA_MAX_SOCKETS: "${VARANDA_MAX_SOCKETS:-}"
+      VARANDA_FRAME_MEMORY: "${VARANDA_FRAME_MEMORY:-}"
+      VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-}"
+      VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-}"
+      VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-}"
+      VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
+      VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
+      VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
 
   web:
     # O Caddy oficial (2.11.6, por digest) mais o módulo de limite por cliente

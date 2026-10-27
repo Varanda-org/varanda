@@ -231,7 +231,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max
+  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -305,6 +305,28 @@ conferir_antes() {
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
     if [ -n "$limite" ] && { ! [[ $limite =~ $limite_re ]] || [ "$limite" -lt "$min" ] || [ "$limite" -gt "$max" ]; }; then
       log "$nome inválido em deploy/seeder/.env"
+      exit 1
+    fi
+  done
+  # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
+  # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
+  # valor presente precisa ser inteiro positivo canônico e estar na mesma
+  # faixa que o semeador aceita (apps/cli/lib/cli.js, optionalEnvInteger): um
+  # valor fora dela derrubaria o semeador só depois da troca, e a volta usa o
+  # mesmo .env. A tabela é NOME:mínimo:máximo; o teste a compara com cli.js.
+  for faixa in VARANDA_MAX_EXTERNAL:1:4096 VARANDA_MAX_SOCKETS:1:8192 \
+    VARANDA_FRAME_MEMORY:8454144:1073741824 \
+    VARANDA_MEDIA_MAX_IN_FLIGHT:1:1024 VARANDA_MEDIA_RATE:1:100000 VARANDA_MEDIA_BURST:1:100000 \
+    VARANDA_INDEX_MAX_IN_FLIGHT:1:1024 VARANDA_INDEX_RATE:1:100000 VARANDA_INDEX_BURST:1:100000; do
+    IFS=: read -r limite minimo maximo <<<"$faixa"
+    # Sem aspas: o Compose passa o texto entre aspas inteiro (comentário
+    # incluído), então um valor entre aspas é recusado em vez de limpo aqui.
+    valor=$(sed -n "s/^[[:space:]]*${limite}[[:space:]]*=//p" "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$valor" ] || continue
+    # No máximo dez dígitos: a comparação inteira do bash não transborda.
+    if ! [[ $valor =~ ^[1-9][0-9]{0,9}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
+      log "$limite inválido em deploy/seeder/.env"
       exit 1
     fi
   done

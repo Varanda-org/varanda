@@ -8,6 +8,13 @@ const repoRoot = path.resolve(__dirname, '../../..')
 const WORKFLOW = path.join(repoRoot, '.github/workflows/deploy.yml')
 const SCRIPT = path.join(repoRoot, 'deploy/seeder/deploy.sh')
 
+// Optional seeder limits passed through compose.web.yaml (read by apps/cli/lib/cli.js).
+const SEEDER_LIMITS = [
+  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY',
+  'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
+  'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
+]
+
 // deploy.yml, checked with line and regex rules (no YAML parser available).
 // Comment lines are dropped so prose cannot satisfy or trip a rule.
 const yml = fs.readFileSync(WORKFLOW, 'utf8')
@@ -183,7 +190,9 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_ACCOUNT_RATE',
     'VARANDA_ACCOUNT_BURST',
     'VARANDA_ACCOUNT_MAX_PENDING',
-    '/account/mod/api/me'
+    '/account/mod/api/me',
+    // The optional seeder limits are validated by shape before anything changes.
+    ...SEEDER_LIMITS
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
@@ -265,6 +274,95 @@ for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'V
     t.ok(new RegExp(name + ': "\\$\\{' + name + ':-\\}"').test(hits[0][0]), 'optional (:-), never :?')
   })
 }
+
+for (const name of SEEDER_LIMITS) {
+  test('compose.web.yaml: ' + name + ' is optional and only on the seeder service', (t) => {
+    const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+    const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name + ':') || l.includes('${' + name))
+    t.is(hits.length, 1, 'mentioned exactly once')
+    const start = webLines.findIndex((l) => /^ {2}seeder:\s*$/.test(l))
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the seeder service')
+    t.is(hits[0][0].trim(), name + ': "${' + name + ':-}"', 'optional (:-), never :?')
+  })
+}
+
+test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and accepts an .env without them', (t) => {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
+  if (probe.error || probe.status !== 0) {
+    t.comment('bash not found: skipping the behavioural check')
+    return
+  }
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  // conferir_antes also reads the account limits table (limite_re,
+  // limites_conta): the stub needs every top-level pattern it uses.
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && res && res.length === 5, 'function and patterns located')
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  const base = 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) +
+    '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=segredo-ultra\n'
+  const run = (extra) => {
+    fs.writeFileSync(envFile, base + extra)
+    // git is stubbed: only the .env checks run, nothing touches a repository.
+    const script = 'set -u\nroot=' + JSON.stringify(dir) + '\ntarget=x\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + fn[0] + 'conferir_antes\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const ok = run('')
+  t.is(ok.status, 0, 'an .env without the lines passes: ' + ok.stderr)
+  const empty = run(SEEDER_LIMITS.map((n) => n + '=\n').join(''))
+  t.is(empty.status, 0, 'empty lines pass: ' + empty.stderr)
+  const good = run('VARANDA_MAX_EXTERNAL=300\nVARANDA_FRAME_MEMORY=268435456\n')
+  t.is(good.status, 0, 'integers pass: ' + good.stderr)
+  const bad = run('VARANDA_MAX_EXTERNAL=abc\n')
+  t.is(bad.status, 1, 'a non-integer is refused')
+  t.ok(bad.stderr.includes('VARANDA_MAX_EXTERNAL inválido em deploy/seeder/.env'), 'says which variable')
+  t.absent(bad.stderr.includes('abc'), 'the value is not printed')
+  const big = run('VARANDA_MEDIA_RATE=12345678\n')
+  t.is(big.status, 1, 'eight digits are refused')
+  const mem = run('VARANDA_FRAME_MEMORY=0268435456\n')
+  t.is(mem.status, 1, 'a leading zero is refused')
+  // The range is checked too: the seeder would exit 2 on these after the swap.
+  const over = run('VARANDA_MAX_EXTERNAL=4097\n')
+  t.is(over.status, 1, 'VARANDA_MAX_EXTERNAL above 4096 is refused')
+  t.ok(over.stderr.includes('VARANDA_MAX_EXTERNAL inválido em deploy/seeder/.env'), 'says which variable (range)')
+  t.absent(over.stderr.includes('4097'), 'the out-of-range value is not printed')
+  t.is(run('VARANDA_MAX_EXTERNAL=4096\n').status, 0, 'VARANDA_MAX_EXTERNAL=4096 passes')
+  t.is(run('VARANDA_FRAME_MEMORY=8454143\n').status, 1, 'VARANDA_FRAME_MEMORY below 8454144 is refused')
+  t.is(run('VARANDA_FRAME_MEMORY=8454144\n').status, 0, 'VARANDA_FRAME_MEMORY=8454144 passes')
+  t.is(run('VARANDA_MEDIA_MAX_IN_FLIGHT=1025\n').status, 1, 'VARANDA_MEDIA_MAX_IN_FLIGHT above 1024 is refused')
+  // Compose passes a quoted value verbatim (comment included), so a quoted
+  // value is refused instead of being cleaned up here; an unquoted trailing
+  // comment is dropped by Compose and here alike.
+  t.is(run('VARANDA_MAX_EXTERNAL="300 # vagas"\n').status, 1, 'a quoted value with a comment is refused')
+  t.is(run("VARANDA_MAX_EXTERNAL='300'\n").status, 1, 'a quoted value is refused')
+  t.is(run('VARANDA_MAX_EXTERNAL=300 # vagas\n').status, 0, 'an unquoted value with a trailing comment passes')
+  t.is(run('VARANDA_MAX_EXTERNAL = 4097\n').status, 1, 'spaces around = do not hide an out-of-range value')
+})
+
+test('deploy.sh: the seeder limit ranges match apps/cli/lib/cli.js', (t) => {
+  const cli = fs.readFileSync(path.join(repoRoot, 'apps/cli/lib/cli.js'), 'utf8')
+  const fromCli = {}
+  for (const m of cli.matchAll(/optionalEnvInteger\(env, '(VARANDA_[A-Z_]+)', (\d+), (\d+)\)/g)) {
+    fromCli[m[1]] = m[2] + ':' + m[3]
+  }
+  const fromSh = {}
+  for (const m of shCode.matchAll(/\b(VARANDA_[A-Z_]+):(\d+):(\d+)\b/g)) {
+    // The account limits table (limites_conta) is checked against account.js below.
+    if (!SEEDER_LIMITS.includes(m[1])) continue
+    t.absent(m[1] in fromSh, m[1] + ' appears once in the deploy.sh table')
+    fromSh[m[1]] = m[2] + ':' + m[3]
+  }
+  t.alike(Object.keys(fromCli).sort(), SEEDER_LIMITS.slice().sort(), 'cli.js reads exactly the seeder limits')
+  t.alike(fromSh, fromCli, 'deploy.sh checks the same min:max as cli.js')
+})
 
 test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   const caddy = fs.readFileSync(CADDYFILE, 'utf8')
