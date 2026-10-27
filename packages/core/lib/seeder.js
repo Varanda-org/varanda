@@ -41,9 +41,9 @@
 // verify the content from the diaries themselves (indexPost, indexCounts,
 // indexMember back the /index routes of apps/cli/lib/seed-ws.js).
 //
-// Topic search index (lib/search-index.js, issue #81): which public posts
+// Topic search index (lib/topic-index.js, issue #81): which public posts
 // contain which whole words, in memory only and rebuilt like the engagement
-// index, but on ITS OWN cursor and queue (`searchIndexed`, _searchQueue).
+// index, but on ITS OWN cursor and queue (`topicIndexed`, _topicQueue).
 // It is not folded into _runIndex because the engagement add is NOT
 // idempotent (engagement-index.js counts every accepted call, so re-reading a
 // block paused for search would double count), and docs/protocol.md already
@@ -55,8 +55,8 @@
 // drop frees room. A dropped diary leaves the search index synchronously in
 // _drop, before its purge starts (the removal deadline of "conteúdo listado
 // sai do índice"). Same trust model: a hit is a hint `<author>:<seq>`, the
-// node reads and verifies the post itself (indexSearch backs the
-// /index/search route of apps/cli/lib/seed-ws.js).
+// node reads and verifies the post itself (indexTopic backs the
+// /index/topic route of apps/cli/lib/seed-ws.js).
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
@@ -114,7 +114,7 @@ const {
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { createEngagementIndex } = require('./engagement-index')
-const { createSearchIndex, QUERY_RE } = require('./search-index')
+const { createTopicIndex, QUERY_RE } = require('./topic-index')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 
@@ -450,11 +450,11 @@ class Seeder {
   // half of maxConnections, at least 1, maxMedia = maxServed). admitHook and
   // purgeHook also see media keys (admission steps 'persist' / 'open').
   // indexMaxRecords, indexMaxTargets and indexPerAuthorMax bound the
-  // engagement index (defaults in engagement-index.js). searchMaxPosts,
-  // searchPerAuthorMax, searchMaxTerms and searchMaxPostings bound the topic
-  // search index; searchPerAuthorPostingsMax and searchPerAuthorTermsMax are
+  // engagement index (defaults in engagement-index.js). topicMaxPosts,
+  // topicPerAuthorMax, topicMaxTerms and topicMaxPostings bound the topic
+  // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
-  // fill them for everyone (defaults in search-index.js; no CLI flags).
+  // fill them for everyone (defaults in topic-index.js; no CLI flags).
   constructor ({
     dataDir,
     associationKey = null,
@@ -482,12 +482,12 @@ class Seeder {
     indexMaxRecords = undefined,
     indexMaxTargets = undefined,
     indexPerAuthorMax = undefined,
-    searchMaxPosts = undefined,
-    searchPerAuthorMax = undefined,
-    searchMaxTerms = undefined,
-    searchMaxPostings = undefined,
-    searchPerAuthorPostingsMax = undefined,
-    searchPerAuthorTermsMax = undefined
+    topicMaxPosts = undefined,
+    topicPerAuthorMax = undefined,
+    topicMaxTerms = undefined,
+    topicMaxPostings = undefined,
+    topicPerAuthorPostingsMax = undefined,
+    topicPerAuthorTermsMax = undefined
   } = {}) {
     this.maxServed = maxServed
     this.maxMedia = maxMedia === null ? maxServed : maxMedia
@@ -559,10 +559,10 @@ class Seeder {
     this._indexRebuildQueued = false
     // Topic search index (header comment): its own queue and startup set,
     // independent of the engagement index's.
-    this._search = createSearchIndex({ maxPosts: searchMaxPosts, perAuthorMax: searchPerAuthorMax, maxTerms: searchMaxTerms, maxPostings: searchMaxPostings, perAuthorPostingsMax: searchPerAuthorPostingsMax, perAuthorTermsMax: searchPerAuthorTermsMax, onFreed: () => this._scheduleSearchResume() })
-    this._searchQueue = Promise.resolve()
-    this._searchStartup = null
-    this._searchResumeQueued = false
+    this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
+    this._topicQueue = Promise.resolve()
+    this._topicStartup = null
+    this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
     // The signed moderation snapshot (blocklist.js createBlocklistState),
     // created in start() once the data-dir lock is held, and the open
@@ -873,7 +873,7 @@ class Seeder {
       // served: growth during step 5 may already queue an index pass, and
       // a pass that pauses at the cap must still count as covered.
       this._indexStartup = new Set(survivors.map(([key]) => key))
-      this._searchStartup = new Set(survivors.map(([key]) => key))
+      this._topicStartup = new Set(survivors.map(([key]) => key))
       for (const [key, core] of survivors) this._serve(key, core, { regate: false })
       for (const [key, diary, core] of mediaSurvivors) this._serveMedia(key, diary, core, { headerOk: true })
 
@@ -913,7 +913,7 @@ class Seeder {
     for (const [key, entry] of this._served) {
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
-      this._searchDiary(key, entry)
+      this._topicDiary(key, entry)
     }
     return { topic, admitted }
   }
@@ -949,8 +949,8 @@ class Seeder {
       mediaBytes,
       indexRecords: this._index.stats().records,
       indexSaturated: this._index.stats().saturated,
-      searchPosts: this._search.stats().posts,
-      searchSaturated: this._search.stats().saturated
+      topicPosts: this._topics.stats().posts,
+      topicSaturated: this._topics.stats().saturated
     }
   }
 
@@ -1233,11 +1233,11 @@ class Seeder {
       indexPaused: false,
       indexRetry: null,
       indexReadFailures: 0,
-      searchIndexed: 1,
-      searchQueued: false,
-      searchPaused: false,
-      searchRetry: null,
-      searchReadFailures: 0
+      topicIndexed: 1,
+      topicQueued: false,
+      topicPaused: false,
+      topicRetry: null,
+      topicReadFailures: 0
     }
     // Log quota on growth (S3): length/byteLength advance on the signed
     // upgrade ('append' fires) before the blocks arrive, so an admitted log
@@ -1281,7 +1281,7 @@ class Seeder {
     this._broadcastHave(key, length)
     this._scanDiary(key, entry)
     this._indexDiary(key, entry)
-    this._searchDiary(key, entry)
+    this._topicDiary(key, entry)
   }
 
   // Local gate of a served, not yet gated replica. The verdict is computed
@@ -1309,7 +1309,7 @@ class Seeder {
       this._broadcastHave(key, entry.core.contiguousLength)
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
-      this._searchDiary(key, entry)
+      this._topicDiary(key, entry)
     }).catch(() => {
       // Only a throwing test hook gets here: fail closed (never gated).
       entry.gating = false
@@ -1325,8 +1325,8 @@ class Seeder {
   _stopEntry (entry) {
     clearTimeout(entry.indexRetry)
     entry.indexRetry = null
-    clearTimeout(entry.searchRetry)
-    entry.searchRetry = null
+    clearTimeout(entry.topicRetry)
+    entry.topicRetry = null
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
@@ -1367,8 +1367,8 @@ class Seeder {
     // Same deadline for the topic search index: synchronous, before the
     // purge, on every drop path (blocked, fork, quota, revoked issuer, failed
     // gate, blocklist adoption). No timer.
-    this._search.removeDiary(key)
-    if (this._searchStartup !== null) this._searchStartup.delete(key)
+    this._topics.removeDiary(key)
+    if (this._topicStartup !== null) this._topicStartup.delete(key)
     // A diary's media cores go with it (one side of the binding is gone); a
     // media admission in flight for it rolls itself back (_mediaStillWanted).
     for (const [k, m] of [...this._mediaServed]) {
@@ -1951,98 +1951,98 @@ class Seeder {
   // rebuild branch: a search posting has no edge from another diary, so
   // removeDiary in _drop is enough, and a re-admitted diary is a new entry
   // scanned from block 1.
-  _searchDiary (key, entry) {
+  _topicDiary (key, entry) {
     if (entry.dropped || !entry.gated || this._closing || this._served.get(key) !== entry) return
-    if (entry.searchQueued || entry.searchPaused || entry.searchRetry) return
-    entry.searchQueued = true
-    const run = () => this._runSearch(key, entry)
-    this._searchQueue = this._searchQueue.then(run, run).catch(noop)
+    if (entry.topicQueued || entry.topicPaused || entry.topicRetry) return
+    entry.topicQueued = true
+    const run = () => this._runTopic(key, entry)
+    this._topicQueue = this._topicQueue.then(run, run).catch(noop)
   }
 
-  // A deliberate twin of _runIndex (its own cursor `searchIndexed`): a fix
+  // A deliberate twin of _runIndex (its own cursor `topicIndexed`): a fix
   // to one must be applied to the other. Only post blocks are handed to the
   // search index; a refused add (cap reached) leaves the cursor AT that block
   // and pauses the diary's search cursor only (never entry.indexPaused).
   // search.add is idempotent, so re-reading the paused block after a resume
   // never double counts.
-  async _runSearch (key, entry) {
+  async _runTopic (key, entry) {
     const core = entry.core
     try {
-      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.searchIndexed < core.contiguousLength) {
-        const i = entry.searchIndexed
+      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.topicIndexed < core.contiguousLength) {
+        const i = entry.topicIndexed
         let raw
         try {
           raw = await core.get(i, { wait: false, raw: true })
         } catch {
-          this._retrySearch(key, entry)
+          this._retryTopic(key, entry)
           return
         }
         if (entry.dropped || this._closing || this._served.get(key) !== entry) return
         if (raw === null) {
-          this._retrySearch(key, entry)
+          this._retryTopic(key, entry)
           return
         }
         const block = decodeBlock(raw)
         if (block !== null && block.type === 'post') {
           const record = validRecordCopy(block, i)
-          if (record !== null && !this._search.add(key, i, record)) {
-            entry.searchPaused = true
+          if (record !== null && !this._topics.add(key, i, record)) {
+            entry.topicPaused = true
             return
           }
         }
-        entry.searchIndexed = i + 1
-        entry.searchReadFailures = 0
+        entry.topicIndexed = i + 1
+        entry.topicReadFailures = 0
       }
     } finally {
-      entry.searchQueued = false
+      entry.topicQueued = false
       // Same startup accounting as _runIndex, over the search fields.
-      if (this._searchStartup !== null && (entry.searchPaused || entry.searchReadFailures >= 4 || entry.searchIndexed >= core.contiguousLength)) {
-        this._searchStartup.delete(key)
+      if (this._topicStartup !== null && (entry.topicPaused || entry.topicReadFailures >= 4 || entry.topicIndexed >= core.contiguousLength)) {
+        this._topicStartup.delete(key)
       }
     }
   }
 
   // As _retryIndex: one timer per served diary, backoff 2/10/30/60 s.
-  _retrySearch (key, entry) {
-    if (entry.searchRetry || entry.dropped || this._closing || this._served.get(key) !== entry) return
-    entry.searchReadFailures = Math.min((entry.searchReadFailures || 0) + 1, 4)
-    const delay = [2000, 10000, 30000, 60000][entry.searchReadFailures - 1]
-    entry.searchRetry = setTimeout(() => {
-      entry.searchRetry = null
-      this._searchDiary(key, entry)
+  _retryTopic (key, entry) {
+    if (entry.topicRetry || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    entry.topicReadFailures = Math.min((entry.topicReadFailures || 0) + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.topicReadFailures - 1]
+    entry.topicRetry = setTimeout(() => {
+      entry.topicRetry = null
+      this._topicDiary(key, entry)
     }, delay)
-    entry.searchRetry.unref()
+    entry.topicRetry.unref()
   }
 
   // As _scheduleIndexResume: resume paused search cursors once, next tick.
-  _scheduleSearchResume () {
-    if (this._closing || this._searchResumeQueued) return
-    this._searchResumeQueued = true
+  _scheduleTopicResume () {
+    if (this._closing || this._topicResumeQueued) return
+    this._topicResumeQueued = true
     setImmediate(() => {
-      this._searchResumeQueued = false
-      this._resumeSearch()
+      this._topicResumeQueued = false
+      this._resumeTopic()
     })
   }
 
   // Room was freed in the search index: every paused search cursor runs again.
-  _resumeSearch () {
+  _resumeTopic () {
     if (this._closing) return
     for (const [key, entry] of this._served) {
-      if (!entry.searchPaused) continue
-      entry.searchPaused = false
-      this._searchDiary(key, entry)
+      if (!entry.topicPaused) continue
+      entry.topicPaused = false
+      this._topicDiary(key, entry)
     }
   }
 
   // The search index's honesty flags, as _indexFlags over the search cursor
   // (no rebuild flag: the search index is never rebuilt wholesale).
-  _searchFlags () {
-    const indexing = !this._ready || this._searchStartup === null || this._searchStartup.size > 0
+  _topicFlags () {
+    const indexing = !this._ready || this._topicStartup === null || this._topicStartup.size > 0
     let complete = !indexing && !this._closing
     if (complete) {
       for (const entry of this._served.values()) {
         if (!entry.gated || entry.dropped) continue
-        if (entry.searchPaused || entry.searchIndexed < entry.core.contiguousLength) {
+        if (entry.topicPaused || entry.topicIndexed < entry.core.contiguousLength) {
           complete = false
           break
         }
@@ -2094,25 +2094,25 @@ class Seeder {
     }
   }
 
-  // GET|HEAD /index/search/<tok>+<tok>[/<cursor>]: refs of visible public
+  // GET|HEAD /index/topic/<tok>+<tok>[/<cursor>]: refs of visible public
   // posts containing every query token (newest first), a seq hint per listed
   // author (engagement index hints: a hint, not content) and the search
   // index's own honesty flags; null for a malformed query or cursor. The
   // query is never logged. No follow filtering and no ageBand filter (every
   // hosted certificate is 'unchecked', cert.js); visibility is the read gate
   // of the engagement index (_indexVisible).
-  indexSearch (path, cursor = null) {
+  indexTopic (path, cursor = null) {
     try {
       if (typeof path !== 'string' || !QUERY_RE.test(path)) return null
       const tokens = [...new Set(path.split('+'))]
-      const page = this._search.search(tokens, cursor, (hex) => this._indexVisible(hex), Date.now())
+      const page = this._topics.search(tokens, cursor, (hex) => this._indexVisible(hex), Date.now())
       if (page === null) return null
       const authors = {}
       for (const ref of page.items) {
         const author = ref.slice(0, ref.indexOf(':'))
         if (!(author in authors)) authors[author] = this._index.hints(author)
       }
-      return { items: page.items, next: page.next, authors, ...this._searchFlags() }
+      return { items: page.items, next: page.next, authors, ...this._topicFlags() }
     } catch {
       return null
     }

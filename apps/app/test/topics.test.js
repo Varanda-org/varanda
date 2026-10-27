@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const load = () => import('../src/search.js')
+const load = () => import('../src/topics.js')
 
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)

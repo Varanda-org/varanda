@@ -1,6 +1,6 @@
 'use strict'
 
-// lib/search-index.js: the normative fold and tokenizer, atomic admission
+// lib/topic-index.js: the normative fold and tokenizer, atomic admission
 // against every cap, sticky saturation, whole-token AND over the shortest
 // posting list, newest-first cursor paging with a bounded scan, hidden
 // future posts, total behaviour on hostile input and a 50k-post load.
@@ -8,7 +8,7 @@ const test = require('brittle')
 const {
   foldText,
   tokensOf,
-  createSearchIndex,
+  createTopicIndex,
   compareNewestFirst,
   parseSearchCursor,
   SEARCH_PAGE,
@@ -18,7 +18,7 @@ const {
   CURSOR_RE,
   DEFAULT_PER_AUTHOR_POSTINGS_MAX,
   DEFAULT_PER_AUTHOR_TERMS_MAX
-} = require('../lib/search-index')
+} = require('../lib/topic-index')
 const { spawnSync } = require('child_process')
 
 const K1 = '1'.repeat(64)
@@ -74,7 +74,7 @@ test('exports: grammar constants and cursor parsing', (t) => {
 })
 
 test('add: validation, nothing-to-store records and idempotence', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const empty = ix.stats()
   t.alike(empty, { posts: 0, terms: 0, postings: 0, saturated: false, maxPosts: 200000 })
   t.is(ix.add('X'.repeat(64), 1, post('ceu')), false, 'bad author')
@@ -82,10 +82,10 @@ test('add: validation, nothing-to-store records and idempotence', (t) => {
   t.is(ix.add(K1, 0, post('ceu')), false, 'seq 0')
   t.is(ix.add(K1, 1.5, post('ceu')), false, 'fractional seq')
   t.is(ix.add(K1, '1', post('ceu')), false, 'string seq')
-  const big = createSearchIndex()
+  const big = createTopicIndex()
   t.is(big.add(K1, 1000000000000000, post('ceu')), false, '16-digit seq: no cursor could carry it')
   t.is(big.stats().saturated, true, 'that refusal is reported like a cap')
-  t.is(createSearchIndex().add(K1, 999999999999999, post('ceu')), true, 'largest 15-digit seq')
+  t.is(createTopicIndex().add(K1, 999999999999999, post('ceu')), true, 'largest 15-digit seq')
   t.is(ix.add(null, 1, post('ceu')), false)
   t.alike(ix.stats(), empty)
   t.is(ix.add(K1, 1, { type: 'like', to: { author: K2, seq: 1 }, on: true, at: at(0) }), true, 'like')
@@ -113,7 +113,7 @@ test('add: validation, nothing-to-store records and idempotence', (t) => {
 })
 
 test('add: a long post indexes every distinct word', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const words = Array.from({ length: 200 }, (_, i) => 'w' + i.toString(36).padStart(3, '0'))
   const text = words.join(' ')
   t.ok(text.length >= 999, 'about 1000 chars: ' + text.length)
@@ -136,7 +136,7 @@ test('caps refuse atomically; removeDiary frees and fires onFreed once', (t) => 
   let freed = 0
   const onFreed = () => { freed++ }
 
-  const a = createSearchIndex({ maxPosts: 2, onFreed })
+  const a = createTopicIndex({ maxPosts: 2, onFreed })
   t.ok(a.add(K1, 1, post('ceu')))
   t.ok(a.add(K2, 1, post('mar')))
   assertAtomicRefusal(t, a, K3, 1, post('ceu azul'), 'maxPosts')
@@ -146,7 +146,7 @@ test('caps refuse atomically; removeDiary frees and fires onFreed once', (t) => 
   t.ok(a.add(K3, 1, post('ceu azul')), 'admitted after free')
 
   freed = 0
-  const b = createSearchIndex({ perAuthorMax: 2, onFreed })
+  const b = createTopicIndex({ perAuthorMax: 2, onFreed })
   t.ok(b.add(K1, 1, post('ceu')))
   t.ok(b.add(K1, 2, post('ceu')))
   t.is(b.stats().saturated, true, 'full author saturates')
@@ -158,7 +158,7 @@ test('caps refuse atomically; removeDiary frees and fires onFreed once', (t) => 
   t.ok(b.add(K1, 3, post('ceu')))
 
   freed = 0
-  const c = createSearchIndex({ maxTerms: 3, onFreed })
+  const c = createTopicIndex({ maxTerms: 3, onFreed })
   t.ok(c.add(K1, 1, post('ceu azul')))
   t.ok(c.add(K2, 1, post('ceu mar')))
   assertAtomicRefusal(t, c, K2, 2, post('ceu sol'), 'maxTerms')
@@ -168,7 +168,7 @@ test('caps refuse atomically; removeDiary frees and fires onFreed once', (t) => 
   t.ok(c.add(K1, 2, post('sol')), 'a freed term admits a new one')
 
   freed = 0
-  const d = createSearchIndex({ maxPostings: 4, onFreed: () => { freed++; throw new Error('hostile') } })
+  const d = createTopicIndex({ maxPostings: 4, onFreed: () => { freed++; throw new Error('hostile') } })
   t.ok(d.add(K1, 1, post('ceu azul')))
   t.ok(d.add(K2, 1, post('ceu mar')))
   assertAtomicRefusal(t, d, K3, 1, post('sol'), 'maxPostings')
@@ -180,7 +180,7 @@ test('caps refuse atomically; removeDiary frees and fires onFreed once', (t) => 
 })
 
 test('saturation is sticky after any refusal', (t) => {
-  const p = createSearchIndex({ maxPostings: 3 })
+  const p = createTopicIndex({ maxPostings: 3 })
   t.ok(p.add(K1, 1, post('ceu')))
   t.ok(p.add(K2, 1, post('mar')))
   t.is(p.stats().saturated, false)
@@ -191,7 +191,7 @@ test('saturation is sticky after any refusal', (t) => {
   t.ok(p.removeDiary(K3))
   t.is(p.stats().saturated, false, 'a free resets the sticky flag')
 
-  const q = createSearchIndex({ maxTerms: 3 })
+  const q = createTopicIndex({ maxTerms: 3 })
   t.ok(q.add(K1, 1, post('ceu')))
   t.ok(q.add(K2, 1, post('mar')))
   t.is(q.add(K3, 1, post('sol lua')), false)
@@ -200,15 +200,15 @@ test('saturation is sticky after any refusal', (t) => {
   q.clear()
   t.alike(q.stats(), { posts: 0, terms: 0, postings: 0, saturated: false, maxPosts: 200000 }, 'clear resets')
 
-  const z = createSearchIndex({ perAuthorMax: 0 })
+  const z = createTopicIndex({ perAuthorMax: 0 })
   t.is(z.stats().saturated, true, 'perAuthorMax 0 saturated before any add')
   t.is(z.add(K1, 1, post('ceu')), false)
 
-  const m = createSearchIndex({ maxPosts: 0 })
+  const m = createTopicIndex({ maxPosts: 0 })
   t.is(m.stats().saturated, true)
   t.is(m.stats().maxPosts, 0, 'zero is a valid option')
 
-  const f = createSearchIndex({ maxPosts: -1, perAuthorMax: 1.5, maxTerms: 'x', maxPostings: Infinity })
+  const f = createTopicIndex({ maxPosts: -1, perAuthorMax: 1.5, maxTerms: 'x', maxPostings: Infinity })
   t.is(f.stats().maxPosts, 200000, 'invalid options fall back to defaults')
   t.ok(f.add(K1, 1, post('ceu')))
   t.ok(f.add(K1, 2, post('ceu')))
@@ -217,7 +217,7 @@ test('saturation is sticky after any refusal', (t) => {
 test('per-author term share: one diary cannot fill the term budget', (t) => {
   t.is(DEFAULT_PER_AUTHOR_TERMS_MAX, 25000, '5% of the term budget')
   let freed = 0
-  const ix = createSearchIndex({ perAuthorTermsMax: 5, onFreed: () => { freed++ } })
+  const ix = createTopicIndex({ perAuthorTermsMax: 5, onFreed: () => { freed++ } })
   t.ok(ix.add(K1, 1, post('aa bb cc')), '3 created')
   t.ok(ix.add(K1, 2, post('dd ee')), '5 created: the share is full')
   t.is(ix.stats().saturated, false)
@@ -237,7 +237,7 @@ test('per-author term share: one diary cannot fill the term budget', (t) => {
 
 test('per-author posting share: one diary cannot fill the posting budget', (t) => {
   t.is(DEFAULT_PER_AUTHOR_POSTINGS_MAX, 200000, '5% of the posting budget')
-  const ix = createSearchIndex({ perAuthorPostingsMax: 4 })
+  const ix = createTopicIndex({ perAuthorPostingsMax: 4 })
   t.ok(ix.add(K1, 1, post('aa bb')))
   t.ok(ix.add(K1, 2, post('cc dd')), '4 postings: the share is full')
   assertAtomicRefusal(t, ix, K1, 3, post('ee'), 'perAuthorPostingsMax')
@@ -251,7 +251,7 @@ test('per-author posting share: one diary cannot fill the posting budget', (t) =
 })
 
 test('search: whole-token AND semantics', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   ix.add(K1, 1, post('Céu azul', 1))
   ix.add(K1, 2, post('azul, céu!', 2))
   ix.add(K1, 3, post('céu e azul', 3))
@@ -269,7 +269,7 @@ test('search: whole-token AND semantics', (t) => {
 })
 
 test('search: malformed input answers null, never throws', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   ix.add(K1, 1, post('ceu'))
   t.is(ix.search([]), null)
   t.is(ix.search('ceu'), null)
@@ -289,7 +289,7 @@ test('search: malformed input answers null, never throws', (t) => {
 })
 
 test('search: newest-first order and paging over 70 hits with ties', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const expected = []
   // Insert out of order (diary by diary, newest diary first) so the lists
   // go dirty and get sorted lazily; every 5th post shares its time.
@@ -324,7 +324,7 @@ test('search: newest-first order and paging over 70 hits with ties', (t) => {
 })
 
 test('search: the scan budget bounds work when every candidate is hidden', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const OLD = key(9999)
   t.ok(ix.add(OLD, 1, post('ceu', 0)))
   for (let i = 1; i <= 2499; i++) ix.add(K1, i, post('ceu', i * 1000))
@@ -342,7 +342,7 @@ test('search: the scan budget bounds work when every candidate is hidden', (t) =
 })
 
 test('search: two common tokens with one shared oldest post', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const OLD = key(9999)
   t.ok(ix.add(OLD, 1, post('ceu azul', 0)))
   for (let i = 1; i <= 2500; i++) ix.add(K1, i, post('ceu', i * 1000))
@@ -364,7 +364,7 @@ test('search: two common tokens with one shared oldest post', (t) => {
 })
 
 test('search: a post dated ahead is hidden until the clock catches up', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const ahead = 2 * 86400000
   t.ok(ix.add(K1, 1, { type: 'post', text: 'ceu', at: new Date(NOW + ahead).toISOString() }))
   t.ok(ix.add(K1, 2, { type: 'post', text: 'ceu', at: new Date(NOW).toISOString() }))
@@ -375,7 +375,7 @@ test('search: a post dated ahead is hidden until the clock catches up', (t) => {
 })
 
 test('search: far-future posts never consume the scan budget', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   t.ok(ix.add(K2, 1, post('ceu', 0)))
   const far = Date.parse('2099-01-01T00:00:00.000Z')
   for (let i = 1; i <= 3000; i++) ix.add(K1, i, { type: 'post', text: 'ceu', at: new Date(far + i).toISOString() })
@@ -385,14 +385,14 @@ test('search: far-future posts never consume the scan budget', (t) => {
   const page = ix.search(['ceu'], null, visible, NOW)
   t.alike(page, { items: [K2 + ':1'], next: null }, 'the ordinary post on the first page')
   t.ok(calls <= 3, 'far-future entries never examined: ' + calls)
-  const only = createSearchIndex()
+  const only = createTopicIndex()
   t.ok(only.add(K1, 1, { type: 'post', text: 'ceu', at: new Date(far).toISOString() }))
   t.alike(only.search(['ceu'], null, undefined, NOW), { items: [], next: null }, 'nothing in range: the end')
   t.alike(only.search(['ceu'], null, undefined, far).items, [K1 + ':1'], 'shown once the clock catches up')
 })
 
 test('search: hidden future posts cannot steer a multi-word query onto a long list', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   for (let i = 1; i <= 40; i++) t.ok(ix.add(K1, i, post('saudade de casa', i)))
   for (let i = 1; i <= 5000; i++) ix.add(K2, i, post('de novo', 1000 + i))
   const far = Date.parse('2099-01-01T00:00:00.000Z')
@@ -405,7 +405,7 @@ test('search: hidden future posts cannot steer a multi-word query onto a long li
 })
 
 test('removeDiary deletes emptied terms and leaves other authors intact', (t) => {
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   ix.add(K1, 1, post('ceu azul', 1))
   ix.add(K1, 2, post('sol', 2))
   ix.add(K2, 1, post('ceu mar', 3))
@@ -426,7 +426,7 @@ test('50k posts from 500 diaries: build and common-token queries stay bounded', 
   let seed = 42
   const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
   const vocab = Array.from({ length: 2000 }, (_, i) => 'pal' + i.toString(36))
-  const ix = createSearchIndex()
+  const ix = createTopicIndex()
   const heapBefore = process.memoryUsage().heapUsed
   const startBuild = performance.now()
   let accepted = 0
@@ -465,12 +465,12 @@ test('50k posts from 500 diaries: build and common-token queries stay bounded', 
 // heap is read after a full collection.
 test('memory: a stored token never retains the post text', (t) => {
   const code = [
-    'const { createSearchIndex } = require(' + JSON.stringify(require.resolve('../lib/search-index')) + ')',
+    'const { createTopicIndex } = require(' + JSON.stringify(require.resolve('../lib/topic-index')) + ')',
     "const K = (i) => i.toString(16).padStart(64, '0')",
     'const pad = String.fromCodePoint(0x1D160).repeat(986)',
     'global.gc()',
     'const before = process.memoryUsage().heapUsed',
-    'const ix = createSearchIndex()',
+    'const ix = createTopicIndex()',
     'let ok = 0',
     'for (let i = 0; i < 4000; i++) {',
     "  const record = { type: 'post', text: 'abcdefghijklm ' + pad, at: new Date(1700000000000 + i).toISOString() }",

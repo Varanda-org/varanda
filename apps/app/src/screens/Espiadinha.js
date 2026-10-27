@@ -25,7 +25,7 @@ import {
   isLastPeekPage, isWebOnlyError, mergePage, peekKey, peekNotice, roundLabel, roundStarts, withoutAuthor
 } from '../peek'
 import { whoOf } from '../who'
-import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../search'
+import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
 import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'

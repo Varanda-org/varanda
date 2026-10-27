@@ -40,7 +40,7 @@ const ACCOUNT_PREFIX = '/account/'
 // account service, the worker never answers it: no cache lookup, no 503.
 const MEDIA_PREFIX = '/media/'
 // The seeder's engagement index (/index/post/..., /index/counts/...,
-// /index/member/...) and its topic search (/index/search/...) are proxied
+// /index/member/...) and its topic search (/index/topic/...) are proxied
 // by Caddy the same way, with their own no-store and real 404s: never
 // answered by the worker either (an app route such as
 // /indexes keeps the shell: only the '/index/' prefix is bypassed).

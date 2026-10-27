@@ -1,7 +1,7 @@
-// The seeder's topic search index (packages/core/lib/search-index.js and the
+// The seeder's topic search index (packages/core/lib/topic-index.js and the
 // search scan of packages/core/lib/seeder.js, issue #81): built in memory
 // from the served diaries' own post blocks on a cursor and queue of its own
-// (never the engagement index's), read through indexSearch with blocked and
+// (never the engagement index's), read through indexTopic with blocked and
 // dropped authors filtered out, removed synchronously in _drop before the
 // purge, bounded by caps where the search cursor pauses (never skips) and
 // resumes when a drop frees room, independently of the engagement cursor.
@@ -20,7 +20,7 @@ const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varan
 const { memberCertRecord, postRecord, likeRecord } = require('@varanda/core/lib/records')
 const { startHealth } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
-const { createSearchIndex } = require('@varanda/core/lib/search-index')
+const { createTopicIndex } = require('@varanda/core/lib/topic-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
 
 const HEX64_ANYWHERE = /[0-9a-f]{64}/
@@ -58,10 +58,10 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     _indexDropped: new Set(),
     _indexRebuildQueued: false,
     _indexResumeQueued: false,
-    _search: createSearchIndex({ ...search, onFreed: () => seeder._scheduleSearchResume() }),
-    _searchQueue: Promise.resolve(),
-    _searchStartup: new Set(),
-    _searchResumeQueued: false,
+    _topics: createTopicIndex({ ...search, onFreed: () => seeder._scheduleTopicResume() }),
+    _topicQueue: Promise.resolve(),
+    _topicStartup: new Set(),
+    _topicResumeQueued: false,
     _served: new Map(),
     _admitted: new Map(),
     _dropping: new Map(),
@@ -84,11 +84,11 @@ function scanFixture ({ index = {}, search = {} } = {}) {
       indexQueued: false,
       indexRetry: null,
       indexReadFailures: 0,
-      searchIndexed: 1,
-      searchQueued: false,
-      searchPaused: false,
-      searchRetry: null,
-      searchReadFailures: 0,
+      topicIndexed: 1,
+      topicQueued: false,
+      topicPaused: false,
+      topicRetry: null,
+      topicReadFailures: 0,
       stopFork: () => {},
       stopGrow: () => {},
       stopQuota: () => {},
@@ -99,7 +99,7 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     seeder._served.set(key, entry)
     seeder._admitted.set(key, true)
     seeder._indexStartup.add(key)
-    seeder._searchStartup.add(key)
+    seeder._topicStartup.add(key)
     return entry
   }
   // Serves a diary and runs the real growth path (both scans).
@@ -117,12 +117,12 @@ async function settle (seeder) {
   let b
   do {
     a = seeder._indexQueue
-    b = seeder._searchQueue
+    b = seeder._topicQueue
     await a
     await b
     await new Promise((resolve) => setImmediate(resolve))
     await new Promise((resolve) => setImmediate(resolve))
-  } while (a !== seeder._indexQueue || b !== seeder._searchQueue)
+  } while (a !== seeder._indexQueue || b !== seeder._topicQueue)
 }
 
 const post = (text, i, extra = {}) => postRecord({ text, at: at(i), ...extra })
@@ -144,23 +144,23 @@ test('word query: deep history, whole-token match, AND, hints, flags, no follow 
     post('até amanhã', 8)
   ])
   await settle(seeder)
-  t.is(seeder._served.get(A).searchIndexed, 9, 'the search cursor reached the end')
-  t.is(seeder._search.stats().posts, 6, 'the like and the media-only post are not indexed')
+  t.is(seeder._served.get(A).topicIndexed, 9, 'the search cursor reached the end')
+  t.is(seeder._topics.stats().posts, 6, 'the like and the media-only post are not indexed')
 
-  const ceu = seeder.indexSearch('ceu')
+  const ceu = seeder.indexTopic('ceu')
   t.alike(ceu, { items: [ref(A, 1)], next: null, authors: { [A]: NO_HINTS }, indexing: false, complete: true }, 'the oldest post, beyond the three newest, with hint and flags')
-  t.alike(seeder.indexSearch('ceus').items, [ref(A, 2)], "'Céus' is its own token")
-  t.alike(seeder.indexSearch('azul').items, [ref(A, 3), ref(A, 1)], 'newest first')
-  t.alike(seeder.indexSearch('ceu+azul').items, [ref(A, 1)], 'AND')
-  t.alike(seeder.indexSearch('azul+ceu+azul').items, [ref(A, 1)], 'repeated tokens are folded')
+  t.alike(seeder.indexTopic('ceus').items, [ref(A, 2)], "'Céus' is its own token")
+  t.alike(seeder.indexTopic('azul').items, [ref(A, 3), ref(A, 1)], 'newest first')
+  t.alike(seeder.indexTopic('ceu+azul').items, [ref(A, 1)], 'AND')
+  t.alike(seeder.indexTopic('azul+ceu+azul').items, [ref(A, 1)], 'repeated tokens are folded')
 
   // A second diary nobody follows: no follow filtering exists here.
   serve(B, [post('Olha o #Céu!', 10)])
   await settle(seeder)
-  const both = seeder.indexSearch('ceu')
+  const both = seeder.indexTopic('ceu')
   t.alike(both.items, [ref(B, 1), ref(A, 1)], "'#Céu' matches too")
   t.alike(Object.keys(both.authors).sort(), [A, B].sort(), 'one hint per listed author')
-  t.alike(seeder.indexSearch('ceu+azul').items, [ref(A, 1)])
+  t.alike(seeder.indexTopic('ceu+azul').items, [ref(A, 1)])
 })
 
 test('malformed queries and cursors -> null; an unknown word -> an empty page', async (t) => {
@@ -168,15 +168,15 @@ test('malformed queries and cursors -> null; an unknown word -> an empty page', 
   const A = authorKey(1)
   serve(A, [post('céu', 1)])
   await settle(seeder)
-  t.is(seeder.indexSearch(''), null)
-  t.is(seeder.indexSearch('CEU'), null, 'the query is folded by the client')
-  t.is(seeder.indexSearch('Céu'), null)
-  t.is(seeder.indexSearch('a'), null, 'a one-letter token')
-  t.is(seeder.indexSearch(Array.from({ length: 9 }, (_, i) => 'ab' + i).join('+')), null, 'nine tokens')
-  t.is(seeder.indexSearch('ceu', 'bad'), null, 'a malformed cursor')
-  t.is(seeder.indexSearch(null), null)
-  t.is(seeder.indexSearch(42), null)
-  t.alike(seeder.indexSearch('desconhecida'), { items: [], next: null, authors: {}, indexing: false, complete: true })
+  t.is(seeder.indexTopic(''), null)
+  t.is(seeder.indexTopic('CEU'), null, 'the query is folded by the client')
+  t.is(seeder.indexTopic('Céu'), null)
+  t.is(seeder.indexTopic('a'), null, 'a one-letter token')
+  t.is(seeder.indexTopic(Array.from({ length: 9 }, (_, i) => 'ab' + i).join('+')), null, 'nine tokens')
+  t.is(seeder.indexTopic('ceu', 'bad'), null, 'a malformed cursor')
+  t.is(seeder.indexTopic(null), null)
+  t.is(seeder.indexTopic(42), null)
+  t.alike(seeder.indexTopic('desconhecida'), { items: [], next: null, authors: {}, indexing: false, complete: true })
 })
 
 test('a blocked author is hidden at read time', async (t) => {
@@ -186,9 +186,9 @@ test('a blocked author is hidden at read time', async (t) => {
   serve(A, [post('céu', 1)])
   serve(B, [post('céu', 2)])
   await settle(seeder)
-  t.alike(seeder.indexSearch('ceu').items, [ref(B, 1), ref(A, 1)])
+  t.alike(seeder.indexTopic('ceu').items, [ref(B, 1), ref(A, 1)])
   seeder._isBlocked = (k) => k === A
-  const page = seeder.indexSearch('ceu')
+  const page = seeder.indexTopic('ceu')
   t.alike(page.items, [ref(B, 1)])
   t.alike(Object.keys(page.authors), [B], 'no hint for the blocked author')
 })
@@ -200,7 +200,7 @@ test('_drop removes the diary from the search index before the purge resolves', 
   serve(A, [post('céu', 1), post('céu de novo', 2)])
   serve(B, [post('céu', 3)])
   await settle(seeder)
-  t.is(seeder._search.stats().posts, 3)
+  t.is(seeder._topics.stats().posts, 3)
   let release
   let purging = false
   seeder._purge = () => {
@@ -208,17 +208,17 @@ test('_drop removes the diary from the search index before the purge resolves', 
     return new Promise((resolve) => { release = resolve })
   }
   seeder._drop(A, 'blocked')
-  t.is(seeder._search.stats().posts, 1, 'removed synchronously')
-  t.alike(seeder.indexSearch('ceu').items, [ref(B, 1)])
-  t.absent(seeder._searchStartup.has(A))
+  t.is(seeder._topics.stats().posts, 1, 'removed synchronously')
+  t.alike(seeder.indexTopic('ceu').items, [ref(B, 1)])
+  t.absent(seeder._topicStartup.has(A))
   await until(() => purging, { name: 'purga iniciada' })
-  t.alike(seeder.indexSearch('ceu').items, [ref(B, 1)], 'still gone while the purge is stalled')
+  t.alike(seeder.indexTopic('ceu').items, [ref(B, 1)], 'still gone while the purge is stalled')
   release()
   await seeder._drops.get(A)
 })
 
 test('caps: search and engagement cursors pause independently; a drop resumes the search cursor without double counting', async (t) => {
-  // searchMaxPosts 2: B's post and A:1 fit, A:2 (the third post) is refused.
+  // topicMaxPosts 2: B's post and A:1 fit, A:2 (the third post) is refused.
   const { seeder, serve } = scanFixture({ search: { maxPosts: 2 } })
   const A = authorKey(1)
   const B = authorKey(2)
@@ -231,27 +231,27 @@ test('caps: search and engagement cursors pause independently; a drop resumes th
     likeRecord({ to: { author: B, seq: 1 }, on: false, at: at(4) })
   ])
   await settle(seeder)
-  t.ok(a.searchPaused, 'the search cursor paused')
-  t.is(a.searchIndexed, 3, 'AT the refused block')
+  t.ok(a.topicPaused, 'the search cursor paused')
+  t.is(a.topicIndexed, 3, 'AT the refused block')
   t.absent(a.indexPaused, 'never pauses the engagement cursor')
   t.is(a.indexed, 5, 'engagement reached the end')
-  t.is(seeder._searchFlags().complete, false)
+  t.is(seeder._topicFlags().complete, false)
   t.is(seeder._indexFlags().complete, true, 'the engagement flags are untouched')
-  t.is(seeder.indexSearch('palavra').complete, false)
+  t.is(seeder.indexTopic('palavra').complete, false)
   t.is(seeder.indexMember(A).complete, true)
-  t.is(seeder._search.stats().saturated, true)
-  t.alike(seeder.indexSearch('palavra').items, [ref(A, 1)])
+  t.is(seeder._topics.stats().saturated, true)
+  t.alike(seeder.indexTopic('palavra').items, [ref(A, 1)])
 
   // Dropping B frees room: A's search cursor resumes at block 3.
   seeder._drop(B, 'fork')
   await seeder._drops.get(B)
   await settle(seeder)
-  t.absent(a.searchPaused)
-  t.is(a.searchIndexed, 5)
-  t.is(seeder._search.stats().posts, 2, 'A:1 and A:3, each counted once')
-  t.alike(seeder.indexSearch('palavra').items, [ref(A, 3), ref(A, 1)])
-  t.is(seeder.indexSearch('palavra').complete, true)
-  t.is(seeder._search.stats().saturated, true, 'at the cap again (2 of 2), nothing refused')
+  t.absent(a.topicPaused)
+  t.is(a.topicIndexed, 5)
+  t.is(seeder._topics.stats().posts, 2, 'A:1 and A:3, each counted once')
+  t.alike(seeder.indexTopic('palavra').items, [ref(A, 3), ref(A, 1)])
+  t.is(seeder.indexTopic('palavra').complete, true)
+  t.is(seeder._topics.stats().saturated, true, 'at the cap again (2 of 2), nothing refused')
 })
 
 test('caps: a paused engagement cursor does not stop the search scan', async (t) => {
@@ -261,9 +261,9 @@ test('caps: a paused engagement cursor does not stop the search scan', async (t)
   await settle(seeder)
   t.ok(a.indexPaused, 'engagement paused at the cap')
   t.is(a.indexed, 2)
-  t.is(a.searchIndexed, 4, 'search reached the end')
+  t.is(a.topicIndexed, 4, 'search reached the end')
   t.is(seeder._indexFlags().complete, false)
-  const page = seeder.indexSearch('palavra')
+  const page = seeder.indexTopic('palavra')
   t.alike(page.items, [ref(A, 3)], 'a post past the engagement pause is found')
   t.is(page.complete, true)
 })
@@ -274,8 +274,8 @@ test('a post dated two days ahead is hidden', async (t) => {
   const future = new Date(Date.now() + 2 * 86400000).toISOString()
   serve(A, [post('céu agora', 1), postRecord({ text: 'céu amanhã', at: future })])
   await settle(seeder)
-  t.alike(seeder.indexSearch('ceu').items, [ref(A, 1)])
-  t.alike(seeder.indexSearch('amanha').items, [])
+  t.alike(seeder.indexTopic('ceu').items, [ref(A, 1)])
+  t.alike(seeder.indexTopic('amanha').items, [])
 })
 
 test('paging over 70 matching posts: 30, 30, 10, then next null', async (t) => {
@@ -283,14 +283,14 @@ test('paging over 70 matching posts: 30, 30, 10, then next null', async (t) => {
   const A = authorKey(1)
   serve(A, Array.from({ length: 70 }, (_, i) => post('palavra ' + i, i)))
   await settle(seeder)
-  const p1 = seeder.indexSearch('palavra')
+  const p1 = seeder.indexTopic('palavra')
   t.is(p1.items.length, 30)
   t.is(p1.items[0], ref(A, 70), 'newest first')
   t.ok(p1.next)
-  const p2 = seeder.indexSearch('palavra', p1.next)
+  const p2 = seeder.indexTopic('palavra', p1.next)
   t.is(p2.items.length, 30)
   t.ok(p2.next)
-  const p3 = seeder.indexSearch('palavra', p2.next)
+  const p3 = seeder.indexTopic('palavra', p2.next)
   t.is(p3.items.length, 10)
   t.is(p3.next, null)
   const seen = new Set([...p1.items, ...p2.items, ...p3.items])
@@ -376,7 +376,7 @@ async function admit (m, assoc) {
 function searchedTo (seeder, m, length = m.diary.length) {
   return until(() => {
     const entry = seeder._served.get(m.key)
-    return entry && entry.searchIndexed >= length
+    return entry && entry.topicIndexed >= length
   }, { name: 'diário pesquisável até ' + length })
 }
 
@@ -393,17 +393,17 @@ test('end to end: indexed after ready, rebuilt on restart, removed by a blocklis
   })
   await admit(A, assoc)
   await searchedTo(first.seeder, A)
-  const found = first.seeder.indexSearch('mundo')
+  const found = first.seeder.indexTopic('mundo')
   t.alike(found, { items: [ref(A.key, 1)], next: null, authors: { [A.key]: NO_HINTS }, indexing: false, complete: true })
-  t.is(first.seeder.stats().searchPosts, 2)
+  t.is(first.seeder.stats().topicPosts, 2)
   await first.seeder.close()
-  t.is(first.seeder.indexSearch('mundo').items.length, 0, 'nothing is visible after close')
+  t.is(first.seeder.indexTopic('mundo').items.length, 0, 'nothing is visible after close')
 
   const second = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
   await second.seeder.start()
-  await until(() => second.seeder.indexSearch('mundo').indexing === false, { name: 'primeira passada da busca' })
-  t.alike(second.seeder.indexSearch('mundo').items, [ref(A.key, 1)], 'rebuilt from the stored diary')
-  t.is(second.seeder.stats().searchPosts, 2)
+  await until(() => second.seeder.indexTopic('mundo').indexing === false, { name: 'primeira passada da busca' })
+  t.alike(second.seeder.indexTopic('mundo').items, [ref(A.key, 1)], 'rebuilt from the stored diary')
+  t.is(second.seeder.stats().topicPosts, 2)
 
   // /health and /metrics: the new fields at the end, counts only.
   const server = await startHealth({ port: 0, stats: () => second.seeder.stats() })
@@ -411,13 +411,13 @@ test('end to end: indexed after ready, rebuilt on restart, removed by a blocklis
   const base = 'http://127.0.0.1:' + server.port
   const htext = await (await fetch(base + '/health')).text()
   const body = JSON.parse(htext)
-  t.alike(Object.keys(body).slice(-3), ['indexSaturated', 'searchPosts', 'searchSaturated'])
-  t.is(body.searchPosts, 2)
-  t.is(body.searchSaturated, false)
+  t.alike(Object.keys(body).slice(-3), ['indexSaturated', 'topicPosts', 'topicSaturated'])
+  t.is(body.topicPosts, 2)
+  t.is(body.topicSaturated, false)
   t.absent(HEX64_ANYWHERE.test(htext), 'no key in /health')
   const mtext = await (await fetch(base + '/metrics')).text()
-  t.ok(mtext.includes('# TYPE varanda_seeder_search_posts gauge\nvaranda_seeder_search_posts 2\n'))
-  t.ok(mtext.includes('# TYPE varanda_seeder_search_saturated gauge\nvaranda_seeder_search_saturated 0\n'))
+  t.ok(mtext.includes('# TYPE varanda_seeder_topic_posts gauge\nvaranda_seeder_topic_posts 2\n'))
+  t.ok(mtext.includes('# TYPE varanda_seeder_topic_saturated gauge\nvaranda_seeder_topic_saturated 0\n'))
   t.absent(HEX64_ANYWHERE.test(mtext), 'no key in /metrics')
   await server.close()
 
@@ -428,7 +428,7 @@ test('end to end: indexed after ready, rebuilt on restart, removed by a blocklis
   // The second seeder has the same key (same data dir), so joinPeer reaches it.
   await member(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot } })
   await until(() => second.events.some((e) => e.event === 'rejected' && e.key === A.key && e.reason === 'blocked'), { name: 'A bloqueado', timeoutMs: 30000 })
-  t.alike(second.seeder.indexSearch('mundo').items, [], 'removed from the index')
-  t.is(second.seeder.stats().searchPosts, 0)
+  t.alike(second.seeder.indexTopic('mundo').items, [], 'removed from the index')
+  t.is(second.seeder.stats().topicPosts, 0)
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
 })

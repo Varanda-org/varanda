@@ -319,7 +319,7 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 - Core node (`packages/core/lib/session.js`: native app, `varanda-serve`): always `USAGE` `'leitura sob demanda só na versão web'`, before anything is opened. The app then falls back to local data (`log.read` of followed diaries) with a note.
 - Size: 36 worst-case entries with a profile and a username always fit `MAX_MESSAGE` (section 2).
 
-Topic search is not an RPC method. The hosted app calls `GET /index/search/<tokens>[/<cursor>]` (protocol §7 "Seeder index route") and verifies each returned ref with `diary.peek` (at most 36 seqs per call, two calls in flight), re-checking the words in the verified text. No new method and no row in the size table.
+Topic search is not an RPC method. The hosted app calls `GET /index/topic/<tokens>[/<cursor>]` (protocol §7 "Seeder index route") and verifies each returned ref with `diary.peek` (at most 36 seqs per call, two calls in flight), re-checking the words in the verified text. No new method and no row in the size table.
 
 A node that predates 5.23 to 5.27 answers `USAGE` `'método desconhecido'`.
 

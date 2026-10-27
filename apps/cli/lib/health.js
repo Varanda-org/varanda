@@ -29,8 +29,8 @@ const METRICS = [
   ['media_bytes', 'bytes dos núcleos de mídia (tamanho assinado)', (s) => s.mediaBytes],
   ['index_records', 'registros no índice de engajamento (em memória)', (s) => s.indexRecords],
   ['index_saturated', '1 quando o índice de engajamento atingiu o limite e há diários pausados', (s) => (s.indexSaturated ? 1 : 0)],
-  ['search_posts', 'publicações no índice de busca de assuntos (em memória)', (s) => s.searchPosts],
-  ['search_saturated', '1 quando o índice de busca atingiu um limite e há diários pausados', (s) => (s.searchSaturated ? 1 : 0)],
+  ['topic_posts', 'publicações no índice de busca de assuntos (em memória)', (s) => s.topicPosts],
+  ['topic_saturated', '1 quando o índice de busca atingiu um limite e há diários pausados', (s) => (s.topicSaturated ? 1 : 0)],
   ['uptime_seconds', 'segundos desde o início do semeador', (s) => s.uptimeSeconds]
 ]
 

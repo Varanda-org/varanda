@@ -15,9 +15,9 @@
 //    fresh copy of only the validated values is returned.
 //
 // Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
-// /index/member/<author>[/<before>] and /index/search/<tokens>[/<cursor>].
+// /index/member/<author>[/<before>] and /index/topic/<tokens>[/<cursor>].
 // The search tokens are already folded words of [a-z0-9] (2..32 chars, at
-// most 8) joined by a literal '+' (apps/app/src/search.js searchPath): this
+// most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
 // module only checks them against the same strict pattern, never folds and
 // never percent-encodes them (encodeURIComponent would turn '+' into '%2B',
 // which the seeder's raw-URL match refuses).
@@ -36,7 +36,7 @@ export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
-export const SEARCH_MAX = 30
+export const TOPIC_MAX = 30
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -49,7 +49,7 @@ const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
-const SEARCH_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
+const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -141,13 +141,13 @@ export function memberUrl (author, before = null) {
   return '/index/member/' + a + (before === null ? '' : '/' + before)
 }
 
-// `path`: tokens already folded and joined by search.js searchPath. Checked
+// `path`: tokens already folded and joined by topics.js searchPath. Checked
 // as is (no folding, no lowercasing, no encoding): anything outside QUERY is
 // refused, so nothing but [a-z0-9+] reaches the URL.
-export function searchUrl (path, cursor = null) {
+export function topicUrl (path, cursor = null) {
   if (typeof path !== 'string' || !QUERY.test(path)) return null
   if (cursor !== null && !isCursor(cursor)) return null
-  return '/index/search/' + path + (cursor === null ? '' : '/' + cursor)
+  return '/index/topic/' + path + (cursor === null ? '' : '/' + cursor)
 }
 
 // --- transport ---
@@ -347,9 +347,9 @@ export function validMemberIndex (body, before = null) {
 // Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
 // author of the items, no more and no fewer (an unrelated or missing hint
 // means a confused or hostile index: refused whole).
-export function validSearch (body) {
-  if (!hasExactKeys(body, SEARCH_KEYS)) return null
-  const items = refList(body.items, SEARCH_MAX)
+export function validTopic (body) {
+  if (!hasExactKeys(body, TOPIC_KEYS)) return null
+  const items = refList(body.items, TOPIC_MAX)
   if (items === null) return null
   if (body.next !== null && !isCursor(body.next)) return null
   if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
@@ -379,6 +379,6 @@ export function fetchMember (author, before = null, deps = {}) {
   return run(memberUrl(author, before), (body) => validMemberIndex(body, before), deps)
 }
 
-export function fetchSearch (path, cursor = null, deps = {}) {
-  return run(searchUrl(path, cursor), validSearch, deps)
+export function fetchTopic (path, cursor = null, deps = {}) {
+  return run(topicUrl(path, cursor), validTopic, deps)
 }

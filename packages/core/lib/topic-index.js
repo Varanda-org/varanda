@@ -90,7 +90,7 @@ const DEFAULT_PER_AUTHOR_TERMS_MAX = 25000
 const HEX64 = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[a-z0-9]{2,32}$/
 
-// Normative fold, duplicated byte for byte by apps/app/src/search.js. No
+// Normative fold, duplicated byte for byte by apps/app/src/topics.js. No
 // Unicode property escapes (the app avoids them).
 function foldText (s) {
   try {
@@ -213,7 +213,7 @@ function notFuturePrefix (list, at) {
   return lo
 }
 
-function createSearchIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perAuthorPostingsMax, perAuthorTermsMax, onFreed = null } = {}) {
+function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perAuthorPostingsMax, perAuthorTermsMax, onFreed = null } = {}) {
   const postCap = option(maxPosts, DEFAULT_MAX_POSTS)
   const authorCap = option(perAuthorMax, DEFAULT_PER_AUTHOR_MAX)
   const termCap = option(maxTerms, DEFAULT_MAX_TERMS)
@@ -428,7 +428,7 @@ function createSearchIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, per
 module.exports = {
   foldText,
   tokensOf,
-  createSearchIndex,
+  createTopicIndex,
   compareNewestFirst,
   parseSearchCursor,
   SEARCH_PAGE,

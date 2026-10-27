@@ -2,14 +2,14 @@
 // renders in place of the rounds while a query is active; the Espiadinha keeps
 // its own state mounted, so 'limpar' brings the rounds back without a reload.
 //
-// Trust model: the seeder's /index/search answer is only a hint of where to
+// Trust model: the seeder's /index/topic answer is only a hint of where to
 // look (refs). Every post is read and verified with diary.peek (the entry
 // checked against the author's signed log) and the VERIFIED text is checked
 // again for the words (assembleSearch); a ref whose post is missing, is not a
 // post or lacks the words counts as "unavailable" and is never shown. Names
 // come only from verified peek fields, never from the index or from a key.
 //
-// Cost: one /index/search plus one /index/counts per <= 31 refs per page
+// Cost: one /index/topic plus one /index/counts per <= 31 refs per page
 // (useSocial), well within Caddy's 20 /index requests per 10 s per client;
 // the peeks run one at a time (peekAll) as the node allows two in flight.
 // Nothing is requested while typing: the Espiadinha only starts a query on
@@ -31,14 +31,14 @@ import { StyleSheet, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { shouldReloadOnShow } from '../paging'
-import { fetchSearch } from '../indexClient'
+import { fetchTopic } from '../indexClient'
 import { planPeeks } from '../thread'
 import { whoOf } from '../who'
 import {
   SEARCH_CONTINUE, SEARCH_CONTINUE_BODY, SEARCH_EMPTY_BODY, SEARCH_EMPTY_TITLE, SEARCH_END, SEARCH_ERROR,
   SEARCH_HINT, SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_MEMORY, SEARCH_OFFLINE_MESSAGE,
   SEARCH_UNAVAILABLE, assembleSearch, isLastSearchPage, mergeRefs, searchNotice
-} from '../search'
+} from '../topics'
 import { CountsNote, refOf, socialRowProps, useSocial } from './ARua'
 import { peekAll, useFollowSet } from './Conversa'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -105,7 +105,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
   // One page: the index answer (a hint), then every ref read and verified by
   // the node, then the shown items. A superseded read stops peeking early.
   const readPage = useCallback(async (cursor, alive) => {
-    const res = await fetchSearch(query.path, cursor)
+    const res = await fetchTopic(query.path, cursor)
     if (!res.ok) {
       if (res.reason === 'not-found') throw new Error(SEARCH_UNAVAILABLE)
       if (res.reason === 'network' || res.reason === 'timeout') throw new Error(SEARCH_OFFLINE_MESSAGE)

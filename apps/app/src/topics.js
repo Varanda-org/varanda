@@ -11,7 +11,7 @@
 //
 // No Unicode property escapes anywhere in this module (apps/app/src/who.js).
 
-// Duplicated from packages/core/lib/search-index.js (the source of truth for
+// Duplicated from packages/core/lib/topic-index.js (the source of truth for
 // the fold and the tokens; keep the two in step).
 // A value whose string conversion throws folds to '' (as the core copy), so
 // callers never see a throw from here.

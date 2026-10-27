@@ -295,7 +295,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'blocks', 'bytes', 'connections', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'mediaCores', 'mediaBytes', 'indexRecords', 'indexSaturated', 'searchPosts', 'searchSaturated'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'blocks', 'bytes', 'connections', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'mediaCores', 'mediaBytes', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
@@ -308,8 +308,8 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.ok(Number.isInteger(body.connections) && Number.isInteger(body.peers))
   t.ok(Number.isInteger(body.indexRecords) && body.indexRecords >= 0, 'index records is a count')
   t.is(body.indexSaturated, false)
-  t.ok(Number.isInteger(body.searchPosts) && body.searchPosts >= 0, 'search posts is a count')
-  t.is(body.searchSaturated, false)
+  t.ok(Number.isInteger(body.topicPosts) && body.topicPosts >= 0, 'search posts is a count')
+  t.is(body.topicSaturated, false)
   t.absent(HEX64_ANYWHERE.test(text), 'no key in /health')
 
   const metrics = await fetch(base + '/metrics?x=1')
@@ -326,8 +326,8 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.ok(mtext.includes('# TYPE varanda_seeder_media_bytes gauge\nvaranda_seeder_media_bytes 0\n'), 'media bytes gauge')
   t.ok(/# TYPE varanda_seeder_index_records gauge\nvaranda_seeder_index_records [0-9]+\n/.test(mtext), 'index records gauge (count only)')
   t.ok(mtext.includes('# TYPE varanda_seeder_index_saturated gauge\nvaranda_seeder_index_saturated 0\n'), 'index saturated gauge')
-  t.ok(/# TYPE varanda_seeder_search_posts gauge\nvaranda_seeder_search_posts [0-9]+\n/.test(mtext), 'search posts gauge (count only)')
-  t.ok(mtext.includes('# TYPE varanda_seeder_search_saturated gauge\nvaranda_seeder_search_saturated 0\n'), 'search saturated gauge')
+  t.ok(/# TYPE varanda_seeder_topic_posts gauge\nvaranda_seeder_topic_posts [0-9]+\n/.test(mtext), 'search posts gauge (count only)')
+  t.ok(mtext.includes('# TYPE varanda_seeder_topic_saturated gauge\nvaranda_seeder_topic_saturated 0\n'), 'search saturated gauge')
   t.absent(HEX64_ANYWHERE.test(mtext), 'no key in /metrics')
   t.absent(mtext.includes(publicKey.slice(0, 8)) || mtext.includes(log.key.slice(0, 8)))
 
@@ -375,7 +375,7 @@ test('seed --health-port on a busy port fails before touching the data dir', asy
 test('health endpoint: 503 while the seeder starts or closes', async (t) => {
   await testnet(t)
   let status = 'starting'
-  const stats = () => ({ status, admitted: 0, dropping: 0, blocks: 0, bytes: 0, connections: 0, peers: 0, firewalled: null, blocked: 0, blocklistSeq: 0, mediaCores: 0, mediaBytes: 0, indexRecords: 0, indexSaturated: false, searchPosts: 0, searchSaturated: false })
+  const stats = () => ({ status, admitted: 0, dropping: 0, blocks: 0, bytes: 0, connections: 0, peers: 0, firewalled: null, blocked: 0, blocklistSeq: 0, mediaCores: 0, mediaBytes: 0, indexRecords: 0, indexSaturated: false, topicPosts: 0, topicSaturated: false })
   const server = await startHealth({ port: 0, stats })
   t.teardown(() => server.close(), { force: true })
   const base = 'http://127.0.0.1:' + server.port
@@ -393,14 +393,14 @@ test('health endpoint: 503 while the seeder starts or closes', async (t) => {
 })
 
 test('metrics: blocklist and media gauges carry counts only', (t) => {
-  const text = metricsText({ status: 'ok', admitted: 2, dropping: 0, blocks: 9, bytes: 100, connections: 1, peers: 1, firewalled: false, blocked: 3, blocklistSeq: 7, mediaCores: 2, mediaBytes: 65536, indexRecords: 12, indexSaturated: true, searchPosts: 3, searchSaturated: false, uptimeSeconds: 5 })
+  const text = metricsText({ status: 'ok', admitted: 2, dropping: 0, blocks: 9, bytes: 100, connections: 1, peers: 1, firewalled: false, blocked: 3, blocklistSeq: 7, mediaCores: 2, mediaBytes: 65536, indexRecords: 12, indexSaturated: true, topicPosts: 3, topicSaturated: false, uptimeSeconds: 5 })
   t.ok(text.includes('# TYPE varanda_seeder_blocked gauge\nvaranda_seeder_blocked 3\n'))
   t.ok(text.includes('# TYPE varanda_seeder_blocklist_seq gauge\nvaranda_seeder_blocklist_seq 7\n'))
   t.ok(text.includes('# TYPE varanda_seeder_media_cores gauge\nvaranda_seeder_media_cores 2\n'))
   t.ok(text.includes('# TYPE varanda_seeder_media_bytes gauge\nvaranda_seeder_media_bytes 65536\n'))
   t.ok(text.includes('# TYPE varanda_seeder_index_records gauge\nvaranda_seeder_index_records 12\n'))
   t.ok(text.includes('# TYPE varanda_seeder_index_saturated gauge\nvaranda_seeder_index_saturated 1\n'))
-  t.ok(text.includes('# TYPE varanda_seeder_search_posts gauge\nvaranda_seeder_search_posts 3\n'))
-  t.ok(text.includes('# TYPE varanda_seeder_search_saturated gauge\nvaranda_seeder_search_saturated 0\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_topic_posts gauge\nvaranda_seeder_topic_posts 3\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_topic_saturated gauge\nvaranda_seeder_topic_saturated 0\n'))
   t.absent(HEX64_ANYWHERE.test(text))
 })
