@@ -6,7 +6,7 @@ const nodeCrypto = require('node:crypto')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
-const { MAX_REPORTS } = require('./moderation-store')
+const { MAX_REPORTS, AI_ACTOR } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -158,6 +158,12 @@ function createModRoutes ({
   moderation = null,
   googleMod = null,
   modEmails = [],
+  // The AI report triage worker (./ai/worker.js) or null when it is off.
+  // Its hooks run only AFTER the HTTP answer went out, never awaited, and
+  // their errors are swallowed into one log token: a throwing or slow model
+  // can change neither the status nor the latency of a member's report or
+  // a moderator's decision. Nothing AI-related is ever read from a body.
+  triage = null,
   panelDir = path.join(__dirname, 'panel'),
   log = () => {},
   now = Date.now,
@@ -223,6 +229,27 @@ function createModRoutes ({
   const over = () => new RouteError('pedido-invalido', 429)
   const unauthorized = () => new RouteError('nao-autorizado', 401)
   const forbidden = () => new RouteError('nao-autorizado', 403)
+
+  // Fire-and-forget: the hook runs on a later microtask, after send().
+  function afterAnswer (hook) {
+    if (triage === null) return
+    Promise.resolve().then(hook).catch(() => {
+      try {
+        log({ event: 'triage', reason: 'erro' })
+      } catch {}
+    })
+  }
+
+  // A read of the worker's view of one report; a failure shows as null, so
+  // the panel never breaks on the AI.
+  function triageView (method, id) {
+    if (triage === null) return null
+    try {
+      return triage[method](id) ?? null
+    } catch {
+      return null
+    }
+  }
 
   function needModeration () {
     if (moderation === null) throw refuse('indisponivel')
@@ -378,6 +405,8 @@ function createModRoutes ({
     const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, reason, text, quote, signature, nonce }))
     log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
     send(res, 200, { id: added.id, duplicate })
+    // A duplicate is a report the triage already has.
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
   // --- moderator sign-in ---------------------------------------------------
@@ -506,7 +535,13 @@ function createModRoutes ({
       reported: { member: r.target, username: reportedName, linked: accounts.contact(r.target) !== null },
       status: r.status,
       decidedAt: r.decidedAt,
-      note: r.note
+      note: r.note,
+      // Who decided, never the e-mail (decidedBy stays in the store).
+      actor: r.status === 'aberta' ? null : r.decidedBy === AI_ACTOR ? 'ia' : 'pessoa',
+      // The triage's suggestion (tokens and numbers) and the verified post
+      // text it read from the seeder ({ texto, midia, citacao }), or null.
+      ia: triageView('suggestionOf', r.id),
+      publicacao: triageView('verifiedOf', r.id)
     }
   }
 
@@ -519,7 +554,8 @@ function createModRoutes ({
       username: usernameOf(c.member, cache),
       at: c.at,
       reportIds: [...c.reportIds],
-      claimedAt: c.claimedAt ?? null
+      claimedAt: c.claimedAt ?? null,
+      byAi: c.by === AI_ACTOR
     }
   }
 
@@ -562,6 +598,8 @@ function createModRoutes ({
     log({ event: 'decided', reason: result.report.status })
     const cache = new Map()
     send(res, 200, { report: projectReport(result.report, cache), change: projectChange(result.change, cache) })
+    // The store's row (decidedBy = this moderator), so the worker can learn.
+    afterAnswer(() => triage.onHumanDecision(result.report))
   }
 
   // The moderator's own case stays hidden here too (as in api/reports): a
@@ -584,6 +622,7 @@ function createModRoutes ({
     const { change } = await storeAsync(() => moderation.unblock(member, { by: session.email }))
     log({ event: 'unblock' })
     send(res, 200, { change: projectChange(change, new Map()) })
+    afterAnswer(() => triage.onUnblock(member))
   }
 
   async function cancel (req, res, session, id) {
@@ -593,6 +632,8 @@ function createModRoutes ({
     const { change } = await storeAsync(() => moderation.cancel(id, { by: session.email }))
     log({ event: 'cancel' })
     send(res, 200, { change: projectChange(change, new Map()) })
+    // The change as it was before the cancel (its reportIds), read above.
+    afterAnswer(() => triage.onCancel(target))
   }
 
   // --- operator (signed by the certified moderator key) -------------------
@@ -641,9 +682,11 @@ function createModRoutes ({
     operatorAuth(body, 'pull', () => canonicalBody('pull'))
     const result = await storeAsync(() => moderation.pull())
     log({ event: 'pull', reason: String(result.changes.length) })
-    // Exactly { changes: [{ id, op, member, at }], published: { snapshot } } (plan D1).
+    // Exactly { changes: [{ id, op, member, at, actor }], published: { snapshot } }
+    // (plan D1). `actor` is the store's projection ('ia' or 'pessoa'); the
+    // moderator's e-mail (`by`) never reaches the operator.
     send(res, 200, {
-      changes: result.changes.map(({ id, op, member, at }) => ({ id, op, member, at })),
+      changes: result.changes.map(({ id, op, member, at, actor }) => ({ id, op, member, at, actor })),
       published: { snapshot: result.published.snapshot }
     })
   }

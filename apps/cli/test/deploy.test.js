@@ -106,7 +106,7 @@ test('deploy.yml: forbidden constructs are absent', (t) => {
 })
 
 test('deploy.yml: check job order and ssh hardening', (t) => {
-  const order = ['npm ci', 'npm run lint', 'npm test', 'npm run demo']
+  const order = ['npm ci --ignore-scripts', 'npm run lint', 'npm test', 'npm run demo']
   const idx = order.map((cmd) => check.split('\n').findIndex((l) => new RegExp('^\\s+- run:\\s*' + cmd + '\\s*$').test(l)))
   t.ok(idx.every((i) => i !== -1), 'all four check commands present')
   t.alike([...idx].sort((a, b) => a - b), idx, 'npm ci, lint, test, demo in that order')
@@ -258,6 +258,57 @@ test('compose.web.yaml: VARANDA_MODERATOR_EMAILS is optional and only on the acc
   }
   t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the account service')
   t.ok(/VARANDA_MODERATOR_EMAILS: "\$\{VARANDA_MODERATOR_EMAILS:-\}"/.test(hits[0][0]), 'optional (:-), never :?')
+})
+
+// AI report triage is optional: every variable defaults with :- (never :?),
+// so an existing .env still boots with triage off. The account service gets
+// all four; the seeder gets only the shared token; the web service none.
+test('compose.web.yaml: AI triage variables are optional and scoped to account and seeder', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  function service (name) {
+    const start = webLines.findIndex((l) => l === '  ' + name + ':')
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    return start === -1 ? [] : webLines.slice(start, end)
+  }
+  const account = service('account')
+  const seeder = service('seeder')
+  const web = service('web')
+  t.ok(account.length > 0 && seeder.length > 0 && web.length > 0, 'account, seeder and web found')
+  const keyCount = (ls, name) => ls.filter((l) => new RegExp('^ {6}' + name + ':').test(l)).length
+
+  for (const name of ['VARANDA_AI', 'VARANDA_SEEDER_HTTP', 'VARANDA_TRIAGE_TOKEN', 'VARANDA_AI_MODEL_DIR']) {
+    t.is(keyCount(account, name), 1, name + ' exactly once under account')
+    t.is(keyCount(web, name), 0, name + ' not on web')
+  }
+  t.is(keyCount(seeder, 'VARANDA_TRIAGE_TOKEN'), 1, 'VARANDA_TRIAGE_TOKEN exactly once under seeder')
+  for (const name of ['VARANDA_AI', 'VARANDA_SEEDER_HTTP', 'VARANDA_AI_MODEL_DIR']) {
+    t.is(keyCount(seeder, name), 0, name + ' not on seeder')
+  }
+  t.is(webLines.filter((l) => l.includes('VARANDA_TRIAGE_TOKEN')).length, 2, 'token mentioned only on account and seeder')
+
+  const line = (ls, name) => ls.find((l) => new RegExp('^ {6}' + name + ':').test(l)) || ''
+  t.ok(/VARANDA_AI: "\$\{VARANDA_AI:-\}"/.test(line(account, 'VARANDA_AI')), 'VARANDA_AI optional (:-)')
+  t.ok(/VARANDA_TRIAGE_TOKEN: "\$\{VARANDA_TRIAGE_TOKEN:-\}"/.test(line(account, 'VARANDA_TRIAGE_TOKEN')), 'account token optional (:-)')
+  t.ok(/VARANDA_TRIAGE_TOKEN: "\$\{VARANDA_TRIAGE_TOKEN:-\}"/.test(line(seeder, 'VARANDA_TRIAGE_TOKEN')), 'seeder token optional (:-)')
+  t.ok(/VARANDA_SEEDER_HTTP: "\$\{VARANDA_SEEDER_HTTP:-http:\/\/127\.0\.0\.1:8789\}"/.test(line(account, 'VARANDA_SEEDER_HTTP')),
+    'VARANDA_SEEDER_HTTP defaults to the seeder loopback listener')
+  t.ok(seeder.some((l) => l.trim() === 'VARANDA_WS_PORT: "8789"') && seeder.some((l) => l.trim() === 'VARANDA_WS_HOST: 127.0.0.1'),
+    'the seeder listener is 127.0.0.1:8789')
+  t.ok(account.some((l) => l.trim() === 'network_mode: host'), 'account on the host network (reaches seeder loopback)')
+  t.ok(/VARANDA_AI_MODEL_DIR: "?\/data\/ai-model"?\s*$/.test(line(account, 'VARANDA_AI_MODEL_DIR')), 'model dir inside account-data')
+  for (const name of ['VARANDA_AI', 'VARANDA_SEEDER_HTTP', 'VARANDA_TRIAGE_TOKEN']) {
+    t.absent(webLines.some((l) => l.includes('$' + '{' + name + ':?')), name + ' never :?')
+  }
+
+  // Unchanged hardening on account.
+  const text = account.join('\n')
+  t.absent(/seeder-data/.test(text), 'account still never mounts seeder-data')
+  t.ok(/^ {4}read_only: true\s*$/m.test(text), 'account read_only')
+  t.ok(/^ {4}cap_drop:\s*\n {6}- ALL\s*$/m.test(text), 'account cap_drop ALL')
+  t.ok(/^ {4}healthcheck:/m.test(text), 'account healthcheck kept')
 })
 
 for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {

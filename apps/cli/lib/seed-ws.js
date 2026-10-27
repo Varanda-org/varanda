@@ -1,6 +1,7 @@
 'use strict'
 
 const http = require('node:http')
+const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
@@ -90,6 +91,41 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // else 503 'ocupado'; a response still open after INDEX_DEADLINE_MS is
 // destroyed. Duplicate refs in /index/counts collapse before the seeder is
 // asked. Nothing is logged and nothing of the path is echoed.
+//
+// Finally, and only when startSeedWs is given a `triageToken`, the listener
+// answers GET /moderation-post/<D>/<seq> for the account service's report
+// triage. A report carries the reporter's quote, which the reporter chose;
+// judging that text would let anyone frame an author with words the author
+// never wrote (packages/core/lib/report.js). Triage must judge the block the
+// author signed, and this seeder already holds it: Seeder#postBlock hands
+// out raw blocks 0 and <seq> of D when both are local, D is admitted,
+// served, gated and not blocked, and nothing changed while it read. The
+// answer is JSON { v: 1, fork, length, block0, block } (blocks base64) of
+// at most POST_MAX_BODY bytes; whatever the record is (a post, a profile),
+// the account service decodes and classifies it.
+// Trust boundary: these are the raw bytes this seeder's own Hypercore
+// verified when they arrived, not a portable proof (no signature or tree
+// nodes travel with them). The account service trusts this local seeder
+// plus the token-authenticated loopback for authenticity; its own
+// re-validation only guards against malformed or wrong-type records.
+// Exposure: the public never reaches this path. Caddy proxies only
+// /seeder, /account/*, /media/* and /index/* to this listener
+// (deploy/seeder/Caddyfile), and this route is deliberately not added
+// there. The token still gates it because "loopback" is not "trusted":
+// any local process, and any browser page through a DNS-rebinding or a
+// mis-set proxy, could otherwise enumerate what the seeder holds. The
+// `Authorization: Bearer <token>` header is read only on this path; both
+// sides are hashed with sha256 to a fixed length before
+// crypto.timingSafeEqual, so a wrong-length header neither throws nor
+// returns early. Without a token the path is the generic 404 and no header
+// is read. A wrong or missing token, a seeder without postBlock, a null
+// answer, a throw or an oversized body are all the same 404 'não
+// encontrado' (no-store, nosniff); a query string is 404, other methods
+// (HEAD included) 405 with Allow: GET. Load has its own budget, never the
+// /index or /media one: POST_MAX_IN_FLIGHT answers at once and POST_RATE
+// per second (burst POST_BURST), else 503 'ocupado'; a response still open
+// after POST_DEADLINE_MS is destroyed. The token, the path, the keys and
+// the body are never logged.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -137,6 +173,17 @@ const INDEX_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': 'no-store'
 }
+
+const POST_PREFIX = '/moderation-post'
+const POST_RE = /^\/moderation-post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const POST_MAX_IN_FLIGHT = 2
+const POST_RATE = 4
+const POST_BURST = 8
+const POST_DEADLINE_MS = 5000
+const POST_MAX_BODY = 65536
+const TRIAGE_TOKEN_RE = /^[0-9a-f]{64}$/
+
+const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 
 // The secret-stream's per-frame authentication overhead, read from the
 // sodium-secretstream that the installed @hyperswarm/secret-stream (the one
@@ -341,18 +388,34 @@ function refuse (socket, code, reason) {
 // indexSearch(segment) -> null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
-// and in-flight cap and is never logged or echoed.
+// and in-flight cap and is never logged or echoed. triageToken: optional
+// 64 lower-case hex secret that enables /moderation-post (absent, null or
+// '' leaves it a 404; any other value throws), backed by the seeder's
+// postBlock(diaryHex, seq) -> null | { fork, length, block0, block }; post:
+// overrides of its limits ({ maxInFlight, rate, burst, deadlineMs }), for
+// tests.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
-// below MAX_SOCKETS, so lowering one cap never shrinks the listener.
+// below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
+// POST_MAX_IN_FLIGHT /moderation-post answers fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {} }) {
+  if (triageToken !== null && triageToken !== undefined && triageToken !== '' &&
+    (typeof triageToken !== 'string' || !TRIAGE_TOKEN_RE.test(triageToken))) {
+    throw new TypeError('triageToken inválido') // never echoes the value
+  }
+  // Only the hash is kept; the comparison is between two fixed-length digests.
+  const tokenHash = triageToken ? sha256(triageToken) : null
+  const postMaxInFlight = post.maxInFlight ?? POST_MAX_IN_FLIGHT
+  const postDeadlineMs = post.deadlineMs ?? POST_DEADLINE_MS
+  const takePostToken = tokenBucket(post.rate ?? POST_RATE, post.burst ?? POST_BURST)
+  let postInFlight = 0
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
   const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
@@ -435,6 +498,83 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     res.end(req.method === 'HEAD' ? undefined : body)
   }
 
+  // Constant-time check of `Authorization: Bearer <token>`: a missing or
+  // malformed header compares the digest of '' instead, so every request
+  // costs the same and nothing short-circuits on length.
+  function triageAuthorized (req) {
+    const header = req.headers.authorization
+    const given = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
+    return nodeCrypto.timingSafeEqual(sha256(given), tokenHash)
+  }
+
+  // The answer of postBlock as the response body, or null (-> 404) when it
+  // is not exactly the expected shape or would exceed POST_MAX_BODY.
+  function postBody (answer) {
+    if (answer === null || typeof answer !== 'object' || answer.fork !== 0) return null
+    if (!Number.isSafeInteger(answer.length) || answer.length < 1) return null
+    if (!(answer.block0 instanceof Uint8Array) || !(answer.block instanceof Uint8Array)) return null
+    // Refuse oversized blocks BEFORE encoding: the seeder stores whatever a
+    // custom client appended (only appendRecord caps a block), and base64 +
+    // JSON.stringify of megabytes would run synchronously on this process.
+    // Base64 grows 4/3, so raw bytes above 3/4 of the cap can never fit.
+    if (answer.block0.byteLength + answer.block.byteLength > Math.floor(POST_MAX_BODY * 3 / 4)) return null
+    const text = JSON.stringify({
+      v: 1,
+      fork: 0,
+      length: answer.length,
+      block0: Buffer.from(answer.block0.buffer, answer.block0.byteOffset, answer.block0.byteLength).toString('base64'),
+      block: Buffer.from(answer.block.buffer, answer.block.byteOffset, answer.block.byteLength).toString('base64')
+    }) + '\n'
+    return Buffer.byteLength(text) <= POST_MAX_BODY ? text : null
+  }
+
+  // Authentication runs before the budget, so callers without the token
+  // cannot drain the account service's slots or tokens. The in-flight slot
+  // is held until the response is closed AND postBlock has settled, as for
+  // /index; a response still open after postDeadlineMs is destroyed.
+  async function servePost (req, res, match) {
+    if (!triageAuthorized(req)) return send(res, 404, NOT_FOUND)
+    if (!takePostToken() || postInFlight >= postMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    postInFlight++
+    let resClosed = false
+    let pending = true
+    let released = false
+    const release = () => {
+      if (released || !resClosed || pending) return
+      released = true
+      postInFlight--
+    }
+    const timer = setTimeout(() => res.destroy(), postDeadlineMs)
+    timer.unref()
+    const closed = new Promise((resolve) => res.once('close', () => {
+      resClosed = true
+      clearTimeout(timer)
+      release()
+      resolve(CLOSED)
+    }))
+    const settled = () => {
+      pending = false
+      release()
+    }
+    let body = null
+    try {
+      if (typeof seeder.postBlock === 'function') {
+        const work = Promise.resolve().then(() => seeder.postBlock(match[1], Number(match[2])))
+        work.then(settled, settled)
+        const answer = await Promise.race([work, closed])
+        if (answer !== CLOSED) body = postBody(answer)
+      } else {
+        settled()
+      }
+    } catch {
+      body = null
+    }
+    if (resClosed || res.destroyed || res.writableEnded) return
+    if (body === null) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, { ...INDEX_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+    res.end(body)
+  }
+
   async function serveMedia (req, res, match) {
     const start = Number(match[3])
     const count = Number(match[4])
@@ -514,6 +654,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const call = indexCall(req.url)
       if (call === null) return send(res, 404, NOT_FOUND)
       return serveIndex(req, res, call).catch(() => res.destroy())
+    }
+    // Without a token this branch does not exist: the path falls through to
+    // the generic 404 below and no header is read.
+    if (tokenHash !== null && (pathname === POST_PREFIX || pathname.startsWith(POST_PREFIX + '/'))) {
+      if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
+      const match = POST_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      return servePost(req, res, match).catch(() => res.destroy())
     }
     send(res, 404, NOT_FOUND)
   })
@@ -628,5 +776,11 @@ module.exports = {
   INDEX_RATE,
   INDEX_BURST,
   INDEX_DEADLINE_MS,
-  INDEX_MAX_BODY
+  INDEX_MAX_BODY,
+  POST_RE,
+  POST_MAX_IN_FLIGHT,
+  POST_RATE,
+  POST_BURST,
+  POST_DEADLINE_MS,
+  POST_MAX_BODY
 }

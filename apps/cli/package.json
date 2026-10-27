@@ -17,6 +17,7 @@
     "demo": "node scripts/demo.js"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.8.1",
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
     "b4a": "1.9.0",

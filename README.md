@@ -736,6 +736,33 @@ Os moderadores marcam cada denúncia como bloquear ou descartar, e desbloqueiam 
 
 Para um pedido legal, `account reports [--member <chave>]` (rodado no servidor, como `account status`, por exemplo `docker compose ... run --rm account account reports --member <hex>`) imprime uma linha JSON por denúncia, com `reporterContact` e `targetContact` (`{ email, username }` ou `null`). É o único caminho pelo qual o e-mail do vínculo sai do serviço: não rode em outra máquina nem cole a saída em chamados, e não está nos registros. Sem `--member` lista todas; com ele, as feitas contra aquela chave.
 
+##### Triagem com IA (opcional)
+
+A triagem lê a publicação denunciada no semeador e compara com decisões humanas já tomadas. Comece em `sombra` e só passe a `1` quando as sugestões coincidirem com o que os moderadores decidem.
+
+No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado: depois de gravar estas linhas, recrie `account` e o `seeder`, como no passo 3):
+
+- `VARANDA_AI`: vazio ou ausente desliga (padrão). `sombra` só registra o que a IA faria e mostra a sugestão no painel. `1` deixa a IA decidir. Outro valor é erro de uso antes de abrir a porta. Sem o modelo o serviço sobe sem triagem (`sem-modelo`) e a checagem de saúde continua verde.
+- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele a rota de leitura não existe no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando.
+- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`.
+- `VARANDA_AI_MODEL_DIR`: diretório dos pesos, só fora do Compose. Padrão `<dataDir>/ai-model`. No Compose ele é fixo em `/data/ai-model`, dentro do volume `account-data`: não o defina no `.env`.
+
+Baixe os pesos uma vez. O script confere o sha256 dos cinco arquivos e recusa um diretório dentro do repositório. No Compose, grave direto no volume do serviço de conta, com a própria imagem:
+
+```sh
+docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml run --rm --entrypoint node account apps/cli/scripts/fetch-ai-model.js --dir /data/ai-model
+```
+
+Fora do Compose:
+
+```sh
+node apps/cli/scripts/fetch-ai-model.js --dir <dataDir>/ai-model
+```
+
+Numa instalação local, prefira `npm ci --ignore-scripts` (ou defina `ONNXRUNTIME_NODE_INSTALL_CUDA=skip`, que evita o download de artefatos CUDA no linux x64). O CI, o fluxo de deploy, `deploy/seeder/build-web.sh` e a imagem Docker instalam com `--ignore-scripts`: nenhum script de instalação de dependência roda, e os binários nativos usados já vêm nos pacotes.
+
+`account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json` e `triage.json` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
+
 #### Aplicar as decisões do painel
 
 Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.
@@ -748,17 +775,17 @@ node bin/varanda.js mod apply --server https://<domínio> --data <modDir>
 
 1. busca as decisões pendentes (`api/pull`) e a última lista que o painel confirmou;
 2. confere a lista local: se `blocklist.json` está atrás da publicada, sai com `erro: lista local atrás da publicada; restaure o backup da moderação` (código 1) sem gravar nada;
-3. aplica as decisões na ordem em que foram tomadas e mostra, antes de assinar, uma linha por chave com o efeito final: `bloquear <chave>`, `desbloquear <chave>`, `já estava bloqueada <chave>` ou `não estava bloqueada <chave>`. Um desbloqueio de chave cujo bloqueio não veio do painel (feito com `mod block`, ou sem registro em `moderation.jsonl`) aparece como `desbloquear <chave> (bloqueada pela operação)`;
+3. aplica as decisões na ordem em que foram tomadas e mostra, antes de assinar, uma linha por chave com o efeito final: `bloquear <chave>`, `desbloquear <chave>`, `já estava bloqueada <chave>` ou `não estava bloqueada <chave>`. Um desbloqueio de chave cujo bloqueio não veio do painel (feito com `mod block`, ou sem registro em `moderation.jsonl`) aparece como `desbloquear <chave> (bloqueada pela operação)`. Um bloqueio pedido só pela IA aparece como `bloquear <chave> (ia)`; com `--yes` ele não é assinado e aparece como `bloquear <chave> (ia) — aguarda revisão no terminal`, até um `mod apply` num terminal. Bloqueios da IA chegam pelo mesmo caminho; o programa do operador tem de ser atualizado junto com o servidor, porque um `mod apply` anterior recusa a resposta nova do pull, `{ changes: [{ id, op, member, at, actor }], published: { snapshot } }` (`actor` é `ia` ou `pessoa`);
 4. pede a revisão (abaixo), assina UMA lista nova (`seq` + 1, uma linha por chave em `moderation.jsonl`) e a publica no semeador como `mod block`;
 5. só com a lista entregue, confirma ao painel (`api/ack`) as decisões aplicadas e a lista assinada: `aplicado: seq <n>, <k> chaves bloqueadas`.
 
 Nada que o servidor devolve é assinado sem revisão. Num terminal, o comando pergunta `Assinar e publicar estas mudanças? [s/N] ` e só segue com `s` ou `sim`; outra resposta sai com `erro: nada assinado` (código 1), sem assinar, publicar nem confirmar nada. Se houver desbloqueios de chaves bloqueadas pela operação, pergunta de novo, `Desbloquear também as chaves bloqueadas pela operação? [s/N] `; recusando, só essas chaves ficam de fora e seguem pendentes no painel. Sem terminal (cron, pipe) e sem `--yes`, sai com `erro: rode num terminal para revisar, ou use --yes para aplicar só os bloqueios` (código 1) antes de qualquer pedido ao servidor.
 
-`--yes` é para o agendamento: aplica só os bloqueios, no máximo 100 chaves novas por execução (mais que isso sai com `erro: muitos bloqueios de uma vez; rode no terminal para revisar`, código 1, nada assinado). Toda chave cujo efeito final é um desbloqueio fica retida: nenhuma decisão dela é assinada nem confirmada, e a saída diz `desbloqueios aguardando revisão no terminal: <n>`. As decisões retidas continuam pendentes no painel até a próxima execução num terminal, que as mostra e pede a confirmação. Assim, quem roubar o login Google de um moderador (ou controlar o servidor de conta) pode enfileirar decisões e fazer o cron bloquear até 100 chaves por execução, mas não desbloqueia ninguém sem o operador revisar no terminal; nenhum dos dois publica nada sem a chave da moderação, que fica na máquina do operador.
+`--yes` é para o agendamento: aplica só os bloqueios pedidos por pessoas (os da IA e os desbloqueios ficam para a revisão no terminal), no máximo 100 chaves novas por execução (mais que isso sai com `erro: muitos bloqueios de uma vez; rode no terminal para revisar`, código 1, nada assinado). Toda chave cujo efeito final é um desbloqueio fica retida: nenhuma decisão dela é assinada nem confirmada, e a saída diz `desbloqueios aguardando revisão no terminal: <n>`. As decisões retidas continuam pendentes no painel até a próxima execução num terminal, que as mostra e pede a confirmação. Assim, quem roubar o login Google de um moderador (ou controlar o servidor de conta) pode enfileirar decisões e fazer o cron bloquear até 100 chaves por execução, mas não desbloqueia ninguém sem o operador revisar no terminal; nenhum dos dois publica nada sem a chave da moderação, que fica na máquina do operador.
 
 Se a publicação falhar (`erro: não foi possível publicar a lista`, código 1), nada é confirmado e a lista nova fica gravada; a próxima execução reenvia exatamente a mesma lista antes de confirmar (`confirmado: seq <n>`). Sem decisões pendentes e com a lista já confirmada, imprime `nada a aplicar`. Se o painel já confirmou uma lista mais nova, sai com `erro: o servidor tem uma lista mais nova; restaure o backup`. Uma resposta fora do formato esperado é `erro: resposta inválida do servidor`. Num diretório sem `blocklist.json`, aplicar decisões exige `--new-list`, como em `mod block`. `--no-publish` é recusado (código 2); `--json` imprime na última linha a lista pública, os identificadores das decisões confirmadas e quantos desbloqueios ficaram retidos (`held`); nenhuma saída traz a chave secreta, e-mail ou endereço de par.
 
-O "Pendentes" do painel só esvazia depois de um `mod apply` bem-sucedido, então rode-o com `--yes` num agendamento (por exemplo, a cada hora pelo cron) na máquina do operador, e rode-o num terminal, sem `--yes`, para revisar e aplicar os desbloqueios retidos. Depois do primeiro deploy do painel, rode-o uma vez sem nenhuma decisão: ele confirma a lista que `mod block` já tinha publicado, e "Bloqueadas" passa a mostrar a mesma lista. Se o diretório da moderação ainda não tem lista (nenhum `mod block` antes), a primeira execução é `node bin/varanda.js mod apply --server https://<domínio> --data <modDir> --new-list`; depois disso, nunca mais com `--new-list`. Faça uma cópia do diretório da moderação (`blocklist.json`, `moderation.jsonl`, a chave e o certificado) antes de cada execução: é dela que vem o `blocklist.json` para "restaurar o backup". `mod apply` segura o mesmo bloqueio do diretório que os outros comandos `mod` (`erro: outra operação de moderação em andamento`).
+O "Pendentes" do painel só esvazia depois de um `mod apply` bem-sucedido, então rode-o com `--yes` num agendamento (por exemplo, a cada hora pelo cron) na máquina do operador, e rode-o num terminal, sem `--yes`, para revisar e aplicar os desbloqueios e os bloqueios da IA retidos. Depois do primeiro deploy do painel, rode-o uma vez sem nenhuma decisão: ele confirma a lista que `mod block` já tinha publicado, e "Bloqueadas" passa a mostrar a mesma lista. Se o diretório da moderação ainda não tem lista (nenhum `mod block` antes), a primeira execução é `node bin/varanda.js mod apply --server https://<domínio> --data <modDir> --new-list`; depois disso, nunca mais com `--new-list`. Faça uma cópia do diretório da moderação (`blocklist.json`, `moderation.jsonl`, a chave e o certificado) antes de cada execução: é dela que vem o `blocklist.json` para "restaurar o backup". `mod apply` segura o mesmo bloqueio do diretório que os outros comandos `mod` (`erro: outra operação de moderação em andamento`).
 
 ## Servidor local para a interface web (varanda-serve)
 

@@ -516,7 +516,7 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 }
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
-// moderation, googleMod, modEmails, panelDir })
+// moderation, googleMod, modEmails, triage, panelDir })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -524,8 +524,9 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // URI is always origin + '/account/callback', never taken from a request.
 // `moderation` (openModerationStore), `googleMod` (a createGoogle whose
 // redirect URI is origin + '/account/mod/callback'), `modEmails` (the
-// moderators' lowercase e-mails; empty disables the panel sign-in) and
-// `panelDir` (tests only) are passed to ./mod-routes.js.
+// moderators' lowercase e-mails; empty disables the panel sign-in), `triage`
+// (the AI report triage worker of ./ai/worker.js, or null when it is off)
+// and `panelDir` (tests only) are passed to ./mod-routes.js.
 function createAccountServer ({
   association,
   origin,
@@ -537,6 +538,7 @@ function createAccountServer ({
   moderation = null,
   googleMod = null,
   modEmails = [],
+  triage = null,
   panelDir,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
@@ -572,6 +574,7 @@ function createAccountServer ({
     moderation,
     googleMod,
     modEmails,
+    triage,
     panelDir,
     log,
     now,

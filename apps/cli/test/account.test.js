@@ -924,6 +924,7 @@ test('account key, cert add, status and export', async (t) => {
   t.ok(before.stdout.includes('certificado: ausente'))
   t.ok(before.stdout.includes('vínculos: 0'))
   t.ok(before.stdout.includes('estado: parado'))
+  t.ok(before.stdout.includes('Triagem IA: desligada'), 'no exemplars.json yet')
 
   const certFile = path.join(root, 'issuer-cert.json')
   fs.writeFileSync(certFile, JSON.stringify(createIssuerCert({ issuer: publicKey }, issuer().assoc)))
@@ -948,6 +949,18 @@ test('account key, cert add, status and export', async (t) => {
   t.is(status.configured, true)
   t.is(status.publicKey, publicKey)
   t.absent(varanda(dir, ['account', 'status']).stdout.includes('emissor não certificado'))
+  t.is(status.triage, null)
+
+  // The precedents are counted from exemplars.json, read-only.
+  const exemplarsFile = path.join(dir, 'exemplars.json')
+  const exemplars = JSON.stringify({ v: 1, model: 'modelo', items: [{}, {}] })
+  fs.writeFileSync(exemplarsFile, exemplars)
+  t.ok(varanda(dir, ['account', 'status']).stdout.includes('Triagem IA: 2 precedentes'))
+  t.alike(JSON.parse(varanda(dir, ['account', 'status', '--json']).stdout.trim().split('\n').pop()).triage, { exemplars: 2 })
+  t.is(fs.readFileSync(exemplarsFile, 'utf8'), exemplars, 'never rewritten')
+  fs.writeFileSync(exemplarsFile, '{')
+  t.ok(varanda(dir, ['account', 'status']).stdout.includes('Triagem IA: indisponível'))
+  fs.unlinkSync(exemplarsFile)
 
   // A link made in-process, then exported by the CLI.
   const store = openAccountStore(dir)
@@ -982,6 +995,37 @@ test('account key, cert add, status and export', async (t) => {
     t.ok(r.stderr.includes('diretório não é do serviço de conta'), r.stderr)
   }
   t.is(varanda(dir, ['account', 'nope']).code, 2)
+})
+
+test('readEnv: VARANDA_AI off, sombra or 1; token, seeder URL and model dir checked without echo', (t) => {
+  const base = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const token = 'ab'.repeat(32)
+  t.is(readEnv(base, '/data').triage, null, 'unset: off')
+  t.is(readEnv({ ...base, VARANDA_AI: '' }, '/data').triage, null, 'empty: off')
+  t.is(readEnv({ ...cleanEnv, ...base }, '/data').triage, null, 'cleanEnv (no VARANDA_*) keeps it off')
+  t.alike(readEnv({ ...base, VARANDA_AI: 'sombra', VARANDA_TRIAGE_TOKEN: token }, '/data').triage,
+    { mode: 'sombra', token, seederHttp: 'http://127.0.0.1:8789', modelDir: path.join('/data', 'ai-model') })
+  t.alike(readEnv({ ...base, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: token, VARANDA_SEEDER_HTTP: 'http://[::1]:9000/', VARANDA_AI_MODEL_DIR: '/modelo' }, '/data').triage,
+    { mode: 'auto', token, seederHttp: 'http://[::1]:9000', modelDir: '/modelo' })
+  t.is(readEnv({ ...base, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: token, VARANDA_SEEDER_HTTP: 'http://localhost:8789' }, '/data').triage.seederHttp, 'http://localhost:8789')
+
+  const usage = (env, message) => {
+    try {
+      readEnv({ ...base, ...env }, '/data')
+      t.fail('accepted: ' + message)
+    } catch (err) {
+      t.is(err.code, 'USAGE', message)
+      t.is(err.message, message)
+      for (const v of Object.values(env)) if (v.length > 3) t.absent(err.message.includes(v), 'the value is not echoed')
+    }
+  }
+  for (const ai of ['true', 'auto', '0', 'SOMBRA', ' 1']) usage({ VARANDA_AI: ai, VARANDA_TRIAGE_TOKEN: token }, 'VARANDA_AI inválido')
+  usage({ VARANDA_AI: '1' }, 'VARANDA_TRIAGE_TOKEN inválido')
+  usage({ VARANDA_AI: 'sombra', VARANDA_TRIAGE_TOKEN: 'AB'.repeat(32) }, 'VARANDA_TRIAGE_TOKEN inválido')
+  usage({ VARANDA_AI: 'sombra', VARANDA_TRIAGE_TOKEN: 'ab'.repeat(31) }, 'VARANDA_TRIAGE_TOKEN inválido')
+  for (const url of ['https://127.0.0.1:8789', 'http://10.0.0.1:8789', 'http://127.0.0.1', 'http://127.0.0.1:8789/x', 'http://127.0.0.1:0', 'http://127.0.0.1:70000', 'http://seeder:8789']) {
+    usage({ VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: token, VARANDA_SEEDER_HTTP: url }, 'VARANDA_SEEDER_HTTP inválido')
+  }
 })
 
 test('account status, export and serve on a directory restored from an older backup', async (t) => {
@@ -1085,6 +1129,7 @@ test('account (serve): boots unconfigured, takes the data-dir lock, stops on SIG
   const port = await until(() => listeningPort(svc.stdout()), { name: 'listening' })
   // 'listening' and 'ready' are two writes; they can arrive in separate chunks.
   t.ok(await until(() => svc.stdout().includes(JSON.stringify({ event: 'ready', configured: false })), { name: 'ready' }))
+  t.ok(svc.stdout().includes(JSON.stringify({ event: 'triage', reason: 'desligada' })), 'VARANDA_AI unset: triage off')
   t.ok(lockHeld(dir), 'lock taken')
   const health = await fetch('http://127.0.0.1:' + port + '/account/health')
   t.alike(await health.json(), { status: 'ok' })
@@ -1123,6 +1168,35 @@ test('account (serve): boots unconfigured, takes the data-dir lock, stops on SIG
   t.is(await again.exited, 1, 'exits non-zero once the lock is lost')
   t.ok(again.stdout().includes(JSON.stringify({ event: 'lock', reason: 'perdido' })), 'the loss is logged')
   t.is(fs.readFileSync(lockFile, 'utf8'), foreign, 'the foreign lock survives')
+})
+
+test('account (serve): an invalid VARANDA_AI is a usage error; a missing model runs without triage', async (t) => {
+  t.timeout(60000)
+  const root = tmpDir(t)
+  const dir = path.join(root, 'account')
+  const token = 'cd'.repeat(32)
+  const env = {
+    VARANDA_ASSOCIATION: issuer().association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET
+  }
+  const bad = varanda(dir, ['account'], { ...env, VARANDA_AI: 'talvez' })
+  t.is(bad.code, 2)
+  t.ok(bad.stderr.includes('VARANDA_AI inválido'))
+  t.absent(fs.existsSync(path.join(dir, LOCK_FILE)), 'refused before the lock and the listen')
+  const badToken = varanda(dir, ['account'], { ...env, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: 'segredo' })
+  t.is(badToken.code, 2)
+  t.absent(badToken.stderr.includes('segredo'), 'the token is never printed')
+
+  const svc = await serveCli(t, dir, { ...env, VARANDA_AI: '1', VARANDA_TRIAGE_TOKEN: token, VARANDA_AI_MODEL_DIR: path.join(root, 'sem-modelo') })
+  const port = await until(() => listeningPort(svc.stdout()), { name: 'listening' })
+  t.ok(svc.stdout().includes(JSON.stringify({ event: 'triage', reason: 'sem-modelo' })), 'the token is logged')
+  const health = await fetch('http://127.0.0.1:' + port + '/account/health')
+  t.is(health.status, 200, 'the healthcheck stays green')
+  t.is(await svc.stop(), 0, svc.stderr())
+  t.absent(svc.stdout().includes(token), 'never the triage token')
+  t.absent(fs.existsSync(path.join(dir, 'exemplars.json')), 'nothing of the triage was opened')
 })
 
 // --- capacity: member cap and configurable limits ---------------------------------

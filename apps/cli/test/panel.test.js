@@ -301,7 +301,8 @@ test('a hostile quote renders as inert text and creates no element', async (t) =
   t.is(q.children.length, 0)
   t.ok(nodes.find((n) => n._text === text && n.className === 'untrusted'), 'the comment too')
   t.ok(doc.main.textContent.includes('denunciada por: @<i>'), 'the username is text too')
-  t.ok(doc.main.textContent.includes('Texto enviado por quem denunciou, não conferido. O servidor não abre o diário.'))
+  t.ok(doc.main.textContent.includes('Texto enviado por quem denunciou, não conferido.'))
+  t.absent(doc.main.textContent.includes('O servidor não abre o diário'), 'the old claim is gone')
   t.ok(doc.main.textContent.includes('O bloqueio vale para a conta inteira, incluindo suas publicações.'))
   t.ok(doc.main.textContent.includes('mod@example.org'))
 })
@@ -567,4 +568,156 @@ test('a pending row with claimedAt shows enviada para assinatura; without it, no
   await panel.createPanel(env(doc2, fakeFetch(routes2).fetch)).start()
   buttons(doc2, 'Pendentes')[0].click()
   t.absent(doc2.main.textContent.includes('enviada para assinatura'))
+})
+
+// AI triage (report.ia, report.actor, report.publicacao, change.byAi).
+
+function cardsOf (doc) {
+  return walk(doc.main).filter((n) => n.className === 'card')
+}
+
+test('quote label no longer claims the server never opens the diary', async (t) => {
+  t.is(panel.TEXT.quoteLabel, 'Texto enviado por quem denunciou, não conferido.')
+  t.absent(fs.readFileSync(APP, 'utf8').includes('O servidor não abre o diário'))
+})
+
+test('pure AI helpers: comma decimal, closed reason map, fallback', async (t) => {
+  t.is(panel.formatSimilarity(0.93), '0,93')
+  t.is(panel.formatSimilarity(0.5), '0,50')
+  t.is(panel.formatSimilarity(1.5), '')
+  t.is(panel.formatSimilarity('0.9'), '')
+  t.is(panel.formatSimilarity(NaN), '')
+  t.is(panel.aiReasonLabel('humano-revisou'), 'esta conta tem uma mudança pendente ou uma pessoa já desfez um bloqueio dela')
+  t.is(panel.aiReasonLabel('__proto__'), 'sem precedente suficiente')
+  t.is(panel.aiReasonLabel('nao-existe'), 'sem precedente suficiente')
+  for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia']) {
+    t.ok(Object.prototype.hasOwnProperty.call(panel.AI_REASONS, tok), 'label for ' + tok)
+    t.not(panel.AI_REASONS[tok], tok, 'not the raw token: ' + tok)
+  }
+})
+
+test('an AI suggestion renders one line with a comma decimal, never a percentage', async (t) => {
+  const doc = fakeDocument()
+  const ia = { sugestao: 'bloquear', semelhanca: 0.9312, vizinhos: 3, motivo: 'margem', modo: 'sombra' }
+  const { fetch } = fakeFetch(signedIn([report({ ia, actor: null })]))
+  await panel.createPanel(env(doc, fetch)).start()
+  const lines = walk(doc.main).filter((n) => n.className === 'ai')
+  t.is(lines.length, 1)
+  t.is(lines[0].textContent, 'Sugestão da IA: bloquear (semelhança 0,93) · modo de observação: a IA só registra, não decide', 'sombra is said')
+  t.absent(doc.main.textContent.includes('%'))
+  t.absent(doc.main.textContent.includes('0.93'))
+  t.is(buttons(doc, 'Bloquear').length, 1, 'block stays on the open card')
+  t.is(buttons(doc, 'Descartar').length, 1)
+})
+
+test('an exact-match suggestion names its reason', async (t) => {
+  const doc = fakeDocument()
+  const ia = { sugestao: 'descartar', semelhanca: 1, vizinhos: 1, motivo: 'exato', modo: 'auto' }
+  const { fetch } = fakeFetch(signedIn([report({ ia })]))
+  await panel.createPanel(env(doc, fetch)).start()
+  t.ok(doc.main.textContent.includes('Sugestão da IA: descartar (semelhança 1,00) · igual a um caso já decidido'))
+})
+
+test('an abstention shows its Portuguese label; an unknown token falls back and is not echoed', async (t) => {
+  const doc = fakeDocument()
+  const { fetch } = fakeFetch(signedIn([
+    report({ id: R1, ia: { sugestao: null, semelhanca: null, vizinhos: 0, motivo: 'frio', modo: 'auto' } }),
+    report({ id: R2, ia: { sugestao: 'apagar', semelhanca: 0.4, vizinhos: 0, motivo: 'xyz-token', modo: 'auto' } })
+  ]))
+  await panel.createPanel(env(doc, fetch)).start()
+  const lines = walk(doc.main).filter((n) => n.className === 'ai').map((n) => n.textContent)
+  t.alike(lines, [
+    'A IA não sugeriu nada: ainda há poucas decisões para comparar',
+    'A IA não sugeriu nada: sem precedente suficiente'
+  ])
+  t.absent(doc.main.textContent.includes('xyz-token'))
+  t.absent(doc.main.textContent.includes('apagar'))
+})
+
+test('the verified post renders as text with its notes; a bad shape is ignored', async (t) => {
+  const doc = fakeDocument()
+  const texto = 'linha um\n<b>linha dois</b>'
+  const { fetch } = fakeFetch(signedIn([
+    report({ id: R1, publicacao: { texto, midia: true, citacao: true } }),
+    report({ id: R2, publicacao: { texto: 'x'.repeat(1001), midia: false, citacao: false } })
+  ]))
+  await panel.createPanel(env(doc, fetch)).start()
+  const [c1, c2] = cardsOf(doc)
+  t.ok(c1.textContent.includes('Publicação lida no semeador'))
+  const q = walk(c1).find((n) => n._text === texto)
+  t.ok(q, 'the post is one textContent value')
+  t.is(q.className, 'untrusted')
+  t.is(q.children.length, 0)
+  t.ok(c1.textContent.includes('A publicação tem fotos; a IA não vê imagens.'))
+  t.ok(c1.textContent.includes('A publicação cita outra; confira no app.'))
+  t.absent(doc.created.some((n) => n.tagName === 'B'))
+  t.absent(c2.textContent.includes('Publicação lida no semeador'), 'over 1000 code points is ignored')
+
+  for (const bad of [null, 'texto', [], { texto: 1, midia: false, citacao: false }, { texto: 'a', midia: 'sim', citacao: false }, { texto: 'a' }]) {
+    const d = fakeDocument()
+    await panel.createPanel(env(d, fakeFetch(signedIn([report({ publicacao: bad })])).fetch)).start()
+    t.absent(d.main.textContent.includes('Publicação lida no semeador'), 'ignored: ' + JSON.stringify(bad))
+  }
+})
+
+test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [
+      report({ id: R1, status: 'bloquear', actor: 'ia', decidedBy: null, decidedAt: '2026-10-22T00:00:00.000Z', publicacao: { texto: 'lido', midia: false, citacao: false } }),
+      report({ id: R2, status: 'descartar', actor: 'pessoa', decidedAt: '2026-10-22T00:00:00.000Z' }),
+      report({ id: 'r3abcdefghijklmnopqrst', status: 'descartar', decidedAt: '2026-10-22T00:00:00.000Z' })
+    ],
+    truncated: false
+  }]
+  const { fetch } = fakeFetch(routes)
+  await panel.createPanel(env(doc, fetch)).start()
+  buttons(doc, 'Histórico')[0].click()
+  const cards = cardsOf(doc)
+  t.is(cards.length, 3)
+  t.ok(cards[0].textContent.includes(' · pela IA'))
+  t.ok(cards[0].textContent.includes('Publicação lida no semeador'))
+  t.ok(cards[1].textContent.includes(' · por uma pessoa'))
+  t.ok(cards[2].textContent.includes(' · por uma pessoa'), 'a missing actor on a decided report is a person')
+  for (const c of cards) t.absent(c.textContent.includes('@'), 'no e-mail or handle in a history card')
+  t.is(buttons(doc, 'Bloquear').length, 0, 'no decision buttons in history')
+  t.is(buttons(doc, 'Descartar').length, 0)
+})
+
+test('Pendentes marks a change requested by the AI; cancel still undoes it', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([], {
+    published: { seq: 3, at: '2026-10-20T10:00:00.000Z' },
+    blocked: [],
+    pending: [
+      { id: 'c1', op: 'block', member: A, username: '', by: null, byAi: true, at: '2026-10-22T00:00:00.000Z', reportIds: [], claimedAt: null },
+      { id: 'c2', op: 'block', member: C, username: '', by: 'x', at: '2026-10-22T00:00:00.000Z', reportIds: [], claimedAt: null }
+    ]
+  })
+  let cancelled = false
+  routes['POST /account/mod/api/pending/c1/cancel'] = () => { cancelled = true; return [200, { change: null }] }
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Pendentes')[0].click()
+  const [ca, cc] = cardsOf(doc)
+  t.ok(ca.textContent.includes('pedido pela IA'))
+  t.absent(cc.textContent.includes('pedido pela IA'), 'missing byAi is false')
+  buttons(doc, 'cancelar')[0].click()
+  await p.settled()
+  t.ok(cancelled)
+})
+
+test('old fixtures without the AI fields render unchanged', async (t) => {
+  const doc = fakeDocument()
+  const { fetch } = fakeFetch(signedIn([report()]))
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.is(walk(doc.main).filter((n) => n.className === 'ai' || n.className === 'verified').length, 0)
+  t.absent(doc.main.textContent.includes('IA'))
+  t.absent(doc.main.textContent.includes('semeador'))
+  t.is(p.state.open.reports[0].actor, null, 'an open report has no actor')
+  t.is(p.state.open.reports[0].ai, null)
+  t.is(p.state.open.reports[0].verified, null)
 })

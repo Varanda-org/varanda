@@ -17,7 +17,8 @@ const {
   MAX_REPORTS,
   MAX_PER_REPORTER_DAY,
   MAX_BLOCKED,
-  NOTE_MAX
+  NOTE_MAX,
+  AI_ACTOR
 } = require('../lib/account/moderation-store')
 const { tmpDir } = require('./helpers/net')
 
@@ -355,7 +356,7 @@ test('a claimed change is compensated, never deleted; the next apply acks both (
   const { change } = await store.decide(r.id, { decision: 'bloquear', by: MOD })
   c.t += 1000
   const pulled = await store.pull()
-  t.alike(pulled.changes, [{ id: change.id, op: 'block', member: target, at: change.at }])
+  t.alike(pulled.changes, [{ id: change.id, op: 'block', member: target, at: change.at, actor: 'pessoa' }])
   t.is(pulled.published.snapshot, null)
   t.is(store.pending().changes[0].claimedAt, new Date(T0 + 1000).toISOString())
   // Publication failed; the panel cancels the claimed block.
@@ -369,6 +370,98 @@ test('a claimed change is compensated, never deleted; the next apply acks both (
   t.is(ok.ok, true)
   t.alike(store.pending().changes, [])
   t.alike(store.blocked(), [])
+})
+
+test('pull marks a change the AI decided with actor ia and never returns by', async (t) => {
+  const { store } = setup(t)
+  t.is(AI_ACTOR, 'ia')
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  // A human report joining the AI's unclaimed block keeps by 'ia'.
+  const r2 = (await store.add(report(target))).report
+  await store.decide(r2.id, { decision: 'bloquear', by: MOD })
+  const human = key()
+  const r3 = (await store.add(report(human))).report
+  const h = (await store.decide(r3.id, { decision: 'bloquear', by: MOD })).change
+  const pulled = await store.pull()
+  t.alike(pulled.changes, [
+    { id: change.id, op: 'block', member: target, at: change.at, actor: 'ia' },
+    { id: h.id, op: 'block', member: human, at: h.at, actor: 'pessoa' }
+  ])
+  t.absent(JSON.stringify(pulled).includes('@'), 'never an e-mail')
+})
+
+test('humanReversed: a human cancel, compensation or unblock counts; the AI and descartar do not', async (t) => {
+  const { store, m } = setup(t)
+  const fresh = key()
+  t.is(store.humanReversed(fresh), false, 'a fresh member')
+  t.is(store.humanReversed('nao-hex'), false, 'an invalid member')
+  t.is(store.humanReversed(fresh.toUpperCase()), false, 'upper hex is invalid')
+
+  // Only a human descartar.
+  const dropped = key()
+  const rd = (await store.add(report(dropped))).report
+  await store.decide(rd.id, { decision: 'descartar', by: MOD })
+  t.is(store.humanReversed(dropped), false, 'descartar')
+
+  // A pending block alone is not a reversal.
+  const unclaimed = key()
+  const ru = (await store.add(report(unclaimed))).report
+  const cu = (await store.decide(ru.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  t.is(store.humanReversed(unclaimed), false, 'a pending block')
+  // Cancel of an unclaimed block.
+  await store.cancel(cu.id, { by: MOD })
+  t.is(store.humanReversed(unclaimed), true, 'cancel of an unclaimed block')
+
+  // Cancel of a claimed block (a compensating unblock).
+  const claimed = key()
+  const rc = (await store.add(report(claimed))).report
+  const cc = (await store.decide(rc.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.pull()
+  t.is(store.humanReversed(claimed), false, 'a claimed block')
+  await store.cancel(cc.id, { by: MOD })
+  t.is(store.humanReversed(claimed), true, 'cancel of a claimed block')
+
+  // An AI cancel event does not count (the worker never cancels; simulated
+  // here), as long as the member is blocked again.
+  const byAi = key()
+  const ra = (await store.add(report(byAi))).report
+  const ca = (await store.decide(ra.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.cancel(ca.id, { by: AI_ACTOR })
+  const ra2 = (await store.add(report(byAi))).report
+  await store.decide(ra2.id, { decision: 'bloquear', by: AI_ACTOR })
+  t.ok(store.pending().changes.some((c) => c.member === byAi && c.op === 'block'))
+  t.is(store.humanReversed(byAi), false, 'an ia cancel event')
+
+  // A panel unblock of a published member, before and after its publish.
+  const listed = key()
+  const rl = (await store.add(report(listed))).report
+  await store.decide(rl.id, { decision: 'bloquear', by: MOD })
+  let all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((c) => c.id), snapshot: m.snap(1, [listed, byAi]), moderatorCert: m.cert })
+  t.is(store.humanReversed(listed), false, 'published')
+  await store.unblock(listed, { by: MOD })
+  t.is(store.humanReversed(listed), true, 'a pending unblock')
+  all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((c) => c.id), snapshot: m.snap(2, [byAi]), moderatorCert: m.cert })
+  t.alike(store.pending().changes, [])
+  t.is(store.humanReversed(listed), true, 'after the unblock is published')
+  t.is(store.humanReversed(byAi), false, 'still published')
+
+  // Blocked outside the panel (`mod block`: in the snapshot, no report), then
+  // unblocked from the panel: still reversed after the unblock is acked.
+  const outside = key()
+  all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((c) => c.id), snapshot: m.snap(3, [byAi, outside]), moderatorCert: m.cert })
+  t.is(store.humanReversed(outside), false, 'blocked outside the panel')
+  await store.unblock(outside, { by: MOD })
+  all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((c) => c.id), snapshot: m.snap(4, [byAi]), moderatorCert: m.cert })
+  t.alike(store.pending().changes, [])
+  t.is(store.humanReversed(outside), true, 'panel unblock of an outside block, after ack')
+  // A human bloquear decision's own 'pedido' is not an unblock request.
+  t.is(store.humanReversed(byAi), false, 'still not reversed')
 })
 
 test('cancel of an unclaimed change deletes it', async (t) => {
@@ -426,7 +519,7 @@ test('a malformed file disables every method and is never replaced', async (t) =
   await rejects(t, store.add(report(key())), 'indisponivel', 'add')
   await rejects(t, store.ack({ changeIds: [], snapshot: m.snap(1), moderatorCert: m.cert }), 'indisponivel', 'ack')
   await rejects(t, store.pull(), 'indisponivel', 'pull')
-  for (const name of ['list', 'pending', 'stats', 'blocked', 'exportRows', 'newestModeratorDate']) {
+  for (const name of ['list', 'pending', 'stats', 'blocked', 'exportRows', 'newestModeratorDate', 'humanReversed']) {
     throwsCode(t, () => store[name](), 'indisponivel', name)
   }
   t.is(fs.readFileSync(file, 'utf8'), '{ not json', 'untouched')

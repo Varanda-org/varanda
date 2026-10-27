@@ -46,7 +46,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # --ignore-scripts: no dependency install script runs (supply chain);
+      # the native binaries the code uses ship in their packages.
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm test
       - run: npm run demo

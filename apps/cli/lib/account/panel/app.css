@@ -55,3 +55,7 @@ label { display: block; font-size: 0.9em; }
 .warning { font-size: 0.9em; border: 1px solid #b26a00; }
 .waiting { font-size: 0.9em; border: 1px solid #8888; }
 .change { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #8884; }
+/* AI triage lines (suggestion, abstention, 'pedido pela IA'): advice, so
+   muted, never styled like a decision. */
+.ai { font-size: 0.9em; opacity: 0.75; font-style: italic; }
+.verified { display: flex; flex-direction: column; gap: 6px; }

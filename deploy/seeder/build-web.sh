@@ -25,6 +25,8 @@ fi
 # A mesma imagem Node, fixada por digest, do Dockerfile do semeador.
 image="node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205"
 
+# --ignore-scripts: nenhum script de instalação de dependência roda no build
+# (cadeia de suprimentos); os binários nativos usados já vêm nos pacotes.
 # --init: com um init como PID 1, um Ctrl-C ou SIGTERM repassado pelo docker
 # para de fato o build (sh como PID 1 ignoraria o sinal e seguiria gravando).
 docker run --rm --init \
@@ -34,7 +36,7 @@ docker run --rm --init \
   -v "$src":/src \
   -w /src \
   "$image" \
-  sh -c 'npm ci --no-audit --no-fund && npm run export:web -w apps/app'
+  sh -c 'npm ci --no-audit --no-fund --ignore-scripts && npm run export:web -w apps/app'
 
 test -f "$src/apps/app/dist/index.html"
 test -f "$src/apps/app/dist/varanda-node.js"
