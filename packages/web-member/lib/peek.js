@@ -52,8 +52,11 @@
 // profile and username records, posts and reposts) plus the set of fetched
 // seqs, within PEEK_SNAPSHOT_MAX_BYTES of retained JSON per snapshot; raw
 // buffers and the memory cores (64 KiB pages) are released after every
-// window. The snapshot is replaced on every after-less read, dropped on TTL,
-// abort() and close(). One read at a time.
+// window. The snapshot is replaced on every after-less read once the new one
+// exists (a failed refresh must not strand the list on screen) and dropped
+// on TTL, abort() and close(). A continuation without a live snapshot is
+// refused: applying its cursor to a rebuilt order could silently skip rows.
+// One read at a time.
 //
 // Every read, continuation pages included and even when nothing is
 // fetched, re-filters the snapshot with the CURRENT follows and blocklist
@@ -528,8 +531,13 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     }
     const mod = await moderation(storage, association)
     checkAborted(run)
-    if (first || snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs) {
-      snapshot = null
+    if (cursor !== null && (snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs)) {
+      throw new UsageError('A lista expirou; atualize para continuar.')
+    }
+    if (first) {
+      // The previous snapshot stays until this one exists: a failed refresh
+      // must not strand the list on screen. Idle expiry, abort() and close()
+      // still drop it.
       const built = await buildSnapshot(run, { follows, blocked: mod.blocked })
       checkAborted(run)
       snapshot = built
