@@ -18,12 +18,24 @@
 // never be mistaken for someone else.
 //
 // Pending link rows (Google transaction secrets: state, PKCE verifier) live in
-// memory only and are never written to disk: at most MAX_PENDING live rows,
-// at most MAX_UNPROVEN_PER_MEMBER unproven ones per member and at most
-// MAX_PER_SUB rows per Google subject (see start(), unproven() and
-// putGoogle()). Error objects carry only a
-// token in `code` (and `nextChangeAt` for 'troca-bloqueada'): no sub, e-mail
-// or secret.
+// memory only and are never written to disk: at most `maxPending` (default
+// MAX_PENDING) live rows, at most MAX_UNPROVEN_PER_MEMBER unproven ones per
+// member and at most MAX_PER_SUB rows per Google subject (see start(),
+// unproven() and putGoogle()). Error objects carry only a token in `code`
+// (and `nextChangeAt` for 'troca-bloqueada'): no sub, e-mail or secret.
+//
+// Member cap (`maxMembers`, null = no cap): the number of linked members is
+// counted on demand from `links` (never from `usedNames`, which never
+// shrinks). While it is reached, start() and the new-link branch of finish()
+// answer 'lista-de-espera'; renames, status, lookup, export, the moderation
+// desk and a linked member's e-mail update never consult the cap, and
+// lowering it below the current count removes nobody. A member who lost a
+// passkey and links a NEW key with ANOTHER Google account counts as a new member, so it is
+// refused too while the cap is reached. Nothing about a refused attempt is
+// stored: start() creates no row and finish() deletes the row it refuses.
+// isFull() lets the server's Google callback refuse (and dropPending() the
+// row) before the Google code is exchanged, so no Google data is collected
+// for a link that would be refused.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -131,7 +143,9 @@ function readDirectory (file) {
 // readOnly: for `account status` / `account export` — no mkdir/chmod (works
 // on a read-only volume and never changes permissions) and every disk
 // mutation answers 'indisponivel'.
-function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
+// maxMembers: null (no cap) or the number of linked members past which new
+// links answer 'lista-de-espera'. maxPending: the live pending-row ceiling.
+function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembers = null, maxPending = MAX_PENDING } = {}) {
   refuseSymlinkDir(dataDir)
   if (!readOnly) {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
@@ -224,6 +238,14 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     if (failed) throw fail('indisponivel')
   }
 
+  function linkCount () {
+    return Object.keys(state.links).length
+  }
+
+  function full () {
+    return maxMembers !== null && linkCount() >= maxMembers
+  }
+
   // A row is unproven until putGoogle() (Google answered: it has `sub`). A
   // member signature (reserve()) does not count: member keys are free to
   // generate, so a key-proven row is as cheap for an attacker as a bare
@@ -258,8 +280,11 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     member = normalizeMember(member)
     if (!validName(username)) throw fail('nome-invalido')
     if (has(state.links, member)) throw fail('conta-vinculada')
-    if (nameTaken(state, username, member)) throw fail('nome-em-uso')
+    // Sweep before the cap check: while the cap is full this is the only
+    // call that keeps expiring rows abandoned before it filled.
     sweep()
+    if (full()) throw fail('lista-de-espera')
+    if (nameTaken(state, username, member)) throw fail('nome-em-uso')
     let own = 0
     for (const row of pending.values()) {
       if (row.member === member && bare(row)) own++
@@ -268,7 +293,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     // Table full (only a flood gets here): the oldest row without a Google
     // answer goes, bare or signed, so new logins outlive abandoned ones;
     // claimed rows are never evicted.
-    if (pending.size >= MAX_PENDING && !evictOldest(unproven)) throw fail('lotado')
+    if (pending.size >= maxPending && !evictOldest(unproven)) throw fail('lotado')
     const row = {
       id: randomToken(),
       member,
@@ -320,6 +345,17 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     return row === null ? null : { ...row }
   }
 
+  // Read-only: true while the member cap is reached (false without a cap).
+  function isFull () {
+    return full()
+  }
+
+  // Deletes a pending row (a callback refused while the cap is full).
+  function dropPending (id) {
+    pending.delete(id)
+    sweep()
+  }
+
   function linkResult (link) {
     return { cert: link.cert, usernameRecord: link.usernameRecord, nextChangeAt: nextChangeAt(link) }
   }
@@ -348,6 +384,13 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
         return linkResult(state.links[member])
       }
       if (has(state.bySub, sub) || has(state.links, member)) throw fail('conta-vinculada')
+      // The cap filled while this row was at Google: drop the row (it holds
+      // the sub, the e-mail and claims the name) and sign nothing.
+      if (full()) {
+        pending.delete(id)
+        sweep()
+        throw fail('lista-de-espera')
+      }
       if (!validName(username)) throw fail('nome-invalido')
       if (nameTaken(state, username, member)) throw fail('nome-em-uso')
 
@@ -450,7 +493,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false } = {}) {
     return state.bySub[sub]
   }
 
-  return { start, reserve, putGoogle, get, finish, rename, status, lookup, exportLinks, contact, memberForSub }
+  return { start, reserve, putGoogle, get, isFull, dropPending, finish, rename, status, lookup, exportLinks, contact, memberForSub }
 }
 
 module.exports = {

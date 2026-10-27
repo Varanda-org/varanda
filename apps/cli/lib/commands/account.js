@@ -46,6 +46,16 @@ const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
 const MAX_SECRET = 256
+// Optional capacity knobs: name -> [option, min, max]. Absent or blank keeps
+// the store/server default; '0' is invalid, never "unlimited".
+const LIMIT_ENV = Object.freeze({
+  VARANDA_MAX_MEMBERS: ['maxMembers', 1, 4096],
+  VARANDA_ACCOUNT_MAX_PENDING: ['maxPending', 1, 100000],
+  VARANDA_ACCOUNT_MAX_CONNECTIONS: ['maxConnections', 1, 4096],
+  VARANDA_ACCOUNT_RATE: ['ratePerSecond', 1, 10000],
+  VARANDA_ACCOUNT_BURST: ['burst', 1, 100000]
+})
+const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -222,7 +232,22 @@ function readEnv (env) {
   const modEmails = parseModEmails(env.VARANDA_MODERATOR_EMAILS)
   // Not a usage error (exit 1), and never the value.
   if (modEmails === null) throw new Error('VARANDA_MODERATOR_EMAILS inválido')
-  return { origin, clientId, clientSecret, modEmails }
+  return { origin, clientId, clientSecret, modEmails, limits: readLimits(env) }
+}
+
+// -> { [option]: integer } holding only the variables that were set.
+function readLimits (env) {
+  const limits = {}
+  for (const [name, [option, min, max]] of Object.entries(LIMIT_ENV)) {
+    const raw = env[name]
+    if (raw === undefined) continue
+    const text = typeof raw === 'string' ? raw.trim() : null
+    if (text === '') continue
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= min && value <= max)) throw new UsageError(name + ' inválido')
+    limits[option] = value
+  }
+  return limits
 }
 
 // For the operator (LGPD access requests, legal orders): every report row
@@ -260,7 +285,8 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails } = readEnv(env)
+  const { origin, clientId, clientSecret, modEmails, limits } = readEnv(env)
+  const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -287,10 +313,10 @@ async function serve (flags, env) {
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
   try {
-    const store = openAccountStore(flags.dataDir)
+    const store = openAccountStore(flags.dataDir, { maxMembers, maxPending })
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
-    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails })
+    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, maxConnections, ratePerSecond, burst })
     try {
       listener = await server.listen({ host, port })
     } catch (err) {
@@ -298,7 +324,7 @@ async function serve (flags, env) {
       throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
     }
     log({ event: 'listening', host: listener.host, port: listener.port })
-    log({ event: 'ready', configured: issuer !== null })
+    log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }) })
     await stopped
   } finally {
     process.off('SIGINT', onSignal)

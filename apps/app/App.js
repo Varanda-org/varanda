@@ -21,7 +21,7 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
-import { parseReturn } from './src/account'
+import { parseReturn, parseReturnWaitlist } from './src/account'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -71,7 +71,10 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', '
 // Identidade's LinkCard is the one that removes the query. Native has no
 // location.
 const LINK_RETURN = (() => {
-  try { return parseReturn(globalThis.location?.search) !== null } catch { return false }
+  try {
+    const search = globalThis.location?.search
+    return parseReturn(search) !== null || parseReturnWaitlist(search) !== ''
+  } catch { return false }
 })()
 
 // True when node.info confirms an identity and a member certificate.

@@ -40,8 +40,9 @@ const { createModRoutes } = require('./mod-routes')
 // cookie and the state named the same row; the public reads share one wide
 // window; the routes that need no proof (start, rename/start) are bounded
 // by their tables (oldest evicted) and by the one global token bucket.
-// Residual: a flood can still drain the global bucket (20/s, burst 100)
-// for everyone. A per-source limit needs client addresses, which the
+// Residual: a flood can still drain the global bucket (by default 20/s,
+// burst 100; `ratePerSecond` and `burst` configure it, and `maxConnections`
+// the socket ceiling, by default 64) for everyone. A per-source limit needs client addresses, which the
 // design keeps out of this service pending the legal opinion on logs
 // (GitHub issue #38); the operator can add per-IP limiting in front of
 // Caddy.
@@ -49,6 +50,8 @@ const { createModRoutes } = require('./mod-routes')
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 8790
 const MAX_SOCKETS = 64
+const DEFAULT_RATE = 20
+const DEFAULT_BURST = 100
 const HEADERS_TIMEOUT_MS = 4000
 const REQUEST_TIMEOUT_MS = 10000
 const CHECK_INTERVAL_MS = 1000
@@ -86,6 +89,9 @@ const ERROR_STATUS = Object.freeze({
   'troca-bloqueada': 409,
   indisponivel: 503,
   lotado: 503,
+  // The member cap is reached (store.js maxMembers): the body is only the
+  // token, so the app can show the waitlist answer.
+  'lista-de-espera': 503,
   // The moderation desk (./mod-routes.js, apps/cli/lib/account/moderation-store.js).
   'nao-vinculado': 403,
   'nao-autorizado': 401,
@@ -420,8 +426,8 @@ function sendError (res, err, headers) {
   send(res, err.status, { error: err.token, ...err.extra }, headers)
 }
 
-function redirect (res, location) {
-  res.writeHead(302, { Location: location, 'Content-Length': 0, ...BASE_HEADERS })
+function redirect (res, location, headers = {}) {
+  res.writeHead(302, { Location: location, 'Content-Length': 0, ...BASE_HEADERS, ...headers })
   res.end()
 }
 
@@ -529,7 +535,10 @@ function createAccountServer ({
   moderation = null,
   googleMod = null,
   modEmails = [],
-  panelDir
+  panelDir,
+  maxConnections = MAX_SOCKETS,
+  ratePerSecond = DEFAULT_RATE,
+  burst = DEFAULT_BURST
 } = {}) {
   if (typeof association !== 'string' || !HEX64_RE.test(association)) throw new TypeError('association must be 64 lowercase hex characters')
   if (typeof origin !== 'string' || !(ORIGIN_RE.test(origin) || LOOPBACK_ORIGIN_RE.test(origin))) throw new TypeError('invalid origin')
@@ -538,11 +547,14 @@ function createAccountServer ({
   if (issuer !== null && checkIssuerCert(issuer.cert, issuer.keyPair, association) !== null) {
     throw new TypeError('issuer certificate is for another association or key')
   }
+  for (const [name, value] of [['maxConnections', maxConnections], ['ratePerSecond', ratePerSecond], ['burst', burst]]) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(name + ' must be a positive integer')
+  }
 
   // Every keyed window is charged after a proof, on the member (or the
   // pending row) the proof named; see the note at the top of the file.
   const limits = {
-    global: tokenBucket(20, 100, now),
+    global: tokenBucket(ratePerSecond, burst, now),
     authorize: keyedWindow(5, 600 * 1000, now),
     finish: keyedWindow(10, 600 * 1000, now),
     renameFinish: keyedWindow(5, 600 * 1000, now),
@@ -567,7 +579,7 @@ function createAccountServer ({
   // OAuth state -> pending id, written at authorize and deleted at the first
   // callback that presents it (single-use). One entry per pending row at
   // most (a row is authorized once), so the table is bounded by the store's
-  // MAX_PENDING; expired entries are swept whenever one is added.
+  // maxPending; expired entries are swept whenever one is added.
   const states = new Map()
   // Pending renames by nonce: { member, username, expiresAt }, in memory
   // only, single-use; at most MAX_RENAMES, the oldest evicted for room
@@ -649,6 +661,17 @@ function createAccountServer ({
     if (!limits.callback(id)) return back('erro')
     const error = url.searchParams.get('error')
     if (error !== null) return back('cancelado')
+    // Cap reached since start: refuse BEFORE the code is exchanged, so no
+    // Google subject or e-mail is ever held for a link finish() would
+    // refuse. The row goes and the cookie is cleared, as finish() does on
+    // its own waitlist refusal (kept for a cap that fills after this point).
+    // A key that is already linked is never a new member: its callback goes
+    // on to finish(), whose same-account branch the cap does not touch.
+    if (store.isFull() && !store.status(row.member).linked) {
+      store.dropPending(id)
+      log({ event: 'lista-de-espera' })
+      return redirect(res, origin + '/?conta=lista-de-espera', { 'Set-Cookie': cookieHeader(id, 0) })
+    }
     const code = url.searchParams.get('code')
     if (typeof code !== 'string' || !PARAM_RE.test(code)) return back('erro')
     const result = await google.exchange({ code, codeVerifier: row.verifier })
@@ -680,7 +703,11 @@ function createAccountServer ({
     try {
       result = await store.finish(row.id, { signature }, issuer.keyPair, issuer.cert, association)
     } catch (err) {
-      throw fromStore(err)
+      const routeErr = fromStore(err)
+      // A waitlist refusal deleted the row too: clear the cookie as on
+      // success, so a retry starts over instead of answering 'expirado'.
+      if (routeErr.token === 'lista-de-espera') routeErr.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
+      throw routeErr
     }
     log({ event: 'linked' })
     // The row is gone (C8): the cookie has nothing left to name.
@@ -785,7 +812,9 @@ function createAccountServer ({
       }, (err) => {
         req.resume()
         const routeErr = err instanceof RouteError ? err : refuse('indisponivel')
-        if (routeErr.token !== 'nao-encontrado') log({ event: 'refused', reason: routeErr.token })
+        // A waitlist answer is logged as its event alone (nothing about who).
+        if (routeErr.token === 'lista-de-espera') log({ event: 'lista-de-espera' })
+        else if (routeErr.token !== 'nao-encontrado') log({ event: 'refused', reason: routeErr.token })
         if (res.headersSent) return res.destroy()
         if (routeErr.status === 413) {
           // The rest of an oversized body is never read: the socket goes
@@ -793,10 +822,10 @@ function createAccountServer ({
           res.setHeader('Connection', 'close')
           res.once('finish', () => req.socket.destroy())
         }
-        sendError(res, routeErr)
+        sendError(res, routeErr, routeErr.headers)
       })
     })
-    server.maxConnections = MAX_SOCKETS
+    server.maxConnections = maxConnections
     server.headersTimeout = HEADERS_TIMEOUT_MS
     server.requestTimeout = REQUEST_TIMEOUT_MS
 
@@ -830,6 +859,9 @@ function createAccountServer ({
 module.exports = {
   DEFAULT_HOST,
   DEFAULT_PORT,
+  MAX_SOCKETS,
+  DEFAULT_RATE,
+  DEFAULT_BURST,
   KEY_FILE,
   CERT_FILE,
   LOCK_FILE,

@@ -1,5 +1,6 @@
 const test = require('brittle')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 
@@ -176,6 +177,12 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // changes, and the unauthenticated panel probe is guarded by the route
     // file so a rollback to B2 skips it.
     'VARANDA_MODERATOR_EMAILS',
+    // The optional account limits are checked as positive integers in range.
+    'VARANDA_MAX_MEMBERS',
+    'VARANDA_ACCOUNT_MAX_CONNECTIONS',
+    'VARANDA_ACCOUNT_RATE',
+    'VARANDA_ACCOUNT_BURST',
+    'VARANDA_ACCOUNT_MAX_PENDING',
     '/account/mod/api/me'
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
@@ -243,6 +250,21 @@ test('compose.web.yaml: VARANDA_MODERATOR_EMAILS is optional and only on the acc
   t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the account service')
   t.ok(/VARANDA_MODERATOR_EMAILS: "\$\{VARANDA_MODERATOR_EMAILS:-\}"/.test(hits[0][0]), 'optional (:-), never :?')
 })
+
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {
+  test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
+    const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+    const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
+    t.is(hits.length, 1, 'mentioned exactly once')
+    const start = webLines.findIndex((l) => /^ {2}account:\s*$/.test(l))
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the account service')
+    t.ok(new RegExp(name + ': "\\$\\{' + name + ':-\\}"').test(hits[0][0]), 'optional (:-), never :?')
+  })
+}
 
 test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   const caddy = fs.readFileSync(CADDYFILE, 'utf8')
@@ -314,4 +336,90 @@ test('deploy.sh: bash -n and refusal to run as non-root', (t) => {
   t.is(res.status, 1, 'exits 1 when not root')
   t.ok(res.stderr.includes('exigido root'), 'stderr says exigido root')
   t.is(res.stdout, '', 'nothing on stdout')
+})
+
+test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an .env without the limits', (t) => {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
+  if (probe.error || probe.status !== 0) {
+    t.comment('bash not found: skipping the behavioural check')
+    return
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  const base = 'VARANDA_DOMAIN=example.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) + '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=secret\n'
+  // Only the conferir_antes function is run (never the script itself), with
+  // git stubbed to report a clean tree.
+  const run = (extra) => {
+    fs.writeFileSync(envFile, base + extra)
+    const script = [
+      'set -u',
+      "log() { printf '%s\\n' \"$*\" >&2; }",
+      'git() { case "$1" in status) ;; *) return 0 ;; esac; }',
+      'target=HEAD',
+      "domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'",
+      "assoc_re='^[0-9a-fA-F]{64}$'",
+      "moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'",
+      "limite_re='^[1-9][0-9]{0,7}$'",
+      shText.match(/^limites_conta='[^'\n]*'$/m)[0],
+      'root=' + JSON.stringify(dir),
+      shText.slice(shText.indexOf('\nconferir_antes() {') + 1, shText.indexOf('\n}\n', shText.indexOf('\nconferir_antes() {')) + 3),
+      'conferir_antes'
+    ].join('\n')
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const shText = fs.readFileSync(SCRIPT, 'utf8')
+  const okRun = run('')
+  t.is(okRun.status, 0, 'an .env without the limit lines passes: ' + okRun.stderr)
+  const good = run('VARANDA_MAX_MEMBERS=500\nVARANDA_ACCOUNT_RATE=\n')
+  t.is(good.status, 0, 'a valid value and an empty one pass: ' + good.stderr)
+  for (const bad of ['abc', '0']) {
+    const res = run('VARANDA_MAX_MEMBERS=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_MAX_MEMBERS=' + bad + ' exits 1')
+    t.ok(res.stderr.includes('VARANDA_MAX_MEMBERS inválido em deploy/seeder/.env'), 'says the value is invalid')
+    t.absent(res.stderr.includes('=' + bad) || res.stdout.includes(bad), 'the value is not echoed')
+  }
+  // The range is the account service's, not only the shape: a value it would
+  // refuse at start fails here, before any container is replaced.
+  const top = run('VARANDA_MAX_MEMBERS=4096\n')
+  t.is(top.status, 0, 'VARANDA_MAX_MEMBERS=4096 passes: ' + top.stderr)
+  for (const [name, bad] of [['VARANDA_MAX_MEMBERS', '4097'], ['VARANDA_ACCOUNT_RATE', '10001']]) {
+    const res = run(name + '=' + bad + '\n')
+    t.is(res.status, 1, name + '=' + bad + ' exits 1')
+    t.ok(res.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says the value is invalid')
+    t.absent(res.stderr.includes(bad) || res.stdout.includes(bad), 'the value is not echoed')
+  }
+  // Compose passes a quoted value verbatim (comment included), so a quoted
+  // value is refused instead of being cleaned up here; an unquoted trailing
+  // comment is dropped by Compose and here alike.
+  for (const quoted of ['"300 # vagas"', "'300'"]) {
+    const res = run('VARANDA_MAX_MEMBERS=' + quoted + '\n')
+    t.is(res.status, 1, 'a quoted VARANDA_MAX_MEMBERS exits 1')
+    t.ok(res.stderr.includes('VARANDA_MAX_MEMBERS inválido em deploy/seeder/.env'), 'says the quoted value is invalid')
+  }
+  const commented = run('VARANDA_MAX_MEMBERS=300 # vagas\n')
+  t.is(commented.status, 0, 'an unquoted value with a trailing comment passes: ' + commented.stderr)
+  t.is(run('VARANDA_MAX_MEMBERS = 4097\n').status, 1, 'spaces around = do not hide an out-of-range value')
+})
+
+test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {
+  const accountJs = fs.readFileSync(path.join(repoRoot, 'apps/cli/lib/commands/account.js'), 'utf8')
+  const block = accountJs.match(/const LIMIT_ENV = Object\.freeze\(\{([\s\S]*?)\}\)/)
+  t.ok(block, 'LIMIT_ENV located in account.js')
+  const fromJs = {}
+  for (const m of block[1].matchAll(/(VARANDA_[A-Z_]+):\s*\['\w+',\s*(\d+),\s*(\d+)\]/g)) {
+    fromJs[m[1]] = [Number(m[2]), Number(m[3])]
+  }
+  const line = shCode.match(/^limites_conta='([^'\n]*)'$/m)
+  t.ok(line, 'limites_conta located in deploy.sh')
+  const fromSh = {}
+  for (const entry of line[1].split(/\s+/).filter(Boolean)) {
+    const [name, min, max] = entry.split(':')
+    fromSh[name] = [Number(min), Number(max)]
+  }
+  t.is(Object.keys(fromJs).length, 5, 'five limits in account.js')
+  t.alike(fromSh, fromJs, 'same names and ranges')
+  // The shape check allows at most 8 digits, so every max must fit in it.
+  for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')
 })

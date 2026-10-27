@@ -564,3 +564,163 @@ test('contact and memberForSub: the moderation desk view of a link; status and l
   t.absent(pub.includes('vera@example.test'), 'status/lookup: no e-mail')
   t.absent(pub.includes('sub-vera'), 'status/lookup: no sub')
 })
+
+function capped (t, opts) {
+  const dir = path.join(tmpDir(t), 'account')
+  const c = clock()
+  const iss = issuer()
+  const open = () => openAccountStore(dir, { now: c.now, ...opts })
+  return { dir, c, iss, store: open(), open }
+}
+
+function claim (s, member, username, sub, email = 'm@example.test') {
+  const row = s.start({ member, username })
+  s.reserve(row.id)
+  s.putGoogle(row.id, { sub, email })
+  return row
+}
+
+test('member cap: two links fill maxMembers 2; a third start is lista-de-espera and holds no row', async (t) => {
+  const { store, iss } = capped(t, { maxMembers: 2 })
+  const a = memberKey()
+  const b = memberKey()
+  await link(store, iss, a, 'alba')
+  await link(store, iss, b, 'bia')
+  const c = memberKey()
+  throwsCode(t, () => store.start({ member: c, username: 'cora' }), 'lista-de-espera', 'a new member waits')
+  throwsCode(t, () => store.start({ member: c, username: 'cora' }), 'lista-de-espera', 'again: nothing was queued')
+  throwsCode(t, () => store.start({ member: a, username: 'outro' }), 'conta-vinculada', 'a linked member still hears conta-vinculada')
+  throwsCode(t, () => store.start({ member: c, username: 'alba' }), 'lista-de-espera', 'the cap answers before the name check')
+  t.is(store.status(c).linked, false)
+  t.is(store.status(a).linked, true, 'status unchanged at the cap')
+  t.is(store.lookup('bia').member, b, 'lookup unchanged at the cap')
+  t.is(store.exportLinks().length, 2)
+})
+
+test('member cap: linked members still rename and take the same-sub e-mail update path', async (t) => {
+  const { store, iss, c } = capped(t, { maxMembers: 2 })
+  const a = memberKey()
+  // Two rows started before either finished (a double click).
+  const r1 = claim(store, a, 'alba', 'sub-a', 'a@example.test')
+  const r2 = claim(store, a, 'alba', 'sub-a', 'a2@example.test')
+  const first = await store.finish(r1.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+  await link(store, iss, memberKey(), 'bia')
+  const again = await store.finish(r2.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+  t.is(again.cert, first.cert, 'the stored cert, not a new link')
+  t.is(store.contact(a).email, 'a2@example.test', 'the e-mail is updated at the cap')
+  c.t += COOLDOWN_MS
+  const renamed = await store.rename(a, 'albinha', iss.kp, iss.cert)
+  t.is(renamed.record.username, 'albinha', 'rename at the cap')
+  t.is(store.exportLinks().length, 2)
+})
+
+test('member cap: a finish that races past a full cap is lista-de-espera, writes nothing and drops its row', async (t) => {
+  const { store, iss, c, dir } = capped(t, { maxMembers: 2 })
+  const a = memberKey()
+  await link(store, iss, a, 'alba')
+  c.t += COOLDOWN_MS
+  const late = memberKey()
+  const row = claim(store, late, 'cora', 'sub-cora', 'cora@example.test')
+  await rejects(t, store.rename(a, 'cora', iss.kp, iss.cert), 'nome-em-uso', 'the claimed row holds its name')
+  await link(store, iss, memberKey(), 'bia')
+  const before = fs.readFileSync(path.join(dir, FILE), 'utf8')
+  await rejects(t, store.finish(row.id, { signature: SIG }, iss.kp, iss.cert, iss.association), 'lista-de-espera', 'the cap filled meanwhile')
+  t.is(fs.readFileSync(path.join(dir, FILE), 'utf8'), before, 'directory.json untouched')
+  t.absent(before.includes('sub-cora') || before.includes('cora@example.test'), 'nothing about the attempt on disk')
+  t.is(store.get(row.id), null, 'the pending row is gone')
+  t.is(store.memberForSub('sub-cora'), null)
+  t.is(store.status(late).linked, false)
+  const renamed = await store.rename(a, 'cora', iss.kp, iss.cert)
+  t.is(renamed.record.username, 'cora', 'the name is free for another member')
+})
+
+test('member cap: isFull() is false without a cap, true at the cap; dropPending removes a row', async (t) => {
+  const { store: open } = capped(t, {})
+  t.is(open.isFull(), false, 'no cap: never full')
+  const { store, iss } = capped(t, { maxMembers: 1 })
+  t.is(store.isFull(), false, 'under the cap')
+  const row = claim(store, memberKey(), 'cora', 'sub-cora', 'cora@example.test')
+  await link(store, iss, memberKey(), 'alba')
+  t.is(store.isFull(), true, 'at the cap')
+  store.dropPending(row.id)
+  t.is(store.get(row.id), null, 'the pending row is gone')
+  await rejects(t, store.finish(row.id, { signature: SIG }, iss.kp, iss.cert, iss.association), 'expirado', 'nothing left to finish')
+  store.dropPending('nao-existe')
+  t.is(store.isFull(), true, 'dropping a row changes no link')
+})
+
+// A capped store whose pending table records every key it deletes. get()
+// expires a row lazily on its own, so the sweep itself is only visible as
+// the deletion it makes. The table is built while the store opens, so the
+// global Map is swapped for that call only.
+function sweptStore (t, opts) {
+  const dir = path.join(tmpDir(t), 'account')
+  const c = clock()
+  const iss = issuer()
+  const deleted = []
+  const NativeMap = globalThis.Map
+  globalThis.Map = class extends NativeMap {
+    delete (key) {
+      deleted.push(key)
+      return super.delete(key)
+    }
+  }
+  let store
+  try {
+    store = openAccountStore(dir, { now: c.now, ...opts })
+  } finally {
+    globalThis.Map = NativeMap
+  }
+  return { c, iss, store, deleted }
+}
+
+test('member cap: a refused start still expires pending rows abandoned before the cap filled', async (t) => {
+  const { store, iss, c, deleted } = sweptStore(t, { maxMembers: 1 })
+  const abandoned = store.start({ member: memberKey(), username: 'cora' })
+  await link(store, iss, memberKey(), 'alba')
+  c.t += PENDING_TTL_MS + 1
+  deleted.length = 0
+  throwsCode(t, () => store.start({ member: memberKey(), username: 'nova' }), 'lista-de-espera', 'the cap is full')
+  t.ok(deleted.includes(abandoned.id), 'the refused start swept the expired row')
+  t.is(store.get(abandoned.id), null)
+})
+
+test('member cap: a refused finish drops its own row and sweeps expired ones', async (t) => {
+  const { store, iss, c, deleted } = sweptStore(t, { maxMembers: 1 })
+  const abandoned = store.start({ member: memberKey(), username: 'cora' })
+  c.t += PENDING_TTL_MS / 2
+  const late = claim(store, memberKey(), 'bia', 'sub-bia', 'bia@example.test')
+  await link(store, iss, memberKey(), 'alba')
+  c.t += PENDING_TTL_MS / 2 + 1
+  deleted.length = 0
+  await rejects(t, store.finish(late.id, { signature: SIG }, iss.kp, iss.cert, iss.association), 'lista-de-espera', 'the cap filled meanwhile')
+  t.ok(deleted.includes(late.id), 'its own row is dropped')
+  t.ok(deleted.includes(abandoned.id), 'the expired row is swept too')
+})
+
+test('member cap: a reopened store counts the existing links; lowering the cap removes nobody', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const c = clock()
+  const iss = issuer()
+  const first = openAccountStore(dir, { now: c.now })
+  const members = [memberKey(), memberKey(), memberKey()]
+  for (let i = 0; i < members.length; i++) await link(first, iss, members[i], fillerName(i))
+  const two = openAccountStore(dir, { now: c.now, maxMembers: 2 })
+  throwsCode(t, () => two.start({ member: memberKey(), username: 'nova' }), 'lista-de-espera', 'three links over a cap of 2')
+  for (const m of members) t.is(two.status(m).linked, true, 'every link stays')
+  const three = openAccountStore(dir, { now: c.now, maxMembers: 3 })
+  throwsCode(t, () => three.start({ member: memberKey(), username: 'nova' }), 'lista-de-espera', 'exactly at the cap')
+  const four = openAccountStore(dir, { now: c.now, maxMembers: 4 })
+  t.ok(four.start({ member: memberKey(), username: 'nova' }), 'room under a higher cap')
+})
+
+test('maxPending: the option replaces MAX_PENDING; defaults unchanged when options are omitted', async (t) => {
+  const { store } = capped(t, { maxPending: 2 })
+  for (let i = 0; i < 2; i++) claim(store, fillerMember(i), fillerName(i), 'sub-' + i)
+  throwsCode(t, () => store.start({ member: memberKey(), username: 'extra' }), 'lotado', 'two claimed rows fill a table of 2')
+
+  const { store: plain, iss } = setup(t)
+  for (let i = 0; i < 5; i++) await link(plain, iss, memberKey(), fillerName(i))
+  t.ok(plain.start({ member: memberKey(), username: 'semteto' }), 'no member cap by default')
+  t.is(MAX_PENDING, 1000, 'default pending ceiling')
+})

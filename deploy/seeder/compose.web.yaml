@@ -94,6 +94,16 @@ services:
       # serviço account a recebe (nem o semeador nem o web); moderation.json
       # fica em account-data.
       VARANDA_MODERATOR_EMAILS: "${VARANDA_MODERATOR_EMAILS:-}"
+      # Teto de membros vinculados. Vazio = sem teto; passando dele, um vínculo
+      # NOVO recebe a resposta "lista de espera" e quem já é membro não muda.
+      # O semeador tem o próprio limite de 4096 diários, então mantenha este
+      # valor igual ou abaixo dele.
+      VARANDA_MAX_MEMBERS: "${VARANDA_MAX_MEMBERS:-}"
+      # Limites do serviço account. Vazios mantêm os padrões do serviço.
+      VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
+      VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"
+      VARANDA_ACCOUNT_BURST: "${VARANDA_ACCOUNT_BURST:-}"
+      VARANDA_ACCOUNT_MAX_PENDING: "${VARANDA_ACCOUNT_MAX_PENDING:-}"
     # Volume próprio: o diretório de contas e a chave do emissor nunca ficam
     # no volume do semeador.
     volumes:

@@ -185,6 +185,11 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_WS_PORT` | Porta da entrada WebSocket do `seed`. O mesmo que `--ws-port`. Ausente, nada escuta. |
 | `VARANDA_WS_HOST` | Endereço da entrada WebSocket. O mesmo que `--ws-host`. Padrão `127.0.0.1`. |
 | `VARANDA_WS_ORIGIN` | Origens de navegador aceitas na entrada WebSocket, separadas por vírgula (ex.: `https://app.exemplo.org`). O mesmo que `--ws-origin` (repetível). Ausente, só páginas `http` em loopback. |
+| `VARANDA_MAX_MEMBERS` | Teto de contas vinculadas no serviço `account` (em `deploy/seeder/.env`), de 1 a 4096. Ausente ou vazio, sem teto. Ao chegar ao teto, um vínculo novo recebe "lista de espera" (HTTP 503); quem já é membro não muda. Ver "Vínculo de conta Google e @nome". |
+| `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
+| `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
+| `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
+| `VARANDA_ACCOUNT_MAX_PENDING` | Vínculos pendentes ao mesmo tempo no serviço `account`, de 1 a 100000. Padrão 1000. |
 
 `--bootstrap` pode repetir. Se algum `--bootstrap` aparece na linha, ele prevalece sobre `VARANDA_BOOTSTRAP`. `--dht-host` prevalece sobre `VARANDA_DHT_HOST`.
 
@@ -517,6 +522,8 @@ O serviço sobe sem emissor: até a cerimônia abaixo, `/account/health` respond
 4. Reinicie o serviço: `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml restart account`. Depois disso `account status` deixa de dizer `emissor não certificado`.
 
 O `association.json` nunca sai da máquina do operador, e o segredo do emissor nunca sai do volume do serviço `account`. O `account cert add` recusa um certificado de outra associação ou de outra chave.
+
+Com `VARANDA_MAX_MEMBERS` definido, quando o número de contas vinculadas chega ao teto, um vínculo que criaria um membro novo recebe "lista de espera" (HTTP 503) e o app mostra uma tela calma com essa resposta. Nada sobre a pessoa fica guardado: o serviço não grava a tentativa, nem o @nome escolhido, nem o e-mail, e a linha pendente é apagada se a recusa vier na conclusão do vínculo. Se o teto se completar enquanto a pessoa está no Google, a volta do Google é recusada antes de o código do Google ser trocado, então nenhum dado do Google é coletado para um vínculo recusado. Quem já é membro segue normalmente: renomear, ver o status, denunciar e concluir um segundo vínculo começado antes de o primeiro terminar (vale como atualização de e-mail) continuam funcionando. Uma chave nova para uma conta já vinculada conta como membro novo e também espera. Baixar o teto abaixo do número atual não remove ninguém. O semeador tem o próprio limite de 4096 diários, que continua valendo: mantenha `VARANDA_MAX_MEMBERS` igual ou abaixo dele.
 
 ### Implantação automática pelo GitHub Actions
 
