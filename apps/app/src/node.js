@@ -66,12 +66,20 @@
 // `sync.start` response is uncertain (@varanda/rpc client.js) and may have
 // started the run, so it is reconciled through `sync.status` too, never
 // retried blindly. A run that ends by itself is restarted after a backoff.
-// A hidden web page sends `sync.stop` once to release its continuous run;
-// once runs and starts in flight are left alone. An uncertain stop is
+// A hidden web page sends `sync.stop` once to release its continuous run, or,
+// with no run active during the lease's idle gap, the node's continuous intent
+// (a later request would otherwise restart a run while hidden); once runs and
+// starts in flight are left alone. An uncertain stop is
 // reconciled too: sync.status can restart a run, so a confirmed continuous
 // run gets at most one more stop in that hidden period. Showing the page
-// lets the start gate resume sync (locking alone stops nothing). Every
-// awaited continuation re-checks the connection, epoch and passkey generation.
+// lets the start gate resume sync at once, also inside the idle gap (locking
+// alone stops nothing). The start backoff keeps the failure ladder and the
+// idle gap apart (autoSyncPolicy.js): any sync.started ends the idle part.
+// syncNow() (pull-to-refresh) waits for the continuous run to catch up, and
+// starts it if none is active, only when auto-sync could run now (connected,
+// online, visible, wanted, not given up, nothing in flight); otherwise it
+// resolves at once. Every awaited continuation re-checks the connection,
+// epoch and passkey generation.
 // `signals` folds the sync events into UI hints (syncSignals.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
@@ -83,8 +91,8 @@ import { isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
-import { EMPTY_SIGNALS, foldSignal, ackFresh as ackFreshSignals } from './syncSignals'
-import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, graceExpired, nextBackoff, shouldStopForHidden, startFailure, wantsStart } from './autoSyncPolicy'
+import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
+import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
 
 const MAX_SYNC_LINES = 200
@@ -130,6 +138,8 @@ export function NodeProvider ({ children }) {
   // 'live' | 'remembered' | null (see the header).
   const [hostedSource, setHostedSource] = useState(null)
   const [online, setOnline] = useState(() => isOnline())
+  const onlineRef = useRef(online)
+  onlineRef.current = online
   const [visible, setVisible] = useState(() => isVisible())
   const visibleRef = useRef(visible)
   // Replaced on visibility transitions, never by a late stop response.
@@ -182,6 +192,7 @@ export function NodeProvider ({ children }) {
   // Auto-sync (see the header). Every value has a ref for the callbacks.
   const [signals, setSignals] = useState(EMPTY_SIGNALS)
   const signalsRef = useRef(EMPTY_SIGNALS)
+  const refreshWaitsRef = useRef(new Set())
   const [autoWanted, setAutoWanted] = useState(false)
   const wantedRef = useRef(false)
   // true after a start failed for good (no identity); the next
@@ -193,8 +204,12 @@ export function NodeProvider ({ children }) {
   // connection or epoch.
   const [reconciling, setReconciling] = useState(false)
   const reconcilingRef = useRef(false)
+  // The effective backoff, and its two parts (see the header).
   const [backoffUntil, setBackoffUntil] = useState(0)
   const backoffUntilRef = useRef(0)
+  const [failureUntil, setFailureUntil] = useState(0)
+  const failureUntilRef = useRef(0)
+  const idleUntilRef = useRef(0)
   const backoffMsRef = useRef(0)
   // While the node should restart a preempted continuous run: until when the
   // app waits for its sync.started (0 = not waiting).
@@ -211,9 +226,14 @@ export function NodeProvider ({ children }) {
     awaitingRef.current = until
     setAwaitingRestartUntil(until)
   }, [])
-  const setBackoff = useCallback((until) => {
+  // A part left out keeps its current value.
+  const setBackoff = useCallback(({ failure = failureUntilRef.current, idle = idleUntilRef.current }) => {
+    failureUntilRef.current = failure
+    idleUntilRef.current = idle
+    const until = effectiveBackoff({ failureUntil: failure, idleUntil: idle })
     backoffUntilRef.current = until
     setBackoffUntil(until)
+    setFailureUntil(failure)
   }, [])
   const setRecon = useCallback((on) => {
     reconcilingRef.current = on
@@ -229,18 +249,35 @@ export function NodeProvider ({ children }) {
     if (signalsRef.current.runId !== null) return
     const now = Date.now()
     if (once === false) runStartedAtRef.current = now
-    resetSignals({ ...signalsRef.current, runId, once, ready: false, peer: false, reconnecting: false, unverified: false, startedAt: now })
+    resetSignals({ ...signalsRef.current, runId, once, ready: false, peer: false, seederVerified: false, reconnecting: false, unverified: false, startedAt: now, idleSince: null })
   }, [resetSignals])
+  // Open refresh waits: a run adopted without a sync.started they saw is
+  // handed to them (a once run, or none, resolves the waits that follow
+  // nothing); failWaits() resolves those at once after a failed start.
+  const trackWaits = useCallback((runId, once, ended = false) => {
+    const sig = signalsRef.current
+    const peerUp = sig.runId === runId && sig.seederVerified === true
+    for (const wait of refreshWaitsRef.current) {
+      if (once === false && runId != null) wait.track(runId, { peerUp, ended })
+      else wait.fail()
+    }
+  }, [])
+  const failWaits = useCallback(() => {
+    for (const wait of refreshWaitsRef.current) wait.fail()
+  }, [])
   // A new connection, epoch or identity: what was being waited for, reconciled
   // or backed off belonged to the previous one.
   const resetAuto = useCallback(() => {
+    for (const wait of refreshWaitsRef.current) wait.done()
+    refreshWaitsRef.current.clear()
+    if (signalsRef.current.idleSince !== null) resetSignals({ ...signalsRef.current, idleSince: null })
     if (autoTimerRef.current !== null) clearTimeout(autoTimerRef.current)
     autoTimerRef.current = null
     setRecon(false)
     setWait(0)
-    setBackoff(0)
+    setBackoff({ failure: 0, idle: 0 })
     backoffMsRef.current = 0
-  }, [setRecon, setWait, setBackoff])
+  }, [setRecon, setWait, setBackoff, resetSignals])
   const bumpEpoch = useCallback(() => {
     epochRef.current += 1
     resetAuto()
@@ -256,16 +293,20 @@ export function NodeProvider ({ children }) {
   }, [resetAuto])
 
   useEffect(() => () => {
+    for (const wait of refreshWaitsRef.current) wait.done()
+    refreshWaitsRef.current.clear()
     if (autoTimerRef.current !== null) clearTimeout(autoTimerRef.current)
     autoTimerRef.current = null
   }, [])
 
   useEffect(() => subscribeOnline(setOnline), [])
   useEffect(() => subscribeVisible((next) => {
-    if (visibleRef.current !== next) hiddenStopRef.current = { attempts: 0, retry: false }
+    const change = visibilityChange({ wasVisible: visibleRef.current, visible: next })
+    if (change.newPeriod) hiddenStopRef.current = { attempts: 0, retry: false }
+    if (change.clearIdle && idleUntilRef.current !== 0) setBackoff({ idle: 0 })
     visibleRef.current = next
     setVisible(next)
-  }), [])
+  }), [setBackoff])
   // The service worker (hosted browser-node page only); never awaited.
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
@@ -279,6 +320,8 @@ export function NodeProvider ({ children }) {
       // The run came back (or a new one began): no restart is awaited.
       if (awaitingRef.current) setWait(0)
       if (data.once === false) runStartedAtRef.current = now
+      // A new run: an earlier idle gap no longer holds.
+      if (idleUntilRef.current !== 0) setBackoff({ idle: 0 })
     } else if (name === 'sync.stopped') {
       // The mode of the run that ended: from the folded signals, else from
       // the adopted active run.
@@ -291,12 +334,18 @@ export function NodeProvider ({ children }) {
       } else if (once === false) {
         const ms = nextBackoff({ reason: data.reason, startedAt: runStartedAtRef.current, stoppedAt: now, previousMs: backoffMsRef.current })
         if (ms !== null) {
-          backoffMsRef.current = ms
-          setBackoff(now + ms)
+          // An idle lease gap is not a failure and never grows that ladder.
+          if (data.reason === 'idle') {
+            setBackoff({ idle: now + ms })
+          } else {
+            backoffMsRef.current = ms
+            setBackoff({ failure: now + ms })
+          }
         }
       }
     }
     resetSignals(foldSignal(signalsRef.current, name, data, now))
+    for (const wait of refreshWaitsRef.current) wait.onEvent(name, data)
     setSync((prev) => {
       if (name === 'sync.started') return { ...prev, active: { runId: data.runId, once: data.once }, stopped: null }
       if (name === 'sync.stopped') {
@@ -712,19 +761,34 @@ export function NodeProvider ({ children }) {
     setWait(0)
     setRecon(true)
     let st
-    try { st = await request('sync.status', {}) } catch { return }
+    try {
+      st = await request('sync.status', {})
+    } catch {
+      if (stillCurrent(conn, ep, gen)) failWaits()
+      return
+    }
     if (!stillCurrent(conn, ep, gen) || !reconcilingRef.current) return
     if (st && st.state === 'running') {
       setSync((prev) => (prev.active && prev.active.runId === st.runId && prev.active.once === st.once ? prev : { ...prev, active: { runId: st.runId, once: st.once } }))
       adoptSignals(st.runId, st.once)
+      trackWaits(st.runId, st.once)
       setRecon(false)
     } else if (st && st.state === 'idle') {
       setSync((prev) => (prev.active ? { ...prev, active: null } : prev))
-      setBackoff(Date.now() + FIRST_BACKOFF_MS)
+      const parts = reconcileIdle({
+        failureUntil: failureUntilRef.current,
+        idleUntil: idleUntilRef.current,
+        lastStopIdle: signalsRef.current.idleSince !== null,
+        now: Date.now()
+      })
+      setBackoff({ failure: parts.failureUntil, idle: parts.idleUntil })
+      failWaits()
       setRecon(false)
+    } else {
+      failWaits()
     }
     return st
-  }, [request, stillCurrent, setWait, setRecon, setBackoff, adoptSignals])
+  }, [request, stillCurrent, setWait, setRecon, setBackoff, adoptSignals, trackWaits, failWaits])
 
   // The one auto-start: sync.start {} and the handling of its outcome.
   const autoStart = useCallback(() => {
@@ -741,19 +805,27 @@ export function NodeProvider ({ children }) {
       // and the run has not ended already.
       const runId = r && r.runId
       setSync((prev) => (prev.active || (prev.stopped && prev.stopped.runId === runId) ? prev : { ...prev, active: { runId, once: false } }))
+      const stopped = syncRef.current.stopped
+      trackWaits(runId, false, stopped !== null && stopped.runId === runId)
     }, (err) => {
       autoInflightRef.current = false
       if (connRef.current !== conn) return
       const action = startFailure({ code: err && err.code, message: err && err.message, uncertain: Boolean(err) && err.uncertain === true })
       // Reconciling only reads; it is safe even when the epoch moved on.
+      // It hands an adopted run to the refresh waits, or resolves them.
       if (action === 'reconcile') { reconcile(); return }
       if (!stillCurrent(conn, ep, gen)) return
       if (action === 'ignore') {
         // A run is active that this provider has not seen: read it, never
         // start again.
-        if (syncRef.current.active === null) reconcile()
+        const active = syncRef.current.active
+        if (active === null) reconcile()
+        else trackWaits(active.runId, active.once)
         return
       }
+      // A failed start ends the idle gap and the refresh waits.
+      resetSignals(endIdle(signalsRef.current))
+      failWaits()
       if (action === 'give-up') {
         gaveUpRef.current = true
         setGaveUp(true)
@@ -761,16 +833,51 @@ export function NodeProvider ({ children }) {
       }
       const ms = Math.min(MAX_BACKOFF_MS, backoffMsRef.current ? backoffMsRef.current * 2 : FIRST_BACKOFF_MS)
       backoffMsRef.current = ms
-      setBackoff(Date.now() + ms)
+      setBackoff({ failure: Date.now() + ms })
     }).finally(() => setAutoTick((t) => t + 1))
-  }, [request, stillCurrent, reconcile, setBackoff])
+  }, [request, stillCurrent, reconcile, setBackoff, resetSignals, trackWaits, failWaits])
+
+  // Refresh waits before reading: member reads would preempt this run.
+  // Subscribe before starting, since even sync.started can arrive immediately.
+  // Never starts or waits when auto-sync could not run now (refreshPlan).
+  const syncNow = useCallback(async () => {
+    const active = syncRef.current.active
+    const sig = signalsRef.current
+    const plan = refreshPlan({
+      connected: connRef.current !== null,
+      phase,
+      online: onlineRef.current,
+      visible: visibleRef.current,
+      wanted: wantedRef.current,
+      gaveUp: gaveUpRef.current,
+      busy: startingRef.current > 0 || autoInflightRef.current || reconcilingRef.current || recoveryRef.current !== null,
+      active,
+      seederUp: active !== null && sig.runId === active.runId && sig.seederVerified === true,
+      // Only the browser node (configured with a seederUrl) leases its link.
+      leased: !!(config && config.seederUrl)
+    })
+    if (plan.action === 'skip') return
+    const wait = waitForCatchUp({ runId: plan.action === 'wait' ? plan.runId : null, peerUp: plan.peerUp === true })
+    refreshWaitsRef.current.add(wait)
+    try {
+      if (plan.action === 'start') {
+        setBackoff({ failure: 0, idle: 0 })
+        autoStart()
+      }
+      await wait.promise
+    } finally {
+      wait.done()
+      refreshWaitsRef.current.delete(wait)
+    }
+  }, [phase, config, autoStart, setBackoff])
 
   // The only visibility stop path. Reserve each attempt synchronously, even
   // if React evaluates again before rendering. Only an authoritative status
   // after an uncertain stop permits the second attempt in this hidden period.
   useEffect(() => {
     if (phase !== 'ready' || startingRef.current > 0 || autoInflightRef.current || reconcilingRef.current) return
-    if (!shouldStopForHidden({ active: syncRef.current.active, visible: visibleRef.current })) return
+    const idleIntent = signalsRef.current.runId === null && signalsRef.current.idleSince !== null
+    if (!shouldStopForHidden({ active: syncRef.current.active, visible: visibleRef.current, idleIntent })) return
     const period = hiddenStopRef.current
     if (period.attempts >= 2 || (period.attempts > 0 && !period.retry)) return
     const conn = connRef.current
@@ -779,7 +886,14 @@ export function NodeProvider ({ children }) {
     const gen = pkGenRef.current
     period.attempts += 1
     period.retry = false
-    request('sync.stop', {}).catch(async (err) => {
+    const idlePath = syncRef.current.active === null
+    request('sync.stop', {}).then(() => {
+      // The node's continuous intent is cleared: no idle gap is left (the
+      // start gate starts a fresh run once the page is shown).
+      if (!idlePath || !stillCurrent(conn, ep, gen)) return
+      if (signalsRef.current.runId === null) resetSignals(endIdle(signalsRef.current))
+      setBackoff({ idle: 0 })
+    }, async (err) => {
       if (!stillCurrent(conn, ep, gen) || !err || err.uncertain !== true) return
       const st = await reconcile()
       if (!stillCurrent(conn, ep, gen) || hiddenStopRef.current !== period || visibleRef.current !== false) return
@@ -788,7 +902,7 @@ export function NodeProvider ({ children }) {
         setAutoTick((t) => t + 1)
       }
     })
-  }, [phase, visible, sync.active, starting, reconciling, autoTick, request, reconcile, stillCurrent])
+  }, [phase, visible, sync.active, starting, reconciling, autoTick, signals.idleSince, request, reconcile, stillCurrent, resetSignals, setBackoff])
 
   // Re-evaluated on every relevant change and by the one timer. Decisions read
   // the refs (always current), so two evaluations before a re-render can never
@@ -847,7 +961,7 @@ export function NodeProvider ({ children }) {
     resetSignals(ackFreshSignals(signalsRef.current, keys))
   }, [resetSignals])
 
-  const autoSync = useMemo(() => ({ wanted: autoWanted, backoffUntil, reconciling }), [autoWanted, backoffUntil, reconciling])
+  const autoSync = useMemo(() => ({ wanted: autoWanted, backoffUntil, failureUntil, reconciling, idleSince: signals.idleSince }), [autoWanted, backoffUntil, failureUntil, reconciling, signals.idleSince])
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
@@ -893,8 +1007,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync
-  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync])
+    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync, syncNow
+  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync, syncNow])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

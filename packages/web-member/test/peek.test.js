@@ -1095,3 +1095,38 @@ test('the own diary shows in the Espiadinha like any unfollowed diary', async (t
   t.is(page.diaries, 2, 'the own diary is a candidate')
   t.alike(page.items.map((i) => [i.author, i.text]), [[hex(mine.key), 'Eu 1'], [hex(other.key), 'Outro 1']], 'the own post (newer) first')
 })
+
+// ---- privacy: never the sync link (docs/rpc.md 5.22) ----
+
+// Resolves once the run's seeder link verified (its `peer seeder` line).
+function seederVerified (web, runId) {
+  return until(() => web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line.startsWith('peer seeder')), { name: 'seeder verified', timeoutMs: 30000 })
+}
+
+test('with a live continuous run, peek.read still opens its own short socket and never touches the sync link', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const B = await diary(t, author(assoc, 'B', [now - 1000]))
+  const C = await diary(t, author(assoc, 'C', [now - 2000]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [B, C] })
+  const { web, sockets, internal } = await webNode(t, assoc, seeder.url, { certify: true })
+  const { runId } = await web.request('sync.start', { once: false })
+  await seederVerified(web, runId)
+  t.is(sockets.length, 1, 'the sync link only')
+  const syncSocket = sockets[0]
+  const before = web.events.length
+  const reading = web.request('peek.read', {})
+  await until(() => sockets.length === 2, { name: 'the page dialled its own socket' })
+  t.not(sockets[1], syncSocket, 'a socket of its own, beside the sync one')
+  const page = await reading
+  t.alike(page.items.map((i) => i.author), [hex(B.key), hex(C.key)], 'the page is served')
+  t.alike({ next: page.next, diaries: page.diaries, skipped: page.skipped, incomplete: page.incomplete }, { next: null, diaries: 2, skipped: 0, incomplete: false })
+  await until(() => sockets[1].readyState === WebSocket.CLOSED, { name: 'the page socket closed after the page' })
+  t.is(sockets.length, 2, 'one extra socket for the page, no more')
+  t.is(syncSocket.readyState, WebSocket.OPEN, 'the sync socket is still open')
+  t.alike(web.events.slice(before).filter((e) => e.name === 'sync.stopped'), [], 'no sync.stopped')
+  t.alike(await web.request('sync.status', {}), { state: 'running', runId, once: false })
+  await web.request('sync.stop', {})
+  t.alike(internal, [])
+})
