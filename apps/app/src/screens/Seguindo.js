@@ -3,6 +3,14 @@
 // from the profiles cache; never a key. The list reloads when another device
 // changes the follows (node.followsVersion). A "Seguindo" pill unfollows. Design:
 // apps/site/artwork/app-design.md.
+//
+// On the hosted web a "Buscar" field above the exact follow field finds
+// people by display name or @nome (useMemberSearch): the seeder's search
+// answer only says where to look, and a row appears only once diary.peek
+// confirms that person (name from the peeked profile, @nome only from the
+// verified username). Each row opens the profile and has Seguir/Seguindo,
+// read from the full follow set (useFollowSet). The own key never has a row.
+// Native and loopback keep the exact follow field only and send no search.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -18,6 +26,9 @@ import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { colors, type } from '../ui/theme'
+import { queryPath } from '../search'
+import { useMemberSearch } from '../useMemberSearch'
+import { useFollowSet } from './Conversa'
 
 const PAGE = 50
 
@@ -78,6 +89,55 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
   )
 }
 
+// One confirmed search result, styled like FollowRow: the name and the
+// verified @nome from the peek (`hit`), never a key, and no 'denunciar'. The
+// avatar and name open the profile; the pill follows ('Seguir') or unfollows
+// ('Seguindo'), disabled while the follow set is unknown (`following` null).
+function SearchRow ({ hit, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+  const profile = { name: hit.name, username: hit.username }
+  const who = whoOf(profile)
+  const title = displayText(who.title)
+  const subtitle = who.subtitle ? displayText(who.subtitle) : null
+  const open = typeof onOpen === 'function' ? () => onOpen(hit.author, profile) : undefined
+  return (
+    <View style={styles.row}>
+      <Pressable
+        style={({ pressed }) => [styles.open, pressed && open && styles.pressed]}
+        accessibilityRole='link'
+        accessibilityLabel={'ver o perfil de ' + title}
+        disabled={!open}
+        onPress={open}
+      >
+        <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
+        <View style={styles.who}>
+          <Text style={styles.name} numberOfLines={1}>{title}</Text>
+          {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+        </View>
+      </Pressable>
+      {following === true
+        ? (
+          <Pill
+            label='Seguindo'
+            onPress={() => onUnfollow(hit)}
+            pending={pending}
+            disabled={disabled}
+            accessibilityLabel={'deixar de seguir ' + title}
+          />
+          )
+        : (
+          <Pill
+            label='Seguir'
+            filled
+            onPress={() => onFollow(hit)}
+            pending={pending}
+            disabled={disabled || following === null}
+            accessibilityLabel={'seguir ' + title}
+          />
+          )}
+    </View>
+  )
+}
+
 // One key of the legacy-follows card: a checkbox (on by default), the name or
 // @nome the profile cache knows, or 'Alguém sem nome' with a short key
 // fragment so an unknown (possibly planted) entry stands out.
@@ -109,9 +169,10 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
 // `onFollowsChanged` (optional): called after a follow or unfollow that
 // changed the list, so the shell refreshes A Rua, Diário and the follow count.
 // `onOpenMember(followKey, { name, username })` (optional): a row's name opens
-// the member's profile.
-export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMember, scrollToTop }) {
+// the member's profile. `ownKey`: the own public key, never a search row.
+export default function Seguindo ({ active, ownKey, followsTick, onReport, onFollowsChanged, onOpenMember, scrollToTop }) {
   const node = useNode()
+  const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   const names = useNames()
   const bottomPad = useBottomPad()
   const [keys, setKeys] = useState([])
@@ -127,6 +188,23 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMe
   const [done, setDone] = useNotice()
   const add = useAction()
   const remove = useAction()
+  const follow = useAction()
+  // The key a search row is following: only its pill shows "Seguir…".
+  const [following, setFollowing] = useState(null)
+  const search = useMemberSearch({ request: node.request, hosted: node.hosted === true, online: node.online !== false, ownKey: own })
+  const { setQuery: setSearchQuery, flush: handleSearch, retry: handleRetry } = search
+  const { follows, load: loadFollows, mark: markFollow } = useFollowSet(node.request)
+  const searching = search.phase !== 'idle'
+  // The full follow set is read when search first becomes active and again
+  // at every new search (a failed or stale read never sticks).
+  const followsAsked = useRef(false)
+  const loading = search.phase === 'loading'
+  useEffect(() => {
+    if (!searching) return
+    if (followsAsked.current && !loading) return
+    followsAsked.current = true
+    loadFollows()
+  }, [searching, loading, loadFollows])
   // Paging state, set together with the new items (one render per page).
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreError, setMoreError] = useState('')
@@ -181,13 +259,25 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMe
     if (seenVersion.current === followsVersion) return
     seenVersion.current = followsVersion
     if (active) reload(PAGE)
-  }, [followsVersion, active, reload])
+    if (followsAsked.current) loadFollows()
+  }, [followsVersion, active, reload, loadFollows])
+
+  // A follow changed in this app (another screen, the profile, the exact
+  // field): the search pills read the follow set again once search was used.
+  const seenTick = useRef(followsTick)
+  useEffect(() => {
+    if (seenTick.current === followsTick) return
+    seenTick.current = followsTick
+    if (followsAsked.current) loadFollows()
+  }, [followsTick, loadFollows])
 
   // Pull-to-refresh re-reads the first page; the list never calls it twice.
+  // It also re-reads the follow set and re-runs a valid search query.
   const refresh = async () => {
     setRefreshing(true)
     try {
-      await reload(PAGE)
+      if (node.hosted === true && queryPath(search.query) !== null) search.retry()
+      await Promise.all([reload(PAGE), followsAsked.current ? loadFollows() : null])
     } finally {
       setRefreshing(false)
     }
@@ -237,9 +327,35 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMe
       const r = await remove.run(() => node.request('follow.remove', { key }))
       if (r.ok) setDone(r.value.changed ? 'Você deixou de seguir.' : 'Você já não seguia esta pessoa.')
       if (r.ok && r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
+      if (r.ok && followsAsked.current) markFollow(key.toLowerCase(), false)
+      // Success, failure or an uncertain answer: the search pills read the
+      // follow set again, like the list below.
+      if (followsAsked.current) loadFollows()
       await reread()
     } finally {
       setRemoving(null)
+    }
+  }
+
+  // Seguir on a search row: the verified name and @nome come from the peek.
+  // One attempt; never retried automatically.
+  const doFollowHit = async (hit) => {
+    setDone('')
+    setFollowing(hit.author)
+    try {
+      const r = await follow.run(() => node.request('follow.add', { key: hit.author }))
+      if (r.ok) {
+        markFollow(hit.author, true)
+        names.learnMany([[hit.author, { name: hit.name, username: hit.username }]])
+        const title = displayText(whoOf({ name: hit.name, username: hit.username }).title)
+        setDone(r.value.changed ? 'Agora você segue ' + title + '.' : 'Você já segue esta pessoa.')
+        if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
+      }
+      // Success, failure or an uncertain answer: read the follow set again.
+      loadFollows()
+      await reread()
+    } finally {
+      setFollowing(null)
     }
   }
 
@@ -302,10 +418,76 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMe
     }
   }
 
-  const changing = add.pending || remove.pending || rereading
+  const changing = add.pending || remove.pending || follow.pending || rereading
+
+  // The search block (hosted only): field, state lines, confirmed rows.
+  const hits = search.hits.filter((h) => h.author !== own)
+  const offline = node.online === false
+  const ready = search.phase === 'ready'
+  const listed = ready || search.phase === 'loading'
+  const searchBlock = node.hosted === true
+    ? (
+      <>
+        <Field
+          label='Buscar'
+          placeholder='nome ou @nome'
+          value={search.query}
+          onChangeText={setSearchQuery}
+          maxLength={80}
+          editable={!offline}
+        />
+        <View style={styles.addRow}>
+          <Pill label='Buscar' onPress={handleSearch} disabled={offline || search.query.trim() === ''} />
+        </View>
+        {offline || search.phase === 'offline' ? <Soft>A busca precisa de internet.</Soft> : null}
+        {search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
+        {search.phase === 'error'
+          ? (
+            <>
+              <ErrorText>{search.error}</ErrorText>
+              <View style={styles.addRow}><Pill label='tentar de novo' onPress={handleRetry} /></View>
+            </>
+            )
+          : null}
+        {search.phase === 'loading' && hits.length === 0 ? <View style={styles.bleed}><Skeleton rows={2} /></View> : null}
+        {hits.length > 0
+          ? (
+            <View style={styles.bleed}>
+              {hits.map((hit) => (
+                <SearchRow
+                  key={hit.author}
+                  hit={hit}
+                  following={follows === null ? null : follows.has(hit.author)}
+                  onOpen={onOpenMember}
+                  onFollow={doFollowHit}
+                  onUnfollow={(h) => doRemove(h.author)}
+                  pending={following === hit.author || removing === hit.author}
+                  disabled={changing}
+                />
+              ))}
+            </View>
+            )
+          : null}
+        {ready && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
+        {ready && hits.length === 0 && search.unchecked > 0
+          ? (
+            <>
+              <Soft>Não deu para conferir todo mundo agora.</Soft>
+              <View style={styles.addRow}><Pill label='tentar de novo' onPress={handleRetry} /></View>
+            </>
+            )
+          : null}
+        {ready && hits.length > 0 && search.unchecked > 0 ? <Soft>Algumas pessoas não puderam ser conferidas agora.</Soft> : null}
+        {listed && search.complete === false ? <Soft>Ainda montando a lista; alguém pode faltar.</Soft> : null}
+        {listed && search.more ? <Soft>Há mais gente com esse nome. Tente um nome mais específico.</Soft> : null}
+        <ErrorText>{follow.error}</ErrorText>
+      </>
+      )
+    : null
 
   const header = (
     <View style={styles.header}>
+      {searchBlock}
       <Field
         placeholder={node.hosted ? '@nome ou chave' : 'chave da pessoa (64 letras e números)'}
         value={input}
@@ -359,7 +541,7 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMe
         <EmptyState
           icon='gente'
           title='Você ainda não segue ninguém'
-          body={node.hosted ? 'Digite o @nome de alguém para ver as publicações dessa pessoa na Rua.' : 'Cole a chave de alguém para ver as publicações dessa pessoa na Rua.'}
+          body={node.hosted ? 'Busque alguém pelo nome ou @nome para ver as publicações dessa pessoa na Rua.' : 'Cole a chave de alguém para ver as publicações dessa pessoa na Rua.'}
         />
         )
       : null
@@ -408,6 +590,7 @@ const styles = StyleSheet.create({
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   note: { paddingHorizontal: 16, paddingBottom: 8 },
+  bleed: { marginHorizontal: -16 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
   row: {

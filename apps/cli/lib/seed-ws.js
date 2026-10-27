@@ -59,7 +59,11 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
 //   the last reply of the previous page) -> Seeder#indexPost;
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
-// - /index/member/<author>[/<before>] -> indexMember.
+// - /index/member/<author>[/<before>] -> indexMember;
+// - /index/search/<segment> (1..4 tokens of [a-z0-9]{1,20} joined by '-',
+//   the folded search text) -> indexSearch(segment) -> null | { members:
+//   [{ author, profileSeq, usernameSeq }] (at most 20), more, indexing,
+//   complete }; a query with no hit is 200 with members: [].
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -99,6 +103,8 @@ const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
+const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -308,8 +314,11 @@ function refuse (socket, code, reason) {
 // optional overrides of the /media limits ({ maxInFlight, rate, burst,
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs) and indexMember(authorHex, before) -> null |
-// plain object back /index.
+// cursor), indexCounts(refs), indexMember(authorHex, before) and
+// indexSearch(segment) -> null | plain object back /index; indexSearch's
+// object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
+// more, indexing, complete }. The search segment shares the index bucket
+// and in-flight cap and is never logged or echoed.
 function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {} }) {
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
@@ -331,6 +340,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
+    m = INDEX_SEARCH_RE.exec(url)
+    if (m) return ['indexSearch', [m[1]]]
     return null
   }
 
@@ -550,6 +561,7 @@ module.exports = {
   INDEX_POST_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
+  INDEX_SEARCH_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

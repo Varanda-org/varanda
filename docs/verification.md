@@ -1351,3 +1351,42 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+
+## 21. Account search (2026-10-26)
+
+### Summary
+
+- A member can find people by name or @nome in Seguindo and follow them. The seeder keeps an in-memory name index (folded tokens and the verified @nome only) fed by the existing index scan, and answers `GET|HEAD /index/search/<segment>` with at most 20 `{ author, profileSeq, usernameSeq }` rows (`docs/protocol.md` sections 5 "Seeder name index" and 7 "Seeder index route"). No RPC change: the app reads and verifies each row's name and @nome with `diary.peek`.
+- Contract: query of 1..4 folded words joined by `-`, at least 2 characters; order 0 exact @nome, 1 @nome equal ignoring `_`, 2 @nome prefix, 3 every typed word starts a word of the name or @nome; ties by member key; at most 20 results, no cursor. Body exactly `{ members, more, indexing, complete }`; a valid query with no hit answers `members: []`; a segment under 2 characters is the generic 404.
+- Moderation: blocked, dropped and ungated authors never appear; an @nome from a revoked issuer stops matching at the next query without a rescan; a diary whose re-gate after a newly revoked issuer is pending is held out of results until block 0's verdict clears it; the name index is cleared on rebuild.
+- Scope: hosted web only ("Buscar" field in Seguindo, 400 ms after typing stops). Native and `varanda-serve` are unchanged. No opt-out in this version.
+- Files: `packages/core/lib/search-text.js`, `packages/core/lib/name-index.js`, `packages/core/lib/seeder.js` (`indexSearch`, wiring), `apps/cli/lib/seed-ws.js` (`INDEX_SEARCH_RE`), `deploy/seeder/Caddyfile`, `apps/app/src/indexClient.js` (`fetchSearch`), `apps/app/src/search.js`, `apps/app/scripts/sw.js`, and the Seguindo screen with `useMemberSearch`.
+
+### Automated (CI)
+
+- `packages/core/test/search-text.test.js` (the fold and the query grammar).
+- `packages/core/test/name-index.test.js` (the pure index: newest record wins with no fallback, one verification per candidate, bounded candidate copy, unusable issuers and visibility at query time, `remove`, `maxAuthors`, ordering and `more`).
+- `apps/app/test/search.test.js` (the app-side copy: parity with core, the `diary.peek` plan, verification through `diary.peek`, dropped and unconfirmed rows, own account). The follow state of search rows lives in `Seguindo.js` and has no automated test (CI renders no React).
+- Extended: `apps/cli/test/seed-ws.test.js` (the route, 200 body, 404 / 405 / 421 policy, shared caps), `apps/cli/test/seeder-index.test.js` (the seeder wiring: removal on drop, cap pause and resume, revocation without a rescan, the re-gate hold, blocked authors, one loopback request), `apps/app/test/indexClient.test.js` (`fetchSearch`) and `apps/app/test/sw.test.js` (the service worker still bypasses `/index/`).
+
+### Human verification
+
+None of these was performed for this change. Use two or three hosted accounts against the same seeder.
+
+- [ ] An author blocked by the operator is absent from a search for their name and for their @nome.
+- [ ] An author whose @nome record has a bad signature is not found by that @nome (the display name can still match).
+- [ ] An author who renamed themselves is found only under the new name, not the old one.
+- [ ] A request for `/index/search/<query>` that fails (unknown path, one-letter segment) answers the generic 404 and does not echo the query; the seeder and Caddy logs show no query.
+- [ ] Rows appear only after `diary.peek` verified them (a throttled network shows no row before its name and @nome are read); a row whose name no longer matches the query is dropped.
+- [ ] The own account never appears in the results.
+- [ ] Someone followed past the first page of the follow list shows "Seguindo", not "Seguir".
+- [ ] Typing one letter shows "Digite pelo menos 2 letras."; offline shows "A busca precisa de internet."; a name with no hit shows "Ninguém encontrado com esse nome.".
+- [ ] The exact "@nome ou chave" field below still follows by @nome or key through the account service.
+
+### Residual risks
+
+- The seeder sees the folded query in the path (neither the seeder nor Caddy logs it).
+- An anonymous client learns at most 20 keys per probe, keys already in the seeder's hello inventory.
+- Ordering, omissions and completeness are seeder claims, and the seeder may point at an older authentic profile / username record (a stale name; the same trust model as the member profile screen, `docs/rpc.md` `diary.peek`).
+- A member blocked while a search is on screen can stay in the rows already shown until the next search.
+- No opt-out in this version; names in other scripts are found only by @nome; matching is by word prefix only; no topic search.
