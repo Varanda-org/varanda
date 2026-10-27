@@ -12,7 +12,8 @@
 // screens coalesce. The own key and the keys a screen asks for (resolve,
 // resolveMany: what is on screen) go first. BACKGROUND batches (freshness
 // re-fetches and failure retries) wait until the current continuous run has
-// lasted 5 s, so every restart gets time to reach the seeder (#66). Lookups
+// lasted 5 s or entered its idle gap (while no failure backoff is pending),
+// so every restart gets time to reach the seeder (#66). Lookups
 // never run while a ONCE run is active (it would end for good), while a
 // sync.start is in flight or while the provider reconciles an uncertain start.
 // A failure (connection lost, timeout, no identity) keeps the keys for a retry
@@ -24,6 +25,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode } from './node'
+import { namesQuiet } from './autoSyncPolicy'
 
 const DEBOUNCE_MS = 100
 const MIN_GAP_MS = 1000
@@ -89,7 +91,7 @@ export function NamesProvider ({ children }) {
   gateRef.current = gate
   const continuous = signals && signals.runId !== null && signals.once === false ? signals.startedAt : null
   const quietRef = useRef({ wanted: false, startedAt: null })
-  quietRef.current = { wanted: autoSync.wanted === true, startedAt: continuous }
+  quietRef.current = { wanted: autoSync.wanted === true, startedAt: continuous, idleSince: autoSync.idleSince, failureUntil: autoSync.failureUntil || 0 }
 
   const commit = useCallback((next) => {
     cacheRef.current = next
@@ -123,11 +125,7 @@ export function NamesProvider ({ children }) {
   const learn = useCallback((key, fields) => apply([[key, fields]]), [apply])
   const learnMany = useCallback((entries) => apply(entries), [apply])
 
-  const quietOk = (now) => {
-    const q = quietRef.current
-    if (!q.wanted) return true
-    return q.startedAt !== null && now - q.startedAt >= QUIET_MS
-  }
+  const quietOk = (now) => namesQuiet({ ...quietRef.current, now, quietMs: QUIET_MS })
 
   // Ref-held so the timers always run the current flush.
   const flushRef = useRef(() => {})
@@ -307,7 +305,7 @@ export function NamesProvider ({ children }) {
   const quietNow = continuous === null ? !autoSync.wanted : null
   useEffect(() => {
     if (gate) schedule()
-  }, [gate, quietNow, continuous, schedule])
+  }, [gate, quietNow, continuous, autoSync.idleSince, autoSync.failureUntil, schedule])
 
   // The node became ready again: the failed keys are retried once.
   const prevPhaseRef = useRef(phase)
