@@ -563,12 +563,12 @@ function createModRoutes ({
   // api/reports shows would tell them someone reported them.
   async function me (req, res, session) {
     const own = ownMember(session)
-    const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS }))
+    const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS, exclude: own }))
     const { changes } = store(() => moderation.pending())
     send(res, 200, {
       email: session.email,
       published: store(publishedInfo),
-      open: rows.filter((r) => !ownCase(r, own)).length,
+      open: rows.length,
       pending: changes.filter((c) => c.member !== own).length
     })
   }
@@ -580,13 +580,12 @@ function createModRoutes ({
     // the page starts right after it.
     const antes = url.searchParams.get('antes')
     if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
-    // Every row first, then the moderator's own cases (as target or as
-    // reporter) out, then the page:
-    // truncating before the filter could hide every actionable report
-    // behind a first page of the moderator's own cases.
-    const { reports: rows, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS }))
+    // The moderator's own cases (as target or as reporter) leave the store's
+    // list before its cut at MAX_REPORTS and before the page: truncating
+    // first could hide every actionable report behind a first page of the
+    // moderator's own cases, and `truncated` must not count them either.
     const own = ownMember(session)
-    const visible = rows.filter((r) => !ownCase(r, own))
+    const { reports: visible, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
     let start = 0
     if (antes !== null) {
       const at = visible.findIndex((r) => r.id === antes)

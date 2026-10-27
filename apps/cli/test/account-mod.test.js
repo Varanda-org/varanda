@@ -813,10 +813,15 @@ test('panel: a store cut at its limit is reported on the last reachable page', a
   t.is(uncut.body.alemDoLimite, false)
 
   const list = s.moderation.list
-  s.moderation.list = (options) => ({ ...list(options), truncated: true })
+  const asked = []
+  s.moderation.list = (options) => { asked.push(options); return { ...list(options), truncated: true } }
   const cut = await s.api('GET', '/account/mod/api/reports?estado=decidida', { cookie })
   t.is(cut.body.truncated, false, 'this page is the last one the panel reaches')
   t.is(cut.body.alemDoLimite, true)
+  t.is(asked.length, 1)
+  t.is(asked[0].exclude, s.carol.hex, 'the own cases leave the store list before its cut')
+  await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(asked[1].exclude, s.carol.hex, 'and the counts of api/me')
   s.moderation.list = list
 })
 
