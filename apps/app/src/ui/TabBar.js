@@ -1,6 +1,7 @@
-// The bottom tab bar: A Rua, Espiadinha, Seguindo and Diário. Pressing the tab
-// that is already current calls onReselect (scroll to top / refresh), not
-// onSelect.
+// The bottom tab bar: A Rua, Espiadinha, Seguindo, Avisos and Diário. Pressing
+// the tab that is already current calls onReselect (scroll to top / refresh),
+// not onSelect. `badges` maps a tab id to true to show a plain dot on its icon
+// (never a count).
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -11,22 +12,24 @@ export const TABS = [
   { id: 'rua', label: 'A Rua', icon: 'casa' },
   { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
   { id: 'seguindo', label: 'Seguindo', icon: 'gente' },
+  { id: 'avisos', label: 'Avisos', icon: 'sino' },
   { id: 'diario', label: 'Diário', icon: 'pessoa' }
 ]
 
-export function TabBar ({ current, onSelect, onReselect }) {
+export function TabBar ({ current, onSelect, onReselect, badges = {} }) {
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
       {TABS.map((tab) => {
         const selected = tab.id === current
         const tint = selected ? colors.accent : colors.soft
+        const badged = badges[tab.id] === true
         return (
           <Pressable
             key={tab.id}
             accessibilityRole='tab'
             accessibilityState={{ selected }}
-            accessibilityLabel={tab.label}
+            accessibilityLabel={badged ? `${tab.label}, novidades` : tab.label}
             onPress={() => {
               if (selected) {
                 if (onReselect) onReselect(tab.id)
@@ -36,7 +39,10 @@ export function TabBar ({ current, onSelect, onReselect }) {
             }}
             style={styles.tab}
           >
-            <Icon name={tab.icon} size={27} color={tint} />
+            <View style={styles.iconWrap}>
+              <Icon name={tab.icon} size={27} color={tint} />
+              {badged && <View style={styles.dot} />}
+            </View>
             <Text style={[styles.label, { color: tint }, selected && styles.labelOn]} numberOfLines={1}>{tab.label}</Text>
           </Pressable>
         )
@@ -60,6 +66,18 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line
   },
   tab: { flex: 1, alignItems: 'center', gap: 3 },
+  // Anchors the dot to the icon's corner rather than the whole tab.
+  iconWrap: { position: 'relative' },
+  // A plain dot: no text, no number.
+  dot: {
+    position: 'absolute',
+    top: 0,
+    right: -2,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.accent
+  },
   label: { ...type.tab },
   labelOn: { fontWeight: '700' }
 })

@@ -39,6 +39,9 @@ const FEED_LIMIT_MAX = 31
 // MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
 const PEEK_LIMIT_DEFAULT = 30
 const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
+// Notices per page: the worst case fits MAX_MESSAGE (test/sizes.test.js).
+const NOTICES_LIMIT_DEFAULT = 30
+const NOTICES_LIMIT_MAX = 64
 // Authors per profile.read: its worst case fits MAX_MESSAGE with room to
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
@@ -143,6 +146,8 @@ module.exports = {
   FEED_LIMIT_MAX,
   PEEK_LIMIT_DEFAULT,
   PEEK_LIMIT_MAX,
+  NOTICES_LIMIT_DEFAULT,
+  NOTICES_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
   FOLLOW_LIMIT_DEFAULT,
   FOLLOW_LIMIT_MAX,

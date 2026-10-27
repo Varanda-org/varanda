@@ -20,6 +20,31 @@ test('admission.js loads without the node-only network stack', (t) => {
   }
 })
 
+// The notices modules ship in the web bundle, which stubs `crypto` and `fs`
+// to throw: neither may be required, by them or anything they load from
+// lib/ (hypercore-crypto's Node backend, sodium-native, requires `fs` to
+// find its addon; the bundle swaps that backend out, so only `crypto` is
+// checked beyond lib/).
+for (const mod of ['./lib/notices.js', './lib/notices-net.js']) {
+  test(mod + ' loads without the node-only network stack, fs or crypto', (t) => {
+    const code = "const m = require('node:module'); const seen = []; const orig = m.prototype.require; m.prototype.require = function (id) { seen.push([this.filename, id]); return orig.apply(this, arguments) }; require('" + mod + "'); process.stdout.write(JSON.stringify({ cached: Object.keys(require.cache), seen }))"
+    const r = spawnSync(process.execPath, ['-e', code], { cwd: coreRoot, encoding: 'utf8' })
+    t.is(r.status, 0, r.stderr)
+    const { cached, seen } = JSON.parse(r.stdout)
+    t.ok(cached.length > 0, 'modules were loaded')
+    for (const frag of ['/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/', '/udx/', '/rocksdb/', '/corestore/']) {
+      t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+    }
+    const libDir = path.join(coreRoot, 'lib') + path.sep
+    for (const id of ['crypto', 'node:crypto']) {
+      t.absent(seen.some(([, req]) => req === id), 'not required: ' + id)
+    }
+    for (const id of ['fs', 'node:fs']) {
+      t.absent(seen.some(([from, req]) => req === id && typeof from === 'string' && from.startsWith(libDir)), 'not required from lib/: ' + id)
+    }
+  })
+}
+
 test('net.js re-exports the admission functions', (t) => {
   const net = require('../lib/net')
   const admission = require('../lib/admission')

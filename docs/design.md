@@ -124,6 +124,8 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 **Quem a pessoa segue é público.** A lista de seguidos fica no próprio diário (registros `follow`), para chegar igual a todos os aparelhos da pessoa. Por isso qualquer um que tenha o diário vê quem ela segue; o app diz isso em Seguindo.
 
+**Quem foi seguido é avisado, em particular.** Quem começa a seguir alguém aparece para essa pessoa na aba Avisos do app, com "Seguir de volta". Isso é só dentro do app (versão web hospedada), sem contagem de seguidores e sem lista de seguidores: só quem acabou de seguir e ainda não foi seguido de volta, e a linha some ao seguir de volta. O semeador responde apenas à própria pessoa (ela prova que tem a chave do diário) e o app confere cada seguidor no diário assinado dele. Isso não substitui as notificações abaixo: o aviso cifrado por push (APNs e FCM) continua um desenho futuro, e os Avisos não o usam.
+
 **Ler e sincronizar**
 
 1. O app conecta direto aos aparelhos de quem a pessoa segue. Se o CGNAT da operadora impedir, passa por um semeador.

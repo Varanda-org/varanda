@@ -79,6 +79,14 @@ function isPeekCursor (v) {
     Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
+// notices.list `after` (docs/rpc.md 5.23): exactly { at, key }, the
+// notices-order position of the last item the caller holds.
+function isNoticesCursor (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
+  if (!hasOwn(v, 'at') || !hasOwn(v, 'key')) return false
+  return isCanonicalIso(v.at) && isKey(v.key)
+}
+
 // post.create / post.reply `media`: 1..MAX_MEDIA_PER_POST descriptors.
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
@@ -255,6 +263,26 @@ const SPECS = {
       limit: opt(int(1, L.PEEK_LIMIT_MAX), L.PEEK_LIMIT_DEFAULT),
       // Exclusive peek-order cursor; absent = the first page (rebuilds the snapshot).
       after: opt(isPeekCursor)
+    }
+  },
+  // People who follow the caller and whom the caller does not follow yet.
+  // Success: { notices: [{ key: hex64, seq: integer >= 1, at: ISO,
+  // name: string|null, username: string|null, seen: hex32 }],
+  // next: null | { at, key }, incomplete: boolean, supported: boolean }.
+  // No count or total.
+  // name is the follower's profile name; username is their verified username;
+  // seq is the block of their signed follow record; seen is an opaque token,
+  // stable per identity, keyed by the identity secret and unlinkable to the
+  // follower without it (what the app stores as seen); next is the
+  // next-page cursor.
+  // incomplete means the seeder's index or the read's budget was not complete;
+  // supported is false when the seeder does not speak the notices channel.
+  // Hosted web only: the core node answers USAGE 'avisos disponíveis só no navegador'
+  // (docs/rpc.md 5.23).
+  'notices.list': {
+    fields: {
+      limit: opt(int(1, L.NOTICES_LIMIT_MAX), L.NOTICES_LIMIT_DEFAULT),
+      after: opt(isNoticesCursor)
     }
   },
   'sync.start': {

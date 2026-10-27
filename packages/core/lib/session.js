@@ -501,6 +501,14 @@ function createSession ({
       throw new UsageError('Espiadinha disponível só no navegador')
     }),
 
+    // Follow notices need proof of ownership of the diary key, which takes the
+    // Ed25519 identity key; a Hypercore 11 core-node diary key is not that
+    // signer (docs/protocol.md:13), so only the browser node can prove it
+    // (docs/rpc.md 5.23). Nothing is opened, read or written.
+    'notices.list': serial(async () => {
+      throw new UsageError('avisos disponíveis só no navegador')
+    }),
+
     'profile.set': serial(async ({ name, bio }) => {
       const own = await requireOwnKey()
       const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))

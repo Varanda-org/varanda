@@ -65,6 +65,8 @@ const {
 } = require('./store')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
+const { createNoticeIndex } = require('./notices')
+const { attachNotices } = require('./notices-net')
 const {
   validateRecord,
   validRecordCopy,
@@ -81,6 +83,12 @@ const clock = require('./clock')
 
 const GATE_TIMEOUT_MS = 15000
 const REDISCOVER_MS = 10000
+// A diary scan whose block read fails is retried after this delay, at most
+// this many times in a row (a successful read resets the count): without
+// it a fully contiguous log (no further growth to re-queue the scan) would
+// stay pending, and its pages incomplete, for the life of the process.
+const SCAN_RETRY_MS = 2000
+const SCAN_RETRIES_MAX = 8
 const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
@@ -490,6 +498,13 @@ class Seeder {
     // blocklist channel of every connection (for the C4 fan-out).
     this._blocklist = null
     this._blocklistHandles = new Set()
+    // Follow notices (notices.js): the follower index is in memory only,
+    // rebuilt from block 1 by the diary scan on every serve and never
+    // persisted; the open notices channel of every connection.
+    // isMember reads the live sets (both created above); a follow of a key
+    // admitted later is picked up on that author's next serve or restart.
+    this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
+    this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
     // older generation is never applied as a pass (_gate re-runs it).
@@ -1118,6 +1133,8 @@ class Seeder {
       dropped: false,
       scanned: 1,
       scanQueued: false,
+      scanRetry: null, // pending retry timer of a failed block read
+      scanRetries: 0, // failed reads in a row
       decls: new Map(),
       latest: [],
       refused: new Map()
@@ -1130,6 +1147,9 @@ class Seeder {
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
       if (this._overQuota(core)) this._drop(key, 'quota')
+      // The signed length grew: the committed follows may miss the new
+      // blocks until the scan reaches them, so pages say incomplete.
+      else if (this._served.get(key) === entry) this._notices.markPending(key)
     }
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
@@ -1137,6 +1157,10 @@ class Seeder {
     entry.download = core.download({ start: 0, end: -1 })
     entry.stopGrow = watchContiguous(core, (length) => this._onGrow(key, entry, length))
     this._served.set(key, entry)
+    // Every serve scans from block 1: rebuild this author's follows from
+    // scratch, invisible to pages until the scan reaches the signed length.
+    this._notices.removeAuthor(key)
+    this._notices.markPending(key)
     checkQuota()
     if (entry.dropped) return
     // A replica opened for re-gating may already hold block 0.
@@ -1198,6 +1222,10 @@ class Seeder {
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
+    if (entry.scanRetry) {
+      clearTimeout(entry.scanRetry)
+      entry.scanRetry = null
+    }
     try {
       if (entry.download) entry.download.destroy()
     } catch {}
@@ -1212,6 +1240,7 @@ class Seeder {
     if (!entry || entry.dropped || this._closing) return
     entry.dropped = true
     this._served.delete(key)
+    this._notices.removeAuthor(key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -1268,22 +1297,52 @@ class Seeder {
     const core = entry.core
     while (!entry.dropped && !this._closing && entry.scanned < core.contiguousLength) {
       const i = entry.scanned
-      let raw
+      let raw = null
       try {
         raw = await core.get(i, { wait: false, raw: true })
-      } catch {
+      } catch {}
+      // The read suspended this scan: a drop, close or re-serve meanwhile
+      // (all call _notices.removeAuthor) makes this entry stale, and a fold
+      // for it would be an orphan (edge budget held for good) or, after a
+      // re-serve, a seq high-water mark the new scan's records fall under.
+      // Nothing below touches the index for a stale entry.
+      if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+      if (raw === null) {
+        // Pending until a pass commits; the read is retried a bounded number
+        // of times, as growth alone may never re-queue the scan.
+        this._notices.markPending(key)
+        if (entry.scanRetry === null && entry.scanRetries < SCAN_RETRIES_MAX) {
+          entry.scanRetries++
+          entry.scanRetry = setTimeout(() => {
+            entry.scanRetry = null
+            this._scanDiary(key, entry)
+          }, SCAN_RETRY_MS)
+          entry.scanRetry.unref()
+        }
         return
       }
-      if (raw === null) return
+      entry.scanRetries = 0
       entry.scanned = i + 1
       const block = decodeBlock(raw)
-      if (block === null || block.type !== 'media-core') continue
+      if (block === null) continue
+      if (block.type === 'follow') {
+        const r = validRecordCopy(block, i)
+        if (r !== null) this._notices.foldFollow(key, i, r)
+        continue
+      }
+      if (block.type !== 'media-core') continue
       const record = validRecordCopy(block, i)
       if (record === null || record.key === key) continue
       const prev = entry.decls.get(record.key)
       if (prev === undefined || i > prev.seq) entry.decls.set(record.key, { seq: i, at: record.at })
     }
     if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+    // The loop stops at contiguousLength, while the signed length advances
+    // before the blocks arrive: publishing a prefix could hide a later
+    // unfollow, so only a fold that reached the signed length is committed
+    // (a pending author marks every page `incomplete`).
+    if (core.contiguousLength >= core.length) this._notices.commit(key)
+    else this._notices.markPending(key)
     const entries = [...entry.decls].map(([k, { seq, at }]) => ({ seq, record: { type: 'media-core', key: k, at } }))
     entry.latest = latestMediaCores(entries, key, MAX_MEDIA_CORES)
     for (const k of [...entry.refused.keys()]) {
@@ -1934,6 +1993,32 @@ class Seeder {
     }
     this._blocklistHandles.add(handle)
     socket.once('close', () => this._blocklistHandles.delete(handle))
+    // Follow notices: only the followers of the diary key this connection
+    // proved it owns, and never for a blocked diary. A target not (yet)
+    // served or not gated (admission or quarantine window, a re-gate) and a
+    // closing seeder still get what the index holds, marked incomplete: an
+    // empty page marked final would make followers already committed
+    // disappear. A peer that never opens the channel keeps replicating
+    // (notices-net.js).
+    let notices = null
+    try {
+      notices = attachNotices(socket, {
+        role: 'seeder',
+        page: ({ target, after, limit }) => {
+          if (this._isBlocked(target)) return { items: [], next: null, incomplete: false }
+          const result = this._notices.page({ target, isBlocked: (k) => this._isBlocked(k), after, limit })
+          const e = this._served.get(target)
+          if (this._closing || !e || !e.gated) result.incomplete = true
+          return result
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._noticeHandles.add(notices)
+    socket.once('close', () => this._noticeHandles.delete(notices))
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
@@ -1976,6 +2061,7 @@ class Seeder {
       if (this._stopRediscovery) this._stopRediscovery()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
+      this._notices = createNoticeIndex() // nothing of the index outlives close
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const socket of [...this._external]) {
@@ -2000,6 +2086,10 @@ class Seeder {
       }
       this._peers.clear()
       this._blocklistHandles.clear()
+      for (const handle of this._noticeHandles) {
+        try { handle.close() } catch {}
+      }
+      this._noticeHandles.clear()
       this._resolveClosed()
     })()
     return this._closing
