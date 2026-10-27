@@ -1633,3 +1633,57 @@ Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across th
 - On the sync link frames up to `MAX_EXTERNAL_FRAME` are still accepted (legitimate replication frames can be that large).
 - With about 32 hosted members online the 32 external slots are all taken by syncs and every peek or notices read is refused until a slot frees; the message is now accurate; raising `VARANDA_MAX_EXTERNAL` (#168) is how an operator adds room. Sub-cap and link reuse were rejected (see above).
 - Numbers are from loopback on one machine, not from the pilot seeder; no deploy claim is made.
+
+## 25. Busca por assunto na Espiadinha (seeder topic index, issue #81) (2026-10-27)
+
+### Summary
+
+- Shipped: `packages/core/lib/topic-index.js` (the seeder's in-memory full-text index of public posts, whole tokens, ANDed, newest first, paged by cursor); the seeder's own search scan and `Seeder#indexTopic` in `packages/core/lib/seeder.js`; `GET|HEAD /index/topic/<tok>+<tok>[/<cursor>]` in `apps/cli/lib/seed-ws.js`; `fetchTopic` in `apps/app/src/indexClient.js`; the pure helpers in `apps/app/src/topics.js`; the 'pesquisar por assunto' field and the Busca screen (`apps/app/src/screens/Busca.js`) in the Espiadinha.
+- Hosted web only. Native and `varanda-serve` show no field.
+- Trust model: the node re-checks each returned post, including its words, so a seeder can hide results or list unrelated posts but cannot forge content. The seeder's search is a finding aid, not a fact.
+- The index respects the blocklist at the moment the seeder adopts a snapshot.
+- A diary whose re-gate after a newly revoked issuer is still pending is held out of results, and the answer says `complete: false`: the same hold as account search (section 22).
+- `/health` gains `topicPosts` and `topicSaturated`, and the index is announced with the `indexing` and `complete` marks.
+- What #81 asked for that is NOT delivered: removal of a deleted publication (no deletion record exists in the protocol, so the 'conteúdo apagado' criterion cannot be met); hiding a single listed post (#21 and #20 are still open); age protection (certificates are 'unchecked', 18+ is an MVP scope decision, not an enforced gate); 'assuntos do momento' (no trending computation exists).
+
+### Automated (CI)
+
+CI result on the final tree, Node 24.22.1 (run from the worktree root, in this order). Node 20 was not run locally: only Node 24.22.1 is installed on this machine.
+
+- `npm ci`: 1015 packages added, 1022 audited, completed. `node_modules/@varanda` lists `app core rpc site web-member` (the CLI workspace is `varanda`, not linked there). npm reported 5 high-severity advisories and two install-script notices (`esbuild`, `fsevents`); not addressed in this change.
+- `npm run lint`: clean (`standard` printed no output).
+- `npm test` (all workspaces, log in the scratchpad `t8-test.log`): 1345 `ok` lines, 0 `not ok`; 123 test files in total, per workspace: core 21, rpc 8, web-member 27, app 29, cli (`varanda`) 36, site 2; each file reports `# tests = N/N pass`.
+- New or changed test files, all passing in that run: `packages/core/test/topic-index.test.js` (includes the 50k-post load test, see below), `apps/app/test/topics.test.js`, `apps/app/test/indexClient.test.js` (`fetchTopic` and `topicUrl` cases), `apps/app/test/sw.test.js` (additions), `apps/cli/test/seed-ws.test.js` (the `/index/topic` route: a null answer, a throw and a seeder without `indexTopic` answer 404 and echo nothing), `apps/cli/test/seeder-topic.test.js` (new), and `apps/cli/test/seed-ops.test.js` (the search gauges).
+- Core 50k-post load test (`topic-index.test.js`, "50k posts from 500 diaries: build and common-token queries stay bounded"), figures from the log of this run: build 90.7 ms; first query 2.56 ms; second query 0.02 ms; heapUsed delta 15.6 MB. One run on the development machine; the bounds asserted in the test are build under 15 s, first query under 3 s, second query under 250 ms.
+- `npm run demo`: `DEMO OK`.
+- `node packages/rpc/test/sizes.test.js`: 12 tests, 69 asserts, all pass. Worst cases logged: `profile.read` 229170 bytes at 100 authors; `follow.list` 33581 bytes at 500 keys.
+- `npm run export:web -w apps/app`: `NODE_BUNDLE 679651 GZIP 208228`; web bundle `_expo/static/js/web/index-01e34ffd547f5a2bb02b99d0e7a81ac6.js` 917KB; service worker `sw.js` with 11 files, version `3d2cbcb8787e8d5e`.
+- No browser pass in CI: there is no component harness, so the Busca screen and the field are covered only by the pure helper tests and the human checklist below.
+- Re-integration with account search (#169), 2026-10-27: the route moved from `/index/search/...` (now account search's) to `/index/topic/...`, every topic identifier was renamed (`topic-index.js`, `Seeder#indexTopic`, `topicPosts`/`topicSaturated`, `apps/app/src/topics.js`, `fetchTopic`), main was merged in twice (#164, #167, #168, #169, then #171 with #172), and topic search adopted the revocation re-gate hold and #171's request scheduler. Review fixes in the same round: each Busca page peeks into its own map (a map shared across pages kept the first @nome seen, so one revoked meanwhile survived on later pages), and the rounds' 'offline' notice no longer unmounts a search that already loaded. New cases: `seed-ws.test.js` "the same word reaches only its own method", `seeder-topic.test.js` "a diary held by a pending revocation re-gate is left out and the answer is incomplete", and a 429 case for `fetchTopic` in `indexClient.test.js`. CI figures for the final tree are in the PR description.
+
+### Residual risks
+
+- Memory: the search index lives in the seeder's memory next to the engagement index, and grows with the public posts of every diary it keeps. After the security fix cycle (every stored token is a flat canonical copy, so a V8 substring slice can no longer pin a post's folded text), measured on Node 24.22.1 with a full GC before and after: the core test's 50k posts of 4 words from 500 diaries retain 11.2 MB (about 236 B per post); 4,000 crafted posts of one 13-letter word plus 986 U+1D160 retain about 155-260 B per post, against ~12,175 B before the fix (`topic-index.test.js` "memory: a stored token never retains the post text" asserts under 2,000 B). With every default cap full (200,000 posts, 500,000 tokens, 4,000,000 slots) the security audit measured about 264 MB retained, to be added to the engagement index's ~436 MiB worst case when sizing a seeder. The figure for the pilot seeder is not measured. Two full block reads run at startup (search and engagement).
+- Privacy: the seeder learns which words a device searches, as it already learns which diaries it opens. The seeder logs none of it.
+- Privacy, Caddy error log (MEDIUM, deferred): Caddy keeps no access log, but its error log is on for every route (the global `log` block of `deploy/seeder/Caddyfile` only excludes the rate-limit logger). When the proxy to the seeder fails (seeder restarting or crashed, a deadline) it can record the request URI, which for `/index/topic` holds the search words, together with the client address. Fix deferred: a Caddy log filter on the URI verified with a forced 502, and dropping `web` from `deploy/seeder/deploy.sh`'s failure log dump.
+- CPU, out-of-order posts (LOW): a post older than the newest entry of a posting list (e.g. very old-dated) marks that list dirty, and the next query that touches it sorts it synchronously (measured by the audit at about 13 ms for a list at 190k posts, against 0.03 ms for a clean list). A member publishing such posts, plus many client addresses to get past the per-client limit, can spend seeder CPU.
+- Per-diary budgets: each diary holds at most 10,000 indexed posts, 200,000 (token, post) slots and may create at most 25,000 new words (each 5% of its global cap, `topicPerAuthorMax` / `topicPerAuthorPostingsMax` / `topicPerAuthorTermsMax`), so filling a global cap takes at least 20 colluding member diaries. A very prolific author's newest posts stop being indexed past either share (its search cursor pauses and `complete` turns false) until the diary leaves the seeder.
+- Far-future posts: a post dated more than a day ahead is skipped by binary search and never consumes the 2000-candidate budget, so a member cannot empty the first page of a word by flooding it with future-dated posts.
+- A lying seeder can hide results or list unrelated posts. The node drops the unrelated ones after re-checking the words; it never shows a forged post.
+- Whole-token matching misses inflections, substrings and non-Latin letters: "ceu" finds "Céu" and "#Céu" (case and accents are folded), but "céus" or "ceuzinho" are not found.
+- A short or empty page with a cursor is possible when the scan reaches its 2000-candidate budget before the page fills.
+- Rate limit: the per-client limit is 20 requests per 10 s on `/index/*`, shared with the other `/index` routes. Since #171 every `/index` request of the app, the topic search included, goes through one scheduler (2 in flight, 18 starts per 10 s, a shared 429 cooldown), so a page of results that are replies or quotes of many different strangers (one `/index/member` per unknown parent author, as in the Espiadinha rounds) queues instead of tripping 429s; a search that still meets the cooldown shows "Muitas consultas ao semeador agora. Tente de novo em alguns segundos."
+- The search field lives in two React trees (the rounds header and the Busca header). Submitting from the field remounts the input and drops focus.
+- Load: a search is a plain HTTP request (no WebSocket, so it does not count against `maxExternal`); it shares the `/index` in-flight cap (16) and token bucket (32 per second, burst 64) with the other `/index` routes, and beyond either the seeder answers 503 `ocupado`. Not measured on the pilot seeder.
+
+### Human verification
+
+None of these was performed for this change. Use the hosted web app at 320 px and on desktop, against a seeder that holds posts from at least one unfollowed diary.
+
+- [ ] 'ceu' finds 'Céu' from an unfollowed diary, below its three newest posts.
+- [ ] 'boa noite' finds 'boa e noite'.
+- [ ] A listed-but-non-matching ref (a seeder that lists a post without the words) is not shown.
+- [ ] 'limpar' restores the rounds.
+- [ ] A diary blocked by the association disappears on the next search.
+- [ ] Native app and `varanda-serve` show no field.
+- [ ] An older seeder shows 'A pesquisa não está disponível neste semeador.'

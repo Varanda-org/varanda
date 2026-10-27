@@ -165,10 +165,14 @@
 	# O índice de engajamento do semeador (respostas, citações, curtidas,
 	# republicações e as publicações de cada membro, só como referências e
 	# contagens: o conteúdo o app busca e confere no próprio diário):
-	# GET|HEAD /index/post/..., /index/counts/..., /index/member/... e
-	# /index/search/... (a busca de contas por nome ou @nome: o caminho leva
-	# o texto da busca já normalizado, que nem o Caddy, sem log de acesso,
-	# nem o semeador registram),
+	# GET|HEAD /index/post/..., /index/counts/..., /index/member/...,
+	# /index/search/... (a busca de contas por nome ou @nome) e
+	# /index/topic/... (a pesquisa por assunto da Espiadinha). Nas duas
+	# buscas o caminho leva o texto já normalizado: o semeador não o registra
+	# e o Caddy não tem log de acesso, mas o log de erros do Caddy pode
+	# guardar o caminho e o endereço do cliente quando o proxy para o
+	# semeador falha (docs/protocol.md seção 5, "Seeder topic index").
+	# Tudo isso é
 	# servido pelo semeador na porta do WebSocket, em 127.0.0.1, como o
 	# /media/*. Só aceita o Host do destino, e os cabeçalhos com o endereço do
 	# cliente saem. O Cache-Control (no-store) e o 404 vêm do próprio
