@@ -58,7 +58,7 @@ function refs (items) {
 test('peek constants and the public rule', (t) => {
   t.alike([PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS], [3, 8, 64, 3])
   t.alike([PEEK_PARALLEL, PEEK_FETCH_TIMEOUT_MS, PEEK_PAGE_TIMEOUT_MS, PEEK_CONNECT_TIMEOUT_MS, PEEK_SNAPSHOT_TTL_MS, PEEK_PAGE_MAX_BYTES], [16, 10000, 25000, 15000, 300000, 16777216])
-  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
+  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
 })
 
 test('peekCandidates filters inventory, lowercases keys and sorts without mutation', (t) => {
@@ -441,6 +441,75 @@ test('quotes and reposts in effect are publications; likes and undone reposts ar
   // seq 7 (the undo) is in the tail, so nothing about `other` shows.
   const tailOnly = diaryPeek({ ...f, length: 8, entries, fetched: new Set([0, 1, 2, 7]) })
   t.alike(tailOnly.posts, [])
+})
+
+test('a repost in the tail shows beside head blocks that were fetched but sit below the floor', (t) => {
+  const f = fixture()
+  const target = { author: B, seq: 4 }
+  // 20 blocks, head 0..2 and tail 12..19 fetched: 3..11 is the unread gap.
+  const entries = [
+    f.entries[0],
+    { seq: 1, record: post('head post') },
+    { seq: 2, record: profile() },
+    { seq: 13, record: post('tail post') },
+    { seq: 16, record: { type: 'repost', to: target, on: true, at: AT } },
+    { seq: 19, record: post('newest') }
+  ]
+  const fetched = new Set([0, 1, 2, 12, 13, 14, 15, 16, 17, 18, 19])
+  const result = diaryPeek({ ...f, length: 20, entries, fetched })
+  t.is(result.reason, null)
+  t.absent(result.scanned, 'the gap was not read')
+  t.alike(result.posts.map((p) => [p.kind, p.seq]), [['post', 19], ['repost', 16], ['post', 13]], 'the head post (seq 1) is below the floor')
+  t.alike(result.posts[1].to, target)
+  t.alike(diaryPeek({ ...f, length: 20, entries: retainRecords(entries), fetched }), result)
+})
+
+test('a repost whose undo sits in the tail is dropped even when the repost is below the floor', (t) => {
+  const f = fixture()
+  const to = { author: B, seq: 4 }
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: { type: 'repost', to, on: true, at: AT } },
+    { seq: 19, record: { type: 'repost', to, on: false, at: AT } }
+  ]
+  const fetched = new Set([0, 1, 2, 12, 13, 14, 15, 16, 17, 18, 19])
+  const result = diaryPeek({ ...f, length: 20, entries, fetched })
+  t.alike(result.posts, [], 'neither the old repost nor its undo shows')
+  t.is(result.future, 0)
+  // Without the undo the same on:true below the floor is still never used.
+  t.alike(diaryPeek({ ...f, length: 20, entries: entries.slice(0, -1), fetched }).posts, [])
+})
+
+test('a repost dated beyond MAX_FUTURE_MS counts as future and shows no item', (t) => {
+  const f = fixture()
+  const to = { author: B, seq: 4 }
+  const late = new Date(NOW + MAX_FUTURE_MS + 1).toISOString()
+  const edge = new Date(NOW + MAX_FUTURE_MS).toISOString()
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: { type: 'repost', to, on: true, at: late } },
+    { seq: 4, record: { type: 'repost', to: { author: C, seq: 1 }, on: true, at: edge } }
+  ]
+  const result = diaryPeek({ ...f, length: 5, entries, fetched: new Set([0, 1, 2, 3, 4]) })
+  t.is(result.future, 1)
+  t.alike(result.posts.map((p) => [p.kind, p.seq, p.at]), [['repost', 4, edge]], 'the boundary is still allowed')
+})
+
+test('two reposters of one original give two items with distinct keys', (t) => {
+  const f = fixture()
+  const to = { author: C, seq: 7 }
+  const entries = [...f.entries, { seq: 3, record: { type: 'repost', to, on: true, at: AT } }]
+  const result = diaryPeek({ ...f, length: 4, entries, fetched: new Set([0, 1, 2, 3]) })
+  t.alike(result.posts.map((p) => [p.kind, p.seq]), [['repost', 3]])
+  // Same seq and same target on purpose: only the reposter tells them apart.
+  const diaries = [A, B].map((key) => ({ key, name: key.slice(0, 2), username: null, posts: result.posts, exhausted: true }))
+  const page = buildPeekPage({ diaries, limit: 35 })
+  t.is(page.items.length, 2)
+  t.alike(page.items.map((i) => i.kind), ['repost', 'repost'])
+  t.alike(page.items.map((i) => i.to), [to, to])
+  t.alike(page.items.map((i) => i.author), [A, B])
+  t.is(new Set(page.items.map((i) => i.author + ':' + i.seq)).size, 2)
+  t.alike(page.items.map((i) => i.round), [0, 0])
 })
 
 test('peek loads without the node-only network or storage stack', (t) => {

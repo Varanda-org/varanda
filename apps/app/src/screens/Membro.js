@@ -16,7 +16,7 @@ import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { fetchMember, POSTS_MAX } from '../indexClient'
+import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -197,7 +197,12 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
       return
     }
     try {
-      if (refreshing) reset()
+      // An explicit refresh reads the member index again instead of the
+      // cached first page (paging never invalidates: its pages follow it).
+      if (refreshing) {
+        reset()
+        invalidateMember(author)
+      }
       peekedRef.current = new Map()
       const page = await readPage(null, alive, !held)
       if (!alive() || page === null) return

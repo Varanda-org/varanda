@@ -28,7 +28,7 @@ const PEEK_PAGE_TIMEOUT_MS = 25000
 const PEEK_CONNECT_TIMEOUT_MS = 15000
 const PEEK_SNAPSHOT_TTL_MS = 300000
 const PEEK_PAGE_MAX_BYTES = 16777216
-const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
+const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
 
 function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0

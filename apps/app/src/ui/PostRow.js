@@ -12,7 +12,9 @@
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
-//   republicou' (pressable -> onOpenReposter).
+//   republicou' (pressable -> onOpenReposter). onFollowReposter, when also
+//   given, is a small 'seguir' on that line (disabled while followPending).
+//   It follows the reposter; the action bar's onFollow follows the author.
 // - counts: null | { replies, likes, reposts, quotes }: the numbers show only
 //   when it is an object (and the number is above 0).
 // - liked, reposted: the own state; pending: null | 'like' | 'repost' (that
@@ -80,7 +82,7 @@ function Action ({ label, onPress, disabled, on, count, children }) {
 export function PostRow ({
   author, name, username, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter,
+  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
   onReply, onQuote, onLike, onRepost, onFollow, followPending, onReport
 }) {
   const hasMedia = Array.isArray(media) && media.length > 0
@@ -95,6 +97,9 @@ export function PostRow ({
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = fn(onOpenReposter)
+  // On the reposter's line, never the action bar: that 'seguir' follows the
+  // original's author, and under their name it would read as the wrong person.
+  const followReposter = reposter ? fn(onFollowReposter) : undefined
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
@@ -109,17 +114,34 @@ export function PostRow ({
     <View style={styles.row}>
       {reposter
         ? (
-          <Pressable
-            accessibilityRole={openReposter ? 'link' : 'text'}
-            accessibilityLabel={reposterName + ' republicou'}
-            disabled={!openReposter}
-            onPress={openReposter}
-            hitSlop={4}
-            style={({ pressed }) => [styles.reposted, pressed && openReposter && styles.pressed]}
-          >
-            <Icon name='republicar' size={14} color={colors.soft} />
-            <Text style={styles.repostedText} numberOfLines={1}>{reposterName + ' republicou'}</Text>
-          </Pressable>
+          <View style={styles.reposted}>
+            <Pressable
+              accessibilityRole={openReposter ? 'link' : 'text'}
+              accessibilityLabel={reposterName + ' republicou'}
+              disabled={!openReposter}
+              onPress={openReposter}
+              hitSlop={4}
+              style={({ pressed }) => [styles.repostedLink, pressed && openReposter && styles.pressed]}
+            >
+              <Icon name='republicar' size={14} color={colors.soft} />
+              <Text style={styles.repostedText} numberOfLines={1}>{reposterName + ' republicou'}</Text>
+            </Pressable>
+            {followReposter
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'seguir ' + reposterName}
+                  accessibilityState={{ disabled: !!followPending }}
+                  disabled={!!followPending}
+                  onPress={followReposter}
+                  hitSlop={6}
+                  style={({ pressed }) => [styles.repostedFollow, followPending && styles.disabled, pressed && styles.pressed]}
+                >
+                  <Text style={styles.repostedFollowText}>seguir</Text>
+                </Pressable>
+                )
+              : null}
+          </View>
           )
         : null}
       <View style={styles.main}>
@@ -273,8 +295,11 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
     backgroundColor: colors.bg
   },
-  reposted: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 26, marginBottom: 4, alignSelf: 'flex-start' },
+  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: 4, maxWidth: '100%' },
+  repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
+  repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
+  repostedFollowText: { ...type.counter, color: colors.accent },
   main: { flexDirection: 'row', gap: 12 },
   body: { flex: 1, minWidth: 0 },
   head: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
