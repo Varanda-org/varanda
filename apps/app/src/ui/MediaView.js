@@ -8,7 +8,9 @@
 // a tap retries. A 404 or a network error (blocks reach the seeder a moment
 // after the post) is first retried automatically after 2, 5 and 15 s while
 // the tile is mounted (retryDelay); a length or SHA-256 mismatch never is.
-// URLs live in a shared LRU (../media/cache.js).
+// URLs live in a shared LRU (../media/cache.js). persist (default true) is
+// false for authors the device does not follow: their photos are fetched with
+// cache: 'no-store' so nothing of them is kept on the device.
 
 import { useEffect, useRef, useState } from 'react'
 import { Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -25,7 +27,7 @@ const cache = createMediaCache({ max: 64, concurrency: 4 })
 const isBlobUrl = (url) => typeof url === 'string' && url.startsWith('blob:')
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
-function useMedia (author, descriptor) {
+function useMedia (author, descriptor, persist) {
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
   const [attempt, setAttempt] = useState(0)
@@ -47,7 +49,7 @@ function useMedia (author, descriptor) {
     }
     setResult({ key, url: null, error: false })
     const fresh = attempt > 0
-    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh })).then(
+    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh, persist })).then(
       (url) => { if (alive) setResult({ key, url, error: false }) },
       (err) => {
         if (!alive) return
@@ -67,7 +69,7 @@ function useMedia (author, descriptor) {
       if (timer !== null) clearTimeout(timer)
     }
     // The descriptor is identified by its key (deps omit the object itself).
-  }, [author, key, attempt])
+  }, [author, key, attempt, persist])
   const retry = () => setAttempt((n) => n + 1)
   if (!canFetch) return { state: 'off', url: null, retry }
   if (!key) return { state: 'error', url: null, retry }
@@ -77,8 +79,8 @@ function useMedia (author, descriptor) {
   return { state: 'loading', url: null, retry }
 }
 
-export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', style, onPress, dark }) {
-  const { state, url, retry } = useMedia(author, descriptor)
+export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+  const { state, url, retry } = useMedia(author, descriptor, persist !== false)
   const failed = state === 'error'
   const press = failed ? retry : onPress
   const a11y = failed ? label + ', indisponível; toque para tentar de novo' : label

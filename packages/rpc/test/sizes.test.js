@@ -26,6 +26,8 @@ const {
   PEEK_LIMIT_MAX,
   NOTICES_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
+  ENGAGEMENT_LIMIT_MAX,
+  PEEK_SEQS_MAX,
   FOLLOW_LIMIT_MAX
 } = require('..')
 
@@ -56,12 +58,16 @@ function worstPost (ch) {
   return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
 }
 
+function worstQuote (ch) {
+  return { ...worstPost(ch), replyTo: null, quote: { author: HEX, seq: SEQ } }
+}
+
 function size (result) {
   return utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
 }
 
 function feedResult (n, ch) {
-  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: MEDIA }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -71,9 +77,10 @@ function feedResult (n, ch) {
   }
 }
 
-// A PeekItem is the feed worst-case item with replyTo null plus `round`.
+// A PeekItem is a FeedItem plus `round`; its worst case is a post with a
+// reply or a quote ref (never both; a repost item is smaller).
 function peekResult (n, ch) {
-  const item = { author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, media: MEDIA, round: 100000 }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000 }
   return {
     items: Array(n).fill(item),
     next: { round: 100000, at: AT, author: HEX, seq: SEQ },
@@ -97,7 +104,21 @@ function noticesResult (n, ch) {
 }
 
 function logResult (n, ch) {
-  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstPost(ch) }), invalid: [], entriesTruncated: SEQ }
+  // Quote records retain replyTo: null and add quote, costing 13 bytes more
+  // than plain reply records (FeedItems always carry both fields).
+  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch) }), invalid: [], entriesTruncated: SEQ }
+}
+
+function diaryPeekResult (entries, invalid, missing, ch) {
+  return {
+    key: HEX,
+    length: SEQ,
+    entries: Array(entries).fill({ seq: SEQ, record: worstQuote(ch) }),
+    invalid: Array(invalid).fill(SEQ),
+    missing: Array(missing).fill(SEQ),
+    profile: { name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO) },
+    username: 'u'.repeat(20)
+  }
 }
 
 function profileResult (n, ch) {
@@ -120,6 +141,17 @@ test('a post outweighs a profile and a certificate in a log page', (t) => {
   t.ok(utf8ByteLength(post) > utf8ByteLength(profile))
   // A certificate has fixed-size fields (hex64, hex128, <= 32-char tokens, ISO).
   t.ok(utf8ByteLength(post) > 1000)
+  t.is(utf8ByteLength(JSON.stringify(worstQuote('\ud800'))), utf8ByteLength(post) + 13, 'quote is the largest post record')
+})
+
+test('feed quote items are no larger than replies, and reposts are smaller', (t) => {
+  for (const ch of WORST) {
+    const post = feedResult(1, ch).items[0]
+    const quote = { ...post, replyTo: null, quote: post.replyTo }
+    const repost = { ...post, kind: 'repost', to: post.replyTo, text: null, replyTo: null, quote: null, media: null }
+    t.ok(size(quote) <= size(post), 'quote ' + JSON.stringify(ch))
+    t.ok(size(repost) < size(post), 'repost ' + JSON.stringify(ch))
+  }
 })
 
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
@@ -128,9 +160,13 @@ test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800'))
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
-  t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')
+  const overflow = size(feedResult(FEED_LIMIT_MAX + 1, '\ud800'))
+  t.comment('feed worst case at ' + (FEED_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
   // Lone surrogates are the worst case: one more item of 4-byte characters fits.
-  t.ok(size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}')) <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
+  const fourByte = size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}'))
+  t.comment('feed at ' + (FEED_LIMIT_MAX + 1) + ' items of 4-byte characters: ' + fourByte + ' bytes')
+  t.ok(fourByte <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
 })
 
 test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
@@ -148,7 +184,40 @@ test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
   t.is(LOG_LIMIT_MAX, 36)
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('log worst case at ' + LOG_LIMIT_MAX + ' entries: ' + size(logResult(LOG_LIMIT_MAX, '\ud800')) + ' bytes')
-  t.ok(size(logResult(LOG_LIMIT_MAX + 1, '\ud800')) > MAX_MESSAGE, 'largest that fits')
+  const overflow = size(logResult(LOG_LIMIT_MAX + 1, '\ud800'))
+  t.comment('log worst case at ' + (LOG_LIMIT_MAX + 1) + ' entries: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+})
+
+test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and username', (t) => {
+  t.is(PEEK_SEQS_MAX, 36)
+  const worst = size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, '\ud800'))
+  for (const ch of WORST) t.ok(size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  // Each requested seq contributes to exactly one of entries/invalid/missing.
+  // Maximum-width integers conservatively bound every distinct requested seq.
+  let largest = 0
+  for (let entries = 0; entries <= PEEK_SEQS_MAX; entries++) {
+    for (let invalid = 0; invalid <= PEEK_SEQS_MAX - entries; invalid++) {
+      const missing = PEEK_SEQS_MAX - entries - invalid
+      largest = Math.max(largest, size(diaryPeekResult(entries, invalid, missing, '\ud800')))
+    }
+  }
+  t.is(largest, worst, '36 quote records dominate all partitions, including 36 invalid or missing seqs')
+  t.ok(largest <= MAX_MESSAGE)
+  t.comment('diary.peek worst case at ' + PEEK_SEQS_MAX + ' entries with profile and username: ' + largest + ' bytes')
+  // All three arrays full would describe 108 requests, outside the contract.
+  // Keep this counterexample explicit: it cannot be used as a fits proof.
+  const impossible = size(diaryPeekResult(PEEK_SEQS_MAX, PEEK_SEQS_MAX, PEEK_SEQS_MAX, '\ud800'))
+  t.comment('diary.peek synthetic 36 entries + 36 invalid + 36 missing: ' + impossible + ' bytes (outside contract)')
+  t.ok(impossible > MAX_MESSAGE)
+})
+
+test('engagement.read: ENGAGEMENT_LIMIT_MAX liked and reposted refs fit', (t) => {
+  t.is(ENGAGEMENT_LIMIT_MAX, 62)
+  const refs = Array.from({ length: ENGAGEMENT_LIMIT_MAX }, (_, i) => HEX + ':' + (SEQ - i))
+  const bytes = size({ liked: refs, reposted: refs })
+  t.comment('engagement.read worst case at ' + ENGAGEMENT_LIMIT_MAX + ' liked + ' + ENGAGEMENT_LIMIT_MAX + ' reposted refs: ' + bytes + ' bytes')
+  t.ok(bytes <= MAX_MESSAGE)
 })
 
 test('profile.read: PROFILE_LIMIT_MAX fits', (t) => {

@@ -1,5 +1,8 @@
-// Publicar: the composer sheet. post.create, or post.reply when a post was
-// chosen to answer. The shell keeps this component mounted: the draft lives in
+// Publicar: the composer sheet. post.create, post.reply when a post was
+// chosen to answer, or post.quote when one was chosen to quote (`quote`, the
+// same shape as `reply`: { ref, name, username, text }). Quotes need a
+// connection: they are never queued in the outbox, and offline the send and
+// the photo button are disabled ('Citações precisam de internet'). The shell keeps this component mounted: the draft lives in
 // its state, outside the Modal, so closing the sheet keeps it.
 // On the browser node a post that cannot go out now (no network, or the write
 // gate could not reach the seeder) is kept in the outbox ('fila de saída',
@@ -31,7 +34,7 @@ import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleShee
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE } from '../outbox'
+import { GATE_MESSAGE, isQuoteRecord } from '../outbox'
 import { countChars } from '../format'
 import { whoOf } from '../who'
 import { countAfterInsert, insertAt } from '../emoji'
@@ -129,7 +132,11 @@ function Ring ({ progress }) {
   )
 }
 
-export default function Publicar ({ open, reply, me, onClose, onClearReply, onPublished }) {
+// `quote` takes precedence over `reply` (the shell keeps them exclusive);
+// `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
+// with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
+export default function Publicar ({ open, reply: replyProp, quote = null, me, onClose, onClearReply, onClearQuote, onPublished }) {
+  const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
@@ -173,9 +180,13 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
   const self = me || { publicKey: null, name: null }
   const canQueue = outbox.available && typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
     !!(node.config && node.config.association)
-  const offlineQueue = canQueue && node.online === false
+  // Quotes are never queued: offline they wait for the network.
+  const offlineQueue = canQueue && node.online === false && !quote
+  const quoteOffline = !!quote && node.online === false
   // Media is never queued: offline, a post with photos waits for the network.
-  const valid = len <= MAX_TEXT && (hasMedia ? mediaReady && mediaOnline && media !== null : len >= 1)
+  // A quote always needs text (1..MAX_TEXT), photos or not.
+  const valid = len <= MAX_TEXT && !quoteOffline && (quote ? len >= 1 : true) &&
+    (hasMedia ? mediaReady && mediaOnline && media !== null : len >= 1)
 
   const patch = (id, fields) => {
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...fields } : item)))
@@ -299,10 +310,12 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
   }
 
   // Clears only what was sent (an edit made meanwhile stays) and tells the
-  // shell, which shows the toast and clears the reply if it still matches.
-  const published = (sent, sentReply, sentIds = []) => {
+  // shell, which shows the toast and clears the reply or quote if it still
+  // matches.
+  const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
     setText((current) => (current === sent ? '' : current))
     if (sentIds.length > 0) removeItems(sentIds)
+    if (sentQuote) return onPublished('quote', sentQuote.ref)
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
   }
 
@@ -331,6 +344,8 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     setCheckError('')
     const sent = text
     const sentReply = reply
+    const sentQuote = quote
+    if (sentQuote && (node.online === false || countChars(sent) < 1)) return
     const sentIds = items.map((item) => item.id)
     let sentMedia = null
     if (hasMedia) {
@@ -344,7 +359,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
         setUploading(false)
       }
       if (sentMedia === null) return
-    } else if (offlineQueue) {
+    } else if (offlineQueue && !sentQuote) {
       queue(sent, sentReply)
       return
     }
@@ -353,19 +368,23 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     const params = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
     // The draft is kept on any failure; a request is never resent.
     let raw = null
-    const r = await action.run(() => (sentReply
-      ? node.request('post.reply', { to: sentReply.ref, ...params })
-      : node.request('post.create', params)).catch((err) => {
+    const call = () => {
+      if (sentQuote) return node.request('post.quote', { to: sentQuote.ref, ...params })
+      if (sentReply) return node.request('post.reply', { to: sentReply.ref, ...params })
+      return node.request('post.create', params)
+    }
+    const r = await action.run(() => call().catch((err) => {
       raw = err
       throw err
     }))
     if (r.ok) {
       confirm(seqOf(r.value))
-      return published(sent, sentReply, sentIds)
+      return published(sent, sentReply, sentIds, sentQuote)
     }
     // The write gate could not reach the seeder: nothing was written, so the
-    // post waits in the outbox (text only: a post with photos stays here).
-    if (sentMedia === null && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+    // post waits in the outbox (text only: a post with photos or a quote
+    // stays here).
+    if (sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
       if (queue(sent, sentReply)) action.clearError()
       return
     }
@@ -375,7 +394,8 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
     // an `at` within the slack of `startedAt`, and a seq above the last one
     // this composer confirmed (so an identical post published just before is
     // not taken for this one). Found = published; otherwise the draft and the
-    // uncertain message stay and the person decides.
+    // uncertain message stay and the person decides. A quote matches only a
+    // record quoting the same post; a post or reply never matches a quote.
     setChecking(true)
     try {
       const res = await node.request('log.read', {})
@@ -383,7 +403,10 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
       const floor = lastSeqRef.current
       const found = (res.entries || []).find((entry) => {
         const record = entry && entry.record
-        return record && record.type === 'post' && record.text === sent &&
+        const quoteOk = sentQuote
+          ? isQuoteRecord(record) && sameRef(refOf(record.quote), sentQuote.ref)
+          : !isQuoteRecord(record)
+        return record && record.type === 'post' && record.text === sent && quoteOk &&
           sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
           Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
           (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
@@ -391,7 +414,7 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
       if (found) {
         confirm(Number.isInteger(found.seq) ? found.seq : null)
         action.clearError()
-        published(sent, sentReply, sentIds)
+        published(sent, sentReply, sentIds, sentQuote)
       }
     } catch (err) {
       setCheckError(errorText(err))
@@ -401,6 +424,8 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
   }
 
   const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''
+  const quoteName = quote ? displayText(whoOf({ name: quote.name, username: quote.username }).title) : ''
+  const attachOff = !mediaOnline || quoteOffline
 
   return (
     <Sheet
@@ -429,6 +454,37 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
                   </Pressable>
                 </View>
                 <Text style={styles.quote} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
+              </>
+              )
+            : null}
+          {quote
+            ? (
+              <>
+                <View style={styles.markRow}>
+                  <Text style={styles.mark}>
+                    {'citando '}
+                    <Text style={styles.markName}>{quoteName}</Text>
+                  </Text>
+                  {typeof onClearQuote === 'function'
+                    ? (
+                      <Pressable
+                        accessibilityRole='button'
+                        accessibilityState={{ disabled: busy }}
+                        disabled={busy}
+                        onPress={onClearQuote}
+                        hitSlop={8}
+                      >
+                        <Text style={styles.markCancel}>cancelar citação</Text>
+                      </Pressable>
+                      )
+                    : null}
+                </View>
+                <View style={styles.quoteCard}>
+                  <Text style={styles.quoteCardName} numberOfLines={1}>{quoteName}</Text>
+                  {typeof quote.text === 'string' && quote.text !== ''
+                    ? <Text style={styles.quote} numberOfLines={3}>{displayText(quote.text, { multiline: true })}</Text>
+                    : null}
+                </View>
               </>
               )
             : null}
@@ -485,14 +541,14 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
                   <Pressable
                     accessibilityRole='button'
                     accessibilityLabel='Foto'
-                    accessibilityState={{ disabled: !mediaOnline || busy }}
-                    disabled={!mediaOnline || busy}
+                    accessibilityState={{ disabled: attachOff || busy }}
+                    disabled={attachOff || busy}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
                       else attach()
                     }}
                     hitSlop={6}
-                    style={({ pressed }) => [styles.tool, !mediaOnline && styles.toolOff, pressed && styles.toolPressed]}
+                    style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
                     <Icon name='image' size={21} color={colors.soft} />
                     <Text style={styles.toolText}>Foto</Text>
@@ -506,7 +562,10 @@ export default function Publicar ({ open, reply, me, onClose, onClearReply, onPu
             </View>
           </View>
           <EmojiPicker open={emojiOpen} onPick={pickEmoji} />
-          {canAttach && !mediaOnline
+          {quoteOffline
+            ? <View style={styles.errors}><Soft>Citações precisam de internet</Soft></View>
+            : null}
+          {canAttach && !mediaOnline && !quoteOffline
             ? <View style={styles.errors}><Soft>Fotos precisam de internet</Soft></View>
             : null}
           {note ? <View style={styles.errors}><Soft>{note}</Soft></View> : null}
@@ -606,6 +665,16 @@ const styles = StyleSheet.create({
   markName: { color: colors.accent, fontWeight: '600' },
   markCancel: { ...type.replyMark, color: colors.soft },
   quote: { fontSize: 14, lineHeight: 20, color: colors.soft, paddingHorizontal: 16 },
+  quoteCard: {
+    marginTop: 8,
+    marginHorizontal: 16,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 12,
+    gap: 2
+  },
+  quoteCardName: { ...type.postName, color: colors.ink, paddingHorizontal: 16 },
   compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
   // Bare text on the sheet (no box); on the web the caret shows focus, so the
   // browser outline is dropped.

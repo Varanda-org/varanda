@@ -102,6 +102,33 @@
 // event (this device's media core confirmed at the seeder) is diagnostic
 // and makes no line.
 //
+// Engagement: like.set / repost.set / post.quote are diary writes on the
+// post.reply path (unlocked, gate, append, push); a toggle already in the
+// requested state writes nothing (changed: false) and pushes only while the
+// seeder is not known to hold the current length. engagement.read reads the
+// own diary like profile.read (works locked).
+//
+// On-demand reads (diary.peek, docs/rpc.md): outside the serial chain, like
+// peek.read below. It is served by the running sync (./sync.js, through the
+// `diaryPeeker` this session owns: the run publishes its peek function once its
+// seeder link verified and withdraws it when the link closes or the run
+// ends), never by withStore: it opens no storage core, never preempts a
+// run, never restarts one itself (a restart beside a withStore write would
+// corrupt the storage) and stores nothing. At most MAX_DIARY_PEEKS peeks are in
+// flight (USAGE 'ocupado' beyond). When no verified run is live it queues a
+// serial no-op, whose restartWhenIdle restarts a wanted continuous run
+// safely, and waits for the run's peek up to peekTimeoutMs; otherwise
+// NOT_FOUND 'semeador indisponível', which the caller may retry. A peek the
+// run drops while stopping (preempted by a write) is retried once on the
+// next verified run within the same deadline. Trust: the own key and the
+// followed keys are read from the cores the run holds; any other key is
+// gated like a quarantine fetch (block 0 certificate, revoked issuers,
+// quota, blocklist) on an in-memory core that is closed afterwards, and
+// every block is verified by Hypercore against the signed tree; a hidden
+// diary answers NOT_FOUND 'diário indisponível', never why. The username
+// and profile hints are verified records of the peeked block only (no
+// fallback to an earlier record): freshness is the seeder's claim.
+//
 // reset() removes the diary, this device's media cores (kv mediaCores and
 // mediaDevice included), the pending follow changes and the per-device
 // migration marker (the kept follows are offered for confirmation again by
@@ -117,14 +144,14 @@
 // own-key lookup runs on the chain. One peek at a time ('espiadinha já em
 // andamento'); detach, close, reset and setKeyPair abort a running one.
 //
-// Follow notices (web only, docs/rpc.md 5.23): notices.list is answered by
+// Follow notices (web only, docs/rpc.md 5.28): notices.list is answered by
 // ./notices.js exactly like peek.read (own short-lived link, memory cores,
 // no withStore, no preemption, nothing written); the link's ownership proof
 // is signed by the in-memory identity key (locked -> USAGE 'identidade
 // bloqueada'). One at a time ('avisos já em andamento'), aborted with the peek.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -143,7 +170,7 @@ const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
-const { runSync } = require('./sync')
+const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
@@ -166,6 +193,9 @@ const BAD_MEDIA_ARGS = 'mídia inválida'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
 const NOTICES_BUSY = 'avisos já em andamento'
+const DIARY_PEEK_BUSY = 'ocupado'
+// diary.peek requests in flight at once.
+const MAX_DIARY_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
 // Failed drains retried from own-synced without a new follow change.
@@ -202,7 +232,9 @@ const USAGE_PATTERNS = [
 ]
 const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
-  'sem dados locais para este diário'
+  'sem dados locais para este diário',
+  SEEDER_UNAVAILABLE,
+  DIARY_UNAVAILABLE
 ])
 
 function messageOf (err) {
@@ -307,6 +339,7 @@ function redactLogLine (text) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 function createBrowserSession ({
   storage,
   association,
@@ -316,7 +349,8 @@ function createBrowserSession ({
   syncOptions = {},
   limits,
   writeGate = true,
-  writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS
+  writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  peekTimeoutMs = PEEK_TIMEOUT_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -362,6 +396,21 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  // diary.peek: the running sync publishes its peek function here once its
+  // seeder link verified (runSync `peeker`) and withdraws it when the link
+  // closes or the run ends; set() wakes the handlers waiting for one.
+  const diaryPeeker = {
+    peek: null,
+    waiters: new Set(),
+    set (fn) {
+      this.peek = fn
+      for (const wake of [...this.waiters]) wake(fn)
+    },
+    clear (fn) {
+      if (this.peek === fn) this.peek = null
+    }
+  }
+  let diaryPeeksInFlight = 0
   // The Espiadinha: its peeker and the one peek.read in flight (its promise;
   // never the promise of a refused call). `peeking` is the slot, released at
   // once by detach/reset/setKeyPair; `unwinding` keeps every read that has
@@ -388,7 +437,6 @@ function createBrowserSession ({
     association: cfg.association,
     seederUrl: cfg.seederUrl,
     createSocket,
-    ownKey: () => requireOwnKey(),
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
   })
@@ -406,7 +454,7 @@ function createBrowserSession ({
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       return signNoticeProof(payload, keyPair)
     },
-    // The opaque `seen` token of a notice row (docs/rpc.md 5.23): a BLAKE2b
+    // The opaque `seen` token of a notice row (docs/rpc.md 5.28): a BLAKE2b
     // keyed by the identity secret (no length extension), stable for this
     // identity and (key, seq), unlinkable to the follower key without the
     // secret. The app stores only these tokens, so whoever reads the origin's
@@ -451,6 +499,7 @@ function createBrowserSession ({
           createSocket,
           once,
           timeoutMs: once ? timeoutMs : undefined,
+          peeker: diaryPeeker,
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -695,6 +744,60 @@ function createBrowserSession ({
     restartForFold({}).catch(noop)
   }
 
+  // ---- on-demand reads: diary.peek (see the header) ----
+
+  // Resolves with a live peek function other than `not` (the one a dropped
+  // attempt used) before `deadline`, else null. Never starts a run here: a
+  // queued serial no-op lets restartWhenIdle restart a wanted continuous
+  // run once nothing else is on the chain.
+  function awaitPeek (not, deadline) {
+    if (diaryPeeker.peek !== null && diaryPeeker.peek !== not) return Promise.resolve(diaryPeeker.peek)
+    if (!closed) serial(async () => {})({}).catch(noop)
+    return new Promise((resolve) => {
+      let timer = null
+      const wake = (fn) => {
+        if (fn === not) return
+        diaryPeeker.waiters.delete(wake)
+        clearTimeout(timer)
+        resolve(fn)
+      }
+      diaryPeeker.waiters.add(wake)
+      timer = setTimeout(() => {
+        diaryPeeker.waiters.delete(wake)
+        resolve(null)
+      }, Math.max(0, deadline - Date.now()))
+    })
+  }
+
+  // NOT a serial handler: runs beside the chain, inside the running sync.
+  async function diaryPeek ({ author, seqs, profileSeq, usernameSeq }) {
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) throw rpcError('USAGE', DIARY_PEEK_BUSY)
+    diaryPeeksInFlight++
+    try {
+      const deadline = Date.now() + peekTimeoutMs
+      const key = author.toLowerCase()
+      let dropped = null
+      // Two attempts: a run that stops under the first (preempted by a
+      // write) drops it; the next verified run serves the second.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const peek = await awaitPeek(dropped, deadline)
+        if (peek === null) throw new Error(SEEDER_UNAVAILABLE)
+        try {
+          return await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline)
+        } catch (err) {
+          if (messageOf(err) !== SEEDER_UNAVAILABLE || Date.now() >= deadline) throw err
+          dropped = peek
+        }
+      }
+      throw new Error(SEEDER_UNAVAILABLE)
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
+    } finally {
+      diaryPeeksInFlight--
+    }
+  }
+
   function serial (fn) {
     return (params) => {
       const epoch = connection
@@ -734,6 +837,18 @@ function createBrowserSession ({
 
   function syncState () {
     return run === null ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
+  }
+
+  // like.set / repost.set: the post.reply path around member-ops' toggle.
+  async function engagementSet (toggle, { to, on }, epoch) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    await requireUnlocked()
+    await ensureCaughtUp(epoch)
+    const r = await withStore((c) => toggle(c, { to: ref, on }))
+    if (r.changed) wrote(r.seq)
+    await pushAfterWrite()
+    return { seq: r.seq, on: r.on, changed: r.changed }
   }
 
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
@@ -892,6 +1007,33 @@ function createBrowserSession ({
       return { seq: r.seq, ref: r.ref }
     }),
 
+    // A quote: the post.reply path with a `quote` target.
+    'post.quote': serial(async ({ to, text, media }, epoch) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq }
+    }),
+
+    // Idempotent toggles on the post.reply path: a state already held
+    // writes nothing (changed: false) and only pushes an outstanding length.
+    'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
+
+    'repost.set': serial(async ({ to, on }, epoch) => engagementSet(member.repostSet, { to, on }, epoch)),
+
+    // Which of the refs the own diary likes / reposts; local data only,
+    // works locked (as profile.read).
+    'engagement.read': serial(async ({ refs }) => {
+      const r = await withStore((c) => member.engagementRead(c, { refs }))
+      return { liked: r.liked, reposted: r.reposted }
+    }),
+
+    'diary.peek': diaryPeek,
+
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
     // the diary write is the drain, scheduled and not awaited: its outcome
@@ -988,7 +1130,7 @@ function createBrowserSession ({
       }
     },
 
-    // Follow notices (docs/rpc.md 5.23), works only unlocked (the link's
+    // Follow notices (docs/rpc.md 5.28), works only unlocked (the link's
     // proof is signed by the identity key). Shaped exactly like peek.read:
     // not serial as a whole, no preemption, its own slot.
     'notices.list': async (params) => {

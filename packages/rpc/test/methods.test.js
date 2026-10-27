@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -17,13 +17,13 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'cert.add', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.reply', 'profile.read',
-    'profile.set', 'report.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
+    'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
+    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
+    'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'node.close', 'post.create', 'post.reply',
-    'profile.set', 'sync.start', 'sync.stop', 'username.add'
+    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.quote', 'post.reply',
+    'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
@@ -186,6 +186,7 @@ test('post.create and post.reply with media', (t) => {
   ok(t, 'post.create', { text: '', media: [d] }, { text: '', media: [d] })
   ok(t, 'post.create', { text: 'legenda', media: [d, d, d, d] })
   ok(t, 'post.reply', { to: KEY + ':1', text: '', media: [d] })
+  ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: [d, d, d, d] })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, mime: 'image/gif', start: 8192 - 256, blocks: 256, bytes: 256 * 32768, width: 16384, height: 16384 }] })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, blocks: 1, bytes: 1 }] })
   // Without media the text stays 1..MAX_TEXT.
@@ -214,6 +215,7 @@ test('post.create and post.reply with media', (t) => {
   for (const media of badMedia) {
     t.is(msg('post.create', { text: 'x', media }), 'parâmetro inválido: media', JSON.stringify(media))
     t.is(msg('post.reply', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+    t.is(msg('post.quote', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
   }
   // Sparse arrays: a hole is never a descriptor.
   const between = [d, d, d]
@@ -221,10 +223,105 @@ test('post.create and post.reply with media', (t) => {
   for (const media of [new Array(1), new Array(4), between]) {
     t.is(msg('post.create', { text: '', media }), 'parâmetro inválido: media', 'sparse media of length ' + media.length)
     t.is(msg('post.reply', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
+    t.is(msg('post.quote', { to: KEY + ':1', text: 'x', media }), 'parâmetro inválido: media')
   }
   const missing = { ...d }
   delete missing.height
   t.is(msg('post.create', { text: 'x', media: [missing] }), 'parâmetro inválido: media', 'missing key')
+  t.is(msg('post.quote', { to: KEY + ':1', text: 'x', media: [missing] }), 'parâmetro inválido: media')
+})
+
+test('like.set, repost.set and post.quote refs and required fields', (t) => {
+  for (const method of ['like.set', 'repost.set', 'post.quote']) {
+    const base = method === 'post.quote' ? { to: KEY + ':1', text: 'x' } : { to: KEY + ':1', on: true }
+    t.ok(isMutating(method))
+    ok(t, method, base, base)
+    ok(t, method, { ...base, to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+    bad(t, method, {})
+    for (const key of Object.keys(base)) {
+      const params = { ...base }
+      delete params[key]
+      t.is(validateParams(method, params).message, 'parâmetro obrigatório: ' + key)
+    }
+    for (const to of [null, 1, {}, { author: KEY, seq: 1 }, KEY, KEY.toUpperCase() + ':1', KEY + ':0', KEY + ':01', KEY + ':-1', KEY + ':1.5', KEY + ':9007199254740992']) {
+      t.is(validateParams(method, { ...base, to }).message, 'parâmetro inválido: to')
+    }
+    t.is(validateParams(method, { ...base, extra: true }).message, 'parâmetro desconhecido')
+    if (method !== 'post.quote') {
+      ok(t, method, { ...base, on: false }, { ...base, on: false })
+      for (const on of [undefined, null, 0, 1, 'true', {}]) {
+        t.is(validateParams(method, { ...base, on }).message, 'parâmetro inválido: on')
+      }
+    }
+  }
+})
+
+test('post.quote requires nonempty text even with media', (t) => {
+  const to = KEY + ':1'
+  const d = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  for (const extra of [{}, { media: [d] }]) {
+    for (const text of ['x', '😀'.repeat(MAX_TEXT), '\ud800'.repeat(MAX_TEXT), 'line 1\nline 2']) {
+      ok(t, 'post.quote', { to, text, ...extra }, { to, text, ...extra })
+    }
+    for (const text of ['', null, 1, {}, 'x'.repeat(MAX_TEXT + 1), '😀'.repeat(MAX_TEXT + 1)]) {
+      t.is(validateParams('post.quote', { to, text, ...extra }).message, 'parâmetro inválido: text')
+    }
+    t.is(validateParams('post.quote', { to, ...extra }).message, 'parâmetro obrigatório: text')
+  }
+  // Like post.create, RPC leaves control-character rejection to the node's
+  // record builder; it only checks the text's type and code-point length.
+  for (const text of ['\u0000', '\t', '\r', '\u007f', '\u0085', '\u2028', '\u202e', '\u2066']) {
+    t.alike(validateParams('post.quote', { to, text }), { ...validateParams('post.create', { text }), value: { to, text } })
+  }
+})
+
+test('engagement.read requires distinct refs in a dense bounded array', (t) => {
+  t.is(ENGAGEMENT_LIMIT_MAX, 62)
+  t.absent(isMutating('engagement.read'))
+  const ref = KEY + ':1'
+  ok(t, 'engagement.read', { refs: [ref] }, { refs: [ref] })
+  const refs = Array.from({ length: ENGAGEMENT_LIMIT_MAX }, (_, i) => KEY + ':' + (i + 1))
+  ok(t, 'engagement.read', { refs }, { refs })
+  ok(t, 'engagement.read', { refs: [KEY + ':' + Number.MAX_SAFE_INTEGER, ref] })
+  const sparse = [ref, KEY + ':2', KEY + ':3']
+  delete sparse[1]
+  for (const invalid of [undefined, null, ref, {}, [], [ref, ref], [ref, KEY + ':2', ref], [KEY.toUpperCase() + ':1'], [KEY + ':0'], [KEY + ':01'], [KEY + ':9007199254740992'], [1], [{ author: KEY, seq: 1 }], new Array(1), sparse, [...refs, KEY + ':63']]) {
+    t.is(validateParams('engagement.read', { refs: invalid }).message, 'parâmetro inválido: refs')
+  }
+  t.is(validateParams('engagement.read', {}).message, 'parâmetro obrigatório: refs')
+  t.is(validateParams('engagement.read', { refs, author: KEY }).message, 'parâmetro desconhecido')
+})
+
+test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
+  t.is(PEEK_SEQS_MAX, 36)
+  t.is(PEEK_TIMEOUT_MS, 8000)
+  t.absent(isMutating('diary.peek'))
+  const base = { author: KEY, seqs: [1] }
+  ok(t, 'diary.peek', base, base)
+  const seqs = Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1)
+  ok(t, 'diary.peek', { author: KEY, seqs }, { author: KEY, seqs })
+  ok(t, 'diary.peek', { author: KEY, seqs: [1, Number.MAX_SAFE_INTEGER] })
+  for (const author of [undefined, null, 1, {}, KEY.toUpperCase(), KEY.slice(1), KEY + '0']) {
+    t.is(validateParams('diary.peek', { ...base, author }).message, 'parâmetro inválido: author')
+  }
+  for (const key of Object.keys(base)) {
+    const params = { ...base }
+    delete params[key]
+    t.is(validateParams('diary.peek', params).message, 'parâmetro obrigatório: ' + key)
+  }
+  const sparse = [1, 2, 3]
+  delete sparse[1]
+  for (const invalid of [undefined, null, 1, '1', {}, [], [0], [-1], [1.5], ['1'], [null], [Number.MAX_SAFE_INTEGER + 1], [1, 1], [2, 1], [1, 3, 2], new Array(1), sparse, [...seqs, PEEK_SEQS_MAX + 1]]) {
+    t.is(validateParams('diary.peek', { ...base, seqs: invalid }).message, 'parâmetro inválido: seqs')
+  }
+  for (const key of ['profileSeq', 'usernameSeq']) {
+    for (const seq of [1, Number.MAX_SAFE_INTEGER]) ok(t, 'diary.peek', { ...base, [key]: seq }, { ...base, [key]: seq })
+    for (const seq of [undefined, null, 0, -1, 1.5, '1', {}, Number.MAX_SAFE_INTEGER + 1]) {
+      t.is(validateParams('diary.peek', { ...base, [key]: seq }).message, 'parâmetro inválido: ' + key)
+    }
+  }
+  ok(t, 'diary.peek', { ...base, profileSeq: 1, usernameSeq: 2 })
+  t.is(validateParams('diary.peek', { ...base, extra: true }).message, 'parâmetro desconhecido')
 })
 
 test('follow.*', (t) => {

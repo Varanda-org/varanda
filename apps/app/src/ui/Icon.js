@@ -28,7 +28,10 @@ const GLYPHS = {
   olho: 'eye',
   olho_fechado: 'eye-off',
   seguir: 'user-plus',
-  sino: 'bell'
+  sino: 'bell',
+  coracao: 'heart',
+  republicar: 'repeat',
+  citar: 'edit-3'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

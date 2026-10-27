@@ -66,7 +66,8 @@ test('peekCandidates filters inventory, lowercases keys and sorts without mutati
   const follows = new Set(['dd'.repeat(32)])
   const blocked = new Set(['ee'.repeat(32)])
   const before = Array.from(inventory)
-  t.alike(peekCandidates({ inventory, ownKey: B.toUpperCase(), follows, blocked }), [{ key: A, length: 5 }, { key: C, length: 12 }])
+  // The own diary is not excluded: B (length 2) is a candidate like any other.
+  t.alike(peekCandidates({ inventory, follows, blocked }), [{ key: A, length: 5 }, { key: B, length: 2 }, { key: C, length: 12 }])
   t.alike(Array.from(inventory), before)
   t.alike(Array.from(follows), ['dd'.repeat(32)])
   t.alike(Array.from(blocked), ['ee'.repeat(32)])
@@ -75,7 +76,7 @@ test('peekCandidates filters inventory, lowercases keys and sorts without mutati
 test('peekCandidates keeps one candidate per key whatever its spelling', (t) => {
   const inventory = new Map([[A.toUpperCase(), 5], [A, 9], [B, 3]])
   const none = new Set()
-  t.alike(peekCandidates({ inventory, ownKey: C, follows: none, blocked: none }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
+  t.alike(peekCandidates({ inventory, follows: none, blocked: none }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
 })
 
 test('peekWindow starts with the head and newest eight, then descends with a strict cap', (t) => {
@@ -132,7 +133,7 @@ test('diaryPeek validates block zero and revoked issuers, with best effort names
   t.is(diaryPeek({ ...f, entries }).reason, null)
 })
 
-test('diaryPeek uses seq recency, excludes replies and future posts, and copies media', (t) => {
+test('diaryPeek uses seq recency, skips future posts, and copies media', (t) => {
   const f = fixture()
   const withMedia = { ...post('foto', new Date(NOW - 1000).toISOString()), media: MEDIA }
   const entries = [...f.entries,
@@ -155,6 +156,10 @@ test('diaryPeek uses seq recency, excludes replies and future posts, and copies 
   t.not(result.posts[1].media[0], withMedia.media[0])
   t.is(result.posts[2].at, new Date(NOW + MAX_FUTURE_MS).toISOString())
   t.ok(result.scanned)
+  // A reply is a publication too: newest in the tail, it takes the first slot.
+  const withReply = [{ seq: 10, record: post('reply', AT, { author: B, seq: 1 }) }, ...entries]
+  const replied = diaryPeek({ ...f, length: 11, entries: withReply, fetched: new Set(withReply.map((e) => e.seq)) })
+  t.alike(replied.posts.map((p) => [p.seq, p.replyTo]), [[10, { author: B, seq: 1 }], [8, null], [7, null]])
 })
 
 test('diaryPeek contiguity uses fetched even when records are discarded', (t) => {
@@ -203,7 +208,7 @@ test('a cap is not a full scan: an old post can remain undiscovered', (t) => {
   t.alike(peekWindow(all.length, fetched), [])
 })
 
-test('retainRecords keeps copied certificate, profiles, usernames and top-level posts only', (t) => {
+test('retainRecords keeps copied certificate, profiles, usernames, posts and reposts only', (t) => {
   const f = fixture()
   const entries = [...f.entries,
     { seq: 3, record: { ...post('foto'), media: MEDIA } },
@@ -212,16 +217,18 @@ test('retainRecords keeps copied certificate, profiles, usernames and top-level 
     { seq: 6, record: { type: 'media-core', key: C, at: AT } },
     { seq: 7, record: { type: 'other' } },
     { seq: 8, record: null },
-    { seq: 9, record: post('plain') }
+    { seq: 9, record: post('plain') },
+    { seq: 10, record: { type: 'like', to: { author: B, seq: 1 }, on: true, at: AT } },
+    { seq: 11, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
   ]
   const before = JSON.stringify(entries)
   const kept = retainRecords(entries)
-  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 9])
+  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 4, 9, 11])
   t.not(kept, entries)
   t.not(kept[0].record.cert, entries[0].record.cert)
   t.not(kept[3].record.media[0], MEDIA[0])
   t.alike(kept[3].record.media, MEDIA)
-  const input = { ...f, length: 10, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
+  const input = { ...f, length: 12, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
   t.alike(diaryPeek({ ...input, entries: kept }), diaryPeek(input))
   t.is(JSON.stringify(entries), before, 'inputs unchanged')
 })
@@ -234,8 +241,10 @@ test('buildPeekPage: one slot per diary per round, numerical date then author or
   t.alike(page.needs, [])
   t.is(page.next, null)
   t.is(JSON.stringify(diaries), before)
-  t.alike(Object.keys(page.items[0]), ['author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.is(page.items[0].kind, 'post')
   t.is(page.items[0].replyTo, null)
+  t.is(page.items[0].quote, null)
   t.is(page.items[0].media, null)
   const tied = buildPeekPage({ diaries: [diary(C, 1), diary(B, 1), diary(A, 1)], limit: 35 })
   t.alike(tied.items.map((i) => i.author), [A, B, C])
@@ -403,6 +412,35 @@ test('diaryPeek and retainRecords never throw on hostile records, entries or con
   t.alike(diaryPeek({ ...input, entries: retainRecords(entries) }), diaryPeek(input))
   t.execution(() => diaryPeek({ get entries () { throw new Error('hostile') } }))
   t.execution(() => diaryPeek({ ...input, fetched: { has () { throw new Error('hostile') } } }))
+})
+
+test('quotes and reposts in effect are publications; likes and undone reposts are not', (t) => {
+  const f = fixture()
+  const quote = { author: B, seq: 1 }
+  const other = { author: C, seq: 2 }
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: { type: 'post', text: 'olha isso', at: AT, replyTo: null, quote } },
+    { seq: 4, record: { type: 'like', to: quote, on: true, at: AT } },
+    { seq: 5, record: { type: 'repost', to: quote, on: true, at: AT } },
+    { seq: 6, record: { type: 'repost', to: other, on: true, at: AT } },
+    { seq: 7, record: { type: 'repost', to: other, on: false, at: AT } }
+  ]
+  const result = diaryPeek({ ...f, length: 8, entries, fetched: new Set(entries.map((e) => e.seq)) })
+  t.alike(result.posts.map((p) => [p.kind, p.seq]), [['repost', 5], ['post', 3]])
+  t.alike(result.posts[0].to, quote)
+  t.alike(result.posts[1].quote, quote)
+  t.not(result.posts[1].quote, quote, 'a copy')
+  const page = buildPeekPage({ diaries: [{ key: A, name: result.name, username: result.username, posts: result.posts, exhausted: true }], limit: 35 })
+  t.alike(page.items.map((i) => [i.kind, i.seq, i.round]), [['repost', 5, 0], ['post', 3, 1]])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(page.items[0].to, quote)
+  t.is(page.items[0].text, null)
+  t.alike(page.items[1].quote, quote)
+  // A repost whose undo lies below the scanned tail is never used: here only
+  // seq 7 (the undo) is in the tail, so nothing about `other` shows.
+  const tailOnly = diaryPeek({ ...f, length: 8, entries, fetched: new Set([0, 1, 2, 7]) })
+  t.alike(tailOnly.posts, [])
 })
 
 test('peek loads without the node-only network or storage stack', (t) => {

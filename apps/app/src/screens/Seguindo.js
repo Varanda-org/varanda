@@ -21,26 +21,38 @@ import { colors, type } from '../ui/theme'
 
 const PAGE = 50
 
-// One followed diary. The name column is not pressable yet; 'denunciar' opens
-// the report sheet for the whole account (the list never holds the own key:
-// follow.add refuses it). `profile` is undefined while it is being looked up.
-function FollowRow ({ followKey, profile, onRemove, onReport, pending, disabled }) {
+// One followed diary. The avatar and name column open the member's profile
+// (`onOpen(followKey, profile)`, optional); 'denunciar' opens the report sheet
+// for the whole account (the list never holds the own key: follow.add refuses
+// it). `profile` is undefined while it is being looked up.
+function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, disabled }) {
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
+  const open = typeof onOpen === 'function'
+    ? () => onOpen(followKey, { name: profile ? profile.name : null, username: profile ? profile.username : null })
+    : undefined
   return (
     <View style={styles.row}>
-      <Avatar name={who.avatarName} publicKey={followKey} size={44} />
-      <View style={styles.who}>
-        {who.known
-          ? (
-            <>
-              <Text style={styles.name} numberOfLines={1}>{title}</Text>
-              {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
-            </>
-            )
-          : <View style={styles.skeleton} accessible={false} />}
-      </View>
+      <Pressable
+        style={({ pressed }) => [styles.open, pressed && open && styles.pressed]}
+        accessibilityRole='link'
+        accessibilityLabel={who.known ? 'ver o perfil de ' + title : 'ver o perfil'}
+        disabled={!open}
+        onPress={open}
+      >
+        <Avatar name={who.avatarName} publicKey={followKey} size={44} />
+        <View style={styles.who}>
+          {who.known
+            ? (
+              <>
+                <Text style={styles.name} numberOfLines={1}>{title}</Text>
+                {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+              </>
+              )
+            : <View style={styles.skeleton} accessible={false} />}
+        </View>
+      </Pressable>
       <Pill
         label='Seguindo'
         onPress={() => onRemove(followKey)}
@@ -96,7 +108,9 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
 
 // `onFollowsChanged` (optional): called after a follow or unfollow that
 // changed the list, so the shell refreshes A Rua, Diário and the follow count.
-export default function Seguindo ({ active, onReport, onFollowsChanged, scrollToTop }) {
+// `onOpenMember(followKey, { name, username })` (optional): a row's name opens
+// the member's profile.
+export default function Seguindo ({ active, onReport, onFollowsChanged, onOpenMember, scrollToTop }) {
   const node = useNode()
   const names = useNames()
   const bottomPad = useBottomPad()
@@ -377,6 +391,7 @@ export default function Seguindo ({ active, onReport, onFollowsChanged, scrollTo
         <FollowRow
           followKey={item}
           profile={profileOf(item)}
+          onOpen={onOpenMember}
           onRemove={doRemove}
           onReport={onReport}
           pending={removing === item}
@@ -404,6 +419,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
+  open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
   handle: { ...type.postMeta, color: colors.soft },

@@ -11,6 +11,11 @@
 // 3. the body is read with a hard cap of descriptor.bytes: more bytes stop
 //    the read and fail, fewer fail;
 // 4. the SHA-256 of the bytes (WebCrypto) equals descriptor.sha256;
+// Persistence: the device keeps nothing of members it does not follow. With
+// deps.persist === false (authors the device does not follow: the Espiadinha, threads,
+// profiles, reposts, quotes) every attempt uses cache: 'no-store', so not even
+// the browser HTTP cache keeps the photo; otherwise the first attempt may use
+// the long cache (force-cache) and retries revalidate (no-cache).
 // only then the bytes become a Blob typed with the descriptor's mime (one of
 // the four image types) and a blob: URL, which the UI shows as an image and
 // nothing else. Every function takes injectable dependencies for tests.
@@ -111,12 +116,14 @@ function retryable (message) {
 // -> Uint8Array of the verified bytes; throws on any failed check.
 // deps.fresh: revalidate with the server instead of reusing the HTTP cache
 // (used by retries, so a stored 404 is not served again).
+// deps.persist === false: never store the answer ('no-store' on every attempt).
 export async function fetchMedia (author, d, deps) {
   const url = mediaUrl(author, d)
   if (url === null) throw fail('foto inválida')
   const { fetch: get, subtle } = defaults(deps)
   if (!subtle) throw fail('sem criptografia')
-  const cache = deps && deps.fresh === true ? 'no-cache' : 'force-cache'
+  const transient = deps && deps.persist === false
+  const cache = transient ? 'no-store' : deps && deps.fresh === true ? 'no-cache' : 'force-cache'
   let res
   try {
     res = await get(url, { method: 'GET', credentials: 'omit', cache, redirect: 'error' })

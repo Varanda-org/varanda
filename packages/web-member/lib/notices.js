@@ -1,6 +1,6 @@
 'use strict'
 
-// Follow notices in the browser node (docs/rpc.md 5.23, docs/protocol.md
+// Follow notices in the browser node (docs/rpc.md 5.28, docs/protocol.md
 // 'Notices link'): `notices.list` answers "who started following me and
 // whom I do not follow yet" HERE, in the browser. One short-lived seeder link
 // per read: the node proves on 'varanda/notices/1' that it owns its diary key
@@ -157,7 +157,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
 
   // The read's checkpoints: an aborted read, or one whose link was LOST (the
   // socket closed under it, not cut by its own budget or abort), ends with
-  // 'sem conexão com o semeador' and no rows (docs/rpc.md 5.23): a partial
+  // 'sem conexão com o semeador' and no rows (docs/rpc.md 5.28): a partial
   // read is never reported as a successful incomplete one.
   function checkAborted (run) {
     if (run.aborted || run.lost) throw new Error(NO_SEEDER)
@@ -543,7 +543,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return { notices, next, incomplete: run.incomplete, supported: true }
   }
 
-  // -> { notices, next, incomplete, supported } (docs/rpc.md 5.23). A
+  // -> { notices, next, incomplete, supported } (docs/rpc.md 5.28). A
   // concurrent read is refused (UsageError 'avisos já em andamento');
   // abort() and a link lost after the hello reject the running one with
   // Error('sem conexão com o semeador') (the session maps it to USAGE). A

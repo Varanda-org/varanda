@@ -1,28 +1,562 @@
 // A Rua: a newest-first timeline with backward cursors and explicit refreshes.
 // Fresh sync hints offer new posts without moving the person's reading position.
 // PostRow escapes raw peer strings and never derives display names from keys.
+//
+// Reposts and quotes: a feed item `kind: 'repost'` (its text is null and is
+// never shown) renders the ORIGINAL post `item.to` under 'Nome republicou'; a
+// post with a `quote` renders the quoted post in a QuoteCard. Originals are
+// read with diary.peek (one call per author per page; on the hosted web with
+// the seeder index's member hints, so strangers get their name and @nome;
+// followed authors are served locally by the node). A node without
+// diary.peek (the core node: 'leitura sob demanda só na versão web') falls
+// back to log.read, which covers own and followed diaries. Every action on a
+// repost item targets the original (reply, like, repost, quote, open,
+// report), never the reposter's engagement record.
+// Counts (hosted web only) come from the seeder index (/index/counts, 31 refs
+// per call) and the own like/repost state from engagement.read (62 refs per
+// call); like and repost taps are optimistic (../engagement.js), then
+// like.set / repost.set; a failure reverts and shows the error for a moment.
+// `useSocial`, `socialRowProps` and `RepostPlaceholder` are shared with Diário
+// (and the first two with the Espiadinha).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { StyleSheet, View } from 'react-native'
-import { FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX } from '@varanda/rpc'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { cursorMoved, cursorOf, feedKey, isLastFeedPage, mergeOlder, resetWith, shouldReloadOnShow } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
-import { replyNameOf } from '../who'
+import { replyNameOf, whoOf } from '../who'
+import { COUNTS_MAX, fetchCounts, fetchMember } from '../indexClient'
+import { assembleMember, planPeeks } from '../thread'
+import { applyToggle, countsAfter, emptyState, mergeCounts } from '../engagement'
+import { isBusy, isDiaryGone, isSeederDown } from './Conversa'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { colors, type } from '../ui/theme'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
+const TOAST_MS = 4000
+// log.read page maximum (the fallback read of a node without diary.peek).
+const LOG_WINDOW = 36
+const FALLBACK_WINDOWS = 4
+// Transient peek errors: 'semeador indisponível' is retried once after 2 s,
+// 'ocupado' up to 3 times with a growing pause (like Conversa's peekAll); if
+// it persists, the refs stay undefined (a later pass retries them).
+const SEEDER_RETRY_MS = 2000
+const BUSY_RETRY_MS = 600
+const BUSY_RETRIES = 3
+const INCOMPLETE_NOTE = 'Alguns números podem estar incompletos.'
+// Stored in `originals` for a ref whose read failed for a transient reason
+// even after the bounded retries: shown as 'indisponível agora', retried on
+// the next page, refresh or tap. Never exposed by original().
+const TRANSIENT = Object.freeze({ transient: true })
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone }) {
+// 'author:seq' (lowercase author) of a { author, seq } target, or null.
+export function refOf (t) {
+  if (!t || typeof t.author !== 'string' || !Number.isSafeInteger(t.seq) || t.seq < 1) return null
+  return t.author.toLowerCase() + ':' + t.seq
+}
+
+function chunks (list, size) {
+  const out = []
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size))
+  return out
+}
+
+const seqOfRef = (ref) => Number(ref.slice(ref.indexOf(':') + 1))
+const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
+
+// Originals, counts and the own like/repost state of the rows on screen.
+// - ingest({ shown, need, local, authors, reset }): `shown` = refs whose
+//   counts and own state are wanted (the posts with an action bar); `need` =
+//   refs to resolve (repost originals, quoted posts); `local` = a Map ref ->
+//   post item already at hand (feed posts); `authors` = keys known to be own
+//   or followed (their photos may be kept). Calls run one after the other
+//   (the browser node allows only two concurrent peeks).
+// - original(ref): the post item, null (unavailable) or undefined (loading).
+// - toggle(kind, ref): 'like' | 'repost', optimistic.
+// - persistOf(author): true only for own or followed authors.
+// - toast: the text of the last failed toggle for a moment (when the shell
+//   gives no `onToast`).
+export function useSocial ({ ownKey, onToast }) {
+  const node = useNode()
+  const names = useNames()
+  const { request, hosted } = node
+  const online = node.online !== false
+  const { learnMany, resolveMany } = names
+  // flags: the index's `indexing` / `complete` of the counts shown.
+  const [social, setSocial] = useState(() => ({ originals: new Map(), counts: new Map(), eng: emptyState(), pending: new Map(), flags: { indexing: false, complete: true } }))
+  const socialRef = useRef(social)
+  // Bumped whenever `originals` is dropped (refresh, follows/moderation may
+  // have changed): a read started before never writes into the new map.
+  const epochRef = useRef(0)
+  // The refs asked for since the last refresh, to re-resolve after a drop.
+  const seenRef = useRef({ need: new Set(), local: new Map() })
+  const change = useCallback((update) => {
+    socialRef.current = { ...socialRef.current, ...update(socialRef.current) }
+    setSocial(socialRef.current)
+  }, [])
+  // Keys known to be own or followed: rebuilt on every refresh from the
+  // page's authors and follow.list.
+  const knownRef = useRef(new Set())
+  const followsLoadedRef = useRef(false)
+  const queueRef = useRef(Promise.resolve())
+  const mountedRef = useRef(true)
+  // Stamps per field and ref: an engagement.read never overrides a ref whose
+  // toggle started or ended after that read started.
+  const clockRef = useRef(0)
+  const touchedRef = useRef(new Map())
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  const [toast, setToast] = useState('')
+  const toastTimer = useRef(null)
+  useEffect(() => () => clearTimeout(toastTimer.current), [])
+  const showToast = useCallback((text) => {
+    if (typeof onToast === 'function') return onToast(text)
+    clearTimeout(toastTimer.current)
+    setToast(text)
+    toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
+  }, [onToast])
+
+  const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  const isKnown = useCallback((author) => author === own || knownRef.current.has(author), [own])
+
+  // follow.list once per refresh (after a failure, again on the next need).
+  const loadFollows = useCallback(async () => {
+    if (followsLoadedRef.current) return
+    followsLoadedRef.current = true
+    const set = knownRef.current
+    try {
+      const r = await request('follow.list', { offset: 0, limit: FOLLOW_LIMIT_MAX })
+      for (const k of Array.isArray(r.follows) ? r.follows : []) if (typeof k === 'string') set.add(k.toLowerCase())
+    } catch {
+      if (set === knownRef.current) followsLoadedRef.current = false
+    }
+  }, [request])
+
+  // The post items at `refs` (all of one author), as a Map ref -> item.
+  const readAuthor = useCallback(async (author, refs) => {
+    let hints = {}
+    if (hosted && online && !isKnown(author)) {
+      const m = await fetchMember(author)
+      if (m.ok) hints = { [author]: { profileSeq: m.value.profileSeq, usernameSeq: m.value.usernameSeq } }
+    }
+    const out = new Map()
+    const take = (peek, seqs) => {
+      const { items } = assembleMember({ author, index: { posts: seqs.slice().sort((a, b) => b - a) }, peeked: new Map([[author, peek]]) })
+      for (const item of items) if (item.kind === 'post') out.set(author + ':' + item.seq, item)
+    }
+    let fallback = false
+    // Refs whose peek failed for a transient reason: not stored as
+    // unavailable, so a later pass retries them.
+    const transient = new Set()
+    const plan = planPeeks({ refs, authors: hints })
+    for (let i = 0; i < plan.length; i++) {
+      const chunk = plan[i]
+      let peek
+      let seederRetried = false
+      let busyTries = 0
+      let failure = null
+      for (;;) {
+        try {
+          peek = await request('diary.peek', chunk)
+          break
+        } catch (err) {
+          if (isSeederDown(err) && !seederRetried) {
+            seederRetried = true
+            await sleep(SEEDER_RETRY_MS)
+            continue
+          }
+          if (isBusy(err) && busyTries < BUSY_RETRIES) {
+            busyTries++
+            await sleep(BUSY_RETRY_MS * busyTries)
+            continue
+          }
+          failure = err
+          break
+        }
+      }
+      if (failure) {
+        if (isSeederDown(failure) || isBusy(failure)) {
+          // Transient: this chunk and the rest stay undefined.
+          for (const c of plan.slice(i)) for (const seq of c.seqs) transient.add(author + ':' + seq)
+        } else if (!isDiaryGone(failure) && failure.code === 'USAGE') {
+          // USAGE other than 'ocupado': this node has no on-demand reads.
+          fallback = true
+        }
+        break
+      }
+      take(peek, chunk.seqs)
+      if (peek && (peek.profile || peek.username)) {
+        learnMany([[author, { name: peek.profile ? peek.profile.name : null, username: peek.username || null }]])
+      }
+    }
+    if (fallback) {
+      // Local data only: own and followed diaries. The seqs are grouped into
+      // log.read windows (each covers its seqs), newest first, at most
+      // FALLBACK_WINDOWS per author per page; seqs beyond them stay
+      // unavailable until a later page or refresh.
+      const desc = refs.map(seqOfRef).sort((a, b) => b - a)
+      const groups = []
+      for (const seq of desc) {
+        const g = groups[groups.length - 1]
+        if (g && g.max - seq < LOG_WINDOW) g.seqs.push(seq)
+        else groups.push({ max: seq, seqs: [seq] })
+      }
+      for (const g of groups.slice(0, FALLBACK_WINDOWS)) {
+        const min = g.seqs[g.seqs.length - 1]
+        try {
+          const log = await request('log.read', { author, before: g.max + 1, limit: g.max - min + 1 })
+          const wanted = new Set(g.seqs)
+          const entries = Array.isArray(log.entries) ? log.entries.filter((e) => e && wanted.has(e.seq)) : []
+          take({ key: author, entries, profile: null, username: null }, entries.map((e) => e.seq))
+        } catch {}
+      }
+    }
+    out.transient = transient
+    return out
+  }, [hosted, online, request, isKnown, learnMany])
+
+  // Resolves the refs not known yet; -> the items found.
+  const resolve = useCallback(async (need) => {
+    const epoch = epochRef.current
+    const todo = need.filter((ref) => {
+      const cur = socialRef.current.originals.get(ref)
+      return cur === undefined || cur === TRANSIENT
+    })
+    if (todo.length === 0) return []
+    const byAuthor = new Map()
+    for (const ref of todo) {
+      const author = authorOfRef(ref)
+      if (!byAuthor.has(author)) byAuthor.set(author, [])
+      byAuthor.get(author).push(ref)
+    }
+    if ([...byAuthor.keys()].some((a) => !isKnown(a))) await loadFollows()
+    const found = new Map()
+    for (const [author, refs] of byAuthor) {
+      let got
+      try {
+        got = await readAuthor(author, refs)
+      } catch {
+        got = new Map()
+      }
+      if (!mountedRef.current) return []
+      const later = got.transient || new Set()
+      for (const ref of refs) found.set(ref, got.get(ref) || (later.has(ref) ? TRANSIENT : null))
+    }
+    // The originals were dropped while reading: these results are stale.
+    if (epoch !== epochRef.current) return []
+    change((prev) => {
+      const originals = new Map(prev.originals)
+      for (const [ref, item] of found) {
+        const cur = originals.get(ref)
+        if (!cur || cur === TRANSIENT) originals.set(ref, item)
+      }
+      return { originals }
+    })
+    const items = [...found.values()].filter((i) => i && i !== TRANSIENT)
+    const unnamed = items.filter((i) => isKnown(i.author) && !i.name).map((i) => i.author)
+    if (unnamed.length > 0) resolveMany([...new Set(unnamed)])
+    return items
+  }, [request, readAuthor, isKnown, change, resolveMany, loadFollows])
+
+  const ingestNow = useCallback(async ({ shown = [], need = [], local = new Map(), authors = [], reset = false }) => {
+    // A refresh rebuilds the followed set (an unfollowed author's photos are
+    // no longer kept): this page's authors (own or followed now) plus a
+    // fresh follow.list; older pages only add their own authors.
+    if (reset) {
+      knownRef.current = new Set()
+      followsLoadedRef.current = false
+      epochRef.current++
+      seenRef.current = { need: new Set(), local: new Map() }
+    }
+    for (const a of authors) if (typeof a === 'string') knownRef.current.add(a.toLowerCase())
+    if (reset) await loadFollows()
+    for (const r of need) if (typeof r === 'string') seenRef.current.need.add(r)
+    for (const [ref, item] of local) seenRef.current.local.set(ref, item)
+    change((prev) => {
+      // A refresh starts from an empty cache: every original (and each
+      // unavailable one) passes diary.peek again, which refuses authors the
+      // association has blocked since.
+      const originals = reset ? new Map() : new Map(prev.originals)
+      for (const [ref, item] of local) originals.set(ref, item)
+      return { originals, ...(reset ? { flags: { indexing: false, complete: true } } : {}) }
+    })
+    const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
+    // engagement.read first: like every member read it preempts a sync.
+    for (const chunk of chunks(refs, ENGAGEMENT_LIMIT_MAX)) {
+      const started = ++clockRef.current
+      try {
+        const r = await request('engagement.read', { refs: chunk })
+        const liked = new Set(Array.isArray(r.liked) ? r.liked : [])
+        const reposted = new Set(Array.isArray(r.reposted) ? r.reposted : [])
+        // A read never overrides a ref with a pending toggle or a toggle that
+        // started or ended after this read started.
+        const fresh = (field, ref) => !socialRef.current.pending.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
+        change((prev) => {
+          let eng = prev.eng
+          for (const ref of chunk) {
+            if (fresh('liked', ref)) eng = applyToggle(eng, 'like', ref, liked.has(ref))
+            if (fresh('reposted', ref)) eng = applyToggle(eng, 'repost', ref, reposted.has(ref))
+          }
+          return { eng }
+        })
+      } catch {}
+      if (!mountedRef.current) return
+    }
+    if (hosted && online) {
+      for (const chunk of chunks(refs, COUNTS_MAX)) {
+        const r = await fetchCounts(chunk)
+        if (!mountedRef.current) return
+        if (!r.ok) continue
+        change((prev) => {
+          const fetched = {}
+          for (const ref of Object.keys(r.value.counts)) if (!prev.pending.has(ref)) fetched[ref] = r.value.counts[ref]
+          // Keep the index flags: indexing hides the counts, an incomplete
+          // index gets a note.
+          const flags = { indexing: r.value.indexing === true, complete: prev.flags.complete && r.value.complete !== false }
+          return { counts: mergeCounts(prev.counts, fetched), flags }
+        })
+      }
+    }
+    // Originals, then (one level) the posts those originals quote.
+    const first = await resolve([...new Set(need.filter((r) => typeof r === 'string'))])
+    const second = first.map((item) => refOf(item.quote)).filter(Boolean)
+    if (second.length > 0 && mountedRef.current) await resolve([...new Set(second)])
+  }, [request, hosted, online, change, resolve, loadFollows])
+
+  // Stable identity (the screens' load callbacks depend on it): the queued
+  // run uses the latest ingestNow.
+  const ingestNowRef = useRef(ingestNow)
+  ingestNowRef.current = ingestNow
+  const ingest = useCallback((args) => {
+    const run = queueRef.current.then(() => (mountedRef.current ? ingestNowRef.current(args) : null)).catch(() => {})
+    queueRef.current = run
+    return run
+  }, [])
+
+  const toggle = useCallback(async (kind, ref) => {
+    if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string' || socialRef.current.pending.has(ref)) return
+    const field = kind === 'like' ? 'liked' : 'reposted'
+    const was = socialRef.current.eng[field].has(ref)
+    const on = !was
+    const delta = on ? 1 : -1
+    const shift = (prev, d) => {
+      if (!prev.counts.has(ref)) return prev.counts
+      const counts = new Map(prev.counts)
+      counts.set(ref, countsAfter(prev.counts.get(ref), kind, d))
+      return counts
+    }
+    const pendingWith = (prev, set) => {
+      const pending = new Map(prev.pending)
+      if (set) pending.set(ref, kind)
+      else pending.delete(ref)
+      return pending
+    }
+    touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+    change((prev) => ({ eng: applyToggle(prev.eng, kind, ref, on), counts: shift(prev, delta), pending: pendingWith(prev, true) }))
+    try {
+      const r = await request(kind === 'like' ? 'like.set' : 'repost.set', { to: ref, on })
+      if (!mountedRef.current) return
+      touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+      const final = r && typeof r.on === 'boolean' ? r.on : on
+      change((prev) => ({
+        eng: applyToggle(prev.eng, kind, ref, final),
+        // Already in that state: the index had counted it before this tap.
+        counts: r && r.changed === false ? shift(prev, -delta) : prev.counts,
+        pending: pendingWith(prev, false)
+      }))
+    } catch (err) {
+      if (!mountedRef.current) return
+      touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+      change((prev) => ({ eng: applyToggle(prev.eng, kind, ref, was), counts: shift(prev, -delta), pending: pendingWith(prev, false) }))
+      showToast(errorText(err))
+    }
+  }, [request, change, showToast])
+
+  // The follows changed (and the node's moderation may have): drop the cache
+  // and resolve what was asked for again.
+  const followsVersion = typeof node.followsVersion === 'number' ? node.followsVersion : 0
+  const seenFollows = useRef(followsVersion)
+  useEffect(() => {
+    if (seenFollows.current === followsVersion) return
+    seenFollows.current = followsVersion
+    epochRef.current++
+    const { need, local } = seenRef.current
+    change(() => ({ originals: new Map(local) }))
+    if (need.size > 0) ingest({ need: [...need], local })
+  }, [followsVersion, change, ingest])
+
+  const original = useCallback((ref) => {
+    if (typeof ref !== 'string') return null
+    const item = social.originals.get(ref)
+    return item === TRANSIENT ? undefined : item
+  }, [social])
+  const transient = useCallback((ref) => typeof ref === 'string' && social.originals.get(ref) === TRANSIENT, [social])
+  const retry = useCallback((ref) => {
+    if (typeof ref === 'string') ingest({ need: [ref] })
+  }, [ingest])
+  const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
+
+  return { social, ingest, toggle, original, transient, retry, persistOf, toast }
+}
+
+// The PostRow props of `post` (a post item) whose actions target `ref`.
+// `h`: { onOpenThread, onOpenMember, onReply, onQuote, onReport } (each
+// optional). A repost passes the ORIGINAL as `post` and `repostedBy`.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, now, ownKey, h, persist }) {
+  const prof = profileOf(post.author) || null
+  const name = post.name || (prof ? prof.name : null) || null
+  const username = post.username || (prof ? prof.username : null) || null
+  const quoteRef = refOf(post.quote)
+  let quote = null
+  if (quoteRef !== null) {
+    const q = social.original(quoteRef)
+    const qp = profileOf(post.quote.author) || null
+    quote = {
+      author: post.quote.author,
+      name: (q && q.name) || (qp ? qp.name : null) || null,
+      username: (q && q.username) || (qp ? qp.username : null) || null,
+      at: q ? q.at : null,
+      text: q ? q.text : null,
+      media: q ? q.media : null,
+      // A transient failure is shown as unavailable; tapping retries it.
+      missing: q === null || (q === undefined && social.transient(quoteRef)),
+      persist: social.persistOf(post.quote.author),
+      hasQuote: !!(q && q.quote),
+      onOpen: q === undefined && social.transient(quoteRef)
+        ? () => social.retry(quoteRef)
+        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined
+    }
+  }
+  const s = social.social
+  const parentRef = refOf(post.replyTo)
+  // The reply mark: the names cache, else the parent when it was resolved
+  // (verified by the node: the Espiadinha asks for the parents of its
+  // replies); null (unavailable) reads 'sem nome', undefined '…'.
+  let replyToName = null
+  if (parentRef !== null) {
+    const pp = profileOf(post.replyTo.author)
+    const parent = pp ? undefined : social.original(parentRef)
+    replyToName = replyNameOf(parent ? { name: parent.name, username: parent.username } : (parent === null && pp === undefined ? null : pp))
+  }
+  const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  return {
+    author: post.author,
+    name,
+    username,
+    at: post.at,
+    text: post.text,
+    media: post.media || null,
+    replyToName,
+    // Feed posts pass persist: true (own or followed by construction).
+    persistMedia: persist === true ? true : social.persistOf(post.author),
+    now,
+    quote,
+    repostedBy,
+    // While the index is still being built a count would be misleadingly small.
+    counts: s.flags.indexing ? null : (s.counts.get(ref) || null),
+    liked: s.eng.liked.has(ref),
+    reposted: s.eng.reposted.has(ref),
+    pending: s.pending.get(ref) || null,
+    onOpen: typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref, seed: post }) : undefined,
+    onOpenAuthor: typeof h.onOpenMember === 'function' ? () => h.onOpenMember(post.author, { name, username }) : undefined,
+    onOpenParent: parentRef !== null && typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: parentRef }) : undefined,
+    onOpenReposter: repostedBy && typeof h.onOpenMember === 'function' && repostedBy.author !== own
+      ? () => h.onOpenMember(repostedBy.author, { name: repostedBy.name, username: repostedBy.username })
+      : undefined,
+    onReply: typeof h.onReply === 'function' ? () => h.onReply({ ref, name, username, text: post.text }) : undefined,
+    onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
+    onLike: () => social.toggle('like', ref),
+    onRepost: () => social.toggle('repost', ref),
+    // Until the own key is known, no post can safely offer a report action.
+    onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
+      ? () => h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text })
+      : undefined
+  }
+}
+
+// 'Alguns números podem estar incompletos.' once at the top of a list (only
+// when counts were read from the index, i.e. on the hosted web).
+export function CountsNote ({ social }) {
+  const f = social.social.flags
+  if (f.indexing || f.complete !== false) return null
+  return <View style={styles.footer}><Soft>{INCOMPLETE_NOTE}</Soft></View>
+}
+
+// A repost whose original is loading (`missing` false) or unavailable.
+// `transient`: unavailable for now; a tap calls `onRetry`.
+export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, onOpenReposter }) {
+  const who = displayText(whoOf({ name: repostedBy.name, username: repostedBy.username }).title)
+  return (
+    <View style={styles.placeholder}>
+      <Text style={styles.reposted} onPress={onOpenReposter} accessibilityRole={onOpenReposter ? 'link' : 'text'}>
+        <Icon name='republicar' size={14} color={colors.soft} />
+        {' ' + who + ' republicou'}
+      </Text>
+      {transient
+        ? (
+          <Pressable onPress={onRetry} accessibilityRole='button' accessibilityLabel='Publicação indisponível agora, tentar de novo'>
+            <Soft>Publicação indisponível agora · toque para tentar de novo</Soft>
+          </Pressable>
+          )
+        : missing ? <Soft>Publicação indisponível</Soft> : <View style={styles.skeleton} accessible={false} />}
+    </View>
+  )
+}
+
+// The transient error line of a failed toggle (when the shell gives no toast).
+export function SocialToast ({ text }) {
+  if (!text) return null
+  return (
+    <View style={styles.toast} pointerEvents='none'>
+      <Text style={styles.toastText} accessibilityRole='alert'>{text}</Text>
+    </View>
+  )
+}
+
+// The refs a feed page needs: counts and own state for every row's target,
+// originals for reposts, quoted posts; feed posts are already at hand.
+function pageNeeds (pageItems) {
+  const local = new Map()
+  const shown = []
+  const need = []
+  const authors = []
+  for (const i of pageItems) {
+    authors.push(i.author)
+    if (i.kind === 'repost') {
+      const r = refOf(i.to)
+      if (r !== null) {
+        shown.push(r)
+        need.push(r)
+      }
+      continue
+    }
+    const r = feedKey(i)
+    local.set(r, i)
+    shown.push(r)
+    const q = refOf(i.quote)
+    if (q !== null) need.push(q)
+  }
+  return { local, shown, need, authors }
+}
+
+export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onQuote, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
+  const social = useSocial({ ownKey, onToast })
+  const { ingest } = social
   const [feed, setFeed] = useState({
     items: [],
     cursor: null,
@@ -83,10 +617,11 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       learnPage(page.items)
       // Leave growth that arrived during this read available for the next pill.
       ackFresh(freshKeys(seen).filter((key) => key !== 'own' && seen.fresh[key] === signalsRef.current.fresh[key]))
+      ingest({ ...pageNeeds(page.items), reset: true })
     } catch (err) {
       if (mine === seqRef.current) commit({ loading: false, refreshing: false, loadError: errorText(err) })
     }
-  }, [request, ackFresh, commit, learnPage])
+  }, [request, ackFresh, commit, learnPage, ingest])
 
   const loadOlder = useCallback(async () => {
     const current = feedRef.current
@@ -105,10 +640,11 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         loadingMore: false
       })
       learnPage(page.items)
+      ingest(pageNeeds(page.items))
     } catch (err) {
       if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err) })
     }
-  }, [active, request, commit, learnPage])
+  }, [active, request, commit, learnPage, ingest])
 
   // Own posts published on another device: A Rua compares the own diary's
   // synced length (signals.ownLength, never acknowledged, unlike fresh.own,
@@ -193,51 +729,90 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   }
 
   // Reply names re-render when the cache changes; relative dates on each tick.
-  const extra = useMemo(() => ({ profileOf: names.profileOf, now }), [names.profileOf, now])
-  // Until the own key is known, no post can safely offer a report action.
-  const reportable = (item) => typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
-  const renderItem = ({ item }) => (
-    <PostRow
-      author={item.author}
-      name={item.name}
-      username={item.username}
-      at={item.at}
-      text={item.text}
-      media={item.media || null}
-      replyToName={item.replyTo ? replyNameOf(names.profileOf(item.replyTo.author)) : null}
-      now={now}
-      onReply={typeof onReply === 'function'
-        ? () => onReply({ ref: feedKey(item), name: item.name, username: item.username, text: item.text })
-        : undefined}
-      onReport={reportable(item)
-        ? () => onReport({ author: item.author, name: item.name, username: item.username, seq: item.seq, text: item.text })
-        : undefined}
-    />
-  )
+  // Originals, counts and the own state re-render the rows too.
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social }), [names.profileOf, now, social.social])
+  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  // A repost row is the ORIGINAL post (every action targets it), under the
+  // reposter's line; its own text (null) is never shown.
+  const renderItem = ({ item }) => {
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      const repostedBy = { author: item.author, name: item.name, username: item.username }
+      const post = social.original(ref)
+      if (!post) {
+        return (
+          <RepostPlaceholder
+            repostedBy={repostedBy}
+            missing={post === null}
+            transient={social.transient(ref)}
+            onRetry={() => social.retry(ref)}
+            onOpenReposter={typeof onOpenMember === 'function' ? () => onOpenMember(item.author, { name: item.name, username: item.username }) : undefined}
+          />
+        )
+      }
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers })} />
+    }
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true })} />
+  }
 
   return (
-    <RefreshableList
-      listRef={listRef}
-      data={items}
-      keyExtractor={feedKey}
-      renderItem={renderItem}
-      extraData={extra}
-      ListHeaderComponent={items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={refreshing} /> : null}
-      ListEmptyComponent={empty}
-      ListFooterComponent={footer}
-      contentContainerStyle={{ paddingBottom: bottomPad }}
-      onRefresh={loadNewest}
-      refreshing={refreshing}
-      onLoadMore={active && !moreError ? loadOlder : undefined}
-      loadingMore={loadingMore}
-      loadMoreError={!!moreError}
-      atEnd={atEnd}
-      scrollToTopSignal={scrollToTop}
-      newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null, onPress: showNewItems }}
-    />
+    <View style={styles.flex}>
+      <RefreshableList
+        listRef={listRef}
+        data={items}
+        keyExtractor={feedKey}
+        renderItem={renderItem}
+        extraData={extra}
+        ListHeaderComponent={(
+          <View>
+            {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={refreshing} /> : null}
+            <CountsNote social={social} />
+          </View>
+        )}
+        ListEmptyComponent={empty}
+        ListFooterComponent={footer}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={loadNewest}
+        refreshing={refreshing}
+        onLoadMore={active && !moreError ? loadOlder : undefined}
+        loadingMore={loadingMore}
+        loadMoreError={!!moreError}
+        atEnd={atEnd}
+        scrollToTopSignal={scrollToTop}
+        newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null, onPress: showNewItems }}
+      />
+      <SocialToast text={social.toast} />
+    </View>
   )
 }
 
 const styles = StyleSheet.create({
-  footer: { padding: 16, gap: 8 }
+  flex: { flex: 1 },
+  footer: { padding: 16, gap: 8 },
+  placeholder: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    backgroundColor: colors.bg
+  },
+  reposted: { ...type.replyMark, color: colors.soft, fontWeight: '600' },
+  skeleton: { height: 14, width: '60%', borderRadius: 7, backgroundColor: colors.skeleton },
+  toast: {
+    position: 'absolute',
+    top: 12,
+    left: 16,
+    right: 16,
+    alignItems: 'center'
+  },
+  toastText: {
+    ...type.counter,
+    color: '#ffffff',
+    backgroundColor: colors.ink,
+    borderRadius: 18,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    overflow: 'hidden'
+  }
 })

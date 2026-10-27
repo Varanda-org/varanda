@@ -1,8 +1,15 @@
-// Espiadinha: up to three posts of each diary the person does not follow, one
-// round at a time, newest first. No algorithm, no counts. Hosted web only: on
-// native and varanda-serve the tab explains that and never calls peek.read.
-// The rows live in memory only; nothing is persisted. Names come from the item
-// (PostRow), never from the names cache or from a key.
+// Espiadinha: up to three publications (posts, replies, quotes, reposts) of
+// each diary the person does not follow, their own included, one round at a
+// time, newest first.
+// No algorithm. Hosted web only: on native and varanda-serve the tab explains
+// that and never calls peek.read. The rows live in memory only; nothing is
+// persisted (their photos are fetched no-store: these authors are not
+// followed). Names come from the item (PostRow) or from a verified post the
+// node read, never from the names cache or from a key. As in A Rua (its
+// useSocial), a row opens its conversation and its author's profile, shows
+// the counts and offers curtir, republicar and citar; a reply names its
+// parent, a quote shows the quoted post and a repost the original, each
+// read and verified by the node.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -14,6 +21,7 @@ import {
   isLastPeekPage, isWebOnlyError, mergePage, peekKey, peekNotice, roundLabel, roundStarts, withoutAuthor
 } from '../peek'
 import { whoOf } from '../who'
+import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -23,9 +31,38 @@ import { type } from '../ui/theme'
 const MEMORY_TEXT = 'As publicações ficam só na memória do navegador enquanto a aba está aberta.'
 
 const noop = () => {}
+// Never the names cache: undefined lets a reply mark wait for its parent.
+const noProfile = () => undefined
 
-export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey, scrollToTop, onFollowsChanged, onToast }) {
+// useSocial's ingest arguments for a page: the posts are originals at hand
+// (a quote or a reply of a post on the list resolves locally); the posts
+// they quote or answer and the originals of reposts are resolved; no author
+// is followed.
+function pageNeeds (items) {
+  const local = new Map()
+  const shown = []
+  const need = []
+  for (const item of items) {
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      if (ref !== null) {
+        shown.push(ref)
+        need.push(ref)
+      }
+      continue
+    }
+    const ref = peekKey(item)
+    local.set(ref, item)
+    shown.push(ref)
+    for (const r of [refOf(item.quote), refOf(item.replyTo)]) if (r !== null) need.push(r)
+  }
+  return { local, shown, need, authors: [] }
+}
+
+export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, ownKey, scrollToTop, onFollowsChanged, onToast }) {
   const node = useNode()
+  const social = useSocial({ ownKey, onToast })
+  const { ingest } = social
   const now = useNow(60000)
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true && node.passkey !== null
@@ -81,6 +118,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
     try {
       const page = await peek({ limit: PEEK_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
+      ingest({ ...pageNeeds(page.items), reset: true })
       commit({
         items: mergePage([], page.items).items,
         next: page.next,
@@ -96,7 +134,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
       if (isWebOnlyError(err)) commit({ unsupported: true, loading: false, refreshing: false })
       else commit({ loading: false, refreshing: false, loadError: errorText(err) })
     }
-  }, [hosted, peek, commit])
+  }, [hosted, peek, commit, ingest])
 
   const loadMore = useCallback(async () => {
     const current = stateRef.current
@@ -113,6 +151,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
       // Later pages may fetch diaries the first page did not reach: keep the
       // newest counts and never drop an incomplete warning.
       const meta = stateRef.current.meta
+      ingest(pageNeeds(page.items))
       commit({
         items: mergePage(stateRef.current.items, page.items).items,
         next: page.next,
@@ -123,7 +162,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
     } catch (err) {
       if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err) })
     }
-  }, [active, hosted, peek, commit])
+  }, [active, hosted, peek, commit, ingest])
 
   // Reload rules as A Rua: first show, a reselect after 60 s, a refresh bump.
   const previous = useRef({ active: false, refresh, scrollToTop })
@@ -182,6 +221,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
       </Pressable>
       {rule ? <Soft>{PEEK_RULE_TEXT}</Soft> : null}
       <Soft>{MEMORY_TEXT}</Soft>
+      <CountsNote social={social} />
     </View>
   )
 
@@ -225,29 +265,51 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
+  // The own diary shows here too; its rows offer no 'seguir'.
+  const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
+  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const openReposter = (item) => typeof onOpenMember === 'function'
+    ? () => onOpenMember(item.author, { name: item.name, username: item.username })
+    : undefined
+  // A repost row is the ORIGINAL post (every action targets it) under the
+  // reposter's line, as in A Rua; 'denunciar' reports the original. No
+  // 'seguir' there: under the original's name it would read as following
+  // its author, not the reposter.
+  const rowOf = (item) => {
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      const repostedBy = { author: item.author, name: item.name, username: item.username }
+      const post = social.original(ref)
+      if (!post) {
+        return (
+          <RepostPlaceholder
+            repostedBy={repostedBy}
+            missing={post === null}
+            transient={social.transient(ref)}
+            onRetry={() => social.retry(ref)}
+            onOpenReposter={openReposter(item)}
+          />
+        )
+      }
+      const row = socialRowProps({ post, ref, repostedBy, social, profileOf: noProfile, now, ownKey, h: handlers })
+      return <PostRow {...row} onReport={reportable(post) ? row.onReport : undefined} />
+    }
+    const row = socialRowProps({ post: item, ref: peekKey(item), social, profileOf: noProfile, now, ownKey, h: handlers })
+    return (
+      <PostRow
+        {...row}
+        onFollow={isOwn(item) ? undefined : () => follow(item.author, item.name, item.username)}
+        followPending={following.has(item.author)}
+        onReport={reportable(item) ? row.onReport : undefined}
+      />
+    )
+  }
   const renderItem = ({ item, index }) => {
     const label = starts.has(index) && index > 0 ? roundLabel(item.round) : null
     return (
       <View>
         {label ? <View style={styles.separator}><Soft>{label}</Soft></View> : null}
-        <PostRow
-          author={item.author}
-          name={item.name}
-          username={item.username}
-          at={item.at}
-          text={item.text}
-          media={item.media || null}
-          replyToName={null}
-          now={now}
-          onReply={typeof onReply === 'function'
-            ? () => onReply({ ref: item.author + ':' + item.seq, name: item.name, username: item.username, text: item.text })
-            : undefined}
-          onFollow={() => follow(item.author, item.name, item.username)}
-          followPending={following.has(item.author)}
-          onReport={reportable(item)
-            ? () => onReport({ author: item.author, name: item.name, username: item.username, seq: item.seq, text: item.text })
-            : undefined}
-        />
+        {rowOf(item)}
       </View>
     )
   }
@@ -258,7 +320,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, ownKey
       data={shownItems}
       keyExtractor={peekKey}
       renderItem={renderItem}
-      extraData={{ now, following, starts }}
+      extraData={{ now, following, starts, social: social.social }}
       ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : (notice === null ? header : null)}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}

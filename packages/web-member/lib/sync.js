@@ -112,12 +112,30 @@
 //                                      length = the own contiguous length folded
 // The run's own follow states are not changed live: the session restarts
 // the run on follows-changed.
+//
+// On-demand reads (diary.peek, docs/rpc.md): the session hands in a `peeker`
+// and this run publishes its peek function on it (peeker.set) once the
+// seeder link verified, withdrawing it (peeker.clear) when the link closes
+// or the run ends. A peek is served by the run itself, OUTSIDE the session's
+// serial chain: it never opens a storage core, never preempts or restarts
+// anything, writes nothing and enters no index. The own diary and the open
+// follow cores are read in place (Hypercore 10 refuses a second replication
+// channel for a key already on the stream); any other key gets an in-memory
+// core on the verified link, gated exactly like a quarantine fetch (block 0
+// member certificate for the trusted association, revoked issuers, signed
+// length and byteLength within the quota) and closed when the peek ends.
+// Every block read is verified by Hypercore against the signed tree. Trust:
+// the result is only as fresh as the seeder's claim; a blocked, ungated or
+// unknown key answers 'diário indisponível' (never why); a peek the run
+// cannot serve any more (ending, link gone) answers 'semeador indisponível'
+// and the session retries once on the next verified run. Reads of a peeked
+// core are shared between concurrent peeks of the same key on the link.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
-const { certForKey, seederCertForKey } = require('@varanda/core/lib/cert')
+const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
@@ -139,6 +157,9 @@ const MEDIA_POLL_MS = 1000
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REPLICA_INDEX = 'replicas'
+// diary.peek outcomes (the session maps both to NOT_FOUND).
+const SEEDER_UNAVAILABLE = 'semeador indisponível'
+const DIARY_UNAVAILABLE = 'diário indisponível'
 
 function noop () {}
 
@@ -222,9 +243,10 @@ function watchFork (core, onFork) {
 }
 
 // storage: a ./node-storage.js storage. createSocket(url) -> a WebSocket-like
-// object (the browser's WebSocket, or the `ws` client in Node). The limits
-// and timings after `signal` are injectable for tests; their defaults are
-// the protocol constants.
+// object (the browser's WebSocket, or the `ws` client in Node). peeker
+// (optional): { set (fn), clear (fn) } that receives this run's diary.peek
+// function (see the header). The limits and timings after `signal` are
+// injectable for tests; their defaults are the protocol constants.
 async function runSync ({
   storage,
   associationKey = null,
@@ -234,6 +256,7 @@ async function runSync ({
   timeoutMs = 30000,
   log = noop,
   onEvent = noop,
+  peeker = null,
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
@@ -391,7 +414,9 @@ async function runSync ({
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
       inventoryTimedOut: false, // inventoryComplete came from the timeout
-      quarantine: new Set(), // quarantine cores replicating on this link
+      quarantine: new Set(), // quarantine and peek cores replicating on this link
+      peeks: new Map(), // key -> the shared peek core of this link ({ core, ready, refs })
+      peek: null, // this link's diary.peek function, published on the peeker
       lastAdv: new Map(), // key -> last length processed (own + follows only)
       emittedHave: new Map(), // key -> last length reported as a 'have' event
       timer: null,
@@ -472,7 +497,8 @@ async function runSync ({
     l.timer = null
     // A link that closes unverified never adopts what it sent.
     l.failVerified(new Error('link fechado'))
-    // Quarantine fetches on this link end now (their get() rejects).
+    withdrawPeek(l)
+    // Quarantine fetches and peeks on this link end now (their get() rejects).
     for (const q of l.quarantine) q.close().catch(noop)
     l.quarantine.clear()
     if (link !== l) return
@@ -505,6 +531,17 @@ async function runSync ({
     // have goes out again so the seeder sends anything newer (C2).
     l.passVerified()
     if (l.blocklist !== null) l.blocklist.announce()
+    // On-demand reads are served from this link from now on.
+    if (peeker !== null) {
+      l.peek = (key, seqs, profileSeq, usernameSeq, deadline) => peek(l, key, seqs, profileSeq, usernameSeq, deadline)
+      peeker.set(l.peek)
+    }
+  }
+
+  function withdrawPeek (l) {
+    if (peeker === null || l.peek === null) return
+    peeker.clear(l.peek)
+    l.peek = null
   }
 
   // The own diary is announced only with a valid certificate and when the
@@ -756,6 +793,7 @@ async function runSync ({
   function finish (outcome) {
     if (ending) return
     ending = true
+    if (link !== null) withdrawPeek(link)
     discardRegate()
     ;(async () => {
       while (settling.size > 0) await Promise.allSettled([...settling])
@@ -985,6 +1023,7 @@ async function runSync ({
     entry.fetchedAdv = entry.advSeq
     const p = fetchGate(entry, l, fetchTimeout, deadlineBound).finally(() => {
       entry.fetching = false
+      entry.fetch = null
       fetching--
       inflight.delete(p)
       // A slot freed: start the next pending fetch, then re-check the goals.
@@ -994,28 +1033,76 @@ async function runSync ({
       }
       evaluate()
     })
+    entry.fetch = p // a peek of this key waits for the gate to settle
     inflight.add(p)
   }
 
-  // Block 0 through a quarantine core in memory on the link's stream.
+  // Block 0 through a quarantine core in memory on the link's stream (shared
+  // with any peek of the key in flight, acquireLinkCore).
   // -> { raw, length, byteLength } (raw null on timeout or a closed link).
   async function quarantineGet0 (l, key, fetchTimeout) {
-    const q = new Hypercore(memoryStorage(), b4a.from(key, 'hex'), { valueEncoding: 'binary' })
-    l.quarantine.add(q)
+    const none = { raw: null, length: 0, byteLength: 0 }
+    let held
     try {
-      await q.ready()
-      if (l.noise.destroyed) return { raw: null, length: 0, byteLength: 0 }
-      q.replicate(l.noise)
+      held = await acquireLinkCore(l, key)
+    } catch {
+      return none
+    }
+    const q = held.core
+    try {
+      if (l.noise.destroyed) return none
       let raw = null
       try {
         raw = await q.get(0, { raw: true, timeout: fetchTimeout })
       } catch {}
-      if (raw === null) return { raw: null, length: 0, byteLength: 0 }
+      if (raw === null) return none
       return { raw, length: q.length, byteLength: q.byteLength }
     } finally {
-      l.quarantine.delete(q)
-      await q.close().catch(noop)
+      held.release()
+      // A peek still sharing the core keeps it on the link: the replica
+      // (same discovery key, same stream) opens only once it is closed.
+      await held.closed
     }
+  }
+
+  // The in-memory core for `key` on link `l`, one per key per link, shared
+  // by the quarantine fetch and the peeks in flight for it (Hypercore 10
+  // refuses a second replication channel for a discovery key already on the
+  // stream) and closed when the last holder releases it; held in
+  // l.quarantine so a link close ends its reads. -> { core, release, closed }
+  // (closed: resolves once the core is closed).
+  function acquireLinkCore (l, key) {
+    let shared = l.peeks.get(key)
+    if (shared === undefined) {
+      const q = new Hypercore(memoryStorage(), b4a.from(key, 'hex'), { valueEncoding: 'binary' })
+      l.quarantine.add(q)
+      let onClosed
+      shared = {
+        core: q,
+        refs: 0,
+        ready: q.ready().then(() => {
+          if (l.noise.destroyed) throw unavailable()
+          q.replicate(l.noise)
+        }),
+        closed: new Promise((resolve) => { onClosed = resolve })
+      }
+      shared.onClosed = onClosed
+      l.peeks.set(key, shared)
+    }
+    shared.refs++
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      if (--shared.refs > 0) return
+      if (l.peeks.get(key) === shared) l.peeks.delete(key)
+      l.quarantine.delete(shared.core)
+      shared.core.close().catch(noop).then(shared.onClosed)
+    }
+    return shared.ready.then(() => ({ core: shared.core, release, closed: shared.closed }), (err) => {
+      release()
+      throw err
+    })
   }
 
   async function fetchGate (entry, l, fetchTimeout, deadlineBound) {
@@ -1071,6 +1158,122 @@ async function runSync ({
     }
     enterRegate(entry, core)
     evaluate()
+  }
+
+  // ---- on-demand reads: diary.peek (see the header) ----
+
+  function unavailable () {
+    return new Error(SEEDER_UNAVAILABLE)
+  }
+
+  function hidden () {
+    return new Error(DIARY_UNAVAILABLE)
+  }
+
+  // Hypercore treats a timeout of 0 as none: never less than 1 ms.
+  function budget (deadline) {
+    return Math.max(1, deadline - Date.now())
+  }
+
+  // -> the peek result (docs/rpc.md diary.peek). key: lowercase hex64;
+  // seqs: the requested seqs (each lands in exactly one of entries, invalid
+  // or missing); profileSeq / usernameSeq: the seeder's hints (null = none),
+  // read only for `profile` / `username`; deadline: the session's.
+  async function peek (l, key, seqs, profileSeq, usernameSeq, deadline) {
+    if (ending || link !== l || seederLink() !== l) throw unavailable()
+    if (isBlockedKey(key)) throw hidden()
+    let core
+    let release = noop
+    if (key === ownHex) {
+      core = diary
+    } else {
+      const entry = follows.get(key)
+      // A follow whose quarantine gate is in flight: the gate settles first
+      // (its core is never doubled on the link), then its replica is read.
+      if (entry && entry.fetch) await entry.fetch.catch(noop)
+      if (ending || link !== l) throw unavailable()
+      if (entry && entry.core && (entry.state === 'active' || entry.state === 'regate')) core = entry.core
+      else if (entry && entry.state !== 'pending') throw hidden()
+      else ({ core, release } = await acquireLinkCore(l, key))
+    }
+    try {
+      const raw0 = key === ownHex ? null : await gatePeek(l, core, key, deadline)
+      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline)
+      // Moderation and integrity right before answering: a snapshot adopted
+      // or a fork seen while the blocks downloaded hides the diary.
+      if (isBlockedKey(key)) throw hidden()
+      if (raw0 !== null && (core.fork !== 0 || gateVerdict(raw0, key, association, gateOpts()) !== null)) throw hidden()
+      return result
+    } finally {
+      release()
+    }
+  }
+
+  // The quarantine gate on a peeked core: block 0 within the deadline, the
+  // certificate verdict (revoked issuers included), the signed quota, no
+  // fork, the blocklist again. Any failure hides the diary. -> raw block 0.
+  async function gatePeek (l, core, key, deadline) {
+    let raw = null
+    try {
+      raw = await core.get(0, { raw: true, timeout: budget(deadline) })
+    } catch {}
+    if (ending || link !== l) throw unavailable()
+    if (raw === null || isBlockedKey(key) || core.fork !== 0) throw hidden()
+    if (gateVerdict(raw, key, association, gateOpts()) !== null || overQuota(core)) throw hidden()
+    return raw
+  }
+
+  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline) {
+    const wanted = new Set(seqs)
+    if (profileSeq !== null) wanted.add(profileSeq)
+    if (usernameSeq !== null) wanted.add(usernameSeq)
+    // A replica still catching up holds less than the verified seeder
+    // advertises: blocks up to that length are asked for (and verified
+    // against the signed tree on arrival); beyond it nothing is asked.
+    const limit = Math.max(core.length, theirs(key) || 0)
+    const blocks = new Map() // seq -> raw bytes, or null when absent
+    await Promise.all([...wanted].map(async (seq) => {
+      let raw = null
+      if (seq < limit) {
+        try {
+          raw = await core.get(seq, { raw: true, timeout: budget(deadline) })
+        } catch {
+          if (ending || link !== l) throw unavailable()
+          // A core closed under the read (the run dropped the follow): hidden.
+          if (core.closing) throw hidden()
+        }
+      }
+      blocks.set(seq, raw)
+    }))
+    const decoded = (seq) => {
+      const raw = blocks.get(seq)
+      return raw === null || raw === undefined ? null : validRecordCopy(decodeBlock(raw), seq)
+    }
+    const entries = []
+    const invalid = []
+    const missing = []
+    for (const seq of seqs) {
+      if (blocks.get(seq) === null) {
+        missing.push(seq)
+        continue
+      }
+      const record = decoded(seq)
+      if (record === null) invalid.push(seq)
+      else entries.push({ seq, record })
+    }
+    const profile = profileSeq === null ? null : decoded(profileSeq)
+    const username = usernameSeq === null ? null : decoded(usernameSeq)
+    return {
+      key,
+      length: core.length,
+      entries,
+      invalid,
+      missing,
+      profile: profile !== null && profile.type === 'profile' ? { name: profile.name, bio: profile.bio } : null,
+      username: username !== null && username.type === 'username' && verifyUsernameRecord(username, key, association, gateOpts()).ok
+        ? username.username
+        : null
+    }
   }
 
   // ---- moderation: the blocklist snapshot ----
@@ -1495,6 +1698,7 @@ async function runSync ({
         stopQuota: null,
         retryTimer: null,
         fetching: false,
+        fetch: null, // the quarantine fetch in flight (peeks wait for it)
         gating: false,
         advSeq: 0,
         fetchedAdv: 0,
@@ -1570,6 +1774,7 @@ async function runSync ({
     const l = link
     link = null
     if (l !== null) {
+      withdrawPeek(l)
       for (const q of l.quarantine) await q.close().catch(noop)
       l.noise.destroy()
     }
@@ -1593,4 +1798,4 @@ async function runSync ({
   }
 }
 
-module.exports = { runSync, gateVerdict, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES }
+module.exports = { runSync, gateVerdict, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

@@ -225,13 +225,23 @@ function sameTarget (record, item) {
   return (replyTo.author.toLowerCase() + ':' + replyTo.seq) === item.to.toLowerCase()
 }
 
-// A candidate: a post identical to the item, above the claim floor. It may
-// still be an older identical post replicated from another device by the
-// write gate's catch-up, so it is not yet proof of our append.
+// A quote is a post record carrying a non-null `quote` key. The outbox never
+// queues quotes, so a quote record is never the append of a queued post or
+// reply, even with identical text (Publicar's reconciliation uses the same
+// rule).
+export function isQuoteRecord (record) {
+  return record !== null && typeof record === 'object' &&
+    Object.prototype.hasOwnProperty.call(record, 'quote') && record.quote !== null && record.quote !== undefined
+}
+
+// A candidate: a post identical to the item (never a quote), above the claim
+// floor. It may still be an older identical post replicated from another
+// device by the write gate's catch-up, so it is not yet proof of our append.
 function isCandidate (entry, item) {
   if (entry === null || typeof entry !== 'object') return false
   const record = entry.record
   if (record === null || typeof record !== 'object') return false
+  if (isQuoteRecord(record)) return false
   return record.type === 'post' &&
     record.text === item.text &&
     sameTarget(record, item) &&

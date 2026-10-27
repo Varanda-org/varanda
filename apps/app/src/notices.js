@@ -46,7 +46,7 @@ function isHex32 (s) {
 }
 
 // The stored id of a notice: its `seen` token, 32 lowercase hex the node
-// keys with the identity secret (docs/rpc.md 5.23), so nothing derivable
+// keys with the identity secret (docs/rpc.md 5.28), so nothing derivable
 // from a follower key is ever stored. null when the row has none.
 function seenOf (item) {
   return item && isHex32(item.seen) ? item.seen : null

@@ -49,7 +49,7 @@
 // before the link is destroyed.
 //
 // Memory: between pages a diary keeps only retainRecords(entries) (block 0,
-// profile and username records, top-level posts) plus the set of fetched
+// profile and username records, posts and reposts) plus the set of fetched
 // seqs, within PEEK_SNAPSHOT_MAX_BYTES of retained JSON per snapshot; raw
 // buffers and the memory cores (64 KiB pages) are released after every
 // window. The snapshot is replaced on every after-less read, dropped on TTL,
@@ -143,13 +143,11 @@ async function pool (items, n, fn) {
   await Promise.all(workers)
 }
 
-// ownKey: () => Promise<lowercase hex64> (the session's requireOwnKey).
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel).
-function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, log = noop, limits = {} } = {}) {
+function createPeeker ({ storage, association, seederUrl, createSocket, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
-  if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
   const L = {
     connectTimeoutMs: PEEK_CONNECT_TIMEOUT_MS,
     pageTimeoutMs: PEEK_PAGE_TIMEOUT_MS,
@@ -290,10 +288,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     }
   }
 
-  async function buildSnapshot (run, { own, follows, blocked }) {
+  async function buildSnapshot (run, { follows, blocked }) {
     const link = await openLink(run)
     checkAborted(run)
-    const candidates = peekCandidates({ inventory: link.peer.remoteHave, ownKey: own, follows, blocked })
+    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
     const order = shuffle(candidates.map(newDiary))
     return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0 }
   }
@@ -523,7 +521,6 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   async function readWith (run, { limit, cursor, first }) {
     const deadline = Date.now() + L.pageTimeoutMs
     // Preparation: kv reads only, no core is opened.
-    const own = await ownKey()
     const follows = new Set()
     for (const raw of await store.readFollows(storage)) {
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
@@ -533,7 +530,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     checkAborted(run)
     if (first || snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs) {
       snapshot = null
-      const built = await buildSnapshot(run, { own, follows, blocked: mod.blocked })
+      const built = await buildSnapshot(run, { follows, blocked: mod.blocked })
       checkAborted(run)
       snapshot = built
     }
@@ -596,7 +593,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // Skipped = left out by a problem the person should know about (block 0
     // or certificate, blocklist, revoked issuer, unavailable, fork, quota,
     // oversized block) or a scan that ended before finding any post. A diary
-    // with nothing to show (only a profile, only replies, too short) and one
+    // with nothing to show (only a profile or likes, too short) and one
     // followed after this snapshot was built are not problems.
     const skipped = snap.order.filter((d) =>
       (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short') ||
