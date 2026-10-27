@@ -96,6 +96,15 @@ export function PostRow ({
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = fn(onOpenReposter)
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
+  // Composed label for the post body element: author, reply-to, text, date.
+  // The avatar link already provides profile access, so name here is context.
+  const bodyParts = [
+    title,
+    replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
+    hasText ? displayText(text, { multiline: true }) : null,
+    time
+  ].filter(Boolean)
+  const bodyLabel = bodyParts.join('. ')
   return (
     <View style={styles.row}>
       {reposter
@@ -123,67 +132,78 @@ export function PostRow ({
         >
           <Avatar name={who.avatarName} publicKey={author} size={44} />
         </Pressable>
-        {/* The empty area of the body opens the conversation too (photo-only
-            posts have no text); the inner links, the photos and the buttons
-            keep their own taps. Not a focus stop: the time is the
-            accessible 'abrir conversa' link. */}
-        <Pressable style={styles.body} onPress={open} disabled={!open} accessible={false} focusable={false}>
-          <View style={styles.head}>
-            <Pressable
-              accessibilityRole='link'
-              accessibilityLabel={'ver o perfil de ' + title}
-              disabled={!openAuthor}
-              onPress={openAuthor}
-              style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
-            >
-              <Text style={styles.name} numberOfLines={1}>{title}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole={open ? 'link' : 'text'}
-              accessibilityLabel={open ? 'abrir conversa' : undefined}
-              disabled={!open}
-              onPress={open}
-              hitSlop={4}
-              style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
-            >
-              <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
-            </Pressable>
-          </View>
-          {replyToName
-            ? (
-              <Pressable
-                accessibilityRole={openParent ? 'link' : 'text'}
-                disabled={!openParent}
-                onPress={openParent}
-                hitSlop={4}
-                style={({ pressed }) => pressed && openParent && styles.pressed}
-              >
-                <Text style={styles.reply}>
-                  respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
-                </Text>
-              </Pressable>
-              )
-            : null}
-          {hasText
-            ? (
-              <Pressable
-                accessibilityRole={open ? 'link' : 'text'}
-                accessibilityHint={open ? 'abre a conversa' : undefined}
-                disabled={!open}
-                onPress={open}
-              >
-                <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
-              </Pressable>
-              )
-            : null}
-          {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
-          {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+        {/* Body: a single accessible element (author, text, date) so screen
+            readers read in the order: avatar → post content → actions.
+            All visual children are hidden from accessibility; sighted users
+            interact with them directly (name, reply-to and text tap targets). */}
+        <View style={styles.body}>
+          <Pressable
+            onPress={open}
+            disabled={!open}
+            accessible
+            accessibilityRole={open ? 'link' : 'text'}
+            accessibilityLabel={bodyLabel}
+            accessibilityHint={open ? 'abre a conversa' : undefined}
+          >
+            <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+              <View style={styles.head}>
+                <Pressable
+                  accessibilityRole='link'
+                  accessibilityLabel={'ver o perfil de ' + title}
+                  disabled={!openAuthor}
+                  onPress={openAuthor}
+                  style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
+                >
+                  <Text style={styles.name} numberOfLines={1}>{title}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole={open ? 'link' : 'text'}
+                  accessibilityLabel={open ? 'abrir conversa' : undefined}
+                  disabled={!open}
+                  onPress={open}
+                  hitSlop={4}
+                  style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                >
+                  <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
+                </Pressable>
+              </View>
+              {replyToName
+                ? (
+                  <Pressable
+                    accessibilityRole={openParent ? 'link' : 'text'}
+                    disabled={!openParent}
+                    onPress={openParent}
+                    hitSlop={4}
+                    style={({ pressed }) => pressed && openParent && styles.pressed}
+                  >
+                    <Text style={styles.reply}>
+                      respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
+                    </Text>
+                  </Pressable>
+                  )
+                : null}
+              {hasText
+                ? (
+                  <Pressable
+                    accessibilityRole={open ? 'link' : 'text'}
+                    accessibilityHint={open ? 'abre a conversa' : undefined}
+                    disabled={!open}
+                    onPress={open}
+                  >
+                    <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+                  </Pressable>
+                  )
+                : null}
+              {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
+              {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+            </View>
+          </Pressable>
           {bar
             ? (
               <View style={styles.bar}>
                 {fn(onReply)
                   ? (
-                    <Action label='responder' onPress={onReply} count={countOf(counts, 'replies')}>
+                    <Action label={'responder a ' + title} onPress={onReply} count={countOf(counts, 'replies')}>
                       <Icon name='resposta' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -230,7 +250,7 @@ export function PostRow ({
                   : null}
                 {fn(onReport)
                   ? (
-                    <Action label='denunciar' onPress={onReport}>
+                    <Action label={'denunciar publicação de ' + title} onPress={onReport}>
                       <Icon name='bandeira' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -238,7 +258,7 @@ export function PostRow ({
               </View>
               )
             : null}
-        </Pressable>
+        </View>
       </View>
     </View>
   )
