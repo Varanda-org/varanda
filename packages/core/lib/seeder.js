@@ -44,7 +44,6 @@ const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { Duplex } = require('streamx')
 const {
   normalizeHex,
   certForKey,
@@ -99,6 +98,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { createEngagementIndex } = require('./engagement-index')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
+const { FrameGuard, MAX_HANDSHAKE_FRAME, MAX_HANDSHAKE_BYTES, MAX_EXTERNAL_FRAME } = require('./frame-guard')
 
 const GATE_TIMEOUT_MS = 15000
 const REDISCOVER_MS = 10000
@@ -122,160 +122,16 @@ const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
 const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
 
-// Frame guard for external streams (acceptStream). @hyperswarm/secret-stream
-// 6.9.2 frames the raw bytes as a 3-byte little-endian length followed by the
-// body and allocates every declared length (up to 16 MiB) as soon as the
-// first body byte arrives, BEFORE the Noise handshake completes: an anonymous
-// client sending `ff ff ff 00` costs the seeder ~16 MiB per connection.
-// FrameGuard sits between the raw stream and the secret stream and parses
-// the framing of the incoming bytes before forwarding them.
-// Limits, measured on the installed libraries (secret-stream 6.9.2, Noise XX,
-// hypercore 11.39.0, corestore 7.15.0, protomux 3) with a member diary of
-// near-16 KiB blocks (16 265 bytes) and a hello carrying the maximum
-// inventory (4096 keys) replicating through acceptStream over loopback TCP:
-// - the responder receives exactly HANDSHAKE_FRAMES handshake frames, msg1
-//   (`e`) of 32 bytes and msg3 (`s, se`) of 64 bytes, 102 bytes with their
-//   headers. Each must declare at most MAX_HANDSHAKE_FRAME = 1024 bytes
-//   (16 x msg3), so everything up to and including the second frame is at
-//   most MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES x (3 + MAX_HANDSHAKE_FRAME)
-//   = 2054 bytes, a derived bound (no separate budget is kept).
-// - every frame after the second one is a post-handshake frame and must
-//   declare at most MAX_EXTERNAL_FRAME, whether or not the secret stream has
-//   confirmed the handshake yet. Anyone completes a Noise XX handshake with
-//   an arbitrary key pair for free, so the bytes after msg3 are exposed to
-//   the post-handshake bound in any case; judging them by a stricter
-//   pre-'connect' rule buys no security and refuses valid members: a
-//   coalescing transport delivers a member's first post-handshake writes
-//   (its stream-id header and the channel opens of every core it
-//   replicates, 500 opens are ~43 KiB) in the same chunk as msg3.
-//   The largest frame seen after 'connect' was 16 477 bytes (one block and
-//   its proof; 40 blocks, 61 frames), but the code allows far more: hypercore
-//   corks the muxer while it answers its queue of block requests
-//   (replicator.js _handleRequests) and protomux flushes a corked batch only
-//   once it reaches MAX_BATCH = 8 MiB, so a member answering up to 512
-//   in-flight requests for near-16 KiB blocks may legitimately send a frame
-//   of up to MAX_BATCH plus one message. MAX_EXTERNAL_FRAME is therefore
-//   MAX_BATCH plus a 64 KiB margin for that last message and its encoding;
-//   it is a code bound, not a measured one, because a tighter value would
-//   break legitimate replication. Residual risk: a peer that completed the
-//   handshake (not necessarily admitted) can still make the seeder allocate
-//   up to MAX_EXTERNAL_FRAME per frame.
-const HANDSHAKE_FRAMES = 2 // Noise XX responder: receives e, then s+se
-const MAX_HANDSHAKE_FRAME = 1024
-const MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES * (3 + MAX_HANDSHAKE_FRAME)
-const MAX_EXTERNAL_FRAME = 8 * 1024 * 1024 + 64 * 1024
-const HEADER_MUL = [1, 256, 65536]
+// Frame guard for external streams (acceptStream): see lib/frame-guard.js
+// for the limits and how they were measured. The seeder is the Noise XX
+// responder, so the guard keeps its responder defaults (2 handshake frames of
+// at most MAX_HANDSHAKE_FRAME, then frames of at most MAX_EXTERNAL_FRAME).
+
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
 const EXTERNAL_IDLE_MS = 30000
 
 function noop () {}
-
-// A streamx Duplex proxy over a raw duplex: writes pass through unchanged,
-// incoming bytes are parsed with the secret-stream framing before they are
-// pushed, and close/destroy/error propagate both ways. The first
-// HANDSHAKE_FRAMES frames may declare at most MAX_HANDSHAKE_FRAME bytes
-// each, every later frame at most MAX_EXTERNAL_FRAME; nothing is held back
-// (the secret stream parses the same framing and handles post-handshake
-// bytes that arrive in the chunk of msg3 exactly as it does over TCP). Over
-// a limit the guard calls onLimit, destroys itself and the raw stream, and
-// the offending chunk is never forwarded, not even its frames before the
-// offending one.
-class FrameGuard extends Duplex {
-  constructor (raw, { onLimit }) {
-    super()
-    this._raw = raw
-    this._onLimit = onLimit
-    this._frames = 0 // complete incoming frames parsed so far
-    this._header = 0 // header bytes of the current frame read so far (0..2)
-    this._len = 0 // declared length being assembled from the header
-    this._remaining = 0 // body bytes of the current frame still to come
-    this._drainCb = null
-    raw.on('data', (chunk) => this._onRawData(chunk))
-    // A peer that ends its side before both handshake frames arrived can
-    // never complete the handshake: drop it now instead of holding a
-    // connection slot until the handshake deadline.
-    raw.on('end', () => {
-      if (this._frames < HANDSHAKE_FRAMES) return this.destroy()
-      this.push(null)
-    })
-    raw.on('error', (err) => this.destroy(err))
-    raw.on('close', () => {
-      this._releaseDrain()
-      this.destroy()
-    })
-    raw.on('drain', () => this._releaseDrain())
-  }
-
-  _onRawData (chunk) {
-    if (this.destroying) return
-    if (!this._parse(chunk)) return this._limit()
-    if (this.push(chunk) === false) this._raw.pause()
-  }
-
-  // Parses the framing of the whole chunk (parser state carries over between
-  // chunks). Returns false when a frame declares more than its limit.
-  _parse (chunk) {
-    let offset = 0
-    while (offset < chunk.byteLength) {
-      if (this._remaining > 0) {
-        const n = Math.min(this._remaining, chunk.byteLength - offset)
-        this._remaining -= n
-        offset += n
-        if (this._remaining === 0) this._frames++
-        continue
-      }
-      this._len += chunk[offset++] * HEADER_MUL[this._header]
-      if (++this._header < 3) continue
-      const len = this._len
-      this._header = 0
-      this._len = 0
-      const limit = this._frames < HANDSHAKE_FRAMES ? MAX_HANDSHAKE_FRAME : MAX_EXTERNAL_FRAME
-      if (len > limit) return false
-      this._remaining = len
-      if (len === 0) this._frames++
-    }
-    return true
-  }
-
-  _limit () {
-    if (this.destroying) return
-    this._onLimit()
-    this.destroy(new Error('frame over the limit'))
-  }
-
-  _read (cb) {
-    this._raw.resume()
-    cb(null)
-  }
-
-  _write (data, cb) {
-    if (this._raw.destroyed) return cb(null)
-    if (this._raw.write(data) === false) this._drainCb = cb
-    else cb(null)
-  }
-
-  _releaseDrain () {
-    const cb = this._drainCb
-    if (cb === null) return
-    this._drainCb = null
-    cb(null)
-  }
-
-  _final (cb) {
-    this._raw.end()
-    cb(null)
-  }
-
-  _predestroy () {
-    this._raw.destroy()
-    this._releaseDrain()
-  }
-
-  _destroy (cb) {
-    cb(null)
-  }
-}
 
 function isPlainObject (x) {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return false
@@ -2169,9 +2025,17 @@ class Seeder {
   // on the remote public key) is unchanged; after the handshake the socket
   // follows exactly the same path as a swarm connection (_attachPeer).
   // Returns the NoiseSecretStream, or null when the stream was refused.
+  // onRefuse (optional, synchronous): on a capacity refusal the seeder calls
+  // onRefuse({ reason: 'connection-limit' }) and does NOT destroy rawStream:
+  // ownership moves to the caller, so it can tell the client why (seed-ws
+  // closes the WebSocket with 1013) before tearing the transport down.
+  // Destroying here would be too early: ws's createWebSocketStream
+  // terminates the socket in _destroy, so a close frame queued just before
+  // never reaches the client. Without onRefuse the stream is destroyed as
+  // before; not-ready/closing refusals always destroy it.
   // Known spike limit: a concurrent swarm accept and acceptStream can both
   // pass the connection cap (no lock is taken).
-  acceptStream (rawStream, { handshakeTimeoutMs = 10000 } = {}) {
+  acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
     rawStream.on('error', noop)
     if (!this._ready || this._closing) {
       rawStream.destroy()
@@ -2182,8 +2046,18 @@ class Seeder {
     // never take more than half of the slots away from swarm peers.
     const swarmCount = this.swarm ? this.swarm.connections.size : 0
     if (this._external.size >= this.maxExternal || swarmCount + this._external.size >= this.maxConnections) {
-      rawStream.destroy()
       this.log({ event: 'peer-dropped', peerKey: null, reason: 'connection-limit' })
+      // The refused stream is never added to _external, so it takes no slot
+      // whichever side ends up destroying it.
+      if (typeof onRefuse === 'function') {
+        try {
+          onRefuse({ reason: 'connection-limit' })
+        } catch {
+          rawStream.destroy() // a throwing caller cannot be trusted to clean up
+        }
+      } else {
+        rawStream.destroy()
+      }
       return null
     }
     const NoiseSecretStream = require('@hyperswarm/secret-stream')

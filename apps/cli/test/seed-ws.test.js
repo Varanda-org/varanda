@@ -10,7 +10,7 @@ const b4a = require('b4a')
 const Corestore = require('corestore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { testnet, tmpDir, until, bootstrapFlags } = require('./helpers/net')
+const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('./helpers/net')
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
@@ -350,6 +350,126 @@ test('startSeedWs: a WebSocket closed by the client destroys the stream handed t
   ws.close()
   await within(gone, 2000, 'close do duplex')
   t.ok(duplex.destroyed, 'the duplex is destroyed, so the seeder frees the slot')
+})
+
+// Opens a WebSocket on /seeder; resolves { ws, closed } once open, closed
+// resolving { code, reason } on the client's close event.
+function openSeederWs (t, port) {
+  const ws = new WebSocket('ws://127.0.0.1:' + port + '/seeder')
+  ws.on('error', () => {})
+  t.teardown(() => ws.terminate(), { force: true })
+  const closed = new Promise((resolve) => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
+  return within(new Promise((resolve, reject) => {
+    ws.once('open', () => resolve({ ws, closed }))
+    ws.once('unexpected-response', () => reject(new Error('upgrade recusado')))
+  }), 5000, 'open')
+}
+
+test('startSeedWs: a capacity refusal by the real Seeder closes the WebSocket with 1013 lotado', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), associationKey: assoc.hex, maxExternal: 1, log: (e) => events.push(e) })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  // The first socket (an in-flight handshake) takes the only external slot.
+  const first = await openSeederWs(t, server.port)
+  await until(() => seeder.stats().connections === 1, { name: 'primeira conexão contada' })
+
+  const second = await openSeederWs(t, server.port)
+  const started = Date.now()
+  const { code, reason } = await within(second.closed, 5000, 'close da segunda')
+  t.is(code, 1013, 'the refused socket is closed with 1013 (try again later), not 1006')
+  t.is(reason, 'lotado')
+  t.ok(Date.now() - started < 3000, 'closed promptly')
+  t.ok(events.some((e) => e.event === 'peer-dropped' && e.reason === 'connection-limit'), 'connection-limit logged')
+  t.is(seeder.stats().connections, 1, 'the refused socket never took a slot')
+
+  // On loopback a close frame queued just before terminate() still arrives,
+  // so the code alone cannot prove the server did not tear the socket down at
+  // once (createWebSocketStream terminates on destroy; behind a proxy that
+  // turns into 1006). A raw client that never answers the close shows it: the
+  // server must keep the socket for the grace, waiting for the client's
+  // close, and only then terminate it.
+  const raw = await mutedRefusal(t, server.port)
+  t.ok(raw.bytes.includes(CLOSE_1013_LOTADO), 'the raw client received the 1013 lotado close frame')
+  t.ok(raw.heldMs >= 500, 'the server waited for the close handshake (' + raw.heldMs + ' ms), it did not terminate at once')
+  t.ok(raw.heldMs < 3000, 'and destroyed the socket after the grace')
+  t.is(seeder.stats().connections, 1, 'still one connection')
+  t.is(first.ws.readyState, WebSocket.OPEN, 'the admitted socket stays open')
+})
+
+// An unmasked server close frame: FIN + opcode 8, length 8, code 1013, 'lotado'.
+const CLOSE_1013_LOTADO = Buffer.concat([Buffer.from([0x88, 0x08, 0x03, 0xf5]), Buffer.from('lotado')])
+
+// A raw client that completes the /seeder upgrade and then stays silent (it
+// never answers a close frame). Resolves { bytes, heldMs } once the server
+// closes the connection, heldMs measured from the close frame's arrival.
+function mutedRefusal (t, port) {
+  return within(new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    t.teardown(() => socket.destroy(), { force: true })
+    let bytes = Buffer.alloc(0)
+    let closeAt = null
+    socket.on('error', () => {})
+    socket.on('data', (d) => {
+      bytes = Buffer.concat([bytes, d])
+      if (closeAt === null && bytes.includes(CLOSE_1013_LOTADO)) closeAt = Date.now()
+    })
+    socket.once('close', () => resolve({ bytes, heldMs: closeAt === null ? -1 : Date.now() - closeAt }))
+    socket.once('connect', () => {
+      socket.write('GET /seeder HTTP/1.1\r\nHost: 127.0.0.1:' + port + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+    })
+    socket.once('error', reject)
+  }), 5000, 'close do cliente mudo')
+}
+
+test('startSeedWs: a stub refusal through onRefuse closes with 1013; a plain null still terminates', async (t) => {
+  t.timeout(20000)
+  const seeder = stubSeeder('ok')
+  let mode = 'refuse'
+  seeder.acceptStream = (duplex, opts) => {
+    if (mode === 'refuse') {
+      opts.onRefuse({ reason: 'connection-limit' })
+      return null
+    }
+    duplex.destroy()
+    return null
+  }
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const refused = await openSeederWs(t, server.port)
+  t.alike(await within(refused.closed, 5000, 'close recusado'), { code: 1013, reason: 'lotado' })
+
+  mode = 'null'
+  const dropped = await openSeederWs(t, server.port)
+  t.is((await within(dropped.closed, 5000, 'close nulo')).code, 1006, 'without the handoff the socket is terminated as before')
+})
+
+test('startSeedWs: a refused socket whose client never answers the close is destroyed after the grace', async (t) => {
+  t.timeout(20000)
+  const seeder = stubSeeder('ok')
+  seeder.acceptStream = (duplex, opts) => {
+    opts.onRefuse({ reason: 'connection-limit' })
+    return null
+  }
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  // A raw client that completes the upgrade but never sends a close frame
+  // back nor ends its side: only the server's grace timer can free it.
+  const client = await halfOpenUpgrade(server.port, '/seeder')
+  t.teardown(() => client.socket.destroy(), { force: true })
+  const ms = await within(client.closed, 5000, 'close do cliente mudo')
+  t.ok(client.response().startsWith('HTTP/1.1 101'), 'the upgrade completed')
+  t.ok(ms < 3000, 'destroyed within the grace (' + ms + ' ms), not the 30 s close timeout of ws')
+  t.ok(client.socket.destroyed)
 })
 
 // Opens a WebSocket on /seeder with the given extra headers; resolves the

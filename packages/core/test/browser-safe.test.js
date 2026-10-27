@@ -45,6 +45,24 @@ for (const mod of ['./lib/notices.js', './lib/notices-net.js']) {
   })
 }
 
+// frame-guard.js is meant to sit in front of a browser-side secret stream:
+// it may load streamx and nothing server-only (no swarm, no storage, no fs,
+// and not the seeder that used to hold it).
+test('frame-guard.js loads without the node-only network stack, fs or the seeder', (t) => {
+  const code = "const m = require('node:module'); const seen = []; const orig = m.prototype.require; m.prototype.require = function (id) { seen.push(id); return orig.apply(this, arguments) }; require('./lib/frame-guard.js'); process.stdout.write(JSON.stringify({ cached: Object.keys(require.cache), seen }))"
+  const r = spawnSync(process.execPath, ['-e', code], { cwd: coreRoot, encoding: 'utf8' })
+  t.is(r.status, 0, r.stderr)
+  const { cached, seen } = JSON.parse(r.stdout)
+  t.ok(cached.some((p) => p.endsWith(path.join('lib', 'frame-guard.js'))), 'frame-guard.js was loaded')
+  for (const frag of ['/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/', '/hypercore-crypto/', '/udx/', '/rocksdb/', '/corestore/', '/@hyperswarm/secret-stream/']) {
+    t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+  }
+  t.absent(cached.some((p) => p.endsWith(path.join('lib', 'seeder.js'))), 'not loaded: lib/seeder.js')
+  for (const id of ['fs', 'node:fs', '#fs', 'net', 'node:net', 'crypto', 'node:crypto']) {
+    t.absent(seen.includes(id), 'not required: ' + id)
+  }
+})
+
 test('net.js re-exports the admission functions', (t) => {
   const net = require('../lib/net')
   const admission = require('../lib/admission')
