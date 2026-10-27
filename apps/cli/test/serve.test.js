@@ -301,6 +301,13 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   const spa = await request(s, { path: '/perfil/abc' })
   t.is(spa.status, 200, 'SPA fallback')
   t.ok(spa.body.includes('varanda'))
+  // deploy/seeder/Caddyfile's @semExtensao matcher already rewrites these paths in production.
+  for (const p of ['/@ana', '/m/' + 'a'.repeat(64)]) {
+    const link = await request(s, { path: p })
+    t.is(link.status, 200, p + ' SPA fallback')
+    t.is(link.headers['content-type'], 'text/html; charset=utf-8', p + ' HTML')
+    t.ok(link.body.includes('varanda'), p + ' index body')
+  }
   t.is((await request(s, { path: '/assets' })).status, 200, 'a directory is never listed (fallback)')
   t.is((await request(s, { path: '/missing.js' })).status, 404, 'missing file with extension -> 404')
 
