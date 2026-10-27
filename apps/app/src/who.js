@@ -74,3 +74,16 @@ export const PENDING_NAME = '…'
 export function replyNameOf (profile) {
   return profile === undefined ? PENDING_NAME : whoOf(profile).title
 }
+
+// The name in a reply mark from the names cache (`cached`) and the resolved
+// parent post (`parent`, verified by the node: a stranger's name and @nome
+// come from it). '…' while either is still on its way (`pending`: the parent
+// was asked for and has not arrived); 'sem nome' once nothing is left to
+// wait for (or before the ask is recorded: a page renders before useSocial
+// queues its parents, so 'sem nome' can show for a moment).
+export function replyMarkOf ({ cached, parent, pending }) {
+  if (cached && typeof cached === 'object') return whoOf(cached).title
+  if (parent && typeof parent === 'object') return whoOf({ name: parent.name, username: parent.username }).title
+  if (cached === undefined) return parent === null ? UNNAMED : PENDING_NAME
+  return pending ? PENDING_NAME : UNNAMED
+}
