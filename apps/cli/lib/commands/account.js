@@ -46,6 +46,16 @@ const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
 const MAX_SECRET = 256
+// Optional capacity knobs: name -> [option, min, max]. Absent or blank keeps
+// the store/server default; '0' is invalid, never "unlimited".
+const LIMIT_ENV = Object.freeze({
+  VARANDA_MAX_MEMBERS: ['maxMembers', 1, 4096],
+  VARANDA_ACCOUNT_MAX_PENDING: ['maxPending', 1, 100000],
+  VARANDA_ACCOUNT_MAX_CONNECTIONS: ['maxConnections', 1, 4096],
+  VARANDA_ACCOUNT_RATE: ['ratePerSecond', 1, 10000],
+  VARANDA_ACCOUNT_BURST: ['burst', 1, 100000]
+})
+const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -177,9 +187,20 @@ function status (dataDir, given) {
   const association = checkConfig(dataDir, given)
   const publicKey = issuerPublicKey(dataDir)
   const certificate = certificateState(dataDir, association)
-  const links = openAccountStore(dataDir, { readOnly: true }).exportLinks().length
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  const links = accounts.exportLinks().length
   const moderation = moderationStatus(dataDir, association)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, moderation, running: lockHeld(dataDir) }
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, running: lockHeld(dataDir) }
+}
+
+// The directory ends below its high-water mark (directory.hwm): a snapshot
+// and journal restored from an older backup, which the service refuses to
+// open (store.js, "Restore"). Read-only commands still read it and say so;
+// the operator who meant it removes directory.hwm (README).
+const RESTORED_LINE = 'aviso: diretório de contas restaurado de uma cópia antiga; confira o backup'
+
+function warnRestored (accounts) {
+  if (accounts.restored) process.stderr.write(RESTORED_LINE + '\n')
 }
 
 function certificateLine (certificate) {
@@ -196,6 +217,7 @@ function statusLines (s) {
   ]
   if (!s.configured) lines.push('emissor não certificado')
   lines.push('vínculos: ' + s.links)
+  if (s.restored) lines.push(RESTORED_LINE)
   if (s.moderation === null) {
     lines.push('moderação: indisponível (moderation.json inválido)')
   } else {
@@ -222,7 +244,22 @@ function readEnv (env) {
   const modEmails = parseModEmails(env.VARANDA_MODERATOR_EMAILS)
   // Not a usage error (exit 1), and never the value.
   if (modEmails === null) throw new Error('VARANDA_MODERATOR_EMAILS inválido')
-  return { origin, clientId, clientSecret, modEmails }
+  return { origin, clientId, clientSecret, modEmails, limits: readLimits(env) }
+}
+
+// -> { [option]: integer } holding only the variables that were set.
+function readLimits (env) {
+  const limits = {}
+  for (const [name, [option, min, max]] of Object.entries(LIMIT_ENV)) {
+    const raw = env[name]
+    if (raw === undefined) continue
+    const text = typeof raw === 'string' ? raw.trim() : null
+    if (text === '') continue
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= min && value <= max)) throw new UsageError(name + ' inválido')
+    limits[option] = value
+  }
+  return limits
 }
 
 // For the operator (LGPD access requests, legal orders): every report row
@@ -233,6 +270,7 @@ function readEnv (env) {
 function reportRows (dataDir, given, member) {
   const association = checkConfig(dataDir, given)
   const accounts = openAccountStore(dataDir, { readOnly: true })
+  warnRestored(accounts)
   const moderation = existingModeration(dataDir, association)
   if (moderation === null) return []
   const contactOf = (key) => {
@@ -260,7 +298,8 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails } = readEnv(env)
+  const { origin, clientId, clientSecret, modEmails, limits } = readEnv(env)
+  const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -270,27 +309,44 @@ async function serve (flags, env) {
 
   // The lock comes first (single writer), the store after it. Its heartbeat
   // keeps the lock live; once the lock is no longer ours (removed, or
-  // another token on disk) another writer may exist, so the service stops
-  // and exits non-zero (Docker restarts it; see takeLock).
+  // another token on disk) another writer may exist, so the store refuses
+  // every write and the service stops and exits non-zero (Docker restarts
+  // it; see takeLock).
   let stop
   const stopped = new Promise((resolve) => { stop = resolve })
   let lost = false
+  let unavailable = false
+  let store = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      log({ event: 'lock', reason: 'perdido' })
-      stop()
+      loseLock(store, log, stop)
     }
   })
   let listener = null
+  let closing = 'skipped'
   const onSignal = () => stop()
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
   try {
-    const store = openAccountStore(flags.dataDir)
+    try {
+      store = openAccountStore(flags.dataDir, {
+        maxMembers,
+        maxPending,
+        onUnavailable: () => {
+          unavailable = true
+          storeUnavailable(log, stop)
+        }
+      })
+    } catch (err) {
+      // A directory restored from an older backup (store.js, "Restore"): a
+      // security event, logged as such before the error stops the service.
+      if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
+      throw err
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
-    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails })
+    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, maxConnections, ratePerSecond, burst })
     try {
       listener = await server.listen({ host, port })
     } catch (err) {
@@ -298,15 +354,55 @@ async function serve (flags, env) {
       throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
     }
     log({ event: 'listening', host: listener.host, port: listener.port })
-    log({ event: 'ready', configured: issuer !== null })
+    log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }) })
     await stopped
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    // A failed store has nothing it could fold safely (close() would only
+    // answer 'indisponivel'), so it is skipped like a lost lock.
+    closing = await closeIfOwned(store, lock, lost || unavailable, log)
     lock.release()
   }
-  return lost ? 1 : 0
+  return lost || unavailable || closing === 'failed' ? 1 : 0
+}
+
+// The store marked itself unavailable at runtime (writer guard, a failed
+// fsync or reload): every mutation would answer 'indisponivel' until a
+// restart re-reads the disk, so the service logs it (no personal data) and
+// stops, and serve() exits non-zero (Docker restarts it).
+function storeUnavailable (log, stop) {
+  log({ event: 'store', reason: 'indisponivel' })
+  stop()
+}
+
+// The lock is lost: the store is marked unavailable first, synchronously,
+// so no request still draining during the stop appends beside the writer
+// that took the lock over (store.js, "Writer guard"); then the service
+// stops.
+function loseLock (store, log, stop) {
+  if (store !== null) store.fail()
+  log({ event: 'lock', reason: 'perdido' })
+  stop()
+}
+
+// A clean stop folds the journal into a complete v1 directory.json, so the
+// previous build can open it after a rollback. Never once the lock is lost:
+// another writer may own the directory by then. The heartbeat notices a
+// takeover only on its next tick, so the lock file is read again right
+// before closing. A close that fails (the directory may stay v2) is logged
+// without detail and makes serve() exit non-zero.
+// -> 'closed' | 'skipped' | 'failed'.
+async function closeIfOwned (store, lock, lost, log = () => {}) {
+  if (store === null || lost || !lock.owned()) return 'skipped'
+  try {
+    await store.close()
+  } catch {
+    log({ event: 'close', reason: 'falhou' })
+    return 'failed'
+  }
+  return 'closed'
 }
 
 async function run (flags) {
@@ -340,7 +436,9 @@ async function run (flags) {
   if (sub === 'export' && subsub === undefined) {
     checkConfig(flags.dataDir, flags.association)
     if (lockHeld(flags.dataDir)) throw new Error('serviço de conta em execução')
-    for (const link of openAccountStore(flags.dataDir, { readOnly: true }).exportLinks()) {
+    const accounts = openAccountStore(flags.dataDir, { readOnly: true })
+    warnRestored(accounts)
+    for (const link of accounts.exportLinks()) {
       process.stdout.write(jsonLine(link) + '\n')
     }
     return 0
@@ -363,5 +461,8 @@ module.exports = {
   // For tests.
   ensureConfig,
   checkConfig,
-  readEnv
+  readEnv,
+  closeIfOwned,
+  loseLock,
+  storeUnavailable
 }

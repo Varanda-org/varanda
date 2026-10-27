@@ -43,6 +43,17 @@ test('parseReturn maps the three outcomes', async (t) => {
   t.is(parseReturn('?conta=toString'), null)
   t.is(parseReturn(''), null)
   t.is(parseReturn(undefined), null)
+  t.is(parseReturn('?conta=lista-de-espera'), null, 'the waitlist is not a return notice')
+})
+
+test('parseReturnWaitlist: ?conta=lista-de-espera is the calm waitlist sentence', async (t) => {
+  const { parseReturnWaitlist, toError } = await load()
+  t.is(parseReturnWaitlist('?conta=lista-de-espera'), toError('lista-de-espera').message, 'the same sentence as a 503')
+  t.is(parseReturnWaitlist('?x=1&conta=lista-de-espera'), toError('lista-de-espera').message)
+  t.is(parseReturnWaitlist('?conta=ok'), '')
+  t.is(parseReturnWaitlist('?conta=outro'), '')
+  t.is(parseReturnWaitlist(''), '')
+  t.is(parseReturnWaitlist(undefined), '')
 })
 
 test('usernameMatches', async (t) => {
@@ -69,6 +80,9 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   t.is(toError('conta-vinculada').message, 'esta conta Google já está vinculada a outra chave')
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
+  const waiting = toError('lista-de-espera')
+  t.is(waiting.message, 'A Varanda está cheia por enquanto e abriu uma lista de espera. Nada foi guardado; tente de novo mais tarde. Quem já entrou continua usando a rede normalmente.')
+  t.is(waiting.code, 'lista-de-espera')
   const other = toError('<html>secret@example.com</html>')
   t.is(other.message, 'serviço indisponível')
   t.is(other.code, 'indisponivel')
