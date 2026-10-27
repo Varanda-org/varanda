@@ -439,7 +439,7 @@ Verified findings, after merging duplicates and an upgrade-only triage (five wer
 | high | relay page: the diary's signing key was also the Noise and DHT key (cross-protocol reuse, non-constant-time DH with attacker-chosen points) | Claude, verifier | fixed: an ephemeral key pair per relay session |
 | high | the page hook handed the member object (and its secret key) to any script; the secret key is stored unencrypted in IndexedDB | Claude, verifier | hook fixed (a frozen view with only `key`, `length` and `replicate`); **encryption at rest accepted as a known risk of this spike and deferred to PR 4** (decision 2026-10-23; resolved in section 10: the key is derived from a passkey and never stored) |
 | high | the browser member replicated its diary before the seeder's certificate was verified | Grok | fixed: replication starts only after a verified seeder hello (tests with an impostor endpoint) |
-| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | deferred to the hardening PR: a frame-completion deadline that body bytes do not refresh, and a lower frame limit until the peer has an admitted diary |
+| medium | a handshaken client can hold a frame of up to `MAX_EXTERNAL_FRAME` open (secret-stream allocates the declared length up front); dripping one body byte every < 30 s also keeps the external idle deadline from firing, so 32 such clients pin about 256 MiB and every WebSocket slot (swarm peers keep their half) | Claude (low), Grok re-audit (medium) | amplified vector fixed in the seeder capacity PR (section 21): a frame-completion deadline that body bytes do not refresh, `min(120 s, 10 s + 1 s per 64 KiB)` of declared length, a 64 KiB/s minimum throughput (after 10 s of grace) for frames over 64 KiB left incomplete, and a 64 MiB budget charged only by those frames, which evicts the slowest stalled reservation instead of refusing a newcomer (reasons `frame-deadline` and `frame-budget`); a non-amplified, time-bounded ws buffer remains (see the residual bullet below). A lower frame limit until the peer has an admitted diary was not pursued |
 | high (re-audit) | the page hook's facade still let a page script reach the key pair through `replicate()` with its own muxer, contrary to its comment | Claude (re-audit) | same impact as the accepted key-at-rest risk (a same-origin script can read the key from IndexedDB): the comment now says the hook is not a security boundary; the hook goes away in PR 4, when the relay entry joins the page bundle |
 | low (re-audit) | an external socket that sends a hello and goes silent kept a WebSocket slot for good | Claude (re-audit) | fixed: a 30 s inactivity deadline on external sockets after the handshake (live peers send keep-alives every 5 s) |
 | medium (re-audit) | upstream dht-relay defect 2 above (`lib/server-proxy.js:91-93` sends `destroy` without `paired`, the encoder throws inside an `'error'` listener): any DHT peer that fails a relayed handshake stops the relay process; the script's `unhandledRejection` net does not catch a synchronous throw | Grok (re-audit) | deferred with the relay decision to the hardening PR (same reason as the next row) |
@@ -457,8 +457,8 @@ Deferred, not fixed in this PR:
 - `member.post()` does not enforce the diary quota (100,000 blocks / 64 MiB); the seeder would reject and purge on `quota`. The real browser session must enforce it.
 - `ws-stream` drops buffered bytes on `end()` or `destroy()` before the socket opens.
 - Relay page: "apagar tudo" does not leave the relay swarm, and the relay path does not announce to seeders (only direct member to member).
-- A handshaken client can hold a declared frame of up to `MAX_EXTERNAL_FRAME` open without sending its body (no frame-completion deadline yet).
-- Seeder WebSocket entry: a peer that completes a Noise handshake can make the seeder allocate up to about 8 MiB per frame (swarm sockets keep secret-stream's own 16 MiB behaviour); a concurrent swarm accept and `acceptStream` can both pass the cap (no lock); the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR.
+- Frame pinning (section 21): fixed for the amplified vector. FrameGuard gives each incomplete frame `frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` from its header (body bytes do not refresh it). Only a frame over `SMALL_FRAME_BYTES` (64 KiB) still incomplete at the end of a chunk is charged to the seeder's single `maxFrameMemory` budget (default `MAX_FRAME_MEMORY`, 64 MiB): it reserves its declared length until it completes or the guard is destroyed, and is checked every 10 s for 64 KiB/s on average after a 10 s grace (a drip dies at 20 s, not 120 s). When a reservation does not fit, the slowest reservation older than 1 s is evicted (`frame-budget`) and the reservation retried once; only then is the requester refused. Handshake frames, keep-alives and frames that arrive whole are never charged, so a filled budget can neither refuse new members nor drop admitted ones (re-audit HIGH, CWE-400: 8 stalled 8 MiB declarations used to fill the budget for ~40 bytes and drop everyone at their next frame for up to 120 s). The caps are independent (`maxConnections` for swarm sockets, `maxExternal` for external ones), so the shared-sum race is gone. Remaining, bounded but not zero: `ws` buffers a whole WebSocket message, up to `MAX_PAYLOAD` (about 8 MiB), before FrameGuard sees it. Those are bytes the client really sent (not amplified), the 10 s handshake and 30 s idle deadlines drop a socket that stalls, and a partial message delivers nothing to the secret stream, so a stalled message pins at most `MAX_PAYLOAD` per socket for 30 s. Worst-case receive memory is about `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory`; size them together (section 21).
+- Seeder WebSocket entry: swarm sockets keep secret-stream's own 16 MiB behaviour; the transport is plain `ws://` on loopback until the TLS proxy (Caddy) PR. (The per-frame allocation by a handshaken peer and the shared-cap race are addressed in section 21.)
 - The shim's scalar multiplication is not constant-time; it mirrors libsodium's subgroup check, which accepts order-2L points (as libsodium itself does).
 - dht-relay 0.4.3: the two upstream defects above, plus a third found by the security audit (a duplicate `noiseReply` stops the relay process); experimental; custodial mode leaks the secret key.
 - A hosted PWA keeps the key on the device only as long as the served JavaScript is honest (whoever serves the page can change it).
@@ -466,7 +466,7 @@ Deferred, not fixed in this PR:
 
 ### Go/no-go and estimates per later PR
 
-**GO for the seeder path.** G1 and G2 passed; the browser-held key never leaves the device; the seeder admits and serves a Hypercore 10 diary to Hypercore 11 members. **The relay is not production-ready** with dht-relay 0.4.3 (two defects, one needing an adapter, one crashing the relay). That decision belongs to the hardening PR: fix upstream or fork, or keep the seeder-only path for the pilot.
+**GO for the seeder path.** G1 and G2 passed; the browser-held key never leaves the device; the seeder admits and serves a Hypercore 10 diary to Hypercore 11 members. **The relay is not production-ready** with dht-relay 0.4.3 (two defects, one needing an adapter, one crashing the relay). Decision (seeder capacity PR, section 21): the relay is not pursued for this launch (dht-relay 0.4.3 defects; the spike is loopback-only). The seeder WebSocket path is the production entry, and the relay spike script stays a documented experiment.
 
 The estimates below are rough, not measured (person-days with agent assistance):
 
@@ -476,7 +476,7 @@ The estimates below are rough, not measured (person-days with agent assistance):
 | 3 | PWA manifest, service worker, icons | small, 1-2 d; shipped, with an offline outbox, in section 11 |
 | 4 | Identity derived from a passkey (WebAuthn PRF): no key at rest, nothing to wrap or back up; write gate, push and own-diary recovery; hosted `/varanda.json` auto-connect. Built as section 10; export/import of a wrapped key and the passphrase fallback were dropped by that design | done, section 10 |
 | 5 | Caddy (automatic TLS) and compose serving the PWA and `wss:///seeder` on one origin, CSP with `'wasm-unsafe-eval'` | small, 1-2 d, plus the user's DNS and hosting steps |
-| 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision | medium, 3-5 d |
+| 6 | Hardening of the WebSocket entry for the internet, and the dht-relay decision (decided: not pursued for this launch, see above) | medium, 3-5 d |
 
 ### Shipped: the key from a passkey (supersedes the PR 4 wrap design of 2026-10-23)
 
@@ -1353,3 +1353,46 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+
+## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
+
+### Summary
+
+- The WebSocket entry has its own cap, independent of the swarm: `maxExternal` (`VARANDA_MAX_EXTERNAL`, 1 to 4096; default half of `maxConnections`, that is 32) bounds external sockets, in-flight handshakes included, and `maxConnections` bounds swarm sockets only. `/health` and `/metrics` report `swarm`, `external`, `maxConnections` and `maxExternal`.
+- Frame pinning, amplified vector: see the residual bullet in section 8 (`frameDeadlineFor(len)` = `min(120 s, 10 s + 1 s per 64 KiB)` for every incomplete frame; frames over 64 KiB left incomplete are charged to the 64 MiB `maxFrameMemory` budget and must keep 64 KiB/s after a 10 s grace; a full budget evicts the slowest stalled reservation older than 1 s; drop reasons `frame-deadline` and `frame-budget`). The shared budget cannot be used to drop active members or refuse new ones. Tests in `apps/cli/test/seeder-stream.test.js`: `a charged frame that drips is dropped at the first throughput check after the grace`, `stalled declarations filling the budget cannot keep members out or drop them`, `a full budget evicts the stalled reservation for a member frame that makes progress`, `charged declarations over the frame memory budget are refused when nothing can be evicted`.
+- The HTTP listener (`/seeder`, `/media`, `/index`, Caddy keep-alives) has a socket cap that only bounds file descriptors: `max(128, maxExternal + media in flight + index in flight + 64)`, or `VARANDA_MAX_SOCKETS` (1 to 8192) when set (then used as given); the computed value is never below 128.
+- Operator variables (all optional, read by `seed`; empty in `deploy/seeder/.env` means the default): `VARANDA_MAX_EXTERNAL`, `VARANDA_MAX_SOCKETS`, `VARANDA_FRAME_MEMORY` (bytes, 8454144 to 1073741824; the minimum is `MAX_EXTERNAL_FRAME`, so one legal frame always fits), `VARANDA_MEDIA_MAX_IN_FLIGHT`, `VARANDA_MEDIA_RATE`, `VARANDA_MEDIA_BURST`, `VARANDA_INDEX_MAX_IN_FLIGHT`, `VARANDA_INDEX_RATE`, `VARANDA_INDEX_BURST` (1 to 1024, 1 to 100000 and 1 to 100000 respectively). Defaults: media 16 in flight, 64/s, burst 128; index 16 in flight, 32/s, burst 64.
+- Besides the long WebSocket of each member, two features open short extra seeder connections per member while they run: the Espiadinha (`peek.read`) and the follow notices (`notices.list`, polled every 5 minutes by the Avisos screen, `packages/web-member/lib/notices.js`). Count them when choosing `VARANDA_MAX_EXTERNAL`; at the cap the seeder refuses with `connection-limit` and the feature answers "sem conexão com o semeador" or tries again at the next poll.
+
+### Capacidade medida
+
+`apps/cli/scripts/load-ws.js` is a development-only, loopback-only measurement. It opens idle, admitted connections (Noise handshake done, nothing else), holds them, and reports how many were opened and refused and the handshake latency. It does not generate real traffic.
+
+```sh
+# terminal 1: a local seeder (see section 8 for the association and seeder certificate setup)
+VARANDA_MAX_EXTERNAL=64 VARANDA_FRAME_MEMORY=134217728 \
+  node bin/varanda.js seed --data ./data --association <hex> --ws-port 8789 --health-port 8788
+# terminal 2: the load
+node apps/cli/scripts/load-ws.js --port 8789 --health-port 8788 --clients 64 --hold-ms 10000 --json
+```
+
+Flags: `--port` (required), `--clients` 1 to 4096 (default 32), `--hold-ms` 0 to 25000 (default 10000), `--health-port` (optional), `--json`. Read the seeder's resident memory (RSS) from the host (`ps`, `docker stats`) while the clients are held.
+
+Caveat: the numbers are idle admissions, not real traffic. A member that uploads a diary, an Espiadinha read or a notices read costs more memory than an idle socket, and none of that is measured here. No production capacity is claimed.
+
+Operator table (fill it in on the machine that will host the seeder, one row per run; nothing is filled in by this PR):
+
+| Clients | Opened | Refused | p95 handshake (ms) | Seeder RSS (MiB) | `VARANDA_MAX_EXTERNAL` | `VARANDA_FRAME_MEMORY` |
+|---|---|---|---|---|---|---|
+| | | | | | | |
+
+Rule of thumb: `VARANDA_FRAME_MEMORY` >= 8 MiB x the number of members expected to upload at the same time (a legitimate frame can be about 8 MiB, `MAX_EXTERNAL_FRAME`). Raise `VARANDA_FRAME_MEMORY` together with `VARANDA_MAX_EXTERNAL`, and keep the host memory above `maxExternal` x `MAX_PAYLOAD` + `maxFrameMemory` plus the seeder's baseline.
+
+### dht-relay decision
+
+Not pursued for this launch: dht-relay 0.4.3 has defects (section 8, G3) and the relay is a loopback-only spike. The seeder WebSocket path is the production entry; `packages/web-member/scripts/dht-relay.js` spike script stays a documented experiment.
+
+### Not verified
+
+- No production capacity: the load test measures idle admissions only.
+- The memory bound of a stalled WebSocket message (`MAX_PAYLOAD` per socket for 30 s) is derived from the code and the `ws` buffering, not measured under load.

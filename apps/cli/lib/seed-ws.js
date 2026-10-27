@@ -26,9 +26,15 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the loopback spike page works and public pages are refused. There is no
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
-// The seeder also caps external sockets at half its connection limit
-// (Seeder#maxExternal), so these clients never starve swarm peers. Nothing
+// The seeder also caps external sockets on its own (Seeder#maxExternal,
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
 // is logged per connection and no address is ever logged.
+//
+// One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
+// keep-alive connections, so its socket cap (server.maxConnections, see
+// socketCap) only bounds file descriptors: it is sized above the sum of the
+// seeder's external cap and the /media and /index in-flight caps. The
+// seeder's acceptStream is what refuses members beyond maxExternal.
 //
 // The same listener serves media blocks over plain HTTP (Caddy's
 // `handle /media/*` proxies here): GET|HEAD /media/<D>/<K>/<start>/<blocks>,
@@ -307,10 +313,21 @@ function refuse (socket, code, reason) {
 // coreHex, start, blocks) -> null | { bytes, blocks } backs /media. media:
 // optional overrides of the /media limits ({ maxInFlight, rate, burst,
 // deadlineMs }), for tests; index: the same for the /index limits
-// ({ maxInFlight, rate, burst }). The seeder's indexPost(authorHex, seq,
+// ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
+// listener (see socketCap). The seeder's indexPost(authorHex, seq,
 // cursor), indexCounts(refs) and indexMember(authorHex, before) -> null |
 // plain object back /index.
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {} }) {
+// The listener's socket cap: `sockets` when it is an integer >= 1
+// (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
+// /media and /index response in flight and 64 more for keep-alives and
+// requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
+// below MAX_SOCKETS, so lowering one cap never shrinks the listener.
+function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
+  if (Number.isInteger(sockets) && sockets >= 1) return sockets
+  return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
+}
+
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null }) {
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
   const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
@@ -471,7 +488,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     send(res, 404, NOT_FOUND)
   })
-  server.maxConnections = MAX_SOCKETS
+  const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
+  server.maxConnections = socketCap({ maxExternal, mediaInFlight: maxInFlight, indexInFlight: indexMaxInFlight, sockets })
   server.headersTimeout = HEADERS_TIMEOUT_MS
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD, perMessageDeflate: false })
@@ -540,7 +558,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
 module.exports = {
   startSeedWs,
+  socketCap,
   DEFAULT_HOST,
+  MAX_SOCKETS,
   MAX_PAYLOAD,
   MEDIA_MAX_BLOCKS,
   MEDIA_MAX_IN_FLIGHT,
