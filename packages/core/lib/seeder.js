@@ -40,6 +40,18 @@
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
 // verify the content from the diaries themselves (indexPost, indexCounts,
 // indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+//
+// Name index (lib/name-index.js): fed by the same scan, the folded tokens of
+// each served author's newest display name and its verified @nome. Like the
+// engagement index it only says WHERE TO LOOK: a member re-reads and
+// verifies every name from the diary at the returned seq hints. The @nome's
+// signature and issuer delegation are verified once per index pass (never
+// per record, never at query time); the @nome issuer's revocation is checked
+// at every query against the current snapshot, so a revoked issuer stops
+// matching without a rescan, and a diary whose re-gate after a newly revoked
+// issuer is still pending (block 0's verdict) is held out of results. Its
+// cap refuses a new author like the engagement caps: the cursor pauses and
+// resumes when a drop frees room. indexSearch backs /index/search.
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
@@ -52,6 +64,9 @@ const {
   saveKeyPairFile,
   seederCertForKey
 } = require('./cert')
+// Called through the module object (not destructured) so tests can count the
+// username verifications (as lib/username.js).
+const cert = require('./cert')
 const {
   topicFor,
   generateNoiseKeyPair,
@@ -97,6 +112,8 @@ const {
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { createEngagementIndex } = require('./engagement-index')
+const { createNameIndex } = require('./name-index')
+const { parseQuery } = require('./search-text')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 
@@ -710,6 +727,8 @@ class Seeder {
     // `indexing`; set before any entry is served, so a pass queued by
     // growth during start is accounted for).
     this._index = createEngagementIndex({ maxRecords: indexMaxRecords, maxTargets: indexMaxTargets, perAuthorMax: indexPerAuthorMax, onFreed: () => this._scheduleIndexResume() })
+    // Name index (header comment): fed by the same scan, same queue.
+    this._names = this._createNameIndex()
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
     this._indexStartup = null
@@ -1499,6 +1518,9 @@ class Seeder {
     // The diary leaves the engagement index NOW, before the purge even
     // starts: none of its edges, engagements or hints is readable from here
     // on. The room it frees resumes any cursor paused at the cap.
+    // The name index too; an entry freed there resumes a cursor paused at
+    // its cap (removeDiary only calls onFreed when engagement room shrinks).
+    if (this._names.remove(key)) this._scheduleIndexResume()
     this._index.removeDiary(key, () => {
       // A pending rebuild already covers these removals. Never evict a key
       // and silently forget lost edges: rebuild at the bound instead.
@@ -1956,6 +1978,7 @@ class Seeder {
     const rebuild = () => {
       if (this._closing) return
       this._index.clear()
+      this._names.clear()
       this._indexDropped.clear()
       // Only gated diaries can start a pass; an ungated one (block 0 not
       // arrived yet) joins when its gate passes, so it must not pin
@@ -1999,6 +2022,12 @@ class Seeder {
         const block = decodeBlock(raw)
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
+          // The name index refuses only a new author at its cap: pause like
+          // an engagement cap (a retry of the same seq is a no-op there).
+          if (record !== null && (record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
+            entry.indexPaused = true
+            return
+          }
           if (record !== null && !this._index.add(key, i, record)) {
             entry.indexPaused = true
             return
@@ -2009,6 +2038,8 @@ class Seeder {
       }
     } finally {
       entry.indexQueued = false
+      // At most one @nome verification per diary per pass (paused included).
+      if (this._served.get(key) === entry && !entry.dropped) this._names.settle(key)
       // The first pass over a diary served at start is over once its cursor
       // reached the length, paused at the cap, or failed three retries at
       // the same cursor. A behind cursor still makes `complete` false.
@@ -2029,6 +2060,22 @@ class Seeder {
       this._indexDiary(key, entry)
     }, delay)
     entry.indexRetry.unref()
+  }
+
+  // The name index of this seeder: capped at maxServed authors; a @nome
+  // candidate verifies its signature and issuer delegation for the trusted
+  // association (revocation is applied per query by indexSearch).
+  _createNameIndex () {
+    return createNameIndex({
+      maxAuthors: this.maxServed,
+      verifyUsername: (author, record) => {
+        try {
+          return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      }
+    })
   }
 
   // Many toggles or drops can free capacity in one turn; scan paused diaries
@@ -2212,7 +2259,10 @@ class Seeder {
       // read now ('not-in-log') would otherwise stay served with gated set,
       // and later growth never re-checks it. An honest author is gated
       // afresh on its next announce.
+      // Held out of search until every pending verdict cleared it (indexSearch).
+      entry.searchHold = (entry.searchHold || 0) + 1
       localVerdict(entry.core, key, this.association, this._certOpts()).then((reason) => {
+        if (reason === null) entry.searchHold--
         if (reason === null || entry.dropped || this._closing) return
         if (this._served.get(key) === entry) this._drop(key, reason)
       })
@@ -2525,6 +2575,45 @@ class Seeder {
   _onMessage (msg, peer) {
     if (this._closing) return
     if (msg.type === 'announce') this.admit(msg.key, msg.cert, peer).catch(noop)
+  }
+
+  // Whether a newly revoked issuer's re-gate of `hex` is still pending
+  // (_onBlocklistAdopted): until block 0's verdict clears it, or the diary is
+  // dropped, it must not take a search result slot. The verdict is the one
+  // the gate uses (block 0's certificate), never the announcement's.
+  _searchHeld (hex) {
+    const entry = this._served.get(hex)
+    return !!entry && entry.searchHold > 0
+  }
+
+  // GET /index/search/<segment>: the best members whose display name or
+  // verified @nome matches the query, with seq hints, or null for a
+  // malformed segment. Purely in memory: no disk, crypto or account service,
+  // and nothing about the query is ever logged.
+  indexSearch (segment) {
+    try {
+      const q = parseQuery(segment)
+      if (q === null) return null
+      const opts = this._certOpts()
+      const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      // A match held by a pending re-gate is left out, and the answer says
+      // it may be incomplete (complete false) rather than final.
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._names.search(q, visible, (issuer) => !revoked.has(issuer))
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { members: page.members, more: page.more, indexing: flags.indexing, complete: flags.complete && !held }
+    } catch {
+      return null
+    }
   }
 
   close () {

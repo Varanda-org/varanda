@@ -572,6 +572,8 @@ function Member () {
               onQuote={startQuote}
               scrollToTop={scrollSignal.seguindo}
               onFollowsChanged={() => setVersion((v) => v + 1)}
+              ownKey={ownKey}
+              followsTick={version}
             />
           </View>
           <View style={shown('avisos')}>
