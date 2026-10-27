@@ -2337,19 +2337,31 @@ class Seeder {
   // index's own honesty flags; null for a malformed query or cursor. The
   // query is never logged. No follow filtering and no ageBand filter (every
   // hosted certificate is 'unchecked', cert.js); visibility is the read gate
-  // of the engagement index (_indexVisible).
+  // of the engagement index (_indexVisible), and, as in indexSearch, a diary
+  // whose re-gate after a newly revoked issuer is pending (_searchHeld) is
+  // left out and the answer says it may be incomplete (complete false).
   indexTopic (path, cursor = null) {
     try {
       if (typeof path !== 'string' || !QUERY_RE.test(path)) return null
       const tokens = [...new Set(path.split('+'))]
-      const page = this._topics.search(tokens, cursor, (hex) => this._indexVisible(hex), Date.now())
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._topics.search(tokens, cursor, visible, Date.now())
       if (page === null) return null
       const authors = {}
       for (const ref of page.items) {
         const author = ref.slice(0, ref.indexOf(':'))
         if (!(author in authors)) authors[author] = this._index.hints(author)
       }
-      return { items: page.items, next: page.next, authors, ...this._topicFlags() }
+      const flags = this._topicFlags()
+      return { items: page.items, next: page.next, authors, indexing: flags.indexing, complete: flags.complete && !held }
     } catch {
       return null
     }

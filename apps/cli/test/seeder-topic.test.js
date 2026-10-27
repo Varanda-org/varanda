@@ -197,6 +197,29 @@ test('a blocked author is hidden at read time', async (t) => {
   t.alike(Object.keys(page.authors), [B], 'no hint for the blocked author')
 })
 
+test('a diary held by a pending revocation re-gate is left out and the answer is incomplete', async (t) => {
+  const { seeder, serve } = scanFixture()
+  const A = authorKey(1)
+  const B = authorKey(2)
+  serve(A, [post('céu', 1)])
+  serve(B, [post('céu azul', 2)])
+  await settle(seeder)
+  t.is(seeder.indexTopic('ceu').complete, true)
+  // _onBlocklistAdopted holds every re-gated diary until block 0's verdict.
+  seeder._served.get(A).searchHold = 1
+  const held = seeder.indexTopic('ceu')
+  t.alike(held.items, [ref(B, 1)], 'held while the re-gate is pending')
+  t.alike(Object.keys(held.authors), [B], 'no hint for the held author')
+  t.is(held.complete, false, 'a held match makes the answer incomplete')
+  const other = seeder.indexTopic('azul')
+  t.alike(other.items, [ref(B, 1)])
+  t.is(other.complete, true, 'a query the held diary does not match is unaffected')
+  seeder._served.get(A).searchHold = 0
+  const cleared = seeder.indexTopic('ceu')
+  t.alike(cleared.items, [ref(B, 1), ref(A, 1)], 'back once the verdict cleared it')
+  t.is(cleared.complete, true)
+})
+
 test('_drop removes the diary from the search index before the purge resolves', async (t) => {
   const { seeder, serve } = scanFixture()
   const A = authorKey(1)

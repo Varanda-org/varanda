@@ -1443,6 +1443,7 @@ None of these was performed for this change. Use two or three hosted accounts ag
 - Hosted web only. Native and `varanda-serve` show no field.
 - Trust model: the node re-checks each returned post, including its words, so a seeder can hide results or list unrelated posts but cannot forge content. The seeder's search is a finding aid, not a fact.
 - The index respects the blocklist at the moment the seeder adopts a snapshot.
+- A diary whose re-gate after a newly revoked issuer is still pending is held out of results, and the answer says `complete: false`: the same hold as account search (section 22).
 - `/health` gains `topicPosts` and `topicSaturated`, and the index is announced with the `indexing` and `complete` marks.
 - What #81 asked for that is NOT delivered: removal of a deleted publication (no deletion record exists in the protocol, so the 'conteúdo apagado' criterion cannot be met); hiding a single listed post (#21 and #20 are still open); age protection (certificates are 'unchecked', 18+ is an MVP scope decision, not an enforced gate); 'assuntos do momento' (no trending computation exists).
 
@@ -1459,6 +1460,7 @@ CI result on the final tree, Node 24.22.1 (run from the worktree root, in this o
 - `node packages/rpc/test/sizes.test.js`: 12 tests, 69 asserts, all pass. Worst cases logged: `profile.read` 229170 bytes at 100 authors; `follow.list` 33581 bytes at 500 keys.
 - `npm run export:web -w apps/app`: `NODE_BUNDLE 679651 GZIP 208228`; web bundle `_expo/static/js/web/index-01e34ffd547f5a2bb02b99d0e7a81ac6.js` 917KB; service worker `sw.js` with 11 files, version `3d2cbcb8787e8d5e`.
 - No browser pass in CI: there is no component harness, so the Busca screen and the field are covered only by the pure helper tests and the human checklist below.
+- Re-integration with account search (#169), 2026-10-27: the route moved from `/index/search/...` (now account search's) to `/index/topic/...`, every topic identifier was renamed (`topic-index.js`, `Seeder#indexTopic`, `topicPosts`/`topicSaturated`, `apps/app/src/topics.js`, `fetchTopic`), main (#164, #167, #168, #169) was merged in, and topic search adopted the revocation re-gate hold. Run on the final tree with Node 24.22.1: `npm run lint` clean; `npm test` 127 test files, 0 failures (1438 top-level `ok`, 0 `not ok`); `npm run demo` `DEMO OK`; `sizes.test.js` 12 tests, 69 asserts; `npm run export:web -w apps/app` `NODE_BUNDLE 679651 GZIP 208228`. `npm ci` was not rerun: main changed no `package.json` or `package-lock.json`. New cases: `seed-ws.test.js` "the same word reaches only its own method" and `seeder-topic.test.js` "a diary held by a pending revocation re-gate is left out and the answer is incomplete".
 
 ### Residual risks
 
