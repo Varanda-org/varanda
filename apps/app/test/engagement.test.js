@@ -1,4 +1,4 @@
-// Optimistic like/repost state and index counts (engagement.js).
+// Optimistic like/repost state, index counts and second-pass refs (engagement.js).
 'use strict'
 
 const test = require('brittle')
@@ -47,4 +47,29 @@ test('mergeCounts lets the fetched counts win', async (t) => {
   t.is(map.get(R1), a, 'input untouched')
   t.is(mergeCounts(map, new Map([[R2, b]])).get(R2), b)
   t.is(mergeCounts(null, null).size, 0)
+})
+
+test('secondPassRefs: quote and reply parent, one level, deduped', async (t) => {
+  const { secondPassRefs } = await load()
+  const A = 'ab'.repeat(32)
+  const B = 'cd'.repeat(32)
+  const C = 'ef'.repeat(32)
+  // A repost resolves to the original: a reply's parent is the second pass.
+  const reply = Object.freeze({ author: A, seq: 4, text: 'oi', replyTo: Object.freeze({ author: B, seq: 2 }), quote: null })
+  t.alike(secondPassRefs([reply]), [B + ':2'], 'reposted reply')
+  // The quoted post's own quote is a further level and is not followed.
+  const quoted = { author: A, seq: 5, quote: { author: C, seq: 1, quote: { author: B, seq: 9 } } }
+  t.alike(secondPassRefs([quoted]), [C + ':1'], 'reposted quote')
+  t.alike(secondPassRefs([{ author: A, seq: 1, text: 'plain', replyTo: null, quote: null }]), [], 'plain post')
+  t.alike(secondPassRefs([
+    null,
+    { quote: null, replyTo: undefined },
+    { quote: { seq: 1 }, replyTo: { author: B, seq: 0 } },
+    { replyTo: { author: B, seq: 1.5 } },
+    { quote: { author: 1, seq: 2 } }
+  ]), [], 'missing ref')
+  t.alike(secondPassRefs([{ quote: { seq: 1 }, replyTo: { author: B, seq: 3 } }]), [B + ':3'], 'missing quote keeps the parent')
+  const again = { quote: { author: C.toUpperCase(), seq: 1 }, replyTo: { author: B, seq: 2 } }
+  t.alike(secondPassRefs([quoted, again, reply, quoted]), [C + ':1', B + ':2'], 'deduped')
+  t.alike(secondPassRefs(null), [])
 })

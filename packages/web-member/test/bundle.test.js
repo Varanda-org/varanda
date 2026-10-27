@@ -45,4 +45,14 @@ test('build.js bundles the member for the browser', async (t) => {
     t.ok(bundle.includes('crypto_scalarmult_ed25519_noclamp'), name + ': names crypto_scalarmult_ed25519_noclamp')
     t.absent(bundle.includes('sodium-native'), name + ': no sodium-native')
   }
+  // The initiator links run behind @varanda/core lib/frame-guard.js (its
+  // error texts survive minification), which must come without the seeder
+  // it was extracted from: none of lib/seeder.js's server-only log texts.
+  const nodeBundle = fs.readFileSync(path.join(path.dirname(out), 'varanda-node.js'), 'utf8')
+  for (const [name, bundle] of [['app', code], ['node', nodeBundle]]) {
+    t.ok(bundle.includes('frame over the limit') && bundle.includes('FrameGuard: '), name + ': contains lib/frame-guard.js')
+    for (const marker of ['media-admitted', 'seeder-full', 'admission-failed']) {
+      t.absent(bundle.includes(marker), name + ': no lib/seeder.js marker ' + marker)
+    }
+  }
 })

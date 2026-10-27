@@ -1,6 +1,8 @@
 // Pure helpers for the optimistic like/repost state on screen. The own state
 // is `{ liked: Set<ref>, reposted: Set<ref> }` (from engagement.read); index
 // counts are `{ replies, likes, reposts, quotes }` or null when unknown.
+// `secondPassRefs` is the one-level quote and reply targets of originals
+// already resolved (a reposted reply's parent is not on the page).
 // Every function returns new values and never mutates its inputs.
 
 const FIELD = { like: 'liked', repost: 'reposted' }
@@ -45,6 +47,33 @@ export function mergeCounts (map, fetched) {
     for (const [ref, counts] of fetched) out.set(ref, counts)
   } else if (fetched && typeof fetched === 'object') {
     for (const ref of Object.keys(fetched)) out.set(ref, fetched[ref])
+  }
+  return out
+}
+
+// Same rule as screens/ARua refOf. Inlined so this module stays free of
+// imports (the engagement tests load it on its own).
+function refOf (t) {
+  if (!t || typeof t.author !== 'string' || !Number.isSafeInteger(t.seq) || t.seq < 1) return null
+  return t.author.toLowerCase() + ':' + t.seq
+}
+
+// One level of targets still to resolve from originals already in hand: the
+// quoted post and the reply parent, in that order. A reposted reply's parent
+// is not on the page, so the first pass never asks for it and the mark would
+// stay 'sem nome'. Deduped; a null or unusable target is skipped. Not
+// recursive: a quote's own quote is a further level and is not followed.
+export function secondPassRefs (items) {
+  const out = []
+  const seen = new Set()
+  if (!Array.isArray(items)) return out
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    for (const ref of [refOf(item.quote), refOf(item.replyTo)]) {
+      if (ref === null || seen.has(ref)) continue
+      seen.add(ref)
+      out.push(ref)
+    }
   }
   return out
 }
