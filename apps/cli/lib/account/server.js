@@ -289,7 +289,7 @@ function checkIssuerCert (cert, keyPair, association) {
 const LOCK_HEARTBEAT_MS = 10000
 const LOCK_STALE_MS = 30000
 
-// -> { file, release() }. `heartbeatMs`, `staleMs` and `onLost` are for
+// -> { file, owned(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
 // tests and the serve path; the heartbeat timer is unref'd so it never
 // keeps a process alive on its own.
 function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_STALE_MS, onLost = () => {} } = {}) {
@@ -319,7 +319,8 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
-// -> { file, release() }.
+// -> { file, owned(), release() }. owned() reads the lock file now, for a
+// check that cannot wait for the next tick (the shutdown close).
 function heartbeat (file, token, { heartbeatMs, onLost }) {
   let timer = null
   const stop = () => {
@@ -341,6 +342,7 @@ function heartbeat (file, token, { heartbeatMs, onLost }) {
   timer.unref()
   return {
     file,
+    owned: () => ownLock(file, token),
     release: () => {
       stop()
       releaseLock(file, token)

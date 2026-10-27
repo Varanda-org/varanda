@@ -19,7 +19,7 @@ const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv } = require('../lib/commands/account')
+const { readEnv, closeIfOwned, loseLock, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -748,6 +748,89 @@ test('data-dir lock: a second service refuses, a stale lock is recovered, releas
   fs.unlinkSync(lockFile)
 })
 
+test('data-dir lock: owned() reads the lock now, and the shutdown close runs only while it is ours', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  // No heartbeat tick during the test: owned() alone must notice the takeover.
+  const lock = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  t.is(lock.owned(), true, 'owned while held')
+
+  let closes = 0
+  const store = { close: async () => { closes++ } }
+  t.is(await closeIfOwned(null, lock, false), 'skipped', 'no store: nothing to close')
+  t.is(await closeIfOwned(store, lock, true), 'skipped', 'lost: skipped')
+  t.is(closes, 0)
+
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'f'.repeat(32) }) + '\n')
+  t.is(lock.owned(), false, 'not owned once another token is on disk')
+  t.is(await closeIfOwned(store, lock, false), 'skipped', 'a takeover between ticks skips the close')
+  t.is(closes, 0, 'the store was not closed')
+  fs.unlinkSync(lockFile)
+  t.is(lock.owned(), false, 'not owned once the lock file is gone')
+
+  const mine = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => mine.release(), { force: true })
+  t.is(await closeIfOwned(store, mine, false), 'closed', 'owned and not lost: closed')
+  t.is(closes, 1)
+  const failing = { close: async () => { throw new Error('boom') } }
+  const events = []
+  t.is(await closeIfOwned(failing, mine, false, (e) => events.push(e)), 'failed', 'a failing close is reported, so serve() exits non-zero')
+  t.alike(events, [{ event: 'close', reason: 'falhou' }], 'logged without detail')
+})
+
+test('data-dir lock: a lost lock marks the store unavailable before the service stops', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const store = openAccountStore(dir)
+  const calls = []
+  const fail = store.fail
+  store.fail = () => { calls.push('fail'); fail() }
+  loseLock(store, (event) => calls.push(event.event + ':' + event.reason), () => calls.push('stop'))
+  t.alike(calls, ['fail', 'lock:perdido', 'stop'], 'fail() runs first, synchronously')
+  const row = store.start({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), username: 'alba' })
+  store.putGoogle(row.id, { sub: 'sub-alba', email: 'a@example.test' })
+  try {
+    await store.finish(row.id, { signature: 'a'.repeat(128) }, null, null, null)
+    t.fail('finish resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'a request still draining is refused')
+  }
+  const none = []
+  loseLock(null, () => none.push('log'), () => none.push('stop'))
+  t.alike(none, ['log', 'stop'], 'a lock lost before the store opened only stops')
+})
+
+test('serve wiring: a store that fails at runtime logs store:indisponivel once and stops the service', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const calls = []
+  // As serve() passes it: log (no personal data), then stop.
+  const store = openAccountStore(dir, {
+    onUnavailable: () => storeUnavailable((event) => calls.push(event), () => calls.push('stop'))
+  })
+  const member = b4a.toString(crypto.keyPair().publicKey, 'hex')
+  const row = store.start({ member, username: 'alba' })
+  store.putGoogle(row.id, { sub: 'sub-alba', email: 'a@example.test' })
+  // The first link writes the journal header; then the journal disappears
+  // behind the writer, so the next write trips the writer guard.
+  const iss = crypto.keyPair()
+  const assoc = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(iss.publicKey, 'hex') }, assoc)
+  await store.finish(row.id, { signature: 'a'.repeat(128) }, iss, issuerCert, issuerCert.association)
+  t.alike(calls, [], 'nothing while the store works')
+  fs.unlinkSync(path.join(dir, fs.readdirSync(dir).find((name) => name.startsWith('directory.journal.'))))
+  for (const name of ['bia', 'cora']) {
+    const next = store.start({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), username: name })
+    store.putGoogle(next.id, { sub: 'sub-' + name, email: 'b@example.test' })
+    try {
+      await store.finish(next.id, { signature: 'a'.repeat(128) }, iss, issuerCert, issuerCert.association)
+      t.fail('finish resolved')
+    } catch (err) {
+      t.is(err.code, 'indisponivel', name + ': refused')
+    }
+  }
+  t.alike(calls, [{ event: 'store', reason: 'indisponivel' }, 'stop'], 'logged without personal data, then stopped, once')
+})
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 test('data-dir lock: the heartbeat keeps it live, and a lock that is no longer ours is reported lost', async (t) => {
@@ -899,6 +982,56 @@ test('account key, cert add, status and export', async (t) => {
     t.ok(r.stderr.includes('diretório não é do serviço de conta'), r.stderr)
   }
   t.is(varanda(dir, ['account', 'nope']).code, 2)
+})
+
+test('account status, export and serve on a directory restored from an older backup', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const iss = issuer()
+  const association = iss.association
+  const env = {
+    VARANDA_ASSOCIATION: association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET
+  }
+  t.is(varanda(dir, ['account', 'key', '--association', association]).code, 0)
+  const file = path.join(dir, 'directory.json')
+  const hwm = path.join(dir, 'directory.hwm')
+  const linkOne = async (username) => {
+    const store = openAccountStore(dir)
+    const row = store.start({ member: member().hex, username })
+    store.putGoogle(row.id, { sub: 'sub-' + username, email: EMAIL })
+    await store.finish(row.id, { signature: 'a'.repeat(128) }, iss.keyPair, iss.cert, association)
+    await store.close()
+  }
+  await linkOne('ana')
+  const backup = fs.readFileSync(file)
+  await linkOne('bia')
+  t.is(JSON.parse(fs.readFileSync(hwm, 'utf8')).seq, 2)
+  fs.writeFileSync(file, backup)
+
+  const status = varanda(dir, ['account', 'status'])
+  t.is(status.code, 0, status.stderr)
+  t.ok(status.stdout.includes('vínculos: 1'))
+  t.ok(status.stdout.includes('aviso: diretório de contas restaurado de uma cópia antiga; confira o backup'), 'status warns')
+  const json = varanda(dir, ['account', 'status', '--json'])
+  t.is(JSON.parse(json.stdout.trim().split('\n').pop()).restored, true, 'and reports the flag')
+  const exported = varanda(dir, ['account', 'export'])
+  t.is(exported.code, 0, 'export still reads')
+  t.is(exported.stdout.trim().split('\n').length, 1)
+  t.ok(exported.stderr.includes('restaurado de uma cópia antiga'), 'and warns on stderr')
+
+  const refused = varanda(dir, ['account', '--json'], env)
+  t.is(refused.code, 1, 'the service refuses to start')
+  t.ok(refused.stdout.includes(JSON.stringify({ event: 'store', reason: 'restaurado' })), 'logged as a store event')
+  t.ok(refused.stderr.includes('diretório de contas restaurado de uma cópia antiga; confira o backup'), refused.stderr)
+  t.absent(fs.existsSync(path.join(dir, LOCK_FILE)), 'the lock is released')
+
+  // The operator who meant to restore the older copy removes the mark.
+  fs.unlinkSync(hwm)
+  t.absent(varanda(dir, ['account', 'status']).stdout.includes('aviso:'), 'no warning once acknowledged')
+  await linkOne('bia')
+  t.is(JSON.parse(fs.readFileSync(hwm, 'utf8')).seq, 2, 'a new mark from the restored copy on')
 })
 
 // Spawns `account` on a free port; -> { child, port, stdout(), stop() }.

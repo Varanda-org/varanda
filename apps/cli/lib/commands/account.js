@@ -187,9 +187,20 @@ function status (dataDir, given) {
   const association = checkConfig(dataDir, given)
   const publicKey = issuerPublicKey(dataDir)
   const certificate = certificateState(dataDir, association)
-  const links = openAccountStore(dataDir, { readOnly: true }).exportLinks().length
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  const links = accounts.exportLinks().length
   const moderation = moderationStatus(dataDir, association)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, moderation, running: lockHeld(dataDir) }
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, running: lockHeld(dataDir) }
+}
+
+// The directory ends below its high-water mark (directory.hwm): a snapshot
+// and journal restored from an older backup, which the service refuses to
+// open (store.js, "Restore"). Read-only commands still read it and say so;
+// the operator who meant it removes directory.hwm (README).
+const RESTORED_LINE = 'aviso: diretório de contas restaurado de uma cópia antiga; confira o backup'
+
+function warnRestored (accounts) {
+  if (accounts.restored) process.stderr.write(RESTORED_LINE + '\n')
 }
 
 function certificateLine (certificate) {
@@ -206,6 +217,7 @@ function statusLines (s) {
   ]
   if (!s.configured) lines.push('emissor não certificado')
   lines.push('vínculos: ' + s.links)
+  if (s.restored) lines.push(RESTORED_LINE)
   if (s.moderation === null) {
     lines.push('moderação: indisponível (moderation.json inválido)')
   } else {
@@ -258,6 +270,7 @@ function readLimits (env) {
 function reportRows (dataDir, given, member) {
   const association = checkConfig(dataDir, given)
   const accounts = openAccountStore(dataDir, { readOnly: true })
+  warnRestored(accounts)
   const moderation = existingModeration(dataDir, association)
   if (moderation === null) return []
   const contactOf = (key) => {
@@ -296,24 +309,41 @@ async function serve (flags, env) {
 
   // The lock comes first (single writer), the store after it. Its heartbeat
   // keeps the lock live; once the lock is no longer ours (removed, or
-  // another token on disk) another writer may exist, so the service stops
-  // and exits non-zero (Docker restarts it; see takeLock).
+  // another token on disk) another writer may exist, so the store refuses
+  // every write and the service stops and exits non-zero (Docker restarts
+  // it; see takeLock).
   let stop
   const stopped = new Promise((resolve) => { stop = resolve })
   let lost = false
+  let unavailable = false
+  let store = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      log({ event: 'lock', reason: 'perdido' })
-      stop()
+      loseLock(store, log, stop)
     }
   })
   let listener = null
+  let closing = 'skipped'
   const onSignal = () => stop()
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
   try {
-    const store = openAccountStore(flags.dataDir, { maxMembers, maxPending })
+    try {
+      store = openAccountStore(flags.dataDir, {
+        maxMembers,
+        maxPending,
+        onUnavailable: () => {
+          unavailable = true
+          storeUnavailable(log, stop)
+        }
+      })
+    } catch (err) {
+      // A directory restored from an older backup (store.js, "Restore"): a
+      // security event, logged as such before the error stops the service.
+      if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
+      throw err
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, maxConnections, ratePerSecond, burst })
@@ -330,9 +360,49 @@ async function serve (flags, env) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    // A failed store has nothing it could fold safely (close() would only
+    // answer 'indisponivel'), so it is skipped like a lost lock.
+    closing = await closeIfOwned(store, lock, lost || unavailable, log)
     lock.release()
   }
-  return lost ? 1 : 0
+  return lost || unavailable || closing === 'failed' ? 1 : 0
+}
+
+// The store marked itself unavailable at runtime (writer guard, a failed
+// fsync or reload): every mutation would answer 'indisponivel' until a
+// restart re-reads the disk, so the service logs it (no personal data) and
+// stops, and serve() exits non-zero (Docker restarts it).
+function storeUnavailable (log, stop) {
+  log({ event: 'store', reason: 'indisponivel' })
+  stop()
+}
+
+// The lock is lost: the store is marked unavailable first, synchronously,
+// so no request still draining during the stop appends beside the writer
+// that took the lock over (store.js, "Writer guard"); then the service
+// stops.
+function loseLock (store, log, stop) {
+  if (store !== null) store.fail()
+  log({ event: 'lock', reason: 'perdido' })
+  stop()
+}
+
+// A clean stop folds the journal into a complete v1 directory.json, so the
+// previous build can open it after a rollback. Never once the lock is lost:
+// another writer may own the directory by then. The heartbeat notices a
+// takeover only on its next tick, so the lock file is read again right
+// before closing. A close that fails (the directory may stay v2) is logged
+// without detail and makes serve() exit non-zero.
+// -> 'closed' | 'skipped' | 'failed'.
+async function closeIfOwned (store, lock, lost, log = () => {}) {
+  if (store === null || lost || !lock.owned()) return 'skipped'
+  try {
+    await store.close()
+  } catch {
+    log({ event: 'close', reason: 'falhou' })
+    return 'failed'
+  }
+  return 'closed'
 }
 
 async function run (flags) {
@@ -366,7 +436,9 @@ async function run (flags) {
   if (sub === 'export' && subsub === undefined) {
     checkConfig(flags.dataDir, flags.association)
     if (lockHeld(flags.dataDir)) throw new Error('serviço de conta em execução')
-    for (const link of openAccountStore(flags.dataDir, { readOnly: true }).exportLinks()) {
+    const accounts = openAccountStore(flags.dataDir, { readOnly: true })
+    warnRestored(accounts)
+    for (const link of accounts.exportLinks()) {
       process.stdout.write(jsonLine(link) + '\n')
     }
     return 0
@@ -389,5 +461,8 @@ module.exports = {
   // For tests.
   ensureConfig,
   checkConfig,
-  readEnv
+  readEnv,
+  closeIfOwned,
+  loseLock,
+  storeUnavailable
 }
