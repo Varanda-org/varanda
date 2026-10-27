@@ -10,6 +10,9 @@ test('wantsStart: the gate table', async (t) => {
   const { wantsStart } = await load()
   t.is(wantsStart(ready), true)
   t.is(wantsStart({ ...ready, online: undefined }), true)
+  t.is(wantsStart({ ...ready, visible: true }), true)
+  t.is(wantsStart({ ...ready, visible: undefined }), true)
+  t.is(wantsStart({ ...ready, visible: false }), false)
   t.is(wantsStart({ ...ready, backoffUntil: undefined, awaitingRestartUntil: undefined }), true)
   t.is(wantsStart({ ...ready, wanted: false }), false)
   t.is(wantsStart({ ...ready, phase: 'booting' }), false)
@@ -20,6 +23,59 @@ test('wantsStart: the gate table', async (t) => {
   t.is(wantsStart({ ...ready, reconciling: true }), false)
   t.is(wantsStart({ ...ready, backoffUntil: 1001 }), false)
   t.is(wantsStart({ ...ready, backoffUntil: 1000 }), true)
+})
+
+test('shouldStopForHidden: only a continuous run while hidden', async (t) => {
+  const { shouldStopForHidden } = await load()
+  for (const [active, hiddenStop] of [[null, false], [{ once: true }, false], [{ once: false }, true], [{}, false]]) {
+    t.is(shouldStopForHidden({ active, visible: false }), hiddenStop)
+    t.is(shouldStopForHidden({ active, visible: true }), false)
+    t.is(shouldStopForHidden({ active }), false)
+  }
+})
+
+test('visibility: web events, missing browser globals and native no-op', async (t) => {
+  const web = await import('../src/visibility.web.js')
+  const native = await import('../src/visibility.native.js')
+  const saved = ['document', 'window'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)])
+  t.teardown(() => {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  })
+  delete globalThis.document
+  delete globalThis.window
+  t.is(web.isVisible(), true)
+  web.subscribeVisible(() => t.fail('no browser events'))()
+  globalThis.window = {}
+  web.subscribeVisible(() => t.fail('no event listener support'))()
+
+  globalThis.document = {}
+  t.is(web.isVisible(), true)
+  globalThis.document.visibilityState = 'prerender'
+  t.is(web.isVisible(), true)
+  globalThis.document.visibilityState = 'visible'
+  globalThis.window = new EventTarget()
+  const changes = []
+  const unsubscribe = web.subscribeVisible((visible) => changes.push(visible))
+  const unsubscribeNative = native.subscribeVisible(() => t.fail('native does not subscribe'))
+  globalThis.window.dispatchEvent(new Event('pagehide'))
+  globalThis.window.dispatchEvent(new Event('pageshow'))
+  globalThis.document.visibilityState = 'hidden'
+  t.is(web.isVisible(), false)
+  t.is(native.isVisible(), true)
+  globalThis.window.dispatchEvent(new Event('visibilitychange'))
+  globalThis.window.dispatchEvent(new Event('pageshow'))
+  globalThis.document.visibilityState = 'visible'
+  globalThis.window.dispatchEvent(new Event('visibilitychange'))
+  t.alike(changes, [false, true, false, false, true])
+  unsubscribe()
+  unsubscribeNative()
+  for (const name of ['visibilitychange', 'pagehide', 'pageshow']) {
+    globalThis.window.dispatchEvent(new Event(name))
+  }
+  t.alike(changes, [false, true, false, false, true])
 })
 
 test('wantsStart: no start while awaiting the node restart', async (t) => {

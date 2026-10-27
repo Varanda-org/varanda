@@ -61,6 +61,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- Na versão web, a sincronização automática para quando a aba fica oculta: a página envia `sync.stop` e libera a conexão com o semeador, e a sincronização reinicia assim que a aba volta a aparecer. Enquanto a aba está oculta, a fila de saída também não envia. Com a aba visível, a sincronização contínua não muda.
 - Ajustes › Sincronizar virou Ajustes › Sincronização e é só leitura: sem botões de sincronizar ou parar, mostra o estado, a nova tentativa e as últimas 200 linhas. O "handle" de seis dígitos hexadecimais (`@` mais a chave) saiu do app: sem nome, aparece "sem nome", e a chave só é mostrada no próprio perfil (atrás de "mostrar chave"), em Ajustes › Identidade e na etapa do certificado. A fila de saída passa a ser esvaziada também durante a rodada contínua, nunca durante uma rodada única.
 - O Caddy serve todos os arquivos de `/srv/web` com `Cache-Control: no-cache`, revalidado por ETag; arquivos ausentes com extensão dão 404 com `no-store`, e só caminhos sem extensão recebem `index.html` (`/varanda.json` continua com `no-store`).
   O build e a implantação conferem `sw.js`, com sonda byte a byte quando ele existe em `www` (a primeira implantação ainda roda o `deploy.sh` anterior); `expo.web.lang` passa a `pt-BR`, e o servidor do `varanda-serve` reconhece `.webmanifest`.
