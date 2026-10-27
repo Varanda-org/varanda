@@ -1096,7 +1096,7 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
 - The name step is skippable per session: skipping is not remembered across sessions.
 - `varanda-serve` has no automatic transport reconnection.
 - Stages 2-4 (other people's profiles, likes and reposts, media) are not in this change; Seguindo rows are not pressable yet.
-- Hidden web tab, not done: no periodic once runs while the tab is hidden, so the seeder slot stays released for the whole hidden period and nothing syncs in the background. Why: `apps/app/src/names.js:84-92` and `:126-130` wait for a continuous run before the name lookups flush (`quietOk`); `packages/web-member/lib/session.js:600` (`restartIfWanted`) revives only a continuous intent; `packages/web-member/lib/sync.js:96-97` says once runs never wait for media, and the media confirmation only arrives in a continuous run. Releasing the slot while a visible page sits idle (holding the seeder link only while catching up, then a pause) is a separate follow-up PR that keeps the continuous run and adds that release inside the browser node.
+- Hidden web tab, not done (superseded on 2026-10-27: a visible idle page now releases the seeder slot too, see section 17, "Duty cycle; the Espiadinha keeps its own link"; the background sync while hidden is still not done): no periodic once runs while the tab is hidden, so the seeder slot stays released for the whole hidden period and nothing syncs in the background. Why: `apps/app/src/names.js:84-92` and `:126-130` wait for a continuous run before the name lookups flush (`quietOk`); `packages/web-member/lib/session.js:600` (`restartIfWanted`) revives only a continuous intent; `packages/web-member/lib/sync.js:96-97` says once runs never wait for media, and the media confirmation only arrives in a continuous run. Releasing the slot while a visible page sits idle (holding the seeder link only while catching up, then a pause) is a separate follow-up PR that keeps the continuous run and adds that release inside the browser node.
 
 ### Security audit
 
@@ -1270,7 +1270,7 @@ Checked by reading the final code and the tests named (not a multi-vendor audit 
 4. The gate runs before content, fork and quota are handled (tests 9 and 10): block 0 alone is requested first and a failing block 0 never gets a second request. Pass.
 5. No key shown as text in the screen: the screen renders names, @names and "sem nome"; the author key only keys the list and the report action. Pass (by reading `apps/app/src/screens/Espiadinha.js`).
 6. `displayText` on every peer string, through `PostRow` for name, @name and text. Pass.
-7. Sockets: one extra short-lived external socket per page against `maxExternal` (`packages/core/lib/seeder.js`, 32 by default) and `MAX_SOCKETS` 128 (`apps/cli/lib/seed-ws.js`). Accepted; see 17.
+7. Sockets: one extra short-lived external socket per page against `maxExternal` (`packages/core/lib/seeder.js`, 32 by default) and `MAX_SOCKETS` 128 (`apps/cli/lib/seed-ws.js`). Accepted; see 17. Kept on 2026-10-27 whatever the sync state: the page never borrows the sync link (privacy, see "Duty cycle; the Espiadinha keeps its own link").
 8. Privacy: the seeder sees an anonymous link from the same IP asking for the complement of the follows, which it already learns from the sync link; one `peer` log line per link (`packages/core/lib/seeder.js` `_attachPeer`, printed by `apps/cli/lib/commands/seed.js`); nothing new on the account service. Pass.
 9. The client timeout (30 s, `DEFAULT_TIMEOUT_MS`) is above the page deadline (25 s). Pass.
 10. A concurrent `peek.read` is refused (`'espiadinha já em andamento'`, test 13). Pass.
@@ -1280,7 +1280,7 @@ Checked by reading the final code and the tests named (not a multi-vendor audit 
 14. Revocation is re-verified on continuation pages served from the snapshot (test 12). Pass.
 15. Concurrent read and shutdown (test 13, plus the detach regression tests). Pass.
 16. Memory pages and budgets (tests 14 and 15, and the regression tests for the byte budget, the oversized block and the TTL). Pass.
-17. Capacity: the seeder admits 32 external sockets and every hosted member holds one, so with about 30 hosted members online a peek can be refused with `'sem conexão com o semeador'`; the person retries. Estimated from the constants, NOT measured on the pilot seeder.
+17. Capacity: the seeder admits 32 external sockets and every hosted member holds one, so with about 30 hosted members online a peek can be refused with `'sem conexão com o semeador'`; the person retries. The lease of 2026-10-27 does not change this: the Espiadinha still costs a short extra external slot per page while it loads. Estimated from the constants, NOT measured on the pilot seeder.
 
 ### Human verification
 
@@ -1297,6 +1297,48 @@ None of these was performed for this change.
 - [ ] An old PWA bundle against a new node (or the reverse) answers "método desconhecido" and the tab shows the web-only notice (not performed yet).
 - [ ] Caddy logs show no new route and no new error (not performed yet).
 - [ ] Browser heap observed during a page against the pilot seeder (not performed yet).
+
+### Duty cycle; the Espiadinha keeps its own link (2026-10-27)
+
+Scope: the hosted web app with the node in the browser (`packages/web-member`, `apps/app`). The native app, `varanda-serve` and the CLI are unchanged.
+
+#### Summary
+
+- The lease (`packages/web-member/lib/session.js`, header "The lease"; enabled by `packages/web-member/web/node.js` with `leaseHoldMs` 8000 and `leaseGapMs` 45000). A user's continuous run whose seeder link is settled (inventory complete and not timed out, no unmet goal, no failing follow, and every own media core with blocks confirmed pushed, or `leaseMediaMaxMs` 120000 elapsed) for 8 s ends with `sync.stopped { reason: 'idle' }`, keeps the continuous intent and holds no socket for 45 s (`leaseGapMs`). The 8 s clock survives preemptions by member reads and is reset only by an unsettled report or another end of the run. A borrow (`borrow(fn)`) holds the link for as long as it runs, never past `LEASE_BORROW_MAX_MS` 30000 from the first borrow. A `sync.stop` that lands while an idle run unwinds makes its reason `'stopped'` and clears the intent; only the lease produces `'idle'`.
+- Redial inside the gap happens only for `sync.start`, a diary write (which clears the gap first) and a `diary.peek`. Member reads of the gap (feed, profile, log, engagement, node.info, as the lease header lists them) do not redial.
+- App: `apps/app/src/autoSyncPolicy.js` waits `IDLE_GAP_MS` 45000 after an `'idle'` end (`nextBackoff`), and `apps/app/src/syncSignals.js` folds `'idle'` into the chip `'em pausa'` (also the reason text in `apps/app/src/screens/Sincronizar.js`); `'em pausa'` is not shown while the app waits to retry after a failure (`reconcileIdle`, `endIdle`). Pull-to-refresh (`syncNow` in `apps/app/src/node.js`) follows `refreshPlan`: offline, hidden, with automatic sync off or given up (or a start in flight), it only re-reads the device's data without waiting; otherwise it waits through `waitForCatchUp`, which counts only a verified seeder link (`peer seeder`): about 1.5 s with no download after the last one, at most 10 s, and a dropped seeder link (`aviso: sem conexão com o semeador`) restarts the count.
+- Hidden tab: `shouldStopForHidden` sends one `sync.stop` at once, also when the tab is hidden during the 45 s idle gap (no run active, the continuous intent the node kept is released), and showing the tab starts a fresh run at once (`visibilityChange` clears the idle gap; `apps/app/src/node.js`).
+- Espiadinha (`packages/web-member/lib/peek.js`, `docs/rpc.md` 5.22): unchanged by the lease. Every page that needs blocks opens its own short link with an ephemeral Noise key that announces nothing, whatever the sync state, and closes it after the page, on a budget overrun and on abort. It never borrows the sync link and does not hold the lease. The one fix kept from this work in `peek.js`: a get ended by the budget cut (`run.overBudget`) is no verdict on the diary (no `unavailable`, no hole), even before the destroyed link's `close` event sets `run.lost`.
+- Privacy decision (user decision, privacy over capacity): an earlier draft of this change served the Espiadinha over the live sync link to save the second external slot. A security audit (escalated to high) found that this lets the seeder bind the browsing of unfollowed diaries to the member's identity: the sync link already announced the member's diary key and follow inventory, whereas the design (`docs/design.md`) uses a short connection with an ephemeral key that announces nothing. The draft was reverted before merge; the slot cost stays (Limits below).
+- `diary.peek` is the only borrower of the lease (`borrow(fn)`, from its wait to its answer). It already rode the sync link before this change, so that is not a privacy regression; a run that ends while a `diary.peek` waits runs the restart check again once `run` is clear.
+- Notices (`notices.list`, `packages/web-member/lib/notices.js`) also keep their own short link: their channel proves the diary key with a signature bound to that link's Noise key. Each read takes one extra external slot against `maxExternal` 32.
+- Web Lock and the Wi-Fi preference (#48) are untouched: one tab per browser still opens the node, and the app still syncs on any network whenever it is open.
+
+#### Automated (CI)
+
+Test files in the tree that cover this change (their results are recorded by the CI run of the pull request, not in this section):
+
+- `packages/web-member/test/lease.test.js` (10 tests): an idle leased run emits `idle`, keeps the intent, and only `sync.start`, a write or a `diary.peek` dial again; a `profile.read` every 100 ms does not hold the link up; a `sync.stop` queued behind a preempting read clears the hold clocks; an unconfirmed own media core holds the lease until `leaseMediaMaxMs`, a confirmed one does not; `leaseHoldMs` 0 keeps a settled run running; `borrow` holds the lease while it runs; a `diary.peek` around the hold is served (it holds the lease, and one waiting when the run ends is redialled); a `sync.stop` during an idle unwind ends it `stopped`; after a link drop the reconnected link must confirm the media core again; a preemption during a reconnect backoff waits for the old socket to close.
+- `packages/web-member/test/peek.test.js` (1 new test): with a live continuous run, a `peek.read` opens its own short socket (the socket count goes up by one during the page, that socket is closed after it), the sync socket stays open, no `sync.stopped` is emitted, and the page is served.
+- `apps/app/test/autoSyncPolicy.test.js` (3 new tests): the idle gap is exactly 45 s and independent of the failure ladder; `namesQuiet` keeps the idle gap and the 5 s quiet window; the gap belongs only to the last continuous run and ends at the next start.
+- `apps/app/test/syncSignals.test.js` (4 new tests): refresh waits for a settled inventory and ignores early own-sync and stale stops; refresh can await an existing run, time out, or cancel on teardown; refresh on a run whose link is already up starts the quiet window at once; refresh resolves once a verified link goes quiet.
+
+#### Limits
+
+- Freshness: a visible tab that is in its idle gap sees another device's posts within about 45 s (the gap) plus the next run's catch-up. A hidden tab sees them only when it is shown again. Pull-to-refresh adds no freshness beyond the link it waits for. Numbers are from the constants above, not measured on the pilot seeder.
+- The Espiadinha still costs a short extra external slot per page while it loads (its own link, by the privacy decision above), and can be refused when the seeder's 32 external slots are taken (`'Semeador ocupado; tente novamente em instantes.'` after the seeder's 1013 close, section 24; `'sem conexão com o semeador'` from an older seeder that drops the socket without a close frame). It does not redial the sync in a gap.
+- The seeder slot is released while a visible page is idle. Background sync while the tab is hidden is still not done.
+- Notices keep their own short link too; reducing those extra slots without binding the reads to the member's identity is a capacity follow-up.
+
+#### Human verification
+
+None of these was performed for this change.
+
+- [ ] Hosted web: leave the app visible for 60 s on a seeder with no other activity; the connection closes at about 8 s after the last catch-up and reopens within about 45 s after that (not performed yet).
+- [ ] Two devices: publish on one, and see it on a visible idle tab of the other within about 45 s (not performed yet).
+- [ ] Hidden tab: the connection closes at once, and showing the tab restarts the run (not performed yet).
+- [ ] Pull-to-refresh on an idle tab: the list refreshes after the link goes quiet, never later than 10 s (not performed yet).
+- [ ] Espiadinha with the sync running: the seeder log shows a second, short `peer` link for the page that closes after it, and the sync link stays up (not performed yet).
 
 ## 18. Profiles, threads, likes, reposts and quotes (2026-10-26)
 
@@ -1668,7 +1710,7 @@ None of these was performed for this change. Use the hosted web app at 320 px an
 ### Automated (CI)
 
 - Added in this change: `apps/app/test/profileLink.test.js` (parsing, build, invite decode/encode, capture, `inviteAction` table, lookup), `apps/app/test/share.test.js` (copy, share, visible URL), and the service worker and `varanda-serve` cases for the new paths.
-- Run on the branch with main merged in (through §25 and #177): `npm run lint` clean; `npm test` 134 test files, 0 failures; `npm run demo` DEMO OK; `npm run export:web -w apps/app` builds.
+- Run on the branch with main merged in (through #175): `npm run lint` clean; `npm test` 135 test files, 0 failures; `npm run demo` DEMO OK; `npm run export:web -w apps/app` builds.
 
 ### Human verification
 

@@ -90,14 +90,39 @@
 // skips a range the remote already has), so a block counts as held when it
 // is below that length OR was served to that peer on this link (the core's
 // 'upload' event, whose `from` is the Peer): served means sent with its
-// proof, not proven stored; a later link's advertised length is the truth.
+// proof, not proven stored; a later link's advertised length is the truth,
+// so a link close forgets every confirmation and the next link confirms
+// again from its own peer (a reconnect to a seeder that is still behind
+// keeps the media pending).
 // Checked on 'peer-add' and 'upload', and polled every mediaPollMs while
 // the link is verified and some core is not yet confirmed (a range update
 // from the seeder raises no event on our core). When blocks 0..length-1
 // are all held:
-//   media-pushed { key, length }  once per (key, length) per run
+//   media-pushed { key, length }  once per (key, length) per link
 // Once runs never wait for media (no goal): the app keeps a continuous run,
 // which is where the confirmation arrives.
+//
+// Readiness (the session's lease, docs/rpc.md 6.1): a continuous run reports
+// whether its verified link is SETTLED, i.e. the seeder's inventory is
+// complete (not by the inventory timeout), no follow is failing and none of
+// the once-run goals G0-G3 is unmet, together with whether some own media
+// core with blocks is not yet confirmed pushed at its length:
+//   settled { settled, mediaPending }  on every change of either flag; a run
+//                                      starts unsettled, so its first report
+//                                      comes once the link settled
+// It is recomputed wherever a goal can change (checkSettled: evaluate, a
+// fetch or purge starting, a replica's signed length growing, a media
+// confirmation) and never emitted while the run is ending. Once runs do not
+// report it. The session alone decides what to do with it; nothing here
+// ends a run for being idle.
+//
+// The link is closed before the run returns: after the Noise stream is
+// destroyed, runSync waits for the socket's 'close' (at most socketCloseMs)
+// so the next run of the same session never opens a second socket while
+// the previous one is still closing. The wait is on the last socket the run
+// opened, whether or not its link is still live: a link whose Noise stream
+// closed (the run then waiting to reconnect) may have a socket that is
+// still CLOSING.
 //
 // Follow fold: the own diary's valid `follow` records (decodeBlock +
 // validRecordCopy, seq >= 1, the last op per key wins, the own key ignored)
@@ -133,6 +158,8 @@
 // cannot serve any more (ending, link gone) answers 'semeador indisponível'
 // and the session retries once on the next verified run. Reads of a peeked
 // core are shared between concurrent peeks of the same key on the link.
+// The Espiadinha (peek.read, ./peek.js) never rides this link: it opens its
+// own short link with an ephemeral key (docs/rpc.md 5.22).
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -157,6 +184,9 @@ const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
 // Push confirmation poll of the own media cores (see the header).
 const MEDIA_POLL_MS = 1000
+// Longest wait for the socket's close after the run destroyed its link.
+const SOCKET_CLOSE_MS = 1000
+const SOCKET_CLOSED = 3 // WebSocket.CLOSED
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REPLICA_INDEX = 'replicas'
@@ -211,6 +241,27 @@ async function readReplicaIndex (storage) {
     for (const k of data.keys) if (typeof k === 'string' && HEX64.test(k)) keys.add(k)
   }
   return keys
+}
+
+// Resolves once the socket reports CLOSED (its 'close' event, or right away
+// when it already is), or after maxMs: a peer that never answers the close
+// handshake must not hold the run. Never rejects.
+function socketClosed (socket, maxMs) {
+  return new Promise((resolve) => {
+    let timer = null
+    const done = () => {
+      clearTimeout(timer)
+      try { socket.removeEventListener('close', done) } catch {}
+      resolve()
+    }
+    try {
+      if (socket.readyState === SOCKET_CLOSED) return resolve()
+      socket.addEventListener('close', done)
+    } catch {
+      return resolve()
+    }
+    timer = setTimeout(done, maxMs)
+  })
 }
 
 function watchContiguous (core, onGrow) {
@@ -269,6 +320,7 @@ async function runSync ({
   retryMinMs = RETRY_MIN_MS,
   retryMaxMs = RETRY_MAX_MS,
   mediaPollMs = MEDIA_POLL_MS,
+  socketCloseMs = SOCKET_CLOSE_MS,
   blocklistMinIntervalMs // test-only: blocklist-net.js minIntervalMs
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
@@ -324,6 +376,7 @@ async function runSync ({
   const errorsSoft = []
   const hardErrors = []
   let link = null // the current connection to the seeder
+  let lastSocket = null // the last socket opened, awaited at run end
   let readyEmitted = false
   let failures = 0 // consecutive connections that ended without a verified hello
   let fetching = 0
@@ -349,6 +402,7 @@ async function runSync ({
   const media = [] // own media cores: { key, core, pushed, stop, uploaded }
   let mediaTimer = null
   const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
+  let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
 
   function track (p, onOk, onErr) {
     const wrapped = p.then(onOk, onErr).catch(noop)
@@ -409,6 +463,7 @@ async function runSync ({
       reconnectLater()
       return
     }
+    lastSocket = socket
     // Behind the frame guard with MAX_EXTERNAL_FRAME (a seeder's batches
     // legitimately reach 8 MiB): a frame declaring more is cut at its header
     // and the link closes through onLinkClose (reconnect as for any loss).
@@ -418,6 +473,7 @@ async function runSync ({
     const noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
     noise.on('error', noop)
     const l = {
+      socket,
       noise,
       ws, // the WebSocketStream: its closeCode tells a full seeder (1013)
       peer: null,
@@ -515,8 +571,10 @@ async function runSync ({
     link = null
     if (ending) return
     // Nothing is tracked until the next link's hello: own-synced is
-    // reported again then, even for an unchanged length.
+    // reported again then, even for an unchanged length, and every media
+    // core must be confirmed again by the next link (see the header).
     lastOwnSynced = -1
+    for (const m of media) m.pushed = -1
     lastOwnBehind = null
     if (l.ws.closeCode === 1013) {
       log('aviso: semeador ocupado; tente novamente em instantes')
@@ -772,11 +830,26 @@ async function runSync ({
   }
 
   function evaluate () {
+    checkSettled()
     if (ending || !once || deadlineHit) return
     const l = seederLink()
     if (l === null || !l.peer.inventoryComplete) return
     if (anyFailing()) return
     if (unmetGoals().length === 0) finish(() => [true, []])
+  }
+
+  // The readiness report of a continuous run (see the header): the goals of
+  // a once run, met on a link whose inventory completed for real, plus the
+  // media confirmation; emitted on change only.
+  function checkSettled () {
+    if (once || ending) return
+    const l = seederLink()
+    const settled = l !== null && l.hello && l.peer.inventoryComplete && !l.inventoryTimedOut &&
+      !anyFailing() && unmetGoals().length === 0
+    const mediaPending = settled && media.some((m) => m.core.length > 0 && m.pushed !== m.core.length)
+    if (lastSettled.settled === settled && lastSettled.mediaPending === mediaPending) return
+    lastSettled = { settled, mediaPending }
+    emit({ event: 'settled', settled, mediaPending })
   }
 
   function buildResult (ok, errors) {
@@ -898,6 +971,7 @@ async function runSync ({
       return
     }
     entry.state = 'failing'
+    checkSettled()
     const core = entry.core
     entry.core = null
     track((async () => {
@@ -933,7 +1007,11 @@ async function runSync ({
   // checks again, so nothing past the limit is advertised or reported.
   function watchEntry (entry, core) {
     entry.core = core
-    const check = () => { if (entry.core === core) checkQuota(entry) }
+    // A signed length growing ahead of its blocks unsettles the link (G1).
+    const check = () => {
+      if (entry.core !== core) return
+      if (!checkQuota(entry)) checkSettled()
+    }
     core.on('append', check)
     entry.stopQuota = () => core.off('append', check)
     entry.stopFork = watchFork(core, () => { onFork(entry) })
@@ -1035,6 +1113,7 @@ async function runSync ({
     fetching++
     entry.cutByDeadline = false
     entry.fetchedAdv = entry.advSeq
+    checkSettled()
     const p = fetchGate(entry, l, fetchTimeout, deadlineBound).finally(() => {
       entry.fetching = false
       entry.fetch = null
@@ -1196,20 +1275,7 @@ async function runSync ({
   async function peek (l, key, seqs, profileSeq, usernameSeq, deadline) {
     if (ending || link !== l || seederLink() !== l) throw unavailable()
     if (isBlockedKey(key)) throw hidden()
-    let core
-    let release = noop
-    if (key === ownHex) {
-      core = diary
-    } else {
-      const entry = follows.get(key)
-      // A follow whose quarantine gate is in flight: the gate settles first
-      // (its core is never doubled on the link), then its replica is read.
-      if (entry && entry.fetch) await entry.fetch.catch(noop)
-      if (ending || link !== l) throw unavailable()
-      if (entry && entry.core && (entry.state === 'active' || entry.state === 'regate')) core = entry.core
-      else if (entry && entry.state !== 'pending') throw hidden()
-      else ({ core, release } = await acquireLinkCore(l, key))
-    }
+    const { core, release } = await lendCore(l, key)
     try {
       const raw0 = key === ownHex ? null : await gatePeek(l, core, key, deadline)
       const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline)
@@ -1221,6 +1287,26 @@ async function runSync ({
     } finally {
       release()
     }
+  }
+
+  // The core for `key` on link `l` under the run's ownership rules (a
+  // peek, diary.peek): the own diary and an open follow core
+  // are the run's (release is a no-op; a follow whose quarantine gate is in
+  // flight waits for it, its core is never doubled on the link); a follow
+  // in any other state is hidden; any other key gets the link's shared
+  // in-memory core. -> { core, release, closed }; throws unavailable() when
+  // the link is gone.
+  async function lendCore (l, key) {
+    if (ending || link !== l || seederLink() !== l) throw unavailable()
+    if (key === ownHex) return { core: diary, release: noop, closed: null }
+    const entry = follows.get(key)
+    if (entry && entry.fetch) await entry.fetch.catch(noop)
+    if (ending || link !== l) throw unavailable()
+    if (entry && entry.core && (entry.state === 'active' || entry.state === 'regate')) {
+      return { core: entry.core, release: noop, closed: null }
+    }
+    if (entry && entry.state !== 'pending') throw hidden()
+    return acquireLinkCore(l, key)
   }
 
   // The quarantine gate on a peeked core: block 0 within the deadline, the
@@ -1614,6 +1700,7 @@ async function runSync ({
         emit({ event: 'media-pushed', key: m.key, length })
       }
     }
+    checkSettled()
   }
 
   // The light poll runs only while the link is verified and some core is
@@ -1791,6 +1878,13 @@ async function runSync ({
       withdrawPeek(l)
       for (const q of l.quarantine) await q.close().catch(noop)
       l.noise.destroy()
+    }
+    // The socket is closed before the run returns (see the header): the
+    // last one, also when its link already closed and it is still CLOSING.
+    if (lastSocket !== null) {
+      const socket = lastSocket
+      lastSocket = null
+      await socketClosed(socket, socketCloseMs)
     }
     discardRegate() // a throw may have skipped finish()
     await Promise.allSettled([...inflight])

@@ -12,6 +12,7 @@ import { Body, Btn, Card, Mono, Page, Soft, Title, useNow } from '../ui'
 
 const REASONS = {
   done: 'concluída',
+  idle: 'em pausa',
   stopped: 'parada',
   preempted: 'pausada para atender um pedido',
   timeout: 'tempo esgotado',

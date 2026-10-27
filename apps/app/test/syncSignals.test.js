@@ -180,6 +180,12 @@ test('chip labels follow connectivity, recovery, growth and reconnect precedence
     [{ signals: peer }, 'sincronização automática'],
     [{ signals: { ...EMPTY_SIGNALS, reconnecting: true } }, 'reconectando…'],
     [{ active: null }, 'reconectando…'],
+    [{ active: null, signals: { ...EMPTY_SIGNALS, idleSince: 0 } }, 'em pausa'],
+    [{ active: null, signals: { ...EMPTY_SIGNALS, idleSince: 9000 } }, 'em pausa'],
+    [{ active: null, signals: { ...EMPTY_SIGNALS, idleSince: 9000 }, wanted: false }, 'pausado'],
+    [{ active: null, signals: { ...EMPTY_SIGNALS, idleSince: 9000 }, online: false }, 'sem rede'],
+    [{ active: null, signals: { ...EMPTY_SIGNALS, idleSince: 9000 }, connected: false }, 'sem conexão'],
+    [{ signals: { ...EMPTY_SIGNALS, idleSince: 9000 } }, 'conectando…'],
     [{}, 'conectando…'],
     [{ online: undefined }, 'conectando…'],
     [{ signals: { ...EMPTY_SIGNALS, lastDownloadAt: 9999 } }, 'conectando…'],
@@ -187,4 +193,255 @@ test('chip labels follow connectivity, recovery, growth and reconnect precedence
     [{ active: null, wanted: false, signals: recent }, 'pausado']
   ]
   for (const [overrides, expected] of cases) t.is(chipState(freeze({ ...base, ...overrides })), expected)
+})
+
+test('idle gap belongs only to the last continuous run and ends at the next start', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal } = await load()
+  const run = freeze(foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0))
+  const idle = freeze(foldSignal(run, 'sync.stopped', { runId: 1, reason: 'idle' }, 8000))
+  t.is(idle.runId, null)
+  t.is(idle.idleSince, 8000)
+  t.is(foldSignal(run, 'sync.stopped', { runId: 2, reason: 'idle' }, 8000).idleSince, null)
+  for (const once of [true, false]) {
+    const next = freeze(foldSignal(idle, 'sync.started', { runId: 2, once }, 9000))
+    t.is(next.idleSince, null)
+    for (const reason of ['idle', 'stopped', 'preempted', 'error']) {
+      t.is(foldSignal(next, 'sync.stopped', { runId: 2, reason }, 10000).idleSince, !once && reason === 'idle' ? 10000 : null)
+    }
+  }
+})
+
+test('refresh waits for settled inventory, ignoring early own sync and stale stops', async (t) => {
+  const { waitForCatchUp } = await load()
+  const wait = waitForCatchUp()
+  t.teardown(wait.done)
+  let finished = false
+  wait.promise.then(() => { finished = true })
+  wait.onEvent('sync.started', { runId: 1, once: false })
+  wait.onEvent('sync.event', { runId: 1, line: 'sync ready' })
+  wait.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  wait.onEvent('sync.event', { runId: 1, line: 'diário próprio sincronizado (5)' })
+  await Promise.resolve()
+  t.is(finished, false, 'own diary can sync before inventory completes')
+  wait.onEvent('sync.stopped', { runId: 1, reason: 'preempted' })
+  wait.onEvent('sync.started', { runId: 2, once: true })
+  wait.onEvent('sync.stopped', { runId: 2, reason: 'idle' })
+  await Promise.resolve()
+  t.is(finished, false, 'a once run is not the continuous lease')
+  wait.onEvent('sync.started', { runId: 3, once: false })
+  wait.onEvent('sync.stopped', { runId: 1, reason: 'idle' })
+  await Promise.resolve()
+  t.is(finished, false, 'a stale stop cannot complete this run')
+  wait.onEvent('sync.stopped', { runId: 3, reason: 'idle' })
+  await wait.promise
+  t.is(finished, true)
+})
+
+test('refresh can await an existing run, time out, or cancel on teardown', async (t) => {
+  const { waitForCatchUp } = await load()
+  const active = waitForCatchUp({ runId: 7 })
+  t.teardown(active.done)
+  active.onEvent('sync.stopped', { runId: 7, reason: 'idle' })
+  await active.promise
+  const cancelled = waitForCatchUp()
+  cancelled.done()
+  await cancelled.promise
+  const timeout = waitForCatchUp({ runId: 8, timeoutMs: 10 })
+  t.teardown(timeout.done)
+  await timeout.promise
+  t.pass('all paths resolve without a request or a rejection')
+})
+
+test('refresh on a run whose verified link is already up starts the quiet window at once', async (t) => {
+  const { waitForCatchUp } = await load()
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  let finished = false
+  const up = waitForCatchUp({ runId: 3, quietMs: 40, timeoutMs: 2000, peerUp: true })
+  t.teardown(up.done)
+  up.promise.then(() => { finished = true })
+  await sleep(80)
+  t.is(finished, true, 'no new peer line is needed')
+
+  let pending = false
+  const noRun = waitForCatchUp({ runId: null, quietMs: 40, timeoutMs: 2000, peerUp: true })
+  t.teardown(noRun.done)
+  noRun.promise.then(() => { pending = true })
+  await sleep(80)
+  t.is(pending, false, 'without a tracked run peerUp starts nothing')
+})
+
+test('refresh resolves once a verified seeder link goes quiet', async (t) => {
+  const { waitForCatchUp } = await load()
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const track = (wait) => {
+    const state = { finished: false }
+    wait.promise.then(() => { state.finished = true })
+    t.teardown(wait.done)
+    return state
+  }
+  const D = 'downloaded ' + K + ' 3'
+
+  const quiet = waitForCatchUp({ runId: 1, quietMs: 40, timeoutMs: 2000 })
+  const q = track(quiet)
+  quiet.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(15)
+  t.is(q.finished, false, 'not before the quiet window')
+  await sleep(60)
+  t.is(q.finished, true, 'resolves about quietMs after the peer line')
+
+  const busy = waitForCatchUp({ runId: 1, quietMs: 40, timeoutMs: 2000 })
+  const b = track(busy)
+  busy.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(25)
+  busy.onEvent('sync.event', { runId: 1, line: D })
+  await sleep(25)
+  t.is(b.finished, false, 'a download pushes the window out')
+  await sleep(50)
+  t.is(b.finished, true)
+
+  const own = waitForCatchUp({ runId: 1, quietMs: 40, timeoutMs: 2000 })
+  const o = track(own)
+  own.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(25)
+  own.onEvent('sync.event', { runId: 1, line: 'diário próprio atrasado (3/9)' })
+  await sleep(25)
+  t.is(o.finished, false, 'own-diary catch-up from another device pushes the window out')
+  await sleep(50)
+  t.is(o.finished, true)
+
+  const unverified = waitForCatchUp({ runId: 1, quietMs: 20, timeoutMs: 2000 })
+  const u = track(unverified)
+  unverified.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01 não verificado' })
+  unverified.onEvent('sync.event', { runId: 1, line: D })
+  await sleep(60)
+  t.is(u.finished, false, 'an unverified link never counts')
+
+  const stopped = waitForCatchUp({ runId: 1, quietMs: 2000, timeoutMs: 2000 })
+  const s = track(stopped)
+  stopped.onEvent('sync.stopped', { runId: 1, reason: 'error' })
+  await stopped.promise
+  t.is(s.finished, true, 'a stop of the tracked run ends the wait')
+
+  const late = waitForCatchUp({ timeoutMs: 30, quietMs: 2000 })
+  track(late)
+  late.onEvent('sync.started', { runId: 5, once: false })
+  late.onEvent('sync.event', { runId: 5, line: 'peer seeder abcdef01' })
+  await late.promise
+  t.pass('timeout resolves')
+
+  const cancelled = waitForCatchUp({ runId: 1, quietMs: 20 })
+  cancelled.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  cancelled.done()
+  await cancelled.promise
+  t.pass('done resolves')
+})
+
+test('seederVerified follows only the verified seeder link of the current run', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal } = await load()
+  t.is(EMPTY_SIGNALS.seederVerified, false)
+  let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0)
+  const ev = (line) => { state = foldSignal(freeze(state), 'sync.event', freeze({ runId: 1, line }), 1) }
+  const warn = (line) => { state = foldSignal(freeze(state), 'warning', freeze({ line }), 1) }
+  ev('peer member abcdef01')
+  t.is(state.peer, true)
+  t.is(state.seederVerified, false, 'a member link is not the seeder')
+  ev('peer seeder abcdef01 não verificado')
+  t.is(state.seederVerified, false)
+  ev('peer seeder abcdef01')
+  t.is(state.seederVerified, true)
+  ev('peer seeder abcdef01 não verificado')
+  t.is(state.seederVerified, false, 'an unverified answer clears it')
+  ev('peer seeder abcdef01')
+  warn('aviso: sem conexão com o semeador; nova tentativa em 2 s')
+  t.is(state.seederVerified, false, 'a reconnecting warning clears it')
+  ev('peer seeder abcdef01')
+  warn('aviso: o endereço configurado não respondeu como um semeador verificado (abcdef01)')
+  t.is(state.seederVerified, false)
+  ev('peer seeder abcdef01')
+  state = foldSignal(freeze(state), 'sync.event', freeze({ runId: 9, line: 'peer seeder abcdef01 não verificado' }), 1)
+  t.is(state.seederVerified, true, 'a stale run changes nothing')
+  t.is(foldSignal(freeze(state), 'sync.stopped', { runId: 1, reason: 'idle' }, 2).seederVerified, false)
+  t.is(foldSignal(freeze(state), 'sync.started', { runId: 2, once: false }, 2).seederVerified, false)
+})
+
+test('endIdle ends the idle gap without a new run', async (t) => {
+  const { EMPTY_SIGNALS, chipState, endIdle, foldSignal } = await load()
+  const run = freeze(foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0))
+  const idle = freeze(foldSignal(run, 'sync.stopped', { runId: 1, reason: 'idle' }, 8000))
+  const chip = (signals) => chipState({ online: true, connected: true, active: null, wanted: true, signals, now: 9000 })
+  t.is(chip(idle), 'em pausa')
+  const ended = endIdle(idle)
+  t.is(ended.idleSince, null)
+  t.is(chip(ended), 'reconectando…', 'a failure backoff is not a pause')
+  t.is(endIdle(run), run, 'nothing to end')
+})
+
+test('refresh: a failed start resolves at once, an adopted run is tracked', async (t) => {
+  const { waitForCatchUp } = await load()
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const failed = waitForCatchUp({ timeoutMs: 2000 })
+  t.teardown(failed.done)
+  const start = Date.now()
+  failed.fail()
+  await failed.promise
+  t.ok(Date.now() - start < 1000, 'no timeout wait')
+
+  const following = waitForCatchUp({ runId: 3, timeoutMs: 2000 })
+  t.teardown(following.done)
+  let followed = false
+  following.promise.then(() => { followed = true })
+  following.fail()
+  following.track(9)
+  await sleep(10)
+  t.is(followed, false, 'a wait that follows a run ignores fail and track')
+  following.onEvent('sync.stopped', { runId: 3, reason: 'idle' })
+  await following.promise
+
+  const adopted = waitForCatchUp({ timeoutMs: 2000 })
+  t.teardown(adopted.done)
+  adopted.track(5)
+  adopted.onEvent('sync.stopped', { runId: 5, reason: 'idle' })
+  await adopted.promise
+  t.pass('the adopted run counts once handed over')
+
+  const up = waitForCatchUp({ timeoutMs: 2000, quietMs: 20 })
+  t.teardown(up.done)
+  up.track(6, { peerUp: true })
+  await up.promise
+  t.pass('an adopted run with its verified link up arms the quiet window')
+
+  const ended = waitForCatchUp({ timeoutMs: 2000 })
+  t.teardown(ended.done)
+  ended.track(7, { ended: true })
+  await ended.promise
+  t.pass('a run that already stopped resolves the wait')
+})
+
+test('refresh: a dropped seeder link cancels the quiet window until the next verified link', async (t) => {
+  const { waitForCatchUp } = await load()
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const D = 'downloaded ' + K + ' 4'
+  const wait = waitForCatchUp({ runId: 1, quietMs: 30, timeoutMs: 2000 })
+  t.teardown(wait.done)
+  let finished = false
+  wait.promise.then(() => { finished = true })
+  wait.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(10)
+  wait.onEvent('warning', { line: 'aviso: sem conexão com o semeador; nova tentativa em 2 s' })
+  wait.onEvent('sync.event', { runId: 1, line: D })
+  await sleep(60)
+  t.is(finished, false, 'neither the window nor a download completes the wait without a link')
+  wait.onEvent('warning', { line: 'aviso: diário abcdef01 ignorado (x)' })
+  wait.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(60)
+  t.is(finished, true, 'the next verified link re-arms it')
+
+  const peerUp = waitForCatchUp({ runId: 2, quietMs: 30, timeoutMs: 2000, peerUp: true })
+  t.teardown(peerUp.done)
+  let pf = false
+  peerUp.promise.then(() => { pf = true })
+  peerUp.onEvent('warning', { line: 'aviso: sem conexão com o semeador' })
+  await sleep(60)
+  t.is(pf, false, 'a link already up when the wait began is cancelled too')
 })

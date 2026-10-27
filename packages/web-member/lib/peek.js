@@ -454,7 +454,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
           // Ended by the budget cut, a lost link or the page deadline (a
           // timeout shorter than the fetch timeout): not a verdict on the
           // diary, which stays pending for a later read.
-          if (run.lost || run.aborted || t0 < L.fetchTimeoutMs) return
+          if (run.lost || run.aborted || run.overBudget || t0 < L.fetchTimeoutMs) return
           // Terminal for this snapshot at once: skipped and page incomplete,
           // never listed in `needs` again, so paging continues over the rest.
           diary.fail = 'unavailable'
@@ -525,7 +525,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
           // A hole the seeder left: the window is never extended past it.
           // A get ended by the budget cut, a lost link or the page deadline
           // (a timeout shorter than the fetch timeout) is not one.
-          if (!run.lost && !run.aborted && t >= L.fetchTimeoutMs) hole = true
+          if (!run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs) hole = true
           break
         }
         if (!charge(run, raw)) {
