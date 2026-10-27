@@ -19,7 +19,7 @@ export const colors = {
   tabBar: 'rgba(251,248,243,0.94)',
   danger: '#a3201a',
   warn: '#8a5a00',
-  placeholder: '#9aa39e',
+  placeholder: '#616c67',
   skeleton: 'rgba(31,42,36,0.08)',
   pillBg: '#1d6b4f',
   pillInk: '#ffffff'
@@ -31,10 +31,10 @@ export const motion = { fast: 150, normal: 250 }
 // Avatar colors by the first key byte mod 5: azul, laranja, amarelo,
 // vermelho, verde.
 export const stripes = [
-  { bg: '#2a7fb8', ink: '#ffffff' },
+  { bg: '#2576b0', ink: '#ffffff' },
   { bg: '#e8805a', ink: '#1f2a24' },
   { bg: '#f2b705', ink: '#1f2a24' },
-  { bg: '#e94e3c', ink: '#ffffff' },
+  { bg: '#c23528', ink: '#ffffff' },
   { bg: '#1d6b4f', ink: '#ffffff' }
 ]
 

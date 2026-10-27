@@ -15,7 +15,7 @@ function TopRow ({ onClose, title, left, right }) {
       {title
         ? (
           <View style={styles.titleWrap} pointerEvents='none'>
-            <Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{title}</Text>
+            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
           </View>
           )
         : null}
