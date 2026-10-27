@@ -534,12 +534,7 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
   const who = displayText(whoOf({ name: repostedBy.name, username: repostedBy.username }).title)
   return (
     <View style={styles.placeholder}>
-      <Text
-        style={styles.reposted}
-        onPress={onOpenReposter}
-        accessibilityRole={onOpenReposter ? 'link' : 'text'}
-        accessibilityLabel={who + ' republicou'}
-      >
+      <Text style={styles.reposted} onPress={onOpenReposter} accessibilityRole={onOpenReposter ? 'link' : 'text'}>
         <Icon name='republicar' size={14} color={colors.soft} />
         {' ' + who + ' republicou'}
       </Text>
