@@ -23,6 +23,7 @@ const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = 
 const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
+const { createNoticeIndex } = require('@varanda/core/lib/notices')
 
 const HEX64_ANYWHERE = /[0-9a-f]{64}/
 
@@ -150,6 +151,8 @@ function scanFixture (options = {}) {
   const seeder = Object.create(Seeder.prototype)
   Object.assign(seeder, {
     _index: createEngagementIndex({ ...options, onFreed: () => seeder._scheduleIndexResume() }),
+    // _drop also leaves the follow-notices index (seeder.js).
+    _notices: createNoticeIndex(),
     _indexQueue: Promise.resolve(),
     _indexStartup: new Set(),
     _indexDropped: new Set(),

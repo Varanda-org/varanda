@@ -1318,7 +1318,41 @@ CI result on the final tree, Node 24.22.1 (run from the worktree root, in this o
 
 - [ ] Hosted web: publish in A Rua, open the Espiadinha: the post is there, without 'seguir' (not performed yet).
 
-## 20. Espiadinha: republicações, orçamento do índice, expiração e aviso de nova versão (2026-10-27)
+## 20. Follow-back notices: the Avisos tab (PR feat/follow-back-notices, 2026-10-26)
+
+### Summary
+
+- The fifth tab ("Avisos", bell icon `sino`; fourth in the bar, before Diário) tells a member who started following them, with "Seguir de volta" on each row. It is private and quiet: no follower count, no followers list, no HTTP route and no system notification anywhere; the tab shows a plain dot (never a number) when something is unseen.
+- Contract: RPC `notices.list { limit, after }` (`docs/rpc.md` 5.28; `NOTICES_LIMIT_DEFAULT` 30, `NOTICES_LIMIT_MAX` 64); the channel `'varanda/notices/1'` (`docs/protocol.md`, "Notices channel"); the browser read (`docs/protocol.md`, "Notices link").
+- Files: `packages/core/lib/notices.js` (index, proof payload, message validation), `packages/core/lib/notices-net.js` (the channel), `packages/core/lib/seeder.js` (index folded in the diary scan, channel attached after the blocklist channel), `packages/core/lib/session.js` (the node session refuses), `packages/web-member/lib/notices.js` and `session.js` (the read), `packages/rpc` (`notices.list`, limits), `apps/app/src/notices.js`, `apps/app/src/screens/Avisos.js`, `ui/TabBar.js`, `ui/Icon.js`, `apps/app/App.js`.
+- Trust model: the seeder is not trusted for facts. It serves candidates only to a connection that proved it owns the diary key (an Ed25519 signature over `'varanda-notices-v1\n'` + nonce + `'\n'` + the connection's Noise key + `'\n'` + the diary key); the browser re-verifies each row (block 0 gate, the named `follow` block with `on: true` and the claimed `at`, the signed tail for a later unfollow). A seeder can withhold a row or an unfollow outside the verified tail, never forge a follower.
+- Data flows: the seeder index is in memory only, rebuilt from block 1 on every serve and at start, committed per author only when the scan reached the signed length. The browser keeps verified evidence in memory for 5 minutes (at most 512 rows), re-verified on every read; the only thing on the device is the seen-ids list in `localStorage` (`varanda-notices-seen`, scoped to the own key, at most 2048 ids).
+- Scope: hosted web only. Native, `varanda-serve` and the CLI are out of scope (`'avisos disponíveis só no navegador'`, the tab shows the web-only text).
+
+### Limits
+
+- Constants: page 30 / 64; `MAX_NOTICES_MESSAGE` 16384; `MAX_BAD_NOTICES` 5; request timeout 10000 ms (terminal for the channel); `MAX_FOLLOW_TARGETS_PER_AUTHOR` 4096; `NOTICES_MAX_EDGES` 262144; read deadline 25000 ms; byte budget 16777216; 8 rows in parallel; 16 blocks per row; 8 seeder pages; evidence cache 300000 ms / 512 rows; app poll 300000 ms; seen ids 2048.
+- Worst case of one `notices.list` page (64 notices): 42256 bytes against `MAX_MESSAGE` 262144 (`node packages/rpc/test/sizes.test.js`).
+- Capacity: each read occupies one extra external socket (default `maxExternal` 32), like a peek; a busy seeder can refuse it. Not measured on the pilot seeder.
+
+### Human verification
+
+None of these was performed for this change. Use two browsers (or profiles) with two hosted accounts, A and B, against the same seeder.
+
+- [ ] A follows B. B (after opening the app, or within 5 minutes with the page visible) sees a dot on the Avisos tab and no number.
+- [ ] B opens Avisos: the row "<A's name> começou a seguir você" with "Seguir de volta" shows, and the dot goes away. Reload: the dot does not come back for the same row.
+- [ ] B presses "Seguir de volta": the row leaves, the toast says "seguindo <name>" and A shows up in B's Seguindo.
+- [ ] A follows B again after B followed back: no row (B already follows A).
+- [ ] A unfollows B (before B follows back): the row is gone on B's next load (pull to refresh).
+- [ ] The operator blocks A: the row is gone on B's next load.
+- [ ] Nowhere in the app is there a follower count or a followers list; the Diário still says "N seguindo".
+- [ ] A different identity in the same browser starts with no seen ids (the dot lights for rows the first identity had seen).
+- [ ] Offline before the first load: "Sem conexão" and "tentar de novo". Locked identity: the error "identidade bloqueada: entre com a passkey".
+- [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
+- [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
+- [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+
+## 21. Espiadinha: republicações, orçamento do índice, expiração e aviso de nova versão (2026-10-27)
 
 ### Summary
 
@@ -1336,7 +1370,7 @@ CI result on the final tree, Node 24.22.1 (run from the worktree root, in this o
 
 Commands (from the worktree root, in this order): `npm run lint`; `cd packages/core && node ../../scripts/run-tests.js`; `cd packages/rpc && node ../../scripts/run-tests.js`; `cd packages/web-member && node ../../scripts/run-tests.js`; `cd apps/app && node ../../scripts/run-tests.js`.
 
-Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across the six workspaces, 116 test files, 0 failures (changed suites: web-member `peek-repost` 8/8 and `peek` 30/30, core `peek` 25/25, app `indexClient` 18/18, `peek` 14/14, `engagement` 4/4, `release` 7/7); `npm run demo` ends with `DEMO OK`. Security audit of the change: 0 verified findings (auditors: Claude, Claude built-in review, GPT, Grok).
+Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across the six workspaces, 122 test files (with main's notices merged in), 0 failures (changed suites: web-member `peek-repost` 8/8 and `peek` 30/30, core `peek` 25/25, app `indexClient` 18/18, `peek` 14/14, `engagement` 4/4, `release` 7/7); `npm run demo` ends with `DEMO OK`. Security audit of the change: 0 verified findings (auditors: Claude, Claude built-in review, GPT, Grok).
 
 ### Human verification (none performed yet)
 
