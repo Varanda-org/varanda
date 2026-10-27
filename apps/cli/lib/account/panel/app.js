@@ -41,7 +41,10 @@ const API_ERRORS = {
   rede: 'sem conexão com o servidor',
   'ja-revertido': 'Essa decisão já foi desfeita por outra mais recente.',
   expirado: 'a sessão expirou, entre de novo',
-  defasado: 'a lista mudou, recarregue o painel e tente de novo'
+  defasado: 'a lista mudou, recarregue o painel e tente de novo',
+  // api/stats for a moderator who is not a stats admin (api/me hides the
+  // tab then, so this is a stale page or a revoked grant).
+  'nao-autorizado': 'sem acesso às estatísticas'
 }
 
 // The AI triage (apps/cli/lib/account/ai) explains every abstention, and an
@@ -115,7 +118,35 @@ const TEXT = {
   publishedTitle: 'última lista confirmada pela operação',
   notPublished: 'A lista publicada ainda não foi confirmada neste painel. A operação precisa rodar mod apply.',
   noBlocked: 'Nenhuma conta bloqueada na lista confirmada.',
-  loading: 'carregando…'
+  loading: 'carregando…',
+  none: '—',
+  statsNow: 'Agora',
+  statsMembers: 'Membros vinculados',
+  statsOf: ' de ',
+  statsAdmitted: 'Diários no semeador',
+  statsActiveDay: 'Ativos hoje (dia de Brasília)',
+  statsActiveWeek: 'Ativos nos últimos 7 dias',
+  statsConnections: 'Conexões abertas',
+  statsTopicPosts: 'Publicações indexadas',
+  statsStorage: 'Armazenamento',
+  statsActiveNote: 'Ativos: diários cujo tamanho cresceu no dia (horário de Brasília), contados só na memória do semeador; zeram quando ele reinicia.',
+  statsRestarted: 'O semeador reiniciou há menos de 7 dias: os ativos ainda estão parciais.',
+  statsNoSeeder: 'O semeador não respondeu: só os números do serviço de conta.',
+  statsWeeks: 'Cadastros por semana',
+  statsWeekOf: 'semana de ',
+  statsMonths: 'Cadastros por mês',
+  statsTotalOpen: ' (total ',
+  statsTotalClose: ')',
+  statsDays: 'Últimos 30 dias',
+  statsColDay: 'Dia',
+  statsColMembers: 'Membros',
+  statsColActiveDay: 'Ativos no dia',
+  statsColActiveWeek: 'Ativos 7 dias',
+  statsColAdmitted: 'Diários',
+  statsNoHistory: 'Histórico indisponível (usage.json inválido): avise a operação.',
+  statsHistoryStarts: 'O histórico diário começa hoje.',
+  statsPrivacy: 'Só contagens: nenhuma chave, e-mail ou @nome.',
+  statsRefresh: 'Atualizar'
 }
 
 const TABS = [
@@ -124,6 +155,24 @@ const TABS = [
   { id: 'bloqueadas', label: 'Bloqueadas' },
   { id: 'historico', label: 'Histórico' }
 ]
+// Shown only when api/me says `stats: true` (a stats admin): the tab list
+// stays the four moderation tabs for everyone else.
+const STATS_TAB = { id: 'estatisticas', label: 'Estatísticas' }
+
+// Usage statistics (api/stats). Counts only; every field is re-validated
+// here because the panel renders nothing it did not shape itself.
+const DAY_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/
+const MONTH_RE = /^[0-9]{4}-[0-9]{2}$/
+const SIGNUP_ROWS = 24
+const HISTORY_ROWS = 400
+const TABLE_DAYS = 30
+const WEEK_SECONDS = 604800
+const SEEDER_FIELDS = ['uptimeSeconds', 'admitted', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'mediaBytes', 'topicPosts', 'connections', 'external']
+const HISTORY_FIELDS = ['members', 'admitted', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'mediaBytes', 'topicPosts', 'connections', 'external']
+// Fixed pt-BR month abbreviations, not the locale API: the output is the same in
+// every browser and under Node.
+const MONTHS = ['jan.', 'fev.', 'mar.', 'abr.', 'maio', 'jun.', 'jul.', 'ago.', 'set.', 'out.', 'nov.', 'dez.']
+const BYTE_UNITS = ['KB', 'MB', 'GB', 'TB']
 
 function has (obj, key) {
   return obj !== null && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key)
@@ -246,6 +295,114 @@ function publishedOf (p) {
   return { seq: p.seq, at: str(p.at) }
 }
 
+// A count is a non-negative safe integer; anything else (a float, a string
+// digit, a negative) is null and renders as a dash, never as a guess.
+function countOf (v) {
+  return Number.isSafeInteger(v) && v >= 0 ? v : null
+}
+
+function plainObject (v) {
+  return v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype
+}
+
+function rowsOf (v) {
+  return Array.isArray(v) ? v : []
+}
+
+// A real calendar day: the shape alone would accept 2026-02-30 or
+// 9999-99-99, so the date must round-trip through Date unchanged (the Z
+// midnight is only a parsing anchor here, never shown).
+function validDay (day) {
+  if (typeof day !== 'string' || !DAY_RE.test(day)) return false
+  const d = new Date(day + 'T00:00:00Z')
+  return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === day
+}
+
+// 'YYYY-MM' with a month 01..12.
+function validMonth (month) {
+  if (typeof month !== 'string' || !MONTH_RE.test(month)) return false
+  const m = Number(month.slice(5, 7))
+  return m >= 1 && m <= 12
+}
+
+// api/stats -> the stats view model. Rows whose day/week/month key is not
+// the exact date shape are dropped (the key is rendered as text, but a
+// bad key means a bad row). Lists are capped so a broken server cannot
+// make the page build thousands of nodes.
+function statsOf (json) {
+  const members = has(json, 'members') && plainObject(json.members) ? json.members : {}
+  const max = Number.isSafeInteger(members.max) && members.max > 0 ? members.max : null
+  let seeder = null
+  if (has(json, 'seeder') && plainObject(json.seeder)) {
+    seeder = { at: str(json.seeder.at) }
+    for (const k of SEEDER_FIELDS) seeder[k] = countOf(json.seeder[k])
+  }
+  const signups = has(json, 'signups') && plainObject(json.signups) ? json.signups : {}
+  const weeks = rowsOf(signups.weeks)
+    .filter((w) => plainObject(w) && validDay(w.start))
+    .map((w) => ({ start: w.start, count: countOf(w.count) }))
+    .slice(-SIGNUP_ROWS)
+  const months = rowsOf(signups.months)
+    .filter((m) => plainObject(m) && validMonth(m.month))
+    .map((m) => ({ month: m.month, count: countOf(m.count), total: countOf(m.total) }))
+    .slice(-SIGNUP_ROWS)
+  let history = null
+  if (has(json, 'history') && Array.isArray(json.history)) {
+    // Oldest first, as the server sends it: keep the newest rows.
+    history = json.history
+      .filter((r) => plainObject(r) && validDay(r.day))
+      .map((r) => {
+        const row = { day: r.day }
+        for (const k of HISTORY_FIELDS) row[k] = countOf(r[k])
+        return row
+      })
+      .slice(-HISTORY_ROWS)
+    // Rows were sent but none was usable: that is a broken usage.json, not
+    // a history that starts today.
+    if (history.length === 0 && json.history.length > 0) history = null
+  }
+  return {
+    at: has(json, 'at') ? str(json.at) : '',
+    members: { total: countOf(members.total), max },
+    seeder,
+    signups: { weeks, months },
+    history
+  }
+}
+
+// 1234567 -> '1.234.567' (pt-BR grouping, built by hand, locale-free).
+function formatCount (n) {
+  if (countOf(n) === null) return TEXT.none
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+
+// Base 1024, one decimal with a comma: 1536 -> '1,5 KB'.
+function formatBytes (n) {
+  if (countOf(n) === null) return TEXT.none
+  if (n < 1024) return n + ' B'
+  let v = n / 1024
+  let i = 0
+  // Step up while the rounded value would print as 1024,0 or more.
+  while (i < BYTE_UNITS.length - 1 && Math.round(v * 10) / 10 >= 1024) {
+    v /= 1024
+    i++
+  }
+  return v.toFixed(1).replace('.', ',') + ' ' + BYTE_UNITS[i]
+}
+
+// '2026-10-26' -> '26/10/2026'; a dash for anything else.
+function formatDay (day) {
+  if (!validDay(day)) return TEXT.none
+  return day.slice(8, 10) + '/' + day.slice(5, 7) + '/' + day.slice(0, 4)
+}
+
+// '2026-10' -> 'out. 2026'; a dash for anything else.
+function formatMonth (month) {
+  if (!validMonth(month)) return TEXT.none
+  const i = Number(month.slice(5, 7)) - 1
+  return MONTHS[i] + ' ' + month.slice(0, 4)
+}
+
 // The answers of api/me, api/reports (aberta and decidida) and api/blocked
 // -> one view model. Pending changes are an ordered intent log (plan D6):
 // a member's net state is the published membership after its pending
@@ -286,6 +443,8 @@ function buildState ({ me, open, decided, blocked } = {}) {
   }
   return {
     email: has(me, 'email') ? str(me.email) : '',
+    // Only an explicit `stats: true` opens the Estatísticas tab.
+    stats: has(me, 'stats') && me.stats === true,
     published,
     open: reportList(open),
     decided: reportList(decided),
@@ -306,6 +465,20 @@ function createPanel (env) {
   // Decision notes typed but not yet sent, by report id: a render must never
   // lose them (a failed POST keeps the note for the retry).
   const drafts = new Map()
+  // The api/stats answer, fetched lazily on the first visit to the tab and
+  // kept apart from state: load() (and so every mutation) never refetches it.
+  let statsData = null
+  // True only while a GET api/stats is in flight. It is NOT the global busy:
+  // a slow read must never disable Sair or a decision. statsLast is that
+  // GET's promise (settled() waits for it); session changes only on
+  // toLogin, so an answer from a previous login is dropped.
+  let statsLoading = false
+  // The last stats failure, shown only inside the Estatísticas view: a
+  // background read must never paint over another tab or replace a
+  // decision's error line.
+  let statsError = ''
+  let statsLast = Promise.resolve()
+  let session = 0
   let gen = 0
   let last = Promise.resolve()
 
@@ -328,6 +501,12 @@ function createPanel (env) {
     if (p.onInput) node.addEventListener('input', p.onInput)
     if (p.disabled) node.disabled = true
     if (p.onClick) node.addEventListener('click', p.onClick)
+    // <meter> bounds and reading. `amount` is the value attribute: the
+    // `value` prop above sets the property, which is for textareas.
+    if (p.min !== undefined) node.setAttribute('min', String(p.min))
+    if (p.max !== undefined) node.setAttribute('max', String(p.max))
+    if (p.amount !== undefined) node.setAttribute('value', String(p.amount))
+    if (p.label !== undefined) node.setAttribute('aria-label', p.label)
     for (const c of children) if (c) node.appendChild(c)
     return node
   }
@@ -393,9 +572,14 @@ function createPanel (env) {
   // shows the login view; other errors are shown as a fixed message.
   function run (fn) {
     const p = last.then(async () => {
+      // The stats GET runs beside this queue and may have gone to the login
+      // view (a 401) while this step was in flight: then a later failure of
+      // this step must not paint over the login screen.
+      const mine = session
       try {
         await fn()
       } catch (err) {
+        if (mine !== session) return
         if (err instanceof LoginRequired) {
           toLogin('')
           return
@@ -412,6 +596,10 @@ function createPanel (env) {
   function toLogin (erro) {
     gen++
     state = null
+    session++
+    statsData = null
+    statsLoading = false
+    statsError = ''
     notice = ''
     error = ''
     busy = false
@@ -456,8 +644,12 @@ function createPanel (env) {
     error = ''
     render()
     return run(async () => {
+      const mine = session
       try {
         await call('POST', url, body)
+        // Logged out meanwhile (a 401 on the stats GET): do not reload the
+        // queue behind the login screen.
+        if (mine !== session) return
         if (onSent) onSent()
         notice = done
         await load()
@@ -468,22 +660,153 @@ function createPanel (env) {
     })
   }
 
+  // The stats GET. It runs beside the run() queue, not in it: call() has no
+  // timeout, and a slow read must not hold a decision POST behind it. It
+  // mirrors run()'s handling: a 401 goes to login, anything else shows the
+  // fixed API_ERRORS line (a 403 is 'sem acesso às estatísticas'), but in
+  // statsError, never the shared error. A click while one is in flight
+  // returns the same promise: one request at a time.
+  function loadStats () {
+    if (statsLoading) return statsLast
+    const mine = session
+    statsLoading = true
+    statsError = ''
+    renderIfStats()
+    statsLast = (async () => {
+      try {
+        const json = await call('GET', API + 'stats')
+        if (mine === session) statsData = statsOf(json)
+      } catch (err) {
+        if (mine !== session) return
+        if (err instanceof LoginRequired) {
+          toLogin('')
+          return
+        }
+        statsError = err && typeof err.message === 'string' ? err.message : 'erro'
+      } finally {
+        if (mine === session) {
+          statsLoading = false
+          renderIfStats()
+        }
+      }
+    })()
+    return statsLast
+  }
+
+  // Only the Estatísticas view shows stats: on any other tab the answer is
+  // just stored, so a remount never steals the caret from a note being typed.
+  function renderIfStats () {
+    if (state && tab === STATS_TAB.id) render()
+  }
+
+  function selectTab (id) {
+    tab = id
+    notice = ''
+    error = ''
+    render()
+    if (id === STATS_TAB.id && statsData === null) loadStats()
+  }
+
   function render () {
     if (!state) return
+    // A tab id left over from a session that had stats access falls back.
+    if (tab === STATS_TAB.id && !state.stats) tab = 'abertas'
+    const tabs = [...TABS, ...(state.stats ? [STATS_TAB] : [])]
     mount(
       h('div', { className: 'header' },
         h('h1', { text: TEXT.title }),
         h('p', { className: 'email', text: state.email }),
         button(TEXT.logout, logout, { disabled: busy })
       ),
-      h('nav', { className: 'tabs' }, ...TABS.map((t) => button(t.label, () => { tab = t.id; notice = ''; error = ''; render() }, { pressed: tab === t.id }))),
+      h('nav', { className: 'tabs' }, ...tabs.map((t) => button(t.label, () => selectTab(t.id), { pressed: tab === t.id }))),
       notice ? h('p', { className: 'notice', text: notice }) : null,
       error ? h('p', { className: 'error', text: error }) : null,
       tab === 'abertas'
         ? renderOpen()
         : tab === 'pendentes'
           ? renderPending()
-          : tab === 'bloqueadas' ? renderBlocked() : renderHistory()
+          : tab === 'bloqueadas'
+            ? renderBlocked()
+            : tab === STATS_TAB.id ? renderStats() : renderHistory()
+    )
+  }
+
+  function figure (label, text) {
+    return [h('dt', { text: label }), h('dd', { text })]
+  }
+
+  // One labelled <meter> row per signup bucket; the peak bucket fills it.
+  function bars (rows, labelOf, textOf) {
+    const peak = Math.max(1, ...rows.map((r) => r.count ?? 0))
+    return rows.map((r) => {
+      const label = labelOf(r)
+      return h('div', { className: 'bar' },
+        h('span', { text: label }),
+        h('meter', { min: 0, max: peak, amount: r.count ?? 0, label }),
+        h('span', { text: textOf(r) })
+      )
+    })
+  }
+
+  function renderStats () {
+    const refresh = button(TEXT.statsRefresh, loadStats, { disabled: statsLoading })
+    const failed = statsError ? h('p', { className: 'error', text: statsError }) : null
+    if (statsData === null) {
+      // A failed first GET: say why and offer the retry instead of a
+      // 'carregando…' that would never end.
+      return statsLoading ? h('p', { className: 'meta', text: TEXT.loading }) : h('div', { className: 'stats' }, failed, refresh)
+    }
+    const { members, seeder, signups, history } = statsData
+    const s = seeder || {}
+    const storage = countOf(s.bytes) !== null && countOf(s.mediaBytes) !== null
+      ? formatBytes(s.bytes + s.mediaBytes)
+      : TEXT.none
+    const figures = h('dl', { className: 'figures' },
+      ...figure(TEXT.statsMembers, formatCount(members.total) + (members.max !== null ? TEXT.statsOf + formatCount(members.max) : '')),
+      ...figure(TEXT.statsAdmitted, formatCount(s.admitted)),
+      ...figure(TEXT.statsActiveDay, formatCount(s.activeDay)),
+      ...figure(TEXT.statsActiveWeek, formatCount(s.activeWeek)),
+      ...figure(TEXT.statsConnections, formatCount(s.connections)),
+      ...figure(TEXT.statsTopicPosts, formatCount(s.topicPosts)),
+      ...figure(TEXT.statsStorage, storage)
+    )
+    let days
+    if (history === null) {
+      days = h('p', { className: 'banner', text: TEXT.statsNoHistory })
+    } else if (history.length === 0) {
+      days = h('p', { className: 'meta', text: TEXT.statsHistoryStarts })
+    } else {
+      const head = [TEXT.statsColDay, TEXT.statsColMembers, TEXT.statsColActiveDay, TEXT.statsColActiveWeek, TEXT.statsColAdmitted]
+      const rows = history.slice(-TABLE_DAYS).reverse().map((r) => h('tr', null,
+        h('td', { text: formatDay(r.day) }),
+        h('td', { text: formatCount(r.members) }),
+        h('td', { text: formatCount(r.activeDay) }),
+        h('td', { text: formatCount(r.activeWeek) }),
+        h('td', { text: formatCount(r.admitted) })
+      ))
+      days = h('table', { className: 'days' },
+        h('thead', null, h('tr', null, ...head.map((t) => h('th', { text: t })))),
+        h('tbody', null, ...rows)
+      )
+    }
+    return h('div', { className: 'stats' },
+      h('h2', { text: TEXT.statsNow }),
+      figures,
+      h('p', { className: 'meta', text: TEXT.statsActiveNote }),
+      seeder !== null && countOf(seeder.uptimeSeconds) !== null && seeder.uptimeSeconds < WEEK_SECONDS
+        ? h('p', { className: 'meta', text: TEXT.statsRestarted })
+        : null,
+      seeder === null ? h('p', { className: 'meta', text: TEXT.statsNoSeeder }) : null,
+      h('h2', { text: TEXT.statsWeeks }),
+      ...bars(signups.weeks, (w) => TEXT.statsWeekOf + formatDay(w.start).slice(0, 5), (w) => formatCount(w.count)),
+      h('h2', { text: TEXT.statsMonths }),
+      ...bars(signups.months, (m) => formatMonth(m.month), (m) => formatCount(m.count) + TEXT.statsTotalOpen + formatCount(m.total) + TEXT.statsTotalClose),
+      h('h2', { text: TEXT.statsDays }),
+      days,
+      h('p', { className: 'meta', text: TEXT.statsPrivacy }),
+      // A failed refresh keeps the last good numbers above and says so here.
+      failed,
+      refresh
     )
   }
 
@@ -636,13 +959,18 @@ function createPanel (env) {
 
   return {
     start,
-    settled: () => last,
+    // Both queues: the run() chain and the stats GET beside it.
+    settled: async () => {
+      await last
+      await statsLast
+      await last
+    },
     get state () { return state }
   }
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { reasonLabel, aiReasonLabel, formatSimilarity, aiLine, formatDate, buildState, nextAction, shortKey, who, createPanel, REASON_LABELS, LOGIN_ERRORS, AI_REASONS, TEXT }
+  module.exports = { reasonLabel, aiReasonLabel, formatSimilarity, aiLine, formatDate, buildState, nextAction, shortKey, who, statsOf, formatCount, formatBytes, formatDay, formatMonth, createPanel, REASON_LABELS, LOGIN_ERRORS, AI_REASONS, TEXT }
 } else {
   createPanel({
     document,

@@ -113,7 +113,7 @@ async function linkDirect (accounts, iss, m, username, sub, email) {
 // Two linked members (ana, bia), carol linked to the moderator's Google
 // account, and the service with the panel enabled for EMAIL_MOD unless
 // `emails` says otherwise.
-async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir } = {}) {
+async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEmails = [], usage = null } = {}) {
   const root = tmpDir(t)
   const dir = path.join(root, 'account')
   const c = { offset: 0 }
@@ -146,6 +146,8 @@ async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir } = {}) 
     moderation,
     googleMod,
     modEmails: emails,
+    statsEmails,
+    usage,
     panelDir
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
@@ -757,6 +759,80 @@ test('panel: a moderator whose own cases fill the first page still sees later re
   t.is(list.body.reports.length, 1, 'the actionable report after 101 own cases')
   t.is(list.body.reports[0].id, later.id)
   t.is(list.body.truncated, false, 'truncated is computed on the visible rows')
+  noLeak(t, s)
+})
+
+// What a usage view might answer: counts only, no key or e-mail.
+const STATS_FIXTURE = { geradoEm: 1700000000000, contas: { total: 3, vinculadas: 3 }, seeder: { diarios: 12 } }
+
+function fakeUsage (view) {
+  const calls = { n: 0 }
+  return { calls, usage: { view: async () => { calls.n++; return view() } } }
+}
+
+test('stats: an allowed moderator sees the stats flag and api/stats; anonymous is 401 exactly', async (t) => {
+  const fake = fakeUsage(() => STATS_FIXTURE)
+  // EMAIL_MOD as written (mixed case): the routes lowercase it.
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.status, 200)
+  t.is(me.body.stats, true, 'me carries stats: true')
+
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 200, res.text)
+  t.alike(res.body, STATS_FIXTURE)
+  t.is(res.headers.get('cache-control'), 'no-store')
+  t.is(fake.calls.n, 1)
+
+  const anon = await fetch(s.base + '/account/mod/api/stats')
+  t.is(anon.status, 401)
+  t.is(await anon.text(), '{"error":"nao-autorizado"}\n')
+  t.is(fake.calls.n, 1, 'no view without a session')
+  noLeak(t, s)
+})
+
+test('stats: a stats e-mail outside the moderator list is ignored', async (t) => {
+  const fake = fakeUsage(() => STATS_FIXTURE)
+  const s = await setup(t, { statsEmails: ['outra@example.test'], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.status, 200)
+  t.absent('stats' in me.body, 'no stats key at all (never stats: false)')
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 403)
+  t.alike(res.body, { error: 'nao-autorizado' })
+  t.is(fake.calls.n, 0, 'the view is never called')
+  noLeak(t, s)
+})
+
+test('stats: usage off means no flag and 403', async (t) => {
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: null })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.absent('stats' in me.body)
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 403)
+  t.alike(res.body, { error: 'nao-autorizado' })
+  noLeak(t, s)
+})
+
+test('stats: a throwing view answers 503 indisponivel; POST is 404', async (t) => {
+  const fake = fakeUsage(() => { throw new Error('falhou ' + EMAIL_A) })
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 503)
+  t.alike(res.body, { error: 'indisponivel' })
+  t.absent(res.text.includes('falhou'), 'never the error message')
+
+  const post = await s.api('POST', '/account/mod/api/stats', { cookie, body: {} })
+  t.is(post.status, 404)
+  t.alike(post.body, { error: 'nao-encontrado' })
   noLeak(t, s)
 })
 
