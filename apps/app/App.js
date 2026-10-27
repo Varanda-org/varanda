@@ -1,7 +1,7 @@
 // The app shell: the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then four tabs (A Rua, Espiadinha, Seguindo, Diário) with the top bar, the
+// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar, the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
 // both show; its close is remembered for 30 days), the publish button and
@@ -35,6 +35,7 @@ import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
 import { layout, type } from './src/ui/theme'
+import Avisos from './src/screens/Avisos'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
@@ -53,7 +54,7 @@ import Seguindo from './src/screens/Seguindo'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -108,6 +109,8 @@ function Member () {
   // True once this identity reached the tabs in this page session.
   const [reachedTabs, setReachedTabs] = useState(false)
   const [version, setVersion] = useState(0)
+  // Avisos has something unseen: a plain dot on its tab, never a number.
+  const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
   // Latched once node.info confirmed the identity and the certificate: a
@@ -505,7 +508,7 @@ function Member () {
       </View>
     )
   } else {
-    // The four tabs stay mounted (drafts and scroll survive a tab change);
+    // The five tabs stay mounted (drafts and scroll survive a tab change);
     // `active` makes a screen reload its data when it is shown, and again
     // when the connection comes back.
     const on = (id) => tab === id && ready
@@ -571,6 +574,17 @@ function Member () {
               onFollowsChanged={() => setVersion((v) => v + 1)}
             />
           </View>
+          <View style={shown('avisos')}>
+            <Avisos
+              active={on('avisos')}
+              refresh={version}
+              ownKey={ownKey}
+              scrollToTop={scrollSignal.avisos}
+              onFollowsChanged={() => setVersion((v) => v + 1)}
+              onToast={showToast}
+              onBadge={setAvisosNew}
+            />
+          </View>
           <View style={shown('diario')}>
             <Diario
               active={on('diario')}
@@ -608,7 +622,7 @@ function Member () {
             )
           : null}
         <Fab onPress={openComposer} />
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} />}
+        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew }} />}
       </View>
     )
   }

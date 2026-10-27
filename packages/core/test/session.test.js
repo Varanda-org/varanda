@@ -294,6 +294,20 @@ test('peek.read is refused by the node session (USAGE), nothing opened or writte
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('notices.list is refused by the node session (USAGE), nothing opened or written', async (t) => {
+  const NO = { code: 'USAGE', message: 'avisos disponíveis só no navegador' }
+  const fresh = await member(t)
+  const files = fs.readdirSync(fresh.dataDir)
+  t.alike(await failure(fresh.call('notices.list', {})), NO, 'before an identity')
+  t.alike(fs.readdirSync(fresh.dataDir), files, 'no store opened')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('notices.list', {})), NO, 'after an identity')
+  t.alike(await failure(m.call('notices.list', { limit: 5 })), NO, 'with a limit')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('post.create and post.reply with media are refused by the node session (USAGE), nothing opened', async (t) => {
   const NO = { code: 'USAGE', message: 'mídia disponível só na versão web' }
   const media = [{ core: 'dd'.repeat(32), mime: 'image/png', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 4, height: 4 }]

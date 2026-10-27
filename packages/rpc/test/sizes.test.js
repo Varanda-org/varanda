@@ -5,6 +5,7 @@
 
 const test = require('brittle')
 const { validateRecord } = require('../../core/lib/records')
+const { isUsername } = require('../../core/lib/account-link')
 const {
   createServerDispatcher,
   utf8ByteLength,
@@ -23,6 +24,7 @@ const {
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
   PEEK_LIMIT_MAX,
+  NOTICES_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
@@ -85,6 +87,19 @@ function peekResult (n, ch) {
     diaries: 4096,
     skipped: 4096,
     incomplete: true
+  }
+}
+
+function noticesResult (n, ch) {
+  // Derive the maximum from core's username rule, which exports no length limit.
+  let username = 'uuu'
+  while (isUsername(username + 'u')) username += 'u'
+  const item = { key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32) }
+  return {
+    notices: Array(n).fill(item),
+    next: { at: AT, key: HEX },
+    incomplete: true,
+    supported: true
   }
 }
 
@@ -158,6 +173,11 @@ test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
   // With MAX_MEDIA_PER_POST maximal descriptors in every item.
   for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800')) + ' bytes')
+})
+
+test('notices.list: NOTICES_LIMIT_MAX fits', (t) => {
+  for (const ch of WORST) t.ok(size(noticesResult(NOTICES_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('notices.list worst case at ' + NOTICES_LIMIT_MAX + ' notices: ' + size(noticesResult(NOTICES_LIMIT_MAX, '\ud800')) + ' bytes')
 })
 
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {

@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -18,7 +18,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
+    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
     'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
@@ -425,6 +425,36 @@ test('peek.read after', (t) => {
   bad(t, 'peek.read', { after: { ...after, seq: 0 } }, 'seq 0')
   bad(t, 'peek.read', { after: null })
   bad(t, 'peek.read', { after: 'x' })
+})
+
+test('notices.list', (t) => {
+  t.is(isMutating('notices.list'), false)
+  t.is(NOTICES_LIMIT_DEFAULT, 30)
+  t.is(NOTICES_LIMIT_MAX, 64)
+  ok(t, 'notices.list', {}, { limit: 30 })
+  ok(t, 'notices.list', { limit: 1 }, { limit: 1 })
+  ok(t, 'notices.list', { limit: NOTICES_LIMIT_MAX }, { limit: NOTICES_LIMIT_MAX })
+  for (const limit of [0, 65, 1.5, '3', null]) bad(t, 'notices.list', { limit })
+  bad(t, 'notices.list', { x: 1 })
+})
+
+test('notices.list after', (t) => {
+  const after = { at: '2026-10-24T12:00:00.000Z', key: KEY }
+  ok(t, 'notices.list', { limit: 5, after }, { limit: 5, after })
+  ok(t, 'notices.list', { after }, { limit: 30, after })
+  bad(t, 'notices.list', { after: { key: KEY } }, 'missing at')
+  bad(t, 'notices.list', { after: { at: after.at } }, 'missing key')
+  bad(t, 'notices.list', { after: { ...after, x: 1 } }, 'extra key in the cursor')
+  bad(t, 'notices.list', { after: { ...after, key: KEY.toUpperCase() } }, 'uppercase key')
+  bad(t, 'notices.list', { after: { ...after, key: KEY.slice(1) } }, 'short key')
+  bad(t, 'notices.list', { after: { ...after, key: KEY + '0' } }, 'long key')
+  for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 'invalid', 1, '']) {
+    bad(t, 'notices.list', { after: { ...after, at } }, 'at ' + JSON.stringify(at))
+  }
+  bad(t, 'notices.list', { after: null })
+  bad(t, 'notices.list', { after: 'x' })
+  bad(t, 'notices.list', { after: [] })
+  bad(t, 'notices.list', { after, x: 1 })
 })
 
 test('profile.read', (t) => {
