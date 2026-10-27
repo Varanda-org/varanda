@@ -1394,7 +1394,7 @@ None of these was performed for this change. Use two browsers (or profiles) with
 ### Residual risks
 
 - The username lookup is same-origin: the account service answers, and the match is a consistency check, not a signature.
-- A script of this origin in the same tab, an extension or devtools can plant an accepted invite within 1 h (same class as the outbox note in `docs/app.md`, narrowed to one tab).
+- A script of this origin in the same tab, an extension or devtools can plant an accepted invite within 1 h (same class as the outbox note in `docs/app.md`, narrowed to one tab). Within one page it cannot swap the target: acceptance and the follow both require the stored record to name the profile the page showed (or loaded), and a changed target is dropped; a record planted before a reload (for example before the Google return) is still read as found.
 - An OAuth return outside the initiating browsing context (possible in some installed PWAs) loses the invite: the newcomer is not followed automatically and must tap 'Seguir'.
 - Installed iOS PWAs do not capture links.
 - If `sessionStorage` is unavailable or the write fails, there is no follow after the Google reload (the profile still opens on this load).

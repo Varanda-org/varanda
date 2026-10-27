@@ -93,6 +93,8 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
 const inviteRetryDelay = (n) => (n === 0 ? 15000 : n === 1 ? 30000 : 60000)
+// Two invite records name the same profile (the @nome or the key).
+const sameTarget = (a, b) => !!a && !!b && a.username === b.username && a.key === b.key
 
 // True when node.info confirms an identity and a member certificate.
 function setupComplete (info) {
@@ -481,9 +483,13 @@ function Member () {
       // Only a passkey ceremony unlocks with resumed false and the shell
       // re-reads the status after it, so this is consent from the card the
       // visitor saw, bound to the key that just unlocked.
+      // Consent is for the target the card showed (this render's state): a
+      // record whose target changed in tab storage since then (devtools, an
+      // extension) was never agreed to, so it is dropped, not accepted.
       const rec = currentInvite()
-      const next = rec ? acceptInvite(rec, pkStatus.publicKey, Date.now()) : null
-      if (next && !saveInvite(next)) inviteMemoryOnly.current = true
+      const next = sameTarget(rec, inviteRef.current) ? acceptInvite(rec, pkStatus.publicKey, Date.now()) : null
+      if (next === null) dropInvite()
+      else if (!saveInvite(next)) inviteMemoryOnly.current = true
       inviteRef.current = next
       setInvite(next)
       return
@@ -502,6 +508,13 @@ function Member () {
       if (rec === null) {
         inviteRef.current = null
         setInvite(null)
+        return
+      }
+      // The stored record must still name the target this page holds (the one
+      // the card showed and consent was bound to, or the one loaded at start):
+      // a target swapped in tab storage meanwhile is dropped, never followed.
+      if (!sameTarget(rec, inviteRef.current)) {
+        forgetInvite()
         return
       }
       const r = await resolveInvite(rec, lookupUsername)
