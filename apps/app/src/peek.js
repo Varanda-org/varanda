@@ -1,14 +1,20 @@
 // The Espiadinha screen's building blocks: row keys, page merging, the round
-// separators, the notice shown in place of the list and the fixed texts. Pure:
+// separators, the notice shown in place of the list, useSocial's needs for a
+// page, the error tests and the fixed texts. Pure:
 // no imports and no globals, so Node tests load it directly. The rule text
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
 export const PEEK_WEB_ONLY_MESSAGE = 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.'
 export const PEEK_OFFLINE_MESSAGE = 'A Espiadinha precisa de conexão com o semeador.'
-export const PEEK_RULE_TEXT = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
-export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue, uma rodada por vez, da mais nova para a mais antiga.'
+export const PEEK_RULE_TEXT = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
+export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue, o seu incluído, uma rodada por vez, da mais nova para a mais antiga.'
 
 const WEB_ONLY_MESSAGES = ['método desconhecido', 'Espiadinha disponível só no navegador']
+// The browser node's answer to a continuation whose snapshot expired or is
+// gone (packages/web-member/lib/peek.js): the rows shown stay valid, only the
+// cursor is dead, so the list asks for a refresh instead of ending.
+const EXPIRED_MESSAGE = 'A lista expirou; atualize para continuar.'
+const SKIPPED_REASONS = 'sem certificado válido, bloqueados pela associação, com emissor revogado, com histórico alterado, acima da cota, com bloco grande demais, sem resposta a tempo ou sem publicação nos blocos lidos'
 
 export function peekKey (item) {
   return item.author + ':' + item.seq
@@ -57,6 +63,7 @@ export function peekNotice ({ supported, hosted, online, loadedAt }) {
 }
 
 export function roundLabel (round) {
+  if (round === 0) return '1ª publicação de cada diário'
   if (round === 1) return '2ª publicação de cada diário'
   if (round === 2) return '3ª publicação de cada diário'
   return null
@@ -64,4 +71,48 @@ export function roundLabel (round) {
 
 export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
+}
+
+export function isExpiredPeekError (err) {
+  return Boolean(err && err.code === 'USAGE' && err.message === EXPIRED_MESSAGE)
+}
+
+// The note under the list for the diaries a page left out, or null. The
+// reasons are the node's skip reasons (packages/web-member/lib/peek.js).
+export function skippedText (n) {
+  if (!Number.isSafeInteger(n) || n < 1) return null
+  return String(n) + (n === 1 ? ' diário não aparece' : ' diários não aparecem') + ' (' + SKIPPED_REASONS + ')'
+}
+
+// Same as ARua's refOf (a lowercase author:seq, or null), kept here so this
+// file stays import-free.
+function refOf (t) {
+  if (!t || typeof t.author !== 'string' || !Number.isSafeInteger(t.seq) || t.seq < 1) return null
+  return t.author.toLowerCase() + ':' + t.seq
+}
+
+// useSocial's ingest arguments for a page: the posts are originals at hand
+// (a quote or a reply of a post on the list resolves locally); the posts
+// they quote or answer and the originals of reposts are resolved; no author
+// is followed. A repost's list key (peekKey) is the reposter's author:seq,
+// but what it shows and needs is the original's (`to`).
+export function pageNeeds (items) {
+  const local = new Map()
+  const shown = []
+  const need = []
+  for (const item of items) {
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      if (ref !== null) {
+        shown.push(ref)
+        need.push(ref)
+      }
+      continue
+    }
+    const ref = peekKey(item)
+    local.set(ref, item)
+    shown.push(ref)
+    for (const r of [refOf(item.quote), refOf(item.replyTo)]) if (r !== null) need.push(r)
+  }
+  return { local, shown, need, authors: [] }
 }

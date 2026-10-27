@@ -26,7 +26,8 @@
 // - the pill never covers the first row's actions: it is centred and only
 //   the pill itself takes touches, while the row actions sit in the left
 //   column under the avatar;
-// - a refresh only calls onRefresh: never sync.start, never a page reload
+// - a refresh awaits the node's syncNow before onRefresh, once per gesture;
+//   never a page reload
 //   (the browser's own pull-to-refresh is stopped by the CSS in
 //   public/index.html, not by preventDefault, which passive listeners ignore).
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
@@ -35,6 +36,7 @@
 import { createElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
+import { useNode } from '../node'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
@@ -85,6 +87,10 @@ export function RefreshableList ({
   newItems,
   listRef
 }) {
+  const node = useNode()
+  const syncNow = node && node.syncNow
+  const busy = useRef(false) // one refresh across web and native gestures
+  const [spinning, setSpinning] = useState(false)
   const list = useRef(null)
   const setList = useCallback((node) => {
     list.current = node
@@ -109,13 +115,13 @@ export function RefreshableList ({
   const endPending = useRef(false)
   const span = useRef(null) // { data, refreshed } while a load or refresh runs
   const metrics = useRef({ offset: 0, content: 0, layout: 0 })
-  const busyNow = !!loadingMore || !!refreshing
+  const busyNow = !!loadingMore || !!refreshing || spinning
   const nearEnd = useCallback(() => {
     const m = metrics.current
     return m.layout > 0 && m.content - (m.offset + m.layout) <= END_THRESHOLD * m.layout
   }, [])
   const servePending = useCallback(() => {
-    if (!endPending.current || busyNow || typeof onLoadMore !== 'function') return
+    if (!endPending.current || busyNow || busy.current || typeof onLoadMore !== 'function') return
     if (atEnd) {
       endPending.current = false
       return
@@ -129,7 +135,7 @@ export function RefreshableList ({
   useEffect(() => {
     if (busyNow) {
       if (span.current === null) span.current = { data, refreshed: false }
-      if (refreshing) span.current.refreshed = true
+      if (refreshing || spinning) span.current.refreshed = true
       return
     }
     const s = span.current
@@ -139,10 +145,10 @@ export function RefreshableList ({
     // A page that failed (data unchanged, no refresh) is not retried here.
     if (!s.refreshed && s.data === data) endPending.current = false
     servePending()
-  }, [busyNow, refreshing, data, servePending])
+  }, [busyNow, refreshing, spinning, data, servePending])
   const onEndReached = useCallback(() => {
     if (atEnd || typeof onLoadMore !== 'function') return
-    if (busyNow) {
+    if (busyNow || busy.current) {
       endPending.current = true
       return
     }
@@ -151,7 +157,7 @@ export function RefreshableList ({
     onLoadMore()
   }, [busyNow, atEnd, onLoadMore])
   const loadMoreByHand = useCallback(() => {
-    if (busyNow || atEnd || typeof onLoadMore !== 'function') return
+    if (busyNow || busy.current || atEnd || typeof onLoadMore !== 'function') return
     endFired.current = true
     onLoadMore()
   }, [busyNow, atEnd, onLoadMore])
@@ -169,14 +175,12 @@ export function RefreshableList ({
   // Web pull-to-refresh state.
   const atTop = useRef(true)
   const touch = useRef(null) // { startX, startY, lock, armed } while a single touch is tracked
-  const busy = useRef(false) // a web refresh is running (a pull or the hidden action)
   const mounted = useRef(true)
   const timer = useRef(null)
   const anim = useRef(null)
   const distance = useRef(new Animated.Value(0)).current
   const progress = useRef(new Animated.Value(0)).current
   const [showIndicator, setShowIndicator] = useState(false)
-  const [spinning, setSpinning] = useState(false)
   // The hidden 'Atualizar' action has keyboard focus (it is shown then).
   const [actionFocused, setActionFocused] = useState(false)
   // Wheel pull: the wheelPullState state and its idle (release) timer.
@@ -227,14 +231,12 @@ export function RefreshableList ({
         if (mounted.current) hide()
       }, spinRemaining({ startedAt, now: Date.now(), min: MIN_SPIN_MS }))
     }
-    let pending
-    try {
-      pending = Promise.resolve(onRefresh())
-    } catch {
-      pending = Promise.resolve()
-    }
+    const pending = (async () => {
+      if (typeof syncNow === 'function') await syncNow()
+      if (mounted.current) await onRefresh()
+    })()
     pending.then(settle, settle)
-  }, [refreshing, onRefresh, distance, progress, hide])
+  }, [refreshing, onRefresh, syncNow, distance, progress, hide])
 
   // The wheel listener is attached once; it reads the current values here.
   const live = useRef(null)
@@ -443,7 +445,7 @@ export function RefreshableList ({
         dataSet={{ pull: 'y' }}
         refreshControl={web
           ? undefined
-          : <RefreshControl refreshing={!!refreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />}
+          : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} />}
       />
       {web && showIndicator
         ? (

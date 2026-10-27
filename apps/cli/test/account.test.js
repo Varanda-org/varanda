@@ -18,9 +18,10 @@ const { createIssuerCert, certForKey, verifyUsernameRecord } = require('@varanda
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
-const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE } = require('../lib/account/server')
+const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
+const { readEnv, closeIfOwned, loseLock, storeUnavailable } = require('../lib/commands/account')
+const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
-const { readEnv } = require('../lib/commands/account')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const ORIGIN = 'https://varanda.test'
@@ -99,19 +100,19 @@ function member () {
 }
 
 // A clock that starts at the real time and can be advanced (rate windows
-// and TTLs follow it).
+// and TTLs follow it). Setting `frozen` stops it at that instant.
 function clock () {
-  const c = { offset: 0, now: () => Date.now() + c.offset }
+  const c = { offset: 0, frozen: null, now: () => (c.frozen ?? Date.now()) + c.offset }
   return c
 }
 
-async function setup (t, { configured = true } = {}) {
+async function setup (t, { configured = true, storeOpts = {}, serverOpts = {} } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = clock()
   const iss = issuer()
   const fake = await fakeGoogle(t)
   const google = createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: fake.endpoints, fetch: fake.fetch })
-  const store = openAccountStore(dir, { now: c.now })
+  const store = openAccountStore(dir, { now: c.now, ...storeOpts })
   const logs = []
   const server = createAccountServer({
     association: iss.association,
@@ -120,7 +121,8 @@ async function setup (t, { configured = true } = {}) {
     store,
     issuer: configured ? { keyPair: iss.keyPair, cert: iss.cert } : null,
     log: (e) => logs.push(JSON.stringify(e)),
-    now: c.now
+    now: c.now,
+    ...serverOpts
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => listener.close(), { force: true })
@@ -746,6 +748,89 @@ test('data-dir lock: a second service refuses, a stale lock is recovered, releas
   fs.unlinkSync(lockFile)
 })
 
+test('data-dir lock: owned() reads the lock now, and the shutdown close runs only while it is ours', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  // No heartbeat tick during the test: owned() alone must notice the takeover.
+  const lock = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  t.is(lock.owned(), true, 'owned while held')
+
+  let closes = 0
+  const store = { close: async () => { closes++ } }
+  t.is(await closeIfOwned(null, lock, false), 'skipped', 'no store: nothing to close')
+  t.is(await closeIfOwned(store, lock, true), 'skipped', 'lost: skipped')
+  t.is(closes, 0)
+
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'f'.repeat(32) }) + '\n')
+  t.is(lock.owned(), false, 'not owned once another token is on disk')
+  t.is(await closeIfOwned(store, lock, false), 'skipped', 'a takeover between ticks skips the close')
+  t.is(closes, 0, 'the store was not closed')
+  fs.unlinkSync(lockFile)
+  t.is(lock.owned(), false, 'not owned once the lock file is gone')
+
+  const mine = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => mine.release(), { force: true })
+  t.is(await closeIfOwned(store, mine, false), 'closed', 'owned and not lost: closed')
+  t.is(closes, 1)
+  const failing = { close: async () => { throw new Error('boom') } }
+  const events = []
+  t.is(await closeIfOwned(failing, mine, false, (e) => events.push(e)), 'failed', 'a failing close is reported, so serve() exits non-zero')
+  t.alike(events, [{ event: 'close', reason: 'falhou' }], 'logged without detail')
+})
+
+test('data-dir lock: a lost lock marks the store unavailable before the service stops', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const store = openAccountStore(dir)
+  const calls = []
+  const fail = store.fail
+  store.fail = () => { calls.push('fail'); fail() }
+  loseLock(store, (event) => calls.push(event.event + ':' + event.reason), () => calls.push('stop'))
+  t.alike(calls, ['fail', 'lock:perdido', 'stop'], 'fail() runs first, synchronously')
+  const row = store.start({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), username: 'alba' })
+  store.putGoogle(row.id, { sub: 'sub-alba', email: 'a@example.test' })
+  try {
+    await store.finish(row.id, { signature: 'a'.repeat(128) }, null, null, null)
+    t.fail('finish resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'a request still draining is refused')
+  }
+  const none = []
+  loseLock(null, () => none.push('log'), () => none.push('stop'))
+  t.alike(none, ['log', 'stop'], 'a lock lost before the store opened only stops')
+})
+
+test('serve wiring: a store that fails at runtime logs store:indisponivel once and stops the service', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const calls = []
+  // As serve() passes it: log (no personal data), then stop.
+  const store = openAccountStore(dir, {
+    onUnavailable: () => storeUnavailable((event) => calls.push(event), () => calls.push('stop'))
+  })
+  const member = b4a.toString(crypto.keyPair().publicKey, 'hex')
+  const row = store.start({ member, username: 'alba' })
+  store.putGoogle(row.id, { sub: 'sub-alba', email: 'a@example.test' })
+  // The first link writes the journal header; then the journal disappears
+  // behind the writer, so the next write trips the writer guard.
+  const iss = crypto.keyPair()
+  const assoc = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(iss.publicKey, 'hex') }, assoc)
+  await store.finish(row.id, { signature: 'a'.repeat(128) }, iss, issuerCert, issuerCert.association)
+  t.alike(calls, [], 'nothing while the store works')
+  fs.unlinkSync(path.join(dir, fs.readdirSync(dir).find((name) => name.startsWith('directory.journal.'))))
+  for (const name of ['bia', 'cora']) {
+    const next = store.start({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), username: name })
+    store.putGoogle(next.id, { sub: 'sub-' + name, email: 'b@example.test' })
+    try {
+      await store.finish(next.id, { signature: 'a'.repeat(128) }, iss, issuerCert, issuerCert.association)
+      t.fail('finish resolved')
+    } catch (err) {
+      t.is(err.code, 'indisponivel', name + ': refused')
+    }
+  }
+  t.alike(calls, [{ event: 'store', reason: 'indisponivel' }, 'stop'], 'logged without personal data, then stopped, once')
+})
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 test('data-dir lock: the heartbeat keeps it live, and a lock that is no longer ours is reported lost', async (t) => {
@@ -943,6 +1028,56 @@ test('readEnv: VARANDA_AI off, sombra or 1; token, seeder URL and model dir chec
   }
 })
 
+test('account status, export and serve on a directory restored from an older backup', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const iss = issuer()
+  const association = iss.association
+  const env = {
+    VARANDA_ASSOCIATION: association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET
+  }
+  t.is(varanda(dir, ['account', 'key', '--association', association]).code, 0)
+  const file = path.join(dir, 'directory.json')
+  const hwm = path.join(dir, 'directory.hwm')
+  const linkOne = async (username) => {
+    const store = openAccountStore(dir)
+    const row = store.start({ member: member().hex, username })
+    store.putGoogle(row.id, { sub: 'sub-' + username, email: EMAIL })
+    await store.finish(row.id, { signature: 'a'.repeat(128) }, iss.keyPair, iss.cert, association)
+    await store.close()
+  }
+  await linkOne('ana')
+  const backup = fs.readFileSync(file)
+  await linkOne('bia')
+  t.is(JSON.parse(fs.readFileSync(hwm, 'utf8')).seq, 2)
+  fs.writeFileSync(file, backup)
+
+  const status = varanda(dir, ['account', 'status'])
+  t.is(status.code, 0, status.stderr)
+  t.ok(status.stdout.includes('vínculos: 1'))
+  t.ok(status.stdout.includes('aviso: diretório de contas restaurado de uma cópia antiga; confira o backup'), 'status warns')
+  const json = varanda(dir, ['account', 'status', '--json'])
+  t.is(JSON.parse(json.stdout.trim().split('\n').pop()).restored, true, 'and reports the flag')
+  const exported = varanda(dir, ['account', 'export'])
+  t.is(exported.code, 0, 'export still reads')
+  t.is(exported.stdout.trim().split('\n').length, 1)
+  t.ok(exported.stderr.includes('restaurado de uma cópia antiga'), 'and warns on stderr')
+
+  const refused = varanda(dir, ['account', '--json'], env)
+  t.is(refused.code, 1, 'the service refuses to start')
+  t.ok(refused.stdout.includes(JSON.stringify({ event: 'store', reason: 'restaurado' })), 'logged as a store event')
+  t.ok(refused.stderr.includes('diretório de contas restaurado de uma cópia antiga; confira o backup'), refused.stderr)
+  t.absent(fs.existsSync(path.join(dir, LOCK_FILE)), 'the lock is released')
+
+  // The operator who meant to restore the older copy removes the mark.
+  fs.unlinkSync(hwm)
+  t.absent(varanda(dir, ['account', 'status']).stdout.includes('aviso:'), 'no warning once acknowledged')
+  await linkOne('bia')
+  t.is(JSON.parse(fs.readFileSync(hwm, 'utf8')).seq, 2, 'a new mark from the restored copy on')
+})
+
 // Spawns `account` on a free port; -> { child, port, stdout(), stop() }.
 async function serveCli (t, dir, env) {
   const child = spawn(process.execPath, [BIN, 'account', '--json', '--account-port', '0', '--data', dir], { env: { ...cleanEnv, ...env } })
@@ -1062,4 +1197,179 @@ test('account (serve): an invalid VARANDA_AI is a usage error; a missing model r
   t.is(await svc.stop(), 0, svc.stderr())
   t.absent(svc.stdout().includes(token), 'never the triage token')
   t.absent(fs.existsSync(path.join(dir, 'exemplars.json')), 'nothing of the triage was opened')
+})
+
+// --- capacity: member cap and configurable limits ---------------------------------
+
+test('member cap: a new start on a full service is 503 lista-de-espera; status, lookup and linked members unchanged', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 1 } })
+  const linked = member()
+  t.is((await link(s, linked, 'ana')).finish.status, 200)
+
+  const waiting = member()
+  const started = await s.api('POST', '/account/start', { body: { member: waiting.hex, username: 'bia' } })
+  t.is(started.status, 503)
+  t.alike(started.body, { error: 'lista-de-espera' }, 'the body is only the token')
+  t.is(started.headers.get('set-cookie'), null, 'no pending row, no cookie')
+  const again = await s.api('POST', '/account/start', { body: { member: linked.hex, username: 'outra' } })
+  t.alike([again.status, again.body], [409, { error: 'conta-vinculada' }], 'a linked member still hears conta-vinculada')
+
+  const unknown = await s.api('GET', '/account/status?member=' + waiting.hex)
+  t.alike(unknown.body, { linked: false }, 'status of an unknown member is unchanged')
+  const own = await s.api('GET', '/account/status?member=' + linked.hex)
+  t.is(own.body.linked, true)
+  t.is((await s.api('GET', '/account/username/ana')).status, 200, 'lookup unchanged')
+
+  t.ok(s.logs.includes(JSON.stringify({ event: 'lista-de-espera' })), 'logged as the bare event')
+  const log = s.logs.join('\n')
+  noPersonalData(t, log, 'log')
+  t.absent(log.includes(waiting.hex), 'log: no member key')
+})
+
+test('member cap: a finish after the cap filled is 503 lista-de-espera and links nothing', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 2 } })
+  t.is((await link(s, member(), 'ana')).finish.status, 200)
+  s.fake.account.sub = '2098765432109876543210'
+  const late = member()
+  const a = await authorize(s, late, 'bia')
+  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
+  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
+  s.fake.account.sub = '3098765432109876543210'
+  t.is((await link(s, member(), 'cora')).finish.status, 200, 'the cap fills meanwhile')
+  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, late, 'finish', pending.body.nonce, 'bia', pending.body.sub) } })
+  t.alike([finish.status, finish.body], [503, { error: 'lista-de-espera' }])
+  t.alike(cookieOf(finish), { id: a.cookie, maxAge: 0 }, 'the link cookie is cleared as on success')
+  t.alike((await s.api('GET', '/account/status?member=' + late.hex)).body, { linked: false })
+  t.is((await s.api('GET', '/account/pending', { cookie: a.cookie })).status, 404, 'the pending row is gone')
+  t.is((await s.api('GET', '/account/username/bia')).status, 404)
+})
+
+test('member cap: a callback while the cap is full is refused before the Google code is exchanged', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 2 } })
+  t.is((await link(s, member(), 'ana')).finish.status, 200)
+  const late = member()
+  const a = await authorize(s, late, 'bia')
+  s.fake.account.sub = '2098765432109876543210'
+  t.is((await link(s, member(), 'cora')).finish.status, 200, 'the cap fills meanwhile')
+  const calls = s.fake.tokenCalls()
+
+  const cb = await callback(s, a.cookie, a.state)
+  t.is(cb.status, 302)
+  t.is(cb.headers.get('location'), ORIGIN + '/?conta=lista-de-espera')
+  t.alike(cookieOf(cb), { id: a.cookie, maxAge: 0 }, 'the link cookie is cleared')
+  t.is(s.fake.tokenCalls(), calls, 'the code is never exchanged')
+  t.is((await s.api('GET', '/account/pending', { cookie: a.cookie })).status, 404, 'the pending row is gone')
+  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, late, 'finish', a.nonce, 'bia', '4098765432109876543210') } })
+  t.alike([finish.status, finish.body], [404, { error: 'expirado' }], 'a later finish finds nothing')
+  t.is((await s.api('GET', '/account/username/bia')).status, 404, 'the name is not held')
+
+  t.ok(s.logs.includes(JSON.stringify({ event: 'lista-de-espera' })), 'logged as the bare event')
+  t.absent(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'lista-de-espera' })), 'no callback reason line')
+  const log = s.logs.join('\n')
+  noPersonalData(t, log, 'log')
+  t.absent(log.includes(late.hex), 'log: no member key')
+})
+
+test('member cap: a callback for a key linked meanwhile is not refused by the cap', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 2 } })
+  t.is((await link(s, member(), 'ana')).finish.status, 200)
+  s.fake.account.sub = '2098765432109876543210'
+  const m = member()
+  // Two link flows for the same key (two tabs); the first fills the last slot.
+  const first = await authorize(s, m, 'bia')
+  const second = await authorize(s, m, 'bia')
+  t.is((await callback(s, first.cookie, first.state)).headers.get('location'), ORIGIN + '/?conta=ok')
+  const p1 = await s.api('GET', '/account/pending', { cookie: first.cookie })
+  const f1 = await s.api('POST', '/account/finish', { cookie: first.cookie, body: { signature: sign(s, m, 'finish', p1.body.nonce, 'bia', p1.body.sub) } })
+  t.is(f1.status, 200, 'the first flow links the key into the last slot')
+
+  const calls = s.fake.tokenCalls()
+  const cb = await callback(s, second.cookie, second.state)
+  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok', 'the linked key is not sent to the waitlist')
+  t.ok(s.fake.tokenCalls() > calls, 'its code is exchanged as before')
+  const p2 = await s.api('GET', '/account/pending', { cookie: second.cookie })
+  t.is(p2.status, 200, 'its pending row stays for finish()')
+})
+
+test('global bucket: ratePerSecond 1, burst 1 answers 429 on the second immediate request', async (t) => {
+  const s = await setup(t, { serverOpts: { ratePerSecond: 1, burst: 1 } })
+  s.c.frozen = Date.now()
+  const first = await s.api('GET', '/account/status?member=' + member().hex)
+  t.is(first.status, 200)
+  const second = await s.api('GET', '/account/status?member=' + member().hex)
+  t.alike([second.status, second.body], [429, { error: 'pedido-invalido' }])
+  s.c.offset += 1000
+  t.is((await s.api('GET', '/account/status?member=' + member().hex)).status, 200, 'one token per second')
+})
+
+test('defaults: 64 sockets, bucket 20/s with burst 100; invalid limits are refused', async (t) => {
+  t.is(MAX_SOCKETS, 64)
+  t.is(DEFAULT_RATE, 20)
+  t.is(DEFAULT_BURST, 100)
+  const s = await setup(t)
+  s.c.frozen = Date.now()
+  for (let i = 0; i < 100; i++) {
+    const r = await s.api('GET', '/account/status?member=' + member().hex)
+    if (r.status !== 200) {
+      t.fail('request ' + (i + 1) + ' within the default burst: ' + r.status)
+      break
+    }
+  }
+  t.is((await s.api('GET', '/account/status?member=' + member().hex)).status, 429, 'the 101st immediate request')
+
+  const iss = issuer()
+  const base = { association: iss.association, origin: ORIGIN, google: { authorizeUrl () {}, exchange () {} }, store: { start () {} } }
+  for (const bad of [{ maxConnections: 0 }, { ratePerSecond: 1.5 }, { burst: '100' }]) {
+    throwsMessage(t, () => createAccountServer({ ...base, ...bad }), /positive integer/, JSON.stringify(bad))
+  }
+})
+
+test('readEnv: optional capacity variables, canonical integers in range, values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  t.alike(readEnv(env).limits, {}, 'absent: every default')
+  t.alike(readEnv({ ...env, VARANDA_MAX_MEMBERS: '', VARANDA_ACCOUNT_RATE: '   ' }).limits, {}, 'empty after trim: default')
+  t.alike(readEnv({
+    ...env,
+    VARANDA_MAX_MEMBERS: '500',
+    VARANDA_ACCOUNT_MAX_PENDING: '100000',
+    VARANDA_ACCOUNT_MAX_CONNECTIONS: ' 256 ',
+    VARANDA_ACCOUNT_RATE: '1',
+    VARANDA_ACCOUNT_BURST: '400'
+  }).limits, { maxMembers: 500, maxPending: 100000, maxConnections: 256, ratePerSecond: 1, burst: 400 })
+
+  const bad = [
+    ['VARANDA_MAX_MEMBERS', 'abc'],
+    ['VARANDA_MAX_MEMBERS', '0'],
+    ['VARANDA_MAX_MEMBERS', '4097'],
+    ['VARANDA_MAX_MEMBERS', '012'],
+    ['VARANDA_MAX_MEMBERS', '1e3'],
+    ['VARANDA_MAX_MEMBERS', '-5'],
+    ['VARANDA_ACCOUNT_MAX_CONNECTIONS', '4097'],
+    ['VARANDA_ACCOUNT_RATE', '10001'],
+    ['VARANDA_ACCOUNT_BURST', '100001'],
+    ['VARANDA_ACCOUNT_MAX_PENDING', '0']
+  ]
+  for (const [name, value] of bad) {
+    try {
+      readEnv({ ...env, [name]: value })
+      t.fail(name + '=' + value + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, name + '=' + value + ': usage error')
+      t.is(err.message, name + ' inválido', 'the value is not in the message')
+    }
+  }
+})
+
+test('account (serve): an invalid capacity variable exits 2 without printing it', (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const r = varanda(dir, ['account'], {
+    VARANDA_ASSOCIATION: issuer().association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET,
+    VARANDA_MAX_MEMBERS: 'zz9zz'
+  })
+  t.is(r.code, 2)
+  t.ok(r.stderr.includes('VARANDA_MAX_MEMBERS inválido'), r.stderr)
+  t.absent(r.stderr.includes('zz9zz') || r.stdout.includes('zz9zz'), 'the value is not printed')
 })

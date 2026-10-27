@@ -980,7 +980,7 @@ test('regression: a detach while a read awaits the storage frees the slot for a 
   t.is(sockets.length, 1, 'only the new client opened a link')
 })
 
-test('regression: an idle snapshot is released after its TTL and the next continuation rebuilds it', async (t) => {
+test('regression: an idle snapshot expires and only an after-less read rebuilds it', async (t) => {
   t.timeout(90000)
   const assoc = association()
   const now = Date.now()
@@ -1004,14 +1004,82 @@ test('regression: an idle snapshot is released after its TTL and the next contin
   t.ok(first.next !== null)
   t.is(peeker.hasSnapshot(), true, 'retained right after the read')
   t.is(seeder.connections, 1)
+  const second = await peeker.read({ limit: 1, after: first.next })
+  t.alike(second.items.map((i) => i.author), [hex(B.key)], 'a continuation within the TTL keeps the snapshot order')
+  t.is(second.incomplete, false)
+  t.is(seeder.connections, 1, 'cached continuation opens no link')
   await new Promise((resolve) => setTimeout(resolve, 700))
   t.is(peeker.hasSnapshot(), false, 'released by the timer with no further read')
-  const second = await peeker.read({ limit: 1, after: first.next })
-  t.alike(second.items.map((i) => i.author), [hex(B.key)], 'the continuation rebuilt the snapshot and went on from the cursor')
-  t.is(seeder.connections, 2, 'rebuilt over a fresh link')
+  const err = await errorOf(peeker.read({ limit: 1, after: first.next }))
+  t.is(err && err.code, 'USAGE')
+  t.is(err && err.message, 'A lista expirou; atualize para continuar.')
+  t.is(seeder.connections, 1, 'expired continuation opens no link')
+  t.is(peeker.hasSnapshot(), false, 'expired continuation does not rebuild')
+  const fresh = await peeker.read({ limit: 1 })
+  t.alike(fresh.items.map((i) => i.author), [hex(A.key)], 'an after-less read restarts at the newest item')
+  t.is(fresh.incomplete, false)
+  t.is(seeder.connections, 2, 'fresh read rebuilds over a new link')
   t.is(peeker.hasSnapshot(), true)
   peeker.close()
   t.is(peeker.hasSnapshot(), false, 'close drops it')
+})
+
+test('regression: a failed refresh keeps the snapshot a continuation still pages', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, author(assoc, 'A', [now - 1000]))
+  const B = await diary(t, author(assoc, 'B', [now - 2000]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
+  const peeker = createPeeker({
+    storage: memoryNodeStorage(),
+    association: assoc.hex,
+    seederUrl: seeder.url,
+    createSocket: (u) => {
+      const ws = new WebSocket(u)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+  t.teardown(() => peeker.close(), { force: true })
+  const first = await peeker.read({ limit: 1 })
+  t.alike(first.items.map((i) => i.author), [hex(A.key)])
+  t.ok(first.next !== null, 'the first page keeps a cursor')
+  t.is(seeder.connections, 1)
+  // Stopped seeder: the after-less refresh fails at connect.
+  await seeder.close()
+  const err = await errorOf(peeker.read({ limit: 1 }))
+  t.is(err && err.message, NO_SEEDER)
+  t.is(peeker.hasSnapshot(), true, 'a failed refresh leaves the snapshot')
+  const second = await peeker.read({ limit: 1, after: first.next })
+  t.alike(second.items.map((i) => i.author), [hex(B.key)], 'the continuation still returns the following item')
+  t.is(second.incomplete, false)
+  t.is(seeder.connections, 1, 'the continuation needed no link')
+})
+
+test('regression: missing or expired snapshots reach the RPC caller as USAGE without opening a link', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const A = await diary(t, author(assoc, 'A', [now - 1000]))
+  const B = await diary(t, author(assoc, 'B', [now - 2000]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
+  const { web, sockets, internal } = await webNode(t, assoc, seeder.url, { peek: { snapshotTtlMs: 300 } })
+  const first = await web.request('peek.read', { limit: 1 })
+  t.ok(first.next !== null)
+  const other = await webNode(t, assoc, seeder.url)
+  const missing = await errorOf(other.web.request('peek.read', { limit: 1, after: first.next }))
+  t.is(missing && missing.code, 'USAGE')
+  t.is(missing && missing.message, 'A lista expirou; atualize para continuar.')
+  t.is(other.sockets.length, 0, 'a new session cannot resume another snapshot')
+  t.alike(other.internal, [])
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  const err = await errorOf(web.request('peek.read', { limit: 1, after: first.next }))
+  t.is(err && err.code, 'USAGE')
+  t.is(err && err.message, 'A lista expirou; atualize para continuar.')
+  t.is(seeder.connections, 1)
+  t.is(sockets.length, 1, 'refused before opening any WebSocket')
+  t.alike(internal, [])
 })
 
 test('regression: node.close() during a read awaiting the storage waits for it; no internal error, no access after close', async (t) => {
@@ -1094,4 +1162,39 @@ test('the own diary shows in the Espiadinha like any unfollowed diary', async (t
   t.alike(internal, [])
   t.is(page.diaries, 2, 'the own diary is a candidate')
   t.alike(page.items.map((i) => [i.author, i.text]), [[hex(mine.key), 'Eu 1'], [hex(other.key), 'Outro 1']], 'the own post (newer) first')
+})
+
+// ---- privacy: never the sync link (docs/rpc.md 5.22) ----
+
+// Resolves once the run's seeder link verified (its `peer seeder` line).
+function seederVerified (web, runId) {
+  return until(() => web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line.startsWith('peer seeder')), { name: 'seeder verified', timeoutMs: 30000 })
+}
+
+test('with a live continuous run, peek.read still opens its own short socket and never touches the sync link', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const B = await diary(t, author(assoc, 'B', [now - 1000]))
+  const C = await diary(t, author(assoc, 'C', [now - 2000]))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [B, C] })
+  const { web, sockets, internal } = await webNode(t, assoc, seeder.url, { certify: true })
+  const { runId } = await web.request('sync.start', { once: false })
+  await seederVerified(web, runId)
+  t.is(sockets.length, 1, 'the sync link only')
+  const syncSocket = sockets[0]
+  const before = web.events.length
+  const reading = web.request('peek.read', {})
+  await until(() => sockets.length === 2, { name: 'the page dialled its own socket' })
+  t.not(sockets[1], syncSocket, 'a socket of its own, beside the sync one')
+  const page = await reading
+  t.alike(page.items.map((i) => i.author), [hex(B.key), hex(C.key)], 'the page is served')
+  t.alike({ next: page.next, diaries: page.diaries, skipped: page.skipped, incomplete: page.incomplete }, { next: null, diaries: 2, skipped: 0, incomplete: false })
+  await until(() => sockets[1].readyState === WebSocket.CLOSED, { name: 'the page socket closed after the page' })
+  t.is(sockets.length, 2, 'one extra socket for the page, no more')
+  t.is(syncSocket.readyState, WebSocket.OPEN, 'the sync socket is still open')
+  t.alike(web.events.slice(before).filter((e) => e.name === 'sync.stopped'), [], 'no sync.stopped')
+  t.alike(await web.request('sync.status', {}), { state: 'running', runId, once: false })
+  await web.request('sync.stop', {})
+  t.alike(internal, [])
 })

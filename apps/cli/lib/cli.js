@@ -71,6 +71,20 @@ function integer (value, name) {
   return number
 }
 
+// An optional integer setting read from the environment only (the seeder's
+// web limits): null when the variable is absent or empty after trim (compose
+// forwards an unset "${X:-}" as ''), else a canonical integer in min..max.
+// The message never carries the value.
+function optionalEnvInteger (env, name, min, max) {
+  const raw = env[name]
+  if (raw === undefined || raw === null) return null
+  const value = String(raw).trim()
+  if (value === '') return null
+  const number = integer(value, name)
+  if (String(number) !== value || number < min || number > max) throw new UsageError(name + ' inválido')
+  return number
+}
+
 // A TCP port, 0 (the system picks a free one) to 65535, canonical decimal.
 function port (value, name) {
   if (value == null) return null
@@ -211,6 +225,23 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     triageToken,
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
+    // The seeder's web limits, environment only (README, "Variáveis de ambiente").
+    maxExternal: optionalEnvInteger(env, 'VARANDA_MAX_EXTERNAL', 1, 4096),
+    maxSockets: optionalEnvInteger(env, 'VARANDA_MAX_SOCKETS', 1, 8192),
+    // Minimum 8454144 = MAX_EXTERNAL_FRAME (@varanda/core/lib/seeder): a
+    // smaller budget could never reserve one legal frame. A literal, not a
+    // require, so parsing stays cheap and deploy.test.js can compare it.
+    frameMemory: optionalEnvInteger(env, 'VARANDA_FRAME_MEMORY', 8454144, 1073741824),
+    media: {
+      maxInFlight: optionalEnvInteger(env, 'VARANDA_MEDIA_MAX_IN_FLIGHT', 1, 1024),
+      rate: optionalEnvInteger(env, 'VARANDA_MEDIA_RATE', 1, 100000),
+      burst: optionalEnvInteger(env, 'VARANDA_MEDIA_BURST', 1, 100000)
+    },
+    index: {
+      maxInFlight: optionalEnvInteger(env, 'VARANDA_INDEX_MAX_IN_FLIGHT', 1, 1024),
+      rate: optionalEnvInteger(env, 'VARANDA_INDEX_RATE', 1, 100000),
+      burst: optionalEnvInteger(env, 'VARANDA_INDEX_BURST', 1, 100000)
+    },
     ageBand: get('age-band'),
     method: get('method'),
     out: get('out') === null ? null : path.resolve(cwd, get('out')),

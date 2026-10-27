@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const { PEEK_RULE } = require('@varanda/core/lib/peek')
 const load = () => import('../src/peek.js')
 const item = (author, seq, round = 0) => Object.freeze({ author, seq, round, text: 'olá' })
 
@@ -61,9 +62,9 @@ test('round starts mark the first row and every change of round', async (t) => {
   t.alike([...roundStarts([item('a', 1, 1), item('b', 1, 0)])], [0, 1])
 })
 
-test('round labels name the second and third post of each diary only', async (t) => {
+test('round labels name the first, second and third post of each diary only', async (t) => {
   const { roundLabel } = await load()
-  t.is(roundLabel(0), null)
+  t.is(roundLabel(0), '1ª publicação de cada diário')
   t.is(roundLabel(1), '2ª publicação de cada diário')
   t.is(roundLabel(2), '3ª publicação de cada diário')
   t.is(roundLabel(3), null)
@@ -87,10 +88,9 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   const { PEEK_WEB_ONLY_MESSAGE, PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
   t.is(PEEK_WEB_ONLY_MESSAGE, 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.')
   t.is(PEEK_OFFLINE_MESSAGE, 'A Espiadinha precisa de conexão com o semeador.')
-  t.ok(PEEK_RULE_TEXT.startsWith('A Espiadinha mostra a publicação mais recente de cada diário que você não segue'))
-  t.ok(PEEK_RULE_TEXT.includes('e, por fim, a terceira mais recente de cada um'))
-  t.ok(PEEK_RULE_TEXT.endsWith('sem curtidas, sem sugestões e sem pesos escondidos.'))
-  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue, uma rodada por vez, da mais nova para a mais antiga.')
+  t.is(PEEK_RULE_TEXT, PEEK_RULE, 'the rule is the node\'s, word for word')
+  t.ok(PEEK_RULE_TEXT.includes('que você não segue, o seu incluído,'))
+  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue, o seu incluído, uma rodada por vez, da mais nova para a mais antiga.')
 })
 
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {
@@ -104,4 +104,54 @@ test('a web-only error is a USAGE error with one of the two known messages', asy
   t.is(isWebOnlyError(null), false)
   t.is(isWebOnlyError(undefined), false)
   t.is(isWebOnlyError('USAGE'), false)
+})
+
+test('an expired list is the USAGE error with the exact expiry sentence', async (t) => {
+  const { isExpiredPeekError, isWebOnlyError } = await load()
+  const expired = { code: 'USAGE', message: 'A lista expirou; atualize para continuar.' }
+  t.is(isExpiredPeekError(expired), true)
+  t.is(isWebOnlyError(expired), false, 'never read as web-only')
+  t.is(isExpiredPeekError({ code: 'USAGE', message: 'A lista expirou' }), false)
+  t.is(isExpiredPeekError({ code: 'NETWORK', message: 'A lista expirou; atualize para continuar.' }), false)
+  t.is(isExpiredPeekError(new Error('A lista expirou; atualize para continuar.')), false)
+  t.is(isExpiredPeekError({ code: 'USAGE', message: 'método desconhecido' }), false)
+  t.is(isExpiredPeekError(null), false)
+  t.is(isExpiredPeekError(undefined), false)
+})
+
+test('the skipped note is singular or plural and lists every skip reason', async (t) => {
+  const { skippedText } = await load()
+  const reasons = ' (sem certificado válido, bloqueados pela associação, com emissor revogado, com histórico alterado, acima da cota, com bloco grande demais, sem resposta a tempo ou sem publicação nos blocos lidos)'
+  t.is(skippedText(1), '1 diário não aparece' + reasons)
+  t.is(skippedText(3), '3 diários não aparecem' + reasons)
+  t.is(skippedText(0), null)
+  t.is(skippedText(-1), null)
+  t.is(skippedText(undefined), null)
+  t.is(skippedText(1.5), null)
+})
+
+test('page needs: a repost shows and needs its original, never the repost itself', async (t) => {
+  const { pageNeeds, peekKey } = await load()
+  const repost = Object.freeze({ kind: 'repost', author: 'r', seq: 4, round: 0, to: { author: 'AA', seq: 7 } })
+  const needs = pageNeeds([repost])
+  t.alike(needs.shown, ['aa:7'])
+  t.alike(needs.need, ['aa:7'])
+  t.is(needs.local.size, 0, 'nothing local for a repost')
+  t.alike(needs.authors, [])
+  t.is(peekKey(repost), 'r:4', 'the list key is the reposter\'s author:seq')
+  t.not(peekKey(repost), needs.need[0], 'the requested target is the original\'s author:seq')
+})
+
+test('page needs: posts are local and shown; their quote and reply targets are needed', async (t) => {
+  const { pageNeeds } = await load()
+  const post = Object.freeze({ kind: 'post', author: 'a', seq: 1, round: 0, text: 'olá' })
+  const reply = Object.freeze({ kind: 'post', author: 'b', seq: 2, round: 0, text: 'oi', replyTo: { author: 'C', seq: 3 } })
+  const quote = Object.freeze({ kind: 'post', author: 'd', seq: 5, round: 1, text: 'veja', quote: { author: 'e', seq: 6 } })
+  const needs = pageNeeds([post, reply, quote])
+  t.alike(needs.shown, ['a:1', 'b:2', 'd:5'])
+  t.alike(needs.need, ['c:3', 'e:6'])
+  t.alike([...needs.local.keys()], ['a:1', 'b:2', 'd:5'])
+  t.is(needs.local.get('b:2'), reply)
+  t.alike(pageNeeds([{ kind: 'repost', author: 'r', seq: 1, to: { author: 'x', seq: 0 } }]).need, [], 'an invalid repost target is dropped')
+  t.alike(pageNeeds([]), { local: new Map(), shown: [], need: [], authors: [] })
 })

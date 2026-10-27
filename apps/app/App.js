@@ -21,7 +21,7 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
-import { parseReturn } from './src/account'
+import { parseReturn, parseReturnWaitlist } from './src/account'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -30,7 +30,9 @@ import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
+import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
+import { watchRelease } from './src/pwa'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
@@ -71,7 +73,10 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', '
 // Identidade's LinkCard is the one that removes the query. Native has no
 // location.
 const LINK_RETURN = (() => {
-  try { return parseReturn(globalThis.location?.search) !== null } catch { return false }
+  try {
+    const search = globalThis.location?.search
+    return parseReturn(search) !== null || parseReturnWaitlist(search) !== ''
+  } catch { return false }
 })()
 
 // True when node.info confirms an identity and a member certificate.
@@ -85,6 +90,12 @@ function Member () {
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   const install = useInstall()
+  const [updateReady, setUpdateReady] = useState(false)
+  const [updateDismissed, setUpdateDismissed] = useState(false)
+  useEffect(() => {
+    const stop = watchRelease((s) => setUpdateReady(s.update))
+    return () => stop()
+  }, [])
   const ready = node.phase === 'ready'
   // Once the node was ready the tree stays mounted for good: a disconnect,
   // another tab taking over or a restart never unmounts the screens, so
@@ -109,6 +120,15 @@ function Member () {
   // True once this identity reached the tabs in this page session.
   const [reachedTabs, setReachedTabs] = useState(false)
   const [version, setVersion] = useState(0)
+  // The Espiadinha reloads only on a publish (peekVersion); a follow change
+  // (followsSignal) just drops the newly followed authors' rows, keeping its
+  // pages and scroll. `version` still reloads A Rua, Diário and the info.
+  const [peekVersion, setPeekVersion] = useState(0)
+  const [followsSignal, setFollowsSignal] = useState(0)
+  const followsChanged = useCallback(() => {
+    setVersion((v) => v + 1)
+    setFollowsSignal((v) => v + 1)
+  }, [])
   // Avisos has something unseen: a plain dot on its tab, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
@@ -270,7 +290,7 @@ function Member () {
   const outbox = useOutbox()
   useOutboxDrain({
     enabled: ready && !locked && setupDone && !(passkey && passkey.recovering) &&
-      node.online !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
+      node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
     association: node.config ? node.config.association : null
@@ -282,6 +302,7 @@ function Member () {
     if (lastSent.n === lastSentRef.current) return
     lastSentRef.current = lastSent.n
     setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
     showToast(lastSent.kind === 'reply' ? 'resposta publicada' : 'publicado')
   }, [lastSent])
 
@@ -292,8 +313,8 @@ function Member () {
   useEffect(() => {
     if (followsVersion === followsVersionRef.current) return
     followsVersionRef.current = followsVersion
-    setVersion((v) => v + 1)
-  }, [followsVersion])
+    followsChanged()
+  }, [followsVersion, followsChanged])
   const followCount = typeof node.followCount === 'number' ? node.followCount : (info ? info.followCount : null)
 
   const startReply = (r) => setComposer({ open: true, reply: r, quote: null })
@@ -523,7 +544,7 @@ function Member () {
       onOpenThread: openThread,
       onOpenMember: openMember,
       onToast: showToast,
-      onFollowsChanged: () => setVersion((v) => v + 1)
+      onFollowsChanged: followsChanged
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
@@ -531,7 +552,9 @@ function Member () {
           ? <TopBar title={TAB_TITLES[tab]} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
-        {install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
+        {updateReady && !updateDismissed
+          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
+          : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
@@ -551,7 +574,9 @@ function Member () {
           <View style={shown('espiadinha')}>
             <Espiadinha
               active={on('espiadinha')}
-              refresh={version}
+              refresh={peekVersion}
+              followsSignal={followsSignal}
+              onPublish={openComposer}
               onReply={startReply}
               onReport={setReport}
               onOpenThread={openThread}
@@ -559,7 +584,7 @@ function Member () {
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.espiadinha}
-              onFollowsChanged={() => setVersion((v) => v + 1)}
+              onFollowsChanged={followsChanged}
               onToast={showToast}
             />
           </View>
@@ -571,7 +596,9 @@ function Member () {
               onOpenMember={openMember}
               onQuote={startQuote}
               scrollToTop={scrollSignal.seguindo}
-              onFollowsChanged={() => setVersion((v) => v + 1)}
+              onFollowsChanged={followsChanged}
+              ownKey={ownKey}
+              followsTick={version}
             />
           </View>
           <View style={shown('avisos')}>
@@ -580,7 +607,7 @@ function Member () {
               refresh={version}
               ownKey={ownKey}
               scrollToTop={scrollSignal.avisos}
-              onFollowsChanged={() => setVersion((v) => v + 1)}
+              onFollowsChanged={followsChanged}
               onToast={showToast}
               onBadge={setAvisosNew}
             />
@@ -661,6 +688,7 @@ function Member () {
           // Kept in the outbox: nothing new in the diary yet.
           if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
           setVersion((v) => v + 1)
+          setPeekVersion((v) => v + 1)
           showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
         }}
       />

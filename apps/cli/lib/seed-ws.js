@@ -27,9 +27,15 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the loopback spike page works and public pages are refused. There is no
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
-// The seeder also caps external sockets at half its connection limit
-// (Seeder#maxExternal), so these clients never starve swarm peers. Nothing
+// The seeder also caps external sockets on its own (Seeder#maxExternal,
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
 // is logged per connection and no address is ever logged.
+//
+// One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
+// keep-alive connections, so its socket cap (server.maxConnections, see
+// socketCap) only bounds file descriptors: it is sized above the sum of the
+// seeder's external cap and the /media and /index in-flight caps. The
+// seeder's acceptStream is what refuses members beyond maxExternal.
 //
 // The same listener serves media blocks over plain HTTP (Caddy's
 // `handle /media/*` proxies here): GET|HEAD /media/<D>/<K>/<start>/<blocks>,
@@ -60,7 +66,23 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
 //   the last reply of the previous page) -> Seeder#indexPost;
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
-// - /index/member/<author>[/<before>] -> indexMember.
+// - /index/member/<author>[/<before>] -> indexMember;
+// - /index/search/<segment> (1..4 tokens of [a-z0-9]{1,20} joined by '-',
+//   the folded search text) -> indexSearch(segment) -> null | { members:
+//   [{ author, profileSeq, usernameSeq }] (at most 20), more, indexing,
+//   complete }; a query with no hit is 200 with members: [].
+// - /index/topic/<tokens>[/<cursor>] -> Seeder#indexTopic: tokens are
+//   folded [a-z0-9] words of 2..32 chars joined by a literal '+', 1..8 of
+//   them (the client folds; '%2B', uppercase, accents or a query string
+//   never match, nothing is decoded here); the cursor `<atMs>.<author>.<seq>`
+//   is the last candidate the previous page examined. The answer is
+//   `{ items: [ref] (<= 30), next: cursor | null, authors: { hex64:
+//   { profileSeq, usernameSeq } }, indexing, complete }`; an unknown word is
+//   a 200 with empty items, a malformed path the generic 404. Unlike
+//   ordinary browsing, which the browser computes from replicated diaries,
+//   the submitted words DO reach the seeder here; they are never logged nor
+//   echoed by the seeder; Caddy's error log can still record the URI when
+//   proxying fails (docs/protocol.md).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -109,8 +131,9 @@ const PATH = '/seeder'
 const MAX_SOCKETS = 128
 const HEADERS_TIMEOUT_MS = 4000
 const CHECK_INTERVAL_MS = 1000
-// How long a refused upgrade may take to flush its response before the
-// socket is destroyed anyway.
+// How long a refused upgrade may take to flush its response, or a WebSocket
+// refused by the seeder for capacity its 1013 close, before the socket is
+// destroyed anyway.
 const REFUSE_GRACE_MS = 1000
 
 const MEDIA_PREFIX = '/media'
@@ -135,6 +158,11 @@ const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
+const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+// 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
+// optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
+const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -354,14 +382,30 @@ function refuse (socket, code, reason) {
 // coreHex, start, blocks) -> null | { bytes, blocks } backs /media. media:
 // optional overrides of the /media limits ({ maxInFlight, rate, burst,
 // deadlineMs }), for tests; index: the same for the /index limits
-// ({ maxInFlight, rate, burst }). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs) and indexMember(authorHex, before) -> null |
-// plain object back /index. triageToken: optional 64 lower-case hex secret
-// that enables /moderation-post (absent, null or '' leaves it a 404; any
-// other value throws), backed by the seeder's postBlock(diaryHex, seq) ->
-// null | { fork, length, block0, block }; post: overrides of its limits
-// ({ maxInFlight, rate, burst, deadlineMs }), for tests.
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, triageToken = null, post = {} }) {
+// ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
+// listener (see socketCap). The seeder's indexPost(authorHex, seq,
+// cursor), indexCounts(refs), indexMember(authorHex, before) and
+// indexSearch(segment) -> null | plain object back /index; indexSearch's
+// object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
+// more, indexing, complete }. The search segment shares the index bucket
+// and in-flight cap and is never logged or echoed. triageToken: optional
+// 64 lower-case hex secret that enables /moderation-post (absent, null or
+// '' leaves it a 404; any other value throws), backed by the seeder's
+// postBlock(diaryHex, seq) -> null | { fork, length, block0, block }; post:
+// overrides of its limits ({ maxInFlight, rate, burst, deadlineMs }), for
+// tests.
+// The listener's socket cap: `sockets` when it is an integer >= 1
+// (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
+// /media and /index response in flight and 64 more for keep-alives and
+// requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
+// below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
+// POST_MAX_IN_FLIGHT /moderation-post answers fit in those 64.
+function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
+  if (Number.isInteger(sockets) && sockets >= 1) return sockets
+  return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
+}
+
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {} }) {
   if (triageToken !== null && triageToken !== undefined && triageToken !== '' &&
     (typeof triageToken !== 'string' || !TRIAGE_TOKEN_RE.test(triageToken))) {
     throw new TypeError('triageToken inválido') // never echoes the value
@@ -392,6 +436,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
+    m = INDEX_SEARCH_RE.exec(url)
+    if (m) return ['indexSearch', [m[1]]]
+    m = INDEX_TOPIC_RE.exec(url)
+    if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
     return null
   }
 
@@ -617,7 +665,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     send(res, 404, NOT_FOUND)
   })
-  server.maxConnections = MAX_SOCKETS
+  const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
+  server.maxConnections = socketCap({ maxExternal, mediaInFlight: maxInFlight, indexInFlight: indexMaxInFlight, sockets })
   server.headersTimeout = HEADERS_TIMEOUT_MS
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD, perMessageDeflate: false })
@@ -645,17 +694,39 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       ws.on('error', () => {})
       if (closing) return ws.terminate()
       let duplex
+      // Set when the seeder refuses for capacity: the socket is then ours to
+      // close with 1013 (try again later) instead of the bare 1006 a
+      // terminate() gives, so the client can tell "full" from a network loss.
+      let refused = false
+      const onRefuse = () => {
+        if (refused) return
+        refused = true
+        // The duplex must not be destroyed before the close frame is out:
+        // createWebSocketStream's _destroy calls ws.terminate() while the
+        // WebSocket is still open. Nothing destroys it here until ws emits
+        // 'close' (the listener below), when terminate() is a no-op. The
+        // unref'd timer bounds how long a client that never answers the close
+        // can keep the socket (ws's own close timeout is 30 s).
+        const timer = setTimeout(() => ws.terminate(), REFUSE_GRACE_MS)
+        timer.unref()
+        ws.once('close', () => clearTimeout(timer))
+        try {
+          ws.close(1013, 'lotado')
+        } catch {
+          ws.terminate()
+        }
+      }
       try {
         duplex = createWebSocketStream(ws)
         duplex.on('error', () => {})
         // A closed WebSocket only ends the duplex's readable side; destroy it
         // so the seeder releases the connection slot at once.
         ws.once('close', () => duplex.destroy())
-        Promise.resolve(seeder.acceptStream(duplex)).then((noise) => {
-          if (!noise) ws.terminate()
-        }, () => ws.terminate())
+        Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
+          if (!noise && !refused) ws.terminate()
+        }, () => { if (!refused) ws.terminate() })
       } catch {
-        ws.terminate()
+        if (!refused) ws.terminate()
       }
     })
   })
@@ -686,7 +757,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
 module.exports = {
   startSeedWs,
+  socketCap,
   DEFAULT_HOST,
+  MAX_SOCKETS,
   MAX_PAYLOAD,
   MEDIA_MAX_BLOCKS,
   MEDIA_MAX_IN_FLIGHT,
@@ -696,6 +769,8 @@ module.exports = {
   INDEX_POST_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
+  INDEX_SEARCH_RE,
+  INDEX_TOPIC_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

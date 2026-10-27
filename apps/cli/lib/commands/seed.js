@@ -49,11 +49,29 @@ async function listenHealth (flags, seeder) {
   }
 }
 
+// Only the keys that are set (not null): an unset variable keeps the default.
+function setKeys (limits) {
+  const out = {}
+  for (const [name, value] of Object.entries(limits || {})) {
+    if (value !== null && value !== undefined) out[name] = value
+  }
+  return out
+}
+
 async function listenWs (flags, seeder) {
   // Loaded only with --ws-port: without it the ws module is never touched.
   const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
   try {
-    return await startSeedWs({ host: flags.wsHost || WS_HOST, port: flags.wsPort, seeder, origins: flags.wsOrigins, triageToken: flags.triageToken })
+    return await startSeedWs({
+      host: flags.wsHost || WS_HOST,
+      port: flags.wsPort,
+      seeder,
+      origins: flags.wsOrigins,
+      sockets: flags.maxSockets ?? null,
+      media: setKeys(flags.media),
+      index: setKeys(flags.index),
+      triageToken: flags.triageToken
+    })
   } catch (err) {
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
     throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')
@@ -64,13 +82,17 @@ async function runSeeder (flags) {
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
   }
-  const seeder = new Seeder({
+  const options = {
     dataDir: flags.dataDir,
     associationKey: flags.association,
     bootstrap: flags.bootstrap,
     host: flags.dhtHost || undefined,
     log
-  })
+  }
+  // Web limits from the environment; unset ones keep the seeder's defaults.
+  if (flags.maxExternal != null) options.maxExternal = flags.maxExternal
+  if (flags.frameMemory != null) options.maxFrameMemory = flags.frameMemory
+  const seeder = new Seeder(options)
   // Handlers go in BEFORE start(): a signal during startup (DHT join) must not
   // take Node's default terminate path; the seeder is closed once start settles.
   let onSignal
