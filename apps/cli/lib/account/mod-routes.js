@@ -584,7 +584,7 @@ function createModRoutes ({
     // reporter) out, then the page:
     // truncating before the filter could hide every actionable report
     // behind a first page of the moderator's own cases.
-    const { reports: rows } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS }))
+    const { reports: rows, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS }))
     const own = ownMember(session)
     const visible = rows.filter((r) => !ownCase(r, own))
     let start = 0
@@ -596,7 +596,10 @@ function createModRoutes ({
     const cache = new Map()
     send(res, 200, {
       reports: visible.slice(start, start + REPORTS_PAGE).map((r) => projectReport(r, cache)),
-      truncated: visible.length > start + REPORTS_PAGE
+      truncated: visible.length > start + REPORTS_PAGE,
+      // The store lists at most MAX_REPORTS rows: on the last page the panel
+      // can reach, older rows may exist that it never shows.
+      alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
     })
   }
 

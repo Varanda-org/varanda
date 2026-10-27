@@ -722,6 +722,21 @@ test('Histórico: a failed mostrar mais keeps the rows and shows the error', asy
   t.is(buttons(doc, 'mostrar mais')[0].disabled, false, 'it can be tried again')
 })
 
+test('Histórico: avisa quando há decisões além do limite do painel', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [report({ id: 'd1abcdefghijklmnopqrst', status: 'descartar', decidedAt: '2026-10-22T00:00:00.000Z' })],
+    truncated: false,
+    alemDoLimite: true
+  }]
+  const { fetch } = fakeFetch(routes)
+  await panel.createPanel(env(doc, fetch)).start()
+  buttons(doc, 'Histórico')[0].click()
+  t.ok(doc.main.textContent.includes('Há decisões mais antigas que o painel não mostra.'))
+  t.is(buttons(doc, 'mostrar mais').length, 0, 'there is no page to ask for')
+})
+
 test('Pendentes marks a change requested by the AI; cancel still undoes it', async (t) => {
   const doc = fakeDocument()
   const routes = signedIn([], {

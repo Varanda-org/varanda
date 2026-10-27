@@ -108,6 +108,7 @@ const TEXT = {
   moreOpen: 'Há mais denúncias depois destas.',
   moreDecided: 'Há mais decisões antes destas.',
   showMore: 'mostrar mais',
+  beyondLimit: 'Há decisões mais antigas que o painel não mostra.',
   noDecided: 'Nenhuma decisão ainda.',
   pendingBanner: 'As decisões só valem depois que a associação rodar `varanda mod apply` e publicar a lista.',
   noPending: 'Nenhuma mudança pendente.',
@@ -239,7 +240,11 @@ function reportRow (r) {
 
 function reportList (json) {
   const rows = has(json, 'reports') && Array.isArray(json.reports) ? json.reports : []
-  return { reports: rows.map(reportRow).filter((r) => r !== null), truncated: has(json, 'truncated') && json.truncated === true }
+  return {
+    reports: rows.map(reportRow).filter((r) => r !== null),
+    truncated: has(json, 'truncated') && json.truncated === true,
+    beyondLimit: has(json, 'alemDoLimite') && json.alemDoLimite === true
+  }
 }
 
 function publishedOf (p) {
@@ -589,7 +594,7 @@ function createPanel (env) {
   }
 
   function renderHistory () {
-    const { reports, truncated } = state.decided
+    const { reports, truncated, beyondLimit } = state.decided
     if (reports.length === 0) return h('p', { text: TEXT.noDecided })
     const cards = reports.map((r) => h('div', { className: 'card' },
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
@@ -601,7 +606,8 @@ function createPanel (env) {
     ))
     return h('div', { className: 'list' }, ...cards,
       truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,
-      truncated ? button(TEXT.showMore, showMoreDecided, { disabled: busy }) : null)
+      truncated ? button(TEXT.showMore, showMoreDecided, { disabled: busy }) : null,
+      beyondLimit ? h('p', { className: 'meta', text: TEXT.beyondLimit }) : null)
   }
 
   // The next page of the history, appended to what is shown; the other
@@ -616,10 +622,10 @@ function createPanel (env) {
     render()
     return run(async () => {
       try {
-        const page = reportList(await call('GET', API + 'reports?estado=decidida&antes=' + cursor))
+        const page = reportList(await call('GET', API + 'reports?estado=decidida&antes=' + encodeURIComponent(cursor)))
         if (mine !== gen) return
         const seen = new Set(shown.map((r) => r.id))
-        state.decided = { reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))], truncated: page.truncated }
+        state.decided = { ...page, reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))] }
       } finally {
         busy = false
         if (state) render()
