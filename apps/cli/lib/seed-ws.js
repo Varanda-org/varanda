@@ -70,6 +70,18 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the folded search text) -> indexSearch(segment) -> null | { members:
 //   [{ author, profileSeq, usernameSeq }] (at most 20), more, indexing,
 //   complete }; a query with no hit is 200 with members: [].
+// - /index/topic/<tokens>[/<cursor>] -> Seeder#indexTopic: tokens are
+//   folded [a-z0-9] words of 2..32 chars joined by a literal '+', 1..8 of
+//   them (the client folds; '%2B', uppercase, accents or a query string
+//   never match, nothing is decoded here); the cursor `<atMs>.<author>.<seq>`
+//   is the last candidate the previous page examined. The answer is
+//   `{ items: [ref] (<= 30), next: cursor | null, authors: { hex64:
+//   { profileSeq, usernameSeq } }, indexing, complete }`; an unknown word is
+//   a 200 with empty items, a malformed path the generic 404. Unlike
+//   ordinary browsing, which the browser computes from replicated diaries,
+//   the submitted words DO reach the seeder here; they are never logged nor
+//   echoed by the seeder; Caddy's error log can still record the URI when
+//   proxying fails (docs/protocol.md).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -112,6 +124,9 @@ const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
 // 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
 const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+// 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
+// optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
+const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -360,6 +375,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
     m = INDEX_SEARCH_RE.exec(url)
     if (m) return ['indexSearch', [m[1]]]
+    m = INDEX_TOPIC_RE.exec(url)
+    if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
     return null
   }
 
@@ -605,6 +622,7 @@ module.exports = {
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
+  INDEX_TOPIC_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

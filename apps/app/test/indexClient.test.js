@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -614,4 +614,105 @@ test('fetchSearch transport: 404, 429, 503, redirect, size cap', async (t) => {
   const big = response(JSON.stringify(searchBody({ pad: 'x'.repeat(70000) })))
   t.is((await fetchSearch('ana', { fetch: async () => big })).reason, 'too-large')
   t.ok(big.cancelled, 'oversized read is cancelled')
+})
+
+function topicBody (over = {}) {
+  return {
+    items: [A + ':5', B + ':2', A + ':3'],
+    next: CURSOR,
+    authors: {
+      [A]: { profileSeq: 1, usernameSeq: null },
+      [B]: { profileSeq: null, usernameSeq: 2 }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('topicUrl: folded tokens joined by a literal plus, nothing else', async (t) => {
+  const { topicUrl } = await load()
+  t.is(topicUrl('ceu'), '/index/topic/ceu')
+  t.is(topicUrl('ceu+azul'), '/index/topic/ceu+azul', 'literal plus, not %2B')
+  t.is(topicUrl('ceu+azul', CURSOR), '/index/topic/ceu+azul/' + CURSOR)
+  t.is(topicUrl(Array.from({ length: 8 }, () => 'ab').join('+')), '/index/topic/' + Array.from({ length: 8 }, () => 'ab').join('+'))
+  t.is(topicUrl('x'.repeat(32)), '/index/topic/' + 'x'.repeat(32))
+  const nine = Array.from({ length: 9 }, () => 'ab').join('+')
+  for (const bad of ['Céu', 'CEU', 'ceu azul', 'ceu%2Bazul', 'ceu?x=1', 'a', 'x'.repeat(33), nine, '', 'ceu+', '+ceu', 'ceu++azul', 'ceu/azul', null, 7, ['ceu']]) {
+    t.is(topicUrl(bad), null, 'path ' + String(bad))
+  }
+  for (const bad of ['x', '1.' + B + '.0', CURSOR + '/x', 7]) {
+    t.is(topicUrl('ceu', bad), null, 'cursor ' + String(bad))
+  }
+})
+
+test('validTopic: exact shape, hints for exactly the items\' authors', async (t) => {
+  const { validTopic, TOPIC_MAX } = await load()
+  t.is(TOPIC_MAX, 30)
+  t.alike(validTopic(topicBody()), topicBody())
+  const empty = { items: [], next: null, authors: {}, indexing: true, complete: false }
+  t.alike(validTopic(empty), empty, 'empty list')
+  const thirty = Array.from({ length: 30 }, (_, i) => A + ':' + (i + 1))
+  t.alike(validTopic(topicBody({ items: thirty, authors: { [A]: { profileSeq: null, usernameSeq: null } } })).items, thirty, '30 items')
+  const missing = topicBody()
+  delete missing.next
+  const bad = [
+    topicBody({ extra: 1 }),
+    missing,
+    topicBody({ items: Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)), authors: { [A]: { profileSeq: null, usernameSeq: null } } }),
+    topicBody({ items: [A + ':5', A + ':5'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ items: [A + ':0'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ items: 'x' }),
+    topicBody({ next: 'x' }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, ['zz'.repeat(32)]: { profileSeq: null, usernameSeq: 2 } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: 0, usernameSeq: 2 } } }),
+    topicBody({ authors: [] }),
+    topicBody({ indexing: 'no' }),
+    topicBody({ complete: 1 }),
+    topicBody({ complete: null }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validTopic(body), null, JSON.stringify(body).slice(0, 80))
+})
+
+test('fetchTopic: transport, contract and a fresh copy', async (t) => {
+  const { fetchTopic, validTopic } = await load()
+  const calls = []
+  const parsed = topicBody()
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(parsed))
+  }
+  const res = await fetchTopic('ceu+azul', CURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, topicBody())
+  t.is(calls[0].url, '/index/topic/ceu+azul/' + CURSOR)
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  // A fresh copy: mutating the result leaves the parsed body untouched.
+  const own = topicBody()
+  const copy = validTopic(own)
+  copy.items.push(C + ':1')
+  copy.authors[A].profileSeq = 99
+  t.is(own.items.length, 3, 'items copied')
+  t.is(own.authors[A].profileSeq, 1, 'hints copied')
+  res.value.items.length = 0
+  t.is(parsed.items.length, 3, 'the fetched result is a copy too')
+  let called = false
+  t.alike(await fetchTopic('Céu', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+  const text = JSON.stringify(topicBody())
+  t.is((await fetchTopic('ceu', null, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchTopic('ceu', null, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
+  t.is((await fetchTopic('ceu', null, { fetch: async () => response(JSON.stringify(topicBody({ pad: 'x'.repeat(70000) }))) })).reason, 'too-large')
+  t.is((await fetchTopic('ceu', null, { fetch: json(topicBody({ next: 'x' })) })).reason, 'malformed')
+  t.is((await fetchTopic('ceu', null, { fetch: async () => response('not json') })).reason, 'malformed')
+  // A 429 is the shared cooldown with retries, as on every /index route
+  // (last here: the cooldown it sets outlives the remaining calls).
+  const limited = await fetchTopic('ceu', null, { fetch: async () => response(text, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
 })

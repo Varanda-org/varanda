@@ -175,8 +175,12 @@ export function Btn ({ label, onPress, disabled, pending, secondary, danger }) {
 
 // Key, JSON and host fields are `mono`: no capitalisation or correction.
 // Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4 }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType }) {
   const raw = mono ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
+  // Forwarded only when passed: existing callers are unchanged.
+  const submit = {}
+  if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing
+  if (returnKeyType !== undefined) submit.returnKeyType = returnKeyType
   return (
     <View style={styles.field}>
       {label ? <Label>{label}</Label> : null}
@@ -191,6 +195,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
         placeholderTextColor={colors.placeholder}
         accessibilityLabel={label || placeholder}
         {...raw}
+        {...submit}
       />
     </View>
   )
