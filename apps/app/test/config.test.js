@@ -133,7 +133,8 @@ test('parseCertificateText: curly quotes from iOS smart punctuation are read as 
   const expected = { v: 1, member: ASSOC }
   t.alike(parseCertificateText(plain).cert, expected, 'plain quotes')
   for (const [open, close] of [['“', '”'], ['„', '”'], ['‟', '″']]) {
-    const curly = plain.replace(/"/g, (_, i) => (i % 2 === 0 ? open : close))
+    let n = 0
+    const curly = plain.replace(/"/g, () => (n++ % 2 === 0 ? open : close))
     t.alike(parseCertificateText(curly).cert, expected, open + close)
   }
 })
