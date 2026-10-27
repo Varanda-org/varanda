@@ -51,6 +51,12 @@ assoc_re='^[0-9a-fA-F]{64}$'
 json_type_re='^application/json( *;.*)?$'
 # Um e-mail de moderador em VARANDA_MODERATOR_EMAILS (só a forma, sem espaço).
 moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
+# Os limites opcionais do serviço de conta: um inteiro positivo sem zero à
+# esquerda, dentro da faixa NOME:mínimo:máximo abaixo. A faixa é a mesma de
+# LIMIT_ENV em apps/cli/lib/commands/account.js (um teste compara as duas):
+# um valor fora dela derrubaria o serviço só depois de trocar o contêiner.
+limite_re='^[1-9][0-9]{0,7}$'
+limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000'
 
 root=''
 www=''
@@ -225,7 +231,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 faixa limite minimo maximo valor
+  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -284,6 +290,24 @@ conferir_antes() {
       fi
     done < <(printf '%s\n' "$moderators" | tr ',' '\n')
   fi
+  # Limites opcionais do serviço de conta: ausente ou vazio passa (valem os
+  # padrões). Lidos do mesmo jeito, nunca executados e nunca impressos; um
+  # valor presente precisa ser um inteiro positivo dentro da faixa que o
+  # serviço aceita (a forma vem antes, então a comparação só vê inteiros).
+  for entrada in $limites_conta; do
+    nome=${entrada%%:*}
+    min=${entrada#*:}
+    max=${min#*:}
+    min=${min%%:*}
+    # Sem aspas: o Compose passa o texto entre aspas inteiro (comentário
+    # incluído), então um valor entre aspas é recusado em vez de limpo aqui.
+    limite=$(sed -n "s/^[[:space:]]*$nome[[:space:]]*=//p" "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -n "$limite" ] && { ! [[ $limite =~ $limite_re ]] || [ "$limite" -lt "$min" ] || [ "$limite" -gt "$max" ]; }; then
+      log "$nome inválido em deploy/seeder/.env"
+      exit 1
+    fi
+  done
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
   # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
   # valor presente precisa ser inteiro positivo canônico e estar na mesma

@@ -20,7 +20,9 @@ const ERROR_MESSAGES = {
   'nome-invalido': 'nome inválido',
   'conta-vinculada': 'esta conta Google já está vinculada a outra chave',
   'assinatura-invalida': 'não foi possível provar a chave',
-  expirado: 'o vínculo expirou, comece de novo'
+  expirado: 'o vínculo expirou, comece de novo',
+  // Member cap (503). Already-linked members never receive this token.
+  'lista-de-espera': 'A Varanda está cheia por enquanto e abriu uma lista de espera. Nada foi guardado; tente de novo mais tarde. Quem já entrou continua usando a rede normalmente.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -38,6 +40,17 @@ export function parseReturn (search) {
   let value
   try { value = new URLSearchParams(search).get('conta') } catch { return null }
   return Object.hasOwn(RETURN_NOTICES, value) ? RETURN_NOTICES[value] : null
+}
+
+// ?conta=lista-de-espera (the service refused the Google callback while the
+// member cap was full, before exchanging the code) -> the calm waitlist
+// sentence, or ''. Not a return notice: the screen shows it as its
+// waitlist state, as for a 503 from start/finish.
+export function parseReturnWaitlist (search) {
+  if (typeof search !== 'string') return ''
+  let value
+  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
+  return value === 'lista-de-espera' ? ERROR_MESSAGES['lista-de-espera'] : ''
 }
 
 export function usernameMatches (record, member, name) {
