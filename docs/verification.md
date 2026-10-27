@@ -1397,4 +1397,47 @@ Shipped behaviours:
 - `at` is author-supplied (up to 24 h ahead is accepted), so ordering inside a round can be gamed within that bound.
 - Names can be absent (`packages/web-member/lib/who.js`, around lines 60-66): a profile or @name outside blocks 1-2 and the fetched tail reads as 'sem nome'.
 - The cause of the repost report is unproven; if the checklist finds a real defect it needs a new fix.
-- Hardening of the seeder link (frame guard and capacity) is not in this PR; it follows in a stacked PR.
+- Hardening of the seeder link (frame guard and capacity) was not part of this change; it is section 22.
+
+## 22. Ligação com o semeador: guarda de quadros no cliente e semeador lotado (2026-10-27)
+
+### Summary
+
+- Issue #130 (seeder-link hardening and capacity), stacked on the Espiadinha reposts PR. No production limit changed (64 total, 32 external); what changed is what a client sees and how much it will accept.
+- T8: `packages/core/lib/frame-guard.js` holds `FrameGuard`, moved out of `seeder.js` unchanged in behaviour, plus `handshakeFrames` (Noise XX responder receives 2 handshake frames, the initiator 1), option validation, and a throwing `onLimit` can no longer skip the destroy. It depends on streamx only (browser-safe, checked by `packages/core/test/browser-safe.test.js`).
+- T10: `Seeder#acceptStream(raw, { onRefuse })` hands a capacity refusal to the caller without destroying the stream; `apps/cli/lib/seed-ws.js` closes the WebSocket with 1013 `'lotado'` and terminates it after `REFUSE_GRACE_MS` = 1 s. Callers without `onRefuse` keep destroy-on-cap.
+- T11: `packages/web-member/lib/ws-stream.js` `guardedWsStream` (FrameGuard with `handshakeFrames` 1, records the close code). Peek and notices links: `PEEK_MAX_FRAME` = 1 MiB; sync and seeder-link: `MAX_EXTERNAL_FRAME` (8 MiB + 64 KiB). Over the bound the link is cut (peek: incomplete page and 'aviso: quadro grande demais do semeador'; sync reconnects). A 1013 close gives USAGE 'Semeador ocupado; tente novamente em instantes.' (peek, notices) and the sync warning 'aviso: semeador ocupado; tente novamente em instantes'.
+- Considered and NOT done: link reuse (a peek over the sync link) collides with the peeker's destroy-on-budget/abort model; an anonymous sub-cap would be post-handshake and spoofable.
+- Docs: `docs/design.md`, `docs/protocol.md` (section 4 "External transports", Peek link), `docs/rpc.md` (5.22 and 13), `README.md`, `CHANGELOG.md`.
+
+### Measurements
+
+`packages/web-member/test/peek-capacity.test.js`, Apple M4 Pro, Node 24, loopback, real in-process Seeder behind `startSeedWs`; the header comment of the test holds the full numbers.
+
+- Largest legitimate frame, against a real seeder with 64 diaries x 200 posts and a media core: 11,665 bytes; a 4096-key inventory stand-in: 9,031 bytes. Hence the 1 MiB bound for peek and notices.
+- Production caps 64/32, 40 member sync links: 40 attempted, 40 connected, 32 admitted, 8 refused. With the 32 slots held, a peek or notices read fails with USAGE 'Semeador ocupado; tente novamente em instantes.' in 2-5 ms (peek) and 1-3 ms (notices); a bare 33rd socket closes 0-1 ms after its refusal log line, far inside the 1 s grace.
+- Test-only caps (maxConnections 64, `seeder.maxExternal` 40): 40 admitted; the 41st peek or notices read is refused with the busy message in 3-7 ms; with `maxExternal` 41 the 41st peek reads a 10-diary page in 11-14 ms.
+- A peek link holds a slot about 10-20 ms on loopback (a notices read 2-3 ms); each network round-trip adds to that over a real network.
+- Not measured: whether held member links survive the 30 s external idle deadline with no traffic.
+- Hostile-frame result: a frame declaring more than the bound is cut at its 3-byte header: `frame-guard-client.test.js` drives a hostile seeder against the peek, sync and seeder links, and `ws-stream.test.js` covers the shared `guardedWsStream`; the notices link uses that same call and has no hostile-seeder test of its own; `frame-guard.test.js` covers the guard itself.
+
+Test-only overrides: `seeder.maxExternal` (40 / 41) in the capacity test; `maxFrame` and the guard options in the frame tests. Production code carries no such switch.
+
+### Automated (CI)
+
+Commands (from the worktree root, in this order): `npm run lint`; `npm test`; `npm run demo`.
+
+Results (2026-10-27, local, Node 24): `npm run lint` clean; `npm test` across the six workspaces, 125 test files, 0 failures (new or changed suites: core `frame-guard` 23 tests, `browser-safe`; cli `seed-ws`, `seeder-stream`; web-member `frame-guard-client` 8 tests, `ws-stream`, `bundle`, `peek-capacity` 43 asserts); `npm run demo` ends with `DEMO OK`. Security audit of the change: 0 verified findings (auditors: Claude, Claude built-in review, GPT, Grok).
+
+### Human verification (none performed yet)
+
+- [ ] Oversized frame cut: against a test seeder or a stub that sends a frame declaring more than 1 MiB on the peek link, the Espiadinha page is incomplete with 'aviso: quadro grande demais do semeador' and the app keeps working (not performed yet).
+- [ ] Seeder full: with the seeder's external slots held, opening the Espiadinha and the Avisos shows 'Semeador ocupado; tente novamente em instantes.' and works again after a retry once a slot frees (not performed yet).
+- [ ] Normal reads unaffected: with free slots, the Espiadinha, the Avisos and the sync behave as before (not performed yet).
+
+### Residual risks
+
+- The browser has already allocated the whole WebSocket message before the guard sees it; the guard bounds the secret-stream copy and cuts early.
+- On the sync link frames up to `MAX_EXTERNAL_FRAME` are still accepted (legitimate replication frames can be that large).
+- With about 32 hosted members online the 32 external slots are all taken by syncs and every peek or notices read is refused until a slot frees; the message is now accurate but the capacity is unchanged. Sub-cap and link reuse were rejected (see above).
+- Numbers are from loopback on one machine, not from the pilot seeder; no deploy claim is made.

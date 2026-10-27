@@ -42,11 +42,18 @@
 // diaries in parallel, under one page deadline and one byte budget).
 // The budget is charged per block as it arrives and checked before every
 // block request; each worker keeps ONE block in flight and a block over
-// MAX_BLOCK_BYTES ends its diary for the snapshot. RESIDUAL RISK: at most
-// PEEK_PARALLEL blocks are in flight at once, each bounded only by the
-// transport's frame limit until it arrives, so a hostile seeder can make
-// the node receive up to PEEK_PARALLEL oversized frames past the budget
-// before the link is destroyed.
+// MAX_BLOCK_BYTES ends its diary for the snapshot. FRAMES: the link runs
+// behind a frame guard (./ws-stream.js guardedWsStream, @varanda/core
+// lib/frame-guard) bounding every frame the seeder sends after the Noise
+// handshake to PEEK_MAX_FRAME; a frame declaring more cuts the link at its
+// 3-byte header (warning 'aviso: quadro grande demais do semeador', page
+// incomplete), before the secret stream allocates the body and before the
+// page budget is charged. RESIDUAL RISK: the browser has already allocated
+// each WebSocket message it hands over (one message is one frame or more,
+// so up to the socket's own message limit), and a hostile seeder may have
+// several such messages in flight when the guard cuts; the guard bounds
+// the secret stream's copy of a frame and cuts early, it cannot un-receive
+// what the WebSocket buffered.
 //
 // Memory: between pages a diary keeps only retainRecords(entries) (block 0,
 // profile and username records, posts and reposts) plus the set of fetched
@@ -87,7 +94,7 @@ const {
   retainRecords
 } = require('@varanda/core/lib/peek')
 const { memoryStorage } = require('./storage')
-const { wsStream } = require('./ws-stream')
+const { guardedWsStream } = require('./ws-stream')
 const { moderation } = require('./member-ops')
 const store = require('./node-store')
 
@@ -97,6 +104,26 @@ const PEEK_SNAPSHOT_MAX_BYTES = 33554432
 const PEEK_CORE_PAGE_SIZE = 65536
 // No fetch starts with less than this left on the page deadline.
 const PEEK_MIN_FETCH_MS = 250
+// The largest frame the peek link accepts after the Noise handshake (the
+// FrameGuard bound; sync and seeder links keep MAX_EXTERNAL_FRAME because a
+// member's batches legitimately reach 8 MiB). The peek link receives the
+// seeder's inventory (a hello of at most MAX_HELLO_HAVE = 100 keys inside
+// one admission payload of at most 16 KiB, the rest as one 'have' message
+// each, up to MAX_INVENTORY 4096) and blocks answered for PEEK_PARALLEL
+// workers with ONE block in flight each (<= MAX_BLOCK_BYTES plus its
+// proof), which the seeder may cork into one batch: 16 x ~16.5 KiB is
+// ~264 KiB in the worst legitimate case. MEASURED 2026-10-27
+// (test/frame-guard-client.test.js): a full 7-page read from a real seeder
+// holding 64 diaries of 200 near-4 KiB posts and a media core received 831
+// frames, the largest 11 665 bytes; a full 4096-key inventory from the real
+// admission code, 4027 frames, the largest 9031 bytes.
+// 1 MiB keeps a wide margin over both while refusing a frame 8x larger.
+const PEEK_MAX_FRAME = 1048576
+// A seeder at its connection cap closes the WebSocket with 1013 (try again
+// later); an older one terminates the socket (1006): NO_SEEDER.
+const CLOSE_TRY_AGAIN = 1013
+const SEEDER_BUSY = 'Semeador ocupado; tente novamente em instantes.'
+const FRAME_TOO_LARGE = 'aviso: quadro grande demais do semeador'
 const NO_SEEDER = 'sem conexão com o semeador'
 const BUSY = 'espiadinha já em andamento'
 const HEX64 = /^[0-9a-f]{64}$/
@@ -148,7 +175,7 @@ async function pool (items, n, fn) {
 
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
-// snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel).
+// snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, maxFrame).
 function createPeeker ({ storage, association, seederUrl, createSocket, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   const L = {
@@ -159,6 +186,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     pageMaxBytes: PEEK_PAGE_MAX_BYTES,
     snapshotMaxBytes: PEEK_SNAPSHOT_MAX_BYTES,
     parallel: PEEK_PARALLEL,
+    maxFrame: PEEK_MAX_FRAME,
     ...(limits || {})
   }
 
@@ -184,7 +212,13 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
   // the admission channel with an EMPTY inventory, verifies the hello
   // exactly as ./sync.js does and waits for the inventory to complete. One
   // deadline covers socket, Noise, hello and inventory. -> the link
-  // { noise, peer, incomplete }; rejects Error('sem conexão com o semeador').
+  // { noise, peer, incomplete }; rejects Error('sem conexão com o semeador'),
+  // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
+  // text: nothing the seeder sent is ever echoed). A frame over maxFrame
+  // destroys the link (run.lost) and marks the read frameCut: after the
+  // inventory that page is answered incomplete; during the hello or the
+  // inventory (this link not resolved yet) the read fails with
+  // 'sem conexão com o semeador' instead. The warning is logged either way.
   function openLink (run) {
     return new Promise((resolve, reject) => {
       let socket
@@ -194,7 +228,16 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
         reject(new Error(NO_SEEDER))
         return
       }
-      const noise = new NoiseSecretStream(true, wsStream(socket), { keyPair: crypto.keyPair() })
+      let noise = null
+      const { ws, stream } = guardedWsStream(socket, {
+        maxFrame: L.maxFrame,
+        onLimit: () => {
+          run.frameCut = true
+          warn(FRAME_TOO_LARGE)
+          if (noise !== null) noise.destroy()
+        }
+      })
+      noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
       const link = { noise, peer: null, verified: false, incomplete: false }
       run.link = link
@@ -216,7 +259,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
         // (their cores are closed) and the page is incomplete.
         run.lost = true
         for (const q of run.cores) q.close().catch(noop)
-        finish(new Error(NO_SEEDER))
+        finish(ws.closeCode === CLOSE_TRY_AGAIN ? new UsageError(SEEDER_BUSY) : new Error(NO_SEEDER))
       })
       noise.once('connect', () => {
         if (run.aborted) {
@@ -590,7 +633,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
         await fetchWindow(run, snap, diary, ctx)
       })
       checkAborted(run)
-      if (run.overBudget) incomplete = true
+      if (run.overBudget || run.frameCut) incomplete = true
     }
     // A diary a block did not arrive for (block 0 included: skipped as
     // 'unavailable') or one capped before supplying its posts leaves the
@@ -598,6 +641,8 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     for (const d of snap.order) {
       if (d.failed || (d.reason === null && d.capped && d.posts.length < PEEK_MAX_ROUNDS)) incomplete = true
     }
+    // A link cut by the frame guard never answers a complete page.
+    if (run.frameCut) incomplete = true
     // Skipped = left out by a problem the person should know about (block 0
     // or certificate, blocklist, revoked issuer, unavailable, fork, quota,
     // oversized block) or a scan that ended before finding any post. A diary
@@ -618,7 +663,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     if (!Number.isSafeInteger(limit) || limit < 1) throw new UsageError('limit inválido')
     const first = after === undefined || after === null
     if (!first && !isPeekCursor(after)) throw new UsageError('after inválido')
-    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, overBudget: false }
+    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, overBudget: false, frameCut: false }
     current = run
     try {
       return await readWith(run, { limit, cursor: first ? null : after, first })
@@ -684,4 +729,4 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
   return { read, abort, close, hasSnapshot }
 }
 
-module.exports = { createPeeker, PEEK_SNAPSHOT_MAX_BYTES, PEEK_CORE_PAGE_SIZE }
+module.exports = { createPeeker, PEEK_SNAPSHOT_MAX_BYTES, PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY }

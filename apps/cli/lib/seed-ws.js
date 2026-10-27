@@ -73,8 +73,9 @@ const PATH = '/seeder'
 const MAX_SOCKETS = 128
 const HEADERS_TIMEOUT_MS = 4000
 const CHECK_INTERVAL_MS = 1000
-// How long a refused upgrade may take to flush its response before the
-// socket is destroyed anyway.
+// How long a refused upgrade may take to flush its response, or a WebSocket
+// refused by the seeder for capacity its 1013 close, before the socket is
+// destroyed anyway.
 const REFUSE_GRACE_MS = 1000
 
 const MEDIA_PREFIX = '/media'
@@ -499,17 +500,39 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       ws.on('error', () => {})
       if (closing) return ws.terminate()
       let duplex
+      // Set when the seeder refuses for capacity: the socket is then ours to
+      // close with 1013 (try again later) instead of the bare 1006 a
+      // terminate() gives, so the client can tell "full" from a network loss.
+      let refused = false
+      const onRefuse = () => {
+        if (refused) return
+        refused = true
+        // The duplex must not be destroyed before the close frame is out:
+        // createWebSocketStream's _destroy calls ws.terminate() while the
+        // WebSocket is still open. Nothing destroys it here until ws emits
+        // 'close' (the listener below), when terminate() is a no-op. The
+        // unref'd timer bounds how long a client that never answers the close
+        // can keep the socket (ws's own close timeout is 30 s).
+        const timer = setTimeout(() => ws.terminate(), REFUSE_GRACE_MS)
+        timer.unref()
+        ws.once('close', () => clearTimeout(timer))
+        try {
+          ws.close(1013, 'lotado')
+        } catch {
+          ws.terminate()
+        }
+      }
       try {
         duplex = createWebSocketStream(ws)
         duplex.on('error', () => {})
         // A closed WebSocket only ends the duplex's readable side; destroy it
         // so the seeder releases the connection slot at once.
         ws.once('close', () => duplex.destroy())
-        Promise.resolve(seeder.acceptStream(duplex)).then((noise) => {
-          if (!noise) ws.terminate()
-        }, () => ws.terminate())
+        Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
+          if (!noise && !refused) ws.terminate()
+        }, () => { if (!refused) ws.terminate() })
       } catch {
-        ws.terminate()
+        if (!refused) ws.terminate()
       }
     })
   })
