@@ -13,6 +13,11 @@ const MAX_SOCKETS = 16
 const HEADERS_TIMEOUT_MS = 4000
 const REQUEST_TIMEOUT_MS = 5000
 
+// A missing or non-finite value is reported as 0.
+function finite (v) {
+  return Number.isFinite(v) ? v : 0
+}
+
 // [name, help, value(snapshot)]: every metric is a gauge.
 const METRICS = [
   ['ready', '1 quando o semeador está pronto; 0 ao iniciar ou encerrar', (s) => (s.status === 'ok' ? 1 : 0)],
@@ -21,6 +26,10 @@ const METRICS = [
   ['blocks', 'blocos guardados dos diários admitidos', (s) => s.blocks],
   ['bytes', 'bytes dos diários admitidos (tamanho assinado)', (s) => s.bytes],
   ['connections', 'conexões abertas', (s) => s.connections],
+  ['swarm', 'conexões abertas pela rede P2P (swarm)', (s) => finite(s.swarm)],
+  ['external', 'conexões externas abertas (WebSocket), handshakes em curso incluídos', (s) => finite(s.external)],
+  ['max_connections', 'limite de conexões da rede P2P (swarm)', (s) => finite(s.maxConnections)],
+  ['max_external', 'limite de conexões externas (WebSocket)', (s) => finite(s.maxExternal)],
   ['peers', 'pares com canal de admissão aberto', (s) => s.peers],
   ['firewalled', '1 quando a DHT se vê atrás de firewall ou NAT', (s) => (s.firewalled ? 1 : 0)],
   ['blocked', 'chaves na lista de bloqueio adotada', (s) => s.blocked],
@@ -29,8 +38,8 @@ const METRICS = [
   ['media_bytes', 'bytes dos núcleos de mídia (tamanho assinado)', (s) => s.mediaBytes],
   ['index_records', 'registros no índice de engajamento (em memória)', (s) => s.indexRecords],
   ['index_saturated', '1 quando o índice de engajamento atingiu o limite e há diários pausados', (s) => (s.indexSaturated ? 1 : 0)],
-  ['topic_posts', 'publicações no índice de busca de assuntos (em memória)', (s) => s.topicPosts],
-  ['topic_saturated', '1 quando o índice de busca atingiu um limite e há diários pausados', (s) => (s.topicSaturated ? 1 : 0)],
+  ['topic_posts', 'publicações no índice de assuntos (em memória)', (s) => s.topicPosts],
+  ['topic_saturated', '1 quando o índice de assuntos atingiu um limite e há diários pausados', (s) => (s.topicSaturated ? 1 : 0)],
   ['uptime_seconds', 'segundos desde o início do semeador', (s) => s.uptimeSeconds]
 ]
 

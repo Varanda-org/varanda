@@ -26,9 +26,15 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the loopback spike page works and public pages are refused. There is no
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
-// The seeder also caps external sockets at half its connection limit
-// (Seeder#maxExternal), so these clients never starve swarm peers. Nothing
+// The seeder also caps external sockets on its own (Seeder#maxExternal,
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
 // is logged per connection and no address is ever logged.
+//
+// One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
+// keep-alive connections, so its socket cap (server.maxConnections, see
+// socketCap) only bounds file descriptors: it is sized above the sum of the
+// seeder's external cap and the /media and /index in-flight caps. The
+// seeder's acceptStream is what refuses members beyond maxExternal.
 //
 // The same listener serves media blocks over plain HTTP (Caddy's
 // `handle /media/*` proxies here): GET|HEAD /media/<D>/<K>/<start>/<blocks>,
@@ -60,6 +66,10 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the last reply of the previous page) -> Seeder#indexPost;
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
 // - /index/member/<author>[/<before>] -> indexMember;
+// - /index/search/<segment> (1..4 tokens of [a-z0-9]{1,20} joined by '-',
+//   the folded search text) -> indexSearch(segment) -> null | { members:
+//   [{ author, profileSeq, usernameSeq }] (at most 20), more, indexing,
+//   complete }; a query with no hit is 200 with members: [].
 // - /index/topic/<tokens>[/<cursor>] -> Seeder#indexTopic: tokens are
 //   folded [a-z0-9] words of 2..32 chars joined by a literal '+', 1..8 of
 //   them (the client folds; '%2B', uppercase, accents or a query string
@@ -111,6 +121,8 @@ const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
+const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
 // optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
 const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
@@ -322,10 +334,24 @@ function refuse (socket, code, reason) {
 // coreHex, start, blocks) -> null | { bytes, blocks } backs /media. media:
 // optional overrides of the /media limits ({ maxInFlight, rate, burst,
 // deadlineMs }), for tests; index: the same for the /index limits
-// ({ maxInFlight, rate, burst }). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs) and indexMember(authorHex, before) -> null |
-// plain object back /index.
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {} }) {
+// ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
+// listener (see socketCap). The seeder's indexPost(authorHex, seq,
+// cursor), indexCounts(refs), indexMember(authorHex, before) and
+// indexSearch(segment) -> null | plain object back /index; indexSearch's
+// object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
+// more, indexing, complete }. The search segment shares the index bucket
+// and in-flight cap and is never logged or echoed.
+// The listener's socket cap: `sockets` when it is an integer >= 1
+// (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
+// /media and /index response in flight and 64 more for keep-alives and
+// requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
+// below MAX_SOCKETS, so lowering one cap never shrinks the listener.
+function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
+  if (Number.isInteger(sockets) && sockets >= 1) return sockets
+  return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
+}
+
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null }) {
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
   const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
@@ -346,6 +372,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
+    m = INDEX_SEARCH_RE.exec(url)
+    if (m) return ['indexSearch', [m[1]]]
     m = INDEX_TOPIC_RE.exec(url)
     if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
     return null
@@ -488,7 +516,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     send(res, 404, NOT_FOUND)
   })
-  server.maxConnections = MAX_SOCKETS
+  const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
+  server.maxConnections = socketCap({ maxExternal, mediaInFlight: maxInFlight, indexInFlight: indexMaxInFlight, sockets })
   server.headersTimeout = HEADERS_TIMEOUT_MS
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD, perMessageDeflate: false })
@@ -557,7 +586,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
 module.exports = {
   startSeedWs,
+  socketCap,
   DEFAULT_HOST,
+  MAX_SOCKETS,
   MAX_PAYLOAD,
   MEDIA_MAX_BLOCKS,
   MEDIA_MAX_IN_FLIGHT,
@@ -567,6 +598,7 @@ module.exports = {
   INDEX_POST_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
+  INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,

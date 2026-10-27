@@ -75,8 +75,12 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     log: () => {},
     _ready: true,
     _closing: false,
-    _isBlocked: () => false
+    _isBlocked: () => false,
+    association: null,
+    maxServed: 4096
   })
+  // The name index (account search) is fed by the same engagement scan.
+  seeder._names = seeder._createNameIndex()
   function diary (key, records) {
     const entry = {
       indexed: 1,

@@ -53,6 +53,8 @@ Os celulares guardam e trocam as publicações, e parceiros e serviços no Brasi
 
 **Índice de engajamento do semeador.** Como o semeador já guarda todo diário admitido, ele monta em memória, a cada início, um índice de respostas, citações, curtidas, republicações e das publicações de cada membro, para que a conversa completa e as contagens apareçam mesmo de quem a pessoa não segue. O índice só diz onde procurar e quantos são; cada publicação, nome ou bio mostrado é lido do diário do autor e conferido pelo nó (na versão web, uma leitura sob demanda na memória, sem guardar nada). Os celulares continuam guardando só os diários seguidos. Contagens e completude são afirmações do semeador; o índice tem limite de memória e avisa quando está incompleto. Detalhes em [protocol.md](protocol.md), seções 5 e 7. O semeador guarda também as palavras de cada publicação pública, só para dizer onde procurar na pesquisa por assunto da Espiadinha; o nó confere as palavras no texto que ele mesmo leu e verificou.
 
+**Índice de nomes do semeador.** Para achar uma pessoa por nome ou @nome e seguir, o semeador guarda em memória, alimentado pela mesma varredura do índice de engajamento, só os tokens dobrados do nome (sem acentos, em minúsculas) e o @nome já conferido (assinatura e delegação do emissor); nunca o nome original, a bio, o e-mail nem a conta. A busca aceita de 1 a 4 palavras (mínimo de 2 letras), casa começo de palavras, devolve até 20 pessoas e fica atrás da mesma moderação: bloqueados nunca aparecem, e um @nome de emissor revogado deixa de casar na hora. O app confere o nome e o @nome de cada linha no diário da pessoa antes de mostrá-la. O semeador vê o texto dobrado da busca na rota (sem registrar), e a ordem, as omissões e a completude são afirmações dele. Não há opção de sair nesta versão. Detalhes em [protocol.md](protocol.md), seções 5 e 7.
+
 ```mermaid
 flowchart TB
   classDef planned stroke-dasharray: 5 5
@@ -215,7 +217,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
-| Publicações e perfil | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos |
+| Publicações e perfil | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia. Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |
 | Lista de quem a pessoa segue (registros `follow` no diário) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
 | Mensagens diretas | Só nos aparelhos dos participantes, cifradas de ponta a ponta | Execução de contrato | Até apagarem |
 | Certificado de membro (chave, faixa etária, método, data) | Serviço de idade, no Brasil | Obrigação legal, ECA Digital (Art. 7º, II) | Enquanto a conta existir |
@@ -295,7 +297,7 @@ O maior risco é escala: nenhuma rede social P2P chegou a milhões de usuários 
 | Parceiros não aparecem | Conteúdo some quando os celulares desligam | Começar com 1–2 semeadores da associação no plano gratuito da Oracle em São Paulo |
 | Equipe de moderação pequena | Prazos legais estourados | Ondas de convite só quando houver moderação para elas |
 | Holepunch muda as APIs | Retrabalho | Fixar versões e acompanhar a documentação oficial |
-| Busca e assuntos do momento são difíceis sem servidor | Descoberta pobre | O inventário do `hello` do semeador já é um índice de diários; a Espiadinha usa esse índice e ordena no navegador, sem classificação no servidor. A busca por palavras usa o índice de busca do semeador (issue #81), em ordem de data e sem classificação; "assuntos do momento" continua em aberto, porque qualquer ordem por popularidade é um peso escondido |
+| Busca e assuntos do momento são difíceis sem servidor | Descoberta pobre | O inventário do `hello` do semeador já é um índice de diários; a Espiadinha usa esse índice e ordena no navegador, sem classificação no servidor. A busca de contas por nome e @nome existe pelo índice de nomes do semeador (começo de palavras, até 20 resultados, só na web hospedada), e a pesquisa por assunto da Espiadinha usa o índice de assuntos do semeador (issue #81: palavras inteiras, em ordem de data e sem classificação); "assuntos do momento" continua em aberto, porque qualquer ordem por popularidade é um peso escondido |
 
 ## Fases
 

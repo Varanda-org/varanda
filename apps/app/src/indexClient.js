@@ -25,10 +25,15 @@
 // Result convention (never throws): `{ ok: true, value }` or
 // `{ ok: false, reason }`, reason one of 'invalid-input', 'network',
 // 'timeout', 'not-found' (404: not indexed, or author not served; on the
-// search route: a seeder without that route, or a malformed path — an
+// topic route: a seeder without that route, or a malformed path — an
 // unknown word is a 200 with an empty list), 'status', 'too-large',
 // 'malformed'. The URL builders return null for bad input. Every fetch
 // function takes injectable deps `{ fetch, timeoutMs }`.
+//
+// Account search, GET /index/search/<segment>: the segment arrives already
+// folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
+// characters in all); it is checked here, never folded, lowercased or
+// trimmed.
 
 export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
@@ -36,11 +41,13 @@ export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
+export const SEARCH_MAX = 20
 export const TOPIC_MAX = 30
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
 const CURSOR = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
+const SEGMENT = /^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/
 // 1..8 folded tokens of 2..32 [a-z0-9] chars joined by a literal '+'.
 const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
@@ -49,6 +56,8 @@ const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
+const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
+const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 
 // --- strict checks (response values are never lowercased or coerced) ---
@@ -148,6 +157,13 @@ export function topicUrl (path, cursor = null) {
   if (typeof path !== 'string' || !QUERY.test(path)) return null
   if (cursor !== null && !isCursor(cursor)) return null
   return '/index/topic/' + path + (cursor === null ? '' : '/' + cursor)
+}
+
+// `segment` is already folded by the caller; it is only checked here.
+export function searchUrl (segment) {
+  if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
+  if (segment.replace(/-/g, '').length < 2) return null
+  return '/index/search/' + segment
 }
 
 // --- transport ---
@@ -361,6 +377,25 @@ export function validTopic (body) {
   return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
 }
 
+// Members: <= 20 distinct authors with exact keys, order kept (the seeder's
+// ranking), never both hints null.
+export function validSearch (body) {
+  if (!hasExactKeys(body, SEARCH_KEYS)) return null
+  if (typeof body.complete !== 'boolean' || typeof body.indexing !== 'boolean' || typeof body.more !== 'boolean') return null
+  const list = body.members
+  if (!Array.isArray(list) || list.length > SEARCH_MAX) return null
+  const seen = new Set()
+  const members = []
+  for (const m of list) {
+    if (!hasExactKeys(m, HIT_KEYS) || !isHex64(m.author) || seen.has(m.author)) return null
+    if (!isHint(m.profileSeq) || !isHint(m.usernameSeq)) return null
+    if (m.profileSeq === null && m.usernameSeq === null) return null
+    seen.add(m.author)
+    members.push({ author: m.author, profileSeq: m.profileSeq, usernameSeq: m.usernameSeq })
+  }
+  return { members, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
 // --- fetchers ---
 
 export function fetchPost (ref, cursor = null, deps = {}) {
@@ -381,4 +416,8 @@ export function fetchMember (author, before = null, deps = {}) {
 
 export function fetchTopic (path, cursor = null, deps = {}) {
   return run(topicUrl(path, cursor), validTopic, deps)
+}
+
+export function fetchSearch (segment, deps = {}) {
+  return run(searchUrl(segment), validSearch, deps)
 }

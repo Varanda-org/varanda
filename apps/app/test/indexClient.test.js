@@ -230,6 +230,128 @@ test('fetchMember: exact shape, descending seqs under before and length', async 
 
 function searchBody (over = {}) {
   return {
+    members: [
+      { author: B, profileSeq: 3, usernameSeq: null },
+      { author: A, profileSeq: null, usernameSeq: 1 },
+      { author: C, profileSeq: 2, usernameSeq: 4 }
+    ],
+    more: true,
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('searchUrl: only the folded segment grammar, never a fetch otherwise', async (t) => {
+  const { searchUrl, fetchSearch } = await load()
+  for (const good of ['ana', 'ana-silva', 'a-b', 'joao-da-silva-x', 'x'.repeat(20)]) {
+    t.is(searchUrl(good), '/index/search/' + good, good)
+  }
+  let called = false
+  const fetch = async () => { called = true }
+  const bad = ['Ana', 'ANA-silva', 'a', 'x'.repeat(21), 'ana-b-c-d-e', '-ana', 'ana-', 'ana--b', 'ana_silva', '/', '@ana', 'ana silva', ' ana', '', null, undefined, 7, ['ana'], { s: 'ana' }]
+  for (const s of bad) {
+    t.is(searchUrl(s), null, 'url ' + JSON.stringify(s))
+    t.alike(await fetchSearch(s, { fetch }), { ok: false, reason: 'invalid-input' }, 'fetch ' + JSON.stringify(s))
+  }
+  t.absent(called)
+})
+
+test('fetchSearch: request options, order kept, a fresh copy', async (t) => {
+  const { fetchSearch } = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(searchBody()))
+  }
+  const res = await fetchSearch('ana-silva', { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, searchBody())
+  t.alike(res.value.members.map((m) => m.author), [B, A, C], 'ranking order preserved')
+  t.is(calls.length, 1)
+  t.is(calls[0].url, '/index/search/ana-silva')
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.is(calls[0].opts.headers.Accept, 'application/json')
+  t.ok(calls[0].opts.signal, 'abortable')
+  const empty = await fetchSearch('ana', { fetch: json(searchBody({ members: [], more: false })) })
+  t.alike(empty, { ok: true, value: searchBody({ members: [], more: false }) })
+})
+
+test('validSearch returns a copy that does not track the input', async (t) => {
+  const { validSearch } = await load()
+  const input = searchBody()
+  const out = validSearch(input)
+  t.alike(out, searchBody())
+  t.not(out, input)
+  t.not(out.members, input.members)
+  t.not(out.members[0], input.members[0])
+  input.members[0].profileSeq = 99
+  input.members.push({ author: 'aa'.repeat(32), profileSeq: 1, usernameSeq: 1 })
+  input.more = false
+  t.alike(out, searchBody(), 'unchanged by mutating the input')
+})
+
+test('fetchSearch rejects anything outside the contract', async (t) => {
+  const { fetchSearch, SEARCH_MAX } = await load()
+  t.is(SEARCH_MAX, 20)
+  const hit = (i) => ({ author: i.toString(16).padStart(64, '0'), profileSeq: 1, usernameSeq: null })
+  t.is((await fetchSearch('ana', { fetch: json(searchBody({ members: Array.from({ length: 20 }, (_, i) => hit(i + 1)) })) })).ok, true, '20 members')
+  const m = { author: A, profileSeq: 1, usernameSeq: null }
+  const bad = [
+    { extra: 1 },
+    { name: 'Ana' },
+    { members: Array.from({ length: 21 }, (_, i) => hit(i + 1)) },
+    { members: [m, { ...m, profileSeq: 2 }] },
+    { members: [{ ...m, author: A.toUpperCase() }] },
+    { members: [{ ...m, author: 'ab' }] },
+    { members: [{ ...m, profileSeq: null }] },
+    { members: [{ ...m, profileSeq: 0 }] },
+    { members: [{ ...m, usernameSeq: 0 }] },
+    { members: [{ ...m, profileSeq: 1.5 }] },
+    { members: [{ ...m, usernameSeq: '2' }] },
+    { members: [{ ...m, name: 'Ana' }] },
+    { members: [{ ...m, username: 'ana' }] },
+    { members: [{ ...m, bio: 'oi' }] },
+    { members: [{ author: A, profileSeq: 1 }] },
+    { members: [[A, 1, null]] },
+    { members: [null] },
+    { members: {} },
+    { members: 'x' },
+    { more: 'yes' },
+    { indexing: 0 },
+    { complete: null }
+  ]
+  for (const over of bad) {
+    t.alike(await fetchSearch('ana', { fetch: json(searchBody(over)) }), { ok: false, reason: 'malformed' }, JSON.stringify(over).slice(0, 80))
+  }
+  for (const key of ['members', 'more', 'indexing', 'complete']) {
+    const body = searchBody()
+    delete body[key]
+    t.is((await fetchSearch('ana', { fetch: json(body) })).reason, 'malformed', 'missing ' + key)
+  }
+  for (const body of ['null', '[]', '"x"', 'not json']) {
+    t.is((await fetchSearch('ana', { fetch: async () => response(body) })).reason, 'malformed', body)
+  }
+})
+
+test('fetchSearch transport: 404, 429, 503, redirect, size cap', async (t) => {
+  const { fetchSearch } = await load()
+  const body = JSON.stringify(searchBody())
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 429 }) })).reason, 'status')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 503 }) })).reason, 'status')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { redirected: true }) })).reason, 'status')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 404, redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(searchBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchSearch('ana', { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
+})
+
+function topicBody (over = {}) {
+  return {
     items: [A + ':5', B + ':2', A + ':3'],
     next: CURSOR,
     authors: {
@@ -261,29 +383,29 @@ test('topicUrl: folded tokens joined by a literal plus, nothing else', async (t)
 test('validTopic: exact shape, hints for exactly the items\' authors', async (t) => {
   const { validTopic, TOPIC_MAX } = await load()
   t.is(TOPIC_MAX, 30)
-  t.alike(validTopic(searchBody()), searchBody())
+  t.alike(validTopic(topicBody()), topicBody())
   const empty = { items: [], next: null, authors: {}, indexing: true, complete: false }
   t.alike(validTopic(empty), empty, 'empty list')
   const thirty = Array.from({ length: 30 }, (_, i) => A + ':' + (i + 1))
-  t.alike(validTopic(searchBody({ items: thirty, authors: { [A]: { profileSeq: null, usernameSeq: null } } })).items, thirty, '30 items')
-  const missing = searchBody()
+  t.alike(validTopic(topicBody({ items: thirty, authors: { [A]: { profileSeq: null, usernameSeq: null } } })).items, thirty, '30 items')
+  const missing = topicBody()
   delete missing.next
   const bad = [
-    searchBody({ extra: 1 }),
+    topicBody({ extra: 1 }),
     missing,
-    searchBody({ items: Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)), authors: { [A]: { profileSeq: null, usernameSeq: null } } }),
-    searchBody({ items: [A + ':5', A + ':5'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
-    searchBody({ items: [A + ':0'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
-    searchBody({ items: 'x' }),
-    searchBody({ next: 'x' }),
-    searchBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, ['zz'.repeat(32)]: { profileSeq: null, usernameSeq: 2 } } }),
-    searchBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }),
-    searchBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
-    searchBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: 0, usernameSeq: 2 } } }),
-    searchBody({ authors: [] }),
-    searchBody({ indexing: 'no' }),
-    searchBody({ complete: 1 }),
-    searchBody({ complete: null }),
+    topicBody({ items: Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)), authors: { [A]: { profileSeq: null, usernameSeq: null } } }),
+    topicBody({ items: [A + ':5', A + ':5'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ items: [A + ':0'], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ items: 'x' }),
+    topicBody({ next: 'x' }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, ['zz'.repeat(32)]: { profileSeq: null, usernameSeq: 2 } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    topicBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: 0, usernameSeq: 2 } } }),
+    topicBody({ authors: [] }),
+    topicBody({ indexing: 'no' }),
+    topicBody({ complete: 1 }),
+    topicBody({ complete: null }),
     null,
     []
   ]
@@ -293,19 +415,19 @@ test('validTopic: exact shape, hints for exactly the items\' authors', async (t)
 test('fetchTopic: transport, contract and a fresh copy', async (t) => {
   const { fetchTopic, validTopic } = await load()
   const calls = []
-  const parsed = searchBody()
+  const parsed = topicBody()
   const fetch = async (url, opts) => {
     calls.push({ url, opts })
     return response(JSON.stringify(parsed))
   }
   const res = await fetchTopic('ceu+azul', CURSOR, { fetch })
   t.is(res.ok, true)
-  t.alike(res.value, searchBody())
+  t.alike(res.value, topicBody())
   t.is(calls[0].url, '/index/topic/ceu+azul/' + CURSOR)
   t.is(calls[0].opts.credentials, 'omit')
   t.is(calls[0].opts.redirect, 'error')
   // A fresh copy: mutating the result leaves the parsed body untouched.
-  const own = searchBody()
+  const own = topicBody()
   const copy = validTopic(own)
   copy.items.push(C + ':1')
   copy.authors[A].profileSeq = 99
@@ -316,10 +438,10 @@ test('fetchTopic: transport, contract and a fresh copy', async (t) => {
   let called = false
   t.alike(await fetchTopic('Céu', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
   t.absent(called, 'no request for bad input')
-  const text = JSON.stringify(searchBody())
+  const text = JSON.stringify(topicBody())
   t.is((await fetchTopic('ceu', null, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
   t.is((await fetchTopic('ceu', null, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
-  t.is((await fetchTopic('ceu', null, { fetch: async () => response(JSON.stringify(searchBody({ pad: 'x'.repeat(70000) }))) })).reason, 'too-large')
-  t.is((await fetchTopic('ceu', null, { fetch: json(searchBody({ next: 'x' })) })).reason, 'malformed')
+  t.is((await fetchTopic('ceu', null, { fetch: async () => response(JSON.stringify(topicBody({ pad: 'x'.repeat(70000) }))) })).reason, 'too-large')
+  t.is((await fetchTopic('ceu', null, { fetch: json(topicBody({ next: 'x' })) })).reason, 'malformed')
   t.is((await fetchTopic('ceu', null, { fetch: async () => response('not json') })).reason, 'malformed')
 })
