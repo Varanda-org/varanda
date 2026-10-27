@@ -75,3 +75,31 @@ test('replyNameOf shows a pending mark until the profile is looked up', async (t
   t.is(replyNameOf(Object.freeze({ name: 'Ana', username: 'ana' })), 'Ana')
   t.is(replyNameOf(Object.freeze({ name: '', username: 'ana' })), 'ana')
 })
+
+test('replyMarkOf: names cache, then the resolved parent, then pending or sem nome', async (t) => {
+  const { replyMarkOf } = await load()
+  const f = Object.freeze
+  const parent = f({ name: 'Bia', username: 'bia' })
+  // The names cache wins.
+  t.is(replyMarkOf({ cached: f({ name: 'Ana', username: 'ana' }) }), 'Ana')
+  t.is(replyMarkOf({ cached: f({ name: null, username: 'ana' }) }), 'ana')
+  t.is(replyMarkOf({ cached: f({}) }), 'sem nome')
+  t.is(replyMarkOf({ cached: f({ name: 'Ana', username: 'ana' }), parent, pending: true }), 'Ana')
+  // A stranger: the verified parent post carries the name.
+  t.is(replyMarkOf({ cached: null, parent, pending: false }), 'Bia')
+  t.is(replyMarkOf({ cached: undefined, parent, pending: true }), 'Bia')
+  t.is(replyMarkOf({ cached: undefined, parent: f({ name: null, username: 'bia' }) }), 'bia')
+  // Nothing at hand yet, or nothing left to wait for.
+  t.is(replyMarkOf({ cached: undefined, parent: null, pending: false }), 'sem nome')
+  t.is(replyMarkOf({ cached: undefined, parent: undefined, pending: false }), '…')
+  t.is(replyMarkOf({ cached: null, parent: undefined, pending: true }), '…')
+  t.is(replyMarkOf({ cached: null, parent: undefined, pending: false }), 'sem nome')
+  t.is(replyMarkOf({ cached: null, parent: null, pending: false }), 'sem nome')
+  // A hostile parent name never reads as a handle.
+  for (const name of ['@alice', '＠alice', ' @@alice']) {
+    const title = replyMarkOf({ cached: null, parent: f({ name, username: null }), pending: false })
+    t.is(title, 'alice', JSON.stringify(name))
+    t.not(title.startsWith('@'), true)
+  }
+  t.not(replyMarkOf({ cached: f({ name: '@alice', username: null }) }).startsWith('@'), true)
+})

@@ -12,6 +12,11 @@
 // back to log.read, which covers own and followed diaries. Every action on a
 // repost item targets the original (reply, like, repost, quote, open,
 // report), never the reposter's engagement record.
+// Reply parents of strangers (not own, not followed) are read the same way,
+// on the hosted web only, so their reply mark shows the verified name and
+// @nome; elsewhere (the core node refuses diary.peek, and without the index
+// hints a peek carries no name) they are not read and the mark reads 'sem
+// nome'.
 // Counts (hosted web only) come from the seeder index (/index/counts, 31 refs
 // per call) and the own like/repost state from engagement.read (62 refs per
 // call); like and repost taps are optimistic (../engagement.js), then
@@ -26,7 +31,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { cursorMoved, cursorOf, feedKey, isLastFeedPage, mergeOlder, resetWith, shouldReloadOnShow } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
-import { replyNameOf, whoOf } from '../who'
+import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, mergeCounts } from '../engagement'
@@ -73,13 +78,17 @@ const seqOfRef = (ref) => Number(ref.slice(ref.indexOf(':') + 1))
 const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 
 // Originals, counts and the own like/repost state of the rows on screen.
-// - ingest({ shown, need, local, authors, reset }): `shown` = refs whose
-//   counts and own state are wanted (the posts with an action bar); `need` =
-//   refs to resolve (repost originals, quoted posts); `local` = a Map ref ->
+// - ingest({ shown, need, parents, local, authors, reset }): `shown` = refs
+//   whose counts and own state are wanted (the posts with an action bar);
+//   `need` = refs to resolve (repost originals, quoted posts); `parents` =
+//   reply parents, resolved only on the hosted web and when their author is
+//   neither own nor followed (for the reply mark's name); `local` = a Map ref ->
 //   post item already at hand (feed posts); `authors` = keys known to be own
 //   or followed (their photos may be kept). Calls run one after the other
 //   (the browser node allows only two concurrent peeks).
 // - original(ref): the post item, null (unavailable) or undefined (loading).
+// - pending(ref): true while `ref` was asked for and has no answer yet (not
+//   a transient failure either).
 // - toggle(kind, ref): 'like' | 'repost', optimistic.
 // - persistOf(author): true only for own or followed authors.
 // - toast: the text of the last failed toggle for a moment (when the shell
@@ -269,7 +278,7 @@ export function useSocial ({ ownKey, onToast }) {
     return items
   }, [request, readAuthor, isKnown, change, resolveMany, loadFollows])
 
-  const ingestNow = useCallback(async ({ shown = [], need = [], local = new Map(), authors = [], reset = false }) => {
+  const ingestNow = useCallback(async ({ shown = [], need = [], parents = [], local = new Map(), authors = [], reset = false }) => {
     // A refresh rebuilds the followed set (an unfollowed author's photos are
     // no longer kept): this page's authors (own or followed now) plus a
     // fresh follow.list; older pages only add their own authors.
@@ -281,7 +290,16 @@ export function useSocial ({ ownKey, onToast }) {
     }
     for (const a of authors) if (typeof a === 'string') knownRef.current.add(a.toLowerCase())
     if (reset) await loadFollows()
-    for (const r of need) if (typeof r === 'string') seenRef.current.need.add(r)
+    // Reply parents: only those of strangers are read (verified, with the
+    // name and @nome); own and followed parent authors come from profile.read.
+    // Only on the hosted web with a network: without the index hints the
+    // peek carries no name, and the core node's log.read fallback would
+    // preempt the sync for a mark that still reads 'sem nome'.
+    const asked = hosted && online ? parents.filter((r) => typeof r === 'string') : []
+    if (asked.some((r) => !isKnown(authorOfRef(r)))) await loadFollows()
+    const needed = need.filter((r) => typeof r === 'string')
+    const strangers = asked.filter((r) => !isKnown(authorOfRef(r)))
+    for (const r of needed.concat(strangers)) seenRef.current.need.add(r)
     for (const [ref, item] of local) seenRef.current.local.set(ref, item)
     change((prev) => {
       // A refresh starts from an empty cache: every original (and each
@@ -328,11 +346,22 @@ export function useSocial ({ ownKey, onToast }) {
         })
       }
     }
-    // Originals, then (one level) the posts those originals quote.
-    const first = await resolve([...new Set(need.filter((r) => typeof r === 'string'))])
-    const second = first.map((item) => refOf(item.quote)).filter(Boolean)
+    // Originals, then (one level) the posts those originals quote, then the
+    // strangers' reply parents in a pass of their own: a slow parent lookup
+    // (only a name) never holds back the originals and quotes already read.
+    // The quotes come from every original at hand, not only the ones just
+    // read: one cached earlier (a reply parent, say) may quote a post never
+    // asked for; resolve skips the refs it already knows.
+    const firstRefs = [...new Set(needed)]
+    await resolve(firstRefs)
+    const at = (ref) => {
+      const item = socialRef.current.originals.get(ref)
+      return item && item !== TRANSIENT ? item : null
+    }
+    const second = firstRefs.map(at).filter(Boolean).map((item) => refOf(item.quote)).filter(Boolean)
     if (second.length > 0 && mountedRef.current) await resolve([...new Set(second)])
-  }, [request, hosted, online, change, resolve, loadFollows])
+    if (strangers.length > 0 && mountedRef.current) await resolve([...new Set(strangers)])
+  }, [request, hosted, online, change, resolve, loadFollows, isKnown])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
   // run uses the latest ingestNow.
@@ -402,12 +431,16 @@ export function useSocial ({ ownKey, onToast }) {
     return item === TRANSIENT ? undefined : item
   }, [social])
   const transient = useCallback((ref) => typeof ref === 'string' && social.originals.get(ref) === TRANSIENT, [social])
+  // The ask is recorded before the change that renders the page's originals,
+  // and each answer changes `originals`, so renders after the ask see it
+  // current (rows rendered before ingest runs read not pending).
+  const pending = useCallback((ref) => typeof ref === 'string' && seenRef.current.need.has(ref) && social.originals.get(ref) === undefined, [social])
   const retry = useCallback((ref) => {
     if (typeof ref === 'string') ingest({ need: [ref] })
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, retry, persistOf, toast }
+  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
@@ -441,13 +474,15 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const s = social.social
   const parentRef = refOf(post.replyTo)
   // The reply mark: the names cache, else the parent when it was resolved
-  // (verified by the node: the Espiadinha asks for the parents of its
-  // replies); null (unavailable) reads 'sem nome', undefined '…'.
+  // (verified by the node: A Rua, Diário and the Espiadinha ask for the
+  // parents of strangers' replies); '…' while either is on its way.
   let replyToName = null
   if (parentRef !== null) {
-    const pp = profileOf(post.replyTo.author)
-    const parent = pp ? undefined : social.original(parentRef)
-    replyToName = replyNameOf(parent ? { name: parent.name, username: parent.username } : (parent === null && pp === undefined ? null : pp))
+    replyToName = replyMarkOf({
+      cached: profileOf(post.replyTo.author),
+      parent: social.original(parentRef),
+      pending: typeof social.pending === 'function' ? social.pending(parentRef) : false
+    })
   }
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   return {
@@ -525,7 +560,8 @@ export function SocialToast ({ text }) {
 }
 
 // The refs a feed page needs: counts and own state for every row's target,
-// originals for reposts, quoted posts; feed posts are already at hand.
+// originals for reposts, quoted posts, reply parents; feed posts are already
+// at hand.
 function pageNeeds (pageItems) {
   const local = new Map()
   const shown = []
@@ -547,7 +583,14 @@ function pageNeeds (pageItems) {
     const q = refOf(i.quote)
     if (q !== null) need.push(q)
   }
-  return { local, shown, need, authors }
+  // Reply parents not on this page (useSocial reads only strangers' ones).
+  const parents = new Set()
+  for (const i of pageItems) {
+    if (i.kind === 'repost' || !i.replyTo) continue
+    const p = refOf(i.replyTo)
+    if (p !== null && !local.has(p)) parents.add(p)
+  }
+  return { local, shown, need, parents: [...parents], authors }
 }
 
 export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onQuote, onToast }) {

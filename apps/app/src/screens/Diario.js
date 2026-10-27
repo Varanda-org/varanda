@@ -74,11 +74,13 @@ function liveReposts (rows) {
 }
 
 // What a page of own rows needs: counts and own state of the own posts and
-// the originals of the reposts; originals and quoted posts to resolve.
+// the originals of the reposts; originals and quoted posts to resolve; the
+// parents of own replies (useSocial reads only strangers' ones).
 function rowNeeds (rows, publicKey) {
   const local = new Map()
   const shown = []
   const need = []
+  const parents = new Set()
   for (const row of rows) {
     if (row.invalid || !row.entry || !row.entry.record) continue
     const record = row.entry.record
@@ -88,6 +90,8 @@ function rowNeeds (rows, publicKey) {
       local.set(ref, postOf(publicKey, row.seq, record))
       const q = refOf(record.quote)
       if (q !== null) need.push(q)
+      const p = refOf(record.replyTo)
+      if (p !== null) parents.add(p)
     } else if (record.type === 'repost' && record.on === true) {
       const ref = refOf(record.to)
       if (ref !== null) {
@@ -96,7 +100,8 @@ function rowNeeds (rows, publicKey) {
       }
     }
   }
-  return { local, shown, need, authors: [publicKey] }
+  for (const ref of local.keys()) parents.delete(ref)
+  return { local, shown, need, parents: [...parents], authors: [publicKey] }
 }
 
 // A post item (the feed shape) of an own post record.
