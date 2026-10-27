@@ -40,11 +40,22 @@
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
 // verify the content from the diaries themselves (indexPost, indexCounts,
 // indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+//
+// Name index (lib/name-index.js): fed by the same scan, the folded tokens of
+// each served author's newest display name and its verified @nome. Like the
+// engagement index it only says WHERE TO LOOK: a member re-reads and
+// verifies every name from the diary at the returned seq hints. The @nome's
+// signature and issuer delegation are verified once per index pass (never
+// per record, never at query time); the @nome issuer's revocation is checked
+// at every query against the current snapshot, so a revoked issuer stops
+// matching without a rescan, and a diary whose re-gate after a newly revoked
+// issuer is still pending (block 0's verdict) is held out of results. Its
+// cap refuses a new author like the engagement caps: the cursor pauses and
+// resumes when a drop frees room. indexSearch backs /index/search.
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { Duplex } = require('streamx')
 const {
   normalizeHex,
   certForKey,
@@ -52,6 +63,9 @@ const {
   saveKeyPairFile,
   seederCertForKey
 } = require('./cert')
+// Called through the module object (not destructured) so tests can count the
+// username verifications (as lib/username.js).
+const cert = require('./cert')
 const {
   topicFor,
   generateNoiseKeyPair,
@@ -97,8 +111,23 @@ const {
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { createEngagementIndex } = require('./engagement-index')
+const { createNameIndex } = require('./name-index')
+const { parseQuery } = require('./search-text')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
+const {
+  FrameGuard,
+  frameDeadlineFor,
+  MAX_HANDSHAKE_FRAME,
+  MAX_HANDSHAKE_BYTES,
+  MAX_EXTERNAL_FRAME,
+  FRAME_DEADLINE_CAP_MS,
+  FRAME_DEADLINE_BASE_MS,
+  FRAME_MIN_BYTES_PER_S,
+  MAX_FRAME_MEMORY,
+  SMALL_FRAME_BYTES,
+  FRAME_EVICT_MIN_AGE_MS
+} = require('./frame-guard')
 
 const GATE_TIMEOUT_MS = 15000
 const REDISCOVER_MS = 10000
@@ -122,306 +151,18 @@ const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
 const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
 
-// Frame guard for external streams (acceptStream). @hyperswarm/secret-stream
-// 6.9.2 frames the raw bytes as a 3-byte little-endian length followed by the
-// body and allocates every declared length (up to 16 MiB) as soon as the
-// first body byte arrives, BEFORE the Noise handshake completes: an anonymous
-// client sending `ff ff ff 00` costs the seeder ~16 MiB per connection.
-// FrameGuard sits between the raw stream and the secret stream and parses
-// the framing of the incoming bytes before forwarding them.
-// Limits, measured on the installed libraries (secret-stream 6.9.2, Noise XX,
-// hypercore 11.39.0, corestore 7.15.0, protomux 3) with a member diary of
-// near-16 KiB blocks (16 265 bytes) and a hello carrying the maximum
-// inventory (4096 keys) replicating through acceptStream over loopback TCP:
-// - the responder receives exactly HANDSHAKE_FRAMES handshake frames, msg1
-//   (`e`) of 32 bytes and msg3 (`s, se`) of 64 bytes, 102 bytes with their
-//   headers. Each must declare at most MAX_HANDSHAKE_FRAME = 1024 bytes
-//   (16 x msg3), so everything up to and including the second frame is at
-//   most MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES x (3 + MAX_HANDSHAKE_FRAME)
-//   = 2054 bytes, a derived bound (no separate budget is kept).
-// - every frame after the second one is a post-handshake frame and must
-//   declare at most MAX_EXTERNAL_FRAME, whether or not the secret stream has
-//   confirmed the handshake yet. Anyone completes a Noise XX handshake with
-//   an arbitrary key pair for free, so the bytes after msg3 are exposed to
-//   the post-handshake bound in any case; judging them by a stricter
-//   pre-'connect' rule buys no security and refuses valid members: a
-//   coalescing transport delivers a member's first post-handshake writes
-//   (its stream-id header and the channel opens of every core it
-//   replicates, 500 opens are ~43 KiB) in the same chunk as msg3.
-//   The largest frame seen after 'connect' was 16 477 bytes (one block and
-//   its proof; 40 blocks, 61 frames), but the code allows far more: hypercore
-//   corks the muxer while it answers its queue of block requests
-//   (replicator.js _handleRequests) and protomux flushes a corked batch only
-//   once it reaches MAX_BATCH = 8 MiB, so a member answering up to 512
-//   in-flight requests for near-16 KiB blocks may legitimately send a frame
-//   of up to MAX_BATCH plus one message. MAX_EXTERNAL_FRAME is therefore
-//   MAX_BATCH plus a 64 KiB margin for that last message and its encoding;
-//   it is a code bound, not a measured one, because a tighter value would
-//   break legitimate replication.
-// Size alone does not bound memory: a peer that completed the handshake (not
-// necessarily admitted) may declare up to MAX_EXTERNAL_FRAME and then send
-// the body one byte at a time, and secret-stream keeps the whole declared
-// length allocated from the first body byte on. Three more bounds close that,
-// built so that the attacker, not the other members, pays for it:
-// - charged frames: only a frame that can amplify memory is charged to the
-//   budget below, i.e. one that declares more than SMALL_FRAME_BYTES (64 KiB)
-//   AND is still incomplete at the end of the chunk being parsed. A frame
-//   whose body arrives within the chunk is never charged, nor is a small
-//   frame split across chunks (at most 64 KiB per socket, the same order as
-//   the bytes a client actually sends; handshake frames and keep-alives are
-//   always small). A charged frame reserves its whole declared length, since
-//   that is what secret-stream allocates;
-// - frame deadline: every incomplete frame must complete within
-//   frameDeadlineFor(len) = min(FRAME_DEADLINE_CAP_MS, FRAME_DEADLINE_BASE_MS
-//   + ceil(len / FRAME_MIN_BYTES_PER_S) x 1000 ms) of its header, one timer
-//   per frame that body bytes never refresh (a one-byte drip does not extend
-//   it; the socket idle timeout alone would). A charged frame is also checked
-//   every FRAME_DEADLINE_BASE_MS: at the k-th check its body bytes received
-//   since the header must be at least (k - 1) x FRAME_DEADLINE_BASE_MS x
-//   FRAME_MIN_BYTES_PER_S / 1000, i.e. 64 KiB/s on average after one base
-//   window of grace, so a drip is dropped at the second check (20 s) instead
-//   of the 120 s cap. Both drops are 'frame-deadline';
-// - frame memory budget: the Seeder keeps one counter of the bytes reserved
-//   by charged frames across all external guards (maxFrameMemory, default
-//   MAX_FRAME_MEMORY), held until that frame completes or the guard is
-//   destroyed (never per body byte). When a reservation does not fit, the
-//   Seeder evicts the charged guard with the lowest progress (received /
-//   declared) among those whose reservation is older than
-//   FRAME_EVICT_MIN_AGE_MS ('frame-budget') and retries once; only if it
-//   still does not fit is the requester dropped ('frame-budget'). Stalled
-//   declarations therefore cannot keep a member out: uncharged frames never
-//   touch the budget, and a member's large frame that is making progress
-//   displaces them.
-// The budget covers declared-but-incomplete frames, the amplified vector. It
-// does not cover the bytes the `ws` library buffers for a partial WebSocket
-// message before FrameGuard (apps/cli/lib/seed-ws.js): those are bytes the
-// client actually sent (not amplified), at most MAX_PAYLOAD per socket, and
-// the 30 s idle deadline drops a socket that stops sending them. Sizing rule:
-// worst-case receive memory is about maxExternal x MAX_PAYLOAD +
-// maxFrameMemory (plus at most SMALL_FRAME_BYTES of uncharged frame per
-// socket, negligible next to MAX_PAYLOAD).
-const HANDSHAKE_FRAMES = 2 // Noise XX responder: receives e, then s+se
-const MAX_HANDSHAKE_FRAME = 1024
-const MAX_HANDSHAKE_BYTES = HANDSHAKE_FRAMES * (3 + MAX_HANDSHAKE_FRAME)
-const MAX_EXTERNAL_FRAME = 8 * 1024 * 1024 + 64 * 1024
-const HEADER_MUL = [1, 256, 65536]
-const FRAME_DEADLINE_CAP_MS = 120000
-const FRAME_DEADLINE_BASE_MS = 10000
-const FRAME_MIN_BYTES_PER_S = 65536
-const MAX_FRAME_MEMORY = 64 * 1024 * 1024
-const SMALL_FRAME_BYTES = 64 * 1024
-const FRAME_EVICT_MIN_AGE_MS = 1000
+// Frame guard for external streams (acceptStream): see lib/frame-guard.js
+// for the limits, how they were measured, the frame deadlines and the
+// frame memory budget. The seeder is the Noise XX responder, so the guard
+// keeps its responder defaults (2 handshake frames of at most
+// MAX_HANDSHAKE_FRAME, then frames of at most MAX_EXTERNAL_FRAME) and gets
+// the seeder-wide budget below (_frameBudget).
 
-// Time a frame declaring len bytes has to complete once its header did.
-function frameDeadlineFor (len, baseMs = FRAME_DEADLINE_BASE_MS, capMs = FRAME_DEADLINE_CAP_MS) {
-  return Math.min(capMs, baseMs + Math.ceil(len / FRAME_MIN_BYTES_PER_S) * 1000)
-}
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
 const EXTERNAL_IDLE_MS = 30000
 
 function noop () {}
-
-// A streamx Duplex proxy over a raw duplex: writes pass through unchanged,
-// incoming bytes are parsed with the secret-stream framing before they are
-// pushed, and close/destroy/error propagate both ways. The first
-// HANDSHAKE_FRAMES frames may declare at most MAX_HANDSHAKE_FRAME bytes
-// each, every later frame at most MAX_EXTERNAL_FRAME; nothing is held back
-// (the secret stream parses the same framing and handles post-handshake
-// bytes that arrive in the chunk of msg3 exactly as it does over TCP). A
-// frame declaring more than smallBytes that is still incomplete at the end
-// of a chunk is charged: its declared length is reserved from budget
-// ({ reserve(n, guard) -> boolean, release(n, guard) }, which may evict
-// another guard to make room) until it completes, and it is checked every
-// deadlineBaseMs for the minimum throughput. Every incomplete frame must
-// complete within frameDeadlineFor(len, deadlineBaseMs, deadlineCapMs).
-// Over a limit the guard calls onLimit(reason) ('frame-limit',
-// 'frame-budget' or 'frame-deadline'), destroys itself and the raw stream,
-// and the offending chunk is never forwarded, not even its frames before
-// the offending one.
-class FrameGuard extends Duplex {
-  constructor (raw, { onLimit, budget, deadlineBaseMs = FRAME_DEADLINE_BASE_MS, deadlineCapMs = FRAME_DEADLINE_CAP_MS, smallBytes = SMALL_FRAME_BYTES }) {
-    super()
-    this._raw = raw
-    this._onLimit = onLimit
-    this._budget = budget
-    this._deadlineBaseMs = deadlineBaseMs
-    this._deadlineCapMs = deadlineCapMs
-    this._smallBytes = smallBytes
-    this._frames = 0 // complete incoming frames parsed so far
-    this._header = 0 // header bytes of the current frame read so far (0..2)
-    this._len = 0 // declared length being assembled from the header
-    this._frameLen = 0 // declared length of the current incomplete frame
-    this._remaining = 0 // body bytes of the current frame still to come
-    this._received = 0 // body bytes of the current frame received so far
-    this._reserved = 0 // budget bytes held for the current incomplete frame
-    this.reservedAt = 0 // when the current reservation was made (Date.now())
-    this._timer = null // completion deadline of the current incomplete frame
-    this._progress = null // throughput check of the current charged frame
-    this._checks = 0 // throughput checks run on the current charged frame
-    this._drainCb = null
-    raw.on('data', (chunk) => this._onRawData(chunk))
-    // A peer that ends its side before both handshake frames arrived can
-    // never complete the handshake: drop it now instead of holding a
-    // connection slot until the handshake deadline.
-    raw.on('end', () => {
-      if (this._frames < HANDSHAKE_FRAMES) return this.destroy()
-      this.push(null)
-    })
-    raw.on('error', (err) => this.destroy(err))
-    raw.on('close', () => {
-      this._releaseDrain()
-      this.destroy()
-    })
-    raw.on('drain', () => this._releaseDrain())
-  }
-
-  _onRawData (chunk) {
-    if (this.destroying) return
-    const reason = this._parse(chunk)
-    if (reason !== null) return this._limit(reason)
-    if (this.push(chunk) === false) this._raw.pause()
-  }
-
-  // Parses the framing of the whole chunk (parser state carries over between
-  // chunks), then charges the frame left incomplete at its end when that
-  // frame declares more than smallBytes. Returns null, or the drop reason
-  // when a frame declares more than its limit ('frame-limit') or a charged
-  // frame does not fit in the budget, even after an eviction
-  // ('frame-budget').
-  _parse (chunk) {
-    let offset = 0
-    while (offset < chunk.byteLength) {
-      if (this._remaining > 0) {
-        const n = Math.min(this._remaining, chunk.byteLength - offset)
-        this._remaining -= n
-        this._received += n
-        offset += n
-        if (this._remaining === 0) this._completeFrame()
-        continue
-      }
-      this._len += chunk[offset++] * HEADER_MUL[this._header]
-      if (++this._header < 3) continue
-      const len = this._len
-      this._header = 0
-      this._len = 0
-      const limit = this._frames < HANDSHAKE_FRAMES ? MAX_HANDSHAKE_FRAME : MAX_EXTERNAL_FRAME
-      if (len > limit) return 'frame-limit'
-      if (len === 0) {
-        this._frames++
-        continue
-      }
-      this._frameLen = len
-      this._received = 0
-      this._remaining = len
-    }
-    if (this._remaining === 0) return null
-    // The current frame outlives this chunk. Charge it once, when it can
-    // amplify memory (secret-stream allocates the whole declared length).
-    if (this._frameLen > this._smallBytes && this._reserved === 0) {
-      if (!this._budget.reserve(this._frameLen, this)) return 'frame-budget'
-      this._reserved = this._frameLen
-      this.reservedAt = Date.now()
-      this._checks = 0
-      this._progress = setInterval(() => this._checkProgress(), this._deadlineBaseMs)
-      if (this._progress.unref) this._progress.unref()
-    }
-    // One deadline per incomplete frame, armed when its header completed
-    // and never refreshed by its body bytes (the outer bound of a charged
-    // frame too).
-    if (this._timer === null) {
-      this._timer = setTimeout(() => {
-        this._timer = null
-        this._limit('frame-deadline')
-      }, frameDeadlineFor(this._frameLen, this._deadlineBaseMs, this._deadlineCapMs))
-      if (this._timer.unref) this._timer.unref()
-    }
-    return null
-  }
-
-  // The k-th check of a charged frame requires (k - 1) base windows' worth
-  // of FRAME_MIN_BYTES_PER_S: the first window is grace.
-  _checkProgress () {
-    this._checks++
-    const owed = (this._checks - 1) * this._deadlineBaseMs * FRAME_MIN_BYTES_PER_S / 1000
-    if (this._received < owed) this._limit('frame-deadline')
-  }
-
-  // Share of the current charged frame received so far (eviction order).
-  progress () {
-    return this._frameLen > 0 ? this._received / this._frameLen : 1
-  }
-
-  // Dropped by the budget to make room for another guard: releases the
-  // reservation at once (the caller retries right after), then drops.
-  evict () {
-    this._clearFrame()
-    this._limit('frame-budget')
-  }
-
-  _completeFrame () {
-    this._frames++
-    this._frameLen = 0
-    this._clearFrame()
-  }
-
-  // Releases the reservation and the timers of the current frame
-  // (idempotent).
-  _clearFrame () {
-    if (this._timer !== null) {
-      clearTimeout(this._timer)
-      this._timer = null
-    }
-    if (this._progress !== null) {
-      clearInterval(this._progress)
-      this._progress = null
-    }
-    if (this._reserved > 0) {
-      this._budget.release(this._reserved, this)
-      this._reserved = 0
-    }
-  }
-
-  _limit (reason) {
-    if (this.destroying) return
-    this._onLimit(reason)
-    this.destroy(new Error('frame over the limit'))
-  }
-
-  _read (cb) {
-    this._raw.resume()
-    cb(null)
-  }
-
-  _write (data, cb) {
-    if (this._raw.destroyed) return cb(null)
-    if (this._raw.write(data) === false) this._drainCb = cb
-    else cb(null)
-  }
-
-  _releaseDrain () {
-    const cb = this._drainCb
-    if (cb === null) return
-    this._drainCb = null
-    cb(null)
-  }
-
-  _final (cb) {
-    this._raw.end()
-    cb(null)
-  }
-
-  _predestroy () {
-    this._clearFrame()
-    this._raw.destroy()
-    this._releaseDrain()
-  }
-
-  _destroy (cb) {
-    this._clearFrame()
-    cb(null)
-  }
-}
 
 function isPlainObject (x) {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return false
@@ -710,6 +451,8 @@ class Seeder {
     // `indexing`; set before any entry is served, so a pass queued by
     // growth during start is accounted for).
     this._index = createEngagementIndex({ maxRecords: indexMaxRecords, maxTargets: indexMaxTargets, perAuthorMax: indexPerAuthorMax, onFreed: () => this._scheduleIndexResume() })
+    // Name index (header comment): fed by the same scan, same queue.
+    this._names = this._createNameIndex()
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
     this._indexStartup = null
@@ -1499,6 +1242,9 @@ class Seeder {
     // The diary leaves the engagement index NOW, before the purge even
     // starts: none of its edges, engagements or hints is readable from here
     // on. The room it frees resumes any cursor paused at the cap.
+    // The name index too; an entry freed there resumes a cursor paused at
+    // its cap (removeDiary only calls onFreed when engagement room shrinks).
+    if (this._names.remove(key)) this._scheduleIndexResume()
     this._index.removeDiary(key, () => {
       // A pending rebuild already covers these removals. Never evict a key
       // and silently forget lost edges: rebuild at the bound instead.
@@ -1956,6 +1702,7 @@ class Seeder {
     const rebuild = () => {
       if (this._closing) return
       this._index.clear()
+      this._names.clear()
       this._indexDropped.clear()
       // Only gated diaries can start a pass; an ungated one (block 0 not
       // arrived yet) joins when its gate passes, so it must not pin
@@ -1999,6 +1746,12 @@ class Seeder {
         const block = decodeBlock(raw)
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
+          // The name index refuses only a new author at its cap: pause like
+          // an engagement cap (a retry of the same seq is a no-op there).
+          if (record !== null && (record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
+            entry.indexPaused = true
+            return
+          }
           if (record !== null && !this._index.add(key, i, record)) {
             entry.indexPaused = true
             return
@@ -2009,6 +1762,8 @@ class Seeder {
       }
     } finally {
       entry.indexQueued = false
+      // At most one @nome verification per diary per pass (paused included).
+      if (this._served.get(key) === entry && !entry.dropped) this._names.settle(key)
       // The first pass over a diary served at start is over once its cursor
       // reached the length, paused at the cap, or failed three retries at
       // the same cursor. A behind cursor still makes `complete` false.
@@ -2029,6 +1784,22 @@ class Seeder {
       this._indexDiary(key, entry)
     }, delay)
     entry.indexRetry.unref()
+  }
+
+  // The name index of this seeder: capped at maxServed authors; a @nome
+  // candidate verifies its signature and issuer delegation for the trusted
+  // association (revocation is applied per query by indexSearch).
+  _createNameIndex () {
+    return createNameIndex({
+      maxAuthors: this.maxServed,
+      verifyUsername: (author, record) => {
+        try {
+          return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      }
+    })
   }
 
   // Many toggles or drops can free capacity in one turn; scan paused diaries
@@ -2212,7 +1983,10 @@ class Seeder {
       // read now ('not-in-log') would otherwise stay served with gated set,
       // and later growth never re-checks it. An honest author is gated
       // afresh on its next announce.
+      // Held out of search until every pending verdict cleared it (indexSearch).
+      entry.searchHold = (entry.searchHold || 0) + 1
       localVerdict(entry.core, key, this.association, this._certOpts()).then((reason) => {
+        if (reason === null) entry.searchHold--
         if (reason === null || entry.dropped || this._closing) return
         if (this._served.get(key) === entry) this._drop(key, reason)
       })
@@ -2377,7 +2151,15 @@ class Seeder {
   // on the remote public key) is unchanged; after the handshake the socket
   // follows exactly the same path as a swarm connection (_attachPeer).
   // Returns the NoiseSecretStream, or null when the stream was refused.
-  acceptStream (rawStream, { handshakeTimeoutMs = 10000 } = {}) {
+  // onRefuse (optional, synchronous): on a capacity refusal the seeder calls
+  // onRefuse({ reason: 'connection-limit' }) and does NOT destroy rawStream:
+  // ownership moves to the caller, so it can tell the client why (seed-ws
+  // closes the WebSocket with 1013) before tearing the transport down.
+  // Destroying here would be too early: ws's createWebSocketStream
+  // terminates the socket in _destroy, so a close frame queued just before
+  // never reaches the client. Without onRefuse the stream is destroyed as
+  // before; not-ready/closing refusals always destroy it.
+  acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
     rawStream.on('error', noop)
     if (!this._ready || this._closing) {
       rawStream.destroy()
@@ -2387,8 +2169,18 @@ class Seeder {
     // count. Swarm sockets have their own cap and never count here; the
     // check and _external.add below are synchronous on the same set.
     if (this._external.size >= this.maxExternal) {
-      rawStream.destroy()
       this.log({ event: 'peer-dropped', peerKey: null, reason: 'connection-limit' })
+      // The refused stream is never added to _external, so it takes no slot
+      // whichever side ends up destroying it.
+      if (typeof onRefuse === 'function') {
+        try {
+          onRefuse({ reason: 'connection-limit' })
+        } catch {
+          rawStream.destroy() // a throwing caller cannot be trusted to clean up
+        }
+      } else {
+        rawStream.destroy()
+      }
       return null
     }
     const NoiseSecretStream = require('@hyperswarm/secret-stream')
@@ -2525,6 +2317,45 @@ class Seeder {
   _onMessage (msg, peer) {
     if (this._closing) return
     if (msg.type === 'announce') this.admit(msg.key, msg.cert, peer).catch(noop)
+  }
+
+  // Whether a newly revoked issuer's re-gate of `hex` is still pending
+  // (_onBlocklistAdopted): until block 0's verdict clears it, or the diary is
+  // dropped, it must not take a search result slot. The verdict is the one
+  // the gate uses (block 0's certificate), never the announcement's.
+  _searchHeld (hex) {
+    const entry = this._served.get(hex)
+    return !!entry && entry.searchHold > 0
+  }
+
+  // GET /index/search/<segment>: the best members whose display name or
+  // verified @nome matches the query, with seq hints, or null for a
+  // malformed segment. Purely in memory: no disk, crypto or account service,
+  // and nothing about the query is ever logged.
+  indexSearch (segment) {
+    try {
+      const q = parseQuery(segment)
+      if (q === null) return null
+      const opts = this._certOpts()
+      const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      // A match held by a pending re-gate is left out, and the answer says
+      // it may be incomplete (complete false) rather than final.
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._names.search(q, visible, (issuer) => !revoked.has(issuer))
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { members: page.members, more: page.more, indexing: flags.indexing, complete: flags.complete && !held }
+    } catch {
+      return null
+    }
   }
 
   close () {

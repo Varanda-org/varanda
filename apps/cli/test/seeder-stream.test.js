@@ -335,6 +335,74 @@ test('frameDeadlineFor: base plus one second per 64 KiB, capped', (t) => {
   t.is(frameDeadlineFor(1000, 300, 800), 800)
 })
 
+// A loopback TCP server whose connections are handed to seeder.acceptStream
+// with the onRefuse handoff; each refusal records whether the raw socket was
+// still alive when the hook ran and once acceptStream returned. The test then
+// owns the refused socket and destroys it itself.
+async function handoffServer (t, seeder) {
+  const accepted = []
+  const server = net.createServer((socket) => {
+    const entry = { raw: socket, refusal: null, aliveAfterReturn: null }
+    accepted.push(entry)
+    entry.noise = seeder.acceptStream(socket, {
+      onRefuse: (info) => { entry.refusal = { ...info, aliveAtCall: !socket.destroyed } }
+    })
+    if (entry.refusal) entry.aliveAfterReturn = !socket.destroyed
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => new Promise((resolve) => server.close(() => resolve())), { force: true })
+  return { port: server.address().port, accepted }
+}
+
+test('acceptStream onRefuse: at the external cap the handoff fires and the raw stream is left to the caller', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, maxConnections: 4 })
+  t.is(seeder.maxExternal, 2)
+  const { port, accepted } = await handoffServer(t, seeder)
+
+  // One admitted member and one in-flight handshake take the sub-cap.
+  const member = await streamMember(t, port, assoc)
+  await member.peer.hello
+  rawConnect(t, port)
+  await until(() => accepted.length === 2, { name: 'duas aceitas' })
+  t.ok(accepted[0].noise && accepted[1].noise, 'two external streams accepted')
+  t.is(accepted[0].refusal, null, 'no handoff for admitted streams')
+
+  const third = rawConnect(t, port)
+  await until(() => accepted.length === 3, { name: 'terceira' })
+  const refused = accepted[2]
+  t.is(refused.noise, null, 'the third external stream is refused')
+  t.alike(refused.refusal, { reason: 'connection-limit', aliveAtCall: true }, 'handoff called with the raw stream alive')
+  t.is(refused.aliveAfterReturn, true, 'acceptStream did not destroy the raw stream')
+  t.ok(events.some((e) => e.event === 'peer-dropped' && e.peerKey === null && e.reason === 'connection-limit'), 'connection-limit logged')
+  t.is(seeder.stats().connections, 2, 'the refused stream takes no slot')
+
+  refused.raw.destroy()
+  await closed(third)
+  t.is(seeder.stats().connections, 2, 'still two connections after the caller closed it')
+  t.absent(member.noise.destroyed, 'the admitted member stays connected')
+  member.peer.send({ type: 'announce', key: member.key, cert: createCert({ member: member.key }, assoc.kp) })
+  await member.message((m) => m.type === 'admitted' && m.key === member.key, 'admitted')
+})
+
+test('acceptStream onRefuse: not-ready refusals still destroy the raw stream without the handoff', async (t) => {
+  t.timeout(30000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const { port, accepted } = await handoffServer(t, seeder)
+  const tcp = rawConnect(t, port)
+  await until(() => accepted.length === 1, { name: 'aceita' })
+  t.is(accepted[0].noise, null)
+  t.is(accepted[0].refusal, null, 'no handoff when the seeder is not ready')
+  t.ok(accepted[0].raw.destroyed, 'raw socket destroyed')
+  await closed(tcp)
+})
+
 test('acceptStream: a stream that never completes the handshake is destroyed at the deadline', async (t) => {
   t.timeout(60000)
   const { bootstrap } = await testnet(t)

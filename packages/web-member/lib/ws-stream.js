@@ -9,9 +9,21 @@
 // still CONNECTING are buffered and flushed on 'open'. Destroying the stream
 // closes the socket (code 1000); the socket closing destroys the stream; a
 // socket error is ignored here because every error is followed by 'close'.
+// The socket's close code is kept on the stream (closeCode, null until the
+// socket closed or when the event carries none) so a caller can tell a
+// seeder that is full (1013, try again later) from a lost link; it changes
+// nothing about how the stream ends.
 // Known limit: bufferedAmount is not consulted (no write backpressure).
+//
+// guardedWsStream: the browser node's INITIATOR links (sync, seeder-link,
+// peek, notices) put @varanda/core lib/frame-guard between this stream and
+// their Noise secret stream, so a declared frame length over the link's
+// bound is cut before the secret stream allocates it. Never inside
+// wsStream itself: test responders build on wsStream directly and a Noise
+// responder needs the guard's responder defaults, not the initiator's.
 const { Duplex } = require('streamx')
 const b4a = require('b4a')
+const { FrameGuard, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/frame-guard')
 
 const CONNECTING = 0
 const OPEN = 1
@@ -21,9 +33,13 @@ class WebSocketStream extends Duplex {
     super()
     this.socket = socket
     this._pending = [] // chunks written while CONNECTING
+    this.closeCode = null // the socket's close code, once it closed
     this._onopen = () => this._flushPending()
     this._onmessage = (event) => this._onMessage(event)
-    this._onclose = () => this.destroy()
+    this._onclose = (event) => {
+      if (event && Number.isInteger(event.code)) this.closeCode = event.code
+      this.destroy()
+    }
     this._onerror = () => {}
     socket.binaryType = 'arraybuffer'
     socket.addEventListener('open', this._onopen)
@@ -119,4 +135,19 @@ function wsStream (socket) {
   return new WebSocketStream(socket)
 }
 
-module.exports = { wsStream, WebSocketStream }
+// -> { ws, stream }: `ws` is the WebSocketStream (closeCode), `stream` the
+// FrameGuard to hand to `new NoiseSecretStream(true, stream, ...)`. The Noise
+// XX initiator receives ONE handshake frame (msg2), hence handshakeFrames 1.
+// maxFrame bounds every later frame (default MAX_EXTERNAL_FRAME, the
+// protomux batch bound); onLimit runs once when a frame declares more, after
+// which the guard destroys itself and the socket.
+function guardedWsStream (socket, { maxFrame = MAX_EXTERNAL_FRAME, onLimit } = {}) {
+  const ws = new WebSocketStream(socket)
+  // No frame deadlines on the client: the threat from a hostile seeder here
+  // is a declared size (bounded by maxFrame), and a paused consumer must
+  // never read as a dripping seeder and cut an honest link.
+  const stream = new FrameGuard(ws, { onLimit, handshakeFrames: 1, maxFrame, deadlines: false })
+  return { ws, stream }
+}
+
+module.exports = { wsStream, guardedWsStream, WebSocketStream, MAX_EXTERNAL_FRAME }

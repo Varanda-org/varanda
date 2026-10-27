@@ -43,6 +43,9 @@
 //                                 complete (a new diary); once per length
 //   own-behind { length, theirs } the seeder advertises more than we hold
 //   link-closed                   the link dropped: nothing is tracked
+//                                 (preceded by 'seeder-busy' and a warning
+//                                 when the socket closed with 1013, the
+//                                 seeder at its connection cap)
 // They are emitted by checkOwnSync() from the hello / have handlers and the
 // diary watcher, in once and continuous runs alike.
 //
@@ -167,7 +170,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { memoryStorage } = require('./storage')
-const { wsStream } = require('./ws-stream')
+const { guardedWsStream } = require('./ws-stream')
 const store = require('./node-store')
 
 const GATE_TIMEOUT_MS = 15000
@@ -461,11 +464,18 @@ async function runSync ({
       return
     }
     lastSocket = socket
-    const noise = new NoiseSecretStream(true, wsStream(socket), { keyPair: crypto.keyPair() })
+    // Behind the frame guard with MAX_EXTERNAL_FRAME (a seeder's batches
+    // legitimately reach 8 MiB): a frame declaring more is cut at its header
+    // and the link closes through onLinkClose (reconnect as for any loss).
+    const { ws, stream } = guardedWsStream(socket, {
+      onLimit: () => log('aviso: quadro grande demais do semeador')
+    })
+    const noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
     noise.on('error', noop)
     const l = {
       socket,
       noise,
+      ws, // the WebSocketStream: its closeCode tells a full seeder (1013)
       peer: null,
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
@@ -566,6 +576,10 @@ async function runSync ({
     lastOwnSynced = -1
     for (const m of media) m.pushed = -1
     lastOwnBehind = null
+    if (l.ws.closeCode === 1013) {
+      log('aviso: semeador ocupado; tente novamente em instantes')
+      emit({ event: 'seeder-busy' })
+    }
     emit({ event: 'link-closed' })
     evaluate()
     reconnectLater()

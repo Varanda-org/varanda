@@ -51,9 +51,9 @@ const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = 
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
 const { attachNotices, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
 const { memoryStorage } = require('./storage')
-const { wsStream } = require('./ws-stream')
+const { guardedWsStream } = require('./ws-stream')
 const { moderation } = require('./member-ops')
-const { PEEK_CORE_PAGE_SIZE } = require('./peek')
+const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY } = require('./peek')
 const store = require('./node-store')
 
 const NOTICES_DEADLINE_MS = 25000
@@ -125,7 +125,7 @@ function isCursor (v) {
 // read. Computed for the returned rows only, at return time (never cached).
 // log(text): warnings. limits: test-only overrides (connectTimeoutMs,
 // deadlineMs, budgetBytes, parallel, blockTimeoutMs, maxBlocksPerRow,
-// maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs).
+// maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, maxFrame).
 function createNoticer ({ storage, association, seederUrl, createSocket, ownKey, sign, seenToken, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
@@ -142,6 +142,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     cacheTtlMs: NOTICES_CACHE_TTL_MS,
     cacheMax: NOTICES_CACHE_MAX,
     requestTimeoutMs: NOTICES_REQUEST_TIMEOUT_MS,
+    // The link carries bounded notices pages and a few blocks: the peek
+    // link's frame bound (./peek.js PEEK_MAX_FRAME) fits it with margin.
+    maxFrame: PEEK_MAX_FRAME,
     ...(limits || {})
   }
 
@@ -171,7 +174,11 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // resolves once the hello verified exactly as ./sync.js does. The proof is
   // never signed before that: the admission channel opens first, so an
   // honest seeder's hello precedes its challenge. -> the link
-  // { noise, peer, notices, verified }; rejects Error('sem conexão com o semeador').
+  // { noise, peer, notices, verified }; rejects Error('sem conexão com o semeador'),
+  // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
+  // text, never the seeder's). The link runs behind a frame guard
+  // (./ws-stream.js guardedWsStream): a frame over maxFrame is cut at its
+  // header with a warning and the link is lost (the read fails, no rows).
   function openLink (run, own) {
     return new Promise((resolve, reject) => {
       let socket
@@ -181,7 +188,15 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         reject(new Error(NO_SEEDER))
         return
       }
-      const noise = new NoiseSecretStream(true, wsStream(socket), { keyPair: crypto.keyPair() })
+      let noise = null
+      const { ws, stream } = guardedWsStream(socket, {
+        maxFrame: L.maxFrame,
+        onLimit: () => {
+          warn('aviso: quadro grande demais do semeador')
+          if (noise !== null) noise.destroy()
+        }
+      })
+      noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
       const link = { noise, peer: null, notices: null, verified: false }
       run.link = link
@@ -204,7 +219,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         // closed) and the read fails at its next checkpoint.
         if (run.link === link && !run.aborted && !run.overBudget) run.lost = true
         for (const q of run.cores) q.close().catch(noop)
-        finish(new Error(NO_SEEDER))
+        finish(ws.closeCode === 1013 ? new UsageError(SEEDER_BUSY) : new Error(NO_SEEDER))
       })
       noise.once('connect', () => {
         if (run.aborted) {

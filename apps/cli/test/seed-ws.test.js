@@ -10,14 +10,14 @@ const b4a = require('b4a')
 const Corestore = require('corestore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { testnet, tmpDir, until, bootstrapFlags } = require('./helpers/net')
+const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('./helpers/net')
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -383,6 +383,126 @@ test('startSeedWs: a WebSocket closed by the client destroys the stream handed t
   ws.close()
   await within(gone, 2000, 'close do duplex')
   t.ok(duplex.destroyed, 'the duplex is destroyed, so the seeder frees the slot')
+})
+
+// Opens a WebSocket on /seeder; resolves { ws, closed } once open, closed
+// resolving { code, reason } on the client's close event.
+function openSeederWs (t, port) {
+  const ws = new WebSocket('ws://127.0.0.1:' + port + '/seeder')
+  ws.on('error', () => {})
+  t.teardown(() => ws.terminate(), { force: true })
+  const closed = new Promise((resolve) => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
+  return within(new Promise((resolve, reject) => {
+    ws.once('open', () => resolve({ ws, closed }))
+    ws.once('unexpected-response', () => reject(new Error('upgrade recusado')))
+  }), 5000, 'open')
+}
+
+test('startSeedWs: a capacity refusal by the real Seeder closes the WebSocket with 1013 lotado', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), associationKey: assoc.hex, maxExternal: 1, log: (e) => events.push(e) })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  // The first socket (an in-flight handshake) takes the only external slot.
+  const first = await openSeederWs(t, server.port)
+  await until(() => seeder.stats().connections === 1, { name: 'primeira conexão contada' })
+
+  const second = await openSeederWs(t, server.port)
+  const started = Date.now()
+  const { code, reason } = await within(second.closed, 5000, 'close da segunda')
+  t.is(code, 1013, 'the refused socket is closed with 1013 (try again later), not 1006')
+  t.is(reason, 'lotado')
+  t.ok(Date.now() - started < 3000, 'closed promptly')
+  t.ok(events.some((e) => e.event === 'peer-dropped' && e.reason === 'connection-limit'), 'connection-limit logged')
+  t.is(seeder.stats().connections, 1, 'the refused socket never took a slot')
+
+  // On loopback a close frame queued just before terminate() still arrives,
+  // so the code alone cannot prove the server did not tear the socket down at
+  // once (createWebSocketStream terminates on destroy; behind a proxy that
+  // turns into 1006). A raw client that never answers the close shows it: the
+  // server must keep the socket for the grace, waiting for the client's
+  // close, and only then terminate it.
+  const raw = await mutedRefusal(t, server.port)
+  t.ok(raw.bytes.includes(CLOSE_1013_LOTADO), 'the raw client received the 1013 lotado close frame')
+  t.ok(raw.heldMs >= 500, 'the server waited for the close handshake (' + raw.heldMs + ' ms), it did not terminate at once')
+  t.ok(raw.heldMs < 3000, 'and destroyed the socket after the grace')
+  t.is(seeder.stats().connections, 1, 'still one connection')
+  t.is(first.ws.readyState, WebSocket.OPEN, 'the admitted socket stays open')
+})
+
+// An unmasked server close frame: FIN + opcode 8, length 8, code 1013, 'lotado'.
+const CLOSE_1013_LOTADO = Buffer.concat([Buffer.from([0x88, 0x08, 0x03, 0xf5]), Buffer.from('lotado')])
+
+// A raw client that completes the /seeder upgrade and then stays silent (it
+// never answers a close frame). Resolves { bytes, heldMs } once the server
+// closes the connection, heldMs measured from the close frame's arrival.
+function mutedRefusal (t, port) {
+  return within(new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    t.teardown(() => socket.destroy(), { force: true })
+    let bytes = Buffer.alloc(0)
+    let closeAt = null
+    socket.on('error', () => {})
+    socket.on('data', (d) => {
+      bytes = Buffer.concat([bytes, d])
+      if (closeAt === null && bytes.includes(CLOSE_1013_LOTADO)) closeAt = Date.now()
+    })
+    socket.once('close', () => resolve({ bytes, heldMs: closeAt === null ? -1 : Date.now() - closeAt }))
+    socket.once('connect', () => {
+      socket.write('GET /seeder HTTP/1.1\r\nHost: 127.0.0.1:' + port + '\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+    })
+    socket.once('error', reject)
+  }), 5000, 'close do cliente mudo')
+}
+
+test('startSeedWs: a stub refusal through onRefuse closes with 1013; a plain null still terminates', async (t) => {
+  t.timeout(20000)
+  const seeder = stubSeeder('ok')
+  let mode = 'refuse'
+  seeder.acceptStream = (duplex, opts) => {
+    if (mode === 'refuse') {
+      opts.onRefuse({ reason: 'connection-limit' })
+      return null
+    }
+    duplex.destroy()
+    return null
+  }
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const refused = await openSeederWs(t, server.port)
+  t.alike(await within(refused.closed, 5000, 'close recusado'), { code: 1013, reason: 'lotado' })
+
+  mode = 'null'
+  const dropped = await openSeederWs(t, server.port)
+  t.is((await within(dropped.closed, 5000, 'close nulo')).code, 1006, 'without the handoff the socket is terminated as before')
+})
+
+test('startSeedWs: a refused socket whose client never answers the close is destroyed after the grace', async (t) => {
+  t.timeout(20000)
+  const seeder = stubSeeder('ok')
+  seeder.acceptStream = (duplex, opts) => {
+    opts.onRefuse({ reason: 'connection-limit' })
+    return null
+  }
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  // A raw client that completes the upgrade but never sends a close frame
+  // back nor ends its side: only the server's grace timer can free it.
+  const client = await halfOpenUpgrade(server.port, '/seeder')
+  t.teardown(() => client.socket.destroy(), { force: true })
+  const ms = await within(client.closed, 5000, 'close do cliente mudo')
+  t.ok(client.response().startsWith('HTTP/1.1 101'), 'the upgrade completed')
+  t.ok(ms < 3000, 'destroyed within the grace (' + ms + ' ms), not the 30 s close timeout of ws')
+  t.ok(client.socket.destroyed)
 })
 
 // Opens a WebSocket on /seeder with the given extra headers; resolves the
@@ -871,7 +991,7 @@ function pageOf (ref) {
   }
 }
 
-// A stub seeder with the three index methods, recording every call. gate:
+// A stub seeder with the four index methods, recording every call. gate:
 // optional promise awaited inside each call (holds the in-flight slot).
 function indexSeeder ({ gate = null } = {}) {
   const stub = stubSeeder('ok')
@@ -894,6 +1014,15 @@ function indexSeeder ({ gate = null } = {}) {
     await wait()
     return author === A ? { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true } : null
   }
+  // A one-character segment is too short (null); 'ana' hits A, anything else
+  // is a valid query with no hit.
+  stub.indexSearch = async (segment) => {
+    stub.calls.push(['indexSearch', segment])
+    await wait()
+    if (segment.length < 2) return null
+    const members = segment === 'ana' ? [{ author: A, profileSeq: 1, usernameSeq: null }] : []
+    return { members, more: false, indexing: false, complete: true }
+  }
   return stub
 }
 
@@ -913,6 +1042,7 @@ test('startSeedWs /index: limits and regexes are exported with their documented 
   t.is(INDEX_MAX_BODY, 65536)
   t.is(INDEX_POST_RE.source, '^\\/index\\/post\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
   t.is(INDEX_MEMBER_RE.source, '^\\/index\\/member\\/([0-9a-f]{64})(?:\\/([1-9][0-9]{0,14}))?$')
+  t.is(INDEX_SEARCH_RE.source, '^\\/index\\/search\\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$')
   t.ok(INDEX_COUNTS_RE.test('/index/counts/' + A + ':1'), 'one ref')
   t.ok(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)).join(',')), '31 refs')
   t.absent(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 32 }, (_, i) => A + ':' + (i + 1)).join(',')), '32 refs')
@@ -1245,4 +1375,165 @@ test('startSeedWs /index: the worst-case answer stays within 64 KiB; an oversize
   const over = await mediaRequest(server.port, '/index/post/' + A + '/1')
   t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
   t.is(over.body.toString(), 'não encontrado\n')
+})
+
+// /index/search/<segment>: the folded search text, 1..4 tokens of
+// [a-z0-9]{1,20} joined by single '-'; anything else never reaches the seeder.
+test('startSeedWs /index/search: the canonical segment reaches indexSearch; GET answers JSON, HEAD the headers only', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const hit = await mediaRequest(server.port, '/index/search/ana')
+  t.is(hit.status, 200)
+  jsonHeaders(t, hit)
+  t.is(hit.headers['content-length'], String(hit.body.byteLength))
+  t.alike(JSON.parse(hit.body.toString()), { members: [{ author: A, profileSeq: 1, usernameSeq: null }], more: false, indexing: false, complete: true })
+  t.alike(seeder.calls[0], ['indexSearch', 'ana'])
+
+  const empty = await mediaRequest(server.port, '/index/search/ana-silva')
+  t.is(empty.status, 200, 'a valid query with no hit is 200')
+  jsonHeaders(t, empty)
+  const parsed = JSON.parse(empty.body.toString())
+  t.alike(Object.keys(parsed), ['members', 'more', 'indexing', 'complete'], 'exactly the contract keys')
+  t.alike(parsed, { members: [], more: false, indexing: false, complete: true })
+  t.alike(seeder.calls[1], ['indexSearch', 'ana-silva'])
+
+  t.is((await mediaRequest(server.port, '/index/search/a-b')).status, 200)
+  t.alike(seeder.calls[2], ['indexSearch', 'a-b'])
+
+  const short = await mediaRequest(server.port, '/index/search/a')
+  t.alike(seeder.calls[3], ['indexSearch', 'a'], 'a one-character segment reaches the seeder')
+  t.is(short.status, 404, 'a null answer -> 404')
+  t.is(short.body.toString(), 'não encontrado\n')
+
+  const max = ['a'.repeat(20), 'b'.repeat(20), 'c'.repeat(20), 'd'.repeat(20)].join('-')
+  t.is((await mediaRequest(server.port, '/index/search/' + max)).status, 200, 'four 20-char tokens')
+  t.alike(seeder.calls[4], ['indexSearch', max])
+
+  const head = await mediaRequest(server.port, '/index/search/ana-silva', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], empty.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.alike(seeder.calls[5], ['indexSearch', 'ana-silva'])
+  t.is(seeder.calls.length, 6)
+})
+
+test('startSeedWs /index/search: malformed segments never reach the seeder and are the same 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/search',
+    '/index/search/',
+    '/index/search/' + 'a'.repeat(21),
+    '/index/search/ana-' + 'b'.repeat(21),
+    '/index/search/a-b-c-d-e',
+    '/index/search/-ana',
+    '/index/search/ana-',
+    '/index/search/ana--b',
+    '/index/search/Ana',
+    '/index/search/@ana',
+    '/index/search/%40ana',
+    '/index/search/ana_silva',
+    '/index/search/ana.silva',
+    '/index/search/%61na',
+    '/index/search/ana%20silva',
+    '/index/search/ana%2Dsilva',
+    '/index/search/jos%C3%A9',
+    '/index/search/ana/',
+    '/index/search/ana?x=1',
+    '/index/search/ana?',
+    '/index/search/ana/silva',
+    '/index/search/ana#x',
+    '/index//search/ana',
+    '/INDEX/search/ana',
+    '/index/SEARCH/ana'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url + ' -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.absent(got.body.toString().includes('ana'), 'nothing of the path is echoed')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.is(got.headers['x-content-type-options'], 'nosniff')
+  }
+  t.is(seeder.calls.length, 0, 'malformed segments never reach the seeder')
+})
+
+test('startSeedWs /index/search: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/search/ana'
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421, 'foreign Host -> 421')
+  t.is((await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })).status, 421, 'the Host check runs before the method check')
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/search: a null answer, a throw, a rejection, a non-object and a missing method are 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const answers = [
+    () => null,
+    () => { throw new Error('secret ana') },
+    () => Promise.reject(new Error('secret ana')),
+    () => [1, 2, 3],
+    () => 'ana'
+  ]
+  for (const answer of answers) {
+    const seeder = indexSeeder()
+    seeder.indexSearch = answer
+    const server = await startSeedWs({ port: 0, seeder })
+    const got = await mediaRequest(server.port, '/index/search/ana')
+    await server.close()
+    t.is(got.status, 404)
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.absent(got.body.toString().includes('secret'), 'nothing of the error is echoed')
+  }
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  const got = await mediaRequest(old.port, '/index/search/ana')
+  t.is(got.status, 404, 'a seeder without indexSearch -> 404')
+  t.is(got.body.toString(), 'não encontrado\n')
+})
+
+test('startSeedWs /index/search: the worst-case answer stays within 64 KiB; an oversize answer is 404', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const member = (i) => ({ author: hex(i), profileSeq: Number.MAX_SAFE_INTEGER, usernameSeq: Number.MAX_SAFE_INTEGER })
+  const worst = { members: Array.from({ length: 20 }, (_, i) => member(i)), more: true, indexing: true, complete: false }
+  const seeder = indexSeeder()
+  seeder.indexSearch = async () => worst
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/search/ana')
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'search worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.alike(JSON.parse(got.body.toString()), worst)
+
+  seeder.indexSearch = async () => ({ ...worst, members: Array.from({ length: 2000 }, (_, i) => member(i)) })
+  const over = await mediaRequest(server.port, '/index/search/ana')
+  t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
+  t.is(over.body.toString(), 'não encontrado\n')
+})
+
+test('startSeedWs /index/search: shares the index token bucket with the other /index routes', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/search/ana')).status, 200, 'the search spends the only token')
+  const member = await mediaRequest(server.port, '/index/member/' + A)
+  t.is(member.status, 503, 'the next /index request finds the shared bucket empty')
+  t.is(member.headers['retry-after'], '1')
+  t.alike(seeder.calls, [['indexSearch', 'ana']])
 })

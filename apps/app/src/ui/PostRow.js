@@ -12,7 +12,9 @@
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
-//   republicou' (pressable -> onOpenReposter).
+//   republicou' (pressable -> onOpenReposter). onFollowReposter, when also
+//   given, is a small 'seguir' on that line (disabled while followPending).
+//   It follows the reposter; the action bar's onFollow follows the author.
 // - counts: null | { replies, likes, reposts, quotes }: the numbers show only
 //   when it is an object (and the number is above 0).
 // - liked, reposted: the own state; pending: null | 'like' | 'repost' (that
@@ -80,7 +82,7 @@ function Action ({ label, onPress, disabled, on, count, children }) {
 export function PostRow ({
   author, name, username, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter,
+  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
   onReply, onQuote, onLike, onRepost, onFollow, followPending, onReport
 }) {
   const hasMedia = Array.isArray(media) && media.length > 0
@@ -95,22 +97,51 @@ export function PostRow ({
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
   const openReposter = fn(onOpenReposter)
+  // On the reposter's line, never the action bar: that 'seguir' follows the
+  // original's author, and under their name it would read as the wrong person.
+  const followReposter = reposter ? fn(onFollowReposter) : undefined
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
+  // Composed label for the post body element: author, reply-to, text, date.
+  // The avatar link already provides profile access, so name here is context.
+  const bodyParts = [
+    title,
+    replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
+    hasText ? displayText(text, { multiline: true }) : null,
+    time
+  ].filter(Boolean)
+  const bodyLabel = bodyParts.join('. ')
   return (
     <View style={styles.row}>
       {reposter
         ? (
-          <Pressable
-            accessibilityRole={openReposter ? 'link' : 'text'}
-            accessibilityLabel={reposterName + ' republicou'}
-            disabled={!openReposter}
-            onPress={openReposter}
-            hitSlop={4}
-            style={({ pressed }) => [styles.reposted, pressed && openReposter && styles.pressed]}
-          >
-            <Icon name='republicar' size={14} color={colors.soft} />
-            <Text style={styles.repostedText} numberOfLines={1}>{reposterName + ' republicou'}</Text>
-          </Pressable>
+          <View style={styles.reposted}>
+            <Pressable
+              accessibilityRole={openReposter ? 'link' : 'text'}
+              accessibilityLabel={reposterName + ' republicou'}
+              disabled={!openReposter}
+              onPress={openReposter}
+              hitSlop={4}
+              style={({ pressed }) => [styles.repostedLink, pressed && openReposter && styles.pressed]}
+            >
+              <Icon name='republicar' size={14} color={colors.soft} />
+              <Text style={styles.repostedText} numberOfLines={1}>{reposterName + ' republicou'}</Text>
+            </Pressable>
+            {followReposter
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'seguir ' + reposterName}
+                  accessibilityState={{ disabled: !!followPending }}
+                  disabled={!!followPending}
+                  onPress={followReposter}
+                  hitSlop={6}
+                  style={({ pressed }) => [styles.repostedFollow, followPending && styles.disabled, pressed && styles.pressed]}
+                >
+                  <Text style={styles.repostedFollowText}>seguir</Text>
+                </Pressable>
+                )
+              : null}
+          </View>
           )
         : null}
       <View style={styles.main}>
@@ -123,67 +154,78 @@ export function PostRow ({
         >
           <Avatar name={who.avatarName} publicKey={author} size={44} />
         </Pressable>
-        {/* The empty area of the body opens the conversation too (photo-only
-            posts have no text); the inner links, the photos and the buttons
-            keep their own taps. Not a focus stop: the time is the
-            accessible 'abrir conversa' link. */}
-        <Pressable style={styles.body} onPress={open} disabled={!open} accessible={false} focusable={false}>
-          <View style={styles.head}>
-            <Pressable
-              accessibilityRole='link'
-              accessibilityLabel={'ver o perfil de ' + title}
-              disabled={!openAuthor}
-              onPress={openAuthor}
-              style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
-            >
-              <Text style={styles.name} numberOfLines={1}>{title}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole={open ? 'link' : 'text'}
-              accessibilityLabel={open ? 'abrir conversa' : undefined}
-              disabled={!open}
-              onPress={open}
-              hitSlop={4}
-              style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
-            >
-              <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
-            </Pressable>
-          </View>
-          {replyToName
-            ? (
-              <Pressable
-                accessibilityRole={openParent ? 'link' : 'text'}
-                disabled={!openParent}
-                onPress={openParent}
-                hitSlop={4}
-                style={({ pressed }) => pressed && openParent && styles.pressed}
-              >
-                <Text style={styles.reply}>
-                  respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
-                </Text>
-              </Pressable>
-              )
-            : null}
-          {hasText
-            ? (
-              <Pressable
-                accessibilityRole={open ? 'link' : 'text'}
-                accessibilityHint={open ? 'abre a conversa' : undefined}
-                disabled={!open}
-                onPress={open}
-              >
-                <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
-              </Pressable>
-              )
-            : null}
-          {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
-          {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+        {/* Body: a single accessible element (author, text, date) so screen
+            readers read in the order: avatar → post content → actions.
+            All visual children are hidden from accessibility; sighted users
+            interact with them directly (name, reply-to and text tap targets). */}
+        <View style={styles.body}>
+          <Pressable
+            onPress={open}
+            disabled={!open}
+            accessible
+            accessibilityRole={open ? 'link' : 'text'}
+            accessibilityLabel={bodyLabel}
+            accessibilityHint={open ? 'abre a conversa' : undefined}
+          >
+            <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+              <View style={styles.head}>
+                <Pressable
+                  accessibilityRole='link'
+                  accessibilityLabel={'ver o perfil de ' + title}
+                  disabled={!openAuthor}
+                  onPress={openAuthor}
+                  style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
+                >
+                  <Text style={styles.name} numberOfLines={1}>{title}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole={open ? 'link' : 'text'}
+                  accessibilityLabel={open ? 'abrir conversa' : undefined}
+                  disabled={!open}
+                  onPress={open}
+                  hitSlop={4}
+                  style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                >
+                  <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
+                </Pressable>
+              </View>
+              {replyToName
+                ? (
+                  <Pressable
+                    accessibilityRole={openParent ? 'link' : 'text'}
+                    disabled={!openParent}
+                    onPress={openParent}
+                    hitSlop={4}
+                    style={({ pressed }) => pressed && openParent && styles.pressed}
+                  >
+                    <Text style={styles.reply}>
+                      respondendo a <Text style={styles.replyName}>{displayText(replyToName)}</Text>
+                    </Text>
+                  </Pressable>
+                  )
+                : null}
+              {hasText
+                ? (
+                  <Pressable
+                    accessibilityRole={open ? 'link' : 'text'}
+                    accessibilityHint={open ? 'abre a conversa' : undefined}
+                    disabled={!open}
+                    onPress={open}
+                  >
+                    <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+                  </Pressable>
+                  )
+                : null}
+              {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
+              {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+            </View>
+          </Pressable>
           {bar
             ? (
               <View style={styles.bar}>
                 {fn(onReply)
                   ? (
-                    <Action label='responder' onPress={onReply} count={countOf(counts, 'replies')}>
+                    <Action label={'responder a ' + title} onPress={onReply} count={countOf(counts, 'replies')}>
                       <Icon name='resposta' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -230,7 +272,7 @@ export function PostRow ({
                   : null}
                 {fn(onReport)
                   ? (
-                    <Action label='denunciar' onPress={onReport}>
+                    <Action label={'denunciar publicação de ' + title} onPress={onReport}>
                       <Icon name='bandeira' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -238,7 +280,7 @@ export function PostRow ({
               </View>
               )
             : null}
-        </Pressable>
+        </View>
       </View>
     </View>
   )
@@ -253,8 +295,11 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
     backgroundColor: colors.bg
   },
-  reposted: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 26, marginBottom: 4, alignSelf: 'flex-start' },
+  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: 4, maxWidth: '100%' },
+  repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
+  repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
+  repostedFollowText: { ...type.counter, color: colors.accent },
   main: { flexDirection: 'row', gap: 12 },
   body: { flex: 1, minWidth: 0 },
   head: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
