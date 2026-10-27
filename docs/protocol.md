@@ -410,7 +410,7 @@ The node's current snapshot gives two sets, `blockedSet` (diary keys) and `revok
 
 The issuer key lives in the account service's volume on a public host. If it may have leaked: (1) `mod revoke-issuer <old issuer hex>` publishes a snapshot whose `revokedIssuers` holds it; every up-to-date node then refuses the v2 certificates and `username` records it signed, purges and skips those diaries, and the seeder drops them; (2) create a new key with `account key`, certify it with `assoc certify-issuer`, `account cert add`, restart the service; (3) the affected members link again (their old v2 certificates stop working). Re-issuing the old certificates is not implemented (a later PR may add it). Individual member certificates are NOT revocable: block the diary key instead (`mod block`).
 
-### Golden vectors (`apps/cli/test/cert.test.js`, `packages/core/test/blocklist.test.js`)
+### Golden vectors (`packages/core/test/cert.test.js`, `packages/core/test/blocklist.test.js`)
 
 Keys from hypercore-crypto `keyPair(seed)`: association seed = 32 bytes `0x01`, issuer seed = 32 bytes `0x02`; member = `'ab'` x 32; issuer `date` = `2026-10-24T00:00:00.000Z`; member certificate and username record `date` = `2026-10-24T12:00:00.000Z`; username `ana_maria`. Ed25519 signatures are deterministic.
 
