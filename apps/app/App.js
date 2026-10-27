@@ -13,6 +13,10 @@
 // Back: the browser Back button (src/history.web.js; an in-app back calls
 // history.back() so the history and the stack never drift), Escape on the
 // web, the Android Back button (BackHandler); an open sheet closes first.
+// A profile link (/@ana, /m/<key>; hosted web only, src/profileLink.js) is
+// captured at load: Entrar shows the invite, a passkey ceremony from that card
+// records consent, and once the newcomer reaches the tabs the inviter is
+// followed (a visitor already signed in only gets the profile opened).
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -21,10 +25,12 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
-import { parseReturn } from './src/account'
+import { lookupUsername, parseReturn } from './src/account'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
+import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
+import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
@@ -74,6 +80,20 @@ const LINK_RETURN = (() => {
   try { return parseReturn(globalThis.location?.search) !== null } catch { return false }
 })()
 
+// A profile link (/@ana, /m/<key>) is read and cleaned to '/' here, once,
+// before any render, takeReturnNotice or bindHistory, so neither the history
+// stack nor the account flow ever sees that path; search and hash are kept
+// (?conta= and #token= are read later). No pathname listener: only a page load
+// carries a profile link. Null off the hosted web page.
+const CAPTURED_INVITE = captureInvite()
+// Tab storage refused the write (private mode, sandboxed frame): the invite
+// then lives only in this page's memory, which still opens the profile now.
+const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
+// Lookup retries for a profile link while the account service does not
+// answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
+const INVITE_RETRIES = 10
+const inviteRetryDelay = (n) => (n === 0 ? 15000 : n === 1 ? 30000 : 60000)
+
 // True when node.info confirms an identity and a member certificate.
 function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
@@ -118,6 +138,28 @@ function Member () {
   const [setupDone, setSetupDone] = useState(false)
   const [toast, setToast] = useState('')
   const toastTimer = useRef(null)
+  // The pending profile invite (src/profileLink.js): the record in tab
+  // storage, re-read before every step that acts on it.
+  const [invite, setInvite] = useState(() => loadInvite() || (INVITE_IN_MEMORY ? CAPTURED_INVITE : null))
+  const inviteRef = useRef(invite)
+  inviteRef.current = invite
+  // True once the invite card was on screen in this page load: only then can
+  // a ceremony record consent.
+  const [cardShown, setCardShown] = useState(false)
+  const inviteBusy = useRef(false)
+  const offlineShown = useRef(false)
+  const [inviteTick, setInviteTick] = useState(0)
+  const retryTimer = useRef(null)
+  const retryCount = useRef(0)
+  const wakePending = useRef(false)
+  // The latest decision, so an attempt that awaited a lookup can tell whether
+  // its gate is still open (a once sync, a sheet or another identity since).
+  const actionRef = useRef('none')
+  // Memory instead of tab storage: storage refused the capture, or later the
+  // accepted record. The consent then lives only in this page: a returning
+  // member who reaches the tabs without the Google reload is still followed;
+  // after a reload it is gone.
+  const inviteMemoryOnly = useRef(INVITE_IN_MEMORY)
 
   // Stable (Identidade and Ajustes re-read node.info when it changes).
   const takeInfo = useCallback((i) => {
@@ -388,6 +430,143 @@ function Member () {
   const sheetOpen = composer.open || report !== null || ajustes !== null
   const sheetOpenRef = useRef(sheetOpen)
   sheetOpenRef.current = sheetOpen
+
+  // --- the profile invite (src/profileLink.js) ---
+  // The tabs are on screen and nothing hides them, so the follow toast (it
+  // renders only in the tabs branch) and Membro are seen. !sheetOpen: on a
+  // ?conta= load the shell opens Ajustes → Conta once setupStep turns false
+  // (for a newcomer, right after the account link), and that sheet would
+  // cover both. The once-sync clauses mirror the outbox gate above: a member
+  // request now would preempt the recovery run.
+  const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen &&
+    nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
+  const action = inviteAction({
+    invite,
+    hosted: mode === 'hosted',
+    // The passkey status was read at least once (or there is no passkey).
+    statusKnown: ready && (passkey === null || pkStatus !== null),
+    locked,
+    resumed: !!(pkStatus && pkStatus.resumed === true),
+    cardShown,
+    unlockedKey: !locked && pkStatus ? pkStatus.publicKey : null,
+    ownKey,
+    atTabs
+  })
+  actionRef.current = action
+  // The record is untrusted and may have changed in another render: every
+  // step re-reads it (from tab storage, or memory when storage refused it).
+  // The memory copy keeps the stored record's 1 h limit (readInvite applies
+  // it to storage).
+  const memoryInvite = () => {
+    const rec = inviteRef.current
+    return rec && Date.now() - rec.at <= INVITE_TTL_MS ? rec : null
+  }
+  const currentInvite = () => (inviteMemoryOnly.current ? memoryInvite() : loadInvite())
+  const forgetInvite = () => {
+    dropInvite()
+    inviteRef.current = null
+    setInvite(null)
+  }
+  useEffect(() => () => clearTimeout(retryTimer.current), [])
+  useEffect(() => {
+    if (action === 'card') {
+      setCardShown(true)
+      return
+    }
+    if (action === 'drop') {
+      forgetInvite()
+      return
+    }
+    if (action === 'accept') {
+      // Only a passkey ceremony unlocks with resumed false and the shell
+      // re-reads the status after it, so this is consent from the card the
+      // visitor saw, bound to the key that just unlocked.
+      const rec = currentInvite()
+      const next = rec ? acceptInvite(rec, pkStatus.publicKey, Date.now()) : null
+      if (next && !saveInvite(next)) inviteMemoryOnly.current = true
+      inviteRef.current = next
+      setInvite(next)
+      return
+    }
+    if (action !== 'follow' && action !== 'open') return
+    // One attempt at a time; a wake (online, retry timer) that arrives
+    // meanwhile runs again once this attempt ends.
+    if (inviteBusy.current) {
+      wakePending.current = true
+      return
+    }
+    inviteBusy.current = true
+    const gen = generationRef.current
+    const attempt = async () => {
+      const rec = currentInvite()
+      if (rec === null) {
+        inviteRef.current = null
+        setInvite(null)
+        return
+      }
+      const r = await resolveInvite(rec, lookupUsername)
+      // A lock, unlock or reset meanwhile, or the gate closed during the
+      // lookup (a follow.add now would abort a starting once sync): the record
+      // stays, and the effect runs again when the action comes back.
+      if (gen !== generationRef.current || actionRef.current !== action) return
+      if (r.status === 'unavailable') {
+        // Kept and retried: on node.online changes and on a backoff timer
+        // (the account service can fail while the browser stays online).
+        if (!offlineShown.current) {
+          offlineShown.current = true
+          showToast(OFFLINE_TEXT)
+        }
+        clearTimeout(retryTimer.current)
+        retryTimer.current = null
+        if (retryCount.current < INVITE_RETRIES) {
+          retryTimer.current = setTimeout(() => setInviteTick((n) => n + 1), inviteRetryDelay(retryCount.current))
+          retryCount.current += 1
+        }
+        return
+      }
+      clearTimeout(retryTimer.current)
+      retryTimer.current = null
+      retryCount.current = 0
+      // Claimed before acting: at most one attempt, nothing replayed after a
+      // reload or a failure.
+      forgetInvite()
+      if (r.status !== 'ready') {
+        showToast(NOT_FOUND_TEXT)
+        return
+      }
+      const key = r.key
+      // The own link: openMember switches to Diário; never a self-follow.
+      if (key === ownKey) {
+        openMember(key)
+        return
+      }
+      // The only follow.add of an invite: consent recorded for exactly this
+      // key. 'open' (a visitor already signed in) never follows.
+      if (action === 'follow' && rec.state === 'accepted' && rec.recipient === ownKey) {
+        try {
+          const res = await node.request('follow.add', { key })
+          setVersion((v) => v + 1)
+          showToast(followedText({ username: rec.username, changed: res.changed === true }))
+        } catch (err) {
+          // Uncertain, 'autor bloqueado' and the follow limit are shown once
+          // and never retried (the record is already gone).
+          showToast(errorText(err))
+        }
+        // The follow stands; only the profile is not opened for another
+        // identity. Not the action: forgetInvite() above already turned it to
+        // 'none', so comparing it here would never open the profile.
+        if (gen !== generationRef.current) return
+      }
+      openMember(key)
+    }
+    attempt().catch(() => {}).finally(() => {
+      inviteBusy.current = false
+      if (wakePending.current) {
+        wakePending.current = false
+        setInviteTick((n) => n + 1)
+      }
+    })
+  }, [action, node.online, inviteTick])
   useEffect(() => {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -452,7 +631,15 @@ function Member () {
     let body
     if (passkey !== null || info !== null) {
       // embedded: the top bar above already carries the step's title
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} />
+      // The invite card shows on Entrar only (never in the Ajustes Identidade).
+      const inviteProp = action === 'card'
+        ? {
+            text: inviteCardText(invite),
+            link: buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: invite.username, publicKey: invite.key }),
+            onDismiss: forgetInvite
+          }
+        : null
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} invite={inviteProp} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>

@@ -26,7 +26,9 @@ import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
+import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
 import { atName } from '../who'
@@ -135,7 +137,9 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // service issues the member certificate and the @nome once the key is linked
 // to a Google account. Only same-origin /account/* calls (../account.js) and
 // the RPCs account.sign, cert.add and username.add; the Google page opens in
-// this same tab, so nothing is kept in the browser across the reload.
+// this same tab and nothing of the link is kept across the reload, except the
+// profile invite in sessionStorage (src/profileLink.js), which is never sent
+// to /account/*.
 const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda só para atender uma ordem judicial ou bloquear a conta; nada mais é coletado e a idade não é verificada. Você pode trocar o @nome depois, uma vez a cada 7 dias.'
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
@@ -491,7 +495,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
 // setup: the first run (App.js). The cards render inside the Stepper of
 // `step` (src/onboarding.js) at `index` of `total`.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo }) {
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, invite = null }) {
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -641,6 +645,10 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         setPkError(errorText(err))
       }
       await refresh(false)
+      // The status read right after a first ceremony has no key yet (the diary
+      // did not exist); re-reading it here makes the key known before any
+      // Google step, even when the recovery ends without a sync (offline).
+      try { await passkey.refresh() } catch {}
     }
     // Ends the recovery itself when the run cannot start (no identity, a run
     // already active); every Identidade then reads again.
@@ -702,6 +710,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     }, pkFail).finally(pkEnd)
   }
 
+  // A profile invite (App.js, src/profileLink.js) on a card where no
+  // ceremony is possible (an in-app browser, an IP address): the visitor is
+  // told to open the link elsewhere and can copy it. Hosted page only.
+  const inviteHere = node.hosted === true && invite !== null
+  const blockedInvite = inviteHere
+    ? (
+      <>
+        <Notice>{displayText(invite.text)}</Notice>
+        <Soft>{OPEN_IN_BROWSER_TEXT}</Soft>
+        <ShareProfile url={invite.link} />
+      </>
+      )
+    : null
   let entrar = null
   if (passkey !== null && locked) {
     const blocked = noPrf !== null || (pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no' || !!pkStatus.rpIdError))
@@ -719,13 +740,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     } else if (pkStatus.rpIdError) {
       // The address cannot carry a passkey (an IP): the page must be opened
       // by its domain name (localhost in development).
-      entrar = <Card><Notice>{displayText(pkStatus.rpIdError)}</Notice></Card>
+      entrar = (
+        <Card>
+          <Notice>{displayText(pkStatus.rpIdError)}</Notice>
+          {blockedInvite}
+        </Card>
+      )
     } else if (blocked) {
       const stale = noPrf !== null ? staleText(noPrf.userId) : ''
       entrar = (
         <Card>
           <Notice>{NO_PRF_TEXT}</Notice>
           {stale ? <Notice>{stale}</Notice> : null}
+          {blockedInvite}
         </Card>
       )
     } else {
@@ -759,6 +786,14 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       entrar = (
         <Card>
           <Text style={styles.brand}>Varanda</Text>
+          {inviteHere
+            ? (
+              <>
+                <Notice>{displayText(invite.text)}</Notice>
+                <Btn label='agora não' secondary onPress={() => invite.onDismiss()} disabled={pkPending} />
+              </>
+              )
+            : null}
           <Body>{WELCOME_TEXT}</Body>
           <Soft>{ENTRAR_TEXT}</Soft>
           {shownMismatch

@@ -1351,3 +1351,54 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - [ ] A seeder without the channel (an older build): the tab says "O semeador desta associação ainda não envia avisos." (the 5-minute poll keeps asking, so an upgraded seeder is picked up without a reload).
 - [ ] Native app and `varanda-serve`: the tab shows "Só na versão web" and never errors; no `notices.list` call is made.
 - [ ] Caddy logs show no new route and no new error; the seeder log shows one `peer` event per read.
+## 21. Shareable profile links and follow-on-signup (2026-10-26)
+
+### Summary
+
+- A member can copy or share a profile link, and a newcomer who opens it can sign in and follow that person. Two paths on the installation's own origin: `/@<nome>` (readable) and `/m/<64 hex>` (when the member has no @nome). Hosted web only; there are no universal links, `apple-app-site-association` or `assetlinks`.
+- Consent rule: the link never follows anyone by itself. The follow happens only when the invite card was shown on this page and a passkey ceremony then succeeded on this page; the acceptance is bound to that key and survives the Google return. A visitor already signed in (or restored at load) only gets the profile opened with 'Seguir'.
+- The protocol, the RPC, the account service, the Caddyfile, the static server and the service worker are unchanged: they already serve extensionless paths and the follow uses the existing `follow.add` and `GET /account/username`. No new record, no new RPC method.
+
+### What changed, per area
+
+- `apps/app/src/profileLink.js` (pure ES module): `parseProfilePath` (strict regexes over the raw path, no `decodeURIComponent`), `buildProfileUrl` (the @nome link when there is one, else the key link), the invite record (`v`, `username`, `key`, `state` 'new' | 'accepted', `recipient`, `at`; untrusted on every read, rebuilt field by field, 1 h TTL), `captureInvite` (any `/@…` or `/m/…` path first clears a stored invite, then stores a fresh 'new' one when valid, and cleans the address bar to `/` keeping search and hash), `inviteAction` (the shell's decision table: none, wait, drop, card, accept, follow, open) and `resolveInvite` (@nome to key through the same-origin lookup; a consistency check, not a signature).
+- `apps/app/src/profileLinkStore.web.js` and `profileLinkStore.native.js`: the web store keeps the invite in this tab's `sessionStorage` (`varanda-profile-invite`) so it survives the same-tab trip to Google and back to `/?conta=` and dies with the tab; `localStorage` is not used because it is unauthenticated and shared by every visit on the origin. The native store honours nothing.
+- `apps/app/App.js`: captures the invite once at load; evaluates `inviteAction`; shows the card; records consent after a successful ceremony; resolves the @nome; after the Conta sheet closes, calls `follow.add` and opens Membro with the toast 'Agora você segue @nome.' ('Você já segue @nome.' if already following); the own link opens Diário and never self-follows. Lookup failures (offline, 429/5xx, timeout) keep the invite, show 'Sem conexão: o perfil abre quando a conexão voltar.' once and retry after 15 s, 30 s, then every 60 s (at most 10 tries) and when the connection returns; a missing @nome shows 'Não encontramos esse @nome.'.
+- `apps/app/src/screens/Identidade.js`: the Entrar card shows '@nome convidou você — entre para seguir' ('Alguém convidou você — entre para seguir' for a key link) and 'agora não' (clears card and record); right after the first ceremony it re-reads the passkey status so the key is known before the Google step, even if the recovery ends without a sync (offline); on the cards where no ceremony is possible (no PRF passkey, as in in-app browsers; no WebAuthn; an address that cannot carry a passkey) it shows the invite, 'Para entrar e seguir, abra este link no Chrome ou no Safari.' and the copy/share control with the link rebuilt from the stored invite.
+- `apps/app/src/share.js` and `apps/app/src/ui/ShareProfile.js`: 'copiar link' and, where `navigator.share` exists, 'compartilhar' (a failed share falls back to the copy). Only a `/@nome` link is printed; the `/m/<chave>` link is never shown, except in the selected field when the clipboard write fails ('não foi possível copiar: o link está selecionado abaixo').
+- `apps/app/src/screens/Diario.js`: the header offers the share row for the own profile on the hosted web.
+- Tests: `apps/app/test/profileLink.test.js`, `apps/app/test/share.test.js`; cases added in `apps/app/test/sw.test.js` and `apps/cli/test/serve.test.js` (extensionless profile paths still resolve to the app shell).
+- Docs: `docs/app.md` (Entrar, Diário, Nomes, Navegação) and `CHANGELOG.md`.
+
+### Automated (CI)
+
+- Added in this change: `apps/app/test/profileLink.test.js` (parsing, build, invite decode/encode, capture, `inviteAction` table, lookup), `apps/app/test/share.test.js` (copy, share, visible URL), and the service worker and `varanda-serve` cases for the new paths.
+- Not run by the author of this section: the full suite, lint and exports are run by the orchestrator after the wave, and no result is recorded here.
+
+### Human verification
+
+- [ ] (a) Signed out, open `/@nome`: card, 'Criar passkey', @nome, Google, back, close Conta, name or skip: toast 'Agora você segue @nome.' and Membro shows 'Seguindo' (not performed).
+- [ ] (b) A remembered session opening `/@nome`: Membro with 'Seguir' and no `follow.add` (not performed).
+- [ ] (c) `/m/<hex>`: the 'Alguém convidou você' card and no key on screen (not performed).
+- [ ] (d) 'agora não' clears the card and the record (not performed).
+- [ ] (e) The own link opens Diário (not performed).
+- [ ] (f) A cancelled or pending ceremony does not accept (not performed).
+- [ ] (g) Offline lookup: one toast, invite kept (not performed).
+- [ ] (h) Invalid `/@x!` and `/m/zz` are cleaned and ignored (not performed).
+- [ ] (i) Network toggled off and on during 'Buscando sua conta…': still followed after Google (not performed).
+- [ ] (j) In-app browser: card, 'abra no Chrome ou no Safari' and copy link (not performed).
+- [ ] (k) Google sign-in from the installed PWA on Android and iOS (not performed).
+- [ ] (l) Diário 'copiar link' / 'compartilhar' with and without an @nome (not performed).
+- [ ] Installed PWA: open a profile link offline (not performed).
+
+### Residual risks
+
+- The username lookup is same-origin: the account service answers, and the match is a consistency check, not a signature.
+- A script of this origin in the same tab, an extension or devtools can plant an accepted invite within 1 h (same class as the outbox note in `docs/app.md`, narrowed to one tab).
+- An OAuth return outside the initiating browsing context (possible in some installed PWAs) loses the invite: the newcomer is not followed automatically and must tap 'Seguir'.
+- Installed iOS PWAs do not capture links.
+- If `sessionStorage` is unavailable or the write fails, there is no follow after the Google reload (the profile still opens on this load).
+- The card's @nome comes from the URL and is checked against the account service only at completion.
+- A username renamed after the link was shared stops resolving ('Não encontramos esse @nome.').
+- In-app browsers need the link opened in a real browser.
+- If a signed-in member taps Sair while an invite is pending, the card appears and signing in again counts as accepting it.
