@@ -1,6 +1,8 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
 // @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
-// infinite scroll and pull to refresh. Only publications are listed (PostRows):
+// infinite scroll and pull to refresh. On the hosted web the header also
+// offers the member's profile link (copiar / compartilhar; the /m/<key> form
+// is never printed). Only publications are listed (PostRows):
 // technical records and invalid blocks are not shown. Posts still in the
 // outbox ('Aguardando envio', browser node) are listed above them; they are
 // not PostRows (no reply, no publication date yet). The public key is shown
@@ -25,6 +27,7 @@ import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
+import { buildProfileUrl } from '../profileLink'
 import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -32,6 +35,7 @@ import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
+import { ShareProfile } from '../ui/ShareProfile'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
 import { fonts, type } from '../ui/theme'
@@ -352,6 +356,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
           </Text>
+          {node.hosted === true && publicKey ? <ShareProfile url={buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey })} /> : null}
         </View>
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>

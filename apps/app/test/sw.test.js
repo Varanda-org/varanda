@@ -285,6 +285,28 @@ test('navigation: network first, cached index.html offline', async (t) => {
   t.ok(body.includes('<meta name="varanda-release" content="' + version + '">'), 'the cached index.html')
 })
 
+// Profile links (/@username, /m/<64>) are extensionless navigations: the same
+// shell policy as any other app route.
+test('navigation: profile links /@ana and /m/<64> are the app shell', async (t) => {
+  const { w, version } = await installed()
+  const live = new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } })
+  w.server = () => live
+  const before = w.cache.map.size
+  for (const p of ['/@ana', '/m/' + 'a'.repeat(64)]) {
+    const on = await dispatch(w, ORIGIN + p, { mode: 'navigate' })
+    t.is(on.res, live, p + ': the network response unchanged')
+    t.is(w.cache.map.size, before, p + ': nothing stored')
+  }
+  t.ok((await (await w.cache.match(ORIGIN + '/index.html')).text()).includes(version), 'cached index.html untouched')
+
+  w.server = offline
+  for (const p of ['/@ana', '/m/' + 'a'.repeat(64)]) {
+    const off = await dispatch(w, ORIGIN + p, { mode: 'navigate' })
+    const shell = await off.res.text()
+    t.ok(shell.includes('<meta name="varanda-release" content="' + version + '">'), p + ': the cached index.html')
+  }
+})
+
 test('navigation answered 404 or 5xx: the cached index.html, or the network answer without one', async (t) => {
   const { w, dist, version } = await installed()
   for (const code of [404, 503]) {
