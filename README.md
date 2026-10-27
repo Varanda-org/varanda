@@ -926,7 +926,7 @@ Exemplo de linha em `members.jsonl` (a data real é a da emissão):
 
 `at` é `new Date().toISOString()` na hora da escrita e tem de ser canônico. Serve para ordenar. Quem lê pula bloco que não é um registro válido e não renumera os outros. A referência de uma publicação é `<hex64>:<seq>`.
 
-O feed ordena por `(at, autor, seq)`. `--limit <n>` fica com as últimas `n` depois de tirar as publicações futuras. Para paginar para trás, `--before <cursor>` devolve só as publicações anteriores ao cursor, `{"at","author","seq"}` em JSON, o mesmo de `feed.read`. Quando a página vem cheia, `feed` imprime o próximo cursor na saída de erro (com `--json`, no campo `next`, que é `null` na última página). Um cursor inválido é erro de uso. Item: autor, nome (ou nulo), @nome (ou nulo), `seq`, `at`, texto, `replyTo` e `media` (as descrições das fotos, ou nulo).
+O feed ordena por `(at, autor, seq)`. `--limit <n>` fica com as últimas `n` depois de tirar as publicações futuras. Para paginar para trás, `--before <cursor>` devolve só as publicações anteriores ao cursor, `{"at","author","seq"}` em JSON, o mesmo de `feed.read`. Quando a página vem cheia, `feed` imprime o próximo cursor na saída de erro (com `--json`, no campo `next`, que é `null` quando a página não vem cheia; se a última página tiver exatamente `n` itens, ela também traz o cursor e a seguinte volta vazia). Um cursor inválido é erro de uso. Item: autor, nome (ou nulo), @nome (ou nulo), `seq`, `at`, texto, `replyTo` e `media` (as descrições das fotos, ou nulo).
 
 Certificado do semeador (`seeder-cert.json`), também com exatamente estas chaves:
 
