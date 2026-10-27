@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
@@ -149,15 +149,18 @@ const CERT_KEPT_ERROR = 'certificado já gravado'
 const CERT_KEPT_TEXT = 'Conta vinculada.'
 const CERT_RECEIVED = 'Conta vinculada.'
 // Finish errors (account.js ERROR_MESSAGES) after which the pending row is
-// useless: the member may pick another Google account.
+// useless: the member may pick another Google account. 'lista-de-espera' is
+// not one of them: the cap is full, this key stays, and the form retries by hand.
 const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
 
-// ?conta=ok|erro|cancelado, read once per page load (every mounted
-// Identidade shows it, including the one App.js opens in Ajustes after the
-// return) and removed from the address bar. The value is cached here, so a
-// LinkCard mounted after the removal still shows it; App.js only reads the
-// query, this is the only place that removes it.
+// ?conta=ok|erro|cancelado|lista-de-espera, read once per page load (every
+// mounted Identidade shows it, including the one App.js opens in Ajustes
+// after the return) and removed from the address bar. The value is cached
+// here, so a LinkCard mounted after the removal still shows it; App.js only
+// reads the query, this is the only place that removes it.
+// 'lista-de-espera' is not a notice: it opens the card in its waitlist state.
 let returnNotice
+let returnWaitlist = ''
 function takeReturnNotice () {
   if (returnNotice !== undefined) return returnNotice
   returnNotice = null
@@ -166,9 +169,14 @@ function takeReturnNotice () {
     const hist = globalThis.history
     if (!loc || typeof loc.search !== 'string' || !hist) return null
     returnNotice = parseReturn(loc.search)
+    returnWaitlist = parseReturnWaitlist(loc.search)
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
+}
+function takeReturnWaitlist () {
+  takeReturnNotice()
+  return returnWaitlist
 }
 
 // username.add runs at most once per record per page load (the RPC is
@@ -214,6 +222,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
+  // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
+  const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
   const seqRef = useRef(0)
 
   const load = useCallback(async () => {
@@ -327,12 +337,23 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const username = isUsername(name)
     if (username === null) return setError(NAME_RULE)
     run(async () => {
-      const { nonce } = await startLink({ member: publicKey, username })
-      const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
-      const { authorizeUrl } = await authorizeLink({ signature })
-      if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
-      setNote(RELOAD_TEXT)
-      globalThis.location.assign(authorizeUrl)
+      try {
+        const { nonce } = await startLink({ member: publicKey, username })
+        const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
+        const { authorizeUrl } = await authorizeLink({ signature })
+        if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
+        setWaitlist('')
+        setNote(RELOAD_TEXT)
+        globalThis.location.assign(authorizeUrl)
+      } catch (err) {
+        // Full cap: a calm notice. The name stays; nothing retries on its own.
+        if (err && err.code === 'lista-de-espera') {
+          setWaitlist(err.message)
+          return
+        }
+        setWaitlist('')
+        throw err
+      }
     })
   }
 
@@ -346,10 +367,19 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       const done = await finishLink({ signature })
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
+      setWaitlist('')
       setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
     } catch (err) {
+      // The cap filled at Google: nothing was stored. Keep this key and the
+      // chosen name. Not RESTARTABLE, and restartLink is not called.
+      if (err && err.code === 'lista-de-espera') {
+        setWaitlist(err.message)
+        if (name.trim() === '' && typeof row.username === 'string') setName(row.username)
+        return
+      }
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
+      setWaitlist('')
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -426,10 +456,21 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       </>
     )
   } else {
+    const waiting = waitlist !== ''
     const row = restart ? null : cur.pending
     const foreign = row !== null && row.member !== publicKey
-    const confirmable = row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
-    const showForm = !confirmable && (!memberCert || formOpen)
+    // While the cap is full the confirm step is not a failure: the name form
+    // stays, including the setup step, with a manual retry and no spinner.
+    const confirmable = !waiting && row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
+    const showForm = !confirmable && (!memberCert || formOpen || waiting)
+    const waitlistNote = waiting
+      ? (
+        <>
+          <Body>{waitlist}</Body>
+          <Btn label='tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} />
+        </>
+        )
+      : null
     body = (
       <>
         {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
@@ -460,7 +501,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Soft>De 3 a 20 letras minúsculas, números ou _.</Soft>
               <Body>{LINK_TEXT}</Body>
               <Soft>{RELOAD_TEXT}</Soft>
-              <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+              {waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
           : null}
@@ -470,7 +511,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Body>{LINK_TEXT}</Body>
               <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
               <Soft>{RELOAD_TEXT}</Soft>
-              <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+              {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
           : null}

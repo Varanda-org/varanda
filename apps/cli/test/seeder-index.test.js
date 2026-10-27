@@ -16,7 +16,8 @@ const Corestore = require('corestore')
 const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
-const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const certModule = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair, createIssuerCert, createUsernameRecord } = certModule
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/net')
@@ -24,6 +25,8 @@ const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord } 
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
+const { startSeedWs } = require('../lib/seed-ws')
+const http = require('node:http')
 
 const HEX64_ANYWHERE = /[0-9a-f]{64}/
 
@@ -149,10 +152,17 @@ const authorKey = (i) => i.toString(16).padStart(64, '0')
 // without retaining 100k input records or requiring network replication.
 function scanFixture (options = {}) {
   const seeder = Object.create(Seeder.prototype)
+  const { maxServed, ...indexOptions } = options
   Object.assign(seeder, {
-    _index: createEngagementIndex({ ...options, onFreed: () => seeder._scheduleIndexResume() }),
+    _index: createEngagementIndex({ ...indexOptions, onFreed: () => seeder._scheduleIndexResume() }),
     // _drop also leaves the follow-notices index (seeder.js).
     _notices: createNoticeIndex(),
+    // The topic search scan is stubbed out: a second reader would steal the
+    // reads holdIndexRead holds (apps/cli/test/seeder-topic.test.js covers it).
+    _topics: { removeDiary () { return false }, stats () { return { posts: 0, saturated: false } } },
+    _topicStartup: new Set(),
+    _topicDiary () {},
+    _scheduleTopicResume () {},
     _indexQueue: Promise.resolve(),
     _indexStartup: new Set(),
     _indexDropped: new Set(),
@@ -170,8 +180,12 @@ function scanFixture (options = {}) {
     log: () => {},
     _ready: true,
     _closing: false,
-    _isBlocked: () => false
+    _isBlocked: () => false,
+    association: null,
+    maxServed: maxServed ?? 4096
   })
+  // The name index (account search) is fed by the same scan.
+  seeder._names = seeder._createNameIndex()
   function diary (key, length, recordAt) {
     const entry = {
       indexed: 1,
@@ -1147,7 +1161,11 @@ test('restart rebuilds the index from the stored diaries; indexing is true at re
   const stats = first.seeder.stats()
   t.is(typeof stats.indexRecords, 'number')
   t.is(typeof stats.indexSaturated, 'boolean')
+  t.is(typeof stats.topicPosts, 'number')
+  t.is(typeof stats.topicSaturated, 'boolean')
   const text = metricsText({ ...stats, uptimeSeconds: 1 })
+  t.ok(text.includes('varanda_seeder_topic_posts'), 'topic posts gauge')
+  t.ok(text.includes('varanda_seeder_topic_saturated'), 'topic saturated gauge')
   t.ok(text.includes('# TYPE varanda_seeder_index_records gauge\nvaranda_seeder_index_records 5\n'), 'index records gauge')
   t.ok(text.includes('# TYPE varanda_seeder_index_saturated gauge\nvaranda_seeder_index_saturated 0\n'), 'index saturated gauge')
   t.absent(HEX64_ANYWHERE.test(text), 'no key in the metrics')
@@ -1205,4 +1223,263 @@ test('restart rebuilds the index from the stored diaries; indexing is true at re
   t.ok([...third.seeder._served.values()].some((e) => e.indexPaused), 'one diary is paused at the cap')
   t.is(third.seeder.indexCounts([ref(A.key, 1)]).complete, false, 'complete stays false while paused')
   t.is(third.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+// ---- Name index (account search: packages/core/lib/name-index.js) -------
+
+// scanFixture plus a trusted association, one issuer and helpers to serve a
+// diary of records and to search.
+function nameFixture (options = {}) {
+  const f = scanFixture(options)
+  const assoc = makeAssociation()
+  f.seeder.association = assoc.hex
+  const issuerKp = signingKeyPair()
+  const issuer = hex(issuerKp.publicKey)
+  const issuerCert = createIssuerCert({ issuer, date: at(0) }, assoc.kp)
+  const username = (member, name, date = at(0)) => createUsernameRecord({ member, username: name, date }, issuerKp, issuerCert)
+  const profile = (name, i = 1) => profileRecord({ name, at: at(i) })
+  // Serves `records` at seqs 1..n (push more, then grow() for a later pass).
+  const serve = (key, records) => {
+    const entry = f.diary(key, records.length, (seq) => records[seq - 1])
+    entry.grow = () => {
+      entry.core.contiguousLength = records.length + 1
+      f.seeder._indexDiary(key, entry)
+    }
+    f.seeder._indexDiary(key, entry)
+    return entry
+  }
+  const authors = (segment) => {
+    const r = f.seeder.indexSearch(segment)
+    return r === null ? null : r.members.map((m) => m.author)
+  }
+  return { ...f, assoc, issuer, username, profile, serve, authors }
+}
+
+function badSignature (record) {
+  const c = record.signature[0] === '0' ? '1' : '0'
+  return { ...record, signature: c + record.signature.slice(1) }
+}
+
+test('name search: folded tokens, prefixes, invisible characters', async (t) => {
+  const { seeder, serve, profile, authors } = nameFixture()
+  const A = authorKey(1)
+  const B = authorKey(2)
+  serve(A, [profile('João Silva')])
+  serve(B, [profile('Ma​ria')])
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [A])
+  t.alike(authors('silva'), [A])
+  t.alike(authors('joao-silva'), [A])
+  t.alike(authors('sil'), [A], 'a prefix of a token matches')
+  t.alike(authors('ilva'), [], 'an infix does not')
+  t.alike(authors('maria'), [B], 'a zero-width space does not split the token')
+  t.alike(seeder.indexSearch('joao').members, [{ author: A, profileSeq: 1, usernameSeq: null }])
+})
+
+test('name search: a newer profile replaces the name, an older or equal seq does not', async (t) => {
+  const { seeder, serve, profile, authors } = nameFixture()
+  const A = authorKey(1)
+  const records = [profile('Ana'), profile('Beatriz', 2)]
+  const entry = serve(A, records)
+  await settleIndex(seeder)
+  t.alike(authors('ana'), [])
+  t.alike(authors('beatriz'), [A])
+  t.is(seeder.indexSearch('beatriz').members[0].profileSeq, 2)
+  // An older or equal seq noted again (a rebuild replays from seq 1) keeps
+  // the newest name.
+  seeder._names.note(A, 1, profile('Carla'))
+  seeder._names.note(A, 2, profile('Carla'))
+  t.alike(authors('carla'), [])
+  t.alike(authors('beatriz'), [A])
+  records.push(profile('Davi', 3))
+  entry.grow()
+  await settleIndex(seeder)
+  t.alike(authors('beatriz'), [])
+  t.alike(authors('davi'), [A])
+})
+
+test('name search: exact verified @nome first, then @nome prefix, then name only', async (t) => {
+  const { seeder, serve, profile, username, authors } = nameFixture()
+  const exact = authorKey(9)
+  const prefix = authorKey(5)
+  const nameOnly = authorKey(1)
+  serve(nameOnly, [profile('Joao Pedro')])
+  serve(prefix, [profile('Zé'), username(prefix, 'joaozinho')])
+  serve(exact, [profile('Outro'), username(exact, 'joao')])
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [exact, prefix, nameOnly])
+  const m = seeder.indexSearch('joao').members
+  t.alike(m[0], { author: exact, profileSeq: 1, usernameSeq: 2 })
+  t.alike(m[2], { author: nameOnly, profileSeq: 1, usernameSeq: null })
+})
+
+test('name search: a bad signature or a wrong member never matches by @nome; a newer bad record clears the @nome', async (t) => {
+  const { seeder, serve, profile, username, authors } = nameFixture()
+  const A = authorKey(1)
+  const B = authorKey(2)
+  const C = authorKey(3)
+  serve(A, [profile('Alice'), badSignature(username(A, 'alicinha'))])
+  serve(B, [profile('Bruno'), username(C, 'brunao')]) // copied: member is C
+  const cRecords = [profile('Carla'), username(C, 'carlota')]
+  const c = serve(C, cRecords)
+  await settleIndex(seeder)
+  t.alike(authors('alicinha'), [], 'bad signature')
+  t.alike(authors('alice'), [A], 'the name still matches')
+  t.is(seeder.indexSearch('alice').members[0].usernameSeq, null)
+  t.alike(authors('brunao'), [], 'wrong member')
+  t.alike(authors('bruno'), [B])
+  t.alike(authors('carlota'), [C])
+  cRecords.push(badSignature(username(C, 'carlota', at(5))))
+  c.grow()
+  await settleIndex(seeder)
+  t.alike(authors('carlota'), [], 'no fallback to the earlier @nome')
+  t.alike(seeder.indexSearch('carla').members, [{ author: C, profileSeq: 1, usernameSeq: null }])
+})
+
+test('name search: 1000 username records in one diary cost one verification per pass', async (t) => {
+  const { seeder, serve, profile, username, authors } = nameFixture()
+  const A = authorKey(1)
+  const records = [profile('Ana')]
+  for (let i = 0; i < 1000; i++) records.push(username(A, 'ana_' + i, at(i)))
+  const verify = mock.method(certModule, 'verifyUsernameRecord')
+  t.teardown(() => verify.mock.restore())
+  serve(A, records)
+  await settleIndex(seeder)
+  t.is(verify.mock.callCount(), 1)
+  t.alike(authors('ana-999'), [A], 'the newest record is the one verified')
+  t.is(seeder.indexSearch('ana-999').members[0].usernameSeq, 1001)
+})
+
+test('name search: a revoked @nome issuer stops matching at the next query without a rescan', async (t) => {
+  const { seeder, serve, profile, username, issuer, authors } = nameFixture()
+  const A = authorKey(1)
+  serve(A, [profile('Ana'), username(A, 'anasz')])
+  await settleIndex(seeder)
+  t.alike(authors('anasz'), [A])
+  seeder._blocklist = { revokedIssuers: () => new Set([issuer]), blocked: () => new Set() }
+  t.alike(authors('anasz'), [], 'revoked issuer')
+  t.alike(seeder.indexSearch('ana').members, [{ author: A, profileSeq: 1, usernameSeq: null }], 'the name still matches')
+  seeder._blocklist = { revokedIssuers: () => new Set(), blocked: () => new Set() }
+  t.alike(authors('anasz'), [A], 'un-revoked again, still verified')
+})
+
+test('name search: a pending revocation re-gate, blocked and dropped authors are hidden at once', async (t) => {
+  const { seeder, diary, serve, profile, authors } = nameFixture()
+  const A = authorKey(1)
+  const B = authorKey(2)
+  const C = authorKey(3)
+  const X = 'ab'.repeat(32)
+  serve(A, [profile('Joao A')])
+  serve(B, [profile('Joao B')])
+  serve(C, [profile('Joao C')])
+  await settleIndex(seeder)
+  // The announcement's certificate is not the gate's (block 0's): a revoked
+  // issuer there alone never hides the diary.
+  seeder._admitted.set(A, { v: 2, member: A, issuer: X })
+  seeder._blocklist = { revokedIssuers: () => new Set([X]), blocked: () => new Set() }
+  t.alike(authors('joao'), [A, B, C], 'announcement certificate ignored')
+  // _onBlocklistAdopted holds every re-gated diary until block 0's verdict.
+  seeder._served.get(A).searchHold = 1
+  t.alike(authors('joao'), [B, C], 'held while the re-gate is pending')
+  t.is(seeder.indexSearch('joao').complete, false, 'a held match makes the answer incomplete')
+  t.is(seeder.indexSearch('zzz').complete, seeder._indexFlags().complete, 'a query the held author does not match is unaffected')
+  seeder._served.get(A).searchHold = 0
+  t.alike(authors('joao'), [A, B, C], 'released when the verdict clears it')
+  t.is(seeder.indexSearch('joao').complete, seeder._indexFlags().complete)
+  seeder._blocklist = null
+  seeder._isBlocked = (k) => k === B
+  t.alike(authors('joao'), [A, C], 'blocked')
+  seeder._isBlocked = () => false
+  seeder._drop(C, 'blocked')
+  t.alike(authors('joao'), [A, B], 'dropped synchronously')
+  t.is(seeder._names.stats().authors, 2)
+  await seeder._drops.get(C)
+  await settleIndex(seeder)
+  diary(C, 1, () => profile('Joao C'))
+  seeder._rebuildIndex()
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [A, B, C], 'a rebuild and rescan restore it')
+})
+
+test('name search: the name cap pauses the cursor, never skips, and freed room resumes it', async (t) => {
+  {
+    const { seeder, serve, profile, authors } = nameFixture({ maxServed: 0 })
+    const A = authorKey(1)
+    const a = serve(A, [profile('Ana')])
+    await settleIndex(seeder)
+    t.ok(a.indexPaused)
+    t.is(a.indexed, 1, 'the cursor stays at the refused seq')
+    t.is(seeder.indexMember(A).profileSeq, null, 'the record did not reach the engagement index')
+    t.alike(authors('ana'), [])
+    t.is(seeder.indexSearch('ana').complete, false)
+  }
+  const { seeder, serve, profile, authors } = nameFixture({ maxServed: 1 })
+  const A = authorKey(1)
+  const B = authorKey(2)
+  serve(A, [profile('Ana')])
+  const b = serve(B, [profile('Bia'), postRecord({ text: 'oi', at: at(2) })])
+  await settleIndex(seeder)
+  t.ok(b.indexPaused)
+  t.is(b.indexed, 1)
+  t.is(seeder.indexMember(B).profileSeq, null)
+  seeder._drop(A, 'blocked')
+  await settleIndex(seeder)
+  t.absent(b.indexPaused)
+  t.is(b.indexed, 3)
+  t.alike(authors('bia'), [B])
+  t.is(seeder.indexMember(B).profileSeq, 1)
+  t.alike(seeder._indexFlags(), { indexing: false, complete: true })
+})
+
+test('name search: honest flags, malformed segments, the result cap and no logging', async (t) => {
+  const { seeder, diary, profile } = nameFixture()
+  const lines = []
+  seeder.log = (e) => lines.push(e)
+  const entries = []
+  for (let i = 1; i <= 21; i++) entries.push([authorKey(i), diary(authorKey(i), 1, () => profile('Joao ' + i))])
+  const held = holdIndexRead(entries[0][1], 1)
+  for (const [key, entry] of entries) seeder._indexDiary(key, entry)
+  await held.reading
+  const early = seeder.indexSearch('joao')
+  t.is(early.indexing, true, 'indexing before the first pass ends')
+  t.is(early.complete, false)
+  t.alike(early.members, [])
+  held.release()
+  await settleIndex(seeder)
+  const r = seeder.indexSearch('joao')
+  t.alike(Object.keys(r), ['members', 'more', 'indexing', 'complete'])
+  t.is(r.members.length, 20)
+  t.alike(r.members.map((m) => m.author), entries.slice(0, 20).map(([key]) => key), 'the 20 lowest authors')
+  t.is(r.more, true)
+  t.ok(r.members.every((m) => m.profileSeq !== null || m.usernameSeq !== null), 'no member has both hints null')
+  t.alike({ indexing: r.indexing, complete: r.complete }, seeder._indexFlags())
+  t.alike(seeder.indexSearch('zz'), { members: [], more: false, ...seeder._indexFlags() }, 'an empty result carries the real flags')
+  for (const bad of ['A', 'a', 'ab_cd', 'x'.repeat(21), '', 'a--b', 'a-b-c-d-e', null, 42]) t.is(seeder.indexSearch(bad), null)
+  t.alike(lines, [], 'indexSearch never logs')
+})
+
+test('name search: GET /index/search over loopback answers members/more/indexing/complete, a bad segment the generic 404', async (t) => {
+  const { seeder, serve, profile } = nameFixture()
+  const A = authorKey(1)
+  serve(A, [profile('João')])
+  await settleIndex(seeder)
+  const ws = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => ws.close())
+  const get = (url) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: ws.port, method: 'GET', path: url, headers: { Host: '127.0.0.1:' + ws.port } }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (d) => { body += d })
+      res.on('end', () => resolve({ status: res.statusCode, body }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+  const ok = await get('/index/search/joao')
+  t.is(ok.status, 200)
+  t.alike(JSON.parse(ok.body), { members: [{ author: A, profileSeq: 1, usernameSeq: null }], more: false, indexing: false, complete: true })
+  const bad = await get('/index/search/JOAO')
+  t.is(bad.status, 404)
+  t.is(bad.body, 'não encontrado\n')
+  t.absent(bad.body.includes('JOAO'))
 })
