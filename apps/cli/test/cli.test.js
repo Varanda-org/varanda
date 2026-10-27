@@ -52,7 +52,7 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
 
 function parse (argv = [], env = {}) {
@@ -157,6 +157,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     to: null,
     author: null,
     limit: null,
+    before: null,
     server: null,
     cwd: root
   })
@@ -202,6 +203,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     to: [upperKey + ':2', 'to', { author: lowerKey, seq: 2 }],
     author: [upperKey, 'author', lowerKey],
     limit: ['3', 'limit', 3],
+    before: ['5', 'before', '5'],
     'dht-host': ['127.0.0.1', 'dhtHost', '127.0.0.1'],
     'health-port': ['8788', 'healthPort', 8788],
     'health-host': ['0.0.0.0', 'healthHost', '0.0.0.0'],
