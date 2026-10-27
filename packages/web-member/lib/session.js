@@ -143,7 +143,14 @@
 // may take up to 25 s, which must not block the serial chain. Only the
 // own-key lookup runs on the chain. One peek at a time ('espiadinha já em
 // andamento'); detach, close, reset and setKeyPair abort a running one.
+//
+// Follow notices (web only, docs/rpc.md 5.28): notices.list is answered by
+// ./notices.js exactly like peek.read (own short-lived link, memory cores,
+// no withStore, no preemption, nothing written); the link's ownership proof
+// is signed by the in-memory identity key (locked -> USAGE 'identidade
+// bloqueada'). One at a time ('avisos já em andamento'), aborted with the peek.
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS } = require('@varanda/rpc')
 const {
   validRecordCopy,
@@ -165,6 +172,8 @@ const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { createPeeker } = require('./peek')
+const { createNoticer } = require('./notices')
+const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
 const { checkSeederUrl } = require('./seeder-url')
 
@@ -183,6 +192,7 @@ const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const BAD_MEDIA_ARGS = 'mídia inválida'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
+const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
@@ -213,7 +223,8 @@ const USAGE_MESSAGES = new Set([
   SELF_REPORT,
   BAD_REPORT,
   NO_SEEDER,
-  PEEK_BUSY
+  PEEK_BUSY,
+  NOTICES_BUSY
 ])
 const USAGE_PATTERNS = [
   /^certificado inválido \([a-z0-9-]{1,40}\)$/,
@@ -406,6 +417,9 @@ function createBrowserSession ({
   // not settled yet, aborted ones included, so close() still awaits them
   // before ./node.js closes the storage.
   let peeking = null
+  // The one notices.list in flight (its own slot, same rules as `peeking`;
+  // its promise joins `unwinding` too).
+  let noticing = null
   const unwinding = new Set()
 
   function send (event, data) {
@@ -425,6 +439,38 @@ function createBrowserSession ({
     createSocket,
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
+  })
+
+  // The proof signer of the notices link: synchronous, with the in-memory
+  // key, for the own key the read resolved (account.sign's checks).
+  const noticer = createNoticer({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    ownKey: () => requireOwnKey(),
+    sign: (payload, own) => {
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      return signNoticeProof(payload, keyPair)
+    },
+    // The opaque `seen` token of a notice row (docs/rpc.md 5.28): a BLAKE2b
+    // keyed by the identity secret (no length extension), stable for this
+    // identity and (key, seq), unlinkable to the follower key without the
+    // secret. The app stores only these tokens, so whoever reads the origin's
+    // storage while the passkey is locked cannot confirm who followed.
+    seenToken: (own, key, seq) => {
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const digest = crypto.hash([
+        b4a.from('varanda-notices-seen-v1\n'),
+        keyPair.secretKey.subarray(0, 32),
+        b4a.from(own + '\n' + key + ':' + seq)
+      ])
+      return b4a.toString(digest, 'hex').slice(0, 32)
+    },
+    log: (text) => warning(safe(text)),
+    limits: syncOptions.notices
   })
 
   // ---- sync runs ----
@@ -1084,6 +1130,34 @@ function createBrowserSession ({
       }
     },
 
+    // Follow notices (docs/rpc.md 5.28), works only unlocked (the link's
+    // proof is signed by the identity key). Shaped exactly like peek.read:
+    // not serial as a whole, no preemption, its own slot.
+    'notices.list': async (params) => {
+      const epoch = connection
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      // Locked: refused before any socket is opened (the link's proof needs
+      // the pair), and again after the wait, which may have seen a lock.
+      if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
+      if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
+      await serial(async () => requireOwnKey())(params)
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+      if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
+      if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
+      const p = noticer.read(params)
+      noticing = p
+      unwinding.add(p)
+      p.then(() => unwinding.delete(p), () => unwinding.delete(p))
+      try {
+        return await p
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      } finally {
+        if (noticing === p) noticing = null
+      }
+    },
+
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection
       if (gone()) throw rpcError('USAGE', 'conexão encerrada')
@@ -1132,8 +1206,12 @@ function createBrowserSession ({
     pair.publicKey.fill(0)
   }
 
-  // Both keys go together: a locked identity has no media key either.
+  // Both keys go together: a locked identity has no media key either. A
+  // notices read in flight (its link is held by the proof the pair signed)
+  // is aborted and its slot freed, wherever the lock comes from.
   function zeroKeyPair () {
+    noticer.abort()
+    noticing = null
     zeroPair(keyPair)
     keyPair = null
     zeroPair(mediaKeyPair)
@@ -1167,6 +1245,8 @@ function createBrowserSession ({
       // A peek in flight belongs to the previous identity.
       peeker.abort()
       peeking = null
+      noticer.abort()
+      noticing = null
       zeroKeyPair()
       keyPair = copy
       mediaKeyPair = mediaCopy
@@ -1286,6 +1366,8 @@ function createBrowserSession ({
   const reset = serial(async () => {
     peeker.abort()
     peeking = null
+    noticer.abort()
+    noticing = null
     syncIntent = null
     await stopRun('stopped')
     await storage.deleteCore(store.DIARY)
@@ -1319,6 +1401,8 @@ function createBrowserSession ({
     // so a reconnected client's peek.read starts immediately.
     peeker.abort()
     peeking = null
+    noticer.abort()
+    noticing = null
     connection++
     emitter = null
     syncIntent = null
@@ -1338,6 +1422,8 @@ function createBrowserSession ({
     syncIntent = null
     peeker.abort()
     peeking = null
+    noticer.abort()
+    noticing = null
     closing = (async () => {
       await stopRun('stopped')
       await chain
@@ -1346,6 +1432,7 @@ function createBrowserSession ({
       await Promise.allSettled([...unwinding])
       await stopRun('stopped')
       peeker.close()
+      noticer.close()
       zeroKeyPair()
     })()
     return closing
