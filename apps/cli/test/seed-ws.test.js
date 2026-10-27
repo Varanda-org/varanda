@@ -17,7 +17,7 @@ const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
 const {
   startSeedWs, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -861,6 +861,13 @@ function indexSeeder ({ gate = null } = {}) {
     await wait()
     return author === A ? { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true } : null
   }
+  stub.indexSearch = async (path, cursor) => {
+    stub.calls.push(['indexSearch', path, cursor])
+    await wait()
+    return path === 'ceu+azul' || path === 'ceu'
+      ? { items: [A + ':1'], next: null, authors: { [A]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+      : { items: [], next: null, authors: {}, indexing: false, complete: true }
+  }
   return stub
 }
 
@@ -1212,4 +1219,149 @@ test('startSeedWs /index: the worst-case answer stays within 64 KiB; an oversize
   const over = await mediaRequest(server.port, '/index/post/' + A + '/1')
   t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
   t.is(over.body.toString(), 'não encontrado\n')
+})
+
+// /index/search: the fourth route on the same serveIndex discipline. The
+// words reach the seeder only in their folded, strictly matched form; any
+// other spelling is the generic 404 without a seeder call.
+test('startSeedWs /index/search: the regex is exported with its documented value', async (t) => {
+  t.is(INDEX_SEARCH_RE.source, '^\\/index\\/search\\/([a-z0-9]{2,32}(?:\\+[a-z0-9]{2,32}){0,7})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
+  t.ok(INDEX_SEARCH_RE.test('/index/search/' + Array.from({ length: 8 }, () => 'ab').join('+')), '8 tokens')
+  t.ok(INDEX_SEARCH_RE.test('/index/search/' + 'a'.repeat(32)), 'a 32-char token')
+})
+
+test('startSeedWs /index/search: GET answers JSON with the words and cursor as given, HEAD sends the headers only', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const hit = { items: [A + ':1'], next: null, authors: { [A]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+
+  const got = await mediaRequest(server.port, '/index/search/ceu+azul')
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.is(got.headers['content-length'], String(got.body.byteLength))
+  t.alike(JSON.parse(got.body.toString()), hit)
+  t.alike(seeder.calls[0], ['indexSearch', 'ceu+azul', null], 'no cursor -> null; the + is literal')
+
+  const paged = await mediaRequest(server.port, '/index/search/ceu+azul/' + CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[1], ['indexSearch', 'ceu+azul', CURSOR], 'the cursor is passed as a string')
+
+  const head = await mediaRequest(server.port, '/index/search/ceu+azul', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], got.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.alike(seeder.calls[2], ['indexSearch', 'ceu+azul', null])
+
+  const unknown = await mediaRequest(server.port, '/index/search/xyz')
+  t.is(unknown.status, 200, 'an unknown word is a 200')
+  t.alike(JSON.parse(unknown.body.toString()).items, [])
+  t.alike(seeder.calls[3], ['indexSearch', 'xyz', null])
+})
+
+test('startSeedWs /index/search: malformed, encoded, uppercase or query paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/search',
+    '/index/search/',
+    '/index/search/a',
+    '/index/search/CEU',
+    '/index/search/c%C3%A9u',
+    '/index/search/ceu%2Bazul',
+    '/index/search/ceu+azul?x=1',
+    '/index/search/ceu+azul/',
+    '/index/search/' + 'a'.repeat(33),
+    '/index/search/' + Array.from({ length: 9 }, () => 'ab').join('+'),
+    '/index/search/ceu/1700000000000.' + B.toUpperCase() + '.7',
+    '/index/search/ceu/1700000000000.' + B + '.07'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 40) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.absent(got.body.toString().includes('search'), 'the path is not echoed')
+    t.absent(got.body.toString().includes('ceu'), 'the words are not echoed')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/search: a null answer, a throw and a seeder without indexSearch are 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const nulls = indexSeeder()
+  nulls.indexSearch = async (path, cursor) => { nulls.calls.push(['indexSearch', path, cursor]); return null }
+  const s1 = await startSeedWs({ port: 0, seeder: nulls })
+  t.teardown(() => s1.close(), { force: true })
+  const n = await mediaRequest(s1.port, '/index/search/ceu+azul')
+  t.is(n.status, 404, 'null answer -> 404')
+  t.is(n.body.toString(), 'não encontrado\n')
+  t.is(nulls.calls.length, 1, 'the seeder was asked')
+
+  const throwing = indexSeeder()
+  throwing.indexSearch = () => { throw new Error('secret ceu+azul') }
+  const s2 = await startSeedWs({ port: 0, seeder: throwing })
+  t.teardown(() => s2.close(), { force: true })
+  const th = await mediaRequest(s2.port, '/index/search/ceu+azul')
+  t.is(th.status, 404, 'throw -> 404')
+  t.is(th.body.toString(), 'não encontrado\n')
+  t.absent(th.body.toString().includes('secret'), 'nothing of the error is echoed')
+  t.absent(th.body.toString().includes('ceu'), 'the words are not echoed')
+
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  const o = await mediaRequest(old.port, '/index/search/ceu+azul')
+  t.is(o.status, 404, 'a seeder without indexSearch -> 404')
+  t.is(o.body.toString(), 'não encontrado\n')
+})
+
+test('startSeedWs /index/search: shares the /index token bucket and in-flight cap', async (t) => {
+  t.timeout(30000)
+  const s1 = await startSeedWs({ port: 0, seeder: indexSeeder(), index: { rate: 0.001, burst: 3 } })
+  t.teardown(() => s1.close(), { force: true })
+  for (let i = 0; i < 3; i++) t.is((await mediaRequest(s1.port, '/index/search/ceu')).status, 200, 'within the burst')
+  const over = await mediaRequest(s1.port, '/index/counts/' + A + ':1')
+  t.is(over.status, 503, 'searches spent the shared bucket')
+  t.is(over.body.toString(), 'ocupado\n')
+  t.is(over.headers['retry-after'], '1')
+
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const seeder = indexSeeder({ gate })
+  const s2 = await startSeedWs({ port: 0, seeder, index: { maxInFlight: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  const held = [mediaRequest(s2.port, '/index/search/ceu'), mediaRequest(s2.port, '/index/search/ceu+azul')]
+  await until(() => seeder.calls.length === 2, { name: 'duas buscas retidas', timeoutMs: 5000 })
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'searches hold the shared in-flight slots')
+  t.is(busy.headers['retry-after'], '1')
+  t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
+  release()
+  t.alike((await Promise.all(held)).map((r) => r.status), [200, 200])
+})
+
+test('startSeedWs /index/search: the worst-case answer stays within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const seq = '9'.repeat(15)
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 30; i++) {
+    items.push(hex(i) + ':' + seq)
+    authors[hex(i)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+  }
+  const worst = { items, next: '9'.repeat(16) + '.' + hex(29) + '.' + seq, authors, indexing: true, complete: false }
+  t.is(Object.keys(authors).length, 30, '30 distinct author hints')
+  const seeder = indexSeeder()
+  seeder.indexSearch = async () => worst
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/search/' + Array.from({ length: 8 }, () => 'a'.repeat(32)).join('+') + '/' + CURSOR)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.alike(JSON.parse(got.body.toString()), worst)
 })

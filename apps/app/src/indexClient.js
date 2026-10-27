@@ -14,11 +14,21 @@
 // 4. the JSON must match the contract's exact key sets and limits, and a
 //    fresh copy of only the validated values is returned.
 //
+// Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
+// /index/member/<author>[/<before>] and /index/search/<tokens>[/<cursor>].
+// The search tokens are already folded words of [a-z0-9] (2..32 chars, at
+// most 8) joined by a literal '+' (apps/app/src/search.js searchPath): this
+// module only checks them against the same strict pattern, never folds and
+// never percent-encodes them (encodeURIComponent would turn '+' into '%2B',
+// which the seeder's raw-URL match refuses).
+//
 // Result convention (never throws): `{ ok: true, value }` or
 // `{ ok: false, reason }`, reason one of 'invalid-input', 'network',
-// 'timeout', 'not-found' (404: not indexed, or author not served),
-// 'status', 'too-large', 'malformed'. The URL builders return null for bad
-// input. Every fetch function takes injectable deps `{ fetch, timeoutMs }`.
+// 'timeout', 'not-found' (404: not indexed, or author not served; on the
+// search route: a seeder without that route, or a malformed path — an
+// unknown word is a 200 with an empty list), 'status', 'too-large',
+// 'malformed'. The URL builders return null for bad input. Every fetch
+// function takes injectable deps `{ fetch, timeoutMs }`.
 
 export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
@@ -26,16 +36,20 @@ export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
+export const SEARCH_MAX = 30
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
 const CURSOR = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
+// 1..8 folded tokens of 2..32 [a-z0-9] chars joined by a literal '+'.
+const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 const POST_KEYS = ['authors', 'complete', 'indexing', 'likes', 'next', 'parent', 'quotes', 'quotesTotal', 'ref', 'replies', 'repliesTotal', 'reposts']
 const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
+const SEARCH_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -125,6 +139,15 @@ export function memberUrl (author, before = null) {
   if (a === null) return null
   if (before !== null && !isSeq(before)) return null
   return '/index/member/' + a + (before === null ? '' : '/' + before)
+}
+
+// `path`: tokens already folded and joined by search.js searchPath. Checked
+// as is (no folding, no lowercasing, no encoding): anything outside QUERY is
+// refused, so nothing but [a-z0-9+] reaches the URL.
+export function searchUrl (path, cursor = null) {
+  if (typeof path !== 'string' || !QUERY.test(path)) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return '/index/search/' + path + (cursor === null ? '' : '/' + cursor)
 }
 
 // --- transport ---
@@ -321,6 +344,23 @@ export function validMemberIndex (body, before = null) {
   }
 }
 
+// Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
+// author of the items, no more and no fewer (an unrelated or missing hint
+// means a confused or hostile index: refused whole).
+export function validSearch (body) {
+  if (!hasExactKeys(body, SEARCH_KEYS)) return null
+  const items = refList(body.items, SEARCH_MAX)
+  if (items === null) return null
+  if (body.next !== null && !isCursor(body.next)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const wanted = new Set(items.map((r) => r.split(':')[0]))
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // --- fetchers ---
 
 export function fetchPost (ref, cursor = null, deps = {}) {
@@ -337,4 +377,8 @@ export function fetchCounts (refs, deps = {}) {
 
 export function fetchMember (author, before = null, deps = {}) {
   return run(memberUrl(author, before), (body) => validMemberIndex(body, before), deps)
+}
+
+export function fetchSearch (path, cursor = null, deps = {}) {
+  return run(searchUrl(path, cursor), validSearch, deps)
 }

@@ -153,6 +153,12 @@ function scanFixture (options = {}) {
     _index: createEngagementIndex({ ...options, onFreed: () => seeder._scheduleIndexResume() }),
     // _drop also leaves the follow-notices index (seeder.js).
     _notices: createNoticeIndex(),
+    // The topic search scan is stubbed out: a second reader would steal the
+    // reads holdIndexRead holds (apps/cli/test/seeder-search.test.js covers it).
+    _search: { removeDiary () { return false }, stats () { return { posts: 0, saturated: false } } },
+    _searchStartup: new Set(),
+    _searchDiary () {},
+    _scheduleSearchResume () {},
     _indexQueue: Promise.resolve(),
     _indexStartup: new Set(),
     _indexDropped: new Set(),
@@ -1147,7 +1153,11 @@ test('restart rebuilds the index from the stored diaries; indexing is true at re
   const stats = first.seeder.stats()
   t.is(typeof stats.indexRecords, 'number')
   t.is(typeof stats.indexSaturated, 'boolean')
+  t.is(typeof stats.searchPosts, 'number')
+  t.is(typeof stats.searchSaturated, 'boolean')
   const text = metricsText({ ...stats, uptimeSeconds: 1 })
+  t.ok(text.includes('varanda_seeder_search_posts'), 'search posts gauge')
+  t.ok(text.includes('varanda_seeder_search_saturated'), 'search saturated gauge')
   t.ok(text.includes('# TYPE varanda_seeder_index_records gauge\nvaranda_seeder_index_records 5\n'), 'index records gauge')
   t.ok(text.includes('# TYPE varanda_seeder_index_saturated gauge\nvaranda_seeder_index_saturated 0\n'), 'index saturated gauge')
   t.absent(HEX64_ANYWHERE.test(text), 'no key in the metrics')
