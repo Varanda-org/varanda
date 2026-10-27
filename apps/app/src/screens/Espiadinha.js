@@ -492,8 +492,10 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const shownItems = notice === null ? items : []
-  // The rounds stay mounted (state and social cache) under the search.
-  if (query !== null && hosted && notice === null) {
+  // The rounds stay mounted (state and social cache) under the search. Only
+  // 'web-only' hides it: the rounds' 'offline' notice (no round loaded yet)
+  // must not unmount a search that loaded, which has its own offline state.
+  if (query !== null && hosted && notice !== 'web-only') {
     return (
       <Busca
         query={query}

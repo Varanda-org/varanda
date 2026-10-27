@@ -35,7 +35,7 @@ import { fetchTopic } from '../indexClient'
 import { planPeeks } from '../thread'
 import { whoOf } from '../who'
 import {
-  SEARCH_CONTINUE, SEARCH_CONTINUE_BODY, SEARCH_EMPTY_BODY, SEARCH_EMPTY_TITLE, SEARCH_END, SEARCH_ERROR,
+  SEARCH_BUSY, SEARCH_CONTINUE, SEARCH_CONTINUE_BODY, SEARCH_EMPTY_BODY, SEARCH_EMPTY_TITLE, SEARCH_END, SEARCH_ERROR,
   SEARCH_HINT, SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_MEMORY, SEARCH_OFFLINE_MESSAGE,
   SEARCH_UNAVAILABLE, assembleSearch, isLastSearchPage, mergeRefs, searchNotice
 } from '../topics'
@@ -95,8 +95,6 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
-  // The verified peeks of this query, merged across pages (author -> peek).
-  const peekedRef = useRef(new Map())
   const commit = useCallback((patch) => {
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
@@ -104,17 +102,22 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
 
   // One page: the index answer (a hint), then every ref read and verified by
   // the node, then the shown items. A superseded read stops peeking early.
+  // Each page peeks into its own map: planPeeks asks for every author of the
+  // page with the index's hints, and a map shared across pages would keep the
+  // first @nome seen (mergePeek), so one revoked meanwhile would survive.
   const readPage = useCallback(async (cursor, alive) => {
     const res = await fetchTopic(query.path, cursor)
     if (!res.ok) {
       if (res.reason === 'not-found') throw new Error(SEARCH_UNAVAILABLE)
       if (res.reason === 'network' || res.reason === 'timeout') throw new Error(SEARCH_OFFLINE_MESSAGE)
+      if (res.reason === 'rate-limited') throw new Error(SEARCH_BUSY)
       throw new Error(SEARCH_ERROR)
     }
-    await peekAll(request, planPeeks({ refs: res.value.items, authors: res.value.authors }), peekedRef.current, alive)
+    const peeked = new Map()
+    await peekAll(request, planPeeks({ refs: res.value.items, authors: res.value.authors }), peeked, alive)
     const { items: shown, unavailable: missing } = assembleSearch({
       refs: res.value.items,
-      peeked: peekedRef.current,
+      peeked,
       tokens: query.tokens,
       now: Date.now()
     })
@@ -131,7 +134,6 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
     if (!hosted) return
     const mine = ++seqRef.current
     const alive = () => mine === seqRef.current
-    peekedRef.current = new Map()
     // The follow set is read again with every first page (an unfollow made on
     // a profile while this screen is mounted); errors are ignored by the hook.
     loadFollows()

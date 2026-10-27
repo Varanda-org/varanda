@@ -1143,7 +1143,7 @@ class Seeder {
     // only when re-declared at a newer seq). Index state (header comment):
     // `indexed` is the next block the engagement index reads, `indexPaused`
     // that the index refused a record at that block (cap reached) and the
-    // cursor waits there until room is freed. The search* fields are the
+    // cursor waits there until room is freed. The topic* fields are the
     // same state for the topic search index, on its own cursor.
     const entry = {
       core,
@@ -1924,7 +1924,7 @@ class Seeder {
   // to one must be applied to the other. Only post blocks are handed to the
   // search index; a refused add (cap reached) leaves the cursor AT that block
   // and pauses the diary's search cursor only (never entry.indexPaused).
-  // search.add is idempotent, so re-reading the paused block after a resume
+  // this._topics.add is idempotent, so re-reading the paused block after a resume
   // never double counts.
   async _runTopic (key, entry) {
     const core = entry.core

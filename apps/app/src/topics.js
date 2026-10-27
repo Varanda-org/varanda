@@ -60,6 +60,7 @@ export const SEARCH_INCOMPLETE_NOTE = 'Algumas publicações podem faltar.'
 export const SEARCH_OFFLINE_MESSAGE = 'A pesquisa precisa de conexão com o semeador.'
 export const SEARCH_UNAVAILABLE = 'A pesquisa não está disponível neste semeador.'
 export const SEARCH_ERROR = 'Não foi possível pesquisar.'
+export const SEARCH_BUSY = 'Muitas consultas ao semeador agora. Tente de novo em alguns segundos.'
 export const SEARCH_END = 'Isso é tudo nesta pesquisa.'
 export const SEARCH_MEMORY = 'Os resultados ficam só na memória do navegador enquanto a aba está aberta.'
 

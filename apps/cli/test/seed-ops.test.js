@@ -312,7 +312,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(body.maxExternal, 32, 'default external cap: half of maxConnections')
   t.ok(Number.isInteger(body.indexRecords) && body.indexRecords >= 0, 'index records is a count')
   t.is(body.indexSaturated, false)
-  t.ok(Number.isInteger(body.topicPosts) && body.topicPosts >= 0, 'search posts is a count')
+  t.ok(Number.isInteger(body.topicPosts) && body.topicPosts >= 0, 'topic posts is a count')
   t.is(body.topicSaturated, false)
   t.absent(HEX64_ANYWHERE.test(text), 'no key in /health')
 
