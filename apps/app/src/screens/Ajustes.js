@@ -9,7 +9,9 @@
 // and Recomeçar. Rows that only exist on the browser node (passkey) hide when
 // `node.passkey === null`. Sair drops the key derived from the passkey from
 // memory (signOut, or lock on a provider without it) and the shell returns to
-// Entrar.
+// Entrar. Instalar o app shows an 'Instalar' button that opens the browser's
+// install dialog whenever the browser offers installation, above the text that
+// stays as the fallback.
 
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -17,6 +19,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
+import { useInstall } from '../install'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -66,6 +69,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
   const passkey = node.passkey
   const hasPasskey = passkey !== null && passkey !== undefined
   const unlocked = hasPasskey && passkey.status !== null && passkey.status.unlocked === true
+  const install = useInstall()
 
   const [advanced, setAdvanced] = useState(false)
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
@@ -258,6 +262,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
         </View>
         <View style={shown('instalar')}>
           <Page>
+            {install.canPrompt ? <Btn label='Instalar' onPress={() => { install.promptInstall() }} /> : null}
             <Soft>{INSTALL_TEXT}</Soft>
           </Page>
         </View>

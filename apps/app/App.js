@@ -2,7 +2,9 @@
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
 // and then four tabs (A Rua, Espiadinha, Seguindo, Diário) with the top bar, the
-// 'Sem internet' note under it (only while offline), the publish button and
+// 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
+// note under it too (hosted web, phones and iPad; below 'Sem internet' when
+// both show; its close is remembered for 30 days), the publish button and
 // the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
 // stops a run; its details live in Ajustes → Sincronização. Above the tabs a
@@ -27,6 +29,8 @@ import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { OfflineNote } from './src/ui/OfflineNote'
+import { InstallNote } from './src/ui/InstallNote'
+import { useInstall } from './src/install'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
@@ -79,6 +83,7 @@ function Member () {
   const names = useNames()
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
+  const install = useInstall()
   const ready = node.phase === 'ready'
   // Once the node was ready the tree stays mounted for good: a disconnect,
   // another tab taking over or a restart never unmounts the screens, so
@@ -523,6 +528,7 @@ function Member () {
           ? <TopBar title={TAB_TITLES[tab]} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
