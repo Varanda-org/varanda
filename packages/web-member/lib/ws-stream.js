@@ -143,7 +143,10 @@ function wsStream (socket) {
 // which the guard destroys itself and the socket.
 function guardedWsStream (socket, { maxFrame = MAX_EXTERNAL_FRAME, onLimit } = {}) {
   const ws = new WebSocketStream(socket)
-  const stream = new FrameGuard(ws, { onLimit, handshakeFrames: 1, maxFrame })
+  // No frame deadlines on the client: the threat from a hostile seeder here
+  // is a declared size (bounded by maxFrame), and a paused consumer must
+  // never read as a dripping seeder and cut an honest link.
+  const stream = new FrameGuard(ws, { onLimit, handshakeFrames: 1, maxFrame, deadlines: false })
   return { ws, stream }
 }
 

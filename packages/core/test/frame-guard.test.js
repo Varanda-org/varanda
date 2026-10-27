@@ -2,13 +2,27 @@
 
 // FrameGuard in isolation, over a fake raw duplex: exact limits, one byte
 // over, split headers, several frames per chunk, the responder (2 handshake
-// frames) vs initiator (1) direction, early EOF and teardown. The end-to-end
+// frames) vs initiator (1) direction, early EOF, teardown, the frame
+// budget (unlimited by default, or injected) and the frame deadline. The
+// end-to-end
 // behaviour through Seeder.acceptStream is covered by
 // apps/cli/test/seeder-stream.test.js.
 const test = require('brittle')
 const { EventEmitter } = require('node:events')
 const b4a = require('b4a')
-const { FrameGuard, HANDSHAKE_FRAMES, MAX_HANDSHAKE_FRAME, MAX_HANDSHAKE_BYTES, MAX_EXTERNAL_FRAME } = require('../lib/frame-guard')
+const {
+  FrameGuard,
+  frameDeadlineFor,
+  HANDSHAKE_FRAMES,
+  MAX_HANDSHAKE_FRAME,
+  MAX_HANDSHAKE_BYTES,
+  MAX_EXTERNAL_FRAME,
+  MAX_FRAME_MEMORY,
+  SMALL_FRAME_BYTES,
+  FRAME_DEADLINE_BASE_MS,
+  FRAME_DEADLINE_CAP_MS,
+  FRAME_MIN_BYTES_PER_S
+} = require('../lib/frame-guard')
 
 class FakeRaw extends EventEmitter {
   constructor () {
@@ -45,8 +59,8 @@ function frame (len) {
 
 function setup (opts = {}) {
   const raw = new FakeRaw()
-  const state = { limits: 0, bytes: 0, chunks: 0, ended: false, closed: false }
-  const guard = new FrameGuard(raw, { onLimit: () => { state.limits++ }, ...opts })
+  const state = { limits: 0, reasons: [], bytes: 0, chunks: 0, ended: false, closed: false }
+  const guard = new FrameGuard(raw, { onLimit: (reason) => { state.limits++; state.reasons.push(reason) }, ...opts })
   guard.on('error', () => {})
   guard.on('data', (c) => { state.chunks++; state.bytes += c.byteLength })
   guard.on('end', () => { state.ended = true })
@@ -62,6 +76,28 @@ function tick () {
   return new Promise((resolve) => setImmediate(resolve))
 }
 
+function sleep (ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// A budget that records every reservation and release.
+function recordingBudget (allow = () => true) {
+  const log = { reserved: [], released: [], held: 0 }
+  return {
+    log,
+    reserve (n, guard) {
+      if (!allow(n, guard)) return false
+      log.reserved.push(n)
+      log.held += n
+      return true
+    },
+    release (n, guard) {
+      log.released.push(n)
+      log.held -= n
+    }
+  }
+}
+
 test('production limits are unchanged and the seeder re-exports them', (t) => {
   t.is(HANDSHAKE_FRAMES, 2)
   t.is(MAX_HANDSHAKE_FRAME, 1024)
@@ -71,6 +107,17 @@ test('production limits are unchanged and the seeder re-exports them', (t) => {
   t.is(seeder.MAX_HANDSHAKE_FRAME, MAX_HANDSHAKE_FRAME)
   t.is(seeder.MAX_HANDSHAKE_BYTES, MAX_HANDSHAKE_BYTES)
   t.is(seeder.MAX_EXTERNAL_FRAME, MAX_EXTERNAL_FRAME)
+  t.is(MAX_FRAME_MEMORY, 64 * 1024 * 1024)
+  t.is(SMALL_FRAME_BYTES, 64 * 1024)
+  t.is(FRAME_DEADLINE_BASE_MS, 10000)
+  t.is(FRAME_DEADLINE_CAP_MS, 120000)
+  t.is(FRAME_MIN_BYTES_PER_S, 65536)
+  t.is(seeder.MAX_FRAME_MEMORY, MAX_FRAME_MEMORY)
+  t.is(seeder.SMALL_FRAME_BYTES, SMALL_FRAME_BYTES)
+  t.is(seeder.FRAME_DEADLINE_BASE_MS, FRAME_DEADLINE_BASE_MS)
+  t.is(seeder.FRAME_DEADLINE_CAP_MS, FRAME_DEADLINE_CAP_MS)
+  t.is(seeder.FRAME_MIN_BYTES_PER_S, FRAME_MIN_BYTES_PER_S)
+  t.is(seeder.frameDeadlineFor, frameDeadlineFor)
 })
 
 test('responder: frames at exactly each limit are forwarded', async (t) => {
@@ -98,6 +145,7 @@ test('responder: a post-handshake frame one byte over is destroyed', async (t) =
   t.is(state.bytes, 32 + 3 + 64 + 3)
   await feed(header(MAX_EXTERNAL_FRAME + 1))
   t.is(state.limits, 1)
+  t.alike(state.reasons, ['frame-limit'])
   t.ok(raw.destroyed)
   t.is(state.bytes, 32 + 3 + 64 + 3, 'the offending header was not forwarded')
 })
@@ -215,6 +263,12 @@ test('invalid options are refused', async (t) => {
   await t.exception.all(() => new FrameGuard(raw, { handshakeFrames: 1.5 }), /handshakeFrames/)
   await t.exception.all(() => new FrameGuard(raw, { maxHandshakeFrame: -1 }), /maxHandshakeFrame/)
   await t.exception.all(() => new FrameGuard(raw, { maxFrame: 0x1000000 }), /maxFrame/)
+  await t.exception.all(() => new FrameGuard(raw, { deadlineBaseMs: 0 }), /deadlineBaseMs/)
+  await t.exception.all(() => new FrameGuard(raw, { deadlineBaseMs: 1.5 }), /deadlineBaseMs/)
+  await t.exception.all(() => new FrameGuard(raw, { deadlineCapMs: -1 }), /deadlineCapMs/)
+  await t.exception.all(() => new FrameGuard(raw, { smallBytes: Infinity }), /smallBytes/)
+  await t.exception.all(() => new FrameGuard(raw, { budget: {} }), /budget/)
+  await t.exception.all(() => new FrameGuard(raw, { budget: null }), /budget/)
   t.is(raw.listenerCount('data'), 0, 'a refused guard attaches no listener')
 })
 
@@ -313,4 +367,133 @@ test('a raw error destroys the guard with that error', async (t) => {
   await tick()
   t.is(seen, err)
   t.ok(guard.destroyed)
+})
+
+test('without a budget a large incomplete frame is never refused', async (t) => {
+  const { guard, state, feed } = setup()
+  await feed(frame(32), frame(64))
+  // Several large frames, each left incomplete across chunks: the default
+  // budget is unlimited.
+  for (let i = 0; i < 4; i++) {
+    const f = frame(MAX_EXTERNAL_FRAME)
+    await feed(f.subarray(0, 1000))
+    t.is(guard._reserved, MAX_EXTERNAL_FRAME, 'charged to the default budget')
+    await feed(f.subarray(1000))
+    t.is(guard._reserved, 0, 'released on completion')
+  }
+  t.is(state.limits, 0)
+  t.absent(guard.destroyed)
+})
+
+test('a large incomplete frame is charged to an injected budget and released on completion', async (t) => {
+  const budget = recordingBudget()
+  const { guard, state, feed } = setup({ budget, smallBytes: 1000 })
+  await feed(frame(32), frame(64))
+  const f = frame(5000)
+  await feed(f.subarray(0, 100), f.subarray(100, 200))
+  t.alike(budget.log.reserved, [5000], 'reserved once, the whole declared length')
+  t.is(budget.log.held, 5000)
+  t.ok(guard.reservedAt > 0)
+  t.ok(guard.progress() > 0 && guard.progress() < 1)
+  await feed(f.subarray(200))
+  t.alike(budget.log.released, [5000])
+  t.is(budget.log.held, 0)
+  t.is(state.limits, 0)
+  t.is(state.bytes, 35 + 67 + f.byteLength)
+})
+
+test('frames that are small or complete within the chunk are never charged', async (t) => {
+  const budget = recordingBudget()
+  const { state, feed } = setup({ budget, smallBytes: 1000 })
+  await feed(frame(32), frame(64), frame(5000))
+  const small = frame(1000)
+  await feed(small.subarray(0, 10), small.subarray(10))
+  t.is(budget.log.reserved.length, 0)
+  t.is(state.limits, 0)
+})
+
+test('a refused reservation drops the guard with frame-budget, chunk not forwarded', async (t) => {
+  const budget = recordingBudget(() => false)
+  const { raw, state, feed } = setup({ budget, smallBytes: 1000 })
+  await feed(frame(32), frame(64))
+  const before = state.bytes
+  await feed(frame(5000).subarray(0, 100))
+  t.alike(state.reasons, ['frame-budget'])
+  t.ok(raw.destroyed)
+  t.is(state.bytes, before)
+})
+
+test('destroying or evicting a charged guard releases its reservation once', async (t) => {
+  const budget = recordingBudget()
+  const a = setup({ budget, smallBytes: 1000 })
+  await a.feed(frame(32), frame(64), frame(5000).subarray(0, 100))
+  a.guard.destroy()
+  await tick()
+  t.alike(budget.log.released, [5000])
+
+  const b = setup({ budget, smallBytes: 1000 })
+  await b.feed(frame(32), frame(64), frame(5000).subarray(0, 100))
+  b.guard.evict()
+  await tick()
+  t.alike(b.state.reasons, ['frame-budget'])
+  t.ok(b.raw.destroyed)
+  t.alike(budget.log.released, [5000, 5000])
+  t.is(budget.log.held, 0)
+})
+
+test('a dripping frame is dropped at its frame deadline', async (t) => {
+  const base = 40
+  const cap = 120
+  const { raw, state, feed } = setup({ deadlineBaseMs: base, deadlineCapMs: cap })
+  await feed(frame(32), frame(64))
+  const f = frame(500) // small: uncharged, only the completion deadline
+  await feed(f.subarray(0, 10))
+  t.is(frameDeadlineFor(500, base, cap), cap, 'capped')
+  const started = Date.now()
+  // Drip a byte at a time: body bytes never refresh the deadline.
+  while (!raw.destroyed && Date.now() - started < 2000) {
+    await feed(f.subarray(10, 11))
+    await sleep(10)
+  }
+  t.alike(state.reasons, ['frame-deadline'])
+  t.ok(raw.destroyed)
+  t.ok(Date.now() - started < 1000, 'dropped near the cap')
+})
+
+test('deadlines false (client): no completion deadline and no progress check', async (t) => {
+  const base = 30
+  const { raw, guard, state, feed } = setup({ deadlines: false, smallBytes: 1000, deadlineBaseMs: base, deadlineCapMs: 60 })
+  await feed(frame(32), frame(64), frame(500).subarray(0, 10))
+  await sleep(base * 6)
+  t.alike(state.reasons, [], 'a stalled small frame is not cut')
+  t.absent(raw.destroyed)
+  await feed(frame(500).subarray(10), frame(MAX_EXTERNAL_FRAME).subarray(0, 100))
+  await sleep(base * 6)
+  t.alike(state.reasons, [], 'a stalled large frame is not cut either')
+  t.absent(guard.destroyed)
+  await t.exception.all(() => new FrameGuard(new FakeRaw(), { deadlines: 'no' }), /deadlines/)
+})
+
+test('a charged frame below the minimum throughput fails its progress check', async (t) => {
+  const base = 30
+  const budget = recordingBudget()
+  const { raw, state, feed } = setup({ budget, smallBytes: 1000, deadlineBaseMs: base, deadlineCapMs: 600000 })
+  await feed(frame(32), frame(64), frame(MAX_EXTERNAL_FRAME).subarray(0, 100))
+  await sleep(base * 4)
+  t.alike(state.reasons, ['frame-deadline'])
+  t.ok(raw.destroyed)
+  t.is(budget.log.held, 0, 'reservation released')
+})
+
+test('a frame completed before its deadline clears the timer', async (t) => {
+  const { guard, state, feed } = setup({ deadlineBaseMs: 20, deadlineCapMs: 40 })
+  await feed(frame(32), frame(64))
+  const f = frame(500)
+  await feed(f.subarray(0, 10))
+  t.ok(guard._timer !== null)
+  await feed(f.subarray(10))
+  t.is(guard._timer, null)
+  await sleep(80)
+  t.is(state.limits, 0)
+  t.absent(guard.destroyed)
 })

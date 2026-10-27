@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -490,4 +490,128 @@ test('a queued request still gets the full 8 s fetch budget', async (t) => {
   t.ok(calls[18].at - t0 >= 10000, 'the 19th waited for the window')
   t.is(results[18].ok, true, '7.9 s answer after a 10 s wait is not a timeout')
   t.is(results[19].reason, 'timeout', 'the attempt timeout itself still applies')
+})
+
+function searchBody (over = {}) {
+  return {
+    members: [
+      { author: B, profileSeq: 3, usernameSeq: null },
+      { author: A, profileSeq: null, usernameSeq: 1 },
+      { author: C, profileSeq: 2, usernameSeq: 4 }
+    ],
+    more: true,
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('searchUrl: only the folded segment grammar, never a fetch otherwise', async (t) => {
+  const { searchUrl, fetchSearch } = await load()
+  for (const good of ['ana', 'ana-silva', 'a-b', 'joao-da-silva-x', 'x'.repeat(20)]) {
+    t.is(searchUrl(good), '/index/search/' + good, good)
+  }
+  let called = false
+  const fetch = async () => { called = true }
+  const bad = ['Ana', 'ANA-silva', 'a', 'x'.repeat(21), 'ana-b-c-d-e', '-ana', 'ana-', 'ana--b', 'ana_silva', '/', '@ana', 'ana silva', ' ana', '', null, undefined, 7, ['ana'], { s: 'ana' }]
+  for (const s of bad) {
+    t.is(searchUrl(s), null, 'url ' + JSON.stringify(s))
+    t.alike(await fetchSearch(s, { fetch }), { ok: false, reason: 'invalid-input' }, 'fetch ' + JSON.stringify(s))
+  }
+  t.absent(called)
+})
+
+test('fetchSearch: request options, order kept, a fresh copy', async (t) => {
+  const { fetchSearch } = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(searchBody()))
+  }
+  const res = await fetchSearch('ana-silva', { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, searchBody())
+  t.alike(res.value.members.map((m) => m.author), [B, A, C], 'ranking order preserved')
+  t.is(calls.length, 1)
+  t.is(calls[0].url, '/index/search/ana-silva')
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.is(calls[0].opts.headers.Accept, 'application/json')
+  t.ok(calls[0].opts.signal, 'abortable')
+  const empty = await fetchSearch('ana', { fetch: json(searchBody({ members: [], more: false })) })
+  t.alike(empty, { ok: true, value: searchBody({ members: [], more: false }) })
+})
+
+test('validSearch returns a copy that does not track the input', async (t) => {
+  const { validSearch } = await load()
+  const input = searchBody()
+  const out = validSearch(input)
+  t.alike(out, searchBody())
+  t.not(out, input)
+  t.not(out.members, input.members)
+  t.not(out.members[0], input.members[0])
+  input.members[0].profileSeq = 99
+  input.members.push({ author: 'aa'.repeat(32), profileSeq: 1, usernameSeq: 1 })
+  input.more = false
+  t.alike(out, searchBody(), 'unchanged by mutating the input')
+})
+
+test('fetchSearch rejects anything outside the contract', async (t) => {
+  const { fetchSearch, SEARCH_MAX } = await load()
+  t.is(SEARCH_MAX, 20)
+  const hit = (i) => ({ author: i.toString(16).padStart(64, '0'), profileSeq: 1, usernameSeq: null })
+  t.is((await fetchSearch('ana', { fetch: json(searchBody({ members: Array.from({ length: 20 }, (_, i) => hit(i + 1)) })) })).ok, true, '20 members')
+  const m = { author: A, profileSeq: 1, usernameSeq: null }
+  const bad = [
+    { extra: 1 },
+    { name: 'Ana' },
+    { members: Array.from({ length: 21 }, (_, i) => hit(i + 1)) },
+    { members: [m, { ...m, profileSeq: 2 }] },
+    { members: [{ ...m, author: A.toUpperCase() }] },
+    { members: [{ ...m, author: 'ab' }] },
+    { members: [{ ...m, profileSeq: null }] },
+    { members: [{ ...m, profileSeq: 0 }] },
+    { members: [{ ...m, usernameSeq: 0 }] },
+    { members: [{ ...m, profileSeq: 1.5 }] },
+    { members: [{ ...m, usernameSeq: '2' }] },
+    { members: [{ ...m, name: 'Ana' }] },
+    { members: [{ ...m, username: 'ana' }] },
+    { members: [{ ...m, bio: 'oi' }] },
+    { members: [{ author: A, profileSeq: 1 }] },
+    { members: [[A, 1, null]] },
+    { members: [null] },
+    { members: {} },
+    { members: 'x' },
+    { more: 'yes' },
+    { indexing: 0 },
+    { complete: null }
+  ]
+  for (const over of bad) {
+    t.alike(await fetchSearch('ana', { fetch: json(searchBody(over)) }), { ok: false, reason: 'malformed' }, JSON.stringify(over).slice(0, 80))
+  }
+  for (const key of ['members', 'more', 'indexing', 'complete']) {
+    const body = searchBody()
+    delete body[key]
+    t.is((await fetchSearch('ana', { fetch: json(body) })).reason, 'malformed', 'missing ' + key)
+  }
+  for (const body of ['null', '[]', '"x"', 'not json']) {
+    t.is((await fetchSearch('ana', { fetch: async () => response(body) })).reason, 'malformed', body)
+  }
+})
+
+test('fetchSearch transport: 404, 429, 503, redirect, size cap', async (t) => {
+  const { fetchSearch } = await load()
+  const body = JSON.stringify(searchBody())
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 404 }) })).reason, 'not-found')
+  // A 429 is the shared cooldown with retries (see the request budget tests),
+  // never a plain status failure.
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 429 }) })).reason, 'rate-limited')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 503 }) })).reason, 'status')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { redirected: true }) })).reason, 'status')
+  t.is((await fetchSearch('ana', { fetch: async () => response(body, { status: 404, redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(searchBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchSearch('ana', { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
 })

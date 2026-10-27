@@ -287,7 +287,7 @@ function Member () {
   const outbox = useOutbox()
   useOutboxDrain({
     enabled: ready && !locked && setupDone && !(passkey && passkey.recovering) &&
-      node.online !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
+      node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
     association: node.config ? node.config.association : null
@@ -594,6 +594,8 @@ function Member () {
               onQuote={startQuote}
               scrollToTop={scrollSignal.seguindo}
               onFollowsChanged={followsChanged}
+              ownKey={ownKey}
+              followsTick={version}
             />
           </View>
           <View style={shown('avisos')}>
