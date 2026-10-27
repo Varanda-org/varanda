@@ -203,8 +203,11 @@ export function waitForCatchUp ({ runId = null, timeoutMs = 10000, quietMs = 150
         } else done()
       } else if (name === 'sync.event') {
         const line = data.line
-        if (/^peer seeder [0-9a-f]{8}$/.test(line) || /^downloaded [0-9a-f]{64} (0|[1-9][0-9]*)$/.test(line)) {
-          // Downloads only matter once the verified link is up; they push the window out.
+        if (/^peer seeder [0-9a-f]{8}$/.test(line) || /^downloaded [0-9a-f]{64} (0|[1-9][0-9]*)$/.test(line) ||
+            /^diário próprio atrasado \(/.test(line)) {
+          // Downloads (followed diaries, and the own diary catching up from
+          // another device) only matter once the verified link is up; they
+          // push the window out.
           if (line.startsWith('peer') || quiet !== null) arm()
         }
       }

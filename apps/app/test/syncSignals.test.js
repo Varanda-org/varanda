@@ -299,6 +299,16 @@ test('refresh resolves once a verified seeder link goes quiet', async (t) => {
   await sleep(50)
   t.is(b.finished, true)
 
+  const own = waitForCatchUp({ runId: 1, quietMs: 40, timeoutMs: 2000 })
+  const o = track(own)
+  own.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01' })
+  await sleep(25)
+  own.onEvent('sync.event', { runId: 1, line: 'diário próprio atrasado (3/9)' })
+  await sleep(25)
+  t.is(o.finished, false, 'own-diary catch-up from another device pushes the window out')
+  await sleep(50)
+  t.is(o.finished, true)
+
   const unverified = waitForCatchUp({ runId: 1, quietMs: 20, timeoutMs: 2000 })
   const u = track(unverified)
   unverified.onEvent('sync.event', { runId: 1, line: 'peer seeder abcdef01 não verificado' })
