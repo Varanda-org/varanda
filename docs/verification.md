@@ -999,6 +999,7 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
   - `node apps/cli/test/readme-help.test.js`: passes.
   - the whitespace check on the diff (`git diff --check`): clean.
   - `npm ci` was not run (installing was out of bounds for this run); the dependencies were already in the worktree.
+- Hidden web tab (PWA PR): a hidden page (`visibilitychange`, `pagehide`; `pageshow` shows it again) sends one `sync.stop` and releases its continuous run and its seeder connection slot; the run restarts as soon as the tab is visible again. An uncertain stop is reconciled through `sync.status`, and a run that is still continuous gets at most one more stop in that hidden period. Continuous sync while visible is unchanged, and the outbox does not send while hidden (the `node.visible` gate in `apps/app/App.js`). The Avisos screen already paused its notices poll while hidden before this change (`shouldPoll` in `apps/app/src/notices.js` gates the interval in `apps/app/src/screens/Avisos.js`); it is unchanged. Code: `apps/app/src/visibility.web.js`, `apps/app/src/node.js` (the hidden stop effect, next to the start gate), `apps/app/src/autoSyncPolicy.js` (`shouldStopForHidden`, `wantsStart`).
 - Not verified: anything in a real browser, on a phone, in the iOS simulator, against production or with two devices. See "Human verification"; nothing in that list is marked done.
 
 ### Automated (CI)
@@ -1029,6 +1030,7 @@ A re-review of these fixes found two more, fixed here: `mod apply` re-sorted the
 - The name step is skippable per session: skipping is not remembered across sessions.
 - `varanda-serve` has no automatic transport reconnection.
 - Stages 2-4 (other people's profiles, likes and reposts, media) are not in this change; Seguindo rows are not pressable yet.
+- Hidden web tab, not done: no periodic once runs while the tab is hidden, so the seeder slot stays released for the whole hidden period and nothing syncs in the background. Why: `apps/app/src/names.js:84-92` and `:126-130` wait for a continuous run before the name lookups flush (`quietOk`); `packages/web-member/lib/session.js:600` (`restartIfWanted`) revives only a continuous intent; `packages/web-member/lib/sync.js:96-97` says once runs never wait for media, and the media confirmation only arrives in a continuous run. Releasing the slot while a visible page sits idle (holding the seeder link only while catching up, then a pause) is a separate follow-up PR that keeps the continuous run and adds that release inside the browser node.
 
 ### Security audit
 
