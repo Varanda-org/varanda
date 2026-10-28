@@ -4,7 +4,8 @@ const b4a = require('b4a')
 const c = require('compact-encoding')
 const Corestore = require('corestore')
 const Hypercore = require('hypercore')
-const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
+const { tmpDir } = require('./helpers/tmp')
 const {
   topicFor,
   parseBootstrap,
@@ -23,8 +24,8 @@ const {
   MAX_CONNECTIONS,
   MAX_FETCH_ATTACHMENTS,
   MAX_SEND_BACKLOG
-} = require('@varanda/core/lib/net')
-const { MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
+} = require('../lib/net')
+const { MAX_LOG_BLOCKS } = require('../lib/records')
 
 const DUMMY_SEEDER_CERT = { v: 1, seeder: 'cd'.repeat(32), date: '2026-01-01T00:00:00.000Z', association: 'ab'.repeat(32), signature: 'ef'.repeat(64) }
 const TOPIC = topicFor('ab'.repeat(32))

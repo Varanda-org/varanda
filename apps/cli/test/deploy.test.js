@@ -184,6 +184,10 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // changes, and the unauthenticated panel probe is guarded by the route
     // file so a rollback to B2 skips it.
     'VARANDA_MODERATOR_EMAILS',
+    // The optional usage-stats list must be a subset of the moderators, and
+    // the seeder health URL it enables must stay on loopback.
+    'VARANDA_STATS_EMAILS',
+    'VARANDA_SEEDER_HEALTH',
     // The optional account limits are checked as positive integers in range.
     'VARANDA_MAX_MEMBERS',
     'VARANDA_ACCOUNT_MAX_CONNECTIONS',
@@ -311,6 +315,41 @@ test('compose.web.yaml: AI triage variables are optional and scoped to account a
   t.ok(/^ {4}healthcheck:/m.test(text), 'account healthcheck kept')
 })
 
+// Usage stats are optional and account-only: the list defaults to empty (tab,
+// sampling and usage.json off) and the seeder health URL defaults to the
+// seeder's loopback health listener. Neither ever reaches seeder or web.
+test('compose.web.yaml and .env.example: usage-stats variables are optional and only on the account service', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  function service (name) {
+    const start = webLines.findIndex((l) => l === '  ' + name + ':')
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    return start === -1 ? [] : webLines.slice(start, end)
+  }
+  const account = service('account')
+  const seeder = service('seeder')
+  const web = service('web')
+  t.ok(account.length > 0 && seeder.length > 0 && web.length > 0, 'account, seeder and web found')
+  const keyCount = (ls, name) => ls.filter((l) => new RegExp('^ {6}' + name + ':').test(l)).length
+  const line = (ls, name) => ls.find((l) => new RegExp('^ {6}' + name + ':').test(l)) || ''
+
+  for (const name of ['VARANDA_STATS_EMAILS', 'VARANDA_SEEDER_HEALTH']) {
+    t.is(webLines.filter((l) => l.includes(name)).length, 1, name + ' mentioned exactly once')
+    t.is(keyCount(account, name), 1, name + ' exactly once under account')
+    t.is(keyCount(seeder, name), 0, name + ' not on seeder')
+    t.is(keyCount(web, name), 0, name + ' not on web')
+    t.absent(webLines.some((l) => l.includes('$' + '{' + name + ':?')), name + ' never :?')
+  }
+  t.is(line(account, 'VARANDA_STATS_EMAILS').trim(), 'VARANDA_STATS_EMAILS: "$' + '{VARANDA_STATS_EMAILS:-}"', 'stats list optional (:-)')
+  t.is(line(account, 'VARANDA_SEEDER_HEALTH').trim(), 'VARANDA_SEEDER_HEALTH: "$' + '{VARANDA_SEEDER_HEALTH:-http://127.0.0.1:8788}"',
+    'seeder health defaults to the loopback health listener')
+
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
+  t.ok(example.includes('VARANDA_STATS_EMAILS='), '.env.example has an empty VARANDA_STATS_EMAILS= line')
+})
+
 for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
@@ -396,6 +435,69 @@ test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and a
   t.is(run("VARANDA_MAX_EXTERNAL='300'\n").status, 1, 'a quoted value is refused')
   t.is(run('VARANDA_MAX_EXTERNAL=300 # vagas\n').status, 0, 'an unquoted value with a trailing comment passes')
   t.is(run('VARANDA_MAX_EXTERNAL = 4097\n').status, 1, 'spaces around = do not hide an out-of-range value')
+})
+
+test('deploy.sh: conferir_antes checks VARANDA_STATS_EMAILS against the moderators and VARANDA_SEEDER_HEALTH stays on loopback', (t) => {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
+  if (probe.error || probe.status !== 0) {
+    t.comment('bash not found: skipping the behavioural check')
+    return
+  }
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && res && res.length === 5, 'function and patterns located')
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  const base = 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) +
+    '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=segredo-ultra\n' +
+    'VARANDA_MODERATOR_EMAILS=Mod@x.test,b@x.test\n'
+  const run = (extra) => {
+    fs.writeFileSync(envFile, base + extra)
+    // git is stubbed: only the .env checks run, nothing touches a repository.
+    const script = 'set -u\nroot=' + JSON.stringify(dir) + '\ntarget=x\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + fn[0] + 'conferir_antes\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const none = run('')
+  t.is(none.status, 0, 'an .env without the stats line passes: ' + none.stderr)
+  const empty = run('VARANDA_STATS_EMAILS=\n')
+  t.is(empty.status, 0, 'an empty stats line passes: ' + empty.stderr)
+  const subset = run('VARANDA_STATS_EMAILS=mod@x.test\n')
+  t.is(subset.status, 0, 'a moderator passes, case-insensitively: ' + subset.stderr)
+  const outsider = run('VARANDA_STATS_EMAILS=c@x.test\n')
+  t.is(outsider.status, 1, 'an e-mail that is not a moderator is refused')
+  t.ok(outsider.stderr.includes('VARANDA_STATS_EMAILS inválido em deploy/seeder/.env'), 'says which variable')
+  t.absent(outsider.stderr.includes('c@x.test'), 'the e-mail is not printed')
+  t.is(run('VARANDA_STATS_EMAILS=sem-arroba\n').status, 1, 'an item without @ is refused')
+  // Only a whole list item matches: a moderator's suffix is not a moderator.
+  t.is(run('VARANDA_STATS_EMAILS=od@x.test\n').status, 1, 'a partial match is refused')
+
+  const remote = run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH=http://10.0.0.1:8788\n')
+  t.is(remote.status, 1, 'a non-loopback seeder health URL is refused with stats on')
+  t.ok(remote.stderr.includes('VARANDA_SEEDER_HEALTH inválido em deploy/seeder/.env'), 'says which variable (health)')
+  t.absent(remote.stderr.includes('10.0.0.1'), 'the URL is not printed')
+  const loop = run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH=http://127.0.0.1:8788\n')
+  t.is(loop.status, 0, 'the loopback health URL passes: ' + loop.stderr)
+  t.is(run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH=http://127.0.0.1:65536\n').status, 1, 'a port above 65535 is refused')
+  const off = run('VARANDA_SEEDER_HEALTH=http://10.0.0.1:8788\n')
+  t.is(off.status, 0, 'with stats off the health URL is not read: ' + off.stderr)
+  // Compose applies a line with spaces around '=' and passes quotes through
+  // to the service, which would refuse them: the gate reads and refuses alike.
+  t.is(run('VARANDA_STATS_EMAILS = c@x.test\n').status, 1, 'spaces around = do not hide an outsider')
+  t.is(run('VARANDA_STATS_EMAILS="mod@x.test"\n').status, 1, 'a quoted stats list is refused')
+  // The subset check reads the moderator line Compose applies (the last one,
+  // spaces around '=' allowed), not an earlier unspaced line.
+  t.is(run('VARANDA_MODERATOR_EMAILS = mod@x.test\nVARANDA_STATS_EMAILS=mod@x.test\n').status, 0,
+    'a spaced moderator line still counts for the subset check')
+  t.is(run('VARANDA_MODERATOR_EMAILS = outra@x.test\nVARANDA_STATS_EMAILS=mod@x.test\n').status, 1,
+    'a later spaced moderator line overrides the earlier one')
+  t.is(run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH = http://10.0.0.1:8788\n').status, 1,
+    'spaces around = do not hide a remote health URL')
+  t.is(run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH="http://127.0.0.1:8788"\n').status, 1,
+    'a quoted health URL is refused')
 })
 
 test('deploy.sh: the seeder limit ranges match apps/cli/lib/cli.js', (t) => {

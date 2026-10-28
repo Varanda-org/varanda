@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { safe, jsonLine, isUnsafe, cpWidth } = require('@varanda/core/lib/safe')
+const { safe, jsonLine, isUnsafe, cpWidth } = require('../lib/safe')
 
 const UNSAFE = { test: (s) => Array.from(s).some((ch) => isUnsafe(ch.codePointAt(0))) }
 const JSON_UNSAFE = /[\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
