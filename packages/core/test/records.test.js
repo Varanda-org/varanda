@@ -3,9 +3,9 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const records = require('@varanda/core/lib/records')
-const certLib = require('@varanda/core/lib/cert')
-const { latestUsername, latestUsernameRecord } = require('@varanda/core/lib/username')
+const records = require('../lib/records')
+const certLib = require('../lib/cert')
+const { latestUsername, latestUsernameRecord } = require('../lib/username')
 const { MAX_CERT_BYTES } = require('@varanda/rpc')
 const { testnet } = require('./helpers/net')
 
