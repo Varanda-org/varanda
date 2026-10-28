@@ -817,9 +817,13 @@ function Member () {
   }, [commitStack, goBack])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+  // Side insets (landscape notch/cutout): the larger one on both sides, so
+  // centred content stays centred when only one side has a cutout.
+  const sidePad = Math.max(insets.left, insets.right)
+  const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
   const splash = (
-    <SafeAreaView style={styles.center} edges={['top', 'bottom']}>
+    <SafeAreaView style={[styles.center, { paddingHorizontal: sidePad }]} edges={sideEdges}>
       <Text style={styles.brand}>Varanda</Text>
       <Text style={styles.soft}>conectando…</Text>
       <StatusBar style='dark' />
@@ -833,7 +837,7 @@ function Member () {
   if (decision === 'loading') return splash
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {
     return (
-      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
         <StatusBar style='dark' />
       </SafeAreaView>
@@ -844,7 +848,7 @@ function Member () {
     // loading, connecting, the native Conectar form, or a web error.
     if (node.phase === 'loading' || (node.phase === 'connecting' && !node.canConfigure)) return splash
     return (
-      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
         <StatusBar style='dark' />
       </SafeAreaView>
@@ -899,7 +903,8 @@ function Member () {
       <View style={[styles.shell, wide && styles.shellWide]}>
         <TopBar title={STEP_TITLES[step]} />
         <OfflineNote />
-        <View style={styles.flex}>{body}</View>
+        {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
+        <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
         {connectionLink}
       </View>
     )
@@ -924,7 +929,7 @@ function Member () {
       <View style={[styles.shell, wide && styles.shellWide]}>
         <TopBar title={STEP_TITLES[step]} />
         <OfflineNote />
-        <View style={styles.flex}>
+        <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
             page
             ownKey={ownKey}
@@ -1077,8 +1082,10 @@ function Member () {
   // it light there too.
   const light = tab === 'diario' && step === 'pronto' && node.online !== false && nav.depth(stack) === 0
 
+  // Side insets are applied once here (sidePad); top and bottom by each bar;
+  // Modal content (sheets, photo viewer) pads itself.
   return (
-    <View style={styles.root}>
+    <View style={[styles.root, { paddingHorizontal: sidePad }]}>
       {content}
       <Publicar
         open={composer.open}
