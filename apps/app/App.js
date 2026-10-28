@@ -5,7 +5,8 @@
 // then the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar, the
+// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar (an info button
+// that opens the screen's 'Como funciona' sheet), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
 // both show; its close is remembered for 30 days), the publish button and
@@ -51,6 +52,8 @@ import { watchRelease } from './src/pwa'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
+import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
+import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
 import Ajustes from './src/screens/Ajustes'
@@ -567,6 +570,18 @@ function Member () {
     const binding = bindHistory({
       depthOf: () => nav.depth(stackRef.current),
       onBack: (n) => {
+        if (closeHelp()) {
+          // Help closes first and the screen (and any report draft) stays; the
+          // popstate already stepped the history back, so push the entries again.
+          const h = globalThis.history
+          const d = nav.depth(stackRef.current)
+          if (h && typeof h.pushState === 'function') {
+            for (let k = d - n + 1; k <= d; k++) {
+              try { h.pushState({ varanda: k }, '') } catch {}
+            }
+          }
+          return
+        }
         if (sheetOpenRef.current) {
           // A sheet is open: Back closes it first and the screen stays. The
           // popstate already stepped the history back, so the entries it
@@ -644,6 +659,12 @@ function Member () {
   const sheetOpen = composer.open || report !== null || ajustes !== null
   const sheetOpenRef = useRef(sheetOpen)
   sheetOpenRef.current = sheetOpen
+  const helpOpen = useHelpOpen()
+  const helpOpenRef = useRef(helpOpen)
+  helpOpenRef.current = helpOpen
+  // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
+  const stackDepth = nav.depth(stack)
+  useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
@@ -652,7 +673,7 @@ function Member () {
   // (for a newcomer, right after the account link), and that sheet would
   // cover both. The once-sync clauses mirror the outbox gate above: a member
   // request now would preempt the recovery run.
-  const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen &&
+  const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
   const action = inviteAction({
     invite,
@@ -801,7 +822,7 @@ function Member () {
   useEffect(() => {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-        if (sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
+        if (helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
         commitStack(nav.pop(stackRef.current))
         return true
       })
@@ -809,7 +830,7 @@ function Member () {
     }
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
+      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
       goBack()
     }
     globalThis.addEventListener('keydown', onKey)
@@ -901,7 +922,7 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
         <OfflineNote />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
@@ -927,7 +948,7 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        <TopBar title={STEP_TITLES[step]} right={<HelpButton doc={HELP.perfil} />} />
         <OfflineNote />
         <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
@@ -965,7 +986,7 @@ function Member () {
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={TAB_TITLES[tab]} />
+          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab]} />} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed

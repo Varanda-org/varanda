@@ -7,13 +7,18 @@
 // and opens it again. Web with varanda-serve: no onboarding (the
 // configuration is varanda-serve's), only the connection state and a
 // reconnect button.
+// On the hosted page only, the boot "Conectar" is for everyone, so it shows one
+// plain sentence and a retry, with the technical view under "Detalhes técnicos";
+// Ajustes > Avançado > Conexão keeps that view open.
 
 import { useEffect, useState } from 'react'
-import { Platform, Switch, View } from 'react-native'
+import { Platform, Pressable, Switch, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
 import { canConfigure, hostedPage } from '../configStore'
+import { connectProblem, DETAILS_LABEL, RETRY_LABEL } from '../connectText'
 import { useNode } from '../node'
+import { colors, type } from '../ui/theme'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
 
 // Fixed for the app's lifetime (src/client/mode.js on the web).
@@ -49,6 +54,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   // this browser asks first: the diary is bound to the association it was
   // created with, and the installation may use another one.
   const [confirmBack, setConfirmBack] = useState(false)
+  const [details, setDetails] = useState(false)
   const apply = useAction()
   const ready = node.phase === 'ready'
   const [info, infoError] = useInfo(node, active, ready)
@@ -71,6 +77,55 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   const copy = (
     <Soft>Na web, o seu nó roda neste navegador. A identidade vem da sua passkey; só os diários ficam neste navegador.</Soft>
   )
+
+  // node.hosted is false on the hosted page once a manual configuration was
+  // saved, and node.config is still null during the first connect.
+  if (!embedded && !manual && hostedPage === true) {
+    const configError = node.phase === 'config-error'
+    const problem = connectProblem(node.error || apply.error)
+    return (
+      <Page>
+        <Title>Conectar</Title>
+        {busy && problem.text === '' ? <Notice>conectando…</Notice> : <ErrorText>{problem.text}</ErrorText>}
+        <Btn
+          label={RETRY_LABEL}
+          onPress={() => apply.run(() => configError ? node.retryDiscovery() : node.reconnect())}
+          pending={busy || apply.pending}
+        />
+        <Pressable
+          onPress={() => setDetails((d) => !d)}
+          accessibilityRole='button'
+          accessibilityLabel={DETAILS_LABEL}
+          accessibilityState={{ expanded: details }}
+          hitSlop={10}
+        >
+          <Text style={{ ...type.counter, color: colors.accent }}>{DETAILS_LABEL}</Text>
+        </Pressable>
+        {details
+          ? (
+            <Card>
+              {problem.detail ? <Soft>{problem.detail}</Soft> : null}
+              {copy}
+              {node.config
+                ? (
+                  <View style={{ gap: 4 }}>
+                    <Label>{node.hosted ? 'detectados nesta instalação' : 'configuração em uso'}</Label>
+                    <Mono>{displayText(node.config.association)}</Mono>
+                    <Mono>{displayText(node.config.seederUrl)}</Mono>
+                  </View>
+                  )
+                : null}
+              {node.hostedSource === 'remembered'
+                ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
+                : null}
+              <Btn label={configError ? 'configurar manualmente' : 'usar outra configuração'} onPress={() => setManual(true)} secondary />
+              <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
+            </Card>
+            )
+          : null}
+      </Page>
+    )
+  }
 
   // Hosted page, no configuration found: an error with a retry, never the form
   // (until the person asks for it).

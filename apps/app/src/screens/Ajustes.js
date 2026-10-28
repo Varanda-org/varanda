@@ -14,8 +14,8 @@
 // that record. Recomeçar, once the account is actually gone, calls
 // onTermsReset with the old key so the shell can drop its acceptance too.
 // Instalar o app shows an 'Instalar' button that opens the browser's install
-// dialog whenever the browser offers installation, above the text that stays
-// as the fallback. The button never appears in Samsung Internet, because
+// dialog whenever the browser offers installation, above a short instruction
+// whose Saiba mais sheet holds the per-browser facts. The button never appears in Samsung Internet, because
 // Play Protect blocks the app that browser builds.
 
 import { useEffect, useState } from 'react'
@@ -26,6 +26,8 @@ import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
+import { HELP, SHORT } from '../help'
+import { HelpLink } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -47,7 +49,6 @@ const TITLES = {
   identidade: 'Identidade técnica'
 }
 
-const INSTALL_TEXT = 'Abra o menu do navegador e escolha instalar o app (no iPhone: Compartilhar e depois Adicionar à Tela de Início). No Android, instale pelo Chrome: no Samsung Internet a instalação fica desligada, porque o Android bloqueia o app que esse navegador cria. No Chrome, entre com a mesma passkey. Depois de instalado, ele abre mesmo sem internet e mostra o que já está neste aparelho. Apagar os dados do site apaga o que está guardado aqui. Outra aba deste navegador fica bloqueada enquanto esta estiver aberta.'
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
 
@@ -285,7 +286,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('instalar')}>
           <Page>
             {install.canPrompt ? <Btn label='Instalar' onPress={() => { install.promptInstall() }} /> : null}
-            <Soft>{INSTALL_TEXT}</Soft>
+            <Soft>{SHORT.install}</Soft>
+            <HelpLink doc={HELP.instalar} />
           </Page>
         </View>
         <View style={shown('conexao')}>

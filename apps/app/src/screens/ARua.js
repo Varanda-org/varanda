@@ -39,7 +39,9 @@ import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexC
 import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
 import { isBusy, isDiaryGone, isSeederDown } from './Conversa'
+import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { HelpLink } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -871,6 +873,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         ? (
           <View style={styles.footer}>
             <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
+            <HelpLink doc={HELP.bloqueio} />
           </View>
           )
         : null}

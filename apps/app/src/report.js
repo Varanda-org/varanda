@@ -17,7 +17,7 @@ export const TEXT_MAX = 280
 const TIMEOUT_MS = 8000
 const MAX_BODY = 4096
 
-export const NOT_LINKED_MESSAGE = 'Para denunciar, primeiro vincule sua conta Google em Identidade.'
+export const NOT_LINKED_MESSAGE = 'Para denunciar, primeiro vincule sua conta Google em Ajustes → Conta e @nome.'
 
 const ERROR_MESSAGES = {
   'nao-vinculado': NOT_LINKED_MESSAGE,

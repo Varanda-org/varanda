@@ -11,7 +11,7 @@
 // the counts and offers curtir, republicar and citar; a reply names its
 // parent, a quote shows the quoted post and a repost the original, each
 // read and verified by the node.
-// Hosted web only, a field "pesquisar por assunto" above the explanation: on
+// Hosted web only, a field "pesquisar por assunto" above the short note and help: on
 // submit (never per keystroke) the Busca screen replaces the rounds with the
 // posts of any diary the seeder indexed that contain the words; 'limpar'
 // brings the rounds back from memory, unchanged.
@@ -22,8 +22,9 @@ import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } fro
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
+import { HELP } from '../help'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
   roundLabel, roundStarts, skippedText, withoutAuthor
 } from '../peek'
@@ -33,12 +34,11 @@ import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { HelpLink } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { Pill } from '../ui/Pill'
 import { type } from '../ui/theme'
-
-const MEMORY_TEXT = 'As publicações ficam só na memória do navegador enquanto a aba está aberta.'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
 // most 4095 diaries, so nine pages is the whole list and a hard stop.
@@ -75,7 +75,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     following: new Set()
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
-  const [rule, setRule] = useState(false)
   // The typed text and the active search ({ tokens, path } or null).
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState(null)
@@ -362,17 +361,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     <View style={styles.header}>
       {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel='como funciona'
-        accessibilityState={{ expanded: rule }}
-        onPress={() => setRule((v) => !v)}
-        hitSlop={6}
-      >
-        <Text style={styles.toggle}>{rule ? 'esconder' : 'como funciona'}</Text>
-      </Pressable>
-      {rule ? <Soft>{PEEK_RULE_TEXT}</Soft> : null}
-      <Soft>{MEMORY_TEXT}</Soft>
+      <HelpLink doc={HELP.espiadinha} />
       <CountsNote social={social} />
     </View>
   )
@@ -400,6 +389,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         ? (
           <View style={styles.footer}>
             {skipped ? <Soft>{skipped}</Soft> : null}
+            {skipped ? <HelpLink doc={HELP.ausentes} /> : null}
             {meta.incomplete ? <Soft>A lista pode estar incompleta; puxe para atualizar.</Soft> : null}
           </View>
           )

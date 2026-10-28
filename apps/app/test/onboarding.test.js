@@ -57,3 +57,11 @@ test('step titles and hints cover every step', async (t) => {
   t.alike(Object.keys(STEP_TITLES).sort(), steps.slice().sort())
   for (const s of steps) t.ok(STEP_HINTS[s].length > 0)
 })
+
+test('step titles and hints avoid technical words', async (t) => {
+  const { STEP_TITLES, STEP_HINTS } = await load()
+  const technical = /(^|[^\p{L}])(semeador|chave|certificado|nó)(?![\p{L}])/iu
+  for (const text of [...Object.values(STEP_TITLES), ...Object.values(STEP_HINTS)]) {
+    t.absent(technical.test(text), text)
+  }
+})

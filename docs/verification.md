@@ -1920,3 +1920,52 @@ Defects found and fixed:
 Not verified: a real Android device, arm64-v8a, a release build, Doze and the real background limits (step g only sends the app to the Home screen for 5 s), and iOS after the driver refactor (`--platform ios` keeps the old defaults, `--host 127.0.0.1`, probing on; the iOS gate was not re-run).
 
 Method notes: with the data partition too small the emulator refuses to start, so keep several GB free. `adb reverse` carries TCP only. Do not stop Metro with `kill $(lsof -ti tcp:8081)`: `lsof` also lists the emulator process, which has a connection to that port, and in this run the kill stopped the emulator too. Use `lsof -ti tcp:8081 -sTCP:LISTEN`.
+
+## 31. Textos mais curtos e folhas de ajuda (issue #198, 2026-10-28)
+
+### O que mudou
+
+- As explicações saíram das telas e foram para uma folha de ajuda aberta pelo botão de informações (ⓘ). O conteúdo fica em `apps/app/src/help.js` (um texto por aba e por passo da configuração) e a folha em `apps/app/src/ui/Help.js`. Os avisos que antes ocupavam a tela viraram uma linha curta com "Saiba mais", que abre a folha do tema.
+- Têm ⓘ: A Rua, Espiadinha, Seguindo, Avisos, Diário e os primeiros passos da configuração. Ganharam só "Saiba mais": passkey, vínculo com o Google, instalação, denúncia, diários que não aparecem, contas bloqueadas, pesquisa e registro do aceite.
+- As telas principais e a tela Conectar da web hospedada não mostram mais semeador, nó, chave, certificado nem índice. A tela Conectar mostra uma frase simples e um botão "Tentar de novo" (`apps/app/src/connectText.js`: `CONNECT_FAILED_TEXT`, `OTHER_TAB_TEXT`, `RETRY_LABEL`), e os termos técnicos da falha ficam em "Detalhes técnicos", recolhido.
+- O aviso do vínculo com o Google ficou em uma frase visível, antes de "Continuar com o Google".
+- Textos de offline: Espiadinha e Avisos mostram "Sem conexão" com "Confira sua internet." (`PEEK_OFFLINE_MESSAGE`, `NOTICES_OFFLINE_MESSAGE`); a pesquisa mostra "A pesquisa precisa de conexão." (`SEARCH_OFFLINE_MESSAGE`).
+- "Semeador ocupado" da tela passa a ser "Muitas pessoas conectadas agora. Tente de novo em instantes." (mapeamento em `apps/app/src/ui/index.js`).
+- Ajustes › Avançado continua técnico. Os Termos, a Política de Privacidade e a regra da Espiadinha não mudaram; `apps/app/src/legal.js` não foi alterado, então nenhum aceite novo é pedido.
+
+### Testes automatizados
+
+Cobertura no repositório:
+
+- `apps/app/test/help.test.js`: os textos da folha de ajuda por aba e por passo, e os temas de "Saiba mais".
+- `apps/app/test/connectText.test.js`: as frases da tela Conectar, o botão de tentar de novo e a separação entre a frase e os detalhes técnicos.
+- Atualizados para os textos novos: `apps/app/test/peek.test.js`, `apps/app/test/topics.test.js`, `apps/app/test/notices.test.js`, `apps/app/test/report.test.js` e `apps/app/test/onboarding.test.js`.
+
+Resultados (2026-10-28, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (38, 8, 31, 39, 43 e 2 arquivos de teste); `npm run demo` termina com "DEMO OK". Node 20 não foi rodado localmente; fica para a CI.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados e não realizada ainda; marcar só o que for de fato executado, com a saída.
+
+- [ ] Cada aba (A Rua, Espiadinha, Seguindo, Avisos, Diário) e cada passo da configuração tem o ⓘ, com papel de botão e rótulo (não realizada ainda).
+- [ ] Fechar, o toque no fundo, Escape e o botão Voltar do Android fecham a folha (não realizada ainda).
+- [ ] "Saiba mais" em Entrar, Escolha seu @nome, Conta e @nome, Instalar, Denunciar, no aviso de Espiadinha pulada, no aviso de A Rua bloqueada e na pesquisa abre a folha certa (não realizada ainda).
+- [ ] No iOS, a folha de ajuda aberta sobre Ajustes ou sobre Denunciar aparece e volta para a tela, e o rascunho continua lá (não realizada ainda).
+- [ ] Na web, o Voltar com a folha de ajuda aberta sobre Denunciar fecha só a folha e mantém o rascunho da denúncia (não realizada ainda).
+- [ ] A frase do vínculo com o Google aparece visível antes de "Continuar com o Google" (não realizada ainda).
+- [ ] Na web hospedada, com uma segunda aba aberta, aparece a frase de outra aba, e "Tentar de novo" recupera a conexão (não realizada ainda).
+- [ ] Na web hospedada com uma configuração manual salva antes, a página abre na visão simples (não realizada ainda).
+- [ ] Com o boot offline, aparece a frase genérica de conexão, sem termos técnicos (não realizada ainda).
+- [ ] Enquanto conecta, nenhum campo manual aparece (não realizada ainda).
+- [ ] "Detalhes técnicos" começa recolhido e, ao abrir, é anunciado como expandido (não realizada ainda).
+- [ ] Espiadinha e Avisos offline mostram "Sem conexão" e "Confira sua internet."; a pesquisa offline mostra "A pesquisa precisa de conexão." (não realizada ainda).
+- [ ] Com os slots externos do semeador ocupados, a Espiadinha e os Avisos mostram "Muitas pessoas conectadas agora. Tente de novo em instantes." Este item substitui o texto antigo da verificação "Seeder full" da §24 (não realizada ainda).
+- [ ] Ajustes › Avançado › Conexão continua igual, com os termos técnicos (não realizada ainda).
+- [ ] Em Identidade técnica, o texto ainda diz chave e certificado (não realizada ainda).
+- [ ] Membro que já aceitou a versão 1 dos Termos não é perguntado de novo, porque `legal.js` não mudou (não realizada ainda).
+
+### Limites
+
+- A tela Conectar nativa (ConexaoNo), o `varanda-serve` e Ajustes › Avançado mantêm as palavras técnicas (semeador, chave, certificado).
+- A folha de ajuda ocupa a altura toda porque o componente `Sheet` não tem variante curta.
+- O mock do site (`apps/site/public/index.html`) não foi atualizado nesta mudança.

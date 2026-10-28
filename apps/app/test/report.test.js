@@ -84,7 +84,7 @@ test('a post with a lone surrogate can be reported once normalized', async (t) =
 test('every error token maps to a fixed message', async (t) => {
   const { toError } = await load()
   const cases = {
-    'nao-vinculado': 'Para denunciar, primeiro vincule sua conta Google em Identidade.',
+    'nao-vinculado': 'Para denunciar, primeiro vincule sua conta Google em Ajustes → Conta e @nome.',
     'limite-denuncias': 'muitas denúncias em 24 horas; tente de novo amanhã',
     limite: 'a moderação não pode receber denúncias agora',
     'assinatura-invalida': 'não foi possível provar a chave',

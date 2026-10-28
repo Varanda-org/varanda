@@ -31,18 +31,20 @@ import { StyleSheet, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { shouldReloadOnShow } from '../paging'
+import { HELP, SHORT } from '../help'
 import { fetchTopic } from '../indexClient'
 import { planPeeks } from '../thread'
 import { whoOf } from '../who'
 import {
   SEARCH_BUSY, SEARCH_CONTINUE, SEARCH_CONTINUE_BODY, SEARCH_EMPTY_BODY, SEARCH_EMPTY_TITLE, SEARCH_END, SEARCH_ERROR,
-  SEARCH_HINT, SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_MEMORY, SEARCH_OFFLINE_MESSAGE,
+  SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_OFFLINE_MESSAGE,
   SEARCH_UNAVAILABLE, assembleSearch, isLastSearchPage, mergeRefs, searchNotice
 } from '../topics'
 import { CountsNote, refOf, socialRowProps, useSocial } from './ARua'
 import { peekAll, useFollowSet } from './Conversa'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { HelpLink } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 
@@ -258,8 +260,8 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
       {notice === null
         ? (
           <View style={styles.notes}>
-            <Soft>{SEARCH_HINT}</Soft>
-            <Soft>{SEARCH_MEMORY}</Soft>
+            <Soft>{SHORT.search}</Soft>
+            <HelpLink doc={HELP.busca} />
             {flags.indexing ? <Soft>{SEARCH_INDEXING_NOTE}</Soft> : null}
             {!flags.complete ? <Soft>{SEARCH_INCOMPLETE_NOTE}</Soft> : null}
             {gone ? <Soft>{gone}</Soft> : null}

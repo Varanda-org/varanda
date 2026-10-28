@@ -10,22 +10,22 @@ export const STEP_TITLES = {
   entrar: 'Bem-vindo à Varanda',
   recuperando: 'Buscando sua conta…',
   vinculo: 'Escolha seu @nome',
-  identidade: 'Sua identidade',
+  identidade: 'Criar sua conta',
   // Native and manual setups only.
-  certificado: 'Certificado de membro',
+  certificado: 'Liberar sua conta',
   carregando: 'Um instante',
   perfil: 'Como você quer aparecer',
   pronto: 'Tudo pronto'
 }
 
 export const STEP_HINTS = {
-  entrar: 'Entre com a passkey do seu aparelho: sem senha, sem e-mail.',
+  entrar: 'Entre com a passkey deste aparelho.',
   recuperando: 'Estamos trazendo de volta o que já é seu.',
-  vinculo: 'Seu @nome é como as pessoas encontram você. Vamos confirmar sua conta Google uma única vez.',
-  identidade: 'Sua identidade é criada neste aparelho.',
-  certificado: 'Cole o certificado emitido pela associação para publicar e sincronizar.',
+  vinculo: 'Seu @nome é como as pessoas encontram você.',
+  identidade: 'Sua conta é criada neste aparelho.',
+  certificado: 'Envie o código à associação e cole o que ela devolver.',
   carregando: 'Só um instante.',
-  perfil: 'Seu nome aparece em cada publicação; a bio é opcional.',
+  perfil: 'Seu nome aparece em cada publicação. A bio é opcional.',
   pronto: 'Tudo certo para começar.'
 }
 
