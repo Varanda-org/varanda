@@ -280,6 +280,18 @@ test('report.sign is refused by the node session (USAGE, not INTERNAL)', async (
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('terms.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { nonce: 'n'.repeat(43), version: 1 }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('terms.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('terms.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('peek.read is refused by the node session (USAGE), nothing opened or written', async (t) => {
   const NO = { code: 'USAGE', message: 'Espiadinha disponível só no navegador' }
   const fresh = await member(t)

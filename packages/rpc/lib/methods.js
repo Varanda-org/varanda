@@ -165,6 +165,10 @@ const REPORT_SEQ_MAX = 99999
 
 const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 
+// terms.sign (docs/rpc.md 5.29). Duplicated from @varanda/core lib/terms.js
+// (VERSION_MAX), which this package cannot import.
+const TERMS_VERSION_MAX = 9999
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -234,6 +238,15 @@ const SPECS = {
     cross (given, value) {
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
       return null
+    }
+  },
+  // Signs the terms-acceptance statement with the identity key; the node
+  // fills in member and association itself, so a caller never chooses the
+  // bytes.
+  'terms.sign': {
+    fields: {
+      nonce: req(isNonce),
+      version: req(int(1, TERMS_VERSION_MAX))
     }
   },
   'profile.set': {
