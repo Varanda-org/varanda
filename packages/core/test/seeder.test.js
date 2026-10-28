@@ -10,6 +10,7 @@ const { createCert, createSeederCert, generateAssociationKeyPair } = require('..
 const { createSwarm, joinAndFlush, topicFor, attachAdmission, generateNoiseKeyPair } = require('../lib/net')
 const { memberCertRecord, MAX_BLOCK_BYTES } = require('../lib/records')
 const { openReplica } = require('../lib/store')
+const { localDay } = require('../lib/activity')
 const { discoveryKey } = require('hypercore-crypto')
 
 function hex (buf) {
@@ -185,6 +186,35 @@ test('valid announce: admitted once, persisted before serving, then served', asy
   t.alike(config, { v: 1, role: 'seeder', association: assoc.hex })
   t.absent(fs.existsSync(path.join(dataDir, 'pending.json')), 'no pending.json')
   t.ok(events.some((e) => e.event === 'peer' && e.role === 'member'))
+})
+
+test('active diaries: a newly admitted diary counts once its signed length arrives, counts only', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.is(seeder.stats().activeDay, 0)
+  t.is(seeder.stats().activeWeek, 0)
+
+  const dayBefore = localDay(Date.now())
+  const author = await client(t, bootstrap, assoc, { blocks: validBlocks(assoc) })
+  const peer = await author.seederPeer()
+  peer.send({ type: 'announce', key: author.key, cert: validCert(assoc, author.key) })
+  await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 3, 'have 3', 10000)
+  const first = seeder.stats()
+  t.is(first.activeWeek, 1, 'grown this week')
+  // The Brasília day may roll over mid-test; only then may activeDay be 0.
+  if (localDay(Date.now()) === dayBefore) t.is(first.activeDay, 1, 'grown today')
+  else t.ok(first.activeDay === 0 || first.activeDay === 1, 'day rolled over')
+
+  // Growing again the same diary does not count it twice.
+  await author.core.append(post('4'))
+  await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 4, 'have 4', 10000)
+  const second = seeder.stats()
+  t.is(second.activeWeek, first.activeWeek, 'still one diary this week')
+  t.is(second.activeDay, first.activeDay, 'still one diary today')
+  t.absent(/[0-9a-f]{64}/i.test(JSON.stringify(seeder.stats())), 'no key in stats()')
 })
 
 test('announce rejections: bad certificates and bad block 0 are never kept', async (t) => {

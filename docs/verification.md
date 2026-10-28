@@ -1787,3 +1787,43 @@ Cobertura no repositório:
 - [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
 - [ ] O log do serviço não tem texto de publicação.
 - [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.
+
+## 28. Estatísticas de uso no painel de moderação (2026-10-27)
+
+### Resumo
+
+- A aba Estatísticas de `/account/mod/` fica só para os e-mails de `VARANDA_STATS_EMAILS`, um subconjunto de `VARANDA_MODERATOR_EMAILS`. `GET /account/mod/api/me` traz `stats: true` só para esses administradores. Quem está fora da lista não vê a aba, e `GET /account/mod/api/stats` responde 403 `nao-autorizado`. Sem sessão, a resposta continua 401 `{"error":"nao-autorizado"}`: a sonda `api/me` do `deploy.sh` não muda.
+- A aba mostra membros e teto, diários, ativos hoje e em 7 dias, conexões, publicações indexadas, armazenamento, cadastros por semana (12) e por mês (12, com o total acumulado) a partir de `linkedAt`, e uma tabela de 30 dias. Não mostra contagem de denúncias. Só contagens: sem chave, e-mail ou @nome.
+- `activeDay` e `activeWeek` vêm de `packages/core/lib/activity.js` (`DAY_OFFSET_MS`, `dayStart`, `localDay`, `noteGrowth`, `countActive`). Contam diários servidos e já conferidos (`gated`) cujo tamanho assinado passou do comprimento conhecido ao servir. A janela é o dia de Brasília (UTC−3), fixo, sem horário de verão desde 2019, no relógio da máquina. Ficam só na memória do semeador, zeram no reinício, e um diário admitido pela primeira vez nesta execução conta quando o tamanho assinado cresce. O `/health` publica `activeDay` e `activeWeek`; o `/metrics` publica `varanda_seeder_active_diaries_day` e `varanda_seeder_active_diaries_week`. As contagens nunca dizem quais diários.
+- `usage.json` fica no diretório de dados da conta (volume `account-data`): `{ v: 1, days: [{ day, members, admitted, activeDay, activeWeek, blocks, bytes, mediaBytes, topicPosts, connections, external }] }`, uma linha por dia de Brasília (UTC−3), no máximo 400 (`MAX_DAYS`), modo `0600`, gravado com `writeJsonAtomic`. Um arquivo inválido nunca é regravado. `PEAK_FIELDS` (`activeDay`, `activeWeek`, `connections`, `external`) guardam o pico do dia; os outros totais guardam o valor mais recente. A amostragem de fundo é a cada 15 minutos (a primeira cerca de um minuto depois de subir) e a aba pede no máximo uma leitura ao vivo a cada 5 minutos, em `VARANDA_SEEDER_HEALTH` (padrão `http://127.0.0.1:8788`, loopback, lido só com as estatísticas ligadas). Apagar o arquivo só perde o histórico.
+- Os cadastros por semana e por mês usam o mesmo dia de Brasília (UTC−3) de `linkedAt` e são exatos, sem suprimir células pequenas: `linkedAt` já é a data do certificado público.
+- O serviço de conta registra só `{ event: 'usage', reason }`, com `reason` `ligada`, `desligada`, `invalido` ou `falhou`.
+- O `deploy.sh` e o serviço conferem `VARANDA_STATS_EMAILS` (subconjunto dos moderadores) e `VARANDA_SEEDER_HEALTH` (loopback) sem imprimir os valores. O contêiner `account` precisa ser recriado para ler o `.env`.
+- Documentos: `README.md` (saúde, política de registros, aba), `docs/protocol.md` (seção 7 e "Files and replicas"), `docs/design.md` (tabela LGPD e o painel) e esta seção.
+
+### Testes automatizados
+
+- `packages/core/test/activity.test.js`: `DAY_OFFSET_MS`, `dayStart`, `localDay`, crescimento só além do comprimento conhecido, janelas do dia e da semana, só entradas `gated`.
+- `apps/cli/test/seed-ops.test.js`: `activeDay` e `activeWeek` no `/health` e os medidores `varanda_seeder_active_diaries_day` e `varanda_seeder_active_diaries_week` no `/metrics`; um diário restaurado sem crescimento novo não conta.
+- `packages/core/test/seeder.test.js`: um diário admitido nesta execução conta uma vez quando o tamanho assinado chega; um novo crescimento no mesmo dia não conta de novo.
+- `apps/cli/test/account-store.test.js`: `linkStats` devolve só contagens, por dia de `linkedAt`.
+- `apps/cli/test/account-seeder-health.test.js`: leitura do `/health` em loopback; um semeador antigo sem `activeDay` / `activeWeek` entrega esses campos `null`.
+- `apps/cli/test/account-usage-stats.test.js`: `usage.json`, pico contra o mais recente, teto de 400 dias, arquivo inválido nunca regravado (registro `usage` `invalido`), falha de gravação (registro `usage` `falhou`), baldes de cadastro, `GET` da visão.
+- `apps/cli/test/account-mod.test.js`: `api/me` com `stats: true` só para o administrador das estatísticas; `api/stats` 403 `nao-autorizado` para os outros; sem sessão, `api/me` segue exatamente 401 `{"error":"nao-autorizado"}`.
+- `apps/cli/test/panel.test.js`: a aba Estatísticas só com `stats: true`; a tabela, o aviso de reinício e o aviso de `usage.json` inválido.
+- `apps/cli/test/account-stats.test.js`: o serviço liga e desliga a amostragem a partir de `VARANDA_STATS_EMAILS` e `VARANDA_SEEDER_HEALTH`, e registra `usage` `ligada` ou `desligada`.
+- `apps/cli/test/deploy.test.js`: o `deploy.sh` confere o subconjunto e o loopback sem imprimir os valores (também com espaço em volta do `=` e com aspas); a sonda de `/account/mod/api/me` continua no script.
+
+### Verificação humana
+
+Nenhuma destas conferências foi feita ao escrever esta seção.
+
+- [ ] `VARANDA_STATS_EMAILS` está definido em `deploy/seeder/.env` (subconjunto de `VARANDA_MODERATOR_EMAILS`) e o contêiner `account` foi recriado (`up -d --force-recreate account`).
+- [ ] Um administrador das estatísticas vê a aba Estatísticas em `/account/mod/`.
+- [ ] Um moderador fora da lista não vê a aba, e `GET /account/mod/api/stats` com a sessão dele responde 403 `nao-autorizado`.
+- [ ] Os números da aba batem com `curl -s http://127.0.0.1:8788/health`.
+- [ ] Uma publicação pelo PWA aumenta "Ativos hoje" em até 5 min.
+- [ ] Depois de reiniciar o semeador, a aba mostra "O semeador reiniciou há menos de 7 dias: os ativos ainda estão parciais." e os ativos recomeçam em 0.
+- [ ] `usage.json` aparece no volume `account-data` em cerca de 15 min, com modo `0600` e uma linha por dia de Brasília (UTC−3).
+- [ ] `docker compose logs account seeder` não mostra e-mail, chave nem endereço.
+- [ ] A sonda `api/me` do `deploy.sh` continua igual: sem sessão, 401 e o corpo `{"error":"nao-autorizado"}`.

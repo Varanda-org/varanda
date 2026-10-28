@@ -534,6 +534,39 @@ test('exportLinks has the email and no signature, cert or secret', async (t) => 
   t.absent(JSON.stringify(rows).includes(SIG), 'no signature')
 })
 
+test('linkStats: member total, cap and sign-ups per UTC day; counts only', async (t) => {
+  const { dir, c, iss, store } = setup(t)
+  c.t = Date.parse('2026-10-01T09:00:00.000Z')
+  await link(store, iss, memberKey(), 'ana', 'sub-ana', 'ana@example.test')
+  c.t = Date.parse('2026-10-01T23:59:00.000Z')
+  await link(store, iss, memberKey(), 'beto', 'sub-beto', 'beto@example.test')
+  c.t = Date.parse('2026-10-02T00:01:00.000Z')
+  await link(store, iss, memberKey(), 'caio', 'sub-caio', 'caio@example.test')
+
+  const want = { members: 3, maxMembers: null, byDay: [['2026-10-01', 2], ['2026-10-02', 1]] }
+  const stats = store.linkStats()
+  t.alike(stats, want)
+  t.alike(Object.keys(stats).sort(), ['byDay', 'maxMembers', 'members'], 'only the three fields')
+  t.alike(openAccountStore(dir, { readOnly: true }).linkStats(), want, 'a readOnly reopen gives the same answer')
+  t.is(openAccountStore(dir, { now: c.now, maxMembers: 5 }).linkStats().maxMembers, 5, 'the cap is reported')
+
+  const json = JSON.stringify(stats)
+  t.absent(/[0-9a-f]{64}/i.test(json), 'no member key')
+  t.absent(json.includes('@'), 'no e-mail')
+  t.absent(json.includes('sub-'), 'no sub')
+  for (const name of ['ana', 'beto', 'caio']) t.absent(json.includes(name), 'no username ' + name)
+  t.absent(json.includes('T'), 'no time finer than a day')
+})
+
+test('linkStats: a custom dayOf buckets by another day (UTC-3 here)', async (t) => {
+  const { c, iss, store } = setup(t)
+  c.t = Date.parse('2026-10-02T01:00:00.000Z')
+  await link(store, iss, memberKey(), 'dora')
+  const dayOf = (ms) => new Date(ms - 3 * 3600000).toISOString().slice(0, 10)
+  t.alike(store.linkStats(dayOf).byDay, [['2026-10-01', 1]], 'counts on the UTC-3 day')
+  t.alike(store.linkStats().byDay, [['2026-10-02', 1]], 'the default stays UTC')
+})
+
 test('a symlinked data dir is refused', (t) => {
   const root = tmpDir(t)
   const real = path.join(root, 'real')
