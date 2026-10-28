@@ -21,6 +21,7 @@ const ERROR_MESSAGES = {
   'conta-vinculada': 'esta conta Google já está vinculada a outra chave',
   'assinatura-invalida': 'não foi possível provar a chave',
   expirado: 'o vínculo expirou, comece de novo',
+  'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
   // Member cap (503). Already-linked members never receive this token.
   'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.'
 }
@@ -144,3 +145,16 @@ export const renameStart = ({ member, username }) =>
   call('POST', '/account/rename/start', { member, username })
 export const renameFinish = ({ member, nonce, signature }) =>
   call('POST', '/account/rename/finish', { member, nonce, signature })
+
+// Terms acceptance sync: the member proves its key over a server nonce, the
+// service records which version that Google account accepted and when.
+export const termsStart = async ({ member, version }) => {
+  const data = await call('POST', '/account/terms/start', { member, version })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const termsFinish = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/terms/finish', { member, nonce, signature })
+  if (!Number.isInteger(data.version) || typeof data.acceptedAt !== 'string') throw toError('indisponivel')
+  return { version: data.version, acceptedAt: data.acceptedAt }
+}

@@ -14,7 +14,10 @@
 // session signs (account.sign) are the ones the service verifies; the v2
 // certificate it issues is admitted by the seeder and recovered by a second
 // device; the username record the session appends reaches a follower's
-// `feed --json`, and so does a rename once the cooldown has passed.
+// `feed --json`, and so does a rename once the cooldown has passed; the
+// terms statement the session signs (terms.sign) is the one the service
+// verifies and records in terms.json, without touching the diary or storing
+// any personal data.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -30,6 +33,8 @@ const { createSeederCert, loadAssociationKeyPair, certForKey, verifyUsernameReco
 const { testnet, tmpDir, until, bootstrapFlags } = require('./helpers/net')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS } = require('../lib/account/store')
+const { openTermsStore } = require('../lib/account/terms-store')
+const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { createAccountServer, loadIssuer, COOKIE } = require('../lib/account/server')
 // The browser node lives in packages/web-member; apps/cli does not depend
 // on it, so it is reached by path (as passkey-e2e.test.js reaches this BIN).
@@ -286,12 +291,14 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
   const logs = []
+  const termsDir = tmpDir(t, 'varanda-acc-terms-')
   const server = createAccountServer({
     association,
     origin: ORIGIN,
     google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
     store: openAccountStore(accountDir, { now }),
     issuer,
+    terms: openTermsStore(termsDir),
     log: (e) => logs.push(JSON.stringify(e)),
     now
   })
@@ -384,6 +391,34 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   t.is(linked.username, 'ana')
   t.alike(linked.cert, cert)
   t.is(linked.nextChangeAt, nextChangeAt)
+
+  // ---- terms: signed by the session, recorded by the service, diary untouched ----
+  const diaryBefore = (await a.web.request('log.read', {})).entries.length
+  const acceptTerms = async () => {
+    const start = await account.api('POST', '/account/terms/start', { body: { member: keyHex, version: TERMS_VERSION } })
+    t.is(start.status, 200, 'terms start')
+    const proof = await a.web.request('terms.sign', { nonce: start.body.nonce, version: TERMS_VERSION })
+    return account.api('POST', '/account/terms/finish', { body: { member: keyHex, nonce: start.body.nonce, signature: proof.signature } })
+  }
+  const accepted = await acceptTerms()
+  t.is(accepted.status, 200, 'the terms proof the session signed verifies')
+  t.is(accepted.body.version, TERMS_VERSION)
+  const again = await acceptTerms()
+  t.is(again.status, 200, 'a fresh nonce is accepted again')
+  t.is(again.body.acceptedAt, accepted.body.acceptedAt, 'and answers the same acceptedAt')
+  const stranger = crypto.keyPair()
+  const strangerHex = b4a.toString(stranger.publicKey, 'hex')
+  const c = await device(t, { storage: memoryNodeStorage(), association, seederUrl, keyPair: stranger })
+  await c.web.request('identity.create')
+  const unlinked = await account.api('POST', '/account/terms/start', { body: { member: strangerHex, version: TERMS_VERSION } })
+  t.is(unlinked.status, 403, 'an unlinked session cannot start')
+  t.alike(unlinked.body, { error: 'nao-vinculado' })
+  await c.node.close()
+  t.is((await a.web.request('log.read', {})).entries.length, diaryBefore, 'signing writes nothing to the diary')
+  const termsText = fs.readFileSync(path.join(termsDir, 'terms.json'), 'utf8')
+  t.absent(termsText.includes(EMAIL), 'terms.json: no e-mail')
+  t.absent(termsText.includes(SUB), 'terms.json: no sub')
+  t.alike(openTermsStore(termsDir, { readOnly: true }).list(keyHex), [{ version: TERMS_VERSION, acceptedAt: accepted.body.acceptedAt }])
 
   // ---- a second device: the same pair on fresh storage recovers the certificate ----
   const b = await device(t, { storage: memoryNodeStorage(), association, seederUrl, keyPair })

@@ -19,7 +19,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
-    'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'username.add'
+    'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.quote', 'post.reply',
@@ -90,6 +90,28 @@ test('account.sign', (t) => {
   bad(t, 'account.sign', { ...base, phase: 'finish', sub: '' }, 'finish without sub')
   bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
   bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
+})
+
+test('terms.sign', (t) => {
+  const base = { nonce: 'n'.repeat(43), version: 1 }
+  t.absent(isMutating('terms.sign'))
+  ok(t, 'terms.sign', base, base)
+  ok(t, 'terms.sign', { ...base, version: 9999 })
+  ok(t, 'terms.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'terms.sign', {})
+  for (const k of ['nonce', 'version']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'terms.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key']) {
+    bad(t, 'terms.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const version of [0, 10000, 1.5, '1', null, -1]) bad(t, 'terms.sign', { ...base, version }, 'version ' + version)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'terms.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
 })
 
 test('report.sign', (t) => {
