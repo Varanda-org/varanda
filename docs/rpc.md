@@ -314,7 +314,7 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 ### 5.26 `engagement.read`
 
 - Params: `{ refs: [ref] }`, nothing else: 1..`ENGAGEMENT_LIMIT_MAX` (62) distinct refs with seq >= 1 (a duplicate -> `'parâmetro inválido: refs'`). Not mutating.
-- Result: `{ liked: [ref], reposted: [ref] }`: the subsets of `refs` (request order) that the OWN diary currently likes / reposts. Other people's engagement is not here (counts come from the seeder index, protocol §7 "Seeder index route").
+- Result: `{ liked: [ref], reposted: [ref] }`: the subsets of `refs` (request order) that the OWN diary currently likes / reposts. Other people's engagement is not here (counts come from the seeder index, and so does the who-liked and who-reposted list, protocol §7 "Seeder index route").
 - Local data only; works while the browser identity is locked. Like every member read it preempts a running sync (6.1), so the app calls it before its peeks.
 
 ### 5.27 `diary.peek`
@@ -326,6 +326,8 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 - Size: 36 worst-case entries with a profile and a username always fit `MAX_MESSAGE` (section 2).
 
 Topic search is not an RPC method. The hosted app calls `GET /index/topic/<tokens>[/<cursor>]` (protocol §7 "Seeder index route") and verifies each returned ref with `diary.peek` (at most 36 seqs per call, two calls in flight), re-checking the words in the verified text. No new method and no row in the size table.
+
+Who liked and who reposted is not an RPC method either. The hosted app calls `GET|HEAD /index/likes/<author>/<seq>[/<cursor>]` and `GET|HEAD /index/reposts/<author>/<seq>[/<cursor>]` (protocol §7 "Seeder index route") and verifies each engager with one `diary.peek` `{ author, seqs: [seq], profileSeq?, usernameSeq? }`. The entry must be that `like` or `repost` with `on: true` and `to` equal to the post; anything else is dropped and counted as unavailable. Names come from the peeked profile and the verified username. There is no new method and no row in the size table. On the core node, `diary.peek` stays `USAGE` `'leitura sob demanda só na versão web'`.
 
 A node that predates 5.23 to 5.27 answers `USAGE` `'método desconhecido'`.
 
