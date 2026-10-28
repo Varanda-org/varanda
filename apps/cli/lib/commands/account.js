@@ -14,6 +14,9 @@ const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moder
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
+const { createUsageStats } = require('../account/usage-stats')
+const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
+const { localDay } = require('@varanda/core/lib/activity')
 const {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -44,6 +47,13 @@ const {
 // sign-in is open only to the e-mails in VARANDA_MODERATOR_EMAILS (empty:
 // disabled); its sessions live in memory, so a restart signs every
 // moderator out.
+//
+// It also holds usage.json, the daily history of the anonymous usage
+// statistics (apps/cli/lib/account/usage-stats.js: member count and the
+// local seeder's /health counts) shown on the panel's stats tab to the
+// e-mails in VARANDA_STATS_EMAILS (a subset of the moderators). Without stats
+// e-mails nothing is sampled, the seeder is never fetched and usage.json is
+// never written.
 const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [--member <hex>]]'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
@@ -308,8 +318,20 @@ function readEnv (env, dataDir) {
   const modEmails = parseModEmails(env.VARANDA_MODERATOR_EMAILS)
   // Not a usage error (exit 1), and never the value.
   if (modEmails === null) throw new Error('VARANDA_MODERATOR_EMAILS inválido')
+  // Stats admins are a subset of the moderators: the stats tab lives inside
+  // the moderation panel, whose sign-in only moderators pass. Like the list
+  // above, an error exit 1 that never carries the value.
+  const statsEmails = parseModEmails(env.VARANDA_STATS_EMAILS)
+  if (statsEmails === null || statsEmails.some((e) => !modEmails.includes(e))) throw new Error('VARANDA_STATS_EMAILS inválido')
+  // Ignored while stats are off (as VARANDA_SEEDER_HTTP with VARANDA_AI
+  // off), so a leftover value never stops a service that does not use it.
+  let seederHealth = null
+  if (statsEmails.length > 0) {
+    seederHealth = parseSeederHealthUrl(env.VARANDA_SEEDER_HEALTH)
+    if (seederHealth === null) throw new UsageError('VARANDA_SEEDER_HEALTH inválido')
+  }
   const triage = readTriageEnv(env, dataDir)
-  return { origin, clientId, clientSecret, modEmails, limits: readLimits(env), triage }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage }
 }
 
 // Builds and returns the triage worker, or null when it cannot run: a
@@ -409,7 +431,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
   const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -442,6 +464,7 @@ async function serve (flags, env) {
   })
   let listener = null
   let triage = null
+  let usage = null
   let closing = 'skipped'
   const onSignal = () => stop()
   process.once('SIGINT', onSignal)
@@ -469,10 +492,26 @@ async function serve (flags, env) {
       triage = await openTriage({ config: triageConfig, dataDir: flags.dataDir, association, moderation, log })
       if (triage !== null) log({ event: 'triage', reason: triageConfig.mode })
     }
+    // Usage statistics only when someone may see them. usage.json is written
+    // under the same gate as the account store: never once the lock is lost
+    // or the store failed. Days are Brasília calendar days (localDay), the
+    // same day the seeder's activeDay counts.
+    if (statsEmails.length > 0) {
+      const reader = createSeederHealthReader({ baseUrl: seederHealth })
+      usage = createUsageStats({
+        dataDir: flags.dataDir,
+        accounts: store,
+        readSeeder: () => reader.read(),
+        log,
+        dayOf: localDay,
+        canWrite: () => !lost && !unavailable && lock.owned()
+      })
+    }
+    log({ event: 'usage', reason: usage === null ? 'desligada' : 'ligada' })
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, triage: triage === null ? null : triage.worker, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -482,6 +521,7 @@ async function serve (flags, env) {
       log({ event: 'listening', host: listener.host, port: listener.port })
       log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }) })
       if (triage !== null) triage.worker.start()
+      if (usage !== null) usage.start()
       await stopped
     }
   } finally {
@@ -499,6 +539,10 @@ async function serve (flags, env) {
         new Promise((resolve) => setTimeout(resolve, EMBEDDER_CLOSE_MS).unref())
       ])
     }
+    // The sampler waits for an in-flight read and writes the day's last
+    // counts while the lock is still ours; a lost lock or a failed store
+    // skips the write, as closeIfOwned below does.
+    if (usage !== null) await usage.stop({ flush: !lost && !unavailable && lock.owned() })
     // A failed store has nothing it could fold safely (close() would only
     // answer 'indisponivel'), so it is skipped like a lost lock.
     closing = await closeIfOwned(store, lock, lost || unavailable, log)

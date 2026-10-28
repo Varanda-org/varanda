@@ -258,6 +258,11 @@ function isDate (x) {
   return typeof x === 'string' && Number.isFinite(Date.parse(x))
 }
 
+// linkStats' default bucket: the UTC day (YYYY-MM-DD) of an epoch ms.
+function utcDay (ms) {
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
 // A whole link record: status(), finish() and rename() read every one of
 // these fields, so a record missing one is refused at open, not later.
 function validLink (link) {
@@ -1417,6 +1422,30 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
+  // For the moderation panel's stats tab (apps/cli/lib/account/usage-stats.js):
+  // counts only -> { members, maxMembers, byDay }. members is exact because a
+  // link is never removed (applyEntry knows only link, email and rename);
+  // maxMembers is the cap or null. byDay is [day, count] pairs, ascending, with
+  // day = dayOf(ms of linkedAt) (UTC by default; the caller passes its own,
+  // e.g. the Brasília day). linkedAt is the `date` finish() puts in the
+  // member's public certificate, so a day count discloses nothing a peer
+  // cannot read in block 0. No key, sub, e-mail, username, cert or finer time
+  // leaves here, and exportLinks is not called. In-memory state only, O(N),
+  // so a readOnly or failed store answers too.
+  function linkStats (dayOf = utcDay) {
+    const counts = new Map()
+    for (const member of Object.keys(state.links)) {
+      const ms = Date.parse(state.links[member].linkedAt)
+      // validLink refuses such a record at open and in applyEntry; skipped
+      // rather than thrown so a stats read never takes the panel down.
+      if (!Number.isFinite(ms)) continue
+      const day = dayOf(ms)
+      counts.set(day, (counts.get(day) || 0) + 1)
+    }
+    const byDay = [...counts].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    return { members: linkCount(), maxMembers, byDay }
+  }
+
   // For the moderation desk (apps/cli/lib/account/mod-routes.js and
   // `account reports`): the contact of a linked member, or null. Never part
   // of a public answer (status() and lookup() stay without e-mail and sub);
@@ -1481,7 +1510,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, get, isFull, dropPending, finish, rename, status, lookup, exportLinks, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, get, isFull, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {

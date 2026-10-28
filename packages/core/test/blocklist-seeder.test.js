@@ -8,8 +8,9 @@ const path = require('node:path')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const { keyPair: signingKeyPair } = require('hypercore-crypto')
-const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
-const { Seeder } = require('@varanda/core/lib/seeder')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
+const { tmpDir } = require('./helpers/tmp')
+const { Seeder } = require('../lib/seeder')
 const {
   createCert,
   createSeederCert,
@@ -17,12 +18,12 @@ const {
   createIssuedCert,
   createModeratorCert,
   generateAssociationKeyPair
-} = require('@varanda/core/lib/cert')
-const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
-const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
-const { memberCertRecord } = require('@varanda/core/lib/records')
-const { writeBlocklist } = require('@varanda/core/lib/store')
+} = require('../lib/cert')
+const { createSnapshot } = require('../lib/blocklist')
+const { attachBlocklist } = require('../lib/blocklist-net')
+const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
+const { memberCertRecord } = require('../lib/records')
+const { writeBlocklist } = require('../lib/store')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')

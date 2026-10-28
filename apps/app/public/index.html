@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <!-- viewport-fit=cover: without it iOS reports the safe-area insets (home indicator, notch) as 0 and the tab bar sits under the home indicator -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover" />
     <title>%WEB_TITLE%</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#fbf8f3" />
@@ -19,6 +20,8 @@
       html,
       body {
         height: 100%;
+        /* The app's background, so the page matches the app before the first paint and behind modals */
+        background-color: #fbf8f3;
       }
       /* These styles disable body scrolling if you are using <ScrollView> */
       body {
