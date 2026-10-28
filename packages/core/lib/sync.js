@@ -1372,7 +1372,9 @@ async function runSync ({
     blocklist = createBlocklistState({
       association,
       load: () => {
-        const stored = readBlocklist(dataDir)
+        const stored = readBlocklist(dataDir, {
+          onUnreadable: (aside) => log('aviso: lista de bloqueio ilegível guardada como ' + aside + '; pedindo a lista a um par')
+        })
         if (stored === null) return null
         if (!verifySnapshot(stored.snapshot, association).ok) {
           log('aviso: lista de bloqueio inválida ignorada')

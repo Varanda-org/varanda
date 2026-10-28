@@ -605,13 +605,24 @@ function writeFollows (dataDir, list) {
 
 // The signed moderation snapshot, next to follows.json. Only the shape is
 // checked here (the caller verifies the signature); anything else is absent.
-function readBlocklist (dataDir) {
+// A torn or hand-edited file also reads as absent, so a peer resends the list,
+// but a caller holding the data-dir lock passes `onUnreadable`: the file is
+// then moved aside to `blocklist.json.ilegivel-<ms>` (kept for inspection, and
+// so the next read is a plain "absent") and the callback gets that name.
+function readBlocklist (dataDir, { onUnreadable } = {}) {
+  const file = path.join(dataDir, 'blocklist.json')
   let data
   try {
-    data = readJson(path.join(dataDir, 'blocklist.json'), null)
+    data = readJson(file, null)
   } catch (err) {
-    if (err instanceof SyntaxError) return null // torn or hand-edited file: treated as absent
-    throw err
+    if (!(err instanceof SyntaxError)) throw err
+    if (typeof onUnreadable === 'function') {
+      const aside = file + '.ilegivel-' + Date.now()
+      fs.renameSync(file, aside)
+      fsyncDir(dataDir)
+      onUnreadable(path.basename(aside))
+    }
+    return null
   }
   const ok = data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
     data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
