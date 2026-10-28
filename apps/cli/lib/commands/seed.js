@@ -148,6 +148,7 @@ function statusLines (status) {
     certificateLine(status.certificate),
     'diários admitidos: ' + status.admitted,
     'lista de bloqueio: ' + (status.blocklist === null ? 'nenhuma' : 'seq ' + status.blocklist.seq + ' de ' + safe(status.blocklist.date)),
+    ...(status.blocklistHeld ? ['admissões: seguradas até chegar uma lista de bloqueio verificada'] : []),
     'estado: ' + (status.running ? 'em execução' : 'parado')
   ].join('\n')
 }

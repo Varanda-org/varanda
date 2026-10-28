@@ -109,6 +109,7 @@ const {
   readJson,
   writeJsonAtomic,
   readBlocklist,
+  hasUnreadableBlocklist,
   writeBlocklist
 } = require('./store')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
@@ -500,7 +501,8 @@ class Seeder {
     this._blocklistHandles = new Set()
     // True from a start whose blocklist.json was unreadable or missing with no
     // usable copy to fall back to (a list existed and is lost) until a
-    // verified snapshot is adopted: new admissions are refused meanwhile. In memory only: a restart
+    // verified snapshot is adopted: new admissions are refused meanwhile. A
+    // later start with the torn file still kept aside and no list holds again. In memory only: a restart
     // before a snapshot arrives reads a plain absent file.
     this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
@@ -574,7 +576,12 @@ class Seeder {
       const snapshot = readSnapshot(dataDir)
       if (snapshot !== null && verifySnapshot(snapshot, association).ok) blocklist = { seq: snapshot.seq, date: snapshot.date }
     } catch {}
-    return { association, publicKey, certificate, admitted, blocklist, running: lockHeld(dataDir) }
+    // Whether a start would hold admissions: no usable list and a torn one kept aside.
+    let blocklistHeld = false
+    try {
+      blocklistHeld = blocklist === null && hasUnreadableBlocklist(dataDir)
+    } catch {}
+    return { association, publicKey, certificate, admitted, blocklist, blocklistHeld, running: lockHeld(dataDir) }
   }
 
   // `seed list`: the admitted logs and their signed sizes, each with the
@@ -742,8 +749,9 @@ class Seeder {
         throw new Error('lista de bloqueio ilegível')
       }
       // Decided once the state is loaded: a copy that does not verify leaves
-      // no list either.
-      this._blocklistHeld = unreadable && state.current() === null
+      // no list either, and a torn file kept aside by an earlier start
+      // still says a list existed.
+      this._blocklistHeld = (unreadable || hasUnreadableBlocklist(this.dataDir)) && state.current() === null
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
@@ -899,6 +907,7 @@ class Seeder {
       firewalled: this.swarm ? this.swarm.dht.firewalled : null,
       blocked: this._blocklist ? this._blocklist.blocked().size : 0,
       blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0,
+      blocklistHeld: this._blocklistHeld,
       mediaCores: this._media.size,
       mediaBytes,
       indexRecords: this._index.stats().records,
