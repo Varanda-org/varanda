@@ -123,10 +123,12 @@ function socketTap ({ closeDelayMs = 0 } = {}) {
   const sockets = []
   const tap = {
     sockets,
+    createdAt: [],
     overlaps: 0,
     closeCalls: 0,
     createSocket (url) {
       if (sockets.some((s) => s.readyState !== WebSocket.CLOSED)) tap.overlaps++
+      tap.createdAt.push(Date.now())
       const ws = new WebSocket(url)
       ws.on('error', () => {})
       const socket = closeDelayMs > 0 ? slowClose(ws, closeDelayMs, () => { tap.closeCalls++ }) : ws
@@ -470,7 +472,7 @@ test('after a link drop the reconnected link must confirm the media core again b
   // Dropped before the hold: the member reconnects to a seeder that is behind.
   seeder.connections[0].terminate()
   t.ok(await until(() => tap.sockets.length === 2, 10000), 'reconnected')
-  const reconnectedAt = Date.now()
+  const reconnectedAt = tap.createdAt[1]
   await sleep(2000)
   t.alike(stoppedEvents(web, runId), [], 'past the hold after the reconnect, still running: the media core is pending again')
   const stopped = await stoppedOf(web.events, runId)

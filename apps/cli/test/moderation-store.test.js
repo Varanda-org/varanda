@@ -163,6 +163,33 @@ test('list: open oldest first, decided newest first, with truncated', async (t) 
   throwsCode(t, () => store.list({ limit: 0 }), 'pedido-invalido', 'limit 0')
 })
 
+test('list: exclude leaves a member out before the cut, so truncated counts only the rest', async (t) => {
+  const { store, c } = setup(t)
+  const me = key()
+  const others = []
+  for (let i = 0; i < 2; i++) {
+    await store.add(report(me, key()))
+    c.t += 1000
+    await store.add(report(key(), me))
+    c.t += 1000
+  }
+  for (let i = 0; i < 3; i++) {
+    others.push((await store.add(report(key(), key()))).report.id)
+    c.t += 1000
+  }
+  const all = store.list({ limit: 5 })
+  t.is(all.reports.length, 5)
+  t.is(all.truncated, true, 'without exclude the own cases count')
+  const page = store.list({ limit: 3, exclude: me })
+  t.alike(page.reports.map((r) => r.id), others, 'the own cases (as target and as reporter) are not in the page')
+  t.is(page.truncated, false, 'and do not make it look cut')
+  const cut = store.list({ limit: 2, exclude: me })
+  t.alike(cut.reports.map((r) => r.id), others.slice(0, 2))
+  t.is(cut.truncated, true)
+  t.is(store.list({ exclude: null }).reports.length, 7)
+  throwsCode(t, () => store.list({ exclude: 7 }), 'pedido-invalido', 'exclude must be a string or null')
+})
+
 test('per-reporter daily cap follows the injected clock', async (t) => {
   const { store, c } = setup(t)
   const reporter = key()
