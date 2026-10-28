@@ -6,6 +6,8 @@ const load = () => import('../src/install-offer.js')
 const loadNative = () => import('../src/install.native.js')
 
 const android = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
+const samsung = 'Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36'
+const samsungDesktop = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Safari/537.36'
 const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1'
 const instagram = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 330.0.0.0'
 const ipod = 'Mozilla/5.0 (iPod touch; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1'
@@ -102,14 +104,23 @@ test('deviceOf: phone, tablet and Safari detection uses device signals', async (
     [{ userAgent: mac, platform: 'MacIntel', maxTouchPoints: '5' }, false, false]
   ]
   for (const [arg, handheld, iosSafari] of cases) {
-    t.alike(deviceOf(arg), { handheld, iosSafari }, JSON.stringify(arg))
+    t.alike(deviceOf(arg), { handheld, iosSafari, samsungInternet: false }, JSON.stringify(arg))
   }
   for (const token of ['CriOS', 'FxiOS', 'EdgiOS', 'OPiOS', 'DuckDuckGo/7', 'GSA/', 'FBAN', 'FBAV', 'Instagram', 'Line/']) {
-    t.alike(deviceOf({ userAgent: iphone + ' ' + token }), { handheld: true, iosSafari: false }, token)
+    t.alike(deviceOf({ userAgent: iphone + ' ' + token }), { handheld: true, iosSafari: false, samsungInternet: false }, token)
   }
   for (const arg of [undefined, null, 3, 'iPhone', {}, { userAgent: 5, platform: {} }]) {
-    t.alike(deviceOf(arg), { handheld: false, iosSafari: false }, 'invalid device input')
+    t.alike(deviceOf(arg), { handheld: false, iosSafari: false, samsungInternet: false }, 'invalid device input')
   }
+})
+
+test('deviceOf: Samsung Internet is detected by its SamsungBrowser/ token on any form factor', async (t) => {
+  const { deviceOf } = await load()
+  t.alike(deviceOf({ userAgent: samsung }), { handheld: true, iosSafari: false, samsungInternet: true })
+  t.alike(deviceOf({ userAgent: samsung.replace(' Mobile', '') }), { handheld: false, iosSafari: false, samsungInternet: true })
+  t.alike(deviceOf({ userAgent: samsungDesktop }), { handheld: false, iosSafari: false, samsungInternet: true })
+  t.is(deviceOf({ userAgent: samsung.replace('SamsungBrowser/', 'SamsungBrowser') }).samsungInternet, false)
+  t.is(deviceOf({ userAgent: android }).samsungInternet, false)
 })
 
 test('dismissal parsing and expiry reject malformed and future stamps', async (t) => {
@@ -143,6 +154,8 @@ test('installView: strict gates, note priority and independent settings button',
   t.alike(installView({ ...base, hasPrompt: false }), { note: 'ios', canPrompt: false })
   t.alike(installView({ ...base, hasPrompt: 1, iosSafari: 1 }), none)
   t.alike(installView({ ...base, hasPrompt: false, iosSafari: false }), none, 'non-Safari iPhone')
+  t.alike(installView({ ...base, samsungInternet: true }), none)
+  for (const samsungInternet of [1, 'true', false]) t.alike(installView({ ...base, samsungInternet }), ready)
   t.alike(installView({ ...base, standalone: 1, installed: 1 }), ready)
   for (const arg of [undefined, null, false, 'yes']) t.alike(installView(arg), none)
 })
@@ -196,6 +209,72 @@ test('controller: Chrome prompt runs inside the tap, pending blocks reuse, accep
   t.alike(offer.getSnapshot(), none)
   t.is(await offer.prompt(), 'unavailable')
   offer.stop()
+})
+
+test('controller: Samsung Internet never stores or runs the install prompt', async (t) => {
+  const { createInstallOffer } = await load()
+  const { offer, win } = fixture(createInstallOffer, { nav: { userAgent: samsung, platform: 'Linux armv8l', maxTouchPoints: 5 } })
+  t.alike([...win.listeners.keys()], ['beforeinstallprompt', 'appinstalled'])
+  const e = dialog()
+  win.dispatch('beforeinstallprompt', e)
+  t.is(e.prevented, 1)
+  t.alike(offer.getSnapshot(), none)
+  t.is(await offer.prompt(), 'unavailable')
+  t.is(e.called, 0)
+  offer.stop()
+})
+
+function fakeDoc (overrides = {}) {
+  const doc = {
+    queries: [],
+    removed: [0, 0],
+    querySelectorAll (selector) {
+      doc.queries.push(selector)
+      return [0, 1].map((i) => ({ remove () { doc.removed[i]++ } }))
+    },
+    ...overrides
+  }
+  return doc
+}
+
+test('controller: Samsung Internet drops the manifest link once, only when eligible and not installed', async (t) => {
+  const { createInstallOffer } = await load()
+  const nav = { userAgent: samsung }
+  const eligible = fakeDoc()
+  fixture(createInstallOffer, { nav, doc: eligible })
+  t.alike(eligible.queries, ['link[rel="manifest"]'])
+  t.alike(eligible.removed, [1, 1])
+  const skipped = []
+  const win = fakeWindow()
+  win.mql.matches = true
+  skipped.push([{ nav, eligible: false }, fakeDoc()])
+  skipped.push([{ nav, win }, fakeDoc()])
+  skipped.push([{ nav: { userAgent: samsung, standalone: true } }, fakeDoc()])
+  skipped.push([{ nav: { userAgent: android } }, fakeDoc()])
+  skipped.push([{ nav: { userAgent: iphone } }, fakeDoc()])
+  for (const [over, doc] of skipped) {
+    fixture(createInstallOffer, { ...over, doc })
+    t.is(doc.queries.length, 0)
+    t.alike(doc.removed, [0, 0])
+  }
+})
+
+test('controller: manifest removal failures are contained', async (t) => {
+  const { createInstallOffer } = await load()
+  const nav = { userAgent: samsung }
+  const throwing = fakeDoc({ querySelectorAll: fail })
+  const docs = [null, undefined, {}, throwing, fakeDoc({ querySelectorAll: () => null })]
+  for (const doc of docs) {
+    const { offer } = fixture(createInstallOffer, { nav, doc })
+    t.alike(offer.getSnapshot(), none)
+    t.is(await offer.prompt(), 'unavailable')
+  }
+  let removed = 0
+  const partial = { querySelectorAll: () => [{ remove: fail }, { remove () { removed++ } }] }
+  const { offer } = fixture(createInstallOffer, { nav, doc: partial })
+  t.is(removed, 1, 'a throwing link does not skip the others')
+  t.alike(offer.getSnapshot(), none)
+  t.is(await offer.prompt(), 'unavailable')
 })
 
 test('controller: declined dialogs do not dismiss the note for future events', async (t) => {

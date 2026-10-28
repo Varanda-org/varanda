@@ -1,19 +1,17 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
-const { spawnSync } = require('node:child_process')
 const b4a = require('b4a')
 const Corestore = require('corestore')
-const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
-const { Seeder } = require('@varanda/core/lib/seeder')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { createSwarm, joinAndFlush, topicFor, attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
-const { memberCertRecord, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
-const { openReplica } = require('@varanda/core/lib/store')
-const { localDay } = require('@varanda/core/lib/activity')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
+const { tmpDir } = require('./helpers/tmp')
+const { Seeder } = require('../lib/seeder')
+const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createSwarm, joinAndFlush, topicFor, attachAdmission, generateNoiseKeyPair } = require('../lib/net')
+const { memberCertRecord, MAX_BLOCK_BYTES } = require('../lib/records')
+const { openReplica } = require('../lib/store')
+const { localDay } = require('../lib/activity')
 const { discoveryKey } = require('hypercore-crypto')
-
-const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -1087,29 +1085,4 @@ test('close releases the lock last: the next seeder on the data dir keeps its qu
   await second.seeder.close()
   t.absent(fs.existsSync(q), 'quarantine removed at close')
   t.absent(fs.existsSync(lock), 'lock released')
-})
-
-test('cli: seed key and seed without association', async (t) => {
-  t.timeout(90000)
-  await testnet(t)
-  const assoc = makeAssociation()
-  const env = { ...process.env }
-  delete env.VARANDA_ASSOCIATION
-  delete env.VARANDA_DATA
-  delete env.VARANDA_BOOTSTRAP
-
-  const dir = tmpDir(t, 'varanda-cli-')
-  const r1 = spawnSync(process.execPath, [BIN, 'seed', 'key', '--data', dir, '--association', assoc.hex], { env, encoding: 'utf8' })
-  t.is(r1.status, 0, r1.stderr)
-  const match = /chave do semeador: ([0-9a-f]{64})\n$/.exec(r1.stdout)
-  t.ok(match, r1.stdout)
-  t.is(fs.statSync(path.join(dir, 'seeder-key.json')).mode & 0o777, 0o600)
-  const r2 = spawnSync(process.execPath, [BIN, 'seed', 'key', '--data', dir, '--json'], { env, encoding: 'utf8' })
-  t.is(r2.status, 0, r2.stderr)
-  t.alike(JSON.parse(r2.stdout.trim()), { publicKey: match && match[1] })
-
-  const empty = tmpDir(t, 'varanda-cli-')
-  const r3 = spawnSync(process.execPath, [BIN, 'seed', '--data', empty], { env, encoding: 'utf8' })
-  t.is(r3.status, 2, r3.stderr)
-  t.ok(r3.stderr.includes('informe --association ou VARANDA_ASSOCIATION'))
 })

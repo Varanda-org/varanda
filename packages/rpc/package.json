@@ -11,5 +11,8 @@
   },
   "scripts": {
     "test": "node ../../scripts/run-tests.js"
+  },
+  "devDependencies": {
+    "@varanda/core": "0.1.0"
   }
 }

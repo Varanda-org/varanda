@@ -110,6 +110,8 @@ const TEXT = {
   noOpen: 'Nenhuma denúncia aberta.',
   moreOpen: 'Há mais denúncias depois destas.',
   moreDecided: 'Há mais decisões antes destas.',
+  showMore: 'mostrar mais',
+  beyondLimit: 'Há decisões mais antigas que o painel não mostra.',
   noDecided: 'Nenhuma decisão ainda.',
   pendingBanner: 'As decisões só valem depois que a associação rodar `varanda mod apply` e publicar a lista.',
   noPending: 'Nenhuma mudança pendente.',
@@ -287,7 +289,11 @@ function reportRow (r) {
 
 function reportList (json) {
   const rows = has(json, 'reports') && Array.isArray(json.reports) ? json.reports : []
-  return { reports: rows.map(reportRow).filter((r) => r !== null), truncated: has(json, 'truncated') && json.truncated === true }
+  return {
+    reports: rows.map(reportRow).filter((r) => r !== null),
+    truncated: has(json, 'truncated') && json.truncated === true,
+    beyondLimit: has(json, 'alemDoLimite') && json.alemDoLimite === true
+  }
 }
 
 function publishedOf (p) {
@@ -911,7 +917,7 @@ function createPanel (env) {
   }
 
   function renderHistory () {
-    const { reports, truncated } = state.decided
+    const { reports, truncated, beyondLimit } = state.decided
     if (reports.length === 0) return h('p', { text: TEXT.noDecided })
     const cards = reports.map((r) => h('div', { className: 'card' },
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
@@ -921,7 +927,33 @@ function createPanel (env) {
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       r.note !== '' ? untrusted('p', r.note) : null
     ))
-    return h('div', { className: 'list' }, ...cards, truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null)
+    return h('div', { className: 'list' }, ...cards,
+      truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,
+      truncated ? button(TEXT.showMore, showMoreDecided, { disabled: busy }) : null,
+      beyondLimit ? h('p', { className: 'meta', text: TEXT.beyondLimit }) : null)
+  }
+
+  // The next page of the history, appended to what is shown; the other
+  // lists are not read again.
+  function showMoreDecided () {
+    if (busy) return last
+    const mine = gen
+    const shown = state.decided.reports
+    const cursor = shown[shown.length - 1].id
+    busy = true
+    error = ''
+    render()
+    return run(async () => {
+      try {
+        const page = reportList(await call('GET', API + 'reports?estado=decidida&antes=' + encodeURIComponent(cursor)))
+        if (mine !== gen) return
+        const seen = new Set(shown.map((r) => r.id))
+        state.decided = { ...page, reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))] }
+      } finally {
+        busy = false
+        if (state) render()
+      }
+    })
   }
 
   function logout () {
