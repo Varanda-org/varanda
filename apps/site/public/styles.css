@@ -657,12 +657,12 @@ h2::after {
   font-weight: 700;
   letter-spacing: 0.01em;
   color: #fff;
-  background: #2a7fb8;
+  background: #2576b0;
 }
-.avatar--azul { background: #2a7fb8; }
+.avatar--azul { background: #2576b0; }
 .avatar--laranja { background: #e8805a; color: var(--app-tinta); }
 .avatar--amarelo { background: #f2b705; color: var(--app-tinta); }
-.avatar--vermelho { background: #e94e3c; }
+.avatar--vermelho { background: #c23528; }
 .avatar--verde { background: #1d6b4f; }
 
 /* O botão de publicar e as abas */
