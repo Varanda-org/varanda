@@ -12,8 +12,9 @@
 // the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
 // stops a run; its details live in Ajustes → Sincronização. Above the tabs a
-// small screen stack (src/nav.js) opens Conversa (a post and its replies) and
-// Membro (a profile) as full-screen layers; the tabs stay mounted below.
+// small screen stack (src/nav.js) opens Conversa (a post and its replies),
+// Curtidas (who liked or reposted a post) and Membro (a profile) as
+// full-screen layers; the tabs stay mounted below.
 // Back: the browser Back button (src/history.web.js; an in-app back calls
 // history.back() so the history and the stack never drift), Escape on the
 // web, the Android Back button (BackHandler); an open sheet closes first.
@@ -57,6 +58,7 @@ import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa from './src/screens/Conversa'
+import Curtidas from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
@@ -627,6 +629,9 @@ function Member () {
   const openThread = useCallback(({ ref, seed } = {}) => {
     pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
   }, [pushScreen])
+  const openEngagers = useCallback(({ ref, kind } = {}) => {
+    pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
+  }, [pushScreen])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -958,6 +963,7 @@ function Member () {
       onQuote: startQuote,
       onReport: setReport,
       onOpenThread: openThread,
+      onOpenEngagers: openEngagers,
       onOpenMember: openMember,
       onToast: showToast,
       onFollowsChanged: followsChanged
@@ -979,6 +985,7 @@ function Member () {
               onReply={startReply}
               onReport={setReport}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
               onQuote={startQuote}
               ownKey={ownKey}
@@ -996,6 +1003,7 @@ function Member () {
               onReply={startReply}
               onReport={setReport}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
               onQuote={startQuote}
               ownKey={ownKey}
@@ -1036,6 +1044,7 @@ function Member () {
               onReply={startReply}
               onPublish={openComposer}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
               onQuote={startQuote}
               ownKey={ownKey}
@@ -1047,7 +1056,7 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
-                const Screen = entry.screen === 'conversa' ? Conversa : Membro
+                const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
                 return (
                   <View key={i + ':' + entry.screen + ':' + entry.key} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                     <Screen entry={entry} {...screenProps} />

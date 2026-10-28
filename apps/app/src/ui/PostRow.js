@@ -37,6 +37,10 @@ import { QuoteCard } from './QuoteCard'
 import { colors, type } from './theme'
 
 const ICON = 18
+// A split toggle and its number never share touch area: a mis-tap on the
+// toggle writes a public signed record.
+const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
+const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
 
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
@@ -60,16 +64,16 @@ function Heart ({ filled, color }) {
   )
 }
 
-function Action ({ label, onPress, disabled, on, count, children }) {
+function Action ({ label, onPress, disabled, on, count, split, children }) {
   return (
     <Pressable
       accessibilityRole='button'
       accessibilityLabel={label}
       accessibilityState={{ disabled: !!disabled, selected: !!on }}
       disabled={disabled}
-      hitSlop={6}
+      hitSlop={split ? SPLIT_SLOP : 6}
       onPress={onPress}
-      style={({ pressed }) => [styles.action, disabled && styles.disabled, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.action, split && styles.actionSplit, disabled && styles.disabled, pressed && styles.pressed]}
     >
       {children}
       {count !== null && count !== undefined
@@ -83,8 +87,10 @@ export function PostRow ({
   author, name, username, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
-  onReply, onQuote, onLike, onRepost, onFollow, followPending, onReport
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport
 }) {
+  const likes = countOf(counts, 'likes')
+  const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
   const hasText = typeof text === 'string' && text !== ''
   const time = relativeTime(at, now) ?? displayText(at)
@@ -231,17 +237,41 @@ export function PostRow ({
                     )
                   : null}
                 {fn(onRepost)
-                  ? (
-                    <Action
-                      label={reposted ? 'desfazer republicação' : 'republicar'}
-                      onPress={onRepost}
-                      disabled={pending === 'repost'}
-                      on={!!reposted}
-                      count={countOf(counts, 'reposts')}
-                    >
-                      <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
-                    </Action>
-                    )
+                  ? fn(onOpenReposts) && reposts !== null
+                    ? (
+                      <View style={styles.splitAction}>
+                        <Action
+                          label={reposted ? 'desfazer republicação' : 'republicar'}
+                          onPress={onRepost}
+                          disabled={pending === 'repost'}
+                          on={!!reposted}
+                          count={null}
+                          split
+                        >
+                          <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                        </Action>
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel={'ver quem republicou, ' + reposts}
+                          hitSlop={COUNT_SLOP}
+                          onPress={onOpenReposts}
+                          style={styles.countAction}
+                        >
+                          <Text style={[styles.count, reposted && styles.countOn]}>{displayText(String(reposts))}</Text>
+                        </Pressable>
+                      </View>
+                      )
+                    : (
+                      <Action
+                        label={reposted ? 'desfazer republicação' : 'republicar'}
+                        onPress={onRepost}
+                        disabled={pending === 'repost'}
+                        on={!!reposted}
+                        count={reposts}
+                      >
+                        <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                      </Action>
+                      )
                   : null}
                 {fn(onQuote)
                   ? (
@@ -251,17 +281,41 @@ export function PostRow ({
                     )
                   : null}
                 {fn(onLike)
-                  ? (
-                    <Action
-                      label={liked ? 'descurtir' : 'curtir'}
-                      onPress={onLike}
-                      disabled={pending === 'like'}
-                      on={!!liked}
-                      count={countOf(counts, 'likes')}
-                    >
-                      <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
-                    </Action>
-                    )
+                  ? fn(onOpenLikes) && likes !== null
+                    ? (
+                      <View style={styles.splitAction}>
+                        <Action
+                          label={liked ? 'descurtir' : 'curtir'}
+                          onPress={onLike}
+                          disabled={pending === 'like'}
+                          on={!!liked}
+                          count={null}
+                          split
+                        >
+                          <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                        </Action>
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel={'ver quem curtiu, ' + likes}
+                          hitSlop={COUNT_SLOP}
+                          onPress={onOpenLikes}
+                          style={styles.countAction}
+                        >
+                          <Text style={[styles.count, liked && styles.countOn]}>{displayText(String(likes))}</Text>
+                        </Pressable>
+                      </View>
+                      )
+                    : (
+                      <Action
+                        label={liked ? 'descurtir' : 'curtir'}
+                        onPress={onLike}
+                        disabled={pending === 'like'}
+                        on={!!liked}
+                        count={likes}
+                      >
+                        <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                      </Action>
+                      )
                   : null}
                 {fn(onFollow)
                   ? (
@@ -312,6 +366,11 @@ const styles = StyleSheet.create({
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 36, minWidth: 44, paddingHorizontal: 8 },
+  // A split pair is as wide as the combined button (8 + icon + gap + digits +
+  // 8), so the bar still fits a 320 pt screen.
+  actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },
+  splitAction: { flexDirection: 'row', alignItems: 'center' },
+  countAction: { minHeight: 36, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
   count: { ...type.counter, color: colors.soft },
   countOn: { color: colors.accent },
   heart: { width: ICON, height: ICON, alignItems: 'center', justifyContent: 'center' },

@@ -83,6 +83,8 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the submitted words DO reach the seeder here; they are never logged nor
 //   echoed by the seeder; Caddy's error log can still record the URI when
 //   proxying fails (docs/protocol.md).
+// - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
+//   (at most 20 like/repost record refs, newest first by the engager's at).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -163,6 +165,7 @@ const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
 // optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
 const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -384,8 +387,9 @@ function refuse (socket, code, reason) {
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs), indexMember(authorHex, before) and
-// indexSearch(segment) -> null | plain object back /index; indexSearch's
+// cursor), indexCounts(refs), indexMember(authorHex, before),
+// indexSearch(segment) and indexEngagers(kind, authorHex, seq, cursor) ->
+// null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
 // and in-flight cap and is never logged or echoed. triageToken: optional
@@ -432,6 +436,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function indexCall (url) {
     let m = INDEX_POST_RE.exec(url)
     if (m) return ['indexPost', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]]]
+    m = INDEX_ENGAGERS_RE.exec(url)
+    if (m) return ['indexEngagers', [m[1], m[2], Number(m[3]), m[4] === undefined ? null : m[4]]]
     m = INDEX_COUNTS_RE.exec(url)
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
@@ -771,6 +777,7 @@ module.exports = {
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
+  INDEX_ENGAGERS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

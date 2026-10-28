@@ -20,7 +20,10 @@
 //    honoured in full) during which nothing reaches the network.
 //
 // Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
-// /index/member/<author>[/<before>] and /index/topic/<tokens>[/<cursor>].
+// /index/member/<author>[/<before>], /index/topic/<tokens>[/<cursor>],
+// /index/likes/<author>/<seq>[/<cursor>] and
+// /index/reposts/<author>/<seq>[/<cursor>]. Each likes or reposts item is the
+// ref of a like or repost record, which the node still verifies (diary.peek).
 // The search tokens are already folded words of [a-z0-9] (2..32 chars, at
 // most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
 // module only checks them against the same strict pattern, never folds and
@@ -51,6 +54,8 @@ export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
 export const SEARCH_MAX = 20
 export const TOPIC_MAX = 30
+// Must equal ENGAGER_PAGE in packages/core/lib/engagement-index.js.
+export const ENGAGERS_MAX = 20
 export const MAX_IN_FLIGHT = 2
 export const WINDOW_MS = 10000
 export const MAX_STARTS = 18
@@ -76,6 +81,7 @@ const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
+const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -174,6 +180,18 @@ export function topicUrl (path, cursor = null) {
   if (typeof path !== 'string' || !QUERY.test(path)) return null
   if (cursor !== null && !isCursor(cursor)) return null
   return '/index/topic/' + path + (cursor === null ? '' : '/' + cursor)
+}
+
+// `kind` is taken as is (never lowercased or trimmed). The seq is capped at
+// 15 digits here because isRef alone allows up to MAX_SAFE_INTEGER (16).
+export function engagersUrl (kind, ref, cursor = null) {
+  if (kind !== 'likes' && kind !== 'reposts') return null
+  const r = inputRef(ref)
+  if (r === null) return null
+  const [author, seq] = r.split(':')
+  if (seq.length > 15) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return '/index/' + kind + '/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor)
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -603,6 +621,35 @@ export function validTopic (body) {
   return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
 }
 
+// Items: <= 20 distinct refs, one per engager. Authors: exactly one hint per
+// item author, as in validTopic.
+export function validEngagers (body, ref, kind) {
+  if (!hasExactKeys(body, ENGAGERS_KEYS)) return null
+  if (!isRef(body.ref) || (ref !== undefined && body.ref !== ref)) return null
+  if (kind !== undefined && body.kind !== kind) return null
+  const items = refList(body.items, ENGAGERS_MAX)
+  if (items === null) return null
+  const wanted = new Set(items.map((r) => r.split(':')[0]))
+  if (wanted.size !== items.length) return null
+  if (body.next !== null && !isCursor(body.next)) return null
+  if (!isCount(body.total) || body.total < items.length) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return {
+    ref: body.ref,
+    kind: body.kind,
+    items,
+    next: body.next,
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
 // Members: <= 20 distinct authors with exact keys, order kept (the seeder's
 // ranking), never both hints null.
 export function validSearch (body) {
@@ -707,4 +754,11 @@ export function fetchTopic (path, cursor = null, deps = {}) {
 
 export function fetchSearch (segment, deps = {}) {
   return run(searchUrl(segment), validSearch, deps)
+}
+
+// Never cached: a like or repost can be undone at any time.
+export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
+  const url = engagersUrl(kind, ref, cursor)
+  const r = url === null ? null : inputRef(ref)
+  return run(url, (body) => validEngagers(body, r, kind), deps)
 }

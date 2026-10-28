@@ -66,7 +66,7 @@ function pageNeeds (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Busca ({ query, header, ownKey, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
+export default function Busca ({ query, header, ownKey, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
   const node = useNode()
   const { request } = node
   const social = useSocial({ ownKey, onToast })
@@ -300,7 +300,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
   const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
   const known = (item) => follows === null || follows.has(item.author)
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const renderItem = ({ item }) => {
     const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, now, ownKey, h: handlers })
     // A like or repost toggled here may also be in the hidden rounds, whose

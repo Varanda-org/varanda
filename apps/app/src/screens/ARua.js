@@ -548,7 +548,7 @@ export function useSocial ({ ownKey, onToast }) {
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onReply, onQuote, onReport } (each
+// `h`: { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport } (each
 // optional). A repost passes the ORIGINAL as `post` and `repostedBy`.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, now, ownKey, h, persist }) {
   const prof = profileOf(post.author) || null
@@ -615,6 +615,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       : undefined,
     onReply: typeof h.onReply === 'function' ? () => h.onReply({ ref, name, username, text: post.text }) : undefined,
     onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
+    onOpenLikes: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+    onOpenReposts: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
     onLike: () => social.toggle('like', ref),
     onRepost: () => social.toggle('repost', ref),
     // Until the own key is known, no post can safely offer a report action.
@@ -722,7 +724,7 @@ function pageNeeds (pageItems) {
   return { local, shown, need, parents: [...parents], authors }
 }
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onQuote, onToast }) {
+export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenEngagers, onQuote, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -903,7 +905,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // Reply names re-render when the cache changes; relative dates on each tick.
   // Originals, counts and the own state re-render the rows too.
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social }), [names.profileOf, now, social.social])
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   const renderItem = ({ item }) => {
