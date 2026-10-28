@@ -244,6 +244,33 @@ test('readBlocklist falls back to the copy writeBlocklist kept, and puts it back
   t.alike(store.readBlocklist(dir), { v: 1, snapshot: newer }, 'the copy follows every save')
 })
 
+test('readBlocklist reads the copy of a missing file, and puts it back for a caller that asks', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'blocklist.json')
+  const snapshot = { v: 1, seq: 7, blocked: ['b'.repeat(64)] }
+  const calls = []
+  const onUnreadable = (name, restored) => calls.push({ name, restored })
+
+  store.writeBlocklist(dir, snapshot)
+  fs.rmSync(file)
+  t.alike(store.readBlocklist(dir), { v: 1, snapshot }, 'missing, no callback: read from the copy')
+  t.absent(fs.existsSync(file), 'missing, no callback: nothing is written')
+
+  t.alike(store.readBlocklist(dir, { onUnreadable }), { v: 1, snapshot }, 'missing: read from the copy')
+  t.alike(calls, [{ name: null, restored: true }], 'missing: the callback says the copy was used, nothing was moved aside')
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot }, 'missing: the copy is put back as blocklist.json')
+  t.is(fs.statSync(file).mode & 0o777, 0o600, 'missing: the restored file is mode 0600')
+  t.alike(fs.readdirSync(dir).filter((n) => n.includes('ilegivel')), [], 'missing: no file kept aside')
+  t.alike(store.readBlocklist(dir, { onUnreadable }), { v: 1, snapshot }, 'after the restore it is a plain read')
+  t.is(calls.length, 1, 'no second callback')
+
+  fs.rmSync(file)
+  fs.writeFileSync(file + '.prev', '[]')
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'missing with a bad copy: absent')
+  t.is(calls.length, 1, 'missing with a bad copy: no callback')
+})
+
 test('replicaStored is true only for a core the store holds', async (t) => {
   await testnet(t)
   const a = await open(t, tmpDir(t))

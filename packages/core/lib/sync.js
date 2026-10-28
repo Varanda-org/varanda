@@ -1373,7 +1373,9 @@ async function runSync ({
       association,
       load: () => {
         const stored = readBlocklist(dataDir, {
-          onUnreadable: (aside, restored) => log('aviso: lista de bloqueio ilegível guardada como ' + aside + (restored ? '; usando a cópia anterior' : '; pedindo a lista a um par'))
+          onUnreadable: (aside, restored) => log(aside === null
+            ? 'aviso: lista de bloqueio ausente; usando a cópia anterior'
+            : 'aviso: lista de bloqueio ilegível guardada como ' + aside + (restored ? '; usando a cópia anterior' : '; pedindo a lista a um par'))
         })
         if (stored === null) return null
         if (!verifySnapshot(stored.snapshot, association).ok) {

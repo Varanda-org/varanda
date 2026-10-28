@@ -623,30 +623,36 @@ function readBlocklistCopy (dataDir) {
 
 // The signed moderation snapshot, next to follows.json. Only the shape is
 // checked here (the caller verifies the signature); anything else is absent.
-// A torn or hand-edited file reads as the copy `writeBlocklist` kept
+// A torn or missing file reads as the copy `writeBlocklist` kept
 // (blocklist.json.prev, the same snapshot), else as absent, so a peer resends
-// the list. A caller holding the data-dir lock passes `onUnreadable`: the file
-// is then moved aside to `blocklist.json.ilegivel-<ms>` (kept for inspection),
-// the copy, if any, is put back as blocklist.json, and the callback gets the
-// kept name and whether the copy was used.
+// the list. A caller holding the data-dir lock passes `onUnreadable`: a torn
+// file is then moved aside to `blocklist.json.ilegivel-<ms>` (kept for
+// inspection), the copy, if any, is put back as blocklist.json, and the
+// callback gets the kept name (null for a missing file) and whether the copy
+// was used. A missing file with no copy is a plain absent: no callback.
 function readBlocklist (dataDir, { onUnreadable } = {}) {
   const file = path.join(dataDir, 'blocklist.json')
-  let data
+  let data = null
+  let torn = false
   try {
     data = readJson(file, null)
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err
-    const copy = readBlocklistCopy(dataDir)
-    if (typeof onUnreadable === 'function') {
-      const aside = file + '.ilegivel-' + Date.now()
+    torn = true
+  }
+  if (!torn && (data !== null || fs.existsSync(file))) return blocklistShape(data)
+  const copy = readBlocklistCopy(dataDir)
+  if (typeof onUnreadable === 'function') {
+    let aside = null
+    if (torn) {
+      aside = file + '.ilegivel-' + Date.now()
       fs.renameSync(file, aside)
       fsyncDir(dataDir)
-      if (copy !== null) writeJsonAtomic(file, copy, 0o600)
-      onUnreadable(path.basename(aside), copy !== null)
     }
-    return copy
+    if (copy !== null) writeJsonAtomic(file, copy, 0o600)
+    if (torn || copy !== null) onUnreadable(aside === null ? null : path.basename(aside), copy !== null)
   }
-  return blocklistShape(data)
+  return copy
 }
 
 // Written twice, the same bytes, so a file that later goes bad (disk error,

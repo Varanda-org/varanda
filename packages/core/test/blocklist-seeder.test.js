@@ -344,6 +344,72 @@ test('a torn blocklist.json is replaced by the copy kept by the last save: the l
   t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'blocklist.json is back')
 })
 
+test('a missing blocklist.json is read from the copy: the list is enforced from the start', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const file = path.join(dataDir, 'blocklist.json')
+  const mod = makeModerator(assoc)
+  const snap = snapshot(mod, 4, { blocked: ['c'.repeat(64)] })
+  writeBlocklist(dataDir, snap)
+  fs.rmSync(file)
+
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const warnings = events.filter((e) => e.event === 'warning' && e.reason === 'blocklist-missing')
+  t.is(warnings.length, 1, 'one warning')
+  t.is(warnings[0].restored, true, 'the copy was used')
+  t.is(seeder.stats().blocklistSeq, 4, 'the list is enforced with no peer')
+  const sent = []
+  const fakePeer = { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) }
+  const blockedKey = 'c'.repeat(64)
+  await seeder.admit(blockedKey, createCert({ member: blockedKey }, assoc.kp), fakePeer)
+  t.alike(sent, [{ type: 'rejected', key: blockedKey, reason: 'blocked' }], 'nothing is held: the restored list answers')
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'blocklist.json is back')
+})
+
+test('a copy that does not verify holds new admissions like a lost list', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const file = path.join(dataDir, 'blocklist.json')
+  const mod = makeModerator(assoc)
+  const snap = snapshot(mod, 4, { blocked: ['c'.repeat(64)] })
+  writeBlocklist(dataDir, { ...snap, seq: 5 })
+  fs.writeFileSync(file, '{"v":1,"snapshot":{"seq":')
+
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.is(seeder.stats().blocklistSeq, 0, 'the forged copy is not enforced')
+  const sent = []
+  const fakePeer = { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) }
+  const key = 'd'.repeat(64)
+  await seeder.admit(key, createCert({ member: key }, assoc.kp), fakePeer)
+  t.alike(sent, [{ type: 'rejected', key, reason: 'blocklist-pending' }], 'held')
+})
+
+test('while the list is lost, a diary already served is still answered admitted', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const author = await client(t, bootstrap, assoc, { blocks: blocksFor(assoc) })
+  const cert = createCert({ member: author.key }, assoc.kp)
+  await admit(author, cert)
+
+  seeder._blocklistHeld = true // as after a start that lost the list
+  const sent = []
+  const fakePeer = { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) }
+  await seeder.admit(author.key, cert, fakePeer)
+  t.alike(sent, [{ type: 'admitted', key: author.key, length: 3 }], 'the re-announce of a served diary is not refused')
+  t.absent(fakePeer.seederDropped)
+
+  const other = 'e'.repeat(64)
+  await seeder.admit(other, createCert({ member: other }, assoc.kp), fakePeer)
+  t.alike(sent[1], { type: 'rejected', key: other, reason: 'blocklist-pending' }, 'a new diary is still held')
+})
+
 test('an admission-only peer stays connected; a newer peer receives the snapshot; a revocation drops a v2 diary', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)

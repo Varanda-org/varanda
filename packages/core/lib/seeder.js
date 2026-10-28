@@ -498,9 +498,9 @@ class Seeder {
     // blocklist channel of every connection (for the C4 fan-out).
     this._blocklist = null
     this._blocklistHandles = new Set()
-    // True from a start whose blocklist.json was unreadable with no copy to
-    // fall back to (a list existed and is lost) until a verified snapshot is
-    // adopted: new admissions are refused meanwhile. In memory only: a restart
+    // True from a start whose blocklist.json was unreadable or missing with no
+    // usable copy to fall back to (a list existed and is lost) until a
+    // verified snapshot is adopted: new admissions are refused meanwhile. In memory only: a restart
     // before a snapshot arrives reads a plain absent file.
     this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
@@ -725,12 +725,13 @@ class Seeder {
       // are held until a verified snapshot arrives (serving without knowing
       // what is blocked could hand out a blocked diary). If it cannot be
       // moved aside the start fails.
+      let unreadable = false
       const state = createBlocklistState({
         association: this.association,
         load: () => readSnapshot(this.dataDir, {
           onUnreadable: (aside, restored) => {
-            if (!restored) this._blocklistHeld = true
-            this.log({ event: 'warning', reason: 'blocklist-unreadable', aside, restored })
+            unreadable = true
+            this.log({ event: 'warning', reason: aside === null ? 'blocklist-missing' : 'blocklist-unreadable', aside, restored })
           }
         }),
         save: (snapshot) => this._saveBlocklist(snapshot)
@@ -740,6 +741,9 @@ class Seeder {
       } catch {
         throw new Error('lista de bloqueio ilegível')
       }
+      // Decided once the state is loaded: a copy that does not verify leaves
+      // no list either.
+      this._blocklistHeld = unreadable && state.current() === null
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
@@ -934,11 +938,6 @@ class Seeder {
       this._reject(peer, key, 'blocked')
       return Promise.resolve()
     }
-    // The list was lost: nothing new is admitted until a verified one arrives.
-    if (this._blocklistHeld) {
-      this._reject(peer, key, 'blocklist-pending')
-      return Promise.resolve()
-    }
     return this._enqueue(key, cert, peer)
   }
 
@@ -997,6 +996,10 @@ class Seeder {
       peer.send({ type: 'admitted', key, length })
       return { type: 'admitted', length, shared: true }
     }
+    // The list was lost: nothing new is admitted until a verified one arrives.
+    // After (b) on purpose: a diary already served is re-announced by its
+    // member on every connection, and a rejection would end that sync.
+    if (this._blocklistHeld) return this._reject(peer, key, 'blocklist-pending')
     // Being purged with no drop to wait on: the purge failed and the seeder
     // is closing (fatal); never re-admit over it.
     if (this._dropping.has(key) || this._admitted.has(key)) return
