@@ -1787,3 +1787,36 @@ Cobertura no repositório:
 - [ ] Denúncias `ilegal` e de publicação com fotos ficam abertas.
 - [ ] O log do serviço não tem texto de publicação.
 - [ ] `curl` da rota sem token no semeador dá 404, e pela URL pública (Caddy) também.
+
+## 28. Android gate on the emulator (issue #150, 2026-10-28)
+
+What was run: the worklet gate (steps a to i of [ios-gate.md](ios-gate.md)) on an Android 16 (API 36, google_apis x86_64) emulator, KVM, software GPU, with the debug build of `app.varanda.debug`, on Linux with JDK 21 and Gradle 9.0.0.
+
+Build: `npm run link:addons` and `npm run pack:worklet` (351 files, 38 linked addon entries, scan clean), then `./gradlew assembleDebug` (BUILD SUCCESSFUL). `lib/x86_64` of the APK holds the `.so` addons (`libbare-fs.4.8.4.so`, `librocksdb-native.3.19.1.so`, `libsodium-native.5.2.0.so`, `libudx-native.1.21.3.so`, ...): jniLibs are picked up from the library's `android/src/main/addons`, and the worklet loads them.
+
+Driver output of the final run (lines shortened, `trace` lines omitted):
+
+```
+PASS a: diag structuredClone=function O_NOFOLLOW=yes O_EXCL=yes bare=v1.33.4
+PASS b: identity.create f288d5d0...
+PASS c: cert.add seq 0, node.info memberCert true
+PASS d: post.create f288d5d0...:1
+data-dir lock before the kill: present (files/varanda-gate-<run>/.varanda-lock)
+app terminated (adb); lock after the kill: present
+PASS e: log.read after kill+relaunch: seq 1 "post do app (gate)" (2 entries, recover true)
+PASS f: app sync once done (seederConfirmed true); feed.read has the CLI peer post | CLI peer sync once
+        done downloaded 3 blocks of the app diary
+PASS g: node.info after background/resume: publicKey f288d5d0, sync idle
+PASS h: second worklet (no recover) node.info -> LOCKED; its node.close stop clean in 10 ms; first worklet still answers
+PASS i: terminateNode clean in 9 ms; startNode without recover + node.info + log.read in 315 ms (3 entries)
+GATE OK
+```
+
+Defects found and fixed:
+
+- **`link()` is denied to Android apps.** Step b failed with `INTERNAL erro interno`; logcat had `avc: denied { link }` (SELinux, `untrusted_app`) and `EACCES ... linkSync config.json.<pid>.<rand>.tmp -> config.json` from `publishConfig` (`packages/core/lib/member.js`). The same pattern is in `saveKeyPairFile` (`lib/cert.js`). `lib/link-new.js` now falls back to an `lstat` check and a rename on `EACCES` or `EPERM`, and still refuses to replace an existing entry (`EEXIST`, a dangling symlink included). The two callers run under the store lock or in a data dir private to one process, which the fallback relies on. Regression test: `packages/core/test/link-new.test.js` (fails without the fix with the same `EACCES`).
+- **The emulator does not share the host's loopback** (driver, not product): steps a to e passed and f failed with `sem pares`. The app's DHT did bootstrap (lookup found the seeder and the CLI peer), but the connection failed with `PEER_CONNECTION_FAILED` (hole punch). Fixed in the driver as described in ios-gate.md ("Android emulator"): the nodes bind to `--host`, with firewall probing off. UDP from the emulator to the host's LAN address was checked with a UDP echo first.
+
+Not verified: a real Android device, arm64-v8a, a release build, Doze and the real background limits (step g only sends the app to the Home screen for 5 s), and iOS after the driver refactor (`--platform ios` keeps the old defaults, `--host 127.0.0.1`, probing on; the iOS gate was not re-run).
+
+Method notes: with the data partition too small the emulator refuses to start, so keep several GB free. `adb reverse` carries TCP only. Do not stop Metro with `kill $(lsof -ti tcp:8081)`: `lsof` also lists the emulator process, which has a connection to that port, and in this run the kill stopped the emulator too. Use `lsof -ti tcp:8081 -sTCP:LISTEN`.
