@@ -498,6 +498,11 @@ class Seeder {
     // blocklist channel of every connection (for the C4 fan-out).
     this._blocklist = null
     this._blocklistHandles = new Set()
+    // True from a start whose blocklist.json was unreadable or missing with no
+    // usable copy to fall back to (a list existed and is lost) until a
+    // verified snapshot is adopted: new admissions are refused meanwhile. In memory only: a restart
+    // before a snapshot arrives reads a plain absent file.
+    this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
     // rebuilt from block 1 by the diary scan on every serve and never
     // persisted; the open notices channel of every connection.
@@ -715,13 +720,19 @@ class Seeder {
       }
       // The stored moderation snapshot, read under the lock like
       // admitted.json and kept only when it verifies for the association
-      // (createBlocklistState ignores anything else). An unreadable file
-      // fails the start closed: serving without knowing what is blocked
-      // could hand out a blocked diary.
+      // (createBlocklistState ignores anything else). An unreadable file is
+      // read from the copy writeBlocklist keeps; with no copy, new admissions
+      // are held until a verified snapshot arrives (serving without knowing
+      // what is blocked could hand out a blocked diary). If it cannot be
+      // moved aside the start fails.
+      let unreadable = false
       const state = createBlocklistState({
         association: this.association,
         load: () => readSnapshot(this.dataDir, {
-          onUnreadable: (aside) => this.log({ event: 'warning', reason: 'blocklist-unreadable', aside })
+          onUnreadable: (aside, restored) => {
+            unreadable = true
+            this.log({ event: 'warning', reason: aside === null ? 'blocklist-missing' : 'blocklist-unreadable', aside, restored })
+          }
         }),
         save: (snapshot) => this._saveBlocklist(snapshot)
       })
@@ -730,6 +741,9 @@ class Seeder {
       } catch {
         throw new Error('lista de bloqueio ilegível')
       }
+      // Decided once the state is loaded: a copy that does not verify leaves
+      // no list either.
+      this._blocklistHeld = unreadable && state.current() === null
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
@@ -982,6 +996,10 @@ class Seeder {
       peer.send({ type: 'admitted', key, length })
       return { type: 'admitted', length, shared: true }
     }
+    // The list was lost: nothing new is admitted until a verified one arrives.
+    // After (b) on purpose: a diary already served is re-announced by its
+    // member on every connection, and a rejection would end that sync.
+    if (this._blocklistHeld) return this._reject(peer, key, 'blocklist-pending')
     // Being purged with no drop to wait on: the purge failed and the seeder
     // is closing (fatal); never re-admit over it.
     if (this._dropping.has(key) || this._admitted.has(key)) return
@@ -2220,6 +2238,7 @@ class Seeder {
   // re-check after each await (_admitReserved). A key the snapshot unblocks
   // is not re-admitted: the author's next announce runs the normal gate.
   _onBlocklistAdopted (result, from) {
+    this._blocklistHeld = false
     if (this._closing) return
     const snapshot = this._blocklist.current()
     // Before anything else: a gate verdict in flight (_gate) must not apply

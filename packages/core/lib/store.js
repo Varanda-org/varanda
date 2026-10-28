@@ -603,34 +603,64 @@ function writeFollows (dataDir, list) {
   writeJsonAtomic(path.join(dataDir, 'follows.json'), { v: 1, follows })
 }
 
+function blocklistShape (data) {
+  return data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
+    data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
+    ? data
+    : null
+}
+
+// The copy `writeBlocklist` keeps next to blocklist.json; null when it is
+// absent, torn or odd-shaped (any other read error is thrown).
+function readBlocklistCopy (dataDir) {
+  try {
+    return blocklistShape(readJson(path.join(dataDir, 'blocklist.json.prev'), null))
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err
+    return null
+  }
+}
+
 // The signed moderation snapshot, next to follows.json. Only the shape is
 // checked here (the caller verifies the signature); anything else is absent.
-// A torn or hand-edited file also reads as absent, so a peer resends the list,
-// but a caller holding the data-dir lock passes `onUnreadable`: the file is
-// then moved aside to `blocklist.json.ilegivel-<ms>` (kept for inspection, and
-// so the next read is a plain "absent") and the callback gets that name.
+// A torn or missing file reads as the copy `writeBlocklist` kept
+// (blocklist.json.prev, the same snapshot), else as absent, so a peer resends
+// the list. A caller holding the data-dir lock passes `onUnreadable`: a torn
+// file is then moved aside to `blocklist.json.ilegivel-<ms>` (kept for
+// inspection), the copy, if any, is put back as blocklist.json, and the
+// callback gets the kept name (null for a missing file) and whether the copy
+// was used. A missing file with no copy is a plain absent: no callback.
 function readBlocklist (dataDir, { onUnreadable } = {}) {
   const file = path.join(dataDir, 'blocklist.json')
-  let data
+  let data = null
+  let torn = false
   try {
     data = readJson(file, null)
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err
-    if (typeof onUnreadable === 'function') {
-      const aside = file + '.ilegivel-' + Date.now()
+    torn = true
+  }
+  if (!torn && (data !== null || fs.existsSync(file))) return blocklistShape(data)
+  const copy = readBlocklistCopy(dataDir)
+  if (typeof onUnreadable === 'function') {
+    let aside = null
+    if (torn) {
+      aside = file + '.ilegivel-' + Date.now()
       fs.renameSync(file, aside)
       fsyncDir(dataDir)
-      onUnreadable(path.basename(aside))
     }
-    return null
+    if (copy !== null) writeJsonAtomic(file, copy, 0o600)
+    if (torn || copy !== null) onUnreadable(aside === null ? null : path.basename(aside), copy !== null)
   }
-  const ok = data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
-    data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
-  return ok ? data : null
+  return copy
 }
 
+// Written twice, the same bytes, so a file that later goes bad (disk error,
+// hand edit) can be read back from the other one.
 function writeBlocklist (dataDir, snapshot) {
-  writeJsonAtomic(path.join(dataDir, 'blocklist.json'), { v: 1, snapshot }, 0o600)
+  const data = { v: 1, snapshot }
+  writeJsonAtomic(path.join(dataDir, 'blocklist.json'), data, 0o600)
+  writeJsonAtomic(path.join(dataDir, 'blocklist.json.prev'), data, 0o600)
 }
 
 // Whether the store holds a core for this key (same probe as member.js and
