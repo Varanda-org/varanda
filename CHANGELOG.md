@@ -84,6 +84,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- Teto de membros cheio: o aviso não fala mais em "lista de espera", porque nada sobre a pessoa é guardado e ninguém é avisado depois. Agora diz "A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente." O código `lista-de-espera` e o HTTP 503 não mudam.
 - Na versão web, a sincronização automática para quando a aba fica oculta: a página envia `sync.stop` e libera a conexão com o semeador, e a sincronização reinicia assim que a aba volta a aparecer. Enquanto a aba está oculta, a fila de saída também não envia. Com a aba visível, a sincronização contínua não muda.
 - Ajustes › Sincronizar virou Ajustes › Sincronização e é só leitura: sem botões de sincronizar ou parar, mostra o estado, a nova tentativa e as últimas 200 linhas. O "handle" de seis dígitos hexadecimais (`@` mais a chave) saiu do app: sem nome, aparece "sem nome", e a chave só é mostrada no próprio perfil (atrás de "mostrar chave"), em Ajustes › Identidade e na etapa do certificado. A fila de saída passa a ser esvaziada também durante a rodada contínua, nunca durante uma rodada única.
 - O Caddy serve todos os arquivos de `/srv/web` com `Cache-Control: no-cache`, revalidado por ETag; arquivos ausentes com extensão dão 404 com `no-store`, e só caminhos sem extensão recebem `index.html` (`/varanda.json` continua com `no-store`).

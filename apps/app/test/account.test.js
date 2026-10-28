@@ -81,7 +81,7 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
   const waiting = toError('lista-de-espera')
-  t.is(waiting.message, 'A Varanda está cheia por enquanto e abriu uma lista de espera. Nada foi guardado; tente de novo mais tarde. Quem já entrou continua usando a rede normalmente.')
+  t.is(waiting.message, 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.')
   t.is(waiting.code, 'lista-de-espera')
   const other = toError('<html>secret@example.com</html>')
   t.is(other.message, 'serviço indisponível')

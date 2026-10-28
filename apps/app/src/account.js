@@ -22,7 +22,7 @@ const ERROR_MESSAGES = {
   'assinatura-invalida': 'não foi possível provar a chave',
   expirado: 'o vínculo expirou, comece de novo',
   // Member cap (503). Already-linked members never receive this token.
-  'lista-de-espera': 'A Varanda está cheia por enquanto e abriu uma lista de espera. Nada foi guardado; tente de novo mais tarde. Quem já entrou continua usando a rede normalmente.'
+  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
