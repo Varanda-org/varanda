@@ -5,9 +5,10 @@
 // colours the body down to the bottom edge (home indicator included); it
 // defaults to white.
 
-import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { colors, layout, type } from './theme'
+import { sideInset } from './sideInset'
 
 function TopRow ({ onClose, title, left, right }) {
   return (
@@ -15,7 +16,7 @@ function TopRow ({ onClose, title, left, right }) {
       {title
         ? (
           <View style={styles.titleWrap} pointerEvents='none'>
-            <Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{title}</Text>
+            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
           </View>
           )
         : null}
@@ -44,6 +45,7 @@ function IosContent ({ onClose, title, left, right, background, children }) {
 
 export function Sheet ({ open, onClose, title, left, right, background = colors.card, children }) {
   const insets = useSafeAreaInsets()
+  const { width } = useWindowDimensions()
   if (Platform.OS === 'ios') {
     return (
       <Modal
@@ -59,6 +61,12 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
       </Modal>
     )
   }
+  // Landscape notch/cutout. Web centres the panel (auto margins), so only the
+  // part of each side inset that centring leaves uncovered is padded; native
+  // pads the whole inset rather than rely on Yoga centring an absolute box.
+  const web = Platform.OS === 'web'
+  const padL = web ? sideInset(insets.left, width, layout.column) : insets.left
+  const padR = web ? sideInset(insets.right, width, layout.column) : insets.right
   return (
     <Modal
       visible={!!open}
@@ -69,8 +77,10 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
     >
       <Pressable style={styles.backdrop} accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} />
       <View style={[styles.panel, { top: insets.top + layout.sheetTop }]}>
-        <TopRow onClose={onClose} title={title} left={left} right={right} />
-        <View style={[styles.children, { paddingBottom: insets.bottom, backgroundColor: background }]}>{children}</View>
+        <View style={{ paddingLeft: padL, paddingRight: padR }}>
+          <TopRow onClose={onClose} title={title} left={left} right={right} />
+        </View>
+        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: background }]}>{children}</View>
       </View>
     </Modal>
   )

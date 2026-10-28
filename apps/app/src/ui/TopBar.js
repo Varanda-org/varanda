@@ -13,7 +13,7 @@ const mark = require('../../assets/cadeira.png')
 export function TopBar ({ title, subtitle, right, onBack }) {
   const insets = useSafeAreaInsets()
   return (
-    <View style={[styles.bar, { paddingTop: insets.top, height: layout.topBar + insets.top }]}>
+    <View style={[styles.bar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
       {typeof onBack === 'function'
         ? (
           <Pressable
@@ -28,7 +28,7 @@ export function TopBar ({ title, subtitle, right, onBack }) {
           )
         : <Image source={mark} style={styles.mark} accessibilityLabel='Varanda' />}
       <View style={styles.titles}>
-        <Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{title}</Text>
+        <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
         {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
       </View>
       {right || null}
