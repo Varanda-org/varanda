@@ -271,6 +271,19 @@ test('readBlocklist reads the copy of a missing file, and puts it back for a cal
   t.is(calls.length, 1, 'missing with a bad copy: no callback')
 })
 
+test('hasUnreadableBlocklist is true only once a torn file was kept aside', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'blocklist.json')
+  t.absent(store.hasUnreadableBlocklist(dir), 'empty dir')
+  store.writeBlocklist(dir, { v: 1, seq: 1, blocked: [] })
+  t.absent(store.hasUnreadableBlocklist(dir), 'a good list and its copy')
+  fs.writeFileSync(file, '{"v":1,"snapshot":{"seq":')
+  fs.rmSync(file + '.prev')
+  store.readBlocklist(dir, { onUnreadable () {} })
+  t.ok(store.hasUnreadableBlocklist(dir), 'the torn file is kept aside')
+})
+
 test('replicaStored is true only for a core the store holds', async (t) => {
   await testnet(t)
   const a = await open(t, tmpDir(t))

@@ -655,6 +655,13 @@ function readBlocklist (dataDir, { onUnreadable } = {}) {
   return copy
 }
 
+// Whether an earlier start moved a torn blocklist.json aside
+// (`blocklist.json.ilegivel-<ms>`): a list existed once. Names only, nothing
+// is read or opened.
+function hasUnreadableBlocklist (dataDir) {
+  return fs.readdirSync(dataDir).some((name) => name.startsWith('blocklist.json.ilegivel-'))
+}
+
 // Written twice, the same bytes, so a file that later goes bad (disk error,
 // hand edit) can be read back from the other one.
 function writeBlocklist (dataDir, snapshot) {
@@ -687,6 +694,7 @@ module.exports = {
   readFollows,
   writeFollows,
   readBlocklist,
+  hasUnreadableBlocklist,
   writeBlocklist,
   replicaStored,
   readJson,
