@@ -1920,3 +1920,50 @@ Defects found and fixed:
 Not verified: a real Android device, arm64-v8a, a release build, Doze and the real background limits (step g only sends the app to the Home screen for 5 s), and iOS after the driver refactor (`--platform ios` keeps the old defaults, `--host 127.0.0.1`, probing on; the iOS gate was not re-run).
 
 Method notes: with the data partition too small the emulator refuses to start, so keep several GB free. `adb reverse` carries TCP only. Do not stop Metro with `kill $(lsof -ti tcp:8081)`: `lsof` also lists the emulator process, which has a connection to that port, and in this run the kill stopped the emulator too. Use `lsof -ti tcp:8081 -sTCP:LISTEN`.
+
+## 31. Foto do perfil (PR feat/profile-avatar, 2026-10-28)
+
+### O que mudou
+
+- Web hospedada: Editar perfil escolhe uma imagem, enquadra em círculo e recodifica no navegador (`apps/app/src/media/avatar.js`, `crop.js`, `avatarEncode.web.js`, `ui/AvatarEditor.js`) para um still 512x512 em WebP ou JPEG de no máximo 262144 bytes, sem metadados. O nó confere o resultado (`packages/core/lib/still-image.js`). Nada sobe antes de Salvar (`profileSave.js`).
+- Perfil: chave opcional `avatar` e o par de compatibilidade (`docs/protocol.md`); `profile.set` aceita `avatar`; `avatar` em `profile.read`, `diary.peek`, `peek.read` e `notices.list` (`docs/rpc.md`).
+- Termos de Uso e Política de Privacidade versão 2, com novo aceite.
+- O avatar usa a foto, quando há, no mesmo círculo (cover) por cima das iniciais; sem foto, iniciais; nunca caracteres da chave. O cache de nomes (`namesCache.js`) guarda o `avatar` junto do nome.
+- O nó do núcleo recusa mudar nome ou bio enquanto existe foto (`USAGE` 'perfil com foto: mude o nome e a bio na versão web ou tire a foto').
+
+### Testes automatizados
+
+Novos: `apps/app/test/mediaAvatar.test.js`, `apps/app/test/mediaCrop.test.js`, `apps/app/test/namesCache.test.js`, `packages/core/test/still-image.test.js`.
+
+Alterados: `apps/app/test/legal.test.js`, `search.test.js`, `thread.test.js`, `topics.test.js`; `packages/core/test/helpers/net.js` (o `scanWire` aceita as strings de mime de mídia), `member.test.js`, `peek.test.js`, `records.test.js`, `session-sync.test.js`, `session.test.js`, `terms.test.js`; `packages/rpc/test/methods.test.js`, `sizes.test.js`; `packages/web-member/test/diary-peek.test.js`, `e2e-media.test.js`, `media-ops.test.js`, `notices-e2e.test.js`, `notices.test.js`, `peek-repost.test.js`, `peek.test.js`, `session-e2e.test.js`, `session-media.test.js`, `session.test.js`.
+
+### Verificação humana
+
+Na web hospedada, a cada item:
+
+- [ ] Um JPEG com EXIF e GPS, um PNG, um WebP e um GIF animado: cada um vira um still 512x512 em WebP ou JPEG de no máximo 262144 bytes, sem metadados (`exiftool` nos bytes baixados de `/media`).
+- [ ] Enquadrar arrastando, com os botões, pelo teclado e com leitor de tela (VoiceOver, NVDA).
+- [ ] Confirmar o enquadramento não sobe nada até Salvar.
+- [ ] Remover a foto volta às iniciais.
+- [ ] Num segundo aparelho, editar o nome mantém a foto.
+- [ ] Um build antigo mostra o mesmo nome e a mesma bio.
+- [ ] No nativo, aparecem as iniciais e dá para remover a foto.
+- [ ] O portão da versão 2 dos termos aparece de novo.
+- [ ] O avatar de uma conta bloqueada deixa de carregar.
+- [ ] Caddy, mídia: 120 pedidos por 10 s com uma página cheia de avatares.
+- [ ] Moderação: o painel só sinaliza fotos (`panel/app.js:62,99`); quem modera julga uma denúncia de foto abrindo `/m/<chave>` no app hospedado.
+- [ ] (a) A saída real do codificador no Chrome, no Safari e no Firefox passa na conferência de still e de dimensões do nó: um Salvar com enquadramento novo funciona em cada navegador.
+- [ ] (b) Entrar com foto no cadastro grava o perfil simples antes da declaração do núcleo de mídia, então a linha da Espiadinha de um desconhecido e o aviso de seguidor mantêm o nome depois de mais de 10 escritas.
+- [ ] (c) Um enquadramento cujos bytes codificados falham na conferência local mostra 'não foi possível preparar a foto' e não sobe nada.
+
+### Limites
+
+- A foto é permanente: o registro fica no diário como os demais.
+- Só os 4 núcleos de mídia mais novos valem.
+- Não há comparação com listas de hash.
+- No nativo, só iniciais.
+- Uma aba com pacote antigo não mostra o nome de quem tem foto na busca, nas páginas de membro e nas conversas até recarregar.
+- Quem escreve com versão antiga (aba velha, CLI antiga) e salva o perfil remove a foto.
+- Espiadinha e Avisos mostram o avatar só dentro da janela de espiada.
+- O nó do núcleo recusa mudar nome ou bio enquanto existe foto.
+- Ao publicar, suba o semeador e o pacote web juntos.

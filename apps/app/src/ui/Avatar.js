@@ -1,13 +1,95 @@
+/* global URL */
+
 // A round avatar with the person's initials on the stripe colour picked by
 // the first byte of the key. With no name it shows a person glyph instead:
 // no character derived from a key is ever drawn. Decorative: the name is
 // read elsewhere.
+//
+// A profile photo is drawn over the initials only in the hosted web app (as
+// MediaView does for post photos): the bytes come from the same origin's
+// /media route, verified by ../media/avatar.js (SHA-256, still image, exact
+// 512x512), and only a blob: URL is ever drawn. Retryable failures retry
+// after 2, 5 and 15 s while mounted; any final failure, or an image that
+// does not render, leaves the initials. localUri (a blob: URL the editor
+// just made) is drawn as is. Natively or on a page that is not hosted
+// nothing is fetched. persist is false for authors the device does not
+// follow (cache: 'no-store').
 
-import { StyleSheet, Text, View } from 'react-native'
+import { useEffect, useRef, useState } from 'react'
+import { Image, Platform, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { hostedPage } from '../configStore'
 import { avatarColorOf } from '../format'
+import { avatarKey, loadAvatarUrl, validAvatar } from '../media/avatar'
+import { createMediaCache, retryDelay } from '../media/cache'
 import { Icon } from './Icon'
 import { colors, stripes } from './theme'
+
+const canFetch = Platform.OS === 'web' && hostedPage === true
+
+const cache = createMediaCache({ max: 128, concurrency: 4 })
+
+const isBlobUrl = (url) => typeof url === 'string' && url.startsWith('blob:')
+
+// Hands a blob: URL of verified bytes (the editor's own upload) to the
+// cache, which then owns it; a URL already cached for the key wins. The
+// caller must pass bytes that passed checkAvatarBytes and whose SHA-256 the
+// descriptor carries: a cache hit is drawn without a second check.
+export function primeAvatar (author, descriptor, blobUrl) {
+  if (!validAvatar(descriptor) || !isBlobUrl(blobUrl)) return
+  const key = avatarKey(author, descriptor)
+  const revoke = () => { try { URL.revokeObjectURL(blobUrl) } catch {} }
+  const hit = cache.peek(key)
+  if (hit === blobUrl) return
+  if (hit !== null) {
+    revoke()
+    return
+  }
+  // A load already in flight for the key keeps its own loader; if it fails
+  // (a 404 before the blocks reach the seeder), the retry runs this one.
+  const prime = () => cache.get(key, () => Promise.resolve(blobUrl))
+  const settle = (url) => { if (url !== blobUrl) revoke() }
+  prime().then(settle, () => prime().then(settle, revoke))
+}
+
+// -> a blob: URL to draw, or null.
+function useAvatarUrl (publicKey, picture, persist) {
+  const key = canFetch && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null
+  const [attempt, setAttempt] = useState(0)
+  const autoRef = useRef({ key: null, done: 0 })
+  const [result, setResult] = useState(() => {
+    const hit = key ? cache.peek(key) : null
+    return { key: hit ? key : null, url: hit }
+  })
+  useEffect(() => {
+    if (!key) return
+    if (autoRef.current.key !== key) autoRef.current = { key, done: 0 }
+    let alive = true
+    let timer = null
+    const hit = cache.peek(key)
+    if (hit) {
+      setResult({ key, url: hit })
+      return
+    }
+    const fresh = attempt > 0
+    cache.get(key, () => loadAvatarUrl(publicKey, picture, { persist, fresh })).then(
+      (url) => { if (alive) setResult({ key, url }) },
+      (err) => {
+        if (!alive) return
+        const delay = retryDelay(err, autoRef.current.done)
+        if (delay === null) return
+        autoRef.current.done++
+        timer = setTimeout(() => { if (alive) setAttempt((n) => n + 1) }, delay)
+      }
+    )
+    return () => {
+      alive = false
+      if (timer !== null) clearTimeout(timer)
+    }
+    // The descriptor is identified by its key (deps omit the object itself).
+  }, [publicKey, key, attempt, persist])
+  return key !== null && result.key === key && isBlobUrl(result.url) ? result.url : null
+}
 
 // First letter of the first and last word, or two letters of a single word;
 // '' when the name is missing or blank.
@@ -19,7 +101,14 @@ function initialsFromName (name) {
   return ''
 }
 
-export function Avatar ({ name, publicKey, size = 44, ring = false }) {
+export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri }) {
+  const fetched = useAvatarUrl(publicKey, picture, persist !== false)
+  // The URL that failed to render; the initials stay for it.
+  const [broken, setBroken] = useState(null)
+  // A local URL that failed (primeAvatar may revoke it when the cache already
+  // holds a verified copy) falls back to the fetched one.
+  const uri = isBlobUrl(localUri) && localUri !== broken ? localUri : fetched
+  const photo = uri !== null && uri !== broken ? uri : null
   const stripe = stripes[avatarColorOf(publicKey)]
   const fontSize = size >= 80 ? 30 : size <= 40 ? 15 : 16
   const initials = initialsFromName(name)
@@ -32,6 +121,16 @@ export function Avatar ({ name, publicKey, size = 44, ring = false }) {
       {initials === ''
         ? <Icon name='pessoa' size={size * 0.5} color={stripe.ink} />
         : <Text style={[styles.initials, { color: stripe.ink, fontSize }]} numberOfLines={1}>{displayText(initials)}</Text>}
+      {photo !== null && (
+        <Image
+          source={{ uri: photo }}
+          style={[styles.fill, { borderRadius: size / 2 }]}
+          resizeMode='cover'
+          accessible={false}
+          accessibilityIgnoresInvertColors
+          onError={() => setBroken(photo)}
+        />
+      )}
     </View>
   )
   if (!ring) return circle
@@ -48,6 +147,7 @@ export function Avatar ({ name, publicKey, size = 44, ring = false }) {
 }
 
 const styles = StyleSheet.create({
+  fill: { ...StyleSheet.absoluteFillObject },
   circle: { alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   initials: { fontWeight: '700' }
 })

@@ -32,6 +32,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { pickAvatar } from '../media/avatar'
 import { cursorMoved, cursorOf, feedKey, isLastFeedPage, mergeOlder, resetWith, shouldReloadOnShow } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
@@ -550,7 +551,7 @@ export function useSocial ({ ownKey, onToast }) {
 // The PostRow props of `post` (a post item) whose actions target `ref`.
 // `h`: { onOpenThread, onOpenMember, onReply, onQuote, onReport } (each
 // optional). A repost passes the ORIGINAL as `post` and `repostedBy`.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, now, ownKey, h, persist }) {
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
   const prof = profileOf(post.author) || null
   const name = post.name || (prof ? prof.name : null) || null
   const username = post.username || (prof ? prof.username : null) || null
@@ -563,6 +564,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       author: post.quote.author,
       name: (q && q.name) || (qp ? qp.name : null) || null,
       username: (q && q.username) || (qp ? qp.username : null) || null,
+      avatar: pickAvatar(avatarOf(post.quote.author), q || null),
       at: q ? q.at : null,
       text: q ? q.text : null,
       media: q ? q.media : null,
@@ -593,6 +595,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     author: post.author,
     name,
     username,
+    avatar: pickAvatar(avatarOf(post.author), post),
     at: post.at,
     text: post.text,
     media: post.media || null,
@@ -758,6 +761,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const { learnMany, resolveMany } = names
   const learnPage = useCallback((items) => {
     learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+    resolveMany(items.map((i) => i.author))
     resolveMany(items.filter((i) => i.replyTo).map((i) => i.replyTo.author))
   }, [learnMany, resolveMany])
 

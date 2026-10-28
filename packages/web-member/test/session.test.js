@@ -258,7 +258,7 @@ test('profile, posts, replies, log and feed of the own diary', async (t) => {
 
   // profile.read of the own key (duplicates folded).
   t.alike(await web.request('profile.read', { authors: [key, key] }), {
-    profiles: [{ author: key, name: 'Bia', bio: 'oi', username: null }],
+    profiles: [{ author: key, name: 'Bia', bio: 'oi', avatar: null, username: null }],
     missing: []
   })
 
@@ -300,7 +300,7 @@ test('follows, and reads of diaries with no local data', async (t) => {
   t.is(missing.message, 'sem dados locais para este diário')
   t.absent(await storage.hasCore('replica/' + other), 'no core created by a read')
   t.alike(await web.request('profile.read', { authors: [other, key] }), {
-    profiles: [{ author: key, name: null, bio: null, username: null }],
+    profiles: [{ author: key, name: null, bio: null, avatar: null, username: null }],
     missing: [other]
   }, 'no profile record: null name and bio; no local data: missing')
   t.absent(await storage.hasCore('replica/' + other), 'no core created by profile.read')
@@ -584,7 +584,7 @@ test('username.add: appends a verified username record once, locked and foreign 
   t.alike(await s.web.request('log.read', {}), after, 'nothing appended')
   t.alike(await s.web.request('username.add', { record: rename }), { changed: false, username: 'ana_2' }, 'the latest record is still accepted')
 
-  const named = { profiles: [{ author: s.key, name: null, bio: null, username: 'ana_2' }], missing: [] }
+  const named = { profiles: [{ author: s.key, name: null, bio: null, avatar: null, username: 'ana_2' }], missing: [] }
   t.alike(await s.web.request('profile.read', { authors: [s.key] }), named, 'the verified username')
 
   await s.node.clearKeyPair()
@@ -608,13 +608,13 @@ test('profile.read: a readable replica is named, a blocked one is missing', asyn
 
   // Not followed: still named when its diary would be shown.
   t.alike(await s.web.request('profile.read', { authors: [A, A] }), {
-    profiles: [{ author: A, name: 'Autor', bio: 'de longe', username: null }],
+    profiles: [{ author: A, name: 'Autor', bio: 'de longe', avatar: null, username: null }],
     missing: []
   })
 
   await writeBlocklist(s.storage, snapshot(moderator(assoc.kp), { blocked: [A] }))
   t.alike(await s.web.request('profile.read', { authors: [A, s.key] }), {
-    profiles: [{ author: s.key, name: null, bio: null, username: null }],
+    profiles: [{ author: s.key, name: null, bio: null, avatar: null, username: null }],
     missing: [A]
   }, 'blocked: missing, before any purge')
   t.ok(await s.storage.hasCore('replica/' + A), 'still stored: the read hides it, the sync purges it')

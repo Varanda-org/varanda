@@ -6,6 +6,7 @@ const crypto = require('hypercore-crypto')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } = require('../lib/cert')
+const { profileRecords } = require('../lib/records')
 const { MAX_FUTURE_MS } = require('../lib/feed')
 const {
   PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS,
@@ -116,6 +117,7 @@ test('diaryPeek validates block zero and revoked issuers, with best effort names
   const valid = diaryPeek(f)
   t.is(valid.reason, null)
   t.is(valid.name, 'Ana')
+  t.is(valid.avatar, null)
   t.is(valid.username, 'ana')
   t.ok(valid.scanned)
   t.absent(valid.capped)
@@ -241,8 +243,9 @@ test('buildPeekPage: one slot per diary per round, numerical date then author or
   t.alike(page.needs, [])
   t.is(page.next, null)
   t.is(JSON.stringify(diaries), before)
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
   t.is(page.items[0].kind, 'post')
+  t.is(page.items[0].avatar, null)
   t.is(page.items[0].replyTo, null)
   t.is(page.items[0].quote, null)
   t.is(page.items[0].media, null)
@@ -433,7 +436,7 @@ test('quotes and reposts in effect are publications; likes and undone reposts ar
   t.not(result.posts[1].quote, quote, 'a copy')
   const page = buildPeekPage({ diaries: [{ key: A, name: result.name, username: result.username, posts: result.posts, exhausted: true }], limit: 35 })
   t.alike(page.items.map((i) => [i.kind, i.seq, i.round]), [['repost', 5, 0], ['post', 3, 1]])
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
   t.alike(page.items[0].to, quote)
   t.is(page.items[0].text, null)
   t.alike(page.items[1].quote, quote)
@@ -520,5 +523,65 @@ test('peek loads without the node-only network or storage stack', (t) => {
   t.ok(cached.length > 0)
   for (const frag of ['/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/', '/udx/', '/rocksdb/', '/corestore/']) {
     t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+  }
+})
+
+test('avatar: diaryPeek uses the newest retained profile and page items copy its descriptor', (t) => {
+  const f = fixture()
+  const avatar = { ...MEDIA[0], mime: 'image/jpeg', width: 512, height: 512 }
+  const newer = { ...avatar, start: 2 }
+  const records = [
+    ...profileRecords({ name: 'Older', avatar, at: AT }),
+    ...profileRecords({ name: 'Newest', avatar: newer, at: new Date(NOW - 1000).toISOString() }),
+    post(),
+    { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT }
+  ]
+  const entries = [...f.entries, ...records.map((record, i) => ({ seq: i + 3, record }))]
+  const input = { ...f, length: entries.length, entries: entries.slice().reverse(), fetched: new Set(entries.map(({ seq }) => seq)) }
+  const result = diaryPeek(input)
+  t.is(result.name, 'Newest', 'seq wins over profile at')
+  t.alike(result.avatar, newer)
+  t.not(result.avatar, records[3].avatar)
+  const page = buildPeekPage({ diaries: [{ key: A, ...result, exhausted: true }], limit: 35 })
+  t.alike(page.items.map(({ kind }) => kind), ['repost', 'post'])
+  for (const item of page.items) {
+    t.alike(item.avatar, newer)
+    t.not(item.avatar, result.avatar)
+  }
+  t.execution(() => { page.items[0].avatar.start = 99 })
+  t.is(page.items[1].avatar?.start, 2, 'items do not share descriptors')
+  t.is(result.avatar?.start, 2)
+  t.is(records[3].avatar.start, 2)
+  entries.push({ seq: entries.length, record: profile('Removed') })
+  const removed = diaryPeek({ ...input, entries, length: entries.length, fetched: new Set(entries.map(({ seq }) => seq)) })
+  t.is(removed.avatar, null, 'a newer plain profile removes the avatar')
+  t.ok(buildPeekPage({ diaries: [{ key: A, ...removed, exhausted: true }], limit: 35 }).items.every(({ avatar }) => avatar === null))
+  t.is(diaryPeek({ ...f, entries: [f.entries[0]] }).avatar, null, 'no profile')
+  t.is(diaryPeek(null).avatar, null, 'invalid input')
+})
+
+test('avatar: profiles outside the head and tail preserve the older retained value and block 2 name', (t) => {
+  const f = fixture()
+  const avatar = { ...MEDIA[0], mime: 'image/jpeg', width: 512, height: 512 }
+  for (const older of [null, avatar]) {
+    const head = profileRecords({ name: 'Retained', avatar: older, at: AT })
+    const entries = [
+      f.entries[0],
+      { seq: 1, record: older === null ? post() : head[0] },
+      { seq: 2, record: head[head.length - 1] },
+      ...profileRecords({ name: 'Outside', avatar: { ...avatar, start: 2 }, at: AT }).map((record, i) => ({ seq: i + 3, record })),
+      ...Array.from({ length: 15 }, (_, i) => ({ seq: i + 5, record: post() }))
+    ]
+    const fetched = new Set(peekWindow(entries.length, new Set()))
+    t.absent(fetched.has(3) || fetched.has(4), 'the compat pair is outside the window')
+    const result = diaryPeek({ ...f, length: entries.length, entries: entries.filter(({ seq }) => fetched.has(seq)), fetched })
+    t.is(result.name, 'Retained')
+    t.alike(result.avatar, older)
+    const page = buildPeekPage({ diaries: [{ key: A, ...result, exhausted: true }], limit: 35 })
+    t.is(page.items.length, 3)
+    for (const item of page.items) {
+      t.is(item.name, 'Retained')
+      t.alike(item.avatar, older)
+    }
   }
 })

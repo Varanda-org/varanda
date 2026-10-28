@@ -332,6 +332,43 @@ async function appendNow (core, record, limits) {
   return core.length - 1
 }
 
+// One atomic append of 1..8 records (the profile compat pair): each is
+// validated at its own seq, and either all are appended or none.
+function appendRecords (core, records, limits) {
+  const prev = appendQueues.get(core) || Promise.resolve()
+  const run = () => appendManyNow(core, records, { ...DEFAULT_LIMITS, ...limits })
+  const next = prev.then(run, run)
+  appendQueues.set(core, next.catch(() => {}))
+  return next
+}
+
+async function appendManyNow (core, records, limits) {
+  await core.ready()
+  if (core[UNLOCKED] !== true) throw new UsageError(LOCKED)
+  if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw invalidRecord('malformed')
+  const plains = []
+  let bytes = 0
+  for (let i = 0; i < records.length; i++) {
+    let plain = null
+    try {
+      plain = decodeBlock(b4a.from(JSON.stringify(records[i])))
+    } catch {}
+    if (plain === null) throw invalidRecord('malformed')
+    const reason = validateRecord(plain, core.length + i)
+    if (reason) throw invalidRecord(reason)
+    const blockBytes = b4a.byteLength(JSON.stringify(plain))
+    bytes += blockBytes
+    if (blockBytes > limits.maxBlockBytes ||
+        core.length + i >= limits.maxLogBlocks ||
+        core.byteLength + bytes > limits.maxLogBytes) {
+      throw new Error('limite do diário atingido')
+    }
+    plains.push(plain)
+  }
+  await core.append(plains)
+  return core.length - 1
+}
+
 function readConfig (storage) {
   return storage.readJson('config')
 }
@@ -638,6 +675,7 @@ module.exports = {
   readAll,
   readBlock0,
   appendRecord,
+  appendRecords,
   readConfig,
   writeConfig,
   readFollows,

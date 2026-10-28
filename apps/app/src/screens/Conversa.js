@@ -19,6 +19,7 @@ import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, fromRead, mergeCounts } from '../engagement'
 import { replyNameOf, whoOf } from '../who'
+import { avatarOf, pickAvatar } from '../media/avatar'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
@@ -297,13 +298,14 @@ export function useEngagement ({ request, onToast }) {
   return { state, counts, pending, reset, readOwn, readCounts, setCount, toggle }
 }
 
-// The identity shown for an author: the peeked (verified) fields first,
-// then the profiles cache. Raw strings: PostRow escapes them.
+// Names prefer the verified peek; avatars prefer the authoritative cache.
+// Raw strings: PostRow escapes them.
 export function identityOf (names, author, item) {
   const p = names.profileOf(author)
   return {
     name: (item && item.name) || (p ? p.name : null) || null,
-    username: (item && item.username) || (p ? p.username : null) || null
+    username: (item && item.username) || (p ? p.username : null) || null,
+    avatar: pickAvatar(p, item)
   }
 }
 
@@ -320,9 +322,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     const q = peeked ? postAt(peeked, qref) : null
     if (q) {
       const qwho = identityOf(names, q.author, q)
-      quote = { author: q.author, name: qwho.name, username: qwho.username, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }) }
+      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }) }
     } else {
-      quote = { author: item.quote.author, name: null, username: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
+      quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
     }
   }
   const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
@@ -331,6 +333,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     author: item.author,
     name: who.name,
     username: who.username,
+    avatar: who.avatar,
     at: item.at,
     text: item.text,
     replyToName: parentRef ? replyNameOf(names.profileOf(item.replyTo.author)) : null,
@@ -371,7 +374,8 @@ export function seedItem (seed, ref) {
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
     name: typeof seed.name === 'string' ? seed.name : null,
-    username: typeof seed.username === 'string' ? seed.username : null
+    username: typeof seed.username === 'string' ? seed.username : null,
+    avatar: avatarOf(seed.avatar)
   }
 }
 
@@ -458,7 +462,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       if (!alive()) return
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
-      resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).map((i) => i.author))])
+      resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       setCount(focal, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
       commit({
         phase: 'ready',
@@ -508,6 +512,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
       if (!alive()) return
       learnPeeked(learnMany, peeked)
+      resolveMany([...new Set(page.replies.flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       const seen = new Set(viewRef.current.replies.map((r) => refOf(r.author, r.seq)))
       const fresh = page.replies.filter((r) => !seen.has(refOf(r.author, r.seq)))
       commit({
@@ -521,7 +526,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     } catch (err) {
       if (alive()) commit({ loadingMore: false, moreError: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
-  }, [focal, request, commit, readOwn, readCounts, learnMany, ownKey])
+  }, [focal, request, commit, readOwn, readCounts, learnMany, resolveMany, ownKey])
 
   useEffect(() => {
     if (full) load(false)

@@ -128,6 +128,16 @@ function isDescriptor (d) {
     int(1, L.MAX_MEDIA_DIMENSION)(height)
 }
 
+// profile.set `avatar`: same rules as validAvatar in @varanda/core lib/records.js.
+function isAvatar (v) {
+  return isDescriptor(v) &&
+    L.AVATAR_MIMES.includes(v.mime) &&
+    v.width === L.AVATAR_SIDE &&
+    v.height === L.AVATAR_SIDE &&
+    v.blocks <= L.MAX_AVATAR_BLOCKS &&
+    v.bytes <= L.MAX_AVATAR_BYTES
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function isMediaList (v) {
   if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
@@ -250,7 +260,12 @@ const SPECS = {
     }
   },
   'profile.set': {
-    fields: { name: req(str(1, L.MAX_NAME)), bio: opt(str(0, L.MAX_BIO), '') },
+    // No fallback: an absent avatar keeps the newest own one (docs/rpc.md 5.6).
+    fields: {
+      name: req(str(1, L.MAX_NAME)),
+      bio: opt(str(0, L.MAX_BIO), ''),
+      avatar: opt((v) => v === null || isAvatar(v))
+    },
     mutating: true
   },
   'post.create': {
