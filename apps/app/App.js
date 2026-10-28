@@ -1,4 +1,8 @@
-// The app shell: the first connection, the onboarding (src/onboarding.js
+// The app shell: before anything else the Termos de Uso and Política de
+// Privacidade gate (src/terms.js: per member, per version; nothing renders
+// behind it and autosync, the outbox and a profile invite wait for it; a
+// hosted linked member's acceptance is also sent to the account service),
+// then the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
 // and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar, the
@@ -27,13 +31,16 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
-import { lookupUsername, parseReturn, parseReturnWaitlist } from './src/account'
+import { lookupUsername, parseReturn, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
+import { LEGAL_VERSION } from './src/legal'
+import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
+import { useTerms } from './src/useTerms'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { OfflineNote } from './src/ui/OfflineNote'
@@ -58,6 +65,7 @@ import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
+import Termos from './src/screens/Termos'
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
 // (docs/ios-gate.md).
@@ -71,6 +79,9 @@ const SLOW_LOOKUP_MS = 10000
 // cache retries a failed key only when asked after its retry delay).
 const LOOKUP_RETRY_MS = 5000
 const READY_TOAST = 'Tudo pronto. Siga pessoas para encher a Rua.'
+// A link confirmed in Ajustes re-arms the terms sync at most this many times
+// per member in a page load (Ajustes re-reads the info often).
+const TERMS_REARM_MAX = 5
 
 // The steps the setup branch (Identidade) renders; the others belong to the
 // shell (spinner, Perfil, the tabs).
@@ -244,6 +255,180 @@ function Member () {
     setInfo(null)
   }, [locked])
   const setupStep = locked || (!setupDone && !confirmed)
+  const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
+
+  // --- the Termos de Uso and the Política de Privacidade (src/terms.js) ---
+  // The device's record says which member accepted which version; the gate
+  // (before Conexao, Entrar and the tabs) asks whenever it cannot tell that
+  // the member in front of it accepted the current one. The member is the
+  // unlocked passkey's key (browser node) or node.info's identity.
+  const terms = useTerms(LEGAL_VERSION)
+  const member = passkey !== null
+    ? ((!locked && pkStatus && pkStatus.publicKey) || null)
+    : ((info && info.publicKey) || null)
+  const decision = terms.status === 'loading'
+    ? 'loading'
+    : termsDecision({
+      record: terms.record,
+      version: LEGAL_VERSION,
+      member,
+      claim: terms.claim,
+      hosted: mode === 'hosted',
+      // A failed first status read is known too: nobody (member null), so
+      // the gate shows and then Identidade's error and its retry.
+      identityKnown: passkey === null || pkStatus !== null || !!passkey.error
+    })
+  // Past the setup a hosted member is never null (unlocked means a known
+  // key). On native or varanda-serve a node reached later without an identity
+  // gives null too: termsDecision lets it through (nothing flows without an
+  // identity) and asks as soon as one appears that is not in the record.
+  const termsOk = decision === 'accepted' || decision === 'bind'
+  // The acceptance made before anyone signed in (the claim) is spent on the
+  // first member known in this page load: recorded for that member, or just
+  // dropped when that member had accepted already. It never reaches the next
+  // identity.
+  const { bind: bindTerms, markSynced: markTermsSynced, dropMember: dropTermsMember } = terms
+  useEffect(() => {
+    if (member !== null && terms.claim !== null && (decision === 'bind' || decision === 'accepted')) bindTerms(member)
+  }, [decision, member, terms.claim, bindTerms])
+  const memberRef = useRef(member)
+  memberRef.current = member
+
+  // The acceptance sent to the account service (hosted, linked members): one
+  // start, one signature by the node, one finish, per member and version and
+  // page load. Keyed member#version: { count, state }, moved only by
+  // termsSyncStep (src/terms.js says what each state and event means). A
+  // fresh acceptance after a 'done' (Recomeçar, then accept again) runs
+  // again; a run dropped by a lock, unlock or reset is armed again. Failures
+  // are never toasts; Ajustes → privacidade tells.
+  const termsSync = useRef(new Map())
+  const [, setTermsTick] = useState(0)
+  const stepTermsSync = (key, event) => {
+    const next = termsSyncStep(termsSync.current.get(key), event)
+    if (next === undefined) termsSync.current.delete(key)
+    else termsSync.current.set(key, next)
+  }
+  const termsEntry = member !== null ? termsSync.current.get(member + '#' + LEGAL_VERSION) : undefined
+  // This member's entry in the device record ({acceptedAt, synced} or null).
+  const termsEntryNow = member !== null && terms.record && terms.record.version === LEGAL_VERSION &&
+    Object.hasOwn(terms.record.members, member)
+    ? terms.record.members[member]
+    : null
+  const syncTermsNow = shouldSyncTerms({
+    hosted: mode === 'hosted',
+    termsOk,
+    ready,
+    online: node.online,
+    locked,
+    setupDone,
+    recovering: passkey !== null && passkey.recovering === true,
+    onceSync: !!(node.sync.active && node.sync.active.once) || node.sync.starting === true,
+    member,
+    record: terms.record,
+    version: LEGAL_VERSION,
+    attempted: termsSyncAttempted(termsEntry, termsEntryNow)
+  })
+  useEffect(() => {
+    if (!syncTermsNow || member === null) return
+    const key = member + '#' + LEGAL_VERSION
+    stepTermsSync(key, 'start')
+    const gen = generationRef.current
+    const settle = (event) => {
+      stepTermsSync(key, event)
+      setTermsTick((n) => n + 1)
+    }
+    // A lock, unlock or reset meanwhile: the run is dropped and armed again
+    // (the effect re-runs on the new generation). Once the finish answered,
+    // the server has the acceptance whatever the generation: it is marked
+    // synced for that member all the same.
+    const run = async () => {
+      const { nonce } = await termsStart({ member, version: LEGAL_VERSION })
+      if (gen !== generationRef.current) return settle('generation')
+      const { signature } = await node.request('terms.sign', { nonce, version: LEGAL_VERSION })
+      if (gen !== generationRef.current) return settle('generation')
+      await termsFinish({ member, nonce, signature })
+      markTermsSynced(member)
+      settle('ok')
+    }
+    run().catch((err) => {
+      if (gen !== generationRef.current) return settle('generation')
+      settle(err && err.code === 'nao-vinculado' ? 'nao-vinculado' : 'fail')
+    })
+  }, [syncTermsNow, member, generation, node.request, markTermsSynced])
+  // Back online, or a new passkey generation (an unlock after Sair or a
+  // lock): a transient failure is tried again, up to 3 attempts per member
+  // and version in this page load. The generation counts because a lock,
+  // Sair or Recomeçar clears the key before the generation moves, so a
+  // terms.sign it broke settles as a plain failure.
+  const rearmTermsTransients = useCallback(() => {
+    let changed = false
+    for (const [key, e] of termsSync.current) {
+      const next = termsSyncStep(e, 'online')
+      if (next !== e) {
+        termsSync.current.set(key, next)
+        changed = true
+      }
+    }
+    if (changed) setTermsTick((n) => n + 1)
+  }, [])
+  const termsOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = termsOnlineRef.current
+    termsOnlineRef.current = node.online
+    if (was !== false || node.online === false) return
+    rearmTermsTransients()
+  }, [node.online, rearmTermsTransients])
+  const termsGenRef = useRef(generation)
+  useEffect(() => {
+    if (termsGenRef.current === generation) return
+    termsGenRef.current = generation
+    rearmTermsTransients()
+  }, [generation, rearmTermsTransients])
+  // The link confirmed in Ajustes → Conta (Identidade's LinkCard refreshes
+  // the info): a member remembered as 'so-aparelho' may be linked now, so the
+  // sync is armed again; a run in flight is marked to run again if it fails.
+  // No time window (the confirm's refresh may come seconds after the one that
+  // opened Conta), but at most TERMS_REARM_MAX re-arms per member and page load.
+  const termsRearms = useRef(new Map())
+  const rearmTermsSync = useCallback((m) => {
+    if (typeof m !== 'string') return
+    const key = m + '#' + LEGAL_VERSION
+    const e = termsSync.current.get(key)
+    const next = termsSyncStep(e, 'rearm')
+    if (next === e) return
+    const n = termsRearms.current.get(m) || 0
+    if (n >= TERMS_REARM_MAX) return
+    termsRearms.current.set(m, n + 1)
+    if (next === undefined) termsSync.current.delete(key)
+    else termsSync.current.set(key, next)
+    setTermsTick((n) => n + 1)
+  }, [])
+  // Stable, like takeInfo (Identidade re-reads node.info when it changes).
+  const ajustesInfo = useCallback((i) => {
+    takeInfo(i)
+    rearmTermsSync(memberRef.current)
+  }, [takeInfo, rearmTermsSync])
+  // Recomeçar in Ajustes drops the member's acceptance: every sync memory of
+  // that member goes too, so a new acceptance by the same key is sent.
+  const dropTermsAndSync = useCallback((m) => {
+    dropTermsMember(m)
+    if (typeof m !== 'string') return
+    for (const key of [...termsSync.current.keys()]) {
+      if (key.startsWith(m + '#')) termsSync.current.delete(key)
+    }
+    termsRearms.current.delete(m)
+    setTermsTick((n) => n + 1)
+  }, [dropTermsMember])
+  // What Ajustes → privacidade shows about this member's acceptance.
+  let termsSyncState = null
+  if (termsEntryNow !== null && mode === 'hosted') {
+    if (termsEntryNow.synced) termsSyncState = 'registrado'
+    else if (termsEntry && termsEntry.state === 'so-aparelho') termsSyncState = 'so-aparelho'
+    else termsSyncState = 'pendente'
+  }
+  const termsInfo = termsEntryNow === null
+    ? null
+    : { version: LEGAL_VERSION, acceptedAt: termsEntryNow.acceptedAt, saved: !terms.saveFailed, syncState: termsSyncState }
 
   // The sync intent: continuous sync is wanted as soon as the certificate is
   // confirmed (the profile step does not gate it), never while locked or
@@ -251,8 +436,8 @@ function Member () {
   const recovering = passkey !== null && passkey.recovering === true
   const { setAutoSync } = node
   useEffect(() => {
-    setAutoSync(ready && !locked && setupDone && !recovering)
-  }, [ready, locked, setupDone, recovering, setAutoSync])
+    setAutoSync(ready && !locked && setupDone && !recovering && termsOk)
+  }, [ready, locked, setupDone, recovering, termsOk, setAutoSync])
 
   // Back from the Google step with a certificate already held: the tabs show
   // after the unlock, so open Ajustes → Conta once, where the account card offers
@@ -260,10 +445,10 @@ function Member () {
   // handles the return.
   const linkReturnRef = useRef(LINK_RETURN)
   useEffect(() => {
-    if (setupStep || !linkReturnRef.current) return
+    if (!termsOk || setupStep || !linkReturnRef.current) return
     linkReturnRef.current = false
     setAjustes('conta')
-  }, [setupStep])
+  }, [setupStep, termsOk])
 
   // The own profile (one profile.read through the profiles cache): the
   // onboarding's name step, the Publicar avatar and the own rows.
@@ -275,7 +460,6 @@ function Member () {
   // that the profile is absent: profileKnown is true only once the cache
   // answered (or the node has no profile.read).
   const ownProfile = ownKey ? names.profileOf(ownKey) : undefined
-  const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
   const onboarding = onboardingStep({
     mode,
     locked,
@@ -340,7 +524,7 @@ function Member () {
   // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
-    enabled: ready && !locked && setupDone && !(passkey && passkey.recovering) &&
+    enabled: ready && !locked && setupDone && termsOk && !(passkey && passkey.recovering) &&
       node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
@@ -474,7 +658,8 @@ function Member () {
     invite,
     hosted: mode === 'hosted',
     // The passkey status was read at least once (or there is no passkey).
-    statusKnown: ready && (passkey === null || pkStatus !== null),
+    // Nothing about the invite moves while the terms gate shows.
+    statusKnown: ready && termsOk && (passkey === null || pkStatus !== null),
     locked,
     resumed: !!(pkStatus && pkStatus.resumed === true),
     cardShown,
@@ -632,20 +817,38 @@ function Member () {
   }, [commitStack, goBack])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+  // Side insets (landscape notch/cutout): the larger one on both sides, so
+  // centred content stays centred when only one side has a cutout.
+  const sidePad = Math.max(insets.left, insets.right)
+  const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
+
+  const splash = (
+    <SafeAreaView style={[styles.center, { paddingHorizontal: sidePad }]} edges={sideEdges}>
+      <Text style={styles.brand}>Varanda</Text>
+      <Text style={styles.soft}>conectando…</Text>
+      <StatusBar style='dark' />
+    </SafeAreaView>
+  )
+  // The terms gate, before everything else: Conexao, Entrar (so before
+  // Google), a resumed hosted session and the tabs. Nothing renders behind
+  // it, and autosync, the outbox and the invite wait for termsOk. Not gated
+  // (documented): the provider's boot, the session resume and the one
+  // recovery sync of a diary without its certificate (src/node.js).
+  if (decision === 'loading') return splash
+  if (decision === 'needed' || decision === 'updated' || decision === 'account') {
+    return (
+      <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
+        <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
+        <StatusBar style='dark' />
+      </SafeAreaView>
+    )
+  }
 
   if (!ready && !seen) {
     // loading, connecting, the native Conectar form, or a web error.
-    if (node.phase === 'loading' || (node.phase === 'connecting' && !node.canConfigure)) {
-      return (
-        <SafeAreaView style={styles.center} edges={['top', 'bottom']}>
-          <Text style={styles.brand}>Varanda</Text>
-          <Text style={styles.soft}>conectando…</Text>
-          <StatusBar style='dark' />
-        </SafeAreaView>
-      )
-    }
+    if (node.phase === 'loading' || (node.phase === 'connecting' && !node.canConfigure)) return splash
     return (
-      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
         <StatusBar style='dark' />
       </SafeAreaView>
@@ -700,7 +903,8 @@ function Member () {
       <View style={[styles.shell, wide && styles.shellWide]}>
         <TopBar title={STEP_TITLES[step]} />
         <OfflineNote />
-        <View style={styles.flex}>{body}</View>
+        {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
+        <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
         {connectionLink}
       </View>
     )
@@ -725,7 +929,7 @@ function Member () {
       <View style={[styles.shell, wide && styles.shellWide]}>
         <TopBar title={STEP_TITLES[step]} />
         <OfflineNote />
-        <View style={styles.flex}>
+        <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
             page
             ownKey={ownKey}
@@ -878,8 +1082,10 @@ function Member () {
   // it light there too.
   const light = tab === 'diario' && step === 'pronto' && node.online !== false && nav.depth(stack) === 0
 
+  // Side insets are applied once here (sidePad); top and bottom by each bar;
+  // Modal content (sheets, photo viewer) pads itself.
   return (
-    <View style={styles.root}>
+    <View style={[styles.root, { paddingHorizontal: sidePad }]}>
       {content}
       <Publicar
         open={composer.open}
@@ -913,7 +1119,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={takeInfo} />
+      <Ajustes screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
       <StatusBar style={light ? 'light' : 'dark'} />
     </View>
   )
