@@ -126,7 +126,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onQuote, onToast, ownKey, scrollToTop }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -402,7 +402,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         )
   }
 
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote }
+  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {

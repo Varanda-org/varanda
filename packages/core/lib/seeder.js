@@ -38,8 +38,8 @@
 // blocked diary leaves the index the moment its drop starts, and reads filter
 // out any author that is not served, gated and unblocked. Trust model: the
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
-// verify the content from the diaries themselves (indexPost, indexCounts,
-// indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+// verify the content from the diaries themselves (indexPost, indexEngagers,
+// indexCounts, indexMember back the /index routes of apps/cli/lib/seed-ws.js).
 //
 // Name index (lib/name-index.js): fed by the same scan, the folded tokens of
 // each served author's newest display name and its verified @nome. Like the
@@ -109,6 +109,7 @@ const {
   readJson,
   writeJsonAtomic,
   readBlocklist,
+  hasUnreadableBlocklist,
   writeBlocklist
 } = require('./store')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
@@ -500,8 +501,9 @@ class Seeder {
     this._blocklistHandles = new Set()
     // True from a start whose blocklist.json was unreadable or missing with no
     // usable copy to fall back to (a list existed and is lost) until a
-    // verified snapshot is adopted: new admissions are refused meanwhile. In memory only: a restart
-    // before a snapshot arrives reads a plain absent file.
+    // verified snapshot is adopted: new admissions are refused meanwhile.
+    // Decided again at every start: a torn file kept aside by an earlier
+    // start and no verified list hold it again.
     this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
     // rebuilt from block 1 by the diary scan on every serve and never
@@ -574,7 +576,12 @@ class Seeder {
       const snapshot = readSnapshot(dataDir)
       if (snapshot !== null && verifySnapshot(snapshot, association).ok) blocklist = { seq: snapshot.seq, date: snapshot.date }
     } catch {}
-    return { association, publicKey, certificate, admitted, blocklist, running: lockHeld(dataDir) }
+    // Whether a start would hold admissions: no usable list and a torn one kept aside.
+    let blocklistHeld = false
+    try {
+      blocklistHeld = blocklist === null && hasUnreadableBlocklist(dataDir)
+    } catch {}
+    return { association, publicKey, certificate, admitted, blocklist, blocklistHeld, running: lockHeld(dataDir) }
   }
 
   // `seed list`: the admitted logs and their signed sizes, each with the
@@ -742,8 +749,9 @@ class Seeder {
         throw new Error('lista de bloqueio ilegível')
       }
       // Decided once the state is loaded: a copy that does not verify leaves
-      // no list either.
-      this._blocklistHeld = unreadable && state.current() === null
+      // no list either, and a torn file kept aside by an earlier start
+      // still says a list existed.
+      this._blocklistHeld = (unreadable || hasUnreadableBlocklist(this.dataDir)) && state.current() === null
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
@@ -899,6 +907,7 @@ class Seeder {
       firewalled: this.swarm ? this.swarm.dht.firewalled : null,
       blocked: this._blocklist ? this._blocklist.blocked().size : 0,
       blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0,
+      blocklistHeld: this._blocklistHeld,
       mediaCores: this._media.size,
       mediaBytes,
       indexRecords: this._index.stats().records,
@@ -2106,6 +2115,35 @@ class Seeder {
       const page = this._index.post(authorHex + ':' + seq, cursor, (hex) => this._indexVisible(hex))
       if (page === null) return null
       return { ...page, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // The likers / reposters page of apps/cli/lib/seed-ws.js: who currently
+  // likes or reposts a post, newest first by each engager's own `at`, with a hint
+  // per listed engager; null for anything unknown (a kind other than likes
+  // or reposts, an author not visible, a post not indexed, a malformed
+  // cursor). As in indexTopic, an engager whose re-gate is pending
+  // (_searchHeld) is left out and the answer says complete false; a held
+  // target author answers null. `total` counts every engager currently on.
+  indexEngagers (kind, authorHex, seq, cursor = null) {
+    try {
+      if (kind !== 'likes' && kind !== 'reposts') return null
+      if (!this._indexVisible(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._index.engagers(authorHex + ':' + seq, kind, cursor, visible, Date.now())
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { ref: page.ref, kind: page.kind, items: page.items, next: page.next, total: page.total, authors: page.authors, indexing: flags.indexing, complete: flags.complete && !held }
     } catch {
       return null
     }

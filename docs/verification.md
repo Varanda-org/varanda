@@ -1921,7 +1921,60 @@ Not verified: a real Android device, arm64-v8a, a release build, Doze and the re
 
 Method notes: with the data partition too small the emulator refuses to start, so keep several GB free. `adb reverse` carries TCP only. Do not stop Metro with `kill $(lsof -ti tcp:8081)`: `lsof` also lists the emulator process, which has a connection to that port, and in this run the kill stopped the emulator too. Use `lsof -ti tcp:8081 -sTCP:LISTEN`.
 
-## 31. Textos mais curtos e folhas de ajuda (issue #198, 2026-10-28)
+## 31. Quem curtiu e quem republicou (seeder engagers lists, 2026-10-28)
+
+### Summary
+
+- Shipped: the seeder's engager pages `GET|HEAD /index/likes/...` and `/index/reposts/...` in `apps/cli/lib/seed-ws.js`, backed by `packages/core/lib/engagement-index.js` and `packages/core/lib/seeder.js` (`indexEngagers`, newest first, paged by cursor, 20 per page); `fetchEngagers` in `apps/app/src/indexClient.js`; the pure helpers in `apps/app/src/engagers.js`; the 'Curtidas' screen (`apps/app/src/screens/Curtidas.js`) with its route in `apps/app/src/nav.js` and `apps/app/App.js`; the entry points in `apps/app/src/ui/PostRow.js` and the screens that render it (A Rua, Conversa, Diario, Espiadinha, Membro, Busca); `docs/protocol.md`, `docs/rpc.md`, `docs/design.md`, `docs/app.md`, `apps/site/artwork/app-design.md`, `CHANGELOG.md`. The service worker (`apps/app/scripts/sw.js`) and Caddy already pass every `/index/` path: only `sw.test.js` gains the new URLs and the Caddyfile gains comment lines.
+- Hosted web only. Native and `varanda-serve` show no number control.
+- Entry point: the like and repost numbers on post rows. Each number sits next to its icon as a compact, separate touch target (each icon and number pair is about as wide as the old combined button, about 47 pt, so the bar still fits 320 pt). The toggle and the number have non-overlapping hit areas: the icon toggles, the number opens the list on the matching tab. On a repost row the list is the original post's.
+- Trust model: the index says where to look; each row is the engager's own signed like or repost record, verified by `diary.peek` on the node. A seeder can omit or reorder people but cannot invent one.
+- No new RPC method. The counts on rows are unchanged.
+
+### Automated (CI)
+
+CI result on the final tree, from the worktree root, in this order: `npm ci --ignore-scripts`, `npm run lint`, `npm test`, `npm run demo`. `npm ci` was not rerun in this pass (dependencies were already installed). Lint, test and demo were run on Node 24.22.1 and on Node 20.20.2.
+
+- `npm run lint`: clean on both versions (`standard` printed no output).
+- `npm test` (all workspaces), the same on Node 20.20.2 and on Node 24.22.1, 0 failures: core 38, rpc 8, web-member 31, app 38, cli (`varanda`) 43, site 2 test files (`# N arquivo(s) de teste, 0 falha(s)` for each).
+- `npm run demo`: `DEMO OK` on both versions.
+- New or changed test files, all passing: `apps/cli/test/seeder-index.test.js` (engager pages, 'lazy targets', 20k likers), `apps/cli/test/seed-ws.test.js` (the `/index/likes|reposts` routes and the size cap: 57/57 on Node 20), `apps/app/test/indexClient.test.js` (`fetchEngagers`), `apps/app/test/engagers.test.js` (new, the pure helpers), `apps/app/test/nav.test.js` (the new route) and `apps/app/test/sw.test.js` (additions).
+- 'lazy targets' (`seeder-index.test.js`), Node 20.20.2 log: `50k distinct like targets: 25.06 MiB retained (526 bytes/target including records)`, against the unchanged 35 MiB bound. Before this change the same test retained 22.0 to 22.5 MiB; the extra 3 MiB or so is the per-like and per-repost edge object. The Node 24 run measured 25.08 to 25.54 MiB.
+- 20k engagers on one target (`seeder-index.test.js`, 'engager pages: 20,000 likers on one target have bounded visibility work'): first page 0.054 ms on Node 20 (0.049 ms on Node 24), with at most 201 visibility calls. These are comments in the test log on a development machine, not asserted timings.
+- `seed-ws.test.js` worst case: `engagers worst case: 4516 bytes` against the 65536 cap (a full page of 20 rows with maximum-length fields); an oversize answer is 404.
+- No browser pass in CI: there is no component harness, so the Curtidas screen and the entry points are covered only by the pure helper tests and the human checklist below.
+
+### Residual risks
+
+- Order, omissions, `total`, and whether a listed `on` record is still the engager's latest operation on the post are seeder claims. A lying seeder can hide a person, reorder the list, list an older authentic like that was later taken back, or report a wrong total; it cannot invent a like.
+- An `at` up to 24 h ahead is accepted, so an engager with a future-dated record is listed first; a record dated further ahead is hidden until the clock catches up.
+- The count on the row can exceed the verified list (records dated more than 24 h ahead, engagers held by a pending re-gate, records that do not verify); the list then says 'Algumas pessoas não aparecem nesta lista agora.' or 'N pessoas indisponíveis', never a key, and never 'Ninguém curtiu ainda'.
+- A like or unlike while the list is being paged needs a refresh to show up; a person blocked while the list is open stays until refresh.
+- Each page costs one serial `diary.peek` per engager, up to 20 per page.
+- The page cursor never carries an engager hidden from the list (it resumes from the last person listed), so a run of 200 or more hidden engagers right after the cursor ends the list there; the answer then has `complete: false` and the screen says people may be missing.
+- Privacy: the seeder learns which list was opened (which post, likes or reposts), but never the client address (Caddy strips it); Caddy keeps the address only in memory for the rate-limit window.
+- Privacy, Caddy error log: the error log is on for every route, so a failed proxy (seeder restarting, a deadline) can record the request URI of `/index/likes` and `/index/reposts` together with the client address. The same deferred item as the topic search (section 25).
+- Memory: the engagement index keeps one edge object per like and per repost in seeder memory (see the 'lazy targets' figure above); the pilot seeder was not measured.
+- No follow pill on the rows: opening Membro is the way to follow someone from the list.
+
+### Human verification
+
+None of these was performed for this change. Use the hosted web app at 320 px and on desktop, against a seeder with the change.
+
+- [ ] Hosted web at 320 px: the post bar fits, and tapping the like and repost numbers never toggles the like or repost, and tapping the icons never opens the list.
+- [ ] Hosted web on desktop: the same, with the mouse.
+- [ ] Two accounts like and repost the same post; the post shows both counts.
+- [ ] From A Rua, from a repost row (the list is the original's) and from Conversa, the number opens the matching tab and the icon still toggles.
+- [ ] Rows show verified names (not the raw key).
+- [ ] A row opens Membro, and back returns to the same list.
+- [ ] Unlike, then refresh: the person is gone from 'Curtidas'.
+- [ ] A blocked engager disappears after a refresh.
+- [ ] A record that does not verify shows '1 pessoa indisponível' and no key.
+- [ ] More than 20 likers page with 'mostrar mais', without gaps or duplicates.
+- [ ] Native app and `varanda-serve` show no number control.
+- [ ] Keyboard (tab order, enter on the number) and screen-reader labels on the numbers and on the list.
+
+## 32. Textos mais curtos e folhas de ajuda (issue #198, 2026-10-28)
 
 ### O que mudou
 
@@ -1941,7 +1994,7 @@ Cobertura no repositório:
 - `apps/app/test/connectText.test.js`: as frases da tela Conectar, o botão de tentar de novo e a separação entre a frase e os detalhes técnicos.
 - Atualizados para os textos novos: `apps/app/test/peek.test.js`, `apps/app/test/topics.test.js`, `apps/app/test/notices.test.js`, `apps/app/test/report.test.js` e `apps/app/test/onboarding.test.js`.
 
-Resultados (2026-10-28, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (38, 8, 31, 39, 43 e 2 arquivos de teste); `npm run demo` termina com "DEMO OK". Node 20 não foi rodado localmente; fica para a CI.
+Resultados (2026-10-28, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (38, 8, 31, 40, 43 e 2 arquivos de teste, já com a main de #200); `npm run demo` termina com "DEMO OK". Node 20 não foi rodado localmente; fica para a CI.
 
 ### Verificação humana
 

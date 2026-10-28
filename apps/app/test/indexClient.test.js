@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -713,6 +713,150 @@ test('fetchTopic: transport, contract and a fresh copy', async (t) => {
   // A 429 is the shared cooldown with retries, as on every /index route
   // (last here: the cooldown it sets outlives the remaining calls).
   const limited = await fetchTopic('ceu', null, { fetch: async () => response(text, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+})
+
+function engagersBody (over = {}) {
+  return {
+    ref: REF,
+    kind: 'likes',
+    items: [B + ':9', C + ':4'],
+    next: CURSOR,
+    total: 7,
+    authors: {
+      [B]: { profileSeq: 1, usernameSeq: null },
+      [C]: { profileSeq: null, usernameSeq: null }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('engagersUrl: both kinds, exact paths, everything else refused', async (t) => {
+  const { engagersUrl, fetchEngagers, ENGAGERS_MAX } = await load()
+  t.is(ENGAGERS_MAX, 20)
+  t.is(engagersUrl('likes', REF), '/index/likes/' + A + '/5')
+  t.is(engagersUrl('reposts', REF), '/index/reposts/' + A + '/5')
+  t.is(engagersUrl('likes', REF, CURSOR), '/index/likes/' + A + '/5/' + CURSOR)
+  t.is(engagersUrl('reposts', REF, CURSOR), '/index/reposts/' + A + '/5/' + CURSOR)
+  t.is(engagersUrl('likes', REF.toUpperCase()), '/index/likes/' + A + '/5', 'ref lowercased')
+  t.is(engagersUrl('likes', A + ':' + '9'.repeat(15)), '/index/likes/' + A + '/' + '9'.repeat(15), 'seq of 15 places')
+  for (const kind of ['Likes', 'like', '', ' likes', 'likes ', 'repost', 'post', null, undefined, 7]) {
+    t.is(engagersUrl(kind, REF), null, 'kind ' + String(kind))
+  }
+  for (const ref of [A + ':0', A + ':05', A, 'zz'.repeat(32) + ':1', A + ':1/..', A + ':1000000000000000', A + ':9007199254740991', null, 7]) {
+    t.is(engagersUrl('likes', ref), null, 'ref ' + String(ref))
+  }
+  for (const cursor of ['x', '1.' + B + '.0', CURSOR + '/x', CURSOR + '?a=1', 7]) {
+    t.is(engagersUrl('likes', REF, cursor), null, 'cursor ' + String(cursor))
+  }
+  let called = false
+  const fetch = async () => { called = true }
+  for (const [kind, ref, cursor] of [['Likes', REF, null], ['like', REF, null], ['', REF, null], ['likes', 'nope', null], ['likes', A + ':0', null], ['reposts', A + ':1000000000000000', null], ['likes', REF, 'x']]) {
+    t.alike(await fetchEngagers(kind, ref, cursor, { fetch }), { ok: false, reason: 'invalid-input' }, kind + ' ' + ref + ' ' + cursor)
+  }
+  t.absent(called, 'no request for bad input')
+})
+
+test('validEngagers: exact shape, one item per engager, hints for exactly their authors', async (t) => {
+  const { validEngagers } = await load()
+  t.alike(validEngagers(engagersBody(), REF, 'likes'), engagersBody())
+  t.alike(validEngagers(engagersBody({ kind: 'reposts' }), REF, 'reposts'), engagersBody({ kind: 'reposts' }))
+  const empty = { ref: REF, kind: 'likes', items: [], next: null, total: 0, authors: {}, indexing: false, complete: true }
+  t.alike(validEngagers(empty, REF, 'likes'), empty, 'empty page')
+  const emptyWithNext = { ...empty, next: CURSOR, total: 3, indexing: true, complete: false }
+  t.alike(validEngagers(emptyWithNext, REF, 'likes'), emptyWithNext, 'empty page that carries a next')
+  const keyOf = (i) => i.toString(16).padStart(2, '0').repeat(32)
+  const page = (n) => {
+    const items = Array.from({ length: n }, (_, i) => keyOf(i) + ':1')
+    const authors = Object.fromEntries(items.map((r) => [r.split(':')[0], { profileSeq: null, usernameSeq: 1 }]))
+    return engagersBody({ items, authors, total: n })
+  }
+  t.is(validEngagers(page(20), REF, 'likes').items.length, 20, '20 items')
+  const missingKey = engagersBody()
+  delete missingKey.total
+  const bad = [
+    engagersBody({ extra: 1 }),
+    missingKey,
+    engagersBody({ ref: B + ':5' }),
+    engagersBody({ ref: REF.toUpperCase() }),
+    engagersBody({ ref: A + ':0' }),
+    engagersBody({ kind: 'reposts' }),
+    engagersBody({ kind: 'Likes' }),
+    page(21),
+    engagersBody({ items: [B + ':9', B + ':9'], authors: { [B]: { profileSeq: 1, usernameSeq: null } } }),
+    engagersBody({ items: [B + ':9', B + ':3'], authors: { [B]: { profileSeq: 1, usernameSeq: null } } }),
+    engagersBody({ items: [B + ':0', C + ':4'] }),
+    engagersBody({ items: 'x' }),
+    engagersBody({ next: 'x' }),
+    engagersBody({ next: CURSOR + '/x' }),
+    engagersBody({ total: -1 }),
+    engagersBody({ total: 2.5 }),
+    engagersBody({ total: '7' }),
+    engagersBody({ total: 1 }),
+    engagersBody({ indexing: 'no' }),
+    engagersBody({ complete: 1 }),
+    engagersBody({ complete: null }),
+    engagersBody({ authors: { [B]: { profileSeq: 1, usernameSeq: null } } }),
+    engagersBody({ authors: { [B]: { profileSeq: 1, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null }, [A]: { profileSeq: 1, usernameSeq: 1 } } }),
+    engagersBody({ authors: { [B]: { profileSeq: 1, usernameSeq: null, extra: 1 }, [C]: { profileSeq: null, usernameSeq: null } } }),
+    engagersBody({ authors: { [B]: { profileSeq: 0, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null } } }),
+    engagersBody({ authors: [] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validEngagers(body, REF, 'likes'), null, JSON.stringify(body).slice(0, 80))
+})
+
+test('fetchEngagers: request options, contract, a fresh copy and transport', async (t) => {
+  const { fetchEngagers, validEngagers } = await load()
+  const calls = []
+  const parsed = engagersBody()
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(parsed))
+  }
+  const res = await fetchEngagers('likes', REF.toUpperCase(), CURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, engagersBody())
+  t.is(calls[0].url, '/index/likes/' + A + '/5/' + CURSOR)
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.is(calls[0].opts.headers.Accept, 'application/json')
+  t.ok(calls[0].opts.signal, 'abortable')
+  const reposts = await fetchEngagers('reposts', REF, null, { fetch: json(engagersBody({ kind: 'reposts' })) })
+  t.is(reposts.ok, true)
+  t.is(reposts.value.kind, 'reposts')
+  const own = engagersBody()
+  const copy = validEngagers(own, REF, 'likes')
+  copy.items.push(A + ':1')
+  copy.authors[B].profileSeq = 99
+  t.is(own.items.length, 2, 'items copied')
+  t.is(own.authors[B].profileSeq, 1, 'hints copied')
+  res.value.items.length = 0
+  t.is(parsed.items.length, 2, 'the fetched result is a copy too')
+  const malformed = [
+    engagersBody({ extra: 1 }),
+    engagersBody({ ref: B + ':5' }),
+    engagersBody({ kind: 'reposts' }),
+    engagersBody({ total: 1 })
+  ]
+  for (const body of malformed) {
+    t.alike(await fetchEngagers('likes', REF, null, { fetch: json(body) }), { ok: false, reason: 'malformed' }, JSON.stringify(body).slice(0, 80))
+  }
+  t.is((await fetchEngagers('likes', REF, null, { fetch: async () => response('not json') })).reason, 'malformed')
+  const text = JSON.stringify(engagersBody())
+  t.is((await fetchEngagers('likes', REF, null, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchEngagers('likes', REF, null, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(engagersBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchEngagers('likes', REF, null, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
+  // Last: the cooldown a 429 sets outlives the remaining calls.
+  const limited = await fetchEngagers('reposts', REF, null, { fetch: async () => response(text, { status: 429 }) })
   t.is(limited.reason, 'rate-limited')
   t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
 })

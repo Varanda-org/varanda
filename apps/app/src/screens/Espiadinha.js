@@ -46,7 +46,7 @@ const FOLLOW_PAGES_MAX = 9
 
 const noop = () => {}
 
-export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
+export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenEngagers, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
   const node = useNode()
   const names = useNames()
   const social = useSocial({ ownKey, onToast })
@@ -416,7 +416,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // The own diary shows here too; its rows offer no 'seguir', and neither
   // does any row before the own key is known (it could be the own one).
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
     ? () => onOpenMember(item.author, { name: item.name, username: item.username })
     : undefined
@@ -499,6 +499,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         onQuote={onQuote}
         onOpenThread={onOpenThread}
         onOpenMember={onOpenMember}
+        onOpenEngagers={onOpenEngagers}
         onFollowsChanged={onFollowsChanged}
         onFollowed={(author) => commit({ items: withoutAuthor(stateRef.current.items, author) })}
         onSocialChanged={() => { socialDirtyRef.current = true }}
