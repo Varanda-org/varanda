@@ -6,6 +6,7 @@ const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-link')
+const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { createModRoutes } = require('./mod-routes')
 
@@ -16,7 +17,8 @@ const { createModRoutes } = require('./mod-routes')
 // subject and receives the v2 certificate and the first username record
 // from the directory (apps/cli/lib/account/store.js). A linked member may
 // later rename itself with one more key proof (no cookie: the key is the
-// authority).
+// authority), and record its acceptance of the Termos de Uso and the
+// Política de Privacidade the same way (/account/terms/*, ./terms-store.js).
 //
 // The moderation desk (reports from the app, the moderators' panel and the
 // operator's signed pull/ack) lives in ./mod-routes.js and is dispatched
@@ -60,6 +62,8 @@ const COOKIE = '__Host-varanda-link'
 const COOKIE_MAX_AGE_S = 600
 const RENAME_TTL_MS = 600 * 1000
 const MAX_RENAMES = 1000
+const TERMS_TTL_MS = 600 * 1000
+const MAX_TERMS_NONCES = 1000
 const KEY_FILE = 'issuer-key.json'
 const CERT_FILE = 'issuer-cert.json'
 const LOCK_FILE = '.account-lock'
@@ -516,7 +520,8 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 }
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
-// moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir })
+// moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
+// terms })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -529,7 +534,8 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // `statsEmails` (lowercase e-mails, a subset of `modEmails`, allowed to see
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
 // or null when the stats tab is off) and `panelDir` (tests only) are passed
-// to ./mod-routes.js.
+// to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
+// null: the terms routes then answer 503 'indisponivel'.
 function createAccountServer ({
   association,
   origin,
@@ -545,6 +551,7 @@ function createAccountServer ({
   statsEmails = [],
   usage = null,
   panelDir,
+  terms = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -567,6 +574,7 @@ function createAccountServer ({
     authorize: keyedWindow(5, 600 * 1000, now),
     finish: keyedWindow(10, 600 * 1000, now),
     renameFinish: keyedWindow(5, 600 * 1000, now),
+    termsFinish: keyedWindow(5, 600 * 1000, now),
     callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
@@ -597,6 +605,9 @@ function createAccountServer ({
   // only, single-use; at most MAX_RENAMES, the oldest evicted for room
   // (rename/start needs no proof, so it never refuses for a full table).
   const renames = new Map()
+  // Pending terms acceptances by nonce: { member, version, expiresAt }, the
+  // same rules as `renames` (terms/start needs no proof either).
+  const termsNonces = new Map()
 
   function sweep (map) {
     const t = now()
@@ -781,7 +792,65 @@ function createAccountServer ({
     send(res, 200, { usernameRecord: result.record, nextChangeAt: result.nextChangeAt })
   }
 
-  const POST = { '/account/start': start, '/account/authorize': authorize, '/account/finish': finish, '/account/rename/start': renameStart, '/account/rename/finish': renameFinish }
+  // The terms routes need no issuer (an unconfigured service still records
+  // acceptances) and never the member cap: only an already linked member
+  // can accept, and it is a member already. Links are never removed (the
+  // store has no unlink op), so a link checked at start still holds.
+  function termsAvailable () {
+    if (terms === null || !terms.available()) throw refuse('indisponivel')
+  }
+
+  function linked (member) {
+    if (!store.status(member).linked) throw refuse('nao-vinculado')
+  }
+
+  async function termsStart (req, res, body) {
+    const member = memberParam(body.member)
+    const version = body.version
+    if (!Number.isSafeInteger(version) || version < 1 || version > TERMS_VERSION) throw refuse('pedido-invalido')
+    termsAvailable()
+    linked(member)
+    sweep(termsNonces)
+    while (termsNonces.size >= MAX_TERMS_NONCES) termsNonces.delete(termsNonces.keys().next().value)
+    const nonce = base64url(nodeCrypto.randomBytes(32))
+    termsNonces.set(nonce, { member, version, expiresAt: now() + TERMS_TTL_MS })
+    send(res, 200, { nonce })
+  }
+
+  // Same order as renameFinish: the nonce is spent first, the per-member
+  // window is charged only after the signature verified.
+  async function termsFinish (req, res, body) {
+    const member = memberParam(body.member)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    const signature = signatureParam(body.signature)
+    const row = nonce === null ? undefined : termsNonces.get(nonce)
+    if (nonce !== null) termsNonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    if (!verifyTerms({ nonce, member, association, version: row.version }, signature).ok) throw refuse('assinatura-invalida')
+    if (!limits.termsFinish(member)) throw over()
+    termsAvailable()
+    linked(member)
+    let result
+    try {
+      result = await terms.accept({ member, version: row.version, nonce, signature })
+    } catch (err) {
+      // Includes a guard that failed after the write (the lock was lost):
+      // never acknowledged, 503 'indisponivel'.
+      throw fromStore(err)
+    }
+    log({ event: 'terms', reason: result.changed ? 'novo' : 'repetido' })
+    send(res, 200, { version: result.version, acceptedAt: result.acceptedAt })
+  }
+
+  const POST = {
+    '/account/start': start,
+    '/account/authorize': authorize,
+    '/account/finish': finish,
+    '/account/rename/start': renameStart,
+    '/account/rename/finish': renameFinish,
+    '/account/terms/start': termsStart,
+    '/account/terms/finish': termsFinish
+  }
 
   async function route (req, res, hostOk) {
     if (!hostOk(req)) {

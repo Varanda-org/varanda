@@ -29,11 +29,13 @@
 // ctx.keyPair for the duration of one operation, and is zero-filled by
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
-// signatures the session makes outside the diary are account.sign and
-// report.sign: the domain-separated account-link statement (@varanda/core
-// lib/account-link.js, prefix 'varanda-account-link-v1') and report statement
-// (@varanda/core lib/report.js, prefix 'varanda-report-v1'), whose member and
-// association the session fills in itself, so a caller can never get
+// signatures the session makes outside the diary are account.sign,
+// report.sign and terms.sign: the domain-separated account-link statement
+// (@varanda/core lib/account-link.js, prefix 'varanda-account-link-v1'),
+// report statement (@varanda/core lib/report.js, prefix 'varanda-report-v1')
+// and terms-acceptance statement (@varanda/core lib/terms.js, prefix
+// 'varanda-terms-v1'), whose member and association the session fills in
+// itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
 // signature only.
 //
@@ -201,6 +203,7 @@ const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport } = require('@varanda/core/lib/report')
+const { signTerms } = require('@varanda/core/lib/terms')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
@@ -1127,6 +1130,24 @@ function createBrowserSession ({
         if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
         throw err
       }
+      return { signature }
+    }),
+
+    // Signs the terms-acceptance statement with the in-memory key
+    // (docs/rpc.md 5.29), exactly like account.sign: not a diary write, no
+    // append, no network, and the result never carries the payload or a key.
+    // The session fills in member and association.
+    'terms.sign': serial(async ({ nonce, version }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const signature = signTerms({ nonce, member: own, association: cfg.association, version }, keyPair)
       return { signature }
     }),
 
