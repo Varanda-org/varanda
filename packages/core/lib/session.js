@@ -501,6 +501,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the terms-acceptance statement (docs/rpc.md 5.29).
+    'terms.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // Espiadinha reads diaries this node does not store through the browser
     // node's seeder WebSocket link (packages/web-member/lib/peek.js).
     // Nothing is opened.

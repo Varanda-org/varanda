@@ -18,8 +18,9 @@ const { createIssuerCert, certForKey, verifyUsernameRecord } = require('@varanda
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
+const { openTermsStore } = require('../lib/account/terms-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv, closeIfOwned, loseLock, storeUnavailable } = require('../lib/commands/account')
+const { readEnv, closeIfOwned, loseLock, startTermsHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -798,6 +799,42 @@ test('data-dir lock: a lost lock marks the store unavailable before the service 
   const none = []
   loseLock(null, () => none.push('log'), () => none.push('stop'))
   t.alike(none, ['log', 'stop'], 'a lock lost before the store opened only stops')
+
+  // The terms store is failed too, synchronously, next to the directory.
+  const terms = openTermsStore(dir)
+  const both = []
+  const termsFail = terms.fail
+  terms.fail = () => { both.push('terms'); termsFail() }
+  loseLock(store, (event) => both.push(event.event), () => both.push('stop'), terms)
+  t.alike(both, ['terms', 'lock', 'stop'], 'terms.fail() runs before the log and the stop')
+  t.is(terms.available(), false)
+  try {
+    await terms.accept({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), version: 1, nonce: 'n'.repeat(43), signature: 'a'.repeat(128) })
+    t.fail('accept resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'a terms accept still draining is refused')
+  }
+  t.is(await terms.heal(), false, 'nor does heal() write')
+  try {
+    await terms.accept({ member: b4a.toString(crypto.keyPair().publicKey, 'hex'), version: 2, nonce: 'n'.repeat(43), signature: 'a'.repeat(128) })
+    t.fail('accept resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'later accepts stay refused')
+  }
+})
+
+test('serve wiring: startTermsHeal heals on its interval and logs only a repair', async (t) => {
+  const results = [false, true, false]
+  let heals = 0
+  const events = []
+  const terms = { heal: async () => results[heals++] ?? false }
+  const stop = startTermsHeal(terms, (event) => events.push(event), 5)
+  await until(() => heals >= 3)
+  t.alike(events, [{ event: 'terms', reason: 'reparado' }], 'logged once, for the heal that wrote')
+  stop()
+  const after = heals
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  t.is(heals, after, 'stop() clears the interval')
 })
 
 test('serve wiring: a store that fails at runtime logs store:indisponivel once and stops the service', async (t) => {
@@ -925,6 +962,7 @@ test('account key, cert add, status and export', async (t) => {
   t.ok(before.stdout.includes('vínculos: 0'))
   t.ok(before.stdout.includes('estado: parado'))
   t.ok(before.stdout.includes('Triagem IA: desligada'), 'no exemplars.json yet')
+  t.ok(before.stdout.includes('aceites dos termos: 0'), 'no terms.json yet')
 
   const certFile = path.join(root, 'issuer-cert.json')
   fs.writeFileSync(certFile, JSON.stringify(createIssuerCert({ issuer: publicKey }, issuer().assoc)))
@@ -950,6 +988,7 @@ test('account key, cert add, status and export', async (t) => {
   t.is(status.publicKey, publicKey)
   t.absent(varanda(dir, ['account', 'status']).stdout.includes('emissor não certificado'))
   t.is(status.triage, null)
+  t.is(status.terms, 0)
 
   // The precedents are counted from exemplars.json, read-only.
   const exemplarsFile = path.join(dir, 'exemplars.json')
@@ -972,12 +1011,33 @@ test('account key, cert add, status and export', async (t) => {
   t.is(exported.code, 0, exported.stderr)
   const lines = exported.stdout.trim().split('\n').map((l) => JSON.parse(l))
   t.is(lines.length, 1)
-  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'sub', 'username'])
+  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'sub', 'terms', 'username'])
+  t.alike(lines[0].terms, [], 'no terms.json: no acceptance')
   t.is(lines[0].email, EMAIL)
   t.is(lines[0].sub, SUB)
   t.absent(exported.stdout.includes(secret.slice(0, 16)), 'never the secret')
   t.absent(exported.stdout.includes('signature'))
   t.ok(varanda(dir, ['account', 'status']).stdout.includes('vínculos: 1'))
+
+  // An acceptance recorded in-process shows in the export (version and date
+  // only, never the nonce or the signature) and in the status count.
+  const termsSig = 'b'.repeat(128)
+  const accepted = await openTermsStore(dir).accept({ member: lines[0].member, version: 1, nonce: 'n'.repeat(43), signature: termsSig })
+  const withTerms = varanda(dir, ['account', 'export'])
+  t.is(withTerms.code, 0, withTerms.stderr)
+  t.alike(JSON.parse(withTerms.stdout.trim()).terms, [{ version: 1, acceptedAt: accepted.acceptedAt }])
+  t.absent(withTerms.stdout.includes(termsSig), 'never the terms signature')
+  t.ok(varanda(dir, ['account', 'status']).stdout.includes('aceites dos termos: 1'))
+  const termsFile = path.join(dir, 'terms.json')
+  const termsBytes = fs.readFileSync(termsFile)
+  fs.writeFileSync(termsFile, '{')
+  const badTerms = varanda(dir, ['account', 'export'])
+  t.is(badTerms.code, 1, 'a malformed terms.json fails the export')
+  t.ok(badTerms.stderr.includes('terms.json inválido'), badTerms.stderr)
+  t.ok(varanda(dir, ['account', 'status']).stdout.includes('aceites dos termos: indisponível (terms.json inválido)'))
+  t.is(JSON.parse(varanda(dir, ['account', 'status', '--json']).stdout.trim().split('\n').pop()).terms, 'indisponivel')
+  t.is(fs.readFileSync(termsFile, 'utf8'), '{', 'never rewritten')
+  fs.writeFileSync(termsFile, termsBytes)
 
   const lock = takeLock(dir)
   const busy = varanda(dir, ['account', 'export'])

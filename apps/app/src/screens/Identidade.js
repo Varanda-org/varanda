@@ -141,7 +141,7 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // this same tab and nothing of the link is kept across the reload, except the
 // profile invite in sessionStorage (src/profileLink.js), which is never sent
 // to /account/*.
-const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda só para atender uma ordem judicial ou bloquear a conta; nada mais é coletado e a idade não é verificada. Você pode trocar o @nome depois, uma vez a cada 7 dias.'
+const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda para emitir seu certificado e seu @nome, atender uma ordem judicial ou bloquear a conta; o e-mail nunca vai para o seu diário nem para este navegador, e a idade não é verificada. O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade). Você pode trocar o @nome depois, uma vez a cada 7 dias.'
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
