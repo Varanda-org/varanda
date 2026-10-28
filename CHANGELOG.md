@@ -100,6 +100,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Android: criar a identidade falhava com `INTERNAL`, porque o Android nega `link()` a apps (SELinux). A publicação do `config.json` e do arquivo de chave (`packages/core/lib/link-new.js`) agora cai para `lstat` mais `rename` só com `EACCES`, sem nunca sobrescrever um arquivo existente; `EPERM` e os demais erros continuam subindo. O gate do worklet passa no emulador Android (#150, `docs/verification.md` seção 30).
 - Instalar pelo Samsung Internet disparava o "App de risco bloqueado" do Play Protect: a página hospedada agora não oferece instalação nesse navegador e remove o link do manifesto da aba; Ajustes aponta para instalar pelo Chrome e entrar com a mesma passkey; um app já instalado pelo Samsung Internet não muda.
 - Espiadinha, republicações de diários que você não segue: um teste de ponta a ponta (`packages/web-member/test/peek-repost.test.js`, 8 testes) prova que elas chegam a `peek.read` em todas as camadas; a causa do relato segue não provada no código, e a mais provável é uma janela rodando uma versão antiga (o `sw.js` espera todas as janelas fecharem). Por isso o app avisa "Nova versão disponível." com "atualizar".
 - Espiadinha: uma continuação numa lista expirada ou ausente agora é recusada com "A lista expirou; atualize para continuar." em vez de reconstruir a lista em silêncio; a tela mantém as linhas e pede para puxar; uma atualização que falha não perde a lista anterior.

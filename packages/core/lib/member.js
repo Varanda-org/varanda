@@ -12,6 +12,7 @@ const process = require('#process')
 const b4a = require('b4a')
 const { discoveryKey, randomBytes } = require('hypercore-crypto')
 const { certForKey, verifyUsernameRecord } = require('./cert')
+const { linkNew } = require('./link-new')
 const { latestUsernameRecord, latestUsername } = require('./username')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('./blocklist')
 const {
@@ -127,7 +128,7 @@ function enforcedBlocklist (dataDir, association) {
 // ---- id ----
 
 // Publishes config.json only when it does not exist yet: a unique temp file
-// hard-linked into place, so a concurrent writer can never be clobbered.
+// linked into place (link-new.js), so a concurrent writer can never be clobbered.
 // Returns false when another process published first (EEXIST).
 function publishConfig (dataDir, config) {
   const file = path.join(dataDir, 'config.json')
@@ -142,7 +143,7 @@ function publishConfig (dataDir, config) {
       fs.closeSync(fd)
     }
     try {
-      fs.linkSync(tmp, file)
+      linkNew(tmp, file)
     } catch (err) {
       if (err.code === 'EEXIST') return false
       throw err

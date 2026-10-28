@@ -140,15 +140,35 @@ Other evidence:
   - fs-native-extensions 1.5.1, quickbit-native 2.4.9, rocksdb-native 3.19.1, simdle-native 1.3.9, sodium-native 5.2.0 and udx-native 1.21.3.
 - **Bundle:** `assets/worklet/main.bundle.js` is about 1.9 MB as a module: 344 files and 38 `linked:` addon entries. The scan is clean.
 
+## Android emulator
+
+The same driver and harness run the gate on the Android emulator (steps a to i, same meaning). `gate-server.js --platform android` swaps `xcrun simctl` for `adb`:
+
+| Step | iOS | Android |
+|---|---|---|
+| launch, kill | `simctl launch`, `terminate` | `monkey -p app.varanda.debug`, `am force-stop` |
+| lock check (e) | the lock file in the simulator container | `run-as app.varanda.debug test -e files/varanda-gate-<run>/.varanda-lock` |
+| background, return (g) | open Settings, then `varanda://` | `input keyevent KEYCODE_HOME`, then `am start -a VIEW -d varanda://` |
+
+The Android debug build has the application ID `app.varanda.debug`, so the driver defaults to it. The driver also runs `adb reverse tcp:<port> tcp:<port>` for its own port, so the app reaches it on the same `127.0.0.1` URL as on iOS.
+
+The emulator does not share the host's loopback, and `adb reverse` carries TCP only, while the DHT is UDP. So on Android the testnet, the seeder and the CLI peer bind to `--host` (default: the first non-loopback IPv4 address of the machine), and the app gets a bootstrap on that address. UDP from the emulator reaches it through the emulator's NAT. The driver also turns hyperdht's firewall probing off for those nodes (they are directly reachable): `createSwarm` keeps it on for a non-loopback host, and the seeder then asks the app to hole-punch through the emulator's NAT, which fails with `PEER_CONNECTION_FAILED` (step f: `sem pares`).
+
+```sh
+npm ci --ignore-scripts && (cd apps/app && npm run link:addons && npm run pack:worklet)
+(cd apps/app/android && JAVA_HOME=<JDK 17 or 21> ./gradlew assembleDebug)    # JDK 26 is not supported by this Gradle
+emulator -avd <avd> -no-snapshot                                            # API 36 google_apis x86_64 was used
+adb install -r apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8081 tcp:8081
+(cd apps/app && EXPO_PUBLIC_VARANDA_GATE_URL=http://127.0.0.1:8790 npx expo start --port 8081 --clear)
+(cd apps/app && npm run gate -- --platform android)                         # [--host <ip>] [--device <serial>]
+```
+
+The evidence is in [verification.md](verification.md) section 30.
+
 ## Residual risks
 
-- **Android:** not verified natively. No SDK or Java is installed on this Mac. What has been checked:
-  - prebuild (minSdk 31 and `expo.useLegacyPackaging=true`, so the `.so` addons are extracted to disk);
-  - `npx expo export --platform android`;
-  - the Android hosts in the pack;
-  - bare-link's `.so` output.
-
-  The monorepo bare-link issue #49 did not occur here: all addons were linked for Android. An emulator run must still confirm that jniLibs are picked up from the library's `android/src/main/addons`.
+- **Android:** run on an emulator only (section 30 of verification.md). A real device, an arm64-v8a build and a release build were not run. Android's SELinux denies `link()` to apps, which `identity.create` used to publish `config.json` (`lib/link-new.js` now falls back to a rename).
 - **fs facade TOCTOU:** O_EXCL, O_NOFOLLOW and O_NONBLOCK are emulated by an lstat before the open. A path swapped between the two calls is followed or clobbered. We accept this because the data dir is private to one worklet inside the app sandbox.
 - **Bare version:** bare-kit 0.16.0 embeds Bare v1.33.4. The core's desktop Bare smoke test runs on bare-runtime 1.34.1. Both pass, but they are different runtimes, and a bare-kit upgrade must re-run this gate.
 - **Addon dirs in node_modules:** the linked addons live in `node_modules/react-native-bare-kit/{ios/addons,android/src/main/addons}`. Every `npm install` or `npm ci` wipes them, so `npm run link:addons` (then `pod install`) must run again before a native build. Without it, the app builds but the worklet fails to load its addons.
