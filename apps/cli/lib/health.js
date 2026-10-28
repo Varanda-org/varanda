@@ -23,6 +23,8 @@ const METRICS = [
   ['ready', '1 quando o semeador está pronto; 0 ao iniciar ou encerrar', (s) => (s.status === 'ok' ? 1 : 0)],
   ['admitted_diaries', 'diários admitidos', (s) => s.admitted],
   ['dropping_diaries', 'diários em descarte (limpeza em andamento)', (s) => s.dropping],
+  ['active_diaries_day', 'diários servidos cujo tamanho assinado cresceu hoje (dia de Brasília; aproximado, só em memória, zera quando o semeador reinicia)', (s) => finite(s.activeDay)],
+  ['active_diaries_week', 'diários servidos cujo tamanho assinado cresceu nos últimos 7 dias de Brasília, hoje incluído (aproximado, só em memória, zera quando o semeador reinicia)', (s) => finite(s.activeWeek)],
   ['blocks', 'blocos guardados dos diários admitidos', (s) => s.blocks],
   ['bytes', 'bytes dos diários admitidos (tamanho assinado)', (s) => s.bytes],
   ['connections', 'conexões abertas', (s) => s.connections],
@@ -38,6 +40,8 @@ const METRICS = [
   ['media_bytes', 'bytes dos núcleos de mídia (tamanho assinado)', (s) => s.mediaBytes],
   ['index_records', 'registros no índice de engajamento (em memória)', (s) => s.indexRecords],
   ['index_saturated', '1 quando o índice de engajamento atingiu o limite e há diários pausados', (s) => (s.indexSaturated ? 1 : 0)],
+  ['topic_posts', 'publicações no índice de assuntos (em memória)', (s) => s.topicPosts],
+  ['topic_saturated', '1 quando o índice de assuntos atingiu um limite e há diários pausados', (s) => (s.topicSaturated ? 1 : 0)],
   ['uptime_seconds', 'segundos desde o início do semeador', (s) => s.uptimeSeconds]
 ]
 

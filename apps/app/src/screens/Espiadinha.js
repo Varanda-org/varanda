@@ -11,6 +11,10 @@
 // the counts and offers curtir, republicar and citar; a reply names its
 // parent, a quote shows the quoted post and a repost the original, each
 // read and verified by the node.
+// Hosted web only, a field "pesquisar por assunto" above the explanation: on
+// submit (never per keystroke) the Busca screen replaces the rounds with the
+// posts of any diary the seeder indexed that contain the words; 'limpar'
+// brings the rounds back from memory, unchanged.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -24,8 +28,10 @@ import {
   roundLabel, roundStarts, skippedText, withoutAuthor
 } from '../peek'
 import { whoOf } from '../who'
+import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
+import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
-import { Soft, colors, errorText, useBottomPad, useNow } from '../ui'
+import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
@@ -70,6 +76,9 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
   const [rule, setRule] = useState(false)
+  // The typed text and the active search ({ tokens, path } or null).
+  const [draft, setDraft] = useState('')
+  const [query, setQuery] = useState(null)
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
@@ -232,12 +241,16 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
-    if (!active) return
+    // While a search is shown, Busca handles its own reloads: the refresh value
+    // is NOT advanced, so a bump during the search (a follow) is still seen as
+    // `changed` once the query is cleared and the rounds reload.
+    const searching = query !== null
+    previous.current = { active, refresh: active && !searching ? refresh : prev.refresh, scrollToTop }
+    if (!active || searching) return
     const current = stateRef.current
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
     if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadFirst()
-  }, [active, refresh, scrollToTop, loadFirst])
+  }, [active, refresh, scrollToTop, loadFirst, query])
 
   // A follow made elsewhere (Membro, Seguindo, A Rua, another device): drop
   // the followed authors' rows without reloading, so the pages and the
@@ -294,8 +307,60 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
   const starts = useMemo(() => roundStarts(items), [items])
 
+  // Submit only: the seeder allows a few /index requests per client per 10 s.
+  const submit = () => {
+    const r = searchPath(draft)
+    if (r === null) {
+      if (typeof onToast === 'function') onToast(SEARCH_INVALID)
+      return
+    }
+    if (r.truncated && typeof onToast === 'function') onToast(SEARCH_TRUNCATED)
+    setQuery({ tokens: r.tokens, path: r.path })
+  }
+  // Set when Busca toggled a like or repost: the rounds' cache is then stale.
+  const socialDirtyRef = useRef(false)
+  const clear = () => {
+    if (socialDirtyRef.current) {
+      // Re-read counts and own state of the kept rounds; no peek.read reload.
+      socialDirtyRef.current = false
+      ingest({ ...pageNeeds(stateRef.current.items), reset: true })
+    }
+    setQuery(null)
+    setDraft('')
+  }
+
+  const searchBox = (
+    <View>
+      {hosted && notice === null
+        ? (
+          <View style={styles.searchBox}>
+            <Field
+              label={SEARCH_LABEL}
+              placeholder={SEARCH_PLACEHOLDER}
+              value={draft}
+              onChangeText={setDraft}
+              maxLength={SEARCH_INPUT_MAX}
+              returnKeyType='search'
+              onSubmitEditing={submit}
+              mono
+            />
+            <Btn label={SEARCH_BUTTON} onPress={submit} disabled={draft.trim() === ''} secondary />
+            {query !== null
+              ? (
+                <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} onPress={clear} hitSlop={6}>
+                  <Text style={styles.toggle}>{SEARCH_CLEAR}</Text>
+                </Pressable>
+                )
+              : null}
+          </View>
+          )
+        : null}
+    </View>
+  )
+
   const header = (
     <View style={styles.header}>
+      {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
       <Pressable
         accessibilityRole='button'
@@ -427,6 +492,30 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const shownItems = notice === null ? items : []
+  // The rounds stay mounted (state and social cache) under the search. Only
+  // 'web-only' hides it: the rounds' 'offline' notice (no round loaded yet)
+  // must not unmount a search that loaded, which has its own offline state.
+  if (query !== null && hosted && notice !== 'web-only') {
+    return (
+      <Busca
+        query={query}
+        header={<View style={styles.searchTop}>{searchBox}</View>}
+        ownKey={ownKey}
+        active={active}
+        scrollToTop={scrollToTop}
+        refresh={refresh}
+        onReply={onReply}
+        onReport={onReport}
+        onQuote={onQuote}
+        onOpenThread={onOpenThread}
+        onOpenMember={onOpenMember}
+        onFollowsChanged={onFollowsChanged}
+        onFollowed={(author) => commit({ items: withoutAuthor(stateRef.current.items, author) })}
+        onSocialChanged={() => { socialDirtyRef.current = true }}
+        onToast={onToast}
+      />
+    )
+  }
   return (
     <RefreshableList
       data={shownItems}
@@ -451,6 +540,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 const styles = StyleSheet.create({
   toggle: { ...type.counter, color: colors.accent },
   header: { padding: 16, gap: 8 },
+  searchTop: { padding: 16 },
+  searchBox: { gap: 8 },
   footer: { padding: 16, gap: 8 },
   separator: { paddingHorizontal: 16, paddingVertical: 10 },
   separatorLine: { borderTopWidth: 1, borderTopColor: colors.line },

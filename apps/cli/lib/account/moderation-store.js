@@ -51,6 +51,10 @@ const MAX_EVENTS = 10000
 const NOTE_MAX = 280
 const BY_MAX = 254
 const LIST_DEFAULT = 100
+// The `by` the AI triage worker decides with, and the two `actor` values the
+// operator's pull projection carries instead of `by` (never an e-mail).
+const AI_ACTOR = 'ia'
+const HUMAN_ACTOR = 'pessoa'
 const DAY_MS = 86400000
 // The report rules of packages/core/lib/report.js (T22): same constants and
 // the same character rule, re-checked here because the store is the last
@@ -435,12 +439,15 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
 
   // 'aberta': oldest first (legal deadlines run from the oldest report,
   // docs/design.md "Moderação e obrigações legais"); 'decidida': newest
-  // decision first.
-  function list ({ status = 'aberta', limit = LIST_DEFAULT } = {}) {
+  // decision first. `exclude` (a member key) leaves out the cases about that
+  // member or filed from it BEFORE the cut at `limit`, so `truncated` counts
+  // only what the caller may see.
+  function list ({ status = 'aberta', limit = LIST_DEFAULT, exclude = null } = {}) {
     usable()
     if (status !== 'aberta' && status !== 'decidida') throw fail('pedido-invalido')
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_REPORTS) throw fail('pedido-invalido')
-    const rows = Object.values(state.reports)
+    if (exclude !== null && typeof exclude !== 'string') throw fail('pedido-invalido')
+    const rows = Object.values(state.reports).filter((r) => exclude === null || (r.target !== exclude && r.reporter !== exclude))
     let out
     if (status === 'aberta') {
       out = rows.filter((r) => r.status === 'aberta')
@@ -553,9 +560,14 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   }
 
   // For the operator's `mod apply` (plan D1): every pending change (at most
-  // MAX_PENDING, oldest first) projected to { id, op, member, at }, each
-  // marked claimed (persisted) so a later cancel compensates instead of
+  // MAX_PENDING, oldest first) projected to { id, op, member, at, actor },
+  // each marked claimed (persisted) so a later cancel compensates instead of
   // deleting. A claimed change that is never acked is returned again.
+  // `actor` is AI_ACTOR ('ia') when the triage worker created the change and
+  // 'pessoa' otherwise; the moderator's `by` (an e-mail) never leaves the
+  // store. A human report that later joins an AI-created block change (see
+  // decide()) keeps by 'ia', so the operator still reads it as an AI block
+  // (conservative: they look twice); the reverse keeps 'pessoa'.
   function pull () {
     return enqueue(() => {
       usable()
@@ -568,7 +580,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         persist(next)
       }
       return {
-        changes: changes.map(({ id, op, member, at }) => ({ id, op, member, at })),
+        changes: changes.map(({ id, op, member, at, by }) => ({ id, op, member, at, actor: by === AI_ACTOR ? AI_ACTOR : HUMAN_ACTOR })),
         published: { snapshot: copySnapshot(state.published.snapshot) }
       }
     })
@@ -676,7 +688,58 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return (member === undefined ? rows : rows.filter((r) => r.target === member)).map(copyReport)
   }
 
-  return { add, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, stats, exportRows }
+  // Read-only: has a human already reversed a block of `member`? The triage
+  // worker asks this before blocking, so the AI never re-blocks a person a
+  // human has already cleared or whose block a human cancelled. True when
+  //   (a) a retained event records a human (by !== 'ia') 'cancelado' or
+  //       'compensado' for the member;
+  //   (b) the member has a pending unblock (a human asked for it: the AI
+  //       never unblocks);
+  //   (c) a report about the member was decided 'bloquear', yet the member
+  //       is neither in the published list nor has a pending block: that
+  //       block was decided and later undone. Report rows are kept, so this
+  //       survives the truncation of `events` at MAX_EVENTS.
+  //   (d) a retained event records a human unblock request: a 'pedido' that
+  //       decide() did not write (decide always writes its 'bloquear' event
+  //       right before its 'pedido'; unblock() writes the 'pedido' alone), or
+  //       a human 'ja-desbloqueada'. This covers a member blocked outside the
+  //       panel (`mod block`, no report) whose panel unblock was already
+  //       acked, when (b) and (c) no longer see anything. A 'pedido' whose
+  //       preceding event was truncated away counts too (conservative).
+  // Known limits, both accepted for the pilot: (1) events are capped at
+  // MAX_EVENTS, so a panel unblock of a key blocked outside the panel (no
+  // report, rule (c) cannot see it) is forgotten once its 'pedido' ages out;
+  // (2) events carry no op, so a human cancel of an UNBLOCK (or a re-block
+  // that drops a pending unblock) also reads as a reversal. (2) only makes
+  // the AI abstain and leave the case to a human, the safe direction.
+  // An invalid member is false.
+  function humanReversed (member) {
+    usable()
+    if (!isLowerHex(member, 32)) return false
+    const events = state.events
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i]
+      if (e.member !== member || e.by === AI_ACTOR) continue
+      if (e.action === 'cancelado' || e.action === 'compensado' || e.action === 'ja-desbloqueada') return true
+      if (e.action === 'pedido') {
+        const prev = i > 0 ? events[i - 1] : null
+        if (!(prev && prev.action === 'bloquear' && prev.by === e.by)) return true
+      }
+    }
+    let pendingBlock = false
+    for (const c of state.pending) {
+      if (c.member !== member) continue
+      if (c.op === 'unblock') return true
+      pendingBlock = true
+    }
+    if (pendingBlock || blockedSet(state.published.snapshot).has(member)) return false
+    for (const r of Object.values(state.reports)) {
+      if (r.target === member && r.status === 'bloquear') return true
+    }
+    return false
+  }
+
+  return { add, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, stats, exportRows, humanReversed }
 }
 
 module.exports = {
@@ -687,6 +750,7 @@ module.exports = {
   MAX_EVENTS,
   MAX_BLOCKED,
   NOTE_MAX,
+  AI_ACTOR,
   isCleanText,
   openModerationStore
 }

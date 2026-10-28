@@ -24,6 +24,7 @@ const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const A = 'aa'.repeat(32)
 const B = 'bb'.repeat(32)
 const X = 'cc'.repeat(32)
+const C = 'ee'.repeat(32)
 const SEEDER = 'dd'.repeat(32)
 const CONFIRM = 'Assinar e publicar estas mudanças? [s/N] '
 const CONFIRM_OPERATOR = 'Desbloquear também as chaves bloqueadas pela operação? [s/N] '
@@ -180,9 +181,9 @@ test('two blocks and one unblock become one snapshot, published then acknowledge
   const srv = await fakeServer(t)
   srv.pull = {
     changes: [
-      { id: 'c2', op: 'block', member: B, at: '2026-10-24T10:00:02.000Z' },
-      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' },
-      { id: 'c3', op: 'unblock', member: X, at: '2026-10-24T10:00:03.000Z' }
+      { id: 'c2', op: 'block', member: B, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' },
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c3', op: 'unblock', member: X, at: '2026-10-24T10:00:03.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: first }
   }
@@ -232,7 +233,7 @@ test('decisions in a dir with no list need --new-list', async (t) => {
   await testnet(t)
   const ctx = setup(t)
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: null } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: null } }
   const pub = publisher(true)
   const refused = await run(ctx, srv, pub.publish)
   t.ok(refused.error && refused.error.message.startsWith('este diretório não tem lista anterior'))
@@ -276,7 +277,7 @@ test('a publish timeout exits without an ack; the next run republishes the same 
   const ctx = setup(t)
   const first = seedList(t, ctx.modDir, X)
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   let delivered = false
   const pub = publisher(() => delivered)
   const failed = await run(ctx, srv, pub.publish)
@@ -304,7 +305,7 @@ test('a decision cancelled after a failed publish is undone by the next apply', 
   const ctx = setup(t)
   const first = seedList(t, ctx.modDir, X)
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   let delivered = false
   const pub = publisher(() => delivered)
   await run(ctx, srv, pub.publish)
@@ -312,8 +313,8 @@ test('a decision cancelled after a failed publish is undone by the next apply', 
   // D6: the panel compensates the claimed block with an unblock.
   srv.pull = {
     changes: [
-      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' },
-      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:05.000Z' }
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:05.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: first }
   }
@@ -337,8 +338,8 @@ test('changes are walked in the server order even when the clock stepped back', 
   // after the block although its timestamp is earlier.
   srv.pull = {
     changes: [
-      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:05.000Z' },
-      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:01.000Z' }
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:05.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: first }
   }
@@ -354,8 +355,8 @@ test('pending changes that cancel out in a dir with no list need --new-list, the
   const srv = await fakeServer(t)
   srv.pull = {
     changes: [
-      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' },
-      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:05.000Z' }
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:05.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: null }
   }
@@ -391,7 +392,7 @@ test('after a moderator rotation a run with no net change signs the same sets wi
   // README: the rotation copies blocklist.json into the new dir.
   fs.copyFileSync(path.join(old.modDir, 'blocklist.json'), path.join(ctx.modDir, 'blocklist.json'))
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: X, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: X, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   const pub = publisher(true)
   const res = await run(ctx, srv, pub.publish)
   t.is(res.error, null, res.error && res.error.message)
@@ -440,8 +441,8 @@ test('a full list takes an unblock and a replacement block in one run', async (t
   const srv = await fakeServer(t)
   srv.pull = {
     changes: [
-      { id: 'c1', op: 'unblock', member: keys[0], at: '2026-10-24T10:00:01.000Z' },
-      { id: 'c2', op: 'block', member: A, at: '2026-10-24T10:00:02.000Z' }
+      { id: 'c1', op: 'unblock', member: keys[0], at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'block', member: A, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: full }
   }
@@ -466,7 +467,7 @@ test('a published snapshot ahead of the local list exits writing nothing', async
   const before = fs.readFileSync(path.join(ctx.modDir, 'blocklist.json'))
   const logBefore = fs.readFileSync(path.join(ctx.modDir, 'moderation.jsonl'))
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: ahead } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: ahead } }
   const pub = publisher(true)
   const res = await run(ctx, srv, pub.publish)
   t.is(res.error && res.error.message, 'lista local atrás da publicada; restaure o backup da moderação')
@@ -482,10 +483,12 @@ test('malformed answers and a stale ack exit 1', async (t) => {
   const first = seedList(t, ctx.modDir, X)
   const srv = await fakeServer(t)
   const pub = publisher(true)
-  const change = { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }
+  const change = { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }
   const bad = [
     { status: 200, body: { changes: [], published: { snapshot: null }, extra: 1 } },
     { status: 200, body: { changes: [{ ...change, by: 'x' }], published: { snapshot: null } } },
+    { status: 200, body: { changes: [(({ actor, ...rest }) => rest)(change)], published: { snapshot: null } } },
+    { status: 200, body: { changes: [{ ...change, actor: 'operador' }], published: { snapshot: null } } },
     { status: 200, body: { changes: [change, change], published: { snapshot: null } } },
     { status: 200, body: { changes: [{ ...change, member: A.toUpperCase() }], published: { snapshot: null } } },
     { status: 200, body: { changes: [{ ...change, at: 'ontem' }], published: { snapshot: null } } },
@@ -554,7 +557,7 @@ test('without a terminal and without --yes nothing is pulled or signed', async (
   const ctx = setup(t)
   const first = seedList(t, ctx.modDir, X)
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   const child = cli(['mod', 'apply', '--server', srv.origin, '--seeder', SEEDER, '--data', ctx.modDir])
   t.is(child.status, 1)
   t.is(child.stderr, 'erro: rode num terminal para revisar, ou use --yes para aplicar só os bloqueios\n')
@@ -574,7 +577,7 @@ test('at a terminal the changes are shown and signed only on s or sim', async (t
   const first = seedList(t, ctx.modDir, X)
   const logBefore = fs.readFileSync(path.join(ctx.modDir, 'moderation.jsonl'))
   const srv = await fakeServer(t)
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   const pub = publisher(true)
   for (const answer of ['n', '', 'yes', 'ss', 'não']) {
     const res = await run(ctx, srv, pub.publish, {}, [answer])
@@ -602,7 +605,7 @@ test('--yes applies blocks and holds unblocks; the next run at a terminal applie
   const srv = await fakeServer(t)
   const pub = publisher(true)
   // A is blocked through the panel (source painel).
-  srv.pull = { changes: [{ id: 'c0', op: 'block', member: A, at: '2026-10-24T10:00:00.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c0', op: 'block', member: A, at: '2026-10-24T10:00:00.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   const yesBlock = await run(ctx, srv, pub.publish, { yes: true })
   t.is(yesBlock.error, null, yesBlock.error && yesBlock.error.message)
   t.alike(yesBlock.asked, [], '--yes never asks')
@@ -610,10 +613,10 @@ test('--yes applies blocks and holds unblocks; the next run at a terminal applie
   const second = readList(ctx.modDir)
 
   const held = [
-    { id: 'c2', op: 'unblock', member: X, at: '2026-10-24T10:00:02.000Z' },
-    { id: 'c3', op: 'unblock', member: A, at: '2026-10-24T10:00:03.000Z' }
+    { id: 'c2', op: 'unblock', member: X, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' },
+    { id: 'c3', op: 'unblock', member: A, at: '2026-10-24T10:00:03.000Z', actor: 'pessoa' }
   ]
-  srv.pull = { changes: [{ id: 'c1', op: 'block', member: B, at: '2026-10-24T10:00:01.000Z' }, ...held], published: { snapshot: second } }
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: B, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }, ...held], published: { snapshot: second } }
   const res = await run(ctx, srv, pub.publish, { yes: true })
   t.is(res.error, null, res.error && res.error.message)
   t.alike(res.asked, [])
@@ -649,7 +652,7 @@ test('--yes applies blocks and holds unblocks; the next run at a terminal applie
   t.alike(acks[acks.length - 1].body.changeIds, ['c2', 'c3'])
 
   // --json reports how many unblocks were held.
-  srv.pull = { changes: [{ id: 'c4', op: 'unblock', member: B, at: '2026-10-24T10:00:04.000Z' }], published: { snapshot: readList(ctx.modDir) } }
+  srv.pull = { changes: [{ id: 'c4', op: 'unblock', member: B, at: '2026-10-24T10:00:04.000Z', actor: 'pessoa' }], published: { snapshot: readList(ctx.modDir) } }
   const json = await run(ctx, srv, pub.publish, { yes: true, json: true })
   t.is(json.error, null, json.error && json.error.message)
   t.is(json.lines.length, 1)
@@ -664,7 +667,7 @@ test('--yes refuses more than MAX_UNATTENDED_BLOCKS new blocks', async (t) => {
   const first = seedList(t, ctx.modDir, X)
   const srv = await fakeServer(t)
   const pub = publisher(true)
-  const many = (n) => new Array(n).fill(0).map((_, i) => ({ id: 'b' + i, op: 'block', member: (i + 1).toString(16).padStart(64, '0'), at: '2026-10-24T10:00:01.000Z' }))
+  const many = (n) => new Array(n).fill(0).map((_, i) => ({ id: 'b' + i, op: 'block', member: (i + 1).toString(16).padStart(64, '0'), at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }))
   t.is(MAX_UNATTENDED_BLOCKS, 100)
   srv.pull = { changes: many(101), published: { snapshot: first } }
   const over = await run(ctx, srv, pub.publish, { yes: true })
@@ -674,11 +677,156 @@ test('--yes refuses more than MAX_UNATTENDED_BLOCKS new blocks', async (t) => {
   t.is(srv.byPath('/account/mod/api/ack').length, 0)
 
   // 100 new blocks pass; a block of a key already in the list is not new.
-  srv.pull = { changes: [...many(100), { id: 'bx', op: 'block', member: X, at: '2026-10-24T10:00:02.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [...many(100), { id: 'bx', op: 'block', member: X, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   const cap = await run(ctx, srv, pub.publish, { yes: true })
   t.is(cap.error, null, cap.error && cap.error.message)
   t.is(readList(ctx.modDir).blocked.length, 101)
   t.is(srv.byPath('/account/mod/api/ack')[0].body.changeIds.length, 101)
+})
+
+const HELD_NOTE = ' — aguarda revisão no terminal'
+
+test('--yes holds a block every block change of which the AI made, marked (ia), and applies the human ones', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  srv.pull = {
+    changes: [
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' },
+      { id: 'c2', op: 'block', member: B, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' },
+      // The AI blocked, a person unblocked, the AI again: a person's unblock
+      // endorses no block, so every BLOCK is the AI's and it is held too.
+      { id: 'c3', op: 'block', member: C, at: '2026-10-24T10:00:03.000Z', actor: 'ia' },
+      { id: 'c4', op: 'unblock', member: C, at: '2026-10-24T10:00:04.000Z', actor: 'pessoa' },
+      { id: 'c5', op: 'block', member: C, at: '2026-10-24T10:00:05.000Z', actor: 'ia' }
+    ],
+    published: { snapshot: first }
+  }
+  const res = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(res.error, null, res.error && res.error.message)
+  t.is(res.code, 0)
+  t.alike(res.asked, [], '--yes never asks')
+  t.alike(res.lines, [
+    'bloquear ' + A + ' (ia)' + HELD_NOTE,
+    'bloquear ' + B,
+    'bloquear ' + C + ' (ia)' + HELD_NOTE,
+    'aplicado: seq 2, 2 chaves bloqueadas'
+  ])
+  t.alike(readList(ctx.modDir).blocked, [B, X].sort(), 'only the human block is signed')
+  t.is(pub.calls.length, 1)
+  t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c2'], 'the AI changes are not acked')
+
+  // --json counts the held AI blocks.
+  srv.pull = {
+    changes: [
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' },
+      { id: 'c3', op: 'block', member: C, at: '2026-10-24T10:00:03.000Z', actor: 'ia' }
+    ],
+    published: { snapshot: readList(ctx.modDir) }
+  }
+  const json = await run(ctx, srv, pub.publish, { yes: true, json: true })
+  t.is(json.error, null, json.error && json.error.message)
+  t.is(json.lines.length, 1)
+  const out = JSON.parse(json.lines[0])
+  t.is(out.outcome, 'nada')
+  t.is(out.held, 2)
+})
+
+test('--yes with only AI blocks signs and acks nothing, like held unblocks; a terminal applies them', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  // Acknowledge the seeded list first, so the AI-only run starts idle.
+  srv.pull = { changes: [], published: { snapshot: null } }
+  t.is((await run(ctx, srv, pub.publish, { yes: true })).error, null)
+  const acked = srv.byPath('/account/mod/api/ack').length
+  const published = pub.calls.length
+
+  const changes = [
+    { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' },
+    { id: 'c2', op: 'block', member: B, at: '2026-10-24T10:00:02.000Z', actor: 'ia' }
+  ]
+  srv.pull = { changes, published: { snapshot: first } }
+  const idle = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(idle.error, null, idle.error && idle.error.message)
+  t.is(idle.code, 0)
+  t.alike(idle.lines, ['bloquear ' + A + ' (ia)' + HELD_NOTE, 'bloquear ' + B + ' (ia)' + HELD_NOTE, 'nada a aplicar'])
+  t.is(readList(ctx.modDir).signature, first.signature, 'nothing signed')
+  t.is(pub.calls.length, published, 'nothing published')
+  t.is(srv.byPath('/account/mod/api/ack').length, acked, 'nothing acked: the changes stay pending')
+
+  // At a terminal the operator reads them and confirms.
+  const later = await run(ctx, srv, pub.publish)
+  t.is(later.error, null, later.error && later.error.message)
+  t.alike(later.asked, [CONFIRM])
+  t.alike(later.lines, ['bloquear ' + A + ' (ia)', 'bloquear ' + B + ' (ia)', 'aplicado: seq 2, 3 chaves bloqueadas'])
+  t.alike(readList(ctx.modDir).blocked, [A, B, X].sort())
+  const acks = srv.byPath('/account/mod/api/ack')
+  t.alike(acks[acks.length - 1].body.changeIds, ['c1', 'c2'])
+})
+
+test('--yes applies a block with at least one human block change', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  srv.pull = {
+    changes: [
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' },
+      { id: 'c2', op: 'block', member: A, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' }
+    ],
+    published: { snapshot: first }
+  }
+  const res = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(res.lines, ['bloquear ' + A, 'aplicado: seq 2, 2 chaves bloqueadas'], 'a human block: no mark, not held')
+  t.alike(readList(ctx.modDir).blocked, [A, X].sort())
+  t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c1', 'c2'])
+})
+
+test('at a terminal an AI block is marked (ia) and applied after the confirmation', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' }], published: { snapshot: first } }
+  const refused = await run(ctx, srv, pub.publish, {}, ['n'])
+  t.is(refused.error && refused.error.message, 'nada assinado')
+  t.alike(refused.lines, ['bloquear ' + A + ' (ia)'])
+  t.is(readList(ctx.modDir).signature, first.signature)
+
+  const res = await run(ctx, srv, pub.publish)
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(res.asked, [CONFIRM])
+  t.alike(res.lines, ['bloquear ' + A + ' (ia)', 'aplicado: seq 2, 2 chaves bloqueadas'])
+  t.alike(readList(ctx.modDir).blocked, [A, X].sort())
+  t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c1'])
+})
+
+test('MAX_UNATTENDED_BLOCKS counts only the blocks --yes applies, not held AI blocks', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  const many = (n, actor, from) => new Array(n).fill(0).map((_, i) => ({ id: actor[0] + i, op: 'block', member: (from + i).toString(16).padStart(64, '0'), at: '2026-10-24T10:00:01.000Z', actor }))
+  srv.pull = { changes: [...many(100, 'pessoa', 1), ...many(5, 'ia', 1000)], published: { snapshot: first } }
+  const res = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(res.error, null, res.error && res.error.message)
+  t.is(readList(ctx.modDir).blocked.length, 101, '100 human blocks applied, the 5 AI ones held')
+  t.is(srv.byPath('/account/mod/api/ack')[0].body.changeIds.length, 100)
+  t.is(res.lines.filter((l) => l.endsWith(' (ia)' + HELD_NOTE)).length, 5)
+
+  // 101 human blocks are still too many, whatever the AI queued.
+  srv.pull = { changes: [...many(101, 'pessoa', 2000), ...many(5, 'ia', 1000)], published: { snapshot: readList(ctx.modDir) } }
+  const over = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(over.error && over.error.message, 'muitos bloqueios de uma vez; rode no terminal para revisar')
 })
 
 test('an unblock of a key the operator blocked needs a second confirmation', async (t) => {
@@ -692,15 +840,15 @@ test('an unblock of a key the operator blocked needs a second confirmation', asy
   t.absent('source' in logLines(ctx.modDir)[0])
   const srv = await fakeServer(t)
   const pub = publisher(true)
-  srv.pull = { changes: [{ id: 'c0', op: 'block', member: A, at: '2026-10-24T10:00:00.000Z' }], published: { snapshot: first } }
+  srv.pull = { changes: [{ id: 'c0', op: 'block', member: A, at: '2026-10-24T10:00:00.000Z', actor: 'pessoa' }], published: { snapshot: first } }
   t.is((await run(ctx, srv, pub.publish)).error, null)
   const second = readList(ctx.modDir)
 
   srv.pull = {
     changes: [
-      { id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z' },
-      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:02.000Z' },
-      { id: 'c3', op: 'block', member: B, at: '2026-10-24T10:00:03.000Z' }
+      { id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'unblock', member: A, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' },
+      { id: 'c3', op: 'block', member: B, at: '2026-10-24T10:00:03.000Z', actor: 'pessoa' }
     ],
     published: { snapshot: second }
   }
@@ -719,7 +867,7 @@ test('an unblock of a key the operator blocked needs a second confirmation', asy
   t.alike(acks[acks.length - 1].body.changeIds.slice().sort(), ['c2', 'c3'], 'the change of X is held')
 
   // Refusing the first question signs nothing, whatever the second would be.
-  srv.pull = { changes: [{ id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z' }], published: { snapshot: readList(ctx.modDir) } }
+  srv.pull = { changes: [{ id: 'c1', op: 'unblock', member: X, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: readList(ctx.modDir) } }
   const refused = await run(ctx, srv, pub.publish, {}, ['n'])
   t.is(refused.error && refused.error.message, 'nada assinado')
   t.alike(refused.asked, [CONFIRM])

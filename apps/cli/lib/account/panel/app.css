@@ -55,3 +55,20 @@ label { display: block; font-size: 0.9em; }
 .warning { font-size: 0.9em; border: 1px solid #b26a00; }
 .waiting { font-size: 0.9em; border: 1px solid #8888; }
 .change { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #8884; }
+/* AI triage lines (suggestion, abstention, 'pedido pela IA'): advice, so
+   muted, never styled like a decision. */
+.ai { font-size: 0.9em; opacity: 0.75; font-style: italic; }
+.verified { display: flex; flex-direction: column; gap: 6px; }
+/* Estatísticas (stats admins only): counts in aligned columns, signup
+   buckets as native <meter> bars (no width set from data: the CSP forbids
+   inline style, and the meter draws its own fill). */
+.stats { display: flex; flex-direction: column; gap: 8px; }
+.stats h2 { margin-top: 8px; }
+dl.figures { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin: 0; }
+dl.figures dt { margin: 0; }
+dl.figures dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.bar { display: grid; grid-template-columns: 7.5em 1fr auto; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+meter { width: 100%; height: 1em; }
+table.days { width: 100%; border-collapse: collapse; font-size: small; font-variant-numeric: tabular-nums; }
+table.days th, table.days td { text-align: right; padding: 4px 2px; border-bottom: 1px solid #8884; }
+table.days th:first-child, table.days td:first-child { text-align: left; }

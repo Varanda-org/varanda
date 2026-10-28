@@ -99,8 +99,38 @@
 // continuous run once per distinct own length (lastFoldLength; a burst of
 // folds while a restart is queued costs one restart), so the run follows
 // the new set; a once run is never restarted. The sync's 'media-pushed'
-// event (this device's media core confirmed at the seeder) is diagnostic
-// and makes no line.
+// event (this device's media core confirmed at the seeder) makes no line;
+// the lease below learns the confirmation from the 'settled' report that
+// follows it.
+//
+// The lease (web only, docs/rpc.md 6.1; off unless leaseHoldMs > 0, which
+// only the browser entry sets): a seeder link that has nothing left to do
+// is not held open. The sync reports 'settled { settled, mediaPending }'
+// (./sync.js header: inventory complete and not timed out, no unmet goal,
+// no failing follow; mediaPending while an own media core with blocks is
+// not confirmed pushed). Once a user's continuous run has been settled for
+// leaseHoldMs, counted ACROSS the preemptions of member reads (a
+// profile.read per second must not keep the link up forever: the clock is
+// kept while a run ends 'preempted' and its successor settles again, and
+// reset by an unsettled report or by any other end), with every media
+// core confirmed or leaseMediaMaxMs elapsed waiting for one, and while no
+// borrow holds it (borrow(fn): a counter for the readers of the live link,
+// today diary.peek; the hold waits for it, never past LEASE_BORROW_MAX_MS
+// from the first borrow), the run ends: sync.stopped
+// { runId, reason: 'idle' }, no result, syncIntent stays 'continuous' and
+// leaseUntil = now + leaseGapMs. restartIfWanted does nothing before
+// leaseUntil, so the member reads of the gap (feed, profile, log,
+// engagement, node.info) do not redial. What dials again, inside the gap
+// or after it: a diary write (ensureCaughtUp / pushAfterWrite clear
+// leaseUntil before the handler's finally restarts the run), a diary.peek
+// (awaitPeek clears it and queues its no-op), and sync.start, which starts
+// at once while no run exists; sync.stop clears the intent as always, and
+// a stop that lands while an idle run is still unwinding turns its reason
+// into 'stopped' (only the lease produces 'idle', with the intent kept). Two
+// sync sockets are never open at once (the Espiadinha's own short link is
+// apart from them): runSync returns only after its socket closed
+// (./sync.js socketCloseMs), and a run is only ever started while `run` is
+// null.
 //
 // Engagement: like.set / repost.set / post.quote are diary writes on the
 // post.reply path (unlocked, gate, append, push); a toggle already in the
@@ -137,6 +167,11 @@
 // The Espiadinha (web only, docs/rpc.md 5.22): peek.read is answered by
 // ./peek.js from a dedicated short-lived seeder link and memory cores, in
 // browser memory only (a snapshot of at most 5 minutes, nothing written).
+// That link is ALWAYS its own (an ephemeral Noise key that announces
+// nothing), whatever the sync state: browsing unfollowed diaries over the
+// sync link, which announced the member's diary and follows, would let the
+// seeder bind that browsing to the member (privacy over capacity). It
+// neither borrows nor holds the lease.
 // Unlike every other read it is NOT run inside withStore and does not
 // preempt a running sync: it opens no storage core (the preemption exists
 // only because two Hypercore instances on one storage corrupt it) and a page
@@ -200,6 +235,11 @@ const MAX_DIARY_PEEKS = 2
 const WRITE_GATE_TIMEOUT_MS = 15000
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
+// The lease (see the header): the gap after an idle end, how long a run
+// waits for an unconfirmed media core, and the longest a borrow holds it.
+const LEASE_GAP_MS = 45000
+const LEASE_MEDIA_MAX_MS = 120000
+const LEASE_BORROW_MAX_MS = 30000
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 
 const noop = () => {}
@@ -340,6 +380,8 @@ function redactLogLine (text) {
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
+// leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
+// its gap and its media wait.
 function createBrowserSession ({
   storage,
   association,
@@ -350,7 +392,10 @@ function createBrowserSession ({
   limits,
   writeGate = true,
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
-  peekTimeoutMs = PEEK_TIMEOUT_MS
+  peekTimeoutMs = PEEK_TIMEOUT_MS,
+  leaseHoldMs = 0,
+  leaseGapMs = LEASE_GAP_MS,
+  leaseMediaMaxMs = LEASE_MEDIA_MAX_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -366,10 +411,19 @@ function createBrowserSession ({
   let queued = 0 // operations accepted and not finished
   let closed = false
   let closing = null
-  let run = null // { runId, once, internal, ownSynced, onOwnSynced, abort, reason, done }
+  let run = null // { runId, once, internal, ownSynced, onOwnSynced, abort, reason, done, leased, settled, leaseTimer }
   let lastRunId = 0
   let connection = 0 // epoch, bumped by detach()
   let syncIntent = null // 'continuous' while a user-started continuous run should be running
+  // The lease (header): no continuous run is restarted before leaseUntil;
+  // leaseSettledSince / leaseMediaSince = when the link became settled /
+  // started waiting for a media core (kept across preemptions); borrows =
+  // the readers holding the link open, borrowedSince = the first of them.
+  let leaseUntil = 0
+  let leaseSettledSince = null
+  let leaseMediaSince = null
+  let borrows = 0
+  let borrowedSince = null
   // Own identity, cached once known (the key never changes; block 0 is
   // append-only, so only `memberCert: true` is cached).
   let ownKey = null
@@ -422,14 +476,17 @@ function createBrowserSession ({
   let noticing = null
   const unwinding = new Set()
 
-  function send (event, data) {
+  // A run's events carry the connection epoch it started in: once that
+  // connection is detached, a run still unwinding reports to nobody, not to
+  // the connection that attached after it.
+  function send (event, data, epoch = connection) {
     const fn = emitter
-    if (fn === null) return
+    if (fn === null || epoch !== connection) return
     try { fn(event, data) } catch {}
   }
 
-  function warning (text) {
-    send('warning', { line: line(text) })
+  function warning (text, epoch) {
+    send('warning', { line: line(text) }, epoch)
   }
 
   const peeker = createPeeker({
@@ -481,12 +538,15 @@ function createBrowserSession ({
   function startRun ({ once, timeoutMs, internal = false, label = null, onOwnSynced = noop }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
+    const epoch = connection
     const { signal, abort } = createAbort()
-    const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null }
+    // leased: a user's continuous run under the lease; settled: its last
+    // readiness report; leaseTimer: the hold.
+    const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null }
     run = r
-    send('sync.started', { runId, once })
-    if (label !== null) send('sync.event', { runId, line: line(label) })
-    const event = (text) => send('sync.event', { runId, line: line(text) })
+    send('sync.started', { runId, once }, epoch)
+    if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
+    const event = (text) => send('sync.event', { runId, line: line(text) }, epoch)
     r.done = (async () => {
       let result = null
       let error = null
@@ -503,13 +563,13 @@ function createBrowserSession ({
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
-            warning(safe(clean))
+            warning(safe(clean), epoch)
           },
           onEvent: (ev) => {
             if (!ev) return
             switch (ev.event) {
               case 'skipped':
-                warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')')
+                warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
                 return
               case 'own-synced':
                 synced = true
@@ -526,12 +586,17 @@ function createBrowserSession ({
                 // restarted once per own length so it follows the new set.
                 // A malformed event is dropped whole.
                 if (!Number.isSafeInteger(ev.count) || ev.count < 0 || !Number.isSafeInteger(ev.length) || ev.length < 0) return
-                send('follows.changed', { count: ev.count })
+                send('follows.changed', { count: ev.count }, epoch)
                 if (!once) scheduleFoldRestart(ev.length)
                 return
               case 'media-pushed':
-                // Diagnostic (the seeder holds this device's media core up
-                // to `length`): no line for the page, nothing to format.
+                // The seeder holds this device's media core up to `length`:
+                // no line for the page; the lease sees it through the
+                // 'settled' report the sync emits right after.
+                return
+              case 'settled':
+                // The run's readiness report (header, "The lease").
+                if (r.leased) noteSettled(r, ev)
                 return
               case 'own-behind':
                 synced = false
@@ -562,16 +627,20 @@ function createBrowserSession ({
         error = err
       }
       if (run === r) run = null
+      clearLease(r)
       // A drain deferred by this user's once run is due now.
       if (once && !internal && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
       if (error !== null) {
         if (!internal) syncIntent = null
-        warning('erro: ' + toRpcError(error, reportInternal).message)
-        send('sync.stopped', { runId, reason: 'error' })
+        if (r.leased) leaseSettledSince = leaseMediaSince = null
+        warning('erro: ' + toRpcError(error, reportInternal).message, epoch)
+        send('sync.stopped', { runId, reason: 'error' }, epoch)
         return
       }
       if (once && result && result.seederConfirmed === true) unpushed = false
       let reason = r.reason
+      // 'idle' only while the continuous intent really is kept (stopRun).
+      if (reason === 'idle' && syncIntent !== 'continuous') reason = 'stopped'
       if (reason === null) {
         if (once) {
           reason = isTimeout(result) ? 'timeout' : 'done'
@@ -580,17 +649,37 @@ function createBrowserSession ({
           syncIntent = null
         }
       }
+      // The hold survives only a preemption (its successor resumes it).
+      if (r.leased && reason !== 'preempted') leaseSettledSince = leaseMediaSince = null
       const data = { runId, reason }
       if (once) data.result = capSyncResult(result)
-      send('sync.stopped', data)
+      send('sync.stopped', data, epoch)
+      // A diary.peek still waiting for a link (its wait began under this
+      // run, which the lease ended or a request preempted): the no-op it
+      // queued may have run its restart check while `run` was still this
+      // one, and nothing else need be queued, so the check runs again now
+      // that `run` is clear, the gap cleared too.
+      if (diaryPeeker.waiters.size > 0) {
+        kickLease()
+        restartWhenIdle(0)
+      }
     })()
     return r
   }
 
+  // An explicit stop ('stopped': sync.stop, reset, detach, close, each of
+  // which cleared the intent first) overrides an 'idle' the lease set on a
+  // run that is still unwinding: 'idle' claims the intent was kept, and the
+  // gap no longer applies. Only the lease itself ever sets 'idle'.
   async function stopRun (reason) {
     const r = run
     if (r === null) return false
-    if (r.reason === null) r.reason = reason
+    if (r.reason === null) {
+      r.reason = reason
+    } else if (r.reason === 'idle' && reason === 'stopped') {
+      r.reason = reason
+      kickLease()
+    }
     r.abort()
     await r.done
     return true
@@ -598,7 +687,90 @@ function createBrowserSession ({
 
   function restartIfWanted () {
     if (syncIntent !== 'continuous' || run !== null || closed) return
+    if (Date.now() < leaseUntil) return // the lease's gap (header)
     startRun({ once: false })
+  }
+
+  // ---- the lease (see the header) ----
+
+  // A leased run's readiness report: the hold's clock starts at the first
+  // settled report (or is resumed from the preempted predecessor), the
+  // media wait at the first report that is settled with media pending, and
+  // any unsettled report resets both.
+  function noteSettled (r, { settled, mediaPending }) {
+    r.settled = settled === true
+    const now = Date.now()
+    if (!r.settled) {
+      leaseSettledSince = leaseMediaSince = null
+    } else {
+      if (leaseSettledSince === null) leaseSettledSince = now
+      if (mediaPending !== true) leaseMediaSince = null
+      else if (leaseMediaSince === null) leaseMediaSince = now
+    }
+    armLease(r)
+  }
+
+  // When the hold ends, from its clocks; null while nothing is settled.
+  function leaseDue () {
+    if (leaseSettledSince === null) return null
+    let due = leaseSettledSince + leaseHoldMs
+    if (leaseMediaSince !== null) due = Math.max(due, leaseMediaSince + leaseMediaMaxMs)
+    if (borrows > 0) due = Math.max(due, borrowedSince + LEASE_BORROW_MAX_MS)
+    return due
+  }
+
+  // (Re)arms the hold of the live leased run `r` for leaseDue().
+  function armLease (r) {
+    clearLease(r)
+    if (run !== r || r.reason !== null || !r.settled || closed) return
+    const due = leaseDue()
+    if (due === null) return
+    r.leaseTimer = setTimeout(() => {
+      r.leaseTimer = null
+      if (run !== r || r.reason !== null || !r.settled || closed) return
+      const now = Date.now()
+      const at = leaseDue()
+      if (at === null) return
+      if (at > now) {
+        armLease(r)
+        return
+      }
+      // Idle: the run ends cleanly (its sync.stopped carries 'idle' and the
+      // intent stays), and nothing redials before the gap ends.
+      leaseUntil = now + leaseGapMs
+      r.reason = 'idle'
+      r.abort()
+    }, Math.max(0, due - Date.now()))
+  }
+
+  function clearLease (r) {
+    if (r.leaseTimer === null) return
+    clearTimeout(r.leaseTimer)
+    r.leaseTimer = null
+  }
+
+  // A kick: the gap ends now (the caller's finally restarts the run).
+  function kickLease () {
+    leaseUntil = 0
+  }
+
+  // Runs fn() while counted as a borrower of the live link (a diary.peek):
+  // the hold waits for the last borrower, never past
+  // LEASE_BORROW_MAX_MS from the first. It starts no run and never fails
+  // for the lease's sake; fn's outcome is the caller's.
+  async function borrow (fn) {
+    if (borrows++ === 0) {
+      borrowedSince = Date.now()
+      if (run !== null && run.leased) armLease(run)
+    }
+    try {
+      return await fn()
+    } finally {
+      if (--borrows === 0) {
+        borrowedSince = null
+        if (run !== null && run.leased) armLease(run)
+      }
+    }
   }
 
   // Restarts only when no other operation is waiting (one preemption for a
@@ -631,6 +803,7 @@ function createBrowserSession ({
   // gate ran gets 'conexão encerrada' and nothing is written, and the sync
   // intent is restored only when nothing (detach) changed it meanwhile.
   async function ensureCaughtUp (epoch) {
+    kickLease() // a write redials, inside the lease's gap too
     if (!writeGate || trackingOwn()) return
     if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
     if (run !== null) await stopRun('preempted')
@@ -663,6 +836,7 @@ function createBrowserSession ({
   // ended (its outcome is in the sync.stopped event; the write stays either
   // way, and an unconfirmed push is retried on the next write).
   async function pushAfterWrite () {
+    kickLease()
     if (!writeGate || closed || !unpushed || syncIntent === 'continuous') return
     if (run !== null) await stopRun('preempted')
     const r = startRun({ once: true, timeoutMs: writeGateTimeoutMs, internal: true, label: PUSH_LINE })
@@ -752,6 +926,7 @@ function createBrowserSession ({
   // run once nothing else is on the chain.
   function awaitPeek (not, deadline) {
     if (diaryPeeker.peek !== null && diaryPeeker.peek !== not) return Promise.resolve(diaryPeeker.peek)
+    kickLease() // the no-op's finally redials, inside the lease's gap too
     if (!closed) serial(async () => {})({}).catch(noop)
     return new Promise((resolve) => {
       let timer = null
@@ -770,9 +945,15 @@ function createBrowserSession ({
   }
 
   // NOT a serial handler: runs beside the chain, inside the running sync.
-  async function diaryPeek ({ author, seqs, profileSeq, usernameSeq }) {
-    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) throw rpcError('USAGE', DIARY_PEEK_BUSY)
+  // The peek holds the lease (borrow) from its wait to its answer, so the
+  // hold cannot end the run under it.
+  function diaryPeek (params) {
+    if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
+    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
+    return borrow(() => diaryPeekWith(params))
+  }
+
+  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }) {
     diaryPeeksInFlight++
     try {
       const deadline = Date.now() + peekTimeoutMs
@@ -1167,12 +1348,17 @@ function createBrowserSession ({
       if (publicKey === null) throw rpcError('NOT_FOUND', 'identidade não encontrada')
       if (run !== null) throw rpcError('USAGE', 'sincronização já em andamento')
       syncIntent = once ? null : 'continuous'
+      kickLease() // an explicit start ignores the lease's gap
       const { runId } = startRun({ once, timeoutMs })
       return { runId }
     }),
 
     'sync.stop': serial(async () => {
       syncIntent = null
+      kickLease()
+      // The hold clocks survive a preempted end on purpose; an explicit stop
+      // ends the intent, so a later start must earn its own hold.
+      leaseSettledSince = leaseMediaSince = null
       const stopped = await stopRun('stopped')
       return { stopped }
     }),
@@ -1369,6 +1555,7 @@ function createBrowserSession ({
     noticer.abort()
     noticing = null
     syncIntent = null
+    kickLease()
     await stopRun('stopped')
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
@@ -1446,6 +1633,7 @@ function createBrowserSession ({
     setKeyPair,
     clearKeyPair,
     mediaUpload,
+    borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,
     identityStatus: () => identityStatus({}),

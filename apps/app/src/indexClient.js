@@ -19,20 +19,29 @@
 //    of tripping 429s; a 429 anyway sets one shared cooldown (Retry-After,
 //    honoured in full) during which nothing reaches the network.
 //
+// Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
+// /index/member/<author>[/<before>] and /index/topic/<tokens>[/<cursor>].
+// The search tokens are already folded words of [a-z0-9] (2..32 chars, at
+// most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
+// module only checks them against the same strict pattern, never folds and
+// never percent-encodes them (encodeURIComponent would turn '+' into '%2B',
+// which the seeder's raw-URL match refuses).
+//
 // Result convention (never throws): `{ ok: true, value }` or
 // `{ ok: false, reason }`, reason one of 'invalid-input', 'network',
-// 'timeout', 'not-found' (404: not indexed, or author not served),
-// 'status', 'too-large', 'malformed', or 'rate-limited' (then with a
-// numeric `retryAfterMs`: the cooldown still left). The URL builders return
-// null for bad input. Every fetch function takes injectable deps
+// 'timeout', 'not-found' (404: not indexed, or author not served; on the
+// topic route: a seeder without that route, or a malformed path — an
+// unknown word is a 200 with an empty list), 'status', 'too-large',
+// 'malformed', or 'rate-limited' (then with a numeric `retryAfterMs`: the
+// cooldown still left). The URL builders return null for bad input. Every
+// fetch function takes injectable deps
 // `{ fetch, timeoutMs, now, setTimeout, clearTimeout, sleep }`; the clock
 // ones drive the queue, the cooldown, the cache TTL and the 8 s timeout.
 //
-// Routes: GET /index/post/<author>/<seq>[/<cursor>], /index/counts/<refs>,
-// /index/member/<author>[/<before>] and /index/search/<segment>. The search
-// segment arrives already folded by the caller (1..4 tokens [a-z0-9]{1,20}
-// joined by '-', at least 2 characters in all); it is checked here, never
-// folded, lowercased or trimmed.
+// Account search, GET /index/search/<segment>: the segment arrives already
+// folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
+// characters in all); it is checked here, never folded, lowercased or
+// trimmed.
 
 export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
@@ -41,6 +50,7 @@ export const REPLIES_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
 export const SEARCH_MAX = 20
+export const TOPIC_MAX = 30
 export const MAX_IN_FLIGHT = 2
 export const WINDOW_MS = 10000
 export const MAX_STARTS = 18
@@ -55,6 +65,8 @@ const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
 const CURSOR = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
 const SEGMENT = /^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/
+// 1..8 folded tokens of 2..32 [a-z0-9] chars joined by a literal '+'.
+const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 const POST_KEYS = ['authors', 'complete', 'indexing', 'likes', 'next', 'parent', 'quotes', 'quotesTotal', 'ref', 'replies', 'repliesTotal', 'reposts']
 const COUNTS_KEYS = ['complete', 'counts', 'indexing']
@@ -63,6 +75,7 @@ const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'p
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
+const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -152,6 +165,15 @@ export function memberUrl (author, before = null) {
   if (a === null) return null
   if (before !== null && !isSeq(before)) return null
   return '/index/member/' + a + (before === null ? '' : '/' + before)
+}
+
+// `path`: tokens already folded and joined by topics.js searchPath. Checked
+// as is (no folding, no lowercasing, no encoding): anything outside QUERY is
+// refused, so nothing but [a-z0-9+] reaches the URL.
+export function topicUrl (path, cursor = null) {
+  if (typeof path !== 'string' || !QUERY.test(path)) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return '/index/topic/' + path + (cursor === null ? '' : '/' + cursor)
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -564,6 +586,23 @@ export function validMemberIndex (body, before = null) {
   }
 }
 
+// Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
+// author of the items, no more and no fewer (an unrelated or missing hint
+// means a confused or hostile index: refused whole).
+export function validTopic (body) {
+  if (!hasExactKeys(body, TOPIC_KEYS)) return null
+  const items = refList(body.items, TOPIC_MAX)
+  if (items === null) return null
+  if (body.next !== null && !isCursor(body.next)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const wanted = new Set(items.map((r) => r.split(':')[0]))
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // Members: <= 20 distinct authors with exact keys, order kept (the seeder's
 // ranking), never both hints null.
 export function validSearch (body) {
@@ -660,6 +699,10 @@ export function fetchMember (author, before = null, deps = {}) {
     memberInflight.set(key, p)
   }
   return p.then(copyResult)
+}
+
+export function fetchTopic (path, cursor = null, deps = {}) {
+  return run(topicUrl(path, cursor), validTopic, deps)
 }
 
 export function fetchSearch (segment, deps = {}) {

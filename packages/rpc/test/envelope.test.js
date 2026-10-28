@@ -67,9 +67,19 @@ test('response: success and error', (t) => {
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
   t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed'])
-  t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error'])
+  t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
+  t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
   t.ok(Object.isFrozen(STOP_REASONS))
+})
+
+test('event: sync.stopped reason idle (the browser node\'s lease)', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'sync.stopped', seq: 3, data })
+  t.ok(ev({ runId: 1, reason: 'idle' }).ok, 'idle without result validates')
+  t.alike(ev({ runId: 1, reason: 'idle' }).value.data, { runId: 1, reason: 'idle' })
+  t.absent(ev({ runId: 1, reason: 'leased' }).ok, 'an unknown reason does not')
+  t.absent(ev({ runId: 1, reason: 'Idle' }).ok)
+  t.absent(ev({ runId: 1, reason: 'idle', result: [] }).ok)
 })
 
 test('event: shapes', (t) => {

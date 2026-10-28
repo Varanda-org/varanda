@@ -44,14 +44,14 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
-  '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
+  '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server'
 ])
@@ -192,6 +192,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const wsOrigins = originList(originSource)
   if (originSource.length > 0 && wsOrigins.length === 0) throw new UsageError('ws-origin inválido (vazio)')
 
+  // Secret of the seeder's loopback /moderation-post route (seed-ws.js),
+  // shared with the account service. Environment only: a flag would show up
+  // in `ps` and shell history. Unset or empty disables the route; anything
+  // else must be 64 lower-case hex, and the error never echoes the value.
+  const triageToken = env.VARANDA_TRIAGE_TOKEN === undefined || env.VARANDA_TRIAGE_TOKEN === '' ? null : env.VARANDA_TRIAGE_TOKEN
+  if (triageToken !== null && !/^[0-9a-f]{64}$/.test(triageToken)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -215,6 +222,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     wsPort: port(get('ws-port') ?? env.VARANDA_WS_PORT ?? null, 'ws-port'),
     wsHost,
     wsOrigins: wsOrigins.length ? wsOrigins : null,
+    triageToken,
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
     // The seeder's web limits, environment only (README, "Variáveis de ambiente").
@@ -244,6 +252,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     to: replyTo(get('to')),
     author: key(get('author')),
     limit: integer(get('limit'), 'limit'),
+    // Raw: `log` reads a block seq and `feed` a cursor (commands/member.js).
+    before: get('before'),
     // Raw: `mod apply` checks it is an origin (mod-apply.js).
     server: get('server'),
     cwd

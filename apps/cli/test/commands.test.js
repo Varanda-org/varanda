@@ -169,6 +169,40 @@ test('member commands', async (t) => {
   t.is(log.key, A)
   t.is(log.entries[0].record.type, 'member-cert')
   t.is(log.entries.length, 5)
+  t.is(log.next, null, 'the whole log has no next cursor')
+
+  // paging: feed and log walk backwards with --before
+  const feedPage1 = lastJson(varanda(aDir, ['feed', '--limit', '2', '--json']))
+  t.alike(feedPage1.items.map((i) => i.seq), [3, 4])
+  t.alike(feedPage1.next, { at: feedPage1.items[0].at, author: A, seq: 3 })
+  const feedPage2 = lastJson(varanda(aDir, ['feed', '--limit', '2', '--before', JSON.stringify(feedPage1.next), '--json']))
+  t.alike(feedPage2.items.map((i) => i.seq), [2], 'next page, no repeats')
+  t.is(feedPage2.next, null, 'a short page is the last')
+  const feedHint = varanda(aDir, ['feed', '--limit', '2'])
+  t.ok(feedHint.stderr.includes("--before '" + JSON.stringify(feedPage1.next) + "'"), 'hint carries the next cursor')
+  t.absent(feedHint.stdout.includes('--before'), 'hint stays off stdout')
+  for (const bad of ['x', '{}', '[]', '3', JSON.stringify({ at: 'ontem', author: A, seq: 3 }), JSON.stringify({ at: feedPage1.next.at, author: A, seq: 0 }), JSON.stringify({ ...feedPage1.next, extra: 1 })]) {
+    const r = varanda(aDir, ['feed', '--before', bad])
+    t.is(r.code, 2, 'feed --before ' + bad + ' is a usage error')
+    t.ok(r.stderr.includes('before inválido'))
+  }
+
+  const logPage1 = lastJson(varanda(aDir, ['log', '--limit', '2', '--json']))
+  t.alike(logPage1.entries.map((e) => e.seq), [3, 4])
+  t.is(logPage1.next, 3)
+  const logPage2 = lastJson(varanda(aDir, ['log', '--limit', '2', '--before', '3', '--json']))
+  t.alike(logPage2.entries.map((e) => e.seq), [1, 2])
+  t.is(logPage2.next, 1)
+  const logPage3 = lastJson(varanda(aDir, ['log', '--limit', '2', '--before', '1', '--json']))
+  t.alike(logPage3.entries.map((e) => e.seq), [0])
+  t.is(logPage3.next, null)
+  t.alike(lastJson(varanda(aDir, ['log', '--before', '99', '--json'])).entries.map((e) => e.seq), [0, 1, 2, 3, 4], 'a bound past the end gives everything')
+  const logHint = varanda(aDir, ['log', '--limit', '2'])
+  t.alike(logHint.stdout.trim().split('\n').map((line) => line.split(' ')[0]), ['#3', '#4'])
+  t.ok(logHint.stderr.includes('--before 3'))
+  for (const bad of ['0', '-1', '01', 'x', '1.5', '']) {
+    t.is(varanda(aDir, ['log', '--before', bad]).code, 2, 'log --before ' + JSON.stringify(bad) + ' is a usage error')
+  }
 
   // follows
   t.alike(lastJson(varanda(aDir, ['follows', '--json'])), { follows: [] })

@@ -51,6 +51,12 @@ assoc_re='^[0-9a-fA-F]{64}$'
 json_type_re='^application/json( *;.*)?$'
 # Um e-mail de moderador em VARANDA_MODERATOR_EMAILS (só a forma, sem espaço).
 moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
+# Os limites opcionais do serviço de conta: um inteiro positivo sem zero à
+# esquerda, dentro da faixa NOME:mínimo:máximo abaixo. A faixa é a mesma de
+# LIMIT_ENV em apps/cli/lib/commands/account.js (um teste compara as duas):
+# um valor fora dela derrubaria o serviço só depois de trocar o contêiner.
+limite_re='^[1-9][0-9]{0,7}$'
+limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000'
 
 root=''
 www=''
@@ -225,7 +231,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 faixa limite minimo maximo valor
+  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -284,6 +290,65 @@ conferir_antes() {
       fi
     done < <(printf '%s\n' "$moderators" | tr ',' '\n')
   fi
+  # Estatísticas de uso: opcional (vazio desliga a aba, a amostragem e o
+  # usage.json, e um .env sem a linha continua implantando). Lida do mesmo
+  # jeito, nunca executada e nunca impressa (são e-mails). Cada item precisa
+  # ter a forma a@b, são no máximo 32 e cada um precisa estar também em
+  # VARANDA_MODERATOR_EMAILS (a aba fica dentro do painel de moderação), para
+  # o erro aparecer aqui, antes de qualquer mudança, e não depois da troca.
+  # A comparação ignora maiúsculas (o Google entrega o e-mail em minúsculas)
+  # e usa tr, não ${x,,}: o bash 3.2 do macOS não tem essa expansão. Como nos
+  # limites, espaço em volta do = é aceito (o Compose aplica a linha) e aspas
+  # não são removidas: o Compose as repassa ao serviço, que recusaria o valor,
+  # então um item entre aspas não casa com a lista e é recusado aqui.
+  stats=$(sed -n 's/^[[:space:]]*VARANDA_STATS_EMAILS[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$stats" ]; then
+    # Vírgulas nas pontas: ",item," só casa com um item inteiro da lista. A
+    # lista de moderadores é relida aqui com a mesma regra (espaço em volta do
+    # = aceito, aspas mantidas), para comparar com a linha que o Compose aplica.
+    mods_lc=$(sed -n 's/^[[:space:]]*VARANDA_MODERATOR_EMAILS[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//')
+    mods_lc=",$(printf '%s' "$mods_lc" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'),"
+    while IFS= read -r item; do
+      item=${item#"${item%%[![:space:]]*}"}
+      item=${item%"${item##*[![:space:]]}"}
+      item=$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')
+      stats_itens=$((stats_itens + 1))
+      if [ "$stats_itens" -gt 32 ] || ! [[ $item =~ $moderator_re ]] || [[ $mods_lc != *",$item,"* ]]; then
+        log 'VARANDA_STATS_EMAILS inválido em deploy/seeder/.env'
+        exit 1
+      fi
+    done < <(printf '%s\n' "$stats" | tr ',' '\n')
+    # O endpoint de saúde do semeador, lido só com as estatísticas ligadas.
+    # Vazio usa o padrão do compose (http://127.0.0.1:8788); um valor presente
+    # precisa ficar no loopback, com porta válida, e nunca é impresso.
+    saude=$(sed -n 's/^[[:space:]]*VARANDA_SEEDER_HEALTH[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    saude_re='^http://(127\.0\.0\.1|localhost|\[::1\]):([1-9][0-9]{0,4})/?$'
+    if [ -n "$saude" ] && { ! [[ $saude =~ $saude_re ]] || [ "${BASH_REMATCH[2]}" -gt 65535 ]; }; then
+      log 'VARANDA_SEEDER_HEALTH inválido em deploy/seeder/.env'
+      exit 1
+    fi
+  fi
+  # Limites opcionais do serviço de conta: ausente ou vazio passa (valem os
+  # padrões). Lidos do mesmo jeito, nunca executados e nunca impressos; um
+  # valor presente precisa ser um inteiro positivo dentro da faixa que o
+  # serviço aceita (a forma vem antes, então a comparação só vê inteiros).
+  for entrada in $limites_conta; do
+    nome=${entrada%%:*}
+    min=${entrada#*:}
+    max=${min#*:}
+    min=${min%%:*}
+    # Sem aspas: o Compose passa o texto entre aspas inteiro (comentário
+    # incluído), então um valor entre aspas é recusado em vez de limpo aqui.
+    limite=$(sed -n "s/^[[:space:]]*$nome[[:space:]]*=//p" "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -n "$limite" ] && { ! [[ $limite =~ $limite_re ]] || [ "$limite" -lt "$min" ] || [ "$limite" -gt "$max" ]; }; then
+      log "$nome inválido em deploy/seeder/.env"
+      exit 1
+    fi
+  done
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
   # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
   # valor presente precisa ser inteiro positivo canônico e estar na mesma

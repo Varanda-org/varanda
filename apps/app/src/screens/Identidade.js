@@ -22,11 +22,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
+import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
 import { atName } from '../who'
@@ -135,7 +138,9 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // service issues the member certificate and the @nome once the key is linked
 // to a Google account. Only same-origin /account/* calls (../account.js) and
 // the RPCs account.sign, cert.add and username.add; the Google page opens in
-// this same tab, so nothing is kept in the browser across the reload.
+// this same tab and nothing of the link is kept across the reload, except the
+// profile invite in sessionStorage (src/profileLink.js), which is never sent
+// to /account/*.
 const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda só para atender uma ordem judicial ou bloquear a conta; nada mais é coletado e a idade não é verificada. Você pode trocar o @nome depois, uma vez a cada 7 dias.'
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
@@ -145,15 +150,18 @@ const CERT_KEPT_ERROR = 'certificado já gravado'
 const CERT_KEPT_TEXT = 'Conta vinculada.'
 const CERT_RECEIVED = 'Conta vinculada.'
 // Finish errors (account.js ERROR_MESSAGES) after which the pending row is
-// useless: the member may pick another Google account.
+// useless: the member may pick another Google account. 'lista-de-espera' is
+// not one of them: the cap is full, this key stays, and the form retries by hand.
 const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
 
-// ?conta=ok|erro|cancelado, read once per page load (every mounted
-// Identidade shows it, including the one App.js opens in Ajustes after the
-// return) and removed from the address bar. The value is cached here, so a
-// LinkCard mounted after the removal still shows it; App.js only reads the
-// query, this is the only place that removes it.
+// ?conta=ok|erro|cancelado|lista-de-espera, read once per page load (every
+// mounted Identidade shows it, including the one App.js opens in Ajustes
+// after the return) and removed from the address bar. The value is cached
+// here, so a LinkCard mounted after the removal still shows it; App.js only
+// reads the query, this is the only place that removes it.
+// 'lista-de-espera' is not a notice: it opens the card in its waitlist state.
 let returnNotice
+let returnWaitlist = ''
 function takeReturnNotice () {
   if (returnNotice !== undefined) return returnNotice
   returnNotice = null
@@ -162,9 +170,14 @@ function takeReturnNotice () {
     const hist = globalThis.history
     if (!loc || typeof loc.search !== 'string' || !hist) return null
     returnNotice = parseReturn(loc.search)
+    returnWaitlist = parseReturnWaitlist(loc.search)
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
+}
+function takeReturnWaitlist () {
+  takeReturnNotice()
+  return returnWaitlist
 }
 
 // username.add runs at most once per record per page load (the RPC is
@@ -210,6 +223,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
+  // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
+  const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
   const seqRef = useRef(0)
 
   const load = useCallback(async () => {
@@ -323,12 +338,23 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const username = isUsername(name)
     if (username === null) return setError(NAME_RULE)
     run(async () => {
-      const { nonce } = await startLink({ member: publicKey, username })
-      const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
-      const { authorizeUrl } = await authorizeLink({ signature })
-      if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
-      setNote(RELOAD_TEXT)
-      globalThis.location.assign(authorizeUrl)
+      try {
+        const { nonce } = await startLink({ member: publicKey, username })
+        const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
+        const { authorizeUrl } = await authorizeLink({ signature })
+        if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
+        setWaitlist('')
+        setNote(RELOAD_TEXT)
+        globalThis.location.assign(authorizeUrl)
+      } catch (err) {
+        // Full cap: a calm notice. The name stays; nothing retries on its own.
+        if (err && err.code === 'lista-de-espera') {
+          setWaitlist(err.message)
+          return
+        }
+        setWaitlist('')
+        throw err
+      }
     })
   }
 
@@ -342,10 +368,19 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       const done = await finishLink({ signature })
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
+      setWaitlist('')
       setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
     } catch (err) {
+      // The cap filled at Google: nothing was stored. Keep this key and the
+      // chosen name. Not RESTARTABLE, and restartLink is not called.
+      if (err && err.code === 'lista-de-espera') {
+        setWaitlist(err.message)
+        if (name.trim() === '' && typeof row.username === 'string') setName(row.username)
+        return
+      }
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
+      setWaitlist('')
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -422,10 +457,21 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       </>
     )
   } else {
+    const waiting = waitlist !== ''
     const row = restart ? null : cur.pending
     const foreign = row !== null && row.member !== publicKey
-    const confirmable = row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
-    const showForm = !confirmable && (!memberCert || formOpen)
+    // While the cap is full the confirm step is not a failure: the name form
+    // stays, including the setup step, with a manual retry and no spinner.
+    const confirmable = !waiting && row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
+    const showForm = !confirmable && (!memberCert || formOpen || waiting)
+    const waitlistNote = waiting
+      ? (
+        <>
+          <Body>{waitlist}</Body>
+          <Btn label='tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} />
+        </>
+        )
+      : null
     body = (
       <>
         {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
@@ -456,7 +502,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Soft>De 3 a 20 letras minúsculas, números ou _.</Soft>
               <Body>{LINK_TEXT}</Body>
               <Soft>{RELOAD_TEXT}</Soft>
-              <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+              {waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
           : null}
@@ -466,7 +512,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Body>{LINK_TEXT}</Body>
               <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
               <Soft>{RELOAD_TEXT}</Soft>
-              <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />
+              {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
           : null}
@@ -491,7 +537,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
 // setup: the first run (App.js). The cards render inside the Stepper of
 // `step` (src/onboarding.js) at `index` of `total`.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo }) {
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, invite = null }) {
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -587,15 +633,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
   const doCert = async () => {
     setDone('')
-    let cert
-    try {
-      // iOS smart punctuation turns typed " into curly quotes; a certificate
-      // holds only ASCII values, so they are read back as plain quotes.
-      cert = JSON.parse(certText.replace(/[“”„‟″]/g, '"'))
-    } catch {
-      return setCertLocal('JSON inválido')
-    }
-    if (cert === null || typeof cert !== 'object' || Array.isArray(cert)) return setCertLocal('o certificado deve ser um objeto JSON')
+    const parsed = parseCertificateText(certText)
+    if (parsed.error) return setCertLocal(parsed.error)
+    const cert = parsed.cert
     setCertLocal('')
     const r = await add.run(() => node.request('cert.add', { cert }))
     if (r.ok) {
@@ -641,6 +681,10 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         setPkError(errorText(err))
       }
       await refresh(false)
+      // The status read right after a first ceremony has no key yet (the diary
+      // did not exist); re-reading it here makes the key known before any
+      // Google step, even when the recovery ends without a sync (offline).
+      try { await passkey.refresh() } catch {}
     }
     // Ends the recovery itself when the run cannot start (no identity, a run
     // already active); every Identidade then reads again.
@@ -702,6 +746,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     }, pkFail).finally(pkEnd)
   }
 
+  // A profile invite (App.js, src/profileLink.js) on a card where no
+  // ceremony is possible (an in-app browser, an IP address): the visitor is
+  // told to open the link elsewhere and can copy it. Hosted page only.
+  const inviteHere = node.hosted === true && invite !== null
+  const blockedInvite = inviteHere
+    ? (
+      <>
+        <Notice>{displayText(invite.text)}</Notice>
+        <Soft>{OPEN_IN_BROWSER_TEXT}</Soft>
+        <ShareProfile url={invite.link} />
+      </>
+      )
+    : null
   let entrar = null
   if (passkey !== null && locked) {
     const blocked = noPrf !== null || (pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no' || !!pkStatus.rpIdError))
@@ -719,13 +776,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     } else if (pkStatus.rpIdError) {
       // The address cannot carry a passkey (an IP): the page must be opened
       // by its domain name (localhost in development).
-      entrar = <Card><Notice>{displayText(pkStatus.rpIdError)}</Notice></Card>
+      entrar = (
+        <Card>
+          <Notice>{displayText(pkStatus.rpIdError)}</Notice>
+          {blockedInvite}
+        </Card>
+      )
     } else if (blocked) {
       const stale = noPrf !== null ? staleText(noPrf.userId) : ''
       entrar = (
         <Card>
           <Notice>{NO_PRF_TEXT}</Notice>
           {stale ? <Notice>{stale}</Notice> : null}
+          {blockedInvite}
         </Card>
       )
     } else {
@@ -759,6 +822,14 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       entrar = (
         <Card>
           <Text style={styles.brand}>Varanda</Text>
+          {inviteHere
+            ? (
+              <>
+                <Notice>{displayText(invite.text)}</Notice>
+                <Btn label='agora não' secondary onPress={() => invite.onDismiss()} disabled={pkPending} />
+              </>
+              )
+            : null}
           <Body>{WELCOME_TEXT}</Body>
           <Soft>{ENTRAR_TEXT}</Soft>
           {shownMismatch

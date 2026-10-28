@@ -31,6 +31,10 @@ services:
       VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
       VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
       VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
+      # Segredo compartilhado com o serviço account para a rota local de
+      # triagem por IA (leitura do post denunciado). Opcional: vazio deixa a
+      # rota desligada, então um .env sem esta linha continua subindo.
+      VARANDA_TRIAGE_TOKEN: "${VARANDA_TRIAGE_TOKEN:-}"
 
   web:
     # O Caddy oficial (2.11.6, por digest) mais o módulo de limite por cliente
@@ -108,6 +112,38 @@ services:
       # serviço account a recebe (nem o semeador nem o web); moderation.json
       # fica em account-data.
       VARANDA_MODERATOR_EMAILS: "${VARANDA_MODERATOR_EMAILS:-}"
+      # E-mails que veem a aba Estatísticas do painel (só contagens anônimas).
+      # Opcional: vazio desliga a aba, a amostragem e o usage.json. Cada um
+      # precisa estar também na lista de moderadores. Só o serviço account a
+      # recebe (nem o semeador nem o web).
+      VARANDA_STATS_EMAILS: "${VARANDA_STATS_EMAILS:-}"
+      # Endpoint de saúde do semeador (compose.yaml o publica só em
+      # 127.0.0.1:8788). Lido só com as estatísticas ligadas. Só loopback.
+      VARANDA_SEEDER_HEALTH: "${VARANDA_SEEDER_HEALTH:-http://127.0.0.1:8788}"
+      # Teto de membros vinculados. Vazio = sem teto; passando dele, um vínculo
+      # NOVO recebe a resposta "lista de espera" e quem já é membro não muda.
+      # O semeador tem o próprio limite de 4096 diários, então mantenha este
+      # valor igual ou abaixo dele.
+      VARANDA_MAX_MEMBERS: "${VARANDA_MAX_MEMBERS:-}"
+      # Limites do serviço account. Vazios mantêm os padrões do serviço.
+      VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
+      VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"
+      VARANDA_ACCOUNT_BURST: "${VARANDA_ACCOUNT_BURST:-}"
+      VARANDA_ACCOUNT_MAX_PENDING: "${VARANDA_ACCOUNT_MAX_PENDING:-}"
+      # Triagem das denúncias por IA (similaridade semântica, MiniLM).
+      # Opcional: vazio desliga, 'sombra' só registra sugestões no painel, '1'
+      # deixa a IA decidir (bloqueios seguem pendentes até o `mod apply`).
+      # Um .env sem estas linhas continua subindo com a triagem desligada.
+      VARANDA_AI: "${VARANDA_AI:-}"
+      # O semeador (rede do host) escuta HTTP/WS só em 127.0.0.1:8789
+      # (VARANDA_WS_PORT acima); a conta, também na rede do host, o alcança
+      # ali para ler o post denunciado. Só loopback.
+      VARANDA_SEEDER_HTTP: "${VARANDA_SEEDER_HTTP:-http://127.0.0.1:8789}"
+      # O mesmo segredo do serviço seeder; vazio desliga a leitura.
+      VARANDA_TRIAGE_TOKEN: "${VARANDA_TRIAGE_TOKEN:-}"
+      # Pesos do modelo, dentro de account-data; baixados uma vez pelo
+      # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
+      VARANDA_AI_MODEL_DIR: "/data/ai-model"
     # Volume próprio: o diretório de contas e a chave do emissor nunca ficam
     # no volume do semeador.
     volumes:

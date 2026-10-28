@@ -6,7 +6,9 @@ const { charLength } = require('./text')
 const { isMethod, validateParams, isPlainObject, hasOwn, isId } = require('./methods')
 
 const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed'])
-const STOP_REASONS = Object.freeze(['done', 'stopped', 'preempted', 'timeout', 'error'])
+// 'idle': the browser node ended a continuous run because its verified
+// seeder link was settled for the lease hold (docs/rpc.md 6.1); no result.
+const STOP_REASONS = Object.freeze(['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
 
 function fail (message) {
   return { ok: false, code: 'USAGE', message }

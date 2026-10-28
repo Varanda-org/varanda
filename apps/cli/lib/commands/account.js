@@ -12,6 +12,11 @@ const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
+const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
+const { createUsageStats } = require('../account/usage-stats')
+const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
+const { localDay } = require('@varanda/core/lib/activity')
 const {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -42,10 +47,38 @@ const {
 // sign-in is open only to the e-mails in VARANDA_MODERATOR_EMAILS (empty:
 // disabled); its sessions live in memory, so a restart signs every
 // moderator out.
+//
+// It also holds usage.json, the daily history of the anonymous usage
+// statistics (apps/cli/lib/account/usage-stats.js: member count and the
+// local seeder's /health counts) shown on the panel's stats tab to the
+// e-mails in VARANDA_STATS_EMAILS (a subset of the moderators). Without stats
+// e-mails nothing is sampled, the seeder is never fetched and usage.json is
+// never written.
 const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [--member <hex>]]'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
 const MAX_SECRET = 256
+// VARANDA_AI: unset or '' (off), 'sombra' (suggestions only) or '1' (the
+// worker's 'auto' mode: it may decide within its daily caps).
+const AI_MODES = { sombra: 'sombra', 1: 'auto' }
+// How long shutdown waits for the embedder to finish an inference.
+const EMBEDDER_CLOSE_MS = 5000
+const DEFAULT_SEEDER_HTTP = 'http://127.0.0.1:8789'
+// The seeder's loopback route only: http, a loopback host, an explicit
+// port and no path (the reader, ../account/ai/read-post.js, refuses
+// anything else too).
+const SEEDER_HTTP_RE = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/
+const AI_MODEL_DIR = 'ai-model'
+// Optional capacity knobs: name -> [option, min, max]. Absent or blank keeps
+// the store/server default; '0' is invalid, never "unlimited".
+const LIMIT_ENV = Object.freeze({
+  VARANDA_MAX_MEMBERS: ['maxMembers', 1, 4096],
+  VARANDA_ACCOUNT_MAX_PENDING: ['maxPending', 1, 100000],
+  VARANDA_ACCOUNT_MAX_CONNECTIONS: ['maxConnections', 1, 4096],
+  VARANDA_ACCOUNT_RATE: ['ratePerSecond', 1, 10000],
+  VARANDA_ACCOUNT_BURST: ['burst', 1, 100000]
+})
+const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -173,13 +206,51 @@ function moderationStatus (dataDir, association) {
   }
 }
 
+// { exemplars } of the AI triage's precedents (exemplars.json), or null when
+// the file does not exist (the triage never ran here); 'indisponivel' when
+// it cannot be read. Read-only: the file is parsed, never opened through
+// the store (which would create or chmod), as existingModeration does.
+function triageStatus (dataDir) {
+  let raw
+  try {
+    raw = fs.readFileSync(path.join(dataDir, EXEMPLARS_FILE), 'utf8')
+  } catch (err) {
+    return err.code === 'ENOENT' ? null : 'indisponivel'
+  }
+  try {
+    const obj = JSON.parse(raw)
+    if (obj === null || typeof obj !== 'object' || !Array.isArray(obj.items)) return 'indisponivel'
+    return { exemplars: obj.items.length }
+  } catch {
+    return 'indisponivel'
+  }
+}
+
 function status (dataDir, given) {
   const association = checkConfig(dataDir, given)
   const publicKey = issuerPublicKey(dataDir)
   const certificate = certificateState(dataDir, association)
-  const links = openAccountStore(dataDir, { readOnly: true }).exportLinks().length
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  const links = accounts.exportLinks().length
   const moderation = moderationStatus(dataDir, association)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, moderation, running: lockHeld(dataDir) }
+  const triage = triageStatus(dataDir)
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, running: lockHeld(dataDir) }
+}
+
+function triageLine (triage) {
+  if (triage === null) return 'Triagem IA: desligada'
+  if (triage === 'indisponivel') return 'Triagem IA: indisponível (exemplars.json inválido)'
+  return 'Triagem IA: ' + triage.exemplars + ' precedentes'
+}
+
+// The directory ends below its high-water mark (directory.hwm): a snapshot
+// and journal restored from an older backup, which the service refuses to
+// open (store.js, "Restore"). Read-only commands still read it and say so;
+// the operator who meant it removes directory.hwm (README).
+const RESTORED_LINE = 'aviso: diretório de contas restaurado de uma cópia antiga; confira o backup'
+
+function warnRestored (accounts) {
+  if (accounts.restored) process.stderr.write(RESTORED_LINE + '\n')
 }
 
 function certificateLine (certificate) {
@@ -196,6 +267,7 @@ function statusLines (s) {
   ]
   if (!s.configured) lines.push('emissor não certificado')
   lines.push('vínculos: ' + s.links)
+  if (s.restored) lines.push(RESTORED_LINE)
   if (s.moderation === null) {
     lines.push('moderação: indisponível (moderation.json inválido)')
   } else {
@@ -205,12 +277,36 @@ function statusLines (s) {
       'lista publicada: ' + (s.moderation.publishedSeq === null ? 'nenhuma' : 'seq ' + s.moderation.publishedSeq)
     )
   }
+  lines.push(triageLine(s.triage))
   lines.push('estado: ' + (s.running ? 'em execução' : 'parado'))
   return lines.join('\n')
 }
 
+// The AI report triage's settings, or null when VARANDA_AI is unset or ''
+// (off). Validated by shape only and never printed. VARANDA_TRIAGE_TOKEN is
+// the Bearer token of the seeder's loopback post route: the seeder service
+// reads the SAME variable (deploy/seeder/*.env), so both must be given the
+// same 64-hex value.
+function readTriageEnv (env, dataDir) {
+  const ai = env.VARANDA_AI
+  if (ai === undefined || ai === '') return null
+  if (typeof ai !== 'string' || !Object.hasOwn(AI_MODES, ai)) throw new UsageError('VARANDA_AI inválido')
+  const token = env.VARANDA_TRIAGE_TOKEN
+  if (typeof token !== 'string' || !HEX64_RE.test(token)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
+  const seederHttp = env.VARANDA_SEEDER_HTTP === undefined || env.VARANDA_SEEDER_HTTP === '' ? DEFAULT_SEEDER_HTTP : env.VARANDA_SEEDER_HTTP
+  const m = typeof seederHttp === 'string' ? SEEDER_HTTP_RE.exec(seederHttp) : null
+  const port = m === null ? 0 : Number(m[2])
+  if (port < 1 || port > 65535) throw new UsageError('VARANDA_SEEDER_HTTP inválido')
+  let modelDir = env.VARANDA_AI_MODEL_DIR
+  if (modelDir === undefined || modelDir === '') {
+    modelDir = typeof dataDir === 'string' ? path.join(dataDir, AI_MODEL_DIR) : null
+  }
+  if (modelDir !== null && typeof modelDir !== 'string') throw new UsageError('VARANDA_AI_MODEL_DIR inválido')
+  return { mode: AI_MODES[ai], token, seederHttp: seederHttp.replace(/\/$/, ''), modelDir }
+}
+
 // Read once, validated by shape only; no value is ever printed.
-function readEnv (env) {
+function readEnv (env, dataDir) {
   const origin = env.VARANDA_PUBLIC_ORIGIN
   if (typeof origin !== 'string' || !ORIGIN_RE.test(origin)) throw new UsageError('VARANDA_PUBLIC_ORIGIN inválido')
   const clientId = env.VARANDA_GOOGLE_CLIENT_ID
@@ -222,7 +318,81 @@ function readEnv (env) {
   const modEmails = parseModEmails(env.VARANDA_MODERATOR_EMAILS)
   // Not a usage error (exit 1), and never the value.
   if (modEmails === null) throw new Error('VARANDA_MODERATOR_EMAILS inválido')
-  return { origin, clientId, clientSecret, modEmails }
+  // Stats admins are a subset of the moderators: the stats tab lives inside
+  // the moderation panel, whose sign-in only moderators pass. Like the list
+  // above, an error exit 1 that never carries the value.
+  const statsEmails = parseModEmails(env.VARANDA_STATS_EMAILS)
+  if (statsEmails === null || statsEmails.some((e) => !modEmails.includes(e))) throw new Error('VARANDA_STATS_EMAILS inválido')
+  // Ignored while stats are off (as VARANDA_SEEDER_HTTP with VARANDA_AI
+  // off), so a leftover value never stops a service that does not use it.
+  let seederHealth = null
+  if (statsEmails.length > 0) {
+    seederHealth = parseSeederHealthUrl(env.VARANDA_SEEDER_HEALTH)
+    if (seederHealth === null) throw new UsageError('VARANDA_SEEDER_HEALTH inválido')
+  }
+  const triage = readTriageEnv(env, dataDir)
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage }
+}
+
+// Builds and returns the triage worker, or null when it cannot run: a
+// missing or tampered model ('sem-modelo') logs its token and the service
+// goes on without AI (the healthcheck stays green, reports go to humans).
+// The heavy modules are required here only, so a service with VARANDA_AI
+// off never loads them.
+async function openTriage ({ config, dataDir, association, moderation, log }) {
+  const { createEmbedder } = require('../account/ai/embedder')
+  const { createPostReader } = require('../account/ai/read-post')
+  const { openExemplarStore } = require('../account/ai/exemplar-store')
+  const { openLedger } = require('../account/ai/ledger')
+  const { createWorker } = require('../account/ai/worker')
+  let embedder
+  try {
+    embedder = await createEmbedder({ modelDir: config.modelDir })
+  } catch (err) {
+    log({ event: 'triage', reason: err && err.code === 'sem-modelo' ? 'sem-modelo' : 'erro' })
+    return null
+  }
+  try {
+    const reader = createPostReader({
+      baseUrl: config.seederHttp,
+      token: config.token,
+      association,
+      // The issuers revoked by the last published list, as the seeder's gate.
+      revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot)
+    })
+    const exemplars = openExemplarStore(dataDir, { model: embedder.modelId })
+    const ledger = openLedger(dataDir)
+    const worker = createWorker({
+      mode: config.mode,
+      moderation,
+      exemplars,
+      ledger,
+      readPost: (args) => reader.read(args),
+      embed: (text) => embedder.embed(text),
+      log,
+      modelId: embedder.modelId
+    })
+    return { worker, embedder }
+  } catch (err) {
+    await embedder.close().catch(() => {})
+    log({ event: 'triage', reason: 'erro' })
+    return null
+  }
+}
+
+// -> { [option]: integer } holding only the variables that were set.
+function readLimits (env) {
+  const limits = {}
+  for (const [name, [option, min, max]] of Object.entries(LIMIT_ENV)) {
+    const raw = env[name]
+    if (raw === undefined) continue
+    const text = typeof raw === 'string' ? raw.trim() : null
+    if (text === '') continue
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= min && value <= max)) throw new UsageError(name + ' inválido')
+    limits[option] = value
+  }
+  return limits
 }
 
 // For the operator (LGPD access requests, legal orders): every report row
@@ -233,6 +403,7 @@ function readEnv (env) {
 function reportRows (dataDir, given, member) {
   const association = checkConfig(dataDir, given)
   const accounts = openAccountStore(dataDir, { readOnly: true })
+  warnRestored(accounts)
   const moderation = existingModeration(dataDir, association)
   if (moderation === null) return []
   const contactOf = (key) => {
@@ -260,7 +431,8 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails } = readEnv(env)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
+  const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -270,43 +442,150 @@ async function serve (flags, env) {
 
   // The lock comes first (single writer), the store after it. Its heartbeat
   // keeps the lock live; once the lock is no longer ours (removed, or
-  // another token on disk) another writer may exist, so the service stops
-  // and exits non-zero (Docker restarts it; see takeLock).
+  // another token on disk) another writer may exist, so the store refuses
+  // every write and the service stops and exits non-zero (Docker restarts
+  // it; see takeLock).
   let stop
-  const stopped = new Promise((resolve) => { stop = resolve })
+  let stopRequested = false
+  const stopped = new Promise((resolve) => {
+    stop = () => {
+      stopRequested = true
+      resolve()
+    }
+  })
   let lost = false
+  let unavailable = false
+  let store = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      log({ event: 'lock', reason: 'perdido' })
-      stop()
+      loseLock(store, log, stop)
     }
   })
   let listener = null
+  let triage = null
+  let usage = null
+  let closing = 'skipped'
   const onSignal = () => stop()
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
   try {
-    const store = openAccountStore(flags.dataDir)
+    try {
+      store = openAccountStore(flags.dataDir, {
+        maxMembers,
+        maxPending,
+        onUnavailable: () => {
+          unavailable = true
+          storeUnavailable(log, stop)
+        }
+      })
+    } catch (err) {
+      // A directory restored from an older backup (store.js, "Restore"): a
+      // security event, logged as such before the error stops the service.
+      if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
+      throw err
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
-    const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails })
-    try {
-      listener = await server.listen({ host, port })
-    } catch (err) {
-      if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
-      throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
+    if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
+    else {
+      triage = await openTriage({ config: triageConfig, dataDir: flags.dataDir, association, moderation, log })
+      if (triage !== null) log({ event: 'triage', reason: triageConfig.mode })
     }
-    log({ event: 'listening', host: listener.host, port: listener.port })
-    log({ event: 'ready', configured: issuer !== null })
-    await stopped
+    // Usage statistics only when someone may see them. usage.json is written
+    // under the same gate as the account store: never once the lock is lost
+    // or the store failed. Days are Brasília calendar days (localDay), the
+    // same day the seeder's activeDay counts.
+    if (statsEmails.length > 0) {
+      const reader = createSeederHealthReader({ baseUrl: seederHealth })
+      usage = createUsageStats({
+        dataDir: flags.dataDir,
+        accounts: store,
+        readSeeder: () => reader.read(),
+        log,
+        dayOf: localDay,
+        canWrite: () => !lost && !unavailable && lock.owned()
+      })
+    }
+    log({ event: 'usage', reason: usage === null ? 'desligada' : 'ligada' })
+    // A signal (or a lost lock) during the model load: do not open the port
+    // or start the worker; go straight to the cleanup below.
+    if (!stopRequested) {
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, maxConnections, ratePerSecond, burst })
+      try {
+        listener = await server.listen({ host, port })
+      } catch (err) {
+        if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
+        throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
+      }
+      log({ event: 'listening', host: listener.host, port: listener.port })
+      log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }) })
+      if (triage !== null) triage.worker.start()
+      if (usage !== null) usage.start()
+      await stopped
+    }
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    // The worker ends its running job (bounded) before the lock goes: it
+    // writes moderation.json, exemplars.json and the ledger.
+    if (triage !== null) {
+      await triage.worker.stop()
+      // close() waits for the inference chain; a hung inference must not
+      // keep the lock held forever, so the wait is bounded.
+      await Promise.race([
+        triage.embedder.close().catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, EMBEDDER_CLOSE_MS).unref())
+      ])
+    }
+    // The sampler waits for an in-flight read and writes the day's last
+    // counts while the lock is still ours; a lost lock or a failed store
+    // skips the write, as closeIfOwned below does.
+    if (usage !== null) await usage.stop({ flush: !lost && !unavailable && lock.owned() })
+    // A failed store has nothing it could fold safely (close() would only
+    // answer 'indisponivel'), so it is skipped like a lost lock.
+    closing = await closeIfOwned(store, lock, lost || unavailable, log)
     lock.release()
   }
-  return lost ? 1 : 0
+  return lost || unavailable || closing === 'failed' ? 1 : 0
+}
+
+// The store marked itself unavailable at runtime (writer guard, a failed
+// fsync or reload): every mutation would answer 'indisponivel' until a
+// restart re-reads the disk, so the service logs it (no personal data) and
+// stops, and serve() exits non-zero (Docker restarts it).
+function storeUnavailable (log, stop) {
+  log({ event: 'store', reason: 'indisponivel' })
+  stop()
+}
+
+// The lock is lost: the store is marked unavailable first, synchronously,
+// so no request still draining during the stop appends beside the writer
+// that took the lock over (store.js, "Writer guard"); then the service
+// stops.
+function loseLock (store, log, stop) {
+  if (store !== null) store.fail()
+  log({ event: 'lock', reason: 'perdido' })
+  stop()
+}
+
+// A clean stop folds the journal into a complete v1 directory.json, so the
+// previous build can open it after a rollback. Never once the lock is lost:
+// another writer may own the directory by then. The heartbeat notices a
+// takeover only on its next tick, so the lock file is read again right
+// before closing. A close that fails (the directory may stay v2) is logged
+// without detail and makes serve() exit non-zero.
+// -> 'closed' | 'skipped' | 'failed'.
+async function closeIfOwned (store, lock, lost, log = () => {}) {
+  if (store === null || lost || !lock.owned()) return 'skipped'
+  try {
+    await store.close()
+  } catch {
+    log({ event: 'close', reason: 'falhou' })
+    return 'failed'
+  }
+  return 'closed'
 }
 
 async function run (flags) {
@@ -340,7 +619,9 @@ async function run (flags) {
   if (sub === 'export' && subsub === undefined) {
     checkConfig(flags.dataDir, flags.association)
     if (lockHeld(flags.dataDir)) throw new Error('serviço de conta em execução')
-    for (const link of openAccountStore(flags.dataDir, { readOnly: true }).exportLinks()) {
+    const accounts = openAccountStore(flags.dataDir, { readOnly: true })
+    warnRestored(accounts)
+    for (const link of accounts.exportLinks()) {
       process.stdout.write(jsonLine(link) + '\n')
     }
     return 0
@@ -363,5 +644,8 @@ module.exports = {
   // For tests.
   ensureConfig,
   checkConfig,
-  readEnv
+  readEnv,
+  closeIfOwned,
+  loseLock,
+  storeUnavailable
 }

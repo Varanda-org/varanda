@@ -9,8 +9,8 @@ const path = require('node:path')
 const http = require('node:http')
 const crypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
-const WebSocket = require('ws')
 const { testnet, tmpDir, bootstrapFlags, until } = require('./helpers/net')
+const { connect, openSession } = require('./helpers/ws-client')
 const { initAssociation } = require('@varanda/core/lib/assoc')
 const { MAX_REQUEST } = require('@varanda/rpc')
 
@@ -108,43 +108,6 @@ function rawUpgrade (server, { host, origin, path: p = '/rpc' } = {}) {
   })
 }
 
-// A ws client that records every message and resolves responses by id.
-function connect (server, origin) {
-  const ws = new WebSocket('ws://127.0.0.1:' + server.port + '/rpc', { origin })
-  const client = { ws, messages: [], waiting: new Map(), nextId: 1, closed: null }
-  client.closed = new Promise((resolve) => ws.on('close', (code, reason) => resolve({ code, reason: reason.toString() })))
-  ws.on('error', () => {})
-  ws.on('message', (data) => {
-    const text = data.toString()
-    server.seen.push(text)
-    const msg = JSON.parse(text)
-    client.messages.push(msg)
-    if (msg.id !== undefined && client.waiting.has(msg.id)) {
-      client.waiting.get(msg.id)(msg)
-      client.waiting.delete(msg.id)
-    }
-  })
-  client.opened = new Promise((resolve, reject) => {
-    ws.once('open', resolve)
-    ws.once('unexpected-response', (req, res) => reject(new Error('status ' + res.statusCode)))
-    ws.once('error', reject)
-  })
-  client.call = (method, params = {}) => {
-    const id = client.nextId++
-    const p = new Promise((resolve) => client.waiting.set(id, resolve))
-    ws.send(JSON.stringify({ v: 1, id, method, params }))
-    return p
-  }
-  return client
-}
-
-async function openSession (server, origin) {
-  const c = connect(server, origin)
-  await c.opened
-  const r = await c.call('session.open', { token: server.token })
-  return { c, r }
-}
-
 const ORIGIN = 'http://localhost:8081'
 
 test('default port 80 is written without :80 in Host, Origin and the CSP', (t) => {
@@ -237,6 +200,93 @@ test('at most 4 sockets; a second authenticated socket replaces the first (4000)
   noLeak(t, s)
 })
 
+test('scripted client: errors and the sync events of the contract', async (t) => {
+  const m = await member(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const { c } = await openSession(s, ORIGIN)
+
+  const again = await c.call('session.open', { token: s.token })
+  t.is(again.error.code, 'USAGE')
+  t.is(again.error.message, 'sessão já aberta')
+  const extra = await c.call('node.info', { extra: 1 })
+  t.is(extra.error.code, 'USAGE')
+  t.is(extra.error.message, 'parâmetro desconhecido')
+  const noIdentity = await c.call('sync.start')
+  t.is(noIdentity.error.code, 'NOT_FOUND')
+  t.is(noIdentity.error.message, 'identidade não encontrada')
+  t.is(c.events('sync.started').length, 0, 'a refused sync.start emits nothing')
+
+  t.is((await c.call('identity.create')).ok, true)
+  const start = await c.call('sync.start', { once: false })
+  t.is(start.ok, true)
+  const started = await c.event('sync.started')
+  t.is(started.data.runId, start.result.runId, 'sync.started carries the runId of the response')
+  t.is(started.data.once, false)
+  t.ok(c.messages.indexOf(started) < c.messages.indexOf(start), 'sync.started comes before the response')
+
+  const second = await c.call('sync.start')
+  t.is(second.error.code, 'USAGE')
+  t.is(second.error.message, 'sincronização já em andamento')
+  t.alike((await c.call('sync.status')).result, { state: 'running', runId: start.result.runId, once: false })
+
+  const stop = await c.call('sync.stop')
+  t.is(stop.result.stopped, true)
+  const stopped = await c.event('sync.stopped', (data) => data.runId === start.result.runId)
+  t.is(stopped.data.reason, 'stopped')
+  t.ok(c.messages.indexOf(stopped) < c.messages.indexOf(stop), 'sync.stopped comes before the sync.stop response')
+  t.ok(stopped.seq > started.seq, 'seq grows')
+  t.alike((await c.call('sync.status')).result, { state: 'idle' })
+  t.is((await c.call('sync.stop')).result.stopped, false, 'nothing left to stop')
+  c.ws.close()
+  noLeak(t, s)
+})
+
+test('reconnection: closing the socket stops the run and keeps the identity', async (t) => {
+  const m = await member(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const first = await openSession(s, ORIGIN)
+  const created = await first.c.call('identity.create')
+  const run = await first.c.call('sync.start', { once: false })
+  await first.c.event('sync.started')
+  first.c.ws.close()
+  await first.c.closed
+
+  const { c, r } = await openSession(s, ORIGIN)
+  t.is(r.ok, true, 'the same token opens a new session')
+  t.is((await c.call('node.info')).result.publicKey, created.result.publicKey, 'the identity survives')
+  await until(async () => (await c.call('sync.status')).result.state === 'idle', { name: 'run stopped by the close' })
+  t.absent(c.messages.some((msg) => msg.event !== undefined), 'nothing of the old run reaches the new socket')
+
+  const again = await c.call('sync.start', { once: false })
+  t.is(again.ok, true, 'a new run can start')
+  t.ok(again.result.runId > run.result.runId, 'with a new runId')
+  t.is((await c.event('sync.started')).data.runId, again.result.runId)
+  c.ws.close()
+  noLeak(t, s)
+})
+
+test('reconnection: a replaced socket hands the running sync to the new one', async (t) => {
+  const m = await member(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const first = await openSession(s, ORIGIN)
+  await first.c.call('identity.create')
+  const run = await first.c.call('sync.start', { once: false })
+  await first.c.event('sync.started')
+
+  const next = connect(s, ORIGIN)
+  await next.opened
+  t.is((await next.call('session.open', { token: s.token })).ok, true)
+  t.is((await first.c.closed).code, 4000, 'the first socket is replaced')
+  t.alike((await next.call('sync.status')).result, { state: 'running', runId: run.result.runId, once: false }, 'the run goes on')
+
+  t.is((await next.call('sync.stop')).result.stopped, true)
+  const stopped = await next.event('sync.stopped', (data) => data.runId === run.result.runId)
+  t.is(stopped.data.reason, 'stopped', 'its events reach the new socket')
+  t.is(first.c.events('sync.stopped').length, 0, 'and not the replaced one')
+  next.ws.close()
+  noLeak(t, s)
+})
+
 test('rate limit, binary frame, oversized frame', async (t) => {
   const m = await member(t)
   const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
@@ -301,6 +351,13 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   const spa = await request(s, { path: '/perfil/abc' })
   t.is(spa.status, 200, 'SPA fallback')
   t.ok(spa.body.includes('varanda'))
+  // deploy/seeder/Caddyfile's @semExtensao matcher already rewrites these paths in production.
+  for (const p of ['/@ana', '/m/' + 'a'.repeat(64)]) {
+    const link = await request(s, { path: p })
+    t.is(link.status, 200, p + ' SPA fallback')
+    t.is(link.headers['content-type'], 'text/html; charset=utf-8', p + ' HTML')
+    t.ok(link.body.includes('varanda'), p + ' index body')
+  }
   t.is((await request(s, { path: '/assets' })).status, 200, 'a directory is never listed (fallback)')
   t.is((await request(s, { path: '/missing.js' })).status, 404, 'missing file with extension -> 404')
 

@@ -34,7 +34,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # --ignore-scripts: no dependency install script runs in CI (supply
+      # chain). onnxruntime-node's would only fetch CUDA artifacts; its CPU
+      # binary, sharp's and esbuild's ship in their packages.
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm test
       - run: npm run demo

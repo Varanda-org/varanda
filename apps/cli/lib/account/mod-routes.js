@@ -6,7 +6,7 @@ const nodeCrypto = require('node:crypto')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
-const { MAX_REPORTS } = require('./moderation-store')
+const { MAX_REPORTS, AI_ACTOR } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -34,6 +34,10 @@ const { MAX_REPORTS } = require('./moderation-store')
 // and @username only; e-mails and subs never leave this module except as
 // the signed-in moderator's own e-mail in api/me (the deciding moderator's
 // e-mail stays in moderation.json and `account reports`).
+//   - the stats tab (api/stats): for e-mails in VARANDA_STATS_EMAILS, a
+//     subset of VARANDA_MODERATOR_EMAILS (anyone else in it is ignored), an
+//     anonymous usage view from ./usage-stats.js; counts only, never a key,
+//     e-mail, sub, username or address.
 
 const LOGIN_COOKIE = '__Host-varanda-mod-login'
 const SESSION_COOKIE = '__Host-varanda-mod'
@@ -158,6 +162,18 @@ function createModRoutes ({
   moderation = null,
   googleMod = null,
   modEmails = [],
+  // The AI report triage worker (./ai/worker.js) or null when it is off.
+  // Its hooks run only AFTER the HTTP answer went out, never awaited, and
+  // their errors are swallowed into one log token: a throwing or slow model
+  // can change neither the status nor the latency of a member's report or
+  // a moderator's decision. Nothing AI-related is ever read from a body.
+  triage = null,
+  // Lowercase e-mails allowed to see the usage statistics. Only those that
+  // are also moderators count: the stats tab lives behind the same session.
+  statsEmails = [],
+  // A createUsageStats instance (./usage-stats.js) exposing async view(), or
+  // null when the stats tab is off.
+  usage = null,
   panelDir = path.join(__dirname, 'panel'),
   log = () => {},
   now = Date.now,
@@ -166,6 +182,18 @@ function createModRoutes ({
   const { send, readJsonBody, checkPost, RouteError, refuse, fromStore, keyedWindow, fixedWindow, BASE_HEADERS } = http
   const emails = new Set(Array.isArray(modEmails) ? modEmails.map((e) => String(e).toLowerCase()) : [])
   const panelEnabled = emails.size > 0 && googleMod !== null && moderation !== null
+  // Anything without a view() is treated as off, so a miswired caller shows
+  // no tab instead of a tab that always fails.
+  if (usage === null || usage === undefined || typeof usage.view !== 'function') usage = null
+  // The subset rule enforced here too (not only where the env is parsed): a
+  // stats e-mail that is not a moderator can never hold a session anyway,
+  // and keeping it out makes that explicit.
+  const statsAllowed = new Set((Array.isArray(statsEmails) ? statsEmails : [])
+    .map((e) => String(e).toLowerCase())
+    .filter((e) => emails.has(e)))
+  function canSeeStats (session) {
+    return usage !== null && statsAllowed.has(session.email)
+  }
   const assets = loadAssets(panelDir)
 
   // Report nonces and operator challenges are stateless: the server keeps
@@ -223,6 +251,27 @@ function createModRoutes ({
   const over = () => new RouteError('pedido-invalido', 429)
   const unauthorized = () => new RouteError('nao-autorizado', 401)
   const forbidden = () => new RouteError('nao-autorizado', 403)
+
+  // Fire-and-forget: the hook runs on a later microtask, after send().
+  function afterAnswer (hook) {
+    if (triage === null) return
+    Promise.resolve().then(hook).catch(() => {
+      try {
+        log({ event: 'triage', reason: 'erro' })
+      } catch {}
+    })
+  }
+
+  // A read of the worker's view of one report; a failure shows as null, so
+  // the panel never breaks on the AI.
+  function triageView (method, id) {
+    if (triage === null) return null
+    try {
+      return triage[method](id) ?? null
+    } catch {
+      return null
+    }
+  }
 
   function needModeration () {
     if (moderation === null) throw refuse('indisponivel')
@@ -378,6 +427,8 @@ function createModRoutes ({
     const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, reason, text, quote, signature, nonce }))
     log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
     send(res, 200, { id: added.id, duplicate })
+    // A duplicate is a report the triage already has.
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
   // --- moderator sign-in ---------------------------------------------------
@@ -506,7 +557,13 @@ function createModRoutes ({
       reported: { member: r.target, username: reportedName, linked: accounts.contact(r.target) !== null },
       status: r.status,
       decidedAt: r.decidedAt,
-      note: r.note
+      note: r.note,
+      // Who decided, never the e-mail (decidedBy stays in the store).
+      actor: r.status === 'aberta' ? null : r.decidedBy === AI_ACTOR ? 'ia' : 'pessoa',
+      // The triage's suggestion (tokens and numbers) and the verified post
+      // text it read from the seeder ({ texto, midia, citacao }), or null.
+      ia: triageView('suggestionOf', r.id),
+      publicacao: triageView('verifiedOf', r.id)
     }
   }
 
@@ -519,7 +576,8 @@ function createModRoutes ({
       username: usernameOf(c.member, cache),
       at: c.at,
       reportIds: [...c.reportIds],
-      claimedAt: c.claimedAt ?? null
+      claimedAt: c.claimedAt ?? null,
+      byAi: c.by === AI_ACTOR
     }
   }
 
@@ -527,30 +585,60 @@ function createModRoutes ({
   // api/reports shows would tell them someone reported them.
   async function me (req, res, session) {
     const own = ownMember(session)
-    const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS }))
+    const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS, exclude: own }))
     const { changes } = store(() => moderation.pending())
     send(res, 200, {
       email: session.email,
       published: store(publishedInfo),
-      open: rows.filter((r) => !ownCase(r, own)).length,
-      pending: changes.filter((c) => c.member !== own).length
+      open: rows.length,
+      pending: changes.filter((c) => c.member !== own).length,
+      // Present only for the stats allow-list; never `stats: false`, so
+      // everyone else gets the exact body they always got.
+      ...(canSeeStats(session) ? { stats: true } : {})
     })
+  }
+
+  // The anonymous usage view (./usage-stats.js). It never carries report,
+  // pending or blocked-case counts: those include the admin's own cases,
+  // which me() deliberately hides, so a total here could tell them someone
+  // reported them. No log line of its own (the view is counts only anyway).
+  async function usageStats (req, res, session) {
+    if (!canSeeStats(session)) throw forbidden()
+    let body
+    try {
+      body = await usage.view()
+    } catch {
+      throw refuse('indisponivel')
+    }
+    send(res, 200, body)
   }
 
   async function reports (req, res, session, url) {
     const estado = url.searchParams.get('estado') ?? 'aberta'
     if (estado !== 'aberta' && estado !== 'decidida') throw refuse('pedido-invalido')
-    // Every row first, then the moderator's own cases (as target or as
-    // reporter) out, then the page:
-    // truncating before the filter could hide every actionable report
-    // behind a first page of the moderator's own cases.
-    const { reports: rows } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS }))
+    // `antes`, only for the history: the id of the last row the caller holds;
+    // the page starts right after it.
+    const antes = url.searchParams.get('antes')
+    if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    // The moderator's own cases (as target or as reporter) leave the store's
+    // list before its cut at MAX_REPORTS and before the page: truncating
+    // first could hide every actionable report behind a first page of the
+    // moderator's own cases, and `truncated` must not count them either.
     const own = ownMember(session)
-    const visible = rows.filter((r) => !ownCase(r, own))
+    const { reports: visible, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
+    let start = 0
+    if (antes !== null) {
+      const at = visible.findIndex((r) => r.id === antes)
+      if (at === -1) throw refuse('pedido-invalido')
+      start = at + 1
+    }
     const cache = new Map()
     send(res, 200, {
-      reports: visible.slice(0, REPORTS_PAGE).map((r) => projectReport(r, cache)),
-      truncated: visible.length > REPORTS_PAGE
+      reports: visible.slice(start, start + REPORTS_PAGE).map((r) => projectReport(r, cache)),
+      truncated: visible.length > start + REPORTS_PAGE,
+      // The store lists at most MAX_REPORTS rows: on the last page the panel
+      // can reach, older rows may exist that it never shows.
+      alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
     })
   }
 
@@ -562,6 +650,8 @@ function createModRoutes ({
     log({ event: 'decided', reason: result.report.status })
     const cache = new Map()
     send(res, 200, { report: projectReport(result.report, cache), change: projectChange(result.change, cache) })
+    // The store's row (decidedBy = this moderator), so the worker can learn.
+    afterAnswer(() => triage.onHumanDecision(result.report))
   }
 
   // The moderator's own case stays hidden here too (as in api/reports): a
@@ -584,6 +674,7 @@ function createModRoutes ({
     const { change } = await storeAsync(() => moderation.unblock(member, { by: session.email }))
     log({ event: 'unblock' })
     send(res, 200, { change: projectChange(change, new Map()) })
+    afterAnswer(() => triage.onUnblock(member))
   }
 
   async function cancel (req, res, session, id) {
@@ -593,6 +684,8 @@ function createModRoutes ({
     const { change } = await storeAsync(() => moderation.cancel(id, { by: session.email }))
     log({ event: 'cancel' })
     send(res, 200, { change: projectChange(change, new Map()) })
+    // The change as it was before the cancel (its reportIds), read above.
+    afterAnswer(() => triage.onCancel(target))
   }
 
   // --- operator (signed by the certified moderator key) -------------------
@@ -641,9 +734,11 @@ function createModRoutes ({
     operatorAuth(body, 'pull', () => canonicalBody('pull'))
     const result = await storeAsync(() => moderation.pull())
     log({ event: 'pull', reason: String(result.changes.length) })
-    // Exactly { changes: [{ id, op, member, at }], published: { snapshot } } (plan D1).
+    // Exactly { changes: [{ id, op, member, at, actor }], published: { snapshot } }
+    // (plan D1). `actor` is the store's projection ('ia' or 'pessoa'); the
+    // moderator's e-mail (`by`) never reaches the operator.
     send(res, 200, {
-      changes: result.changes.map(({ id, op, member, at }) => ({ id, op, member, at })),
+      changes: result.changes.map(({ id, op, member, at, actor }) => ({ id, op, member, at, actor })),
       published: { snapshot: result.published.snapshot }
     })
   }
@@ -719,6 +814,7 @@ function createModRoutes ({
     if (get && p === '/account/mod/api/me') return withSession(req, (s) => me(req, res, s))
     if (get && p === '/account/mod/api/reports') return withSession(req, (s) => reports(req, res, s, url))
     if (get && p === '/account/mod/api/blocked') return withSession(req, (s) => blocked(req, res, s))
+    if (get && p === '/account/mod/api/stats') return withSession(req, (s) => usageStats(req, res, s))
     if (post && p === '/account/mod/api/unblock') {
       const body = await postBody(req, undefined)
       return withSession(req, (s) => unblock(req, res, s, body))
