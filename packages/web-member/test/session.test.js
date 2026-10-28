@@ -859,6 +859,23 @@ test('a continuous run is preempted by a member request and restarted', async (t
   t.alike(await web.request('sync.status'), { state: 'idle' }, 'a stopped run is not restarted')
 })
 
+test('regression: a run unwinding after a connection closed does not report to the next connection', async (t) => {
+  await testnet(t)
+  const { node, web } = await certified(t, { syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const { runId } = await web.request('sync.start', {})
+  // The transport does not await detach(): the next page attaches while the run stops.
+  const second = await connectClient(node)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.alike(await second.request('sync.status'), { state: 'idle' })
+  t.absent(second.events.some((e) => e.data.runId === runId || e.name === 'warning'), 'neither a warning nor the sync.stopped of the old run reaches the new connection')
+  t.ok(web.events.some((e) => e.name === 'sync.started' && e.data.runId === runId))
+
+  const { runId: next } = await second.request('sync.start', {})
+  t.ok(second.events.some((e) => e.name === 'sync.started' && e.data.runId === next), 'a run of the new connection reports normally')
+  await second.request('sync.stop')
+  t.is((await stoppedOf(second.events, next)).reason, 'stopped')
+})
+
 test('connections: one at a time, protocol errors close, a closed session refuses', async (t) => {
   await testnet(t)
   const { node, web } = await certified(t)

@@ -255,9 +255,7 @@ test('reconnection: closing the socket stops the run and keeps the identity', as
   t.is(r.ok, true, 'the same token opens a new session')
   t.is((await c.call('node.info')).result.publicKey, created.result.publicKey, 'the identity survives')
   await until(async () => (await c.call('sync.status')).result.state === 'idle', { name: 'run stopped by the close' })
-  // The old run may still be unwinding when the new socket attaches, so its own
-  // sync.stopped can reach it; no other run is ever reported.
-  t.ok(c.events('sync.stopped').every((msg) => msg.data.runId === run.result.runId), 'only the old run reports to the new socket')
+  t.absent(c.messages.some((msg) => msg.event !== undefined), 'nothing of the old run reaches the new socket')
 
   const again = await c.call('sync.start', { once: false })
   t.is(again.ok, true, 'a new run can start')
