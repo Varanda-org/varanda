@@ -36,6 +36,7 @@ const METRICS = [
   ['firewalled', '1 quando a DHT se vê atrás de firewall ou NAT', (s) => (s.firewalled ? 1 : 0)],
   ['blocked', 'chaves na lista de bloqueio adotada', (s) => s.blocked],
   ['blocklist_seq', 'seq da lista de bloqueio adotada; 0 sem lista', (s) => s.blocklistSeq],
+  ['blocklist_held', '1 quando a lista de bloqueio se perdeu e o semeador recusa diários novos até receber uma lista verificada', (s) => (s.blocklistHeld ? 1 : 0)],
   ['media_cores', 'núcleos de mídia vinculados a diários admitidos', (s) => s.mediaCores],
   ['media_bytes', 'bytes dos núcleos de mídia (tamanho assinado)', (s) => s.mediaBytes],
   ['index_records', 'registros no índice de engajamento (em memória)', (s) => s.indexRecords],
