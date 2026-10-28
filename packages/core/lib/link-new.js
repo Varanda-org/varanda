@@ -4,16 +4,19 @@ const fs = require('#fs')
 
 // Publishes the finished temp file `tmp` as `file` only if `file` does not
 // exist (EEXIST otherwise): a hard link, so a concurrent writer can never be
-// clobbered. Android denies link() to apps (SELinux, EACCES), so there it
-// falls back to an lstat check and a rename. That pair is not atomic against
-// another writer, which the callers rule out: they run under the store lock or
-// in a data dir private to one process.
+// clobbered. Android denies link() to apps (SELinux, EACCES), so only that
+// error falls back to an lstat check and a rename. Not EPERM: other file
+// systems (FAT, exFAT, some network volumes) answer link() with it, and callers
+// such as the moderator and account key creation count on EEXIST to never
+// overwrite a secret key. The lstat and rename pair is not atomic against
+// another writer; it is accepted on Android because the app's data dir is
+// private to one worklet.
 function linkNew (tmp, file) {
   try {
     fs.linkSync(tmp, file)
     return
   } catch (err) {
-    if (err.code !== 'EACCES' && err.code !== 'EPERM') throw err
+    if (err.code !== 'EACCES') throw err
   }
   try {
     fs.lstatSync(file)

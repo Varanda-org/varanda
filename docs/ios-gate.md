@@ -164,11 +164,11 @@ adb reverse tcp:8081 tcp:8081
 (cd apps/app && npm run gate -- --platform android)                         # [--host <ip>] [--device <serial>]
 ```
 
-The evidence is in [verification.md](verification.md) section 28.
+The evidence is in [verification.md](verification.md) section 30.
 
 ## Residual risks
 
-- **Android:** run on an emulator only (section 28 of verification.md). A real device, an arm64-v8a build and a release build were not run. Android's SELinux denies `link()` to apps, which `identity.create` used to publish `config.json` (`lib/link-new.js` now falls back to a rename).
+- **Android:** run on an emulator only (section 30 of verification.md). A real device, an arm64-v8a build and a release build were not run. Android's SELinux denies `link()` to apps, which `identity.create` used to publish `config.json` (`lib/link-new.js` now falls back to a rename).
 - **fs facade TOCTOU:** O_EXCL, O_NOFOLLOW and O_NONBLOCK are emulated by an lstat before the open. A path swapped between the two calls is followed or clobbered. We accept this because the data dir is private to one worklet inside the app sandbox.
 - **Bare version:** bare-kit 0.16.0 embeds Bare v1.33.4. The core's desktop Bare smoke test runs on bare-runtime 1.34.1. Both pass, but they are different runtimes, and a bare-kit upgrade must re-run this gate.
 - **Addon dirs in node_modules:** the linked addons live in `node_modules/react-native-bare-kit/{ios/addons,android/src/main/addons}`. Every `npm install` or `npm ci` wipes them, so `npm run link:addons` (then `pod install`) must run again before a native build. Without it, the app builds but the worklet fails to load its addons.

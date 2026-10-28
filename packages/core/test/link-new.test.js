@@ -48,33 +48,36 @@ test('linkNew links the temp file, and refuses to replace an existing one', (t) 
   t.is(fs.readFileSync(file, 'utf8'), 'new', 'the existing file is untouched')
 })
 
-for (const code of ['EACCES', 'EPERM']) {
-  test('linkNew without link(): ' + code + ' falls back to a rename, never over an existing entry', (t) => {
+test('linkNew without link(): EACCES falls back to a rename, never over an existing entry', (t) => {
+  denyLink(t, 'EACCES')
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'a')
+  linkNew(write(path.join(dir, 'a.tmp'), 'new'), file)
+  t.is(fs.readFileSync(file, 'utf8'), 'new')
+  t.absent(fs.existsSync(path.join(dir, 'a.tmp')), 'the temp name is gone')
+
+  const other = write(path.join(dir, 'b.tmp'), 'other')
+  t.is(codeOf(() => linkNew(other, file)), 'EEXIST')
+  t.is(fs.readFileSync(file, 'utf8'), 'new', 'the existing file is untouched')
+  t.ok(fs.existsSync(other), 'the temp file is left for the caller to remove')
+
+  const dangling = path.join(dir, 'dangling')
+  fs.symlinkSync(path.join(dir, 'nowhere'), dangling)
+  t.is(codeOf(() => linkNew(other, dangling)), 'EEXIST', 'a dangling symlink counts as existing')
+  t.absent(fs.existsSync(path.join(dir, 'nowhere')), 'and is not followed')
+})
+
+// EPERM is what link() answers on file systems without hard links (FAT,
+// exFAT): there the callers still need link()'s EEXIST, so no fallback.
+for (const code of ['EPERM', 'ENOSPC']) {
+  test('linkNew passes ' + code + ' through and publishes nothing', (t) => {
     denyLink(t, code)
     const dir = tmpDir(t)
-    const file = path.join(dir, 'a')
-    linkNew(write(path.join(dir, 'a.tmp'), 'new'), file)
-    t.is(fs.readFileSync(file, 'utf8'), 'new')
-    t.absent(fs.existsSync(path.join(dir, 'a.tmp')), 'the temp name is gone')
-
-    const other = write(path.join(dir, 'b.tmp'), 'other')
-    t.is(codeOf(() => linkNew(other, file)), 'EEXIST')
-    t.is(fs.readFileSync(file, 'utf8'), 'new', 'the existing file is untouched')
-    t.ok(fs.existsSync(other), 'the temp file is left for the caller to remove')
-
-    const dangling = path.join(dir, 'dangling')
-    fs.symlinkSync(path.join(dir, 'nowhere'), dangling)
-    t.is(codeOf(() => linkNew(other, dangling)), 'EEXIST', 'a dangling symlink counts as existing')
-    t.absent(fs.existsSync(path.join(dir, 'nowhere')), 'and is not followed')
+    t.is(codeOf(() => linkNew(write(path.join(dir, 'a.tmp'), 'x'), path.join(dir, 'a'))), code)
+    t.absent(fs.existsSync(path.join(dir, 'a')))
+    t.ok(fs.existsSync(path.join(dir, 'a.tmp')), 'the temp file is left for the caller to remove')
   })
 }
-
-test('linkNew passes other link errors through', (t) => {
-  denyLink(t, 'ENOSPC')
-  const dir = tmpDir(t)
-  t.is(codeOf(() => linkNew(write(path.join(dir, 'a.tmp'), 'x'), path.join(dir, 'a'))), 'ENOSPC')
-  t.absent(fs.existsSync(path.join(dir, 'a')))
-})
 
 test('without link(): idCreate publishes config.json and a second one reads it', async (t) => {
   denyLink(t, 'EACCES')
