@@ -17,7 +17,12 @@
 // onboarding Stepper (src/onboarding.js decides the step) with welcome copy,
 // and the technical card (key, association, certificate state) stays for
 // Ajustes › Identidade. The setup changes presentation only: every ceremony,
-// link, certificate, reset and rename path is the one Ajustes uses.
+// link, certificate, reset and rename path is the one Ajustes uses. The setup
+// names the key a code and the certificate the association's release.
+//
+// The cards keep one short line each; the passkey and Google-link
+// explanations sit behind Saiba mais (src/help.js), whose sheet nests in the
+// Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput } from 'react-native'
@@ -25,21 +30,29 @@ import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { HelpLink } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
 import { atName } from '../who'
 
 const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
-const ENTRAR_TEXT = 'Você entra com uma passkey. Guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador. Se perder a passkey, perde a conta; outra passkey é outra conta.'
 // Shown wherever the own key is shown during the setup (the association
 // issues the certificate for it).
 const KEY_NOTE = 'Esta chave é só sua; a associação usa ela para emitir o certificado.'
 const NO_NAME = 'ainda sem @nome'
+// The setup's certificate step in plain words; HELP.certificado names PLAIN_SUBMIT.
+const PLAIN_CODE_LABEL = 'Código para enviar à associação'
+const PLAIN_SEND_TEXT = 'Envie este código à associação. Cole abaixo o que ela devolver.'
+const PLAIN_CERT_LABEL = 'O que a associação devolveu'
+const PLAIN_SUBMIT = 'gravar e continuar'
+// Replaces parseCertificateText's JSON wording in the setup only.
+const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
 // A passkey created but unusable (no PRF) is named so it can be deleted.
 function staleText (userId) {
   return typeof userId === 'string' && /^[0-9a-f]{6,}$/i.test(userId)
@@ -59,8 +72,9 @@ function mismatchText (legacy) {
 
 // The certificate step: the public key to send to the association (copy or
 // share) and the field for the certificate it issues. PR B puts the account
-// link before this step.
-export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, error, pending }) {
+// link before this step. `plain` (the setup) names the key a code and the
+// certificate what the association returns.
+export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, error, pending, plain = false }) {
   const [copyNote, setCopyNote] = useState('')
   const [manual, setManual] = useState(false)
   const manualRef = useRef(null)
@@ -85,10 +99,10 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
       if (nav === null || !nav.clipboard || typeof nav.clipboard.writeText !== 'function') throw new Error('sem área de transferência')
       await nav.clipboard.writeText(String(publicKey))
       setManual(false)
-      setCopyNote('chave copiada')
+      setCopyNote(plain ? 'código copiado' : 'chave copiada')
     } catch {
       setManual(true)
-      setCopyNote('não foi possível copiar: a chave está selecionada abaixo, copie-a')
+      setCopyNote(plain ? 'não foi possível copiar: o código está selecionado acima, copie-o' : 'não foi possível copiar: a chave está selecionada abaixo, copie-a')
     }
   }
 
@@ -101,9 +115,9 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 
   return (
     <Card>
-      <Label>sua chave pública</Label>
+      <Label>{plain ? PLAIN_CODE_LABEL : 'sua chave pública'}</Label>
       <Mono>{key}</Mono>
-      <Soft>{KEY_NOTE}</Soft>
+      {plain ? null : <Soft>{KEY_NOTE}</Soft>}
       {manual
         ? (
           <TextInput
@@ -115,21 +129,21 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
             autoCapitalize='none'
             autoCorrect={false}
             spellCheck={false}
-            accessibilityLabel='sua chave pública'
+            accessibilityLabel={plain ? 'código para enviar à associação' : 'sua chave pública'}
             onChangeText={() => {}}
           />
           )
         : null}
       <Row>
-        <Btn label='copiar chave' secondary onPress={copy} />
+        <Btn label={plain ? 'copiar código' : 'copiar chave'} secondary onPress={copy} />
         {canShare ? <Btn label='compartilhar' secondary onPress={share} /> : null}
       </Row>
       {copyNote ? <Soft>{copyNote}</Soft> : null}
-      <Body>Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.</Body>
-      <Label>certificado de membro (JSON emitido pela associação)</Label>
+      <Body>{plain ? PLAIN_SEND_TEXT : 'Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.'}</Body>
+      <Label>{plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
       <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
-      <Btn label='gravar certificado' onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
+      <Btn label={plain ? PLAIN_SUBMIT : 'gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
     </Card>
   )
 }
@@ -141,7 +155,6 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // this same tab and nothing of the link is kept across the reload, except the
 // profile invite in sessionStorage (src/profileLink.js), which is never sent
 // to /account/*.
-const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda para emitir seu certificado e seu @nome, atender uma ordem judicial ou bloquear a conta; o e-mail nunca vai para o seu diário nem para este navegador, e a idade não é verificada. O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade). Você pode trocar o @nome depois, uma vez a cada 7 dias.'
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
@@ -499,9 +512,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
           ? (
             <>
               <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              <Soft>De 3 a 20 letras minúsculas, números ou _.</Soft>
-              <Body>{LINK_TEXT}</Body>
-              <Soft>{RELOAD_TEXT}</Soft>
+              <Body>{SHORT.link}</Body>
+              <HelpLink doc={HELP.vinculo} />
               {waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
@@ -509,9 +521,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         {showForm && !setup
           ? (
             <>
-              <Body>{LINK_TEXT}</Body>
+              <Body>{SHORT.link}</Body>
+              <HelpLink doc={HELP.vinculo} />
               <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              <Soft>{RELOAD_TEXT}</Soft>
               {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
             </>
             )
@@ -640,7 +652,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     const r = await add.run(() => node.request('cert.add', { cert }))
     if (r.ok) {
       setCertText('')
-      setDone('Certificado gravado.')
+      setDone(setup ? 'Conta liberada.' : 'Certificado gravado.')
       refresh()
     }
   }
@@ -831,7 +843,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               )
             : null}
           <Body>{WELCOME_TEXT}</Body>
-          <Soft>{ENTRAR_TEXT}</Soft>
+          <Soft>{SHORT.passkeyLoss}</Soft>
+          <HelpLink doc={HELP.entrar} />
           {shownMismatch
             ? (
               <>
@@ -889,6 +902,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   if (entrar !== null) return frame('Entrar', entrar)
 
   const withPasskey = passkey !== null
+  // certLocal only ever holds a parseCertificateText error.
+  const certError = setup && certLocal ? PLAIN_PARSE_ERROR : certLocal
   const needsCert = info !== null && info.publicKey !== null && !info.memberCert
   // Hosted page with a passkey: the account link replaces the pasted
   // certificate. Native and varanda-serve keep CertificateStep / the field.
@@ -926,7 +941,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           </Card>
           )
         : null}
-      {needsCert && showTech ? <Soft>Sem o certificado, este aparelho não publica nem sincroniza.</Soft> : null}
+      {needsCert && showTech
+        ? <Soft>{setup ? 'Sem a liberação da associação, este aparelho não publica nem sincroniza.' : 'Sem o certificado, este aparelho não publica nem sincroniza.'}</Soft>
+        : null}
       {showLink && linkMode && info !== null && info.publicKey !== null
         ? (
           <LinkCard
@@ -946,8 +963,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             certText={certText}
             onCertText={setCertText}
             onSubmit={doCert}
-            error={certLocal || add.error}
+            error={certError || add.error}
             pending={add.pending}
+            plain={setup}
           />
           )
         : null}
@@ -956,13 +974,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           <Card>
             {/* The setup hides the technical card: the association issues
                 the certificate for this key, so it is shown here. */}
-            {setup ? <Label>sua chave pública</Label> : null}
+            {setup ? <Label>{PLAIN_CODE_LABEL}</Label> : null}
             {setup ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-            {setup ? <Soft>{KEY_NOTE}</Soft> : null}
-            <Label>certificado de membro (JSON emitido pela associação)</Label>
+            <Label>{setup ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
             <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
-            <ErrorText>{certLocal || add.error}</ErrorText>
-            <Btn label='gravar certificado' onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
+            <ErrorText>{certError || add.error}</ErrorText>
+            <Btn label={setup ? PLAIN_SUBMIT : 'gravar certificado'} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
           </Card>
           )
         : null}

@@ -38,6 +38,8 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
+import { HelpButton } from '../ui/Help'
+import { HELP } from '../help'
 import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
@@ -330,6 +332,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     : (
       <View>
         <SunsetBand height={bandHeight}>
+          <HelpButton doc={HELP.diario} color='#ffffff' style={styles.info} />
           <Pressable
             accessibilityRole='button'
             accessibilityLabel='ajustes'
@@ -469,6 +472,17 @@ const styles = StyleSheet.create({
   gear: {
     position: 'absolute',
     right: 16,
+    bottom: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.dim,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  info: {
+    position: 'absolute',
+    right: 58,
     bottom: 12,
     width: 34,
     height: 34,

@@ -20,8 +20,10 @@ import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { UNNAMED, whoOf } from '../who'
+import { HELP, SHORT } from '../help'
 import { Card, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { HelpLink } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -75,7 +77,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
       <Pressable
         accessibilityRole='button'
         accessibilityLabel={who.known ? 'denunciar ' + title : 'denunciar'}
-        hitSlop={8}
+        hitSlop={13}
         onPress={() => onReport({
           author: followKey,
           name: profile ? profile.name : null,
@@ -84,7 +86,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
           text: null
         })}
       >
-        <Text style={styles.handle}>denunciar</Text>
+        <Icon name='bandeira' size={18} color={colors.soft} />
       </Pressable>
     </View>
   )
@@ -292,8 +294,8 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
     const key = text.toLowerCase()
     let name = null
     if (!isKey(key)) {
-      if (!text.startsWith('@')) return setLocalError(node.hosted ? 'Digite um @nome ou cole a chave da pessoa.' : 'Cole a chave da pessoa (64 letras e números).')
-      if (!node.hosted) return setLocalError('Nesta versão, siga pela chave da pessoa.')
+      if (!text.startsWith('@')) return setLocalError(node.hosted ? 'Digite um @nome ou cole o código da pessoa.' : 'Cole o código da pessoa (64 letras e números).')
+      if (!node.hosted) return setLocalError('Nesta versão, siga pelo código da pessoa.')
       name = isUsername(text)
       if (name === null) return setLocalError('@nome inválido')
     }
@@ -491,7 +493,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
     <View style={styles.header}>
       {searchBlock}
       <Field
-        placeholder={node.hosted ? '@nome ou chave' : 'chave da pessoa (64 letras e números)'}
+        placeholder={node.hosted ? '@nome ou código' : 'código da pessoa (64 letras e números)'}
         value={input}
         onChangeText={setInput}
         mono
@@ -543,7 +545,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
         <EmptyState
           icon='gente'
           title='Você ainda não segue ninguém'
-          body={node.hosted ? 'Busque alguém pelo nome ou @nome para ver as publicações dessa pessoa na Rua.' : 'Cole a chave de alguém para ver as publicações dessa pessoa na Rua.'}
+          body={node.hosted ? 'Busque alguém pelo nome ou @nome para ver as publicações dessa pessoa na Rua.' : 'Cole o código de alguém para ver as publicações dessa pessoa na Rua.'}
         />
         )
       : null
@@ -567,7 +569,10 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
           <SectionHeader right={loaded ? <Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft> : null}>
             Seguindo
           </SectionHeader>
-          <View style={styles.note}><Soft>Quem você segue é público e aparece igual em todos os seus aparelhos.</Soft></View>
+          <View style={styles.note}>
+            <Soft>{SHORT.followsPublic}</Soft>
+            <HelpLink doc={HELP.seguindo} />
+          </View>
         </>
       }
       ListEmptyComponent={empty}
@@ -591,7 +596,7 @@ const styles = StyleSheet.create({
   legacyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  note: { paddingHorizontal: 16, paddingBottom: 8 },
+  note: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   bleed: { marginHorizontal: -16 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },

@@ -17,7 +17,9 @@ import { accountStatus } from '../account'
 import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, reportSend, reportStart, validateReportText, wellFormed } from '../report'
 import { countChars } from '../format'
 import { whoOf } from '../who'
+import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
+import { HelpLink } from '../ui/Help'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -135,8 +137,8 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             the counter and validateReportText enforce TEXT_MAX. */}
         <Field label='observação (opcional)' value={note} onChangeText={setNote} maxLength={TEXT_MAX * 2} />
         <Text style={[styles.counter, noteText === null && styles.over]}>{String(countChars(note)) + '/' + String(TEXT_MAX)}</Text>
-        <Soft>A denúncia vai para a moderação da associação. A pessoa denunciada não vê quem denunciou.</Soft>
-        <Soft>Se a moderação bloquear, a conta inteira deixa de aparecer para quem usa o app oficial.</Soft>
+        <Soft>{SHORT.reportPrivacy}</Soft>
+        <HelpLink doc={HELP.denuncia} />
         <ErrorText>{send.error}</ErrorText>
         <Btn
           label='enviar denúncia'

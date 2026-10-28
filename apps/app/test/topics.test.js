@@ -156,6 +156,9 @@ test('fixed texts and constants', async (t) => {
   t.is(s.SEARCH_INPUT_MAX, 100)
   t.is(s.MAX_FUTURE_MS, 86400000)
   t.is(s.SEARCH_EMPTY_TITLE, 'Nada encontrado')
-  t.is(s.SEARCH_BUSY, 'Muitas consultas ao semeador agora. Tente de novo em alguns segundos.')
+  t.is(s.SEARCH_BUSY, 'Muitas pesquisas agora. Tente de novo em alguns segundos.')
   t.ok(s.SEARCH_HINT.includes('"ceu" encontra "Céu" e "#Céu"'))
+  for (const name of ['SEARCH_HINT', 'SEARCH_INDEXING_NOTE', 'SEARCH_OFFLINE_MESSAGE', 'SEARCH_UNAVAILABLE', 'SEARCH_BUSY']) {
+    t.absent(/semeador|índice/.test(s[name]), name + ' uses plain language')
+  }
 })

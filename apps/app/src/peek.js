@@ -5,16 +5,15 @@
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
 export const PEEK_WEB_ONLY_MESSAGE = 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.'
-export const PEEK_OFFLINE_MESSAGE = 'A Espiadinha precisa de conexão com o semeador.'
+export const PEEK_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const PEEK_RULE_TEXT = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
-export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue, o seu incluído, uma rodada por vez, da mais nova para a mais antiga.'
+export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue, o seu incluído.'
 
 const WEB_ONLY_MESSAGES = ['método desconhecido', 'Espiadinha disponível só no navegador']
 // The browser node's answer to a continuation whose snapshot expired or is
 // gone (packages/web-member/lib/peek.js): the rows shown stay valid, only the
 // cursor is dead, so the list asks for a refresh instead of ending.
 const EXPIRED_MESSAGE = 'A lista expirou; atualize para continuar.'
-const SKIPPED_REASONS = 'sem certificado válido, bloqueados pela associação, com emissor revogado, com histórico alterado, acima da cota, com bloco grande demais, sem resposta a tempo ou sem publicação nos blocos lidos'
 
 export function peekKey (item) {
   return item.author + ':' + item.seq
@@ -78,10 +77,10 @@ export function isExpiredPeekError (err) {
 }
 
 // The note under the list for the diaries a page left out, or null. The
-// reasons are the node's skip reasons (packages/web-member/lib/peek.js).
+// reasons are in the help sheet 'ausentes' (src/help.js).
 export function skippedText (n) {
   if (!Number.isSafeInteger(n) || n < 1) return null
-  return String(n) + (n === 1 ? ' diário não aparece' : ' diários não aparecem') + ' (' + SKIPPED_REASONS + ')'
+  return n === 1 ? '1 diário não aparece.' : String(n) + ' diários não aparecem.'
 }
 
 // Same as ARua's refOf (a lowercase author:seq, or null), kept here so this

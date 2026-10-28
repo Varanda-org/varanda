@@ -87,10 +87,10 @@ test('the notice is web-only first, then offline, else none', async (t) => {
 test('the fixed texts are the approved Portuguese', async (t) => {
   const { PEEK_WEB_ONLY_MESSAGE, PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
   t.is(PEEK_WEB_ONLY_MESSAGE, 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.')
-  t.is(PEEK_OFFLINE_MESSAGE, 'A Espiadinha precisa de conexão com o semeador.')
+  t.is(PEEK_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(PEEK_RULE_TEXT, PEEK_RULE, 'the rule is the node\'s, word for word')
   t.ok(PEEK_RULE_TEXT.includes('que você não segue, o seu incluído,'))
-  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue, o seu incluído, uma rodada por vez, da mais nova para a mais antiga.')
+  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue, o seu incluído.')
 })
 
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {
@@ -119,15 +119,20 @@ test('an expired list is the USAGE error with the exact expiry sentence', async 
   t.is(isExpiredPeekError(undefined), false)
 })
 
-test('the skipped note is singular or plural and lists every skip reason', async (t) => {
+test('the skipped note is singular, plural or null, without reasons', async (t) => {
   const { skippedText } = await load()
-  const reasons = ' (sem certificado válido, bloqueados pela associação, com emissor revogado, com histórico alterado, acima da cota, com bloco grande demais, sem resposta a tempo ou sem publicação nos blocos lidos)'
-  t.is(skippedText(1), '1 diário não aparece' + reasons)
-  t.is(skippedText(3), '3 diários não aparecem' + reasons)
+  const singular = skippedText(1)
+  const plural = skippedText(3)
+  t.is(singular, '1 diário não aparece.')
+  t.is(plural, '3 diários não aparecem.')
   t.is(skippedText(0), null)
   t.is(skippedText(-1), null)
   t.is(skippedText(undefined), null)
   t.is(skippedText(1.5), null)
+  for (const note of [singular, plural]) {
+    t.is(note.includes('certificado'), false)
+    t.is(note.includes('('), false)
+  }
 })
 
 test('page needs: a repost shows and needs its original, never the repost itself', async (t) => {
