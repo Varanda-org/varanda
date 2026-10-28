@@ -292,19 +292,56 @@ test('a torn blocklist.json warns once, is kept aside and the snapshot comes bac
   writeBlocklist(dataDir, snap)
   const whole = fs.readFileSync(file, 'utf8')
   fs.writeFileSync(file, whole.slice(0, whole.length >> 1))
+  fs.rmSync(file + '.prev')
 
   const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
   const warnings = events.filter((e) => e.event === 'warning' && e.reason === 'blocklist-unreadable')
   t.is(warnings.length, 1, 'one warning')
+  t.is(warnings[0].restored, false, 'no copy to restore')
   t.is(seeder.stats().blocklistSeq, 0, 'nothing enforced yet')
+  const sent = []
+  const fakePeer = { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) }
+  const lostKey = 'c'.repeat(64)
+  const lostCert = createCert({ member: lostKey }, assoc.kp)
+  await seeder.admit(lostKey, lostCert, fakePeer)
+  t.alike(sent, [{ type: 'rejected', key: lostKey, reason: 'blocklist-pending' }], 'a new admission is held while the list is lost')
+  t.absent(fakePeer.seederDropped, 'the peer is not penalised for it')
   const kept = fs.readdirSync(dataDir).filter((n) => n.startsWith('blocklist.json.ilegivel-'))
   t.alike(kept, [warnings[0].aside], 'the torn copy is kept aside')
   t.absent(fs.existsSync(file), 'the torn file is out of the way')
 
   await client(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot: snap } })
   await until(() => seeder.stats().blocklistSeq === 4, { name: 'seq 4 de volta' })
+  await seeder.admit(lostKey, lostCert, fakePeer)
+  t.alike(sent[1], { type: 'rejected', key: lostKey, reason: 'blocked' }, 'the hold ends with the verified list, which is enforced')
   t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'stored again')
   t.is(events.filter((e) => e.reason === 'blocklist-unreadable').length, 1, 'no second warning')
+})
+
+test('a torn blocklist.json is replaced by the copy kept by the last save: the list is enforced from the start', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const file = path.join(dataDir, 'blocklist.json')
+  const mod = makeModerator(assoc)
+  const snap = snapshot(mod, 4, { blocked: ['c'.repeat(64)] })
+  writeBlocklist(dataDir, snap)
+  const whole = fs.readFileSync(file, 'utf8')
+  fs.writeFileSync(file, whole.slice(0, whole.length >> 1))
+
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const warnings = events.filter((e) => e.event === 'warning' && e.reason === 'blocklist-unreadable')
+  t.is(warnings.length, 1, 'one warning')
+  t.is(warnings[0].restored, true, 'the copy was used')
+  t.is(seeder.stats().blocklistSeq, 4, 'the list is enforced with no peer')
+  const sent = []
+  const fakePeer = { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) }
+  const blockedKey = 'c'.repeat(64)
+  await seeder.admit(blockedKey, createCert({ member: blockedKey }, assoc.kp), fakePeer)
+  t.alike(sent, [{ type: 'rejected', key: blockedKey, reason: 'blocked' }], 'nothing is held: the restored list answers')
+  t.alike(fs.readdirSync(dataDir).filter((n) => n.startsWith('blocklist.json.ilegivel-')), [warnings[0].aside], 'the torn file is kept aside')
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'blocklist.json is back')
 })
 
 test('an admission-only peer stays connected; a newer peer receives the snapshot; a revocation drops a v2 diary', async (t) => {

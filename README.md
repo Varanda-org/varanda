@@ -893,7 +893,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `quarantine/` — Corestore só da busca do bloco 0 de um diário ainda não aceito. O `sync` apaga esse diretório ao abrir (depois do lock de `store/`) e de novo ao fechar. Não é estado.
 - `config.json` — `{ "v": 1, "role": "member", "association": "<hex64>" }`, escrito por `id create`.
 - `follows.json` — `{ "v": 1, "follows": ["<hex64>"] }`, chaves únicas em ordem. Com o bloco 0 gravado, cada mudança também vira um registro `follow` no diário.
-- `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a lista de bloqueio mais nova que este nó aceitou. Só chaves públicas.
+- `blocklist.json` — `{ "v": 1, "snapshot": <lista assinada> }`, modo `0600`: a lista de bloqueio mais nova que este nó aceitou. Só chaves públicas. O arquivo `blocklist.json.prev` guarda a mesma lista: se o principal ficar ilegível, o nó lê a cópia e a repõe.
 
 ### Semeador (`data/seeder`)
 
@@ -902,7 +902,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `config.json` — `{ "v": 1, "role": "seeder", "association": "<hex64>" }`, escrito pelo primeiro de `seed key`, `seed cert add` e `seed`.
 - `seeder-key.json` — par Noise do semeador, modo `0600`: `v`, `publicKey` (hex64) e `secretKey`. Criado por `seed key`. O comando não imprime `secretKey`.
 - `seeder-cert.json` — certificado do semeador em JSON indentado, escrito por `seed cert add`.
-- `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita. Um arquivo ilegível impede a partida (`erro: lista de bloqueio ilegível`).
+- `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita, com a cópia `blocklist.json.prev`. Um arquivo ilegível é guardado como `blocklist.json.ilegivel-<ms>` e a cópia o substitui. Sem cópia, o semeador não admite diários novos (`rejected` com `blocklist-pending`) até receber uma lista verificada; essa trava fica só em memória e some num reinício. Se o arquivo não puder ser movido, a partida falha (`erro: lista de bloqueio ilegível`).
 - `admitted.json` — único arquivo de estado dos diários servidos: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> }, "media": { "<hex64 do núcleo>": { "diary": "<hex64>", "seq": <n> } } }`. Um arquivo antigo, sem `media`, continua valendo. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
 
 ### Associação (`data/assoc`)

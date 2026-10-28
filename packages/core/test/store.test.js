@@ -160,6 +160,9 @@ test('blocklist round-trip, absent and malformed are null, mode 0600', async (t)
   const file = path.join(dir, 'blocklist.json')
   t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot })
   t.is(fs.statSync(file).mode & 0o777, 0o600)
+  t.alike(JSON.parse(fs.readFileSync(file + '.prev', 'utf8')), { v: 1, snapshot }, 'the copy holds the same snapshot')
+  t.is(fs.statSync(file + '.prev').mode & 0o777, 0o600, 'the copy is mode 0600')
+  fs.rmSync(file + '.prev')
   for (const bad of ['not json', '[]', '{"v":2,"snapshot":{}}', '{"v":1}', '{"v":1,"snapshot":[]}', '{"v":1,"snapshot":null}']) {
     fs.writeFileSync(file, bad)
     t.is(store.readBlocklist(dir), null, 'malformed: ' + bad)
@@ -195,6 +198,50 @@ test('readBlocklist moves a torn file aside only when the caller asks, an absent
 
   t.is(store.readBlocklist(dir, { onUnreadable }), null, 'after the move it is a plain absent')
   t.is(seen.length, 1, 'no second warning')
+})
+
+test('readBlocklist falls back to the copy writeBlocklist kept, and puts it back for a caller that asks', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'blocklist.json')
+  const copy = file + '.prev'
+  const snapshot = { v: 1, seq: 7, blocked: ['b'.repeat(64)] }
+  const calls = []
+  const onUnreadable = (name, restored) => calls.push({ name, restored })
+  const tear = () => fs.writeFileSync(file, '{"v":1,"snapshot":{"seq":')
+
+  store.writeBlocklist(dir, snapshot)
+  tear()
+  t.alike(store.readBlocklist(dir), { v: 1, snapshot }, 'torn, no callback: read from the copy')
+  t.is(fs.readFileSync(file, 'utf8'), '{"v":1,"snapshot":{"seq":', 'torn, no callback: nothing is written')
+
+  t.alike(store.readBlocklist(dir, { onUnreadable }), { v: 1, snapshot }, 'torn: read from the copy')
+  t.is(calls.length, 1)
+  t.ok(calls[0].restored, 'torn: the callback says the copy was used')
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot }, 'torn: the copy is put back as blocklist.json')
+  t.is(fs.statSync(file).mode & 0o777, 0o600, 'torn: the restored file is mode 0600')
+  t.is(fs.readFileSync(path.join(dir, calls[0].name), 'utf8'), '{"v":1,"snapshot":{"seq":', 'torn: the torn bytes are kept aside')
+  t.alike(store.readBlocklist(dir, { onUnreadable }), { v: 1, snapshot }, 'after the restore it is a plain read')
+  t.is(calls.length, 1, 'no second warning')
+
+  for (const bad of ['not json', '[]', '{"v":2,"snapshot":{}}', '{"v":1,"snapshot":null}']) {
+    fs.writeFileSync(copy, bad)
+    tear()
+    t.is(store.readBlocklist(dir), null, 'a bad copy is no copy: ' + bad)
+  }
+  fs.rmSync(copy)
+  tear()
+  const before = calls.length
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'no copy: absent')
+  t.is(calls.length, before + 1)
+  t.absent(calls[before].restored, 'no copy: the callback says so')
+  t.absent(fs.existsSync(file), 'no copy: nothing put back')
+
+  store.writeBlocklist(dir, snapshot)
+  const newer = { v: 1, seq: 8, blocked: [] }
+  store.writeBlocklist(dir, newer)
+  tear()
+  t.alike(store.readBlocklist(dir), { v: 1, snapshot: newer }, 'the copy follows every save')
 })
 
 test('replicaStored is true only for a core the store holds', async (t) => {
