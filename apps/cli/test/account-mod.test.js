@@ -760,6 +760,71 @@ test('panel: a moderator whose own cases fill the first page still sees later re
   noLeak(t, s)
 })
 
+test('panel: the history pages with antes, without repeats or gaps, and keeps own cases out', async (t) => {
+  const s = await setup(t)
+  const add = (reporter, target) => s.moderation.add({ reporter: reporter.hex, target, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+  const decidedIds = []
+  const ownIds = []
+  for (let i = 0; i < 235; i++) {
+    const own = i % 25 === 0
+    s.c.offset += 1
+    const { report } = await add(keys(), own ? s.carol.hex : s.bia.hex)
+    s.c.offset += 1
+    await s.moderation.decide(report.id, { decision: 'descartar', by: 'outra moderadora' })
+    ;(own ? ownIds : decidedIds).push(report.id)
+  }
+  const open = await add(keys(), s.bia.hex)
+
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const page = (query) => s.api('GET', '/account/mod/api/reports?estado=decidida' + query, { cookie })
+  const first = await page('')
+  t.is(first.status, 200, first.text)
+  t.is(first.body.reports.length, 100)
+  t.is(first.body.truncated, true)
+  const second = await page('&antes=' + first.body.reports[99].id)
+  t.is(second.body.reports.length, 100)
+  t.is(second.body.truncated, true)
+  const third = await page('&antes=' + second.body.reports[99].id)
+  t.is(third.body.reports.length, decidedIds.length - 200)
+  t.is(third.body.truncated, false, 'the last page')
+  const all = [...first.body.reports, ...second.body.reports, ...third.body.reports].map((r) => r.id)
+  t.alike(all, decidedIds.slice().reverse(), 'every decision once, newest first')
+  for (const id of ownIds) t.absent(all.includes(id), 'own case stays out')
+
+  for (const bad of ['&antes=' + open.report.id, '&antes=' + ownIds[0], '&antes=nao-existe', '&antes=', '&antes=' + 'a'.repeat(65), '&antes=%00']) {
+    const r = await page(bad)
+    t.is(r.status, 400, 'antes ' + bad)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const openWithAntes = await s.api('GET', '/account/mod/api/reports?estado=aberta&antes=' + all[0], { cookie })
+  t.is(openWithAntes.status, 400, 'antes is for the history only')
+  noLeak(t, s)
+})
+
+test('panel: a store cut at its limit is reported on the last reachable page', async (t) => {
+  const s = await setup(t)
+  const { report } = await s.moderation.add({ reporter: s.ana.hex, target: s.bia.hex, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+  s.c.offset += 1
+  await s.moderation.decide(report.id, { decision: 'descartar', by: 'outra moderadora' })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const uncut = await s.api('GET', '/account/mod/api/reports?estado=decidida', { cookie })
+  t.is(uncut.body.alemDoLimite, false)
+
+  const list = s.moderation.list
+  const asked = []
+  s.moderation.list = (options) => { asked.push(options); return { ...list(options), truncated: true } }
+  const cut = await s.api('GET', '/account/mod/api/reports?estado=decidida', { cookie })
+  t.is(cut.body.truncated, false, 'this page is the last one the panel reaches')
+  t.is(cut.body.alemDoLimite, true)
+  t.is(asked.length, 1)
+  t.is(asked[0].exclude, s.carol.hex, 'the own cases leave the store list before its cut')
+  await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(asked[1].exclude, s.carol.hex, 'and the counts of api/me')
+  s.moderation.list = list
+})
+
 test('panel assets: literal paths, CSP, 404 when missing, no SPA fallback; loopback origin', async (t) => {
   const empty = await setup(t)
   const missing = await empty.api('GET', '/account/mod/')
