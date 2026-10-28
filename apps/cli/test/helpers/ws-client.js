@@ -53,14 +53,14 @@ function connect (server, origin) {
   client.event = (name, match = () => true) => {
     const seen = client.messages.find((msg) => msg.event === name && match(msg.data))
     if (seen) return Promise.resolve(seen)
+    let listener
     return withTimeout(new Promise((resolve) => {
-      const listener = (msg) => {
+      listener = (msg) => {
         if (msg.event !== name || !match(msg.data)) return
-        client.listeners.delete(listener)
         resolve(msg)
       }
       client.listeners.add(listener)
-    }), 'evento ' + name)
+    }), 'evento ' + name).finally(() => client.listeners.delete(listener))
   }
   client.events = (name) => client.messages.filter((msg) => msg.event === name)
   return client
