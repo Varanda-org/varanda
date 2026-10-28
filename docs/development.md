@@ -137,9 +137,9 @@ npm run ios                          # expo run:ios
 
 ## Android
 
-Status: prebuild and `npx expo export --platform android` were checked, and bare-link produces the `.so` addons for arm64-v8a and x86_64. No native Android run is verified (no SDK or Java on the Mac used). `npm run android` is `expo run:android`; an emulator run must still confirm that the addons are picked up.
+Status: the debug build runs on an x86_64 emulator (API 36) and passes the worklet gate (steps a to i of [ios-gate.md](ios-gate.md), 2026-10-28; the `.so` addons are packed in `lib/x86_64` and loaded). Not run: a real device, arm64-v8a and a release build. `npm run android` is `expo run:android`. Gradle needs JDK 17 or 21; the commands for the gate are in the "Android emulator" section of ios-gate.md.
 
-Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. None of this was built here (no Java on the Mac used). See "Residual risks" in [ios-gate.md](ios-gate.md).
+Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. Signing was not exercised in the emulator run (debug build only). See "Residual risks" in [ios-gate.md](ios-gate.md).
 
 ## Browser member spike (packages/web-member)
 
