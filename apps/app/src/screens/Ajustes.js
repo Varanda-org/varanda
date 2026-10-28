@@ -44,13 +44,15 @@ const INSTALL_TEXT = 'Abra o menu do navegador e escolha instalar o app (no iPho
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', pending = false, disabled = false }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', pending = false, disabled = false, expanded }) {
+  const state = { disabled: disabled || pending }
+  if (expanded !== undefined) state.expanded = expanded
   return (
     <Pressable
       style={[styles.row, !first && styles.rowDivider]}
       accessibilityRole='button'
       accessibilityLabel={label}
-      accessibilityState={{ disabled: disabled || pending }}
+      accessibilityState={state}
       disabled={disabled || pending}
       onPress={onPress}
     >
@@ -206,6 +208,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo }) {
                 icon='sliders'
                 label='Avançado'
                 trailing={advanced ? 'chevron-up' : 'chevron-down'}
+                expanded={advanced}
                 onPress={() => setAdvanced((v) => !v)}
               />
               {advanced
