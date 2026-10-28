@@ -226,6 +226,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Denúncias de membros (chave de quem denuncia e de quem é denunciado, publicação, motivo, texto de quem denuncia, trecho citado, data, assinatura) e registro de decisões dos moderadores (e-mail do moderador, decisão, data) | Serviço de conta, no Brasil (`moderation.json`) | Moderação e pedido legal (a base legal ainda precisa de parecer) | Em aberto (issue #38); nada é apagado automaticamente |
 | Precedentes humanos da triagem (texto verificado, motivo, decisão, hash e vetor quantizado; no máximo 4000) | Serviço de conta, no Brasil (`exemplars.json`, modo 0600, volume `account-data`) | Moderação (a base legal ainda precisa de parecer) | Em aberto (issue #38); uma linha inválida torna o arquivo indisponível e ele nunca é regravado |
 | Marcas da triagem e leituras verificadas em cache (no máximo 2000) | Serviço de conta, no Brasil (`triage.json`, modo 0600, volume `account-data`) | Dado derivado da moderação (a base legal ainda precisa de parecer) | Se corrompido, renomeado para `triage.json.corrupt-<ms>` e recriado |
+| Contagens agregadas de uso (membros, diários, ativos, conexões, armazenamento, cadastros por semana/mês) | Serviço de conta (usage.json, 0600, volume account-data); ativos só na memória do semeador | Não são dados pessoais: só contagens, sem chave, e-mail ou @nome; a data de cadastro já é pública no certificado (confirmar no parecer) | Até 400 dias, rotativo; ativos zeram ao reiniciar o semeador |
 | Registro de aceite dos Termos de Uso e da Política de Privacidade (versão e data; no serviço de conta também chave do membro, nonce e assinatura) | Aparelho; serviço de conta, no Brasil (`terms.json`, modo 0600, volume `account-data`), só para membros com vínculo Google | Execução de contrato (a confirmar em parecer) | Em aberto (issue #38) |
 | E-mail de recuperação | Guardião, no Brasil | Execução de contrato | Enquanto a conta existir |
 | Token de push | Serviço de push no Brasil; passa por Apple e Google | Execução de contrato | Até a pessoa desligar os avisos |
@@ -245,6 +246,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 - O serviço de conta guarda cada denúncia com a chave de quem denuncia, a chave denunciada, o número da publicação (quando há), o motivo, o texto opcional de quem denuncia, o trecho da publicação como o denunciante o enviou, a data e a assinatura. A finalidade é só moderar e atender pedido legal. Nada é apagado automaticamente, e a retenção está em aberto (issue #38).
 - Os e-mails dos moderadores ficam no `.env` do servidor (`VARANDA_MODERATOR_EMAILS`) e, ao lado de cada decisão, no registro de decisões. O e-mail do vínculo Google de quem denuncia e de quem é denunciado não aparece no painel nem em registro: só sai por `account reports`, na máquina de operação do servidor, para atender um pedido legal.
 - A pessoa denunciada não tem tela nem rota que mostre uma denúncia contra ela.
+- Quem vê as estatísticas de uso (`VARANDA_STATS_EMAILS`) é um subconjunto dos moderadores. A aba nunca mostra contagem de denúncias.
 
 **Direitos dos titulares (Art. 18) numa rede P2P**
 

@@ -114,6 +114,7 @@ const {
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
+const { noteGrowth, countActive } = require('./activity')
 const { attachNotices } = require('./notices-net')
 const {
   validateRecord,
@@ -853,6 +854,9 @@ class Seeder {
   // Aggregate state for the health endpoint: counts and sizes only, never a
   // key, a certificate, an address or a block. status is 'starting' until
   // start() completes, 'ok' while serving and 'closing' from close() on.
+  // activeDay/activeWeek (lib/activity.js) are approximate: a diary first
+  // admitted in this run counts once its signed length arrives, a dropped
+  // diary leaves the counts at once and a restart zeroes them.
   stats () {
     let blocks = 0
     let bytes = 0
@@ -867,6 +871,7 @@ class Seeder {
       status: this._closing ? 'closing' : (this._ready ? 'ok' : 'starting'),
       admitted: this._admitted.size,
       dropping: this._dropping.size,
+      ...countActive(this._served.values(), Date.now()),
       blocks,
       bytes,
       connections: swarm + this._external.size,
@@ -1170,7 +1175,12 @@ class Seeder {
       topicQueued: false,
       topicPaused: false,
       topicRetry: null,
-      topicReadFailures: 0
+      topicReadFailures: 0,
+      // Active-diary state (lib/activity.js; in memory only, never persisted
+      // or logged): openReplica already awaited core.ready(), so core.length
+      // is the stored signed length, and only growth past it counts.
+      activityLength: core.length,
+      activeAt: null
     }
     // Log quota on growth (S3): length/byteLength advance on the signed
     // upgrade ('append' fires) before the blocks arrive, so an admitted log
@@ -1182,7 +1192,14 @@ class Seeder {
       if (this._overQuota(core)) this._drop(key, 'quota')
       // The signed length grew: the committed follows may miss the new
       // blocks until the scan reaches them, so pages say incomplete.
-      else if (this._served.get(key) === entry) this._notices.markPending(key)
+      // The same growth marks the diary active (wall clock: the windows are
+      // Brasília calendar days). The synchronous call at the end of _serve
+      // sees core.length === activityLength, so a restore, a re-gate or a
+      // rescan never counts.
+      else if (this._served.get(key) === entry) {
+        this._notices.markPending(key)
+        noteGrowth(entry, core.length, Date.now())
+      }
     }
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)

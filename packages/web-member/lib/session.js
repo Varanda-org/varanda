@@ -479,14 +479,17 @@ function createBrowserSession ({
   let noticing = null
   const unwinding = new Set()
 
-  function send (event, data) {
+  // A run's events carry the connection epoch it started in: once that
+  // connection is detached, a run still unwinding reports to nobody, not to
+  // the connection that attached after it.
+  function send (event, data, epoch = connection) {
     const fn = emitter
-    if (fn === null) return
+    if (fn === null || epoch !== connection) return
     try { fn(event, data) } catch {}
   }
 
-  function warning (text) {
-    send('warning', { line: line(text) })
+  function warning (text, epoch) {
+    send('warning', { line: line(text) }, epoch)
   }
 
   const peeker = createPeeker({
@@ -538,14 +541,15 @@ function createBrowserSession ({
   function startRun ({ once, timeoutMs, internal = false, label = null, onOwnSynced = noop }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
+    const epoch = connection
     const { signal, abort } = createAbort()
     // leased: a user's continuous run under the lease; settled: its last
     // readiness report; leaseTimer: the hold.
     const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null }
     run = r
-    send('sync.started', { runId, once })
-    if (label !== null) send('sync.event', { runId, line: line(label) })
-    const event = (text) => send('sync.event', { runId, line: line(text) })
+    send('sync.started', { runId, once }, epoch)
+    if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
+    const event = (text) => send('sync.event', { runId, line: line(text) }, epoch)
     r.done = (async () => {
       let result = null
       let error = null
@@ -562,13 +566,13 @@ function createBrowserSession ({
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
-            warning(safe(clean))
+            warning(safe(clean), epoch)
           },
           onEvent: (ev) => {
             if (!ev) return
             switch (ev.event) {
               case 'skipped':
-                warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')')
+                warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
                 return
               case 'own-synced':
                 synced = true
@@ -585,7 +589,7 @@ function createBrowserSession ({
                 // restarted once per own length so it follows the new set.
                 // A malformed event is dropped whole.
                 if (!Number.isSafeInteger(ev.count) || ev.count < 0 || !Number.isSafeInteger(ev.length) || ev.length < 0) return
-                send('follows.changed', { count: ev.count })
+                send('follows.changed', { count: ev.count }, epoch)
                 if (!once) scheduleFoldRestart(ev.length)
                 return
               case 'media-pushed':
@@ -632,8 +636,8 @@ function createBrowserSession ({
       if (error !== null) {
         if (!internal) syncIntent = null
         if (r.leased) leaseSettledSince = leaseMediaSince = null
-        warning('erro: ' + toRpcError(error, reportInternal).message)
-        send('sync.stopped', { runId, reason: 'error' })
+        warning('erro: ' + toRpcError(error, reportInternal).message, epoch)
+        send('sync.stopped', { runId, reason: 'error' }, epoch)
         return
       }
       if (once && result && result.seederConfirmed === true) unpushed = false
@@ -652,7 +656,7 @@ function createBrowserSession ({
       if (r.leased && reason !== 'preempted') leaseSettledSince = leaseMediaSince = null
       const data = { runId, reason }
       if (once) data.result = capSyncResult(result)
-      send('sync.stopped', data)
+      send('sync.stopped', data, epoch)
       // A diary.peek still waiting for a link (its wait began under this
       // run, which the lease ended or a request preempted): the no-op it
       // queued may have run its restart check while `run` was still this

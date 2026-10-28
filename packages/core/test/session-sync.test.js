@@ -287,6 +287,26 @@ test('regression: detach while sync.start awaits the identity starts no run', as
   await m.call('sync.stop')
 })
 
+test('regression: a run unwinding after detach does not report to the next connection', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association(t)
+  const m = await member(t, bootstrap, assoc, { cert: false })
+  const { runId } = await m.call('sync.start')
+  await waitEvent(m, 'sync.event', (d) => d.runId === runId && d.line === 'sync ready', 'sync ready')
+  const n = m.events.length
+  // The transport does not await detach(): the next socket may attach while the run stops.
+  const detached = m.session.detach()
+  m.session.attach(m.dispatcher.emit)
+  await detached
+  t.is(m.events.length, n, 'neither a warning nor the sync.stopped of the old run reaches the new connection')
+  t.alike(await m.call('sync.status'), { state: 'idle' })
+  const { runId: next } = await m.call('sync.start')
+  t.ok(eventOf(m, 'sync.started', (d) => d.runId === next), 'a run of the new connection reports normally')
+  await m.call('sync.stop')
+  t.ok(eventOf(m, 'sync.stopped', (d) => d.runId === next && d.reason === 'stopped'))
+})
+
 test('regression: resume() before suspend() finished still restarts the run', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)

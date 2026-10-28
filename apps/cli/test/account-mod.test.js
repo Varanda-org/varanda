@@ -113,7 +113,7 @@ async function linkDirect (accounts, iss, m, username, sub, email) {
 // Two linked members (ana, bia), carol linked to the moderator's Google
 // account, and the service with the panel enabled for EMAIL_MOD unless
 // `emails` says otherwise.
-async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir } = {}) {
+async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEmails = [], usage = null } = {}) {
   const root = tmpDir(t)
   const dir = path.join(root, 'account')
   const c = { offset: 0 }
@@ -146,6 +146,8 @@ async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir } = {}) 
     moderation,
     googleMod,
     modEmails: emails,
+    statsEmails,
+    usage,
     panelDir
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
@@ -758,6 +760,145 @@ test('panel: a moderator whose own cases fill the first page still sees later re
   t.is(list.body.reports[0].id, later.id)
   t.is(list.body.truncated, false, 'truncated is computed on the visible rows')
   noLeak(t, s)
+})
+
+// What a usage view might answer: counts only, no key or e-mail.
+const STATS_FIXTURE = { geradoEm: 1700000000000, contas: { total: 3, vinculadas: 3 }, seeder: { diarios: 12 } }
+
+function fakeUsage (view) {
+  const calls = { n: 0 }
+  return { calls, usage: { view: async () => { calls.n++; return view() } } }
+}
+
+test('stats: an allowed moderator sees the stats flag and api/stats; anonymous is 401 exactly', async (t) => {
+  const fake = fakeUsage(() => STATS_FIXTURE)
+  // EMAIL_MOD as written (mixed case): the routes lowercase it.
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.status, 200)
+  t.is(me.body.stats, true, 'me carries stats: true')
+
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 200, res.text)
+  t.alike(res.body, STATS_FIXTURE)
+  t.is(res.headers.get('cache-control'), 'no-store')
+  t.is(fake.calls.n, 1)
+
+  const anon = await fetch(s.base + '/account/mod/api/stats')
+  t.is(anon.status, 401)
+  t.is(await anon.text(), '{"error":"nao-autorizado"}\n')
+  t.is(fake.calls.n, 1, 'no view without a session')
+  noLeak(t, s)
+})
+
+test('stats: a stats e-mail outside the moderator list is ignored', async (t) => {
+  const fake = fakeUsage(() => STATS_FIXTURE)
+  const s = await setup(t, { statsEmails: ['outra@example.test'], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.status, 200)
+  t.absent('stats' in me.body, 'no stats key at all (never stats: false)')
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 403)
+  t.alike(res.body, { error: 'nao-autorizado' })
+  t.is(fake.calls.n, 0, 'the view is never called')
+  noLeak(t, s)
+})
+
+test('stats: usage off means no flag and 403', async (t) => {
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: null })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.absent('stats' in me.body)
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 403)
+  t.alike(res.body, { error: 'nao-autorizado' })
+  noLeak(t, s)
+})
+
+test('stats: a throwing view answers 503 indisponivel; POST is 404', async (t) => {
+  const fake = fakeUsage(() => { throw new Error('falhou ' + EMAIL_A) })
+  const s = await setup(t, { statsEmails: [EMAIL_MOD], usage: fake.usage })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const res = await s.api('GET', '/account/mod/api/stats', { cookie })
+  t.is(res.status, 503)
+  t.alike(res.body, { error: 'indisponivel' })
+  t.absent(res.text.includes('falhou'), 'never the error message')
+
+  const post = await s.api('POST', '/account/mod/api/stats', { cookie, body: {} })
+  t.is(post.status, 404)
+  t.alike(post.body, { error: 'nao-encontrado' })
+  noLeak(t, s)
+})
+
+test('panel: the history pages with antes, without repeats or gaps, and keeps own cases out', async (t) => {
+  const s = await setup(t)
+  const add = (reporter, target) => s.moderation.add({ reporter: reporter.hex, target, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+  const decidedIds = []
+  const ownIds = []
+  for (let i = 0; i < 235; i++) {
+    const own = i % 25 === 0
+    s.c.offset += 1
+    const { report } = await add(keys(), own ? s.carol.hex : s.bia.hex)
+    s.c.offset += 1
+    await s.moderation.decide(report.id, { decision: 'descartar', by: 'outra moderadora' })
+    ;(own ? ownIds : decidedIds).push(report.id)
+  }
+  const open = await add(keys(), s.bia.hex)
+
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const page = (query) => s.api('GET', '/account/mod/api/reports?estado=decidida' + query, { cookie })
+  const first = await page('')
+  t.is(first.status, 200, first.text)
+  t.is(first.body.reports.length, 100)
+  t.is(first.body.truncated, true)
+  const second = await page('&antes=' + first.body.reports[99].id)
+  t.is(second.body.reports.length, 100)
+  t.is(second.body.truncated, true)
+  const third = await page('&antes=' + second.body.reports[99].id)
+  t.is(third.body.reports.length, decidedIds.length - 200)
+  t.is(third.body.truncated, false, 'the last page')
+  const all = [...first.body.reports, ...second.body.reports, ...third.body.reports].map((r) => r.id)
+  t.alike(all, decidedIds.slice().reverse(), 'every decision once, newest first')
+  for (const id of ownIds) t.absent(all.includes(id), 'own case stays out')
+
+  for (const bad of ['&antes=' + open.report.id, '&antes=' + ownIds[0], '&antes=nao-existe', '&antes=', '&antes=' + 'a'.repeat(65), '&antes=%00']) {
+    const r = await page(bad)
+    t.is(r.status, 400, 'antes ' + bad)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const openWithAntes = await s.api('GET', '/account/mod/api/reports?estado=aberta&antes=' + all[0], { cookie })
+  t.is(openWithAntes.status, 400, 'antes is for the history only')
+  noLeak(t, s)
+})
+
+test('panel: a store cut at its limit is reported on the last reachable page', async (t) => {
+  const s = await setup(t)
+  const { report } = await s.moderation.add({ reporter: s.ana.hex, target: s.bia.hex, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+  s.c.offset += 1
+  await s.moderation.decide(report.id, { decision: 'descartar', by: 'outra moderadora' })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const uncut = await s.api('GET', '/account/mod/api/reports?estado=decidida', { cookie })
+  t.is(uncut.body.alemDoLimite, false)
+
+  const list = s.moderation.list
+  const asked = []
+  s.moderation.list = (options) => { asked.push(options); return { ...list(options), truncated: true } }
+  const cut = await s.api('GET', '/account/mod/api/reports?estado=decidida', { cookie })
+  t.is(cut.body.truncated, false, 'this page is the last one the panel reaches')
+  t.is(cut.body.alemDoLimite, true)
+  t.is(asked.length, 1)
+  t.is(asked[0].exclude, s.carol.hex, 'the own cases leave the store list before its cut')
+  await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(asked[1].exclude, s.carol.hex, 'and the counts of api/me')
+  s.moderation.list = list
 })
 
 test('panel assets: literal paths, CSP, 404 when missing, no SPA fallback; loopback origin', async (t) => {

@@ -43,7 +43,7 @@ const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
-// lib/cert.js (not imported here); apps/cli/test/records.test.js checks parity.
+// lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
 const AGE_BAND_RE = /^[a-z0-9+-]{1,32}$/
 const METHOD_RE = /^[a-z0-9-]{1,32}$/
 const AGE_BAND_V2 = 'unchecked'

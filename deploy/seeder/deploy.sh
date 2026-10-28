@@ -231,7 +231,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor
+  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -289,6 +289,47 @@ conferir_antes() {
         exit 1
       fi
     done < <(printf '%s\n' "$moderators" | tr ',' '\n')
+  fi
+  # Estatísticas de uso: opcional (vazio desliga a aba, a amostragem e o
+  # usage.json, e um .env sem a linha continua implantando). Lida do mesmo
+  # jeito, nunca executada e nunca impressa (são e-mails). Cada item precisa
+  # ter a forma a@b, são no máximo 32 e cada um precisa estar também em
+  # VARANDA_MODERATOR_EMAILS (a aba fica dentro do painel de moderação), para
+  # o erro aparecer aqui, antes de qualquer mudança, e não depois da troca.
+  # A comparação ignora maiúsculas (o Google entrega o e-mail em minúsculas)
+  # e usa tr, não ${x,,}: o bash 3.2 do macOS não tem essa expansão. Como nos
+  # limites, espaço em volta do = é aceito (o Compose aplica a linha) e aspas
+  # não são removidas: o Compose as repassa ao serviço, que recusaria o valor,
+  # então um item entre aspas não casa com a lista e é recusado aqui.
+  stats=$(sed -n 's/^[[:space:]]*VARANDA_STATS_EMAILS[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$stats" ]; then
+    # Vírgulas nas pontas: ",item," só casa com um item inteiro da lista. A
+    # lista de moderadores é relida aqui com a mesma regra (espaço em volta do
+    # = aceito, aspas mantidas), para comparar com a linha que o Compose aplica.
+    mods_lc=$(sed -n 's/^[[:space:]]*VARANDA_MODERATOR_EMAILS[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//')
+    mods_lc=",$(printf '%s' "$mods_lc" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'),"
+    while IFS= read -r item; do
+      item=${item#"${item%%[![:space:]]*}"}
+      item=${item%"${item##*[![:space:]]}"}
+      item=$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]')
+      stats_itens=$((stats_itens + 1))
+      if [ "$stats_itens" -gt 32 ] || ! [[ $item =~ $moderator_re ]] || [[ $mods_lc != *",$item,"* ]]; then
+        log 'VARANDA_STATS_EMAILS inválido em deploy/seeder/.env'
+        exit 1
+      fi
+    done < <(printf '%s\n' "$stats" | tr ',' '\n')
+    # O endpoint de saúde do semeador, lido só com as estatísticas ligadas.
+    # Vazio usa o padrão do compose (http://127.0.0.1:8788); um valor presente
+    # precisa ficar no loopback, com porta válida, e nunca é impresso.
+    saude=$(sed -n 's/^[[:space:]]*VARANDA_SEEDER_HEALTH[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    saude_re='^http://(127\.0\.0\.1|localhost|\[::1\]):([1-9][0-9]{0,4})/?$'
+    if [ -n "$saude" ] && { ! [[ $saude =~ $saude_re ]] || [ "${BASH_REMATCH[2]}" -gt 65535 ]; }; then
+      log 'VARANDA_SEEDER_HEALTH inválido em deploy/seeder/.env'
+      exit 1
+    fi
   fi
   # Limites opcionais do serviço de conta: ausente ou vazio passa (valem os
   # padrões). Lidos do mesmo jeito, nunca executados e nunca impressos; um

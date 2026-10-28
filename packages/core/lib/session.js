@@ -271,14 +271,17 @@ function createSession ({
   let ownKey = null
   let certKnown = false
 
-  function send (event, data) {
+  // A run's events carry the connection epoch it started in: once that
+  // connection is detached, a run still unwinding reports to nobody, not to
+  // the connection that attached after it.
+  function send (event, data, epoch = connection) {
     const fn = emitter
-    if (fn === null) return
+    if (fn === null || epoch !== connection) return
     try { fn(event, data) } catch {}
   }
 
-  function warning (text) {
-    send('warning', { line: line(text) })
+  function warning (text, epoch) {
+    send('warning', { line: line(text) }, epoch)
   }
 
   function enterErrorState () {
@@ -291,10 +294,11 @@ function createSession ({
   function startRun ({ once, timeoutMs }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
+    const epoch = connection
     const { signal, abort } = createAbort()
     const r = { runId, once, abort, reason: null, done: null }
     run = r
-    send('sync.started', { runId, once })
+    send('sync.started', { runId, once }, epoch)
     r.done = (async () => {
       let result = null
       let error = null
@@ -309,15 +313,15 @@ function createSession ({
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
-            warning(safe(clean))
+            warning(safe(clean), epoch)
           },
           onEvent: (ev) => {
             if (ev && ev.event === 'skipped') {
-              warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')')
+              warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
               return
             }
             const text = formatEvent(ev)
-            if (text !== null) send('sync.event', { runId, line: line(text) })
+            if (text !== null) send('sync.event', { runId, line: line(text) }, epoch)
           },
           signal,
           storeOptions: currentStoreOptions()
@@ -329,8 +333,8 @@ function createSession ({
       if (error !== null) {
         if (codeOf(error) === 'LOCKED') enterErrorState()
         syncIntent = null
-        warning('erro: ' + toRpcError(error, reportInternal).message)
-        send('sync.stopped', { runId, reason: 'error' })
+        warning('erro: ' + toRpcError(error, reportInternal).message, epoch)
+        send('sync.stopped', { runId, reason: 'error' }, epoch)
         return
       }
       let reason = r.reason
@@ -344,7 +348,7 @@ function createSession ({
       }
       const data = { runId, reason }
       if (once) data.result = capSyncResult(result)
-      send('sync.stopped', data)
+      send('sync.stopped', data, epoch)
     })()
     return runId
   }
