@@ -45,12 +45,13 @@ const { certForKey } = require('@varanda/core/lib/cert')
 const {
   decodeBlock,
   memberCertRecord,
-  profileRecord,
+  profileRecords,
   postRecord,
   mediaCoreRecord,
   followRecord,
   likeRecord,
   repostRecord,
+  validAvatar,
   validateRecord,
   validRecordCopy,
   formatRef,
@@ -68,6 +69,7 @@ const { buildFeed } = require('@varanda/core/lib/feed')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -236,10 +238,42 @@ async function publish (ctx, record, check = null) {
   })
 }
 
-async function profileSet (ctx, { name, bio }) {
-  const record = buildRecord(() => profileRecord({ name, bio: bio || '' }))
-  const { seq } = await publish(ctx, record)
-  return { seq }
+function currentAvatar (entries) {
+  return (latestProfile(entries) || {}).avatar || null
+}
+
+// A still image of exactly the declared size: the reader checks only the
+// descriptor, so the bytes are checked here, at write time.
+function stillAvatar (descriptor, bytes) {
+  const s = stillImageSize(bytes, descriptor.mime)
+  return s !== null && s.width === descriptor.width && s.height === descriptor.height
+}
+
+// avatar: undefined keeps the current one, null removes it. A descriptor
+// equal to the current one is kept unverified: it may live in another
+// device's media core (docs/protocol.md). With an avatar the compat pair
+// (plain block, then the same profile with avatar) is one append.
+async function profileSet (ctx, { name, bio, avatar }) {
+  if (avatar !== undefined && avatar !== null) {
+    const current = await withIdentity(ctx, async ({ diary }) => currentAvatar(await store.readAll(diary)))
+    if (!deepEqual(avatar, current)) {
+      if (!validAvatar(avatar)) throw badMedia()
+      await verifyMedia(ctx, [avatar], stillAvatar)
+    }
+  }
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const current = currentAvatar(await store.readAll(diary))
+    const next = avatar === undefined ? current : avatar
+    const records = buildRecord(() => profileRecords({ name, bio: bio || '', avatar: next }))
+    if (records.length === 1) return { seq: await appendOwn(ctx, diary, records[0]) }
+    try {
+      return { seq: await store.appendRecords(diary, records, ctx.limits) }
+    } catch (err) {
+      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+      throw err
+    }
+  })
 }
 
 function hasMedia (media) {
@@ -416,8 +450,9 @@ async function declareMediaCore (ctx, coreHex) {
 
 // Every descriptor must point into an own media core (kv mediaCores) that
 // the own diary declares among its latest `media-core` records, with every
-// block local and the bytes matching; else 'mídia inválida'.
-async function verifyMedia (ctx, media) {
+// block local and the bytes matching; else 'mídia inválida'. inspect, when
+// given, is called with (descriptor, bytes) and a falsy result refuses it.
+async function verifyMedia (ctx, media, inspect = null) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) throw badMedia()
   const own = new Set(await store.readMediaCores(ctx.storage))
   const { ownHex, declared } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
@@ -441,6 +476,7 @@ async function verifyMedia (ctx, media) {
         total += block.byteLength
       }
       if (total !== bytes || (await sha256Hex(chunks)) !== sha256) throw badMedia()
+      if (typeof inspect === 'function' && !inspect(descriptor, b4a.concat(chunks))) throw badMedia()
     } finally {
       await core.close()
     }
@@ -868,6 +904,7 @@ async function profileRead (ctx, { authors }) {
       author: key,
       name: profile === null ? null : profile.name,
       bio: profile === null ? null : profile.bio,
+      avatar: profile === null ? null : profile.avatar,
       username: latestUsername(entries, key, association, { revokedIssuers: mod.revokedIssuers })
     })
   }

@@ -233,7 +233,7 @@ test('diary.peek reads admitted diaries through the running sync without storing
   t.is(peeked.entries[2].record.username, 'sofia')
   t.alike(peeked.invalid, [5])
   t.alike(peeked.missing, [9])
-  t.alike(peeked.profile, { name: 'Sofia', bio: 'de passagem' })
+  t.alike(peeked.profile, { name: 'Sofia', bio: 'de passagem', avatar: null })
   t.is(peeked.username, 'sofia')
   t.is(replicates(S.key), 1, 'one in-memory core on the link for S')
 

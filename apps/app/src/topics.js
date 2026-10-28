@@ -1,7 +1,7 @@
 // The Espiadinha's "pesquisar por assunto" building blocks: the query path
 // sent to the seeder's search index, whole-token matching, the assembly of the
-// verified results and the fixed texts. Pure: no imports and no globals, so
-// Node tests load it directly (the app cannot import @varanda/core).
+// verified results and the fixed texts. Pure: no globals and only pure app
+// imports, so Node tests load it directly (the app cannot import @varanda/core).
 //
 // Trust model: the seeder index only says where to look (refs). A result is
 // shown only after diary.peek returned the entry verified against the author's
@@ -10,6 +10,8 @@
 // count as "unavailable", never put words into an author's mouth.
 //
 // No Unicode property escapes anywhere in this module (apps/app/src/who.js).
+
+import { avatarOf } from './media/avatar.js'
 
 // Duplicated from packages/core/lib/topic-index.js (the source of truth for
 // the fold and the tokens; keep the two in step).
@@ -111,7 +113,7 @@ function peekOf (peeked, author) {
 
 function identity (peek) {
   const profile = peek && isObject(peek.profile) && typeof peek.profile.name === 'string'
-    ? { name: peek.profile.name }
+    ? { name: peek.profile.name, avatar: avatarOf(peek.profile.avatar) }
     : null
   const username = peek && typeof peek.username === 'string' ? peek.username : null
   return { profile, username }
@@ -144,7 +146,8 @@ function postItem (author, seq, record, peek) {
     quote,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
     name: profile ? profile.name : null,
-    username
+    username,
+    avatar: profile ? profile.avatar : null
   }
 }
 

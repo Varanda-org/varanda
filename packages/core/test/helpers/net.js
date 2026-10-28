@@ -114,7 +114,9 @@ async function failure (promise) {
 // No server text of the file carries the temp root or a '/'.
 function scanWire (t, root) {
   t.ok(wire.length > 0, 'messages were recorded (' + wire.length + ')')
-  const leaks = wire.filter((text) => text.includes(root) || text.includes('/'))
+  // A media mime (a profile avatar's 'image/webp') is the one '/' allowed.
+  const mime = /"mime":"image\/(?:jpeg|png|webp|gif)"/g
+  const leaks = wire.filter((text) => text.includes(root) || text.replace(mime, '').includes('/'))
   t.alike(leaks, [], 'no response or event carries a path')
 }
 

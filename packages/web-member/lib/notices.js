@@ -424,7 +424,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       now: Date.now()
     })
     if (v.reason !== null) return { state: 'dropped' }
-    return { state: 'accepted', row: { key: item.key, seq: item.seq, at: item.at, name: v.name, username: v.username } }
+    return { state: 'accepted', row: { key: item.key, seq: item.seq, at: item.at, name: v.name, avatar: v.avatar, username: v.username } }
   }
 
   // ---- read ----

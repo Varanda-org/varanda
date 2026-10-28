@@ -940,6 +940,7 @@ function Member () {
             ownKey={ownKey}
             onSaved={(v) => {
               names.learn(ownKey, v)
+              names.invalidate([ownKey])
               showToast(READY_TOAST)
             }}
             onSkip={() => setSkippedName(true)}
@@ -1084,7 +1085,8 @@ function Member () {
   const me = {
     publicKey: ownKey,
     name: ownProfile ? (ownProfile.name || null) : null,
-    username: ownProfile ? (ownProfile.username || null) : null
+    username: ownProfile ? (ownProfile.username || null) : null,
+    avatar: ownProfile ? ownProfile.avatar : undefined
   }
   // Light over the Diário band (dark over the offline note above it). The
   // sheets leave the status bar over the (dimmed) screen behind, so they keep

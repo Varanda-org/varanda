@@ -22,7 +22,7 @@ const PREFIX = 'varanda-terms-v1'
 // Must always equal apps/app/src/legal.js LEGAL_VERSION (pinned by
 // apps/app/test/terms-version.test.js). Bumped on every change to the text
 // of either document, so members accept the new text again.
-const TERMS_VERSION = 1
+const TERMS_VERSION = 2
 const VERSION_MAX = 9999
 // A base64url nonce of at least 32 bytes of entropy.
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/

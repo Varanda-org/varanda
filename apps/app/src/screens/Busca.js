@@ -66,7 +66,7 @@ function pageNeeds (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Busca ({ query, header, ownKey, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
+export default function Busca ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
   const node = useNode()
   const { request } = node
   const social = useSocial({ ownKey, onToast })
@@ -302,7 +302,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
   const known = (item) => follows === null || follows.has(item.author)
   const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const renderItem = ({ item }) => {
-    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, now, ownKey, h: handlers })
+    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, avatarOf, now, ownKey, h: handlers })
     // A like or repost toggled here may also be in the hidden rounds, whose
     // social cache is then stale: tell the Espiadinha.
     const changed = () => { if (typeof onSocialChanged === 'function') onSocialChanged() }
@@ -324,7 +324,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
       data={items}
       keyExtractor={itemKey}
       renderItem={renderItem}
-      extraData={{ now, following, follows, social: social.social }}
+      extraData={{ now, following, follows, social: social.social, avatarOf }}
       ListHeaderComponent={top}
       ListEmptyComponent={empty}
       ListFooterComponent={footer}

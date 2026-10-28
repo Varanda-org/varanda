@@ -326,6 +326,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       changed: false,
       reason: null,
       name: null,
+      avatar: null,
       username: null,
       posts: [],
       scanned: false,
@@ -372,6 +373,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       })
       diary.reason = r.reason
       diary.name = r.name
+      diary.avatar = r.avatar
       diary.username = r.username
       diary.posts = r.posts
       diary.scanned = r.scanned

@@ -56,7 +56,7 @@ function EngagerRow ({ row, onOpen }) {
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
-  const open = typeof onOpen === 'function' ? () => onOpen(row.author, profile) : undefined
+  const open = typeof onOpen === 'function' ? () => onOpen(row.author, { ...profile, avatar: row.avatar }) : undefined
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
@@ -65,7 +65,7 @@ function EngagerRow ({ row, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.author} size={44} />
+      <Avatar name={who.avatarName} publicKey={row.author} size={44} picture={row.avatar} persist={false} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}

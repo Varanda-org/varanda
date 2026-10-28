@@ -18,7 +18,7 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
-const { postRecord, profileRecord, validateRecord } = require('../lib/records')
+const { postRecord, profileRecord, profileRecords, validateRecord } = require('../lib/records')
 const store = require('../lib/store')
 
 // A bootstrap that is never dialled: these tests start no sync.
@@ -176,7 +176,7 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
 
   // profile.read folds duplicates; the own diary has no username record.
   t.alike(await m.call('profile.read', { authors: [pk, pk] }), {
-    profiles: [{ author: pk, name: 'Ana', bio: 'oi', username: null }],
+    profiles: [{ author: pk, name: 'Ana', bio: 'oi', avatar: null, username: null }],
     missing: []
   })
   t.alike(m.session.internal, [], 'no internal error')
@@ -186,7 +186,7 @@ test('profile.read: an author with no local data is missing and gets no core', a
   const m = await member(t, { cert: true })
   const unknown = randomKey()
   t.alike(await m.call('profile.read', { authors: [unknown, m.publicKey, unknown] }), {
-    profiles: [{ author: m.publicKey, name: null, bio: null, username: null }],
+    profiles: [{ author: m.publicKey, name: null, bio: null, avatar: null, username: null }],
     missing: [unknown]
   }, 'no profile record: name and bio null; duplicates fold')
   const s = await store.openStore(m.dataDir)
@@ -405,6 +405,38 @@ test('log.read marks invalid blocks with a reason, never their content', async (
   t.ok(log.invalid[1].reason && log.invalid[1].reason !== 'malformed', 'the validateRecord reason')
   const newest = await m.call('log.read', { limit: 2 })
   t.alike(newest, { key: m.publicKey, entries: [], invalid: [{ seq: 3, reason: log.invalid[1].reason }, { seq: 4, reason: 'malformed' }], entriesTruncated: 3 })
+})
+
+test('profile.set: a photo is refused, and a profile with one is not overwritten', async (t) => {
+  const m = await member(t, { cert: true })
+  const pk = m.publicKey
+  const avatar = { core: randomKey(), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 30000, sha256: 'e'.repeat(64), width: 512, height: 512 }
+  const length = async () => (await m.call('log.read')).entries.length
+  t.alike(await failure(m.call('profile.set', { name: 'Ana', avatar })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+  t.is(await length(), 1, 'nothing appended')
+
+  const s = await store.openStore(m.dataDir)
+  try {
+    const diary = await store.openDiary(s)
+    for (const r of profileRecords({ name: 'Ana', bio: 'oi', avatar })) await store.appendRecord(diary, r)
+  } finally {
+    await s.close()
+  }
+  t.alike(await m.call('profile.read', { authors: [pk] }), {
+    profiles: [{ author: pk, name: 'Ana', bio: 'oi', avatar, username: null }],
+    missing: []
+  })
+  const refused = { code: 'USAGE', message: 'perfil com foto: mude o nome e a bio na versão web ou tire a foto' }
+  t.alike(await failure(m.call('profile.set', { name: 'Bia' })), refused)
+  t.alike(await failure(m.call('profile.set', { name: 'Bia', bio: 'tchau' })), refused)
+  t.is(await length(), 3, 'nothing appended')
+
+  t.alike(await m.call('profile.set', { name: 'Bia', avatar: null }), { seq: 3, ref: pk + ':3' })
+  const log = await m.call('log.read')
+  t.is(log.entries.length, 4)
+  t.alike(Object.keys(log.entries[3].record).sort(), ['at', 'bio', 'name', 'type'], 'a 4-key profile')
+  t.alike((await m.call('profile.read', { authors: [pk] })).profiles[0].avatar, null)
+  t.alike(m.session.internal, [], 'no internal error')
 })
 
 test('feed.read caps future and reports the cut', async (t) => {

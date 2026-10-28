@@ -183,6 +183,40 @@ test('profile.set', (t) => {
   bad(t, 'profile.set', { name: 'a', at: 'x' })
 })
 
+test('profile.set avatar', (t) => {
+  const d = { core: KEY, mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: 'cd'.repeat(32), width: 512, height: 512 }
+  const msg = (params) => validateParams('profile.set', params).message
+  ok(t, 'profile.set', { name: 'Ana', avatar: d }, { name: 'Ana', bio: '', avatar: d })
+  ok(t, 'profile.set', { name: 'Ana', avatar: null }, { name: 'Ana', bio: '', avatar: null })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, mime: 'image/jpeg' } })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, blocks: 8, bytes: 262144 } })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, blocks: 1, bytes: 1 } })
+  // Absent stays absent: the node keeps the newest own avatar.
+  const absent = validateParams('profile.set', { name: 'Ana' })
+  t.absent('avatar' in absent.value)
+  t.alike(Object.keys(absent.value), ['name', 'bio'])
+  const missing = { ...d }
+  delete missing.width
+  for (const avatar of [
+    { ...d, mime: 'image/png' },
+    { ...d, mime: 'image/gif' },
+    { ...d, width: 511, height: 511 },
+    { ...d, width: 513, height: 513 },
+    { ...d, width: 512, height: 511 },
+    { ...d, blocks: 9, bytes: 9 * 32768 },
+    { ...d, blocks: 8, bytes: 262145 },
+    { ...d, extra: 1 },
+    missing,
+    undefined,
+    [d],
+    'x',
+    0,
+    {}
+  ]) {
+    t.is(msg({ name: 'Ana', avatar }), 'parâmetro inválido: avatar', JSON.stringify(avatar))
+  }
+})
+
 test('post.create and post.reply', (t) => {
   ok(t, 'post.create', { text: 'olá' }, { text: 'olá' })
   ok(t, 'post.create', { text: 'x'.repeat(MAX_TEXT) })

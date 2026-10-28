@@ -200,6 +200,8 @@ test('planSearchPeeks builds diary.peek params without null hints', async (t) =>
   t.alike(planSearchPeeks('x', OWN), [])
 })
 
+const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 512, height: 512 }
+
 function peekOf (key, name, username, extra = {}) {
   return { key, entries: [], profile: name === undefined ? null : { name, bio: 'ana_ana' }, username, ...extra }
 }
@@ -225,8 +227,8 @@ test('confirmedHits keeps only matches confirmed by the peek', async (t) => {
   const r = confirmedHits(['ana'], members, peeked, OWN)
   // D (verified @nome prefix, rank 2) before C (name only, rank 3).
   t.alike(r.hits, [
-    { author: D, name: 'Zeca', username: 'ana_zeca' },
-    { author: C, name: 'Ana Lima', username: null }
+    { author: D, name: 'Zeca', username: 'ana_zeca', avatar: null },
+    { author: C, name: 'Ana Lima', username: null, avatar: null }
   ])
   t.is(r.dropped, 1)
   t.is(r.unconfirmed, 2)
@@ -266,7 +268,7 @@ test('confirmedHits reads only profile.name and a valid username', async (t) => 
     [D, ['not', 'plain']]
   ])
   const r = confirmedHits(['ana'], members, peeked)
-  t.alike(r.hits, [{ author: A, name: null, username: 'ana_a' }])
+  t.alike(r.hits, [{ author: A, name: null, username: 'ana_a', avatar: null }])
   t.is(r.dropped, 2)
   t.is(r.unconfirmed, 1)
 })
@@ -276,11 +278,24 @@ test('a display name @ana without a verified @nome is only a name match', async 
   const peeked = new Map([[A, peekOf(A, '@ana', null)], [B, peekOf(B, '@ana', 'not valid!')]])
   const r = confirmedHits(queryTokens('@ana'), [{ author: A }, { author: B }], peeked, OWN)
   t.alike(r.hits, [
-    { author: A, name: '@ana', username: null },
-    { author: B, name: '@ana', username: null }
+    { author: A, name: '@ana', username: null, avatar: null },
+    { author: B, name: '@ana', username: null, avatar: null }
   ])
   t.is(r.dropped, 0)
   t.is(r.unconfirmed, 0)
+})
+
+test('confirmedHits copies a valid peeked avatar, an invalid one gives null', async (t) => {
+  const { confirmedHits } = await load()
+  const members = [{ author: A }, { author: B }, { author: C }]
+  const peeked = new Map([
+    [A, { key: A, profile: { name: 'Ana A', bio: '', avatar: AV }, username: null }],
+    [B, { key: B, profile: { name: 'Ana B', bio: '', avatar: { ...AV, extra: 1 } }, username: null }],
+    [C, { key: C, profile: { name: 'Ana C', bio: '', avatar: { ...AV, blocks: 9 } }, username: null }]
+  ])
+  const r = confirmedHits(['ana'], members, peeked, OWN)
+  t.alike(r.hits.map((h) => h.avatar), [AV, null, null])
+  t.not(r.hits[0].avatar, AV, 'a copy, never the peer object')
 })
 
 test('confirmedHits with a non-Map peek set or bad tokens confirms nothing', async (t) => {

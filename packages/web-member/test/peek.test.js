@@ -20,7 +20,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord, likeRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -1196,5 +1196,41 @@ test('with a live continuous run, peek.read still opens its own short socket and
   t.alike(web.events.slice(before).filter((e) => e.name === 'sync.stopped'), [], 'no sync.stopped')
   t.alike(await web.request('sync.status', {}), { state: 'running', runId, once: false })
   await web.request('sync.stop', {})
+  t.alike(internal, [])
+})
+
+test('avatar: a retained compat pair reaches every page while an unseen pair preserves the block 2 name', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const avatar = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 512, height: 512 }
+  const pair = profileRecords({ name: 'New name', avatar })
+  const retained = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    ...pair.map((record) => () => record),
+    ...Array.from({ length: 3 }, () => () => postRecord({ text: 'oi' }))
+  ])
+  const outside = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => postRecord({ text: 'old' }),
+    () => profileRecord({ name: 'Block 2', bio: '' }),
+    ...pair.map((record) => () => record),
+    ...Array.from({ length: 15 }, () => () => postRecord({ text: 'oi' }))
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [retained, outside] })
+  const { web, internal } = await webNode(t, assoc, seeder.url)
+  const items = []
+  let after
+  do {
+    const page = await web.request('peek.read', after ? { limit: 2, after } : { limit: 2 })
+    t.is(page.incomplete, false)
+    items.push(...page.items)
+    after = page.next
+  } while (after)
+  t.is(items.length, 6)
+  for (const item of items) {
+    const visible = item.author === hex(retained.key)
+    t.is(item.name, visible ? 'New name' : 'Block 2')
+    t.alike(item.avatar, visible ? avatar : null)
+  }
   t.alike(internal, [])
 })

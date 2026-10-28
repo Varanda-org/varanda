@@ -344,7 +344,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             so its empty space would take the gear's touches: only the avatar
             and the pill receive them. */}
         <View style={styles.headRow} pointerEvents='box-none'>
-          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} ring />
+          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} picture={profile && profile.avatar} persist ring />
           <Pill label='Editar perfil' onPress={() => setEditing(true)} />
         </View>
         <View style={styles.data}>
@@ -446,11 +446,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       <Perfil
         open={editing}
         ownKey={info ? info.publicKey : null}
-        current={{ name: (profile && profile.name) || '', bio }}
+        current={{ name: (profile && profile.name) || '', bio, avatar: profile ? profile.avatar : undefined }}
         onClose={() => setEditing(false)}
         onSaved={(values) => {
           if (info && info.publicKey) {
-            learn(info.publicKey, { name: values.name, bio: values.bio })
+            learn(info.publicKey, values)
             // The authoritative answer also replaces a cleared bio.
             invalidate([info.publicKey])
           }

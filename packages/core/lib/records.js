@@ -28,10 +28,16 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Profile avatar: one square still image in this device's media core.
+const AVATAR_SIDE = 512
+const MAX_AVATAR_BLOCKS = 8
+const MAX_AVATAR_BYTES = 8 * MEDIA_BLOCK_BYTES
+const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const PROFILE_KEYS = ['type', 'name', 'bio', 'at']
+const PROFILE_AVATAR_KEYS = ['type', 'name', 'bio', 'at', 'avatar']
 const POST_KEYS = ['type', 'text', 'at', 'replyTo']
 const POST_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'media']
 const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
@@ -199,6 +205,20 @@ function validDescriptor (d) {
   }
 }
 
+// Never throws.
+function validAvatar (d) {
+  try {
+    return validDescriptor(d) &&
+      AVATAR_MIMES.includes(d.mime) &&
+      d.width === AVATAR_SIDE &&
+      d.height === AVATAR_SIDE &&
+      d.blocks <= MAX_AVATAR_BLOCKS &&
+      d.bytes <= MAX_AVATAR_BYTES
+  } catch {
+    return false
+  }
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function validMediaList (media) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
@@ -223,7 +243,9 @@ function check (record, seq) {
   // (lib/cert.js) where the username is read (lib/username.js).
   if (type === 'username') return validUsernameShape(record) ? null : 'malformed'
   if (type === 'profile') {
-    if (!hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
+    const withAvatar = hasExactKeys(record, PROFILE_AVATAR_KEYS)
+    if (!withAvatar && !hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
+    if (withAvatar && !validAvatar(record.avatar)) return 'media-invalid'
     const { name, bio, at } = record
     if (typeof name !== 'string' || charLength(name) < 1 || charLength(name) > MAX_NAME) return 'name-length'
     if (typeof bio !== 'string' || charLength(bio) > MAX_BIO) return 'bio-length'
@@ -281,8 +303,19 @@ function memberCertRecord (cert) {
   return build({ type: 'member-cert', cert }, 0)
 }
 
-function profileRecord ({ name, bio = '', at = nowIso() } = {}) {
-  return build({ type: 'profile', name, bio, at }, 1)
+// `avatar` is added only when given and not null.
+function profileRecord ({ name, bio = '', avatar, at = nowIso() } = {}) {
+  const record = { type: 'profile', name, bio, at }
+  if (avatar !== undefined && avatar !== null) record.avatar = copyDescriptor(avatar)
+  return build(record, 1)
+}
+
+// With an avatar, a plain profile followed by the same profile with the
+// avatar: a reader that only knows the 4-key form keeps the name and bio.
+function profileRecords ({ name, bio = '', avatar = null, at = nowIso() } = {}) {
+  const plain = profileRecord({ name, bio, at })
+  if (avatar === undefined || avatar === null) return [plain]
+  return [plain, profileRecord({ name, bio, avatar, at })]
 }
 
 // A copy with exactly the descriptor keys (anything else is passed through
@@ -397,9 +430,10 @@ function latestProfile (entries) {
   for (const { seq, record } of entries) {
     const copy = validRecordCopy(record, seq)
     if (copy === null || copy.type !== 'profile') continue
-    if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio }
+    if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
-  return best ? { name: best.name, bio: best.bio } : null
+  if (!best) return null
+  return { name: best.name, bio: best.bio, avatar: best.avatar === undefined ? null : copyDescriptor(best.avatar) }
 }
 
 function genesisCert (entries) {
@@ -425,18 +459,25 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  AVATAR_SIDE,
+  MAX_AVATAR_BLOCKS,
+  MAX_AVATAR_BYTES,
+  AVATAR_MIMES,
+  PROFILE_AVATAR_KEYS,
   nowIso,
   isHex64,
   isCanonicalIso,
   decodeBlock,
   memberCertRecord,
   profileRecord,
+  profileRecords,
   postRecord,
   mediaCoreRecord,
   followRecord,
   likeRecord,
   repostRecord,
   validDescriptor,
+  validAvatar,
   validateRecord,
   validRecordCopy,
   parseRef,

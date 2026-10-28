@@ -25,6 +25,11 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Profile avatar, same values as records.js.
+const AVATAR_SIDE = 512
+const MAX_AVATAR_BLOCKS = 8
+const MAX_AVATAR_BYTES = 262144
+const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
 
 const LOG_LIMIT_DEFAULT = 20
 // Page maxima: the largest pages whose worst case (every post with
@@ -143,6 +148,10 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  AVATAR_SIDE,
+  MAX_AVATAR_BLOCKS,
+  MAX_AVATAR_BYTES,
+  AVATAR_MIMES,
   LOG_LIMIT_DEFAULT,
   LOG_LIMIT_MAX,
   FEED_LIMIT_DEFAULT,

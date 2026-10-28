@@ -84,7 +84,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 export function PostRow ({
-  author, name, username, at, text, replyToName, media, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport
@@ -158,7 +158,7 @@ export function PostRow ({
           onPress={openAuthor}
           style={({ pressed }) => pressed && openAuthor && styles.pressed}
         >
-          <Avatar name={who.avatarName} publicKey={author} size={44} />
+          <Avatar name={who.avatarName} publicKey={author} size={44} picture={avatar} persist={persistMedia !== false} />
         </Pressable>
         {/* Body: a single accessible element (author, text, date) so screen
             readers read in the order: avatar → post content → actions.

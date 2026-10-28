@@ -1151,10 +1151,10 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    'profile.set': serial(async ({ name, bio }, epoch) => {
+    'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))
+      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
       wrote(seq)
       await pushAfterWrite()
       return { seq, ref: own + ':' + seq }

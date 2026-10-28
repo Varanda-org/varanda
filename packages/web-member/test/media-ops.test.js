@@ -20,7 +20,7 @@ const { createHash } = require('node:crypto')
 const { testnet } = require('./helpers/net')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, followRecord } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, followRecord, profileRecord, profileRecords, latestProfile, decodeBlock } = require('@varanda/core/lib/records')
 const { validateMediaHeader } = require('@varanda/core/lib/media')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { idbNodeStorage, memoryNodeStorage } = require('../lib/node-storage')
@@ -309,6 +309,204 @@ test('a post with media is appended and reads back through logRead', async (t) =
   t.alike(entries[reply.seq].record.replyTo, { author: m.ownHex, seq })
   t.absent('media' in entries[plain.seq].record, 'no media key without media')
   t.is(entries.length, plain.seq + 1, 'the refused post appended nothing')
+})
+
+// A synthetic still WebP (one VP8L chunk with a w x h header, then filler
+// up to about n bytes); anim adds an ANIM chunk, so it is not a still.
+function webp (w, h, n = 2000, { anim = false } = {}) {
+  const chunk = (id, data) => {
+    const head = b4a.alloc(8)
+    head.write(id, 0, 'latin1')
+    head.writeUInt32LE(data.length, 4)
+    return b4a.concat([head, data, b4a.alloc(data.length & 1)])
+  }
+  const vp8l = b4a.alloc(Math.max(5, n - 20))
+  for (let i = 5; i < vp8l.length; i++) vp8l[i] = (i * 13) & 0xff
+  vp8l[0] = 0x2f
+  vp8l.writeUInt32LE(((w - 1) | ((h - 1) << 14)) >>> 0, 1)
+  const chunks = [chunk('VP8L', vp8l)]
+  if (anim) chunks.unshift(chunk('ANIM', b4a.alloc(6)))
+  const body = b4a.concat([b4a.from('WEBP', 'latin1'), ...chunks])
+  const riff = b4a.alloc(8)
+  riff.write('RIFF', 0, 'latin1')
+  riff.writeUInt32LE(body.length, 4)
+  return b4a.concat([riff, body])
+}
+
+function blocksOf (bytes) {
+  const blocks = []
+  for (let at = 0; at < bytes.length; at += MEDIA_BLOCK_BYTES) blocks.push(bytes.subarray(at, Math.min(bytes.length, at + MEDIA_BLOCK_BYTES)))
+  return blocks
+}
+
+// Commits bytes into the own (declared) media core -> the descriptor.
+async function commitImage (m, bytes, { mime = 'image/webp', width = 512, height = 512 } = {}) {
+  const { core, declared } = await ops.mediaPrepare(m.ctx)
+  if (!declared) await ops.declareMediaCore(m.ctx, core)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  return ops.mediaCommit(m.ctx, { blocks: blocksOf(bytes), mime, width, height, sha256 })
+}
+
+async function rawBlocks (m) {
+  const diary = await store.openDiary(m.storage, m.keyPair)
+  try {
+    const out = []
+    for (let i = 0; i < diary.length; i++) out.push(decodeBlock(await diary.get(i, { raw: true })))
+    return out
+  } finally {
+    await diary.close()
+  }
+}
+
+async function diaryLength (m) {
+  return (await rawBlocks(m)).length
+}
+
+test('appendRecords: one atomic append, each record validated at its own seq, limits on the running sum', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const avatar = await commitImage(m, webp(512, 512))
+  const before = await diaryLength(m)
+  const diary = await store.openDiary(m.storage, m.keyPair)
+  try {
+    const pair = profileRecords({ name: 'Bia', bio: 'oi', avatar })
+    t.is(pair.length, 2)
+    const bad = { ...pair[0], name: '' }
+    await t.exception(() => store.appendRecords(diary, [pair[0], bad]), /registro inválido/, 'invalid second record')
+    await t.exception(() => store.appendRecords(diary, [pair[0], { type: 'member-cert', cert: {} }]), /registro inválido/, 'a cert record is valid only at seq 0')
+    await t.exception(() => store.appendRecords(diary, pair, { maxLogBlocks: before + 1 }), /limite do diário/, 'block count overrun on the second record')
+    const firstBytes = b4a.byteLength(JSON.stringify(pair[0]))
+    await t.exception(() => store.appendRecords(diary, pair, { maxLogBytes: diary.byteLength + firstBytes + 1 }), /limite do diário/, 'byte overrun on the running sum')
+    await t.exception(() => store.appendRecords(diary, []), /registro inválido/, 'no records')
+    t.is(diary.length, before, 'nothing appended by any refusal')
+
+    const seq = await store.appendRecords(diary, pair)
+    t.is(diary.length, before + 2, 'grew by exactly 2')
+    t.is(seq, diary.length - 1)
+    t.alike(decodeBlock(await diary.get(seq - 1, { raw: true })), pair[0], 'the plain block first')
+    t.alike(decodeBlock(await diary.get(seq, { raw: true })), pair[1], 'the 5-key block second')
+    t.absent('avatar' in decodeBlock(await diary.get(seq - 1, { raw: true })))
+  } finally {
+    await diary.close()
+  }
+  const locked = await store.openDiary(m.storage)
+  try {
+    await t.exception(() => store.appendRecords(locked, [profileRecord({ name: 'x' })]), /identidade bloqueada/, 'a locked core never appends')
+  } finally {
+    await locked.close()
+  }
+})
+
+test('profileSet: set, keep, remove an avatar', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const avatar = await commitImage(m, webp(512, 512))
+  const start = await diaryLength(m)
+
+  const set = await ops.profileSet(m.ctx, { name: 'Bia', bio: 'oi', avatar })
+  t.is(set.seq, start + 1, 'the seq of the second block of the pair')
+  let blocks = await rawBlocks(m)
+  t.is(blocks.length, start + 2)
+  t.alike(Object.keys(blocks[start]).sort(), ['at', 'bio', 'name', 'type'], 'plain block')
+  t.alike(blocks[start + 1].avatar, avatar, 'then the avatar block')
+  t.alike(latestProfile(blocks.map((record, seq) => ({ seq, record }))).avatar, avatar)
+  const read = await ops.profileRead(m.locked, { authors: [m.ownHex] })
+  t.alike(read.profiles[0].avatar, avatar, 'profileRead returns it')
+
+  const kept = await ops.profileSet(m.ctx, { name: 'Bia Nova' })
+  blocks = await rawBlocks(m)
+  t.is(kept.seq, start + 3, 'a name-only call writes the pair again')
+  t.is(blocks[start + 2].name, 'Bia Nova')
+  t.absent('avatar' in blocks[start + 2])
+  t.alike(blocks[start + 3].avatar, avatar, 'the same descriptor')
+  t.is(blocks[start + 3].bio, '', 'bio defaults to empty')
+
+  const removed = await ops.profileSet(m.ctx, { name: 'Bia', avatar: null })
+  blocks = await rawBlocks(m)
+  t.is(removed.seq, start + 4)
+  t.is(blocks.length, start + 5, 'one block')
+  t.alike(Object.keys(blocks[start + 4]).sort(), ['at', 'bio', 'name', 'type'], 'a 4-key block')
+  t.is((await ops.profileRead(m.locked, { authors: [m.ownHex] })).profiles[0].avatar, null)
+
+  const plain = await ops.profileSet(m.ctx, { name: 'Bia' })
+  t.is(plain.seq, start + 5, 'no avatar in effect: one plain block')
+  t.is(await diaryLength(m), start + 6)
+})
+
+test('profileSet keeps an avatar from another device\'s core when it equals the current one', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const foreign = { core: randomKey(), mime: 'image/webp', start: 1, blocks: 1, bytes: 2000, sha256: item(10).sha256, width: 512, height: 512 }
+  const diary = await store.openDiary(m.storage, m.keyPair)
+  await store.appendRecords(diary, profileRecords({ name: 'Bia', avatar: foreign }))
+  const start = diary.length
+  await diary.close()
+
+  const same = await ops.profileSet(m.ctx, { name: 'Bia 2', avatar: { ...foreign } })
+  t.is(same.seq, start + 1, 'kept without verification')
+  const kept = await ops.profileSet(m.ctx, { name: 'Bia 3' })
+  t.is(kept.seq, start + 3)
+  const blocks = await rawBlocks(m)
+  t.alike(blocks[start + 1].avatar, foreign)
+  t.alike(blocks[start + 3].avatar, foreign)
+  await t.exception(() => ops.profileSet(m.ctx, { name: 'Bia', avatar: { ...foreign, start: 2 } }), /mídia inválida/, 'a different foreign descriptor is verified')
+  t.is(await diaryLength(m), start + 4)
+})
+
+test('profileSet refuses an avatar that does not verify as a local still 512x512 image', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const good = await commitImage(m, webp(512, 512))
+  const small = await commitImage(m, webp(256, 256), { width: 512, height: 512 })
+  const anim = await commitImage(m, webp(512, 512, 3000, { anim: true }))
+  const png = await commitImage(m, webp(512, 512, 2100), { mime: 'image/png' })
+  const notImage = await commitImage(m, item(3000).blocks[0])
+  const other = randomKey()
+  await ops.declareMediaCore(m.ctx, other)
+  const start = await diaryLength(m)
+
+  const refuse = (avatar, label) => t.exception(() => ops.profileSet(m.ctx, { name: 'Bia', avatar }), /mídia inválida/, label)
+  await refuse({ ...good, core: randomKey() }, 'foreign core')
+  await refuse({ ...good, core: other }, 'declared but not an own core')
+  await refuse({ ...good, sha256: item(10).sha256 }, 'wrong sha')
+  await refuse({ ...good, start: 500 }, 'not local')
+  await refuse({ ...good, width: 511 }, 'not 512 in the descriptor')
+  await refuse(small, 'bytes are 256x256')
+  await refuse(anim, 'animated WebP')
+  await refuse(png, 'PNG')
+  await refuse(notImage, 'not an image')
+  t.is(await diaryLength(m), start, 'nothing appended')
+
+  // Undeclared: a fresh member's core is committed before any declaration.
+  const u = await member()
+  const { core } = await ops.mediaPrepare(u.ctx)
+  const bytes = webp(512, 512)
+  const undeclared = await ops.mediaCommit(u.ctx, { blocks: blocksOf(bytes), mime: 'image/webp', width: 512, height: 512, sha256: createHash('sha256').update(bytes).digest('hex') })
+  t.is(undeclared.core, core)
+  const uStart = await diaryLength(u)
+  await t.exception(() => ops.profileSet(u.ctx, { name: 'U', avatar: undeclared }), /mídia inválida/, 'undeclared core')
+  t.is(await diaryLength(u), uStart)
+
+  // Rotated out: four newer declarations push the own core out of the latest 4.
+  for (let i = 0; i < 4; i++) await ops.declareMediaCore(m.ctx, randomKey())
+  const before = await diaryLength(m)
+  await refuse(good, 'rotated out of the latest 4')
+  t.is(await diaryLength(m), before)
+
+  // Post media is unchanged: no still-image check.
+  const p = await member()
+  const d = await ready(p, item(MEDIA_BLOCK_BYTES + 5))
+  t.is((await ops.postCreate(p.ctx, { text: '', media: [d] })).seq, 2, 'a non-image post item still verifies')
+})
+
+test('profileSet sets the avatar that verifies, then keeps it once rotated out', async (t) => {
+  await testnet(t, 1)
+  const m = await member()
+  const good = await commitImage(m, webp(512, 512))
+  const { seq } = await ops.profileSet(m.ctx, { name: 'Bia', avatar: good })
+  for (let i = 0; i < 4; i++) await ops.declareMediaCore(m.ctx, randomKey())
+  const again = await ops.profileSet(m.ctx, { name: 'Bia', avatar: good })
+  t.is(again.seq, seq + 6, 'equal to the current one: kept without verification')
 })
 
 test('follows: changes need the key, update kv and a signed, coalesced pending queue; drain appends them in order', async (t) => {

@@ -8,6 +8,7 @@ const { validateRecord } = require('@varanda/core/lib/records')
 const { isUsername } = require('@varanda/core/lib/account-link')
 const {
   createServerDispatcher,
+  validateParams,
   utf8ByteLength,
   MAX_ID,
   MAX_MESSAGE,
@@ -53,6 +54,13 @@ const DESCRIPTOR = {
   height: MAX_MEDIA_DIMENSION
 }
 const MEDIA = Array(MAX_MEDIA_PER_POST).fill(DESCRIPTOR)
+// The widest avatar: the longest avatar mime and the widest start, blocks
+// and bytes (width and height are fixed).
+const WORST_AVATAR = { core: HEX, mime: 'image/webp', start: 8184, blocks: 8, bytes: 262144, sha256: HEX, width: 512, height: 512 }
+
+function worstProfile (ch) {
+  return { type: 'profile', name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), at: AT, avatar: WORST_AVATAR }
+}
 
 function worstPost (ch) {
   return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
@@ -77,10 +85,10 @@ function feedResult (n, ch) {
   }
 }
 
-// A PeekItem is a FeedItem plus `round`; its worst case is a post with a
+// A PeekItem is a FeedItem plus `round` and the author's `avatar`; its worst case is a post with a
 // reply or a quote ref (never both; a repost item is smaller).
 function peekResult (n, ch) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000 }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000, avatar: WORST_AVATAR }
   return {
     items: Array(n).fill(item),
     next: { round: 100000, at: AT, author: HEX, seq: SEQ },
@@ -94,7 +102,7 @@ function noticesResult (n, ch) {
   // Derive the maximum from core's username rule, which exports no length limit.
   let username = 'uuu'
   while (isUsername(username + 'u')) username += 'u'
-  const item = { key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32) }
+  const item = { key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR }
   return {
     notices: Array(n).fill(item),
     next: { at: AT, key: HEX },
@@ -116,14 +124,14 @@ function diaryPeekResult (entries, invalid, missing, ch) {
     entries: Array(entries).fill({ seq: SEQ, record: worstQuote(ch) }),
     invalid: Array(invalid).fill(SEQ),
     missing: Array(missing).fill(SEQ),
-    profile: { name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO) },
+    profile: { name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), avatar: WORST_AVATAR },
     username: 'u'.repeat(20)
   }
 }
 
 function profileResult (n, ch) {
   return {
-    profiles: Array(n).fill({ author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), bio: ch.repeat(MAX_BIO) }),
+    profiles: Array(n).fill({ author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), bio: ch.repeat(MAX_BIO), avatar: WORST_AVATAR }),
     missing: []
   }
 }
@@ -132,13 +140,21 @@ test('the worst-case records are valid records', (t) => {
   for (const ch of WORST) {
     t.is(validateRecord(worstPost(ch), 1), null)
     if (ch !== '\n') t.is(validateRecord({ type: 'profile', name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), at: AT }, 1), null)
+    if (ch !== '\n') t.is(validateRecord(worstProfile(ch), 1), null)
   }
+})
+
+test('the worst avatar is a valid avatar', (t) => {
+  t.is(utf8ByteLength(JSON.stringify(WORST_AVATAR)), 235)
+  t.ok(validateParams('profile.set', { name: 'a', avatar: WORST_AVATAR }).ok)
+  t.absent(validateParams('profile.set', { name: 'a', avatar: { ...WORST_AVATAR, start: 8185 } }).ok)
 })
 
 test('a post outweighs a profile and a certificate in a log page', (t) => {
   const post = JSON.stringify(worstPost('\ud800'))
   const profile = JSON.stringify({ type: 'profile', name: '\ud800'.repeat(MAX_NAME), bio: '\ud800'.repeat(MAX_BIO), at: AT })
   t.ok(utf8ByteLength(post) > utf8ByteLength(profile))
+  t.ok(utf8ByteLength(post) > utf8ByteLength(JSON.stringify(worstProfile('\ud800'))), 'also a profile with an avatar')
   // A certificate has fixed-size fields (hex64, hex128, <= 32-char tokens, ISO).
   t.ok(utf8ByteLength(post) > 1000)
   t.is(utf8ByteLength(JSON.stringify(worstQuote('\ud800'))), utf8ByteLength(post) + 13, 'quote is the largest post record')

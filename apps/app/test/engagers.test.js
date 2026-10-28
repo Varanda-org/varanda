@@ -34,15 +34,27 @@ test('confirmEngagers keeps a verified like and counts every unproven item', asy
   ])
   const items = [B + ':2', C + ':4', D + ':5', E + ':6', F + ':8', G + ':2', H + ':3', '12'.repeat(31) + 'ff:1']
   const out = confirmEngagers({ kind: 'likes', focal: FOCAL, items, peeked })
-  t.alike(out.rows, [{ author: B, seq: 2, name: 'Bia', username: 'bia_s' }])
+  t.alike(out.rows, [{ author: B, seq: 2, name: 'Bia', username: 'bia_s', avatar: null }])
   t.is(out.unconfirmed, 7, 'repost on likes, on false, other author, other seq, seq missing, wrong key, no peek')
 })
 
 test('confirmEngagers: a like with no profile and no username keeps its row', async (t) => {
   const { confirmEngagers } = await load()
   const out = confirmEngagers({ kind: 'likes', focal: FOCAL, items: [B + ':2'], peeked: new Map([[B, peek(B, 2, like())]]) })
-  t.alike(out.rows, [{ author: B, seq: 2, name: null, username: null }])
+  t.alike(out.rows, [{ author: B, seq: 2, name: null, username: null, avatar: null }])
   t.is(out.unconfirmed, 0)
+})
+
+test('confirmEngagers: a valid avatar is copied from the peeked profile, an invalid one is null', async (t) => {
+  const { confirmEngagers } = await load()
+  const avatar = { core: 'ee'.repeat(32), mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: 'ff'.repeat(32), width: 512, height: 512 }
+  const peeked = new Map([
+    [B, peek(B, 2, like(), { profile: { name: 'Bia', avatar } })],
+    [C, peek(C, 3, like(), { profile: { name: 'Caio', avatar: { ...avatar, width: 256 } } })]
+  ])
+  const out = confirmEngagers({ kind: 'likes', focal: FOCAL, items: [B + ':2', C + ':3'], peeked })
+  t.alike(out.rows.map((r) => r.avatar), [avatar, null])
+  t.not(out.rows[0].avatar, avatar, 'a copy, not the peer object')
 })
 
 test('confirmEngagers: names only from the profile, valid usernames, order and first repeat', async (t) => {
@@ -55,9 +67,9 @@ test('confirmEngagers: names only from the profile, valid usernames, order and f
   ])
   const out = confirmEngagers({ kind: 'reposts', focal: FOCAL, items: [C + ':9', B + ':2', C + ':1', D + ':3'], peeked })
   t.alike(out.rows, [
-    { author: C, seq: 9, name: 'Caio', username: null },
-    { author: B, seq: 2, name: null, username: null },
-    { author: D, seq: 3, name: null, username: 'dani' }
+    { author: C, seq: 9, name: 'Caio', username: null, avatar: null },
+    { author: B, seq: 2, name: null, username: null, avatar: null },
+    { author: D, seq: 3, name: null, username: 'dani', avatar: null }
   ])
   t.is(out.unconfirmed, 0)
   for (const row of out.rows) {
