@@ -1,6 +1,8 @@
 // Web only: bind at module evaluation to catch beforeinstallprompt before React
-// mounts. Use the same hosted browser gate as the service worker.
-/* global window, navigator, localStorage */
+// mounts. Use the same hosted browser gate as the service worker. The Samsung
+// Internet manifest removal also runs at module evaluation, the earliest the
+// bundle can run (CSP forbids inline scripts).
+/* global window, navigator, localStorage, document */
 
 import { useSyncExternalStore } from 'react'
 import { webMode } from './client/mode'
@@ -11,6 +13,7 @@ const offer = createInstallOffer({
   eligible: webMode === 'browser' && hostedPage === true,
   win: typeof window === 'undefined' ? null : window,
   nav: typeof navigator === 'undefined' ? null : navigator,
+  doc: typeof document === 'undefined' ? null : document,
   storage: () => localStorage
 })
 
