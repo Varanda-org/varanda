@@ -23,7 +23,7 @@ const ERROR_MESSAGES = {
   expirado: 'o vínculo expirou, comece de novo',
   'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
   // Member cap (503). Already-linked members never receive this token.
-  'lista-de-espera': 'A Varanda está cheia por enquanto e abriu uma lista de espera. Nada foi guardado; tente de novo mais tarde. Quem já entrou continua usando a rede normalmente.'
+  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
