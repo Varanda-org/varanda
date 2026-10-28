@@ -126,3 +126,36 @@ test('web: isHostedPage', async (t) => {
   t.absent(page('serve', 'https:', 'varanda.example'))
   for (const h of ['localhost', 'LocalHost', '127.0.0.1', '[::1]']) t.absent(page('browser', 'https:', h), h)
 })
+
+test('parseCertificateText: curly quotes from iOS smart punctuation are read as plain quotes', async (t) => {
+  const { parseCertificateText } = await load()
+  const plain = '{"v":1,"member":"' + ASSOC + '"}'
+  const expected = { v: 1, member: ASSOC }
+  t.alike(parseCertificateText(plain).cert, expected, 'plain quotes')
+  for (const [open, close] of [['“', '”'], ['„', '”'], ['‟', '″']]) {
+    let n = 0
+    const curly = plain.replace(/"/g, () => (n++ % 2 === 0 ? open : close))
+    t.alike(parseCertificateText(curly).cert, expected, open + close)
+  }
+})
+
+test('parseCertificateText: invalid JSON and non-objects', async (t) => {
+  const { parseCertificateText } = await load()
+  t.alike(parseCertificateText('{"v":'), { error: 'JSON inválido' })
+  t.alike(parseCertificateText(''), { error: 'JSON inválido' })
+  for (const text of ['[]', 'null', '7', '"x"']) {
+    t.alike(parseCertificateText(text), { error: 'o certificado deve ser um objeto JSON' }, text)
+  }
+})
+
+test('formOf: no config gives an empty form, a config round-trips through checkForm', async (t) => {
+  const { formOf, checkForm } = await load()
+  t.alike(formOf(null), { association: '', bootstrapText: '', publicDht: false, dhtHost: '' })
+  t.alike(formOf(undefined), { association: '', bootstrapText: '', publicDht: false, dhtHost: '' })
+  const bootstrap = { association: ASSOC, bootstrap: ['a.example:49737', '10.0.0.2:1'], dhtHost: '10.0.0.5', allowPublicDht: false }
+  t.alike(formOf(bootstrap), { association: ASSOC, bootstrapText: 'a.example:49737\n10.0.0.2:1', publicDht: false, dhtHost: '10.0.0.5' })
+  t.alike(checkForm(formOf(bootstrap)).config, bootstrap, 'bootstrap config')
+  const pub = { association: ASSOC, bootstrap: null, dhtHost: null, allowPublicDht: true }
+  t.alike(formOf(pub), { association: ASSOC, bootstrapText: '', publicDht: true, dhtHost: '' })
+  t.alike(checkForm(formOf(pub)).config, pub, 'public DHT config')
+})

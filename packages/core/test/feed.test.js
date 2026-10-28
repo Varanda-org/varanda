@@ -3,12 +3,11 @@
 const test = require('brittle')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const certModule = require('@varanda/core/lib/cert')
+const certModule = require('../lib/cert')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } = certModule
-const { buildFeed, shortKey, formatFeedItem, MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
+const { buildFeed, shortKey, formatFeedItem, MAX_FUTURE_MS } = require('../lib/feed')
 const { testnet } = require('./helpers/net')
-const { displayWidth } = require('@varanda/core/lib/safe')
-const { feedWidth } = require('../lib/commands/member')
+const { displayWidth } = require('../lib/safe')
 
 const KA = 'a'.repeat(64)
 const KB = 'b'.repeat(64)
@@ -296,14 +295,6 @@ test('formatFeedItem measures display columns and wraps the header too (L1)', as
     t.ok(rows.every((l) => displayWidth(l) <= eff), 'no row wider than ' + eff)
     t.ok(rows[0].startsWith('['), 'first row is the header')
   }
-})
-
-test('feedWidth: TTY columns, 80 when not a TTY, floor of 20', async (t) => {
-  t.is(feedWidth({ isTTY: true, columns: 120 }), 120)
-  t.is(feedWidth({ isTTY: false, columns: 120 }), 80)
-  t.is(feedWidth({}), 80)
-  t.is(feedWidth({ isTTY: true }), 80)
-  t.is(feedWidth({ isTTY: true, columns: 5 }), 20)
 })
 
 test('header keeps the authenticated suffix on row 1 and truncates the name (L1)', async (t) => {

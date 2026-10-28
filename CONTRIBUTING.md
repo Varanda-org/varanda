@@ -130,6 +130,11 @@ Ofereça ajuda na issue correspondente ou em [Discussions](https://github.com/Va
 Quem contribui regularmente pode receber um convite para ajudar na triagem de etiquetas, issues e tarefas do quadro.
 Com o tempo, pode receber um convite para a equipe de mantenedores.
 
+## Agentes de IA
+
+Se um agente de IA ajuda você, leia o [AGENTS.md](AGENTS.md): ele reúne as regras e as armadilhas do repositório para agentes.
+A pessoa que envia o PR continua sendo a autora e responde pelo que foi enviado.
+
 ## Segurança
 
 Nunca relate uma vulnerabilidade em uma issue pública.
