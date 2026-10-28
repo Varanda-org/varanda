@@ -3,9 +3,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
 const Corestore = require('corestore')
-const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
-const { runSync } = require('@varanda/core/lib/sync')
-const { formatEvent } = require('../lib/commands/sync')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
+const { tmpDir } = require('./helpers/tmp')
+const { runSync } = require('../lib/sync')
 const {
   openStore,
   openDiary,
@@ -15,11 +15,11 @@ const {
   appendRecord,
   writeConfig,
   writeFollows
-} = require('@varanda/core/lib/store')
-const { memberCertRecord, profileRecord, postRecord, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
+} = require('../lib/store')
+const { memberCertRecord, profileRecord, postRecord, MAX_LOG_BLOCKS } = require('../lib/records')
 const c = require('compact-encoding')
 const Hypercore = require('hypercore')
-const { createCert, createSeederCert, certForKey, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, certForKey, generateAssociationKeyPair } = require('../lib/cert')
 const {
   createSwarm,
   topicFor,
@@ -27,7 +27,7 @@ const {
   attachAdmission,
   watchContiguous,
   generateNoiseKeyPair
-} = require('@varanda/core/lib/net')
+} = require('../lib/net')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -401,7 +401,6 @@ test('verified and unverified seeders', async (t) => {
   const peerEv = ev1.events.find((e) => e.event === 'peer')
   t.is(peerEv.role, 'seeder')
   t.is(peerEv.verified, false)
-  t.is(formatEvent(peerEv), 'peer seeder ' + peerEv.peerKey.slice(0, 8) + ' não verificado')
   await s1.leave()
 
   // 2. Unverified peer rejecting with not-in-log: only a withdrawal.
@@ -416,7 +415,6 @@ test('verified and unverified seeders', async (t) => {
   const w = ev2.events.find((e) => e.event === 'withdrawn')
   t.ok(w, 'withdrawn event')
   t.is(w.reason, 'not-in-log')
-  t.is(formatEvent(w), 'withdrawn ' + a2.key + ' ' + w.peerKey.slice(0, 8) + ' not-in-log')
   await s2.leave()
 
   // 3. Verified seeder (cert by kp for its own Noise key): counts.
@@ -1404,25 +1402,6 @@ test('D1/D4 (cycle 3): an active follow advertised only at 0 is unadvertised and
   t.ok(r2.ok, JSON.stringify(r2.errors))
   t.is(r2.downloaded[author.key], 3)
   t.alike(r2.unadvertised, [author.key], 'advertised only at 0: unadvertised')
-})
-
-test('formatEvent escapes control characters in peer-derived strings', (t) => {
-  const k = 'ab'.repeat(32)
-  t.is(formatEvent({ event: 'rejected', key: k, reason: 'x\u001b[31m' }), 'rejected ' + k + ' x\\u{1b}[31m')
-  t.is(formatEvent({ event: 'withdrawn', key: k, peerKey: k, reason: 'a\nadmitted' }), 'withdrawn ' + k + ' abababab a\\u{a}admitted')
-  t.is(formatEvent({ event: 'peer', role: 'member\u2028x', peerKey: '\u007f' + k, verified: false }), 'peer member\\u{2028}x \\u{7f}abababa')
-  t.is(formatEvent({ event: 'rejected', key: k, reason: 'bidi\u202e' }), 'rejected ' + k + ' bidi\\u{202e}')
-})
-
-test('formatEvent lines', (t) => {
-  const k = 'ab'.repeat(32)
-  t.is(formatEvent({ event: 'ready', topic: k }), 'sync ready')
-  t.is(formatEvent({ event: 'peer', role: 'member', peerKey: k, verified: false }), 'peer member abababab')
-  t.is(formatEvent({ event: 'peer', role: 'seeder', peerKey: k, verified: true }), 'peer seeder abababab')
-  t.is(formatEvent({ event: 'admitted', key: k, length: 3 }), 'admitted ' + k + ' 3')
-  t.is(formatEvent({ event: 'rejected', key: k, reason: 'timeout' }), 'rejected ' + k + ' timeout')
-  t.is(formatEvent({ event: 'have', key: k, length: 2 }), 'have ' + k + ' 2')
-  t.is(formatEvent({ event: 'downloaded', key: k, length: 2 }), 'downloaded ' + k + ' 2')
 })
 
 test('retry item 2: failed-fetch sockets are released when they close', async (t) => {

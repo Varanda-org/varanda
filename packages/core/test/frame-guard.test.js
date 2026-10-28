@@ -6,7 +6,7 @@
 // budget (unlimited by default, or injected) and the frame deadline. The
 // end-to-end
 // behaviour through Seeder.acceptStream is covered by
-// apps/cli/test/seeder-stream.test.js.
+// packages/core/test/seeder-stream.test.js.
 const test = require('brittle')
 const { EventEmitter } = require('node:events')
 const b4a = require('b4a')
