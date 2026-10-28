@@ -165,6 +165,37 @@ test('blocklist round-trip, absent and malformed are null, mode 0600', async (t)
   }
 })
 
+test('readBlocklist moves a torn file aside only when the caller asks, an absent or odd-shaped one never', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'blocklist.json')
+  const aside = () => fs.readdirSync(dir).filter((n) => n.startsWith('blocklist.json.ilegivel-'))
+  const seen = []
+  const onUnreadable = (name) => seen.push(name)
+
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'absent')
+  t.alike(seen, [], 'absent: no warning')
+  fs.writeFileSync(file, '[]')
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'odd shape')
+  t.alike(seen, [], 'odd shape: no warning')
+  t.ok(fs.existsSync(file), 'odd shape: left in place')
+
+  fs.writeFileSync(file, '{"v":1,"snapshot":{"seq":')
+  fs.chmodSync(file, 0o600)
+  t.is(store.readBlocklist(dir), null, 'torn, no callback: read as absent')
+  t.ok(fs.existsSync(file), 'torn, no callback: left in place (read-only callers)')
+
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'torn: read as absent')
+  t.is(seen.length, 1, 'torn: one warning')
+  t.absent(fs.existsSync(file), 'torn: moved out of the way')
+  t.alike(aside(), seen, 'torn: the warning names the kept copy')
+  t.is(fs.readFileSync(path.join(dir, seen[0]), 'utf8'), '{"v":1,"snapshot":{"seq":', 'torn: bytes kept')
+  t.is(fs.statSync(path.join(dir, seen[0])).mode & 0o777, 0o600, 'torn: mode kept')
+
+  t.is(store.readBlocklist(dir, { onUnreadable }), null, 'after the move it is a plain absent')
+  t.is(seen.length, 1, 'no second warning')
+})
+
 test('replicaStored is true only for a core the store holds', async (t) => {
   await testnet(t)
   const a = await open(t, tmpDir(t))

@@ -289,8 +289,8 @@ async function localMediaVerdict (core, diaryHex) {
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
 // writeBlocklist), or null.
-function readSnapshot (dataDir) {
-  const data = readBlocklist(dataDir)
+function readSnapshot (dataDir, options) {
+  const data = readBlocklist(dataDir, options)
   return data === null ? null : data.snapshot
 }
 
@@ -719,7 +719,9 @@ class Seeder {
       // could hand out a blocked diary.
       const state = createBlocklistState({
         association: this.association,
-        load: () => readSnapshot(this.dataDir),
+        load: () => readSnapshot(this.dataDir, {
+          onUnreadable: (aside) => this.log({ event: 'warning', reason: 'blocklist-unreadable', aside })
+        }),
         save: (snapshot) => this._saveBlocklist(snapshot)
       })
       try {
