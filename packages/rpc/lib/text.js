@@ -26,8 +26,8 @@ function utf8ByteLength (str) {
   return n
 }
 
-// Strict UTF-8 in pure JS (no TextEncoder/TextDecoder: their Hermes and
-// Bare support is unverified). The encoder writes a lone surrogate as U+FFFD
+// Strict UTF-8 in pure JS (no TextEncoder/TextDecoder: Bare has neither,
+// docs/rpc.md section 3). The encoder writes a lone surrogate as U+FFFD
 // (EF BF BD), exactly like TextEncoder.
 function utf8Encode (str) {
   const out = new Uint8Array(utf8ByteLength(str))
