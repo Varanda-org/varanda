@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const { formatFeedItem } = require('@varanda/core/lib/feed')
 const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
+const { validateParams } = require('@varanda/rpc')
 const { validRecordCopy, validateRecord } = require('@varanda/core/lib/records')
 
 function usage (message) {
@@ -150,28 +151,61 @@ function logLine ({ seq, record }) {
   return '#' + seq + ' ' + body
 }
 
+// `log --before <seq>`: a canonical block seq, the same bound as log.read.
+function logBefore (text) {
+  if (text == null) return null
+  const checked = /^[1-9][0-9]*$/.test(text) ? validateParams('log.read', { before: Number(text) }) : { ok: false }
+  if (!checked.ok) throw usage('before inválido')
+  return checked.value.before
+}
+
 async function logRun (flags) {
-  const { key, entries } = await member.logRead(ctxOf(flags), { author: flags.author || null })
+  const before = logBefore(flags.before)
+  const { key, entries: all } = await member.logRead(ctxOf(flags), { author: flags.author || null })
+  const older = before === null ? all : all.filter((entry) => entry.seq < before)
+  const entries = flags.limit ? older.slice(-flags.limit) : older
+  const next = entries.length < older.length ? entries[0].seq : null
   if (flags.json) {
     for (const entry of entries) process.stdout.write(jsonLine({ seq: entry.seq, record: entry.record }) + '\n')
-    process.stdout.write(jsonLine({ key, entries }) + '\n')
+    process.stdout.write(jsonLine({ key, entries, next }) + '\n')
   } else {
     for (const entry of entries) process.stdout.write(logLine(entry) + '\n')
+    if (next !== null) warn('há blocos mais antigos: use --before ' + next)
   }
 }
 
 // ---- feed ----
 
+// `feed --before <cursor>`: the JSON cursor `feed` prints, validated as
+// feed.read validates it.
+function feedBefore (text) {
+  if (text == null) return null
+  let cursor
+  try {
+    cursor = JSON.parse(text)
+  } catch {
+    throw usage('before inválido')
+  }
+  const checked = validateParams('feed.read', { before: cursor })
+  if (!checked.ok) throw usage('before inválido')
+  return checked.value.before
+}
+
 async function feedRun (flags) {
+  const limit = flags.limit || Infinity
   const { items, skipped, future } = await member.feedRead(ctxOf(flags), {
-    limit: flags.limit || Infinity,
+    limit,
+    before: feedBefore(flags.before),
     onWarn: warn
   })
+  const last = items.length > 0 ? items[0] : null
+  const next = last !== null && items.length === limit ? { at: last.at, author: last.author, seq: last.seq } : null
   if (flags.json) {
-    process.stdout.write(jsonLine({ items, skipped, future }) + '\n')
+    process.stdout.write(jsonLine({ items, skipped, future, next }) + '\n')
   } else {
     const width = feedWidth(process.stdout)
     for (const item of items) process.stdout.write(formatFeedItem({ ...item, text: withMediaTag(item.text, item.media) }, { width }) + '\n')
+    if (next !== null) warn("pode haver publicações mais antigas: use --before '" + jsonLine(next) + "'")
   }
 }
 

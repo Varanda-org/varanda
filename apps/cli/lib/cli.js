@@ -44,14 +44,14 @@ Opções globais:
   --json                     saída JSON na última linha
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
-  --to --author --limit --once --timeout-ms --health-port --health-host --ws-port --ws-host
+  --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
-  '--text', '--to', '--author', '--limit', '--bootstrap', '--dht-host',
+  '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server'
 ])
@@ -252,6 +252,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     to: replyTo(get('to')),
     author: key(get('author')),
     limit: integer(get('limit'), 'limit'),
+    // Raw: `log` reads a block seq and `feed` a cursor (commands/member.js).
+    before: get('before'),
     // Raw: `mod apply` checks it is an origin (mod-apply.js).
     server: get('server'),
     cwd
