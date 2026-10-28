@@ -25,7 +25,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, stoppedOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { startSeedWs } = require('../../../apps/cli/lib/seed-ws')
 const { createBrowserNode } = require('../lib/node')
@@ -54,13 +54,13 @@ function iso (ms) {
   return new Date(ms).toISOString()
 }
 
-// The exact peek.read items (lib/peek.js buildPeekPage: a FeedItem plus round).
-function repostItem ({ author, name = null, username = null, seq, at, to, round }) {
-  return { kind: 'repost', author, name, username, seq, at, to: { author: to.author, seq: to.seq }, text: null, replyTo: null, quote: null, media: null, round }
+// The exact peek.read items (lib/peek.js buildPeekPage: a FeedItem plus round and avatar).
+function repostItem ({ author, name = null, avatar = null, username = null, seq, at, to, round }) {
+  return { kind: 'repost', author, name, avatar, username, seq, at, to: { author: to.author, seq: to.seq }, text: null, replyTo: null, quote: null, media: null, round }
 }
 
-function postItem ({ author, name = null, username = null, seq, at, text, replyTo = null, quote = null, round }) {
-  return { kind: 'post', author, name, username, seq, at, text, replyTo, quote, media: null, round }
+function postItem ({ author, name = null, avatar = null, username = null, seq, at, text, replyTo = null, quote = null, round }) {
+  return { kind: 'post', author, name, avatar, username, seq, at, text, replyTo, quote, media: null, round }
 }
 
 // A Hypercore 10 diary with the given records (block 0 first); each maker
@@ -526,5 +526,29 @@ test('(d) two browser nodes: repost.set through the session, synced to the real 
   t.alike(again.items.filter((i) => i.author === N1.key), expected, 'the same three reposts after the window walked back past the likes')
   t.is(again.incomplete, false)
   await N2.web.request('sync.stop')
+  t.alike(internal, [])
+})
+
+test('avatar: a candidate compat pair supplies the avatar to post and repost items', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const avatar = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 512, height: 512 }
+  const at = iso(Date.now() - HOUR)
+  const to = { author: hex(crypto.keyPair().publicKey), seq: 2 }
+  const candidate = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    ...profileRecords({ name: 'Ana', avatar, at }).map((record) => () => record),
+    () => postRecord({ text: 'oi', at }),
+    () => repostRecord({ to, on: true, at })
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [candidate] })
+  const { web, internal } = await webNode(t, assoc, seeder.url)
+  const page = await web.request('peek.read', {})
+  const author = hex(candidate.key)
+  t.alike(page.items, [
+    repostItem({ author, name: 'Ana', avatar, seq: 4, at, to, round: 0 }),
+    postItem({ author, name: 'Ana', avatar, seq: 3, at, text: 'oi', round: 1 })
+  ])
+  t.is(page.incomplete, false)
   t.alike(internal, [])
 })

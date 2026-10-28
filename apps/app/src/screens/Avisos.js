@@ -103,7 +103,7 @@ function NoticeRow ({ item, now, pending, onFollowBack }) {
   const time = relativeTime(item.at, now)
   return (
     <View style={styles.row}>
-      <Avatar name={who.avatarName} publicKey={item.key} size={44} />
+      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{displayText(noticeLine(who))}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}

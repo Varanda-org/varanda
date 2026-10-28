@@ -126,6 +126,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             </View>
             )
           : null}
+        {!postMode ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
         <View style={styles.pills}>
           {REASONS.map(([id, label]) => (
             <ChoicePill key={id} label={label} selected={reason === id} onPress={() => setReason(id)} />

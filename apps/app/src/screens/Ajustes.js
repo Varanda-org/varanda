@@ -165,7 +165,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       )
 
   const profile = own.key ? names.profileOf(own.key) : undefined
-  const current = { name: (profile && profile.name) || '', bio: (profile && profile.bio) || '' }
+  const current = { name: (profile && profile.name) || '', bio: (profile && profile.bio) || '', avatar: profile ? profile.avatar : undefined }
   const account = node.hosted === true && hasPasskey
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
@@ -262,7 +262,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 current={current}
                 onClose={() => onNavigate('lista')}
                 onSaved={(values) => {
-                  names.learn(own.key, { name: values.name, bio: values.bio })
+                  names.learn(own.key, values)
                   // The authoritative answer also replaces a cleared bio.
                   names.invalidate([own.key])
                   setSaved('Perfil salvo.')

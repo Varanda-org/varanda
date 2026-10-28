@@ -172,7 +172,7 @@ test('the web session and a CLI member exchange posts through the seeder', async
   // local data is missing (and no core is created for it).
   const stranger = 'ef'.repeat(32)
   t.alike(await web.request('profile.read', { authors: [cliKey] }), {
-    profiles: [{ author: cliKey, name: 'Caio', bio: '', username: null }],
+    profiles: [{ author: cliKey, name: 'Caio', bio: '', avatar: null, username: null }],
     missing: []
   }, 'the CLI member by name')
   const mixed = await web.request('profile.read', { authors: [cliKey, stranger] })

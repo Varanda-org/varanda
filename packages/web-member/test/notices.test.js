@@ -16,7 +16,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord, followRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, followRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachNotices, PROTOCOL } = require('@varanda/core/lib/notices-net')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -278,7 +278,7 @@ test('against the real seeder: a verified follower shows, then follows, blocks a
     const r = await read()
     return r.notices.length === 1 && !r.incomplete ? r : null
   }, { name: 'A listed', intervalMs: 250, timeoutMs: 30000 })
-  t.alike(withoutSeen(t, first), { notices: [{ key: A.key, seq, at: follow.at, name: 'Ana', username: 'ana' }], next: null, incomplete: false, supported: true })
+  t.alike(withoutSeen(t, first), { notices: [{ key: A.key, seq, at: follow.at, name: 'Ana', avatar: null, username: 'ana' }], next: null, incomplete: false, supported: true })
 
   // Already followed: omitted.
   await writeFollows(storage, [A.key])
@@ -344,7 +344,7 @@ test('a lying seeder: only author-signed follows of this node at the claimed at,
   state.page = (target) => ({ items: target === me ? items : [], next: null, incomplete: false })
 
   const r = await web.request('notices.list', {})
-  t.alike(withoutSeen(t, r), { notices: [{ key: hex(G.key), seq: 2, at: good.at, name: 'Gil', username: null }], next: null, incomplete: false, supported: true })
+  t.alike(withoutSeen(t, r), { notices: [{ key: hex(G.key), seq: 2, at: good.at, name: 'Gil', avatar: null, username: null }], next: null, incomplete: false, supported: true })
   t.is(seeder.pages.length, 1)
   t.alike(seeder.pages[0], { target: me, after: null, limit: 64 }, 'the proved key, the first page')
   t.alike(internal, [])
@@ -633,5 +633,42 @@ test('a concurrent notices.list is refused; a detach aborts the read and frees t
   const again = await connectClient(node, { timeoutMs: 60000 })
   const r = await again.request('notices.list', {})
   t.alike(keysOf(r), [hex(D.key)], 'a new client reads at once')
+  t.alike(internal, [])
+})
+
+test('avatar: notices carry the retained profile and preserve the block 2 name when the pair is outside the window', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url)
+  const avatar = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 512, height: 512 }
+  const pair = profileRecords({ name: 'New name', avatar })
+  const follow = followRecord({ key: me, on: true })
+  const olderFollow = followRecord({ key: me, on: true, at: iso(Date.parse(follow.at) - 1000) })
+  const retained = await diary(t, [certOf(assoc), ...pair.map((record) => () => record), () => follow])
+  const outside = await diary(t, [
+    certOf(assoc),
+    () => postRecord({ text: 'old' }),
+    () => profileRecord({ name: 'Block 2', bio: '' }),
+    ...pair.map((record) => () => record),
+    ...Array.from({ length: 14 }, () => () => postRecord({ text: 'oi' })),
+    () => olderFollow
+  ])
+  state.cores = [retained, outside]
+  const items = state.cores.map((core, i) => ({ key: hex(core.key), seq: core.length - 1, at: i === 0 ? follow.at : olderFollow.at }))
+  state.page = () => ({ items, next: null, incomplete: false })
+  const expected = {
+    notices: items.map((item, i) => ({ ...item, name: i === 0 ? 'New name' : 'Block 2', avatar: i === 0 ? avatar : null, username: null })),
+    next: null,
+    incomplete: false,
+    supported: true
+  }
+  const first = await web.request('notices.list', {})
+  t.alike(withoutSeen(t, first), expected)
+  const uploads = state.cores.map((core) => core.uploads)
+  first.notices[0].avatar.start = 99
+  t.alike(withoutSeen(t, await web.request('notices.list', {})), expected, 'cached evidence produces a fresh avatar')
+  t.alike(state.cores.map((core) => core.uploads), uploads, 'the second read uses cached evidence')
   t.alike(internal, [])
 })

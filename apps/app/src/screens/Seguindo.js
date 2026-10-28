@@ -17,6 +17,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
+import { pickAvatar } from '../media/avatar'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { UNNAMED, whoOf } from '../who'
 import { HELP, SHORT } from '../help'
@@ -54,7 +55,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={followKey} size={44} />
+        <Avatar name={who.avatarName} publicKey={followKey} size={44} picture={(profile || {}).avatar} persist />
         <View style={styles.who}>
           {who.known
             ? (
@@ -95,7 +96,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
 // verified @nome from the peek (`hit`), never a key, and no 'denunciar'. The
 // avatar and name open the profile; the pill follows ('Seguir') or unfollows
 // ('Seguindo'), disabled while the follow set is unknown (`following` null).
-function SearchRow ({ hit, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+function SearchRow ({ hit, avatar, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
   const profile = { name: hit.name, username: hit.username }
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -110,7 +111,7 @@ function SearchRow ({ hit, following, onOpen, onFollow, onUnfollow, pending, dis
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
+        <Avatar name={who.avatarName} publicKey={hit.author} size={44} picture={avatar} persist={following === true} />
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -459,6 +460,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
                 <SearchRow
                   key={hit.author}
                   hit={hit}
+                  avatar={pickAvatar(names.profileOf(hit.author), hit)}
                   following={follows === null ? null : follows.has(hit.author)}
                   onOpen={onOpenMember}
                   onFollow={doFollowHit}

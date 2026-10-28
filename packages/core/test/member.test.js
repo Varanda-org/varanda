@@ -6,7 +6,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert } = require('@varanda/core/lib/cert')
-const { postRecord } = require('@varanda/core/lib/records')
+const { postRecord, profileRecords } = require('@varanda/core/lib/records')
 const storeLib = require('../lib/store')
 const member = require('../lib/member')
 const { UsageError } = require('../lib/errors')
@@ -133,6 +133,29 @@ test('profileSet, postCreate and postReply', async (t) => {
   t.alike(entries[1].record.name, 'Ana')
   t.alike(entries[1].record.bio, '')
   t.alike(entries[3].record.replyTo, { author: publicKey, seq: 2 })
+})
+
+// The core node writes no media cores, so it must never drop a photo it
+// cannot re-send.
+test('profileSet refuses an avatar and keeps an existing photo', async (t) => {
+  const { ctx, dataDir, publicKey } = await setup(t, { cert: true })
+  const avatar = { core: 'ab'.repeat(32), mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: 'e'.repeat(64), width: 512, height: 512 }
+  await rejectsWith(t, member.profileSet(ctx, { name: 'Ana', avatar }), 'mídia disponível só na versão web', 'USAGE')
+  const s = await storeLib.openStore(dataDir)
+  try {
+    const diary = await storeLib.openDiary(s)
+    for (const r of profileRecords({ name: 'Ana', avatar })) await storeLib.appendRecord(diary, r)
+  } finally {
+    await s.close()
+  }
+  t.alike((await member.profileRead(ctx, { authors: [publicKey] })).profiles[0].avatar, avatar)
+  await rejectsWith(t, member.profileSet(ctx, { name: 'Bia' }), member.PROFILE_PHOTO_WEB_ONLY, 'USAGE')
+  t.is((await member.logRead(ctx)).entries.length, 3, 'nothing appended')
+  t.alike(await member.profileSet(ctx, { name: 'Bia', avatar: null }), { seq: 3 })
+  const last = (await member.logRead(ctx)).entries[3].record
+  t.alike(Object.keys(last).sort(), ['at', 'bio', 'name', 'type'])
+  t.alike((await member.profileRead(ctx, { authors: [publicKey] })).profiles[0], { author: publicKey, name: 'Bia', bio: '', avatar: null, username: null })
+  t.alike(await member.profileSet(ctx, { name: 'Cris' }), { seq: 4 }, 'no photo left: a plain change is allowed')
 })
 
 test('follows', async (t) => {

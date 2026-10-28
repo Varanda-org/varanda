@@ -16,6 +16,9 @@
 // 5. Old readers: a media post the current rules reject (empty media list,
 //    unknown descriptor keys) is invalid and the feed skips it without
 //    failing the diary.
+// 6. Avatar: the profile compat pair reaches the seeder; /media serves the
+//    avatar, the index points at the pair's second block, and the plain
+//    block keeps name and bio for readers that know only 4-key profiles.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -457,4 +460,83 @@ test('old readers: an invalid media post is skipped by the feed without failing 
   t.alike(feed.items.map((i) => i.seq), [3, 7], 'the invalid posts are skipped, the rest of the diary is read')
   t.alike(feed.items[0].media, [descriptor])
   t.is(feed.items[1].media, null)
+})
+
+// A synthetic still WebP: one VP8L chunk with a 512x512 header, then filler
+// (n even, so the chunk needs no pad byte).
+function webp512 (n) {
+  const bytes = randomBytes(n)
+  bytes.write('RIFF', 0, 'latin1')
+  bytes.writeUInt32LE(n - 8, 4)
+  bytes.write('WEBPVP8L', 8, 'latin1')
+  bytes.writeUInt32LE(n - 20, 16)
+  bytes[20] = 0x2f
+  bytes.writeUInt32LE((511 | (511 << 14)) >>> 0, 21)
+  return bytes
+}
+
+function indexGet (port, url) {
+  return mediaRequest(port, url).then((r) => {
+    let json = null
+    try { json = JSON.parse(b4a.toString(r.body)) } catch {}
+    return { status: r.status, json }
+  })
+}
+
+test('avatar: profile.set pair -> real seeder: /media bytes, /index/member and /index/search, the plain block for old readers', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { seeder, events, port, url } = await seederStack(t, bootstrap, assoc)
+  const internal = []
+  const node = browserNode(t, { storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, internal })
+  const mediaPair = crypto.keyPair()
+  const mediaKey = hex(mediaPair.publicKey)
+  await node.setKeyPair(crypto.keyPair(), { media: mediaPair })
+  const web = await connectClient(node, { timeoutMs: 60000 })
+  const { publicKey: webKey } = await web.request('identity.create')
+  await web.request('cert.add', { cert: createCert({ member: webKey }, assoc.kp) })
+
+  const bytes = webp512(40000)
+  const avatar = await node.mediaUpload({ bytes, mime: 'image/webp', width: 512, height: 512 })
+  t.is(avatar.blocks, 2)
+  const set = await web.request('profile.set', { name: 'Bia Avatar', bio: 'oi', avatar })
+  t.alike(set, { seq: 3, ref: webKey + ':3' }, 'the second block of the pair (cert, media-core, plain, avatar)')
+
+  await web.request('sync.start', {})
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === mediaKey), { name: 'media-admitted', timeoutMs: 60000 })
+  const read = await until(() => seeder.mediaRead(webKey, mediaKey, avatar.start, avatar.blocks), { name: 'every avatar block at the seeder', timeoutMs: 60000 })
+  if (read.blocks.return) await read.blocks.return()
+  const got = await mediaRequest(port, '/media/' + webKey + '/' + mediaKey + '/' + avatar.start + '/' + avatar.blocks)
+  t.is(got.status, 200, 'GET /media 200')
+  t.ok(b4a.equals(got.body, bytes), 'the avatar bytes')
+
+  const member = await until(async () => {
+    const r = await indexGet(port, '/index/member/' + webKey)
+    return r.status === 200 && r.json.profileSeq === 3 ? r.json : null
+  }, { name: 'index/member', timeoutMs: 60000 })
+  t.is(member.profileSeq, set.seq, 'profileSeq is the second block of the pair')
+  const search = await until(async () => {
+    const r = await indexGet(port, '/index/search/bia')
+    return r.status === 200 && r.json.members.some((m) => m.author === webKey) ? r.json : null
+  }, { name: 'index/search', timeoutMs: 60000 })
+  t.is(search.members.find((m) => m.author === webKey).profileSeq, 3, 'found by name')
+
+  // The seeder's copy: a 4-key-only reader skips the avatar block and
+  // reads the same name and bio from the plain one.
+  const core = seeder._served.get(webKey).core
+  const blocks = []
+  for (let i = 0; i < core.length; i++) blocks.push(JSON.parse(b4a.toString(await core.get(i, { valueEncoding: 'binary' }))))
+  t.is(blocks.length, 4)
+  const oldProfiles = blocks.filter((r) => r.type === 'profile' && Object.keys(r).length === 4)
+  t.is(oldProfiles.length, 1, 'one plain profile block')
+  t.alike(Object.keys(oldProfiles[0]).sort(), ['at', 'bio', 'name', 'type'])
+  t.alike([oldProfiles[0].name, oldProfiles[0].bio], ['Bia Avatar', 'oi'])
+  t.alike(blocks[3].avatar, avatar)
+  t.alike([blocks[3].name, blocks[3].bio], ['Bia Avatar', 'oi'])
+  t.is(validateRecord(blocks[2], 2), null)
+  t.is(validateRecord(blocks[3], 3), null)
+
+  await web.request('sync.stop')
+  t.alike(internal, [], 'no internal error')
 })

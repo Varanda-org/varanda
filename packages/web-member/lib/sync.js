@@ -1369,7 +1369,7 @@ async function runSync ({
       entries,
       invalid,
       missing,
-      profile: profile !== null && profile.type === 'profile' ? { name: profile.name, bio: profile.bio } : null,
+      profile: profile !== null && profile.type === 'profile' ? { name: profile.name, bio: profile.bio, avatar: profile.avatar === undefined ? null : profile.avatar } : null,
       username: username !== null && username.type === 'username' && verifyUsernameRecord(username, key, association, gateOpts()).ok
         ? username.username
         : null

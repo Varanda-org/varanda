@@ -2,9 +2,10 @@
 
 // Web: lets the person choose photos and GIFs from their own files. A hidden
 // <input type=file> is created on demand for each pick and removed when the
-// pick ends (change or cancel); no global listener is ever kept. Resolves
-// with the chosen File objects ([] when cancelled). If the browser fires
-// neither event, the next pick removes the stale input first.
+// pick ends (change or cancel); no global listener is ever kept. pickImages
+// resolves with the chosen File objects ([] when cancelled); pickImage with
+// one File (null when cancelled). If the browser fires neither event, the
+// next pick removes the stale input first.
 
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 
@@ -15,13 +16,13 @@ function drop (input) {
   if (current === input) current = null
 }
 
-export function pickImages () {
+function pick (multiple) {
   if (current) drop(current)
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = ACCEPT
-    input.multiple = true
+    input.multiple = multiple
     input.style.display = 'none'
     input.setAttribute('aria-hidden', 'true')
     let settled = false
@@ -42,4 +43,13 @@ export function pickImages () {
     document.body.appendChild(input)
     input.click()
   })
+}
+
+export function pickImages () {
+  return pick(true)
+}
+
+export async function pickImage () {
+  const files = await pick(false)
+  return files[0] || null
 }

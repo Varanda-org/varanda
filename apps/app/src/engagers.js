@@ -6,6 +6,7 @@
 
 import { isValidUsername } from './who.js'
 import { isRef } from './nav.js'
+import { avatarOf } from './media/avatar.js'
 
 export const KINDS = Object.freeze(['likes', 'reposts'])
 
@@ -76,7 +77,8 @@ export function confirmEngagers (opts) {
       author: ref.author,
       seq: ref.seq,
       name: isPlain(peek.profile) && typeof peek.profile.name === 'string' ? peek.profile.name : null,
-      username: isValidUsername(peek.username) ? peek.username : null
+      username: isValidUsername(peek.username) ? peek.username : null,
+      avatar: isPlain(peek.profile) ? avatarOf(peek.profile.avatar) : null
     })
   }
   return { rows, unconfirmed: malformed + missing.size }

@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 1
-export const LEGAL_DATE = '27/10/2026'
-export const REVIEW_NOTE = 'Versão 1, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const LEGAL_VERSION = 2
+export const LEGAL_DATE = '28/10/2026'
+export const REVIEW_NOTE = 'Versão 2, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -61,7 +61,7 @@ export const TERMS = {
     {
       heading: 'Fotos e recursos planejados',
       paragraphs: [
-        'A mídia aceita nesta etapa é só imagem: fotos e GIFs, pela web hospedada. Vídeos não são aceitos. A comparação com listas de hashes de mídia ilegal é planejada e ainda não existe. Hoje, denúncias e bloqueio da conta são os meios de moderação dessas imagens.',
+        'A mídia aceita nesta etapa é só imagem, pela web hospedada: fotos e GIFs nas publicações e a foto do perfil. A foto do perfil é sempre uma imagem parada e quadrada; um GIF escolhido para ela vira imagem parada. Vídeos não são aceitos. A comparação com listas de hashes de mídia ilegal é planejada e ainda não existe. Hoje, denúncias e bloqueio da conta são os meios de moderação dessas imagens. Uma foto de perfil imprópria se denuncia pela conta toda, e essa denúncia sempre é decidida por uma pessoa.',
         'Mensagens diretas e notificações push são planejadas. Os avisos atuais aparecem dentro do app aberto, sem push.'
       ]
     },
@@ -96,8 +96,8 @@ export const PRIVACY = {
     {
       heading: 'Diário, perfil e fotos',
       paragraphs: [
-        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário.',
-        'Na Espiadinha, os diários espiados ficam só na memória do navegador. Recarregar descarta essas cópias. No nó, a cópia guardada vale por até 5 minutos.',
+        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário. A foto do perfil é pública, como o nome e a bio. Antes do envio, o app recorta a foto em quadrado, reduz para 512 por 512 pixels e grava de novo, o que remove dados como a localização (GPS) e o modelo da câmera.',
+        'Na Espiadinha, os diários espiados ficam só na memória do navegador. Recarregar descarta essas cópias. No nó, a cópia guardada vale por até 5 minutos. As fotos de perfil de quem você não segue também ficam só na memória do navegador, sem cópia guardada.',
         'Seu nome e seu @nome podem aparecer na busca do semeador. O índice guarda só tokens dobrados, ou seja, partes dos nomes normalizadas para a busca, em memória. O índice some ao reiniciar o semeador. Ainda não há opção de sair dessa busca.'
       ]
     },
@@ -146,7 +146,7 @@ export const PRIVACY = {
       heading: 'Por quanto tempo',
       paragraphs: [
         'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, as decisões e os precedentes de triagem. Denúncias e decisões não são apagadas automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite.',
-        'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Porém, apagar publicações ainda não está disponível no app. A retenção das cópias também depende dos limites da rede P2P.',
+        'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Porém, apagar publicações ainda não está disponível no app. A retenção das cópias também depende dos limites da rede P2P. Tirar a foto do perfil só deixa de mostrá-la; a foto já enviada continua gravada na rede.',
         'As cópias da Espiadinha e o índice de nomes têm os limites de memória descritos acima. Esses limites não apagam as réplicas normais dos diários no semeador. Para registros de acesso, o prazo proposto é de 6 meses, se aplicável.'
       ]
     },
@@ -162,7 +162,7 @@ export const PRIVACY = {
       heading: 'Seus direitos e os limites do P2P',
       paragraphs: [
         'O Art. 18 trata de direitos sobre seus dados, como acesso, portabilidade, correção e eliminação. Seu diário já fica no seu aparelho. A exclusão e a portabilidade dos dados do vínculo Google dependem do serviço de conta, não só do diário.',
-        'Você pode mudar o nome e a bio do perfil. Para o @nome, vale o intervalo de 7 dias, e um nome usado nunca vai para outra pessoa. O fluxo de corrigir uma publicação e o pedido assinado para apagá-la são planejados; apagar publicações ainda não está disponível no app.',
+        'Você pode mudar o nome, a bio e a foto do perfil, e tirar a foto quando quiser. Tirar a foto faz o app deixar de mostrá-la, mas a foto já enviada continua gravada na rede, como as fotos das publicações, e quem já tem uma cópia pode mantê-la. Para o @nome, vale o intervalo de 7 dias, e um nome usado nunca vai para outra pessoa. O fluxo de corrigir uma publicação e o pedido assinado para apagá-la são planejados; apagar publicações ainda não está disponível no app.',
         'O bloqueio da chave faz os semeadores e apps atualizados que obedecem à lista apagarem e recusarem o diário. Não revoga o certificado individual e não apaga o diário do aparelho do autor. Não é possível garantir a eliminação de cópias em apps modificados ou aparelhos que ignoram a lista.',
         'Hoje não há um canal para pedidos sobre seus dados além do que o app já faz. Não existe exclusão de conta por conta própria: a conta é excluída bloqueando a chave pública na lista de moderação, e cópias em apps modificados não podem ser garantidas. O canal privado para exercer seus direitos será publicado com o encarregado. Nunca envie dados pessoais por uma issue pública.'
       ]

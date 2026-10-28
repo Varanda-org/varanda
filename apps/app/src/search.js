@@ -1,8 +1,8 @@
 // Account search in the app (find people by display name or verified @nome):
 // the search text helpers, the diary.peek plan for the seeder's search
 // results, and the verification step that turns peeks into result rows.
-// Pure ES module: no React, no Node built-ins and no imports, so Metro
-// bundles it and Node's import() loads it in tests.
+// Pure ES module: no React, no Node built-ins and only pure app imports, so
+// Metro bundles it and Node's import() loads it in tests.
 //
 // The search text part (TOKEN_MAX .. searchRank) is a verbatim local copy of
 // @varanda/core lib/search-text.js (Metro cannot reach packages/core), pinned
@@ -11,6 +11,8 @@
 // The seeder's search answer is UNTRUSTED: it only says where to look. A row
 // exists only after diary.peek confirms it: the name comes from the peeked
 // profile and the @nome only from the peeked, verified username field.
+
+import { avatarOf } from './media/avatar.js'
 
 export const TOKEN_MAX = 20
 export const NAME_TOKENS_MAX = 16
@@ -300,9 +302,10 @@ export function confirmedHits (qTokens, members, peeked, ownKey) {
       const profile = isPlainObject(peek.profile) ? peek.profile : null
       const name = profile !== null && typeof profile.name === 'string' ? profile.name : null
       const username = isValidUsername(peek.username) ? peek.username : null
+      const avatar = profile !== null && name !== null ? avatarOf(profile.avatar) : null
       const rank = searchRank(qTokens, foldTokens(name || ''), username)
       if (rank >= 0) {
-        ranked.push({ rank, i, hit: { author, name, username } })
+        ranked.push({ rank, i, hit: { author, name, username, avatar } })
       } else {
         out.dropped++
       }

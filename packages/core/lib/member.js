@@ -51,6 +51,8 @@ const { UsageError } = require('./errors')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
+const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+const PROFILE_PHOTO_WEB_ONLY = 'perfil com foto: mude o nome e a bio na versão web ou tire a foto'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const USERNAME_RECORD_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
@@ -247,9 +249,10 @@ function buildRecord (make) {
   }
 }
 
-async function publish (ctx, record) {
+async function publish (ctx, record, check = null) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (check !== null) await check({ diary, ownHex })
     try {
       const seq = await appendRecord(diary, record)
       return { seq, ref: formatRef({ author: ownHex, seq }) }
@@ -260,9 +263,19 @@ async function publish (ctx, record) {
   })
 }
 
-async function profileSet (ctx, { name, bio }) {
+// Only the browser node writes media cores, so here a photo can only be
+// removed (avatar null). Keeping it requires re-sending its descriptor, which
+// the profile.set caller does not hold: a plain name/bio change would drop
+// the photo, so it is refused instead.
+async function profileSet (ctx, { name, bio, avatar }) {
+  if (avatar !== undefined && avatar !== null) throw new UsageError(MEDIA_WEB_ONLY)
   const record = buildRecord(() => profileRecord({ name, bio: bio || '' }))
-  const { seq } = await publish(ctx, record)
+  const check = avatar === null
+    ? null
+    : async ({ diary }) => {
+      if ((latestProfile(await readAll(diary)) || {}).avatar != null) throw new UsageError(PROFILE_PHOTO_WEB_ONLY)
+    }
+  const { seq } = await publish(ctx, record, check)
   return { seq }
 }
 
@@ -578,6 +591,7 @@ async function profileRead (ctx, { authors }) {
         author: key,
         name: profile === null ? null : profile.name,
         bio: profile === null ? null : profile.bio,
+        avatar: profile === null ? null : profile.avatar,
         username: latestUsername(entries, key, association, { revokedIssuers })
       })
     }
@@ -586,6 +600,7 @@ async function profileRead (ctx, { authors }) {
 }
 
 module.exports = {
+  PROFILE_PHOTO_WEB_ONLY,
   GENESIS_REQUIRED,
   BAD_USERNAME_RECORD,
   BLOCKED_AUTHOR,

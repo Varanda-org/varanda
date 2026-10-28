@@ -489,7 +489,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               )
             : null}
           <View style={styles.compose}>
-            <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} />
+            <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} picture={self.avatar} persist />
             <TextInput
               style={styles.input}
               value={text}

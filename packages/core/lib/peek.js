@@ -94,7 +94,7 @@ function retainRecords (entries) {
 
 // Never throws on peer data, including hostile getters and proxies.
 function diaryPeek (input) {
-  const result = { reason: 'not-in-log', name: null, username: null, posts: [], future: 0, scanned: false, capped: false }
+  const result = { reason: 'not-in-log', name: null, avatar: null, username: null, posts: [], future: 0, scanned: false, capped: false }
   try {
     const { key, length, entries, fetched, association, revokedIssuers, now = Date.now() } = input
     if (!Number.isSafeInteger(length) || length < 1) return result
@@ -109,7 +109,9 @@ function diaryPeek (input) {
       const verdict = certForKey(first.record.cert, key, association, { revokedIssuers })
       result.reason = verdict.ok ? null : verdict.reason
     }
-    result.name = (latestProfile(copies) || {}).name || null
+    const profile = latestProfile(copies) || {}
+    result.name = profile.name || null
+    result.avatar = profile.avatar || null
     result.username = latestUsername(copies, key, association, { revokedIssuers })
     const tail = copies.filter(({ seq }) => seq >= floor && seq < length)
     for (const { seq, record: post } of tail) {
@@ -174,23 +176,23 @@ function buildPeekPage ({ diaries, limit, after = null }) {
   const needs = new Set()
   for (let round = cursor === null ? 0 : cursor.round; round < PEEK_MAX_ROUNDS; round++) {
     const slots = []
-    for (const { key, name, username, posts, exhausted } of diaries) {
+    for (const { key, name, avatar = null, username, posts, exhausted } of diaries) {
       const post = posts[round]
       if (!post) {
         if (!exhausted) needs.add(key)
         continue
       }
       const { seq, at } = post
-      // A FeedItem (lib/feed.js), plus round.
+      // A FeedItem (lib/feed.js), plus round and avatar.
       let item
       if (post.kind === 'repost') {
         const to = { author: post.to.author, seq: post.to.seq }
-        item = { kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
+        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
       } else {
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, username, seq, at, text: post.text, replyTo, quote, media, round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, round }
       }
       if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
     }

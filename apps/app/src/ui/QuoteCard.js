@@ -40,7 +40,7 @@ export function QuoteCard ({ quote, now }) {
         : (
           <>
             <View style={styles.head}>
-              {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} /> : null}
+              {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /> : null}
               <Text style={styles.name} numberOfLines={1}>{title}</Text>
               {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
             </View>

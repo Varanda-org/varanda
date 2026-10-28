@@ -264,6 +264,40 @@ test('mediaUpload stores the item, declares the core once, and a post carries th
   t.alike(s.internal, [], 'no internal error')
 })
 
+// A synthetic still WebP: one VP8L chunk with a 512x512 header, then filler.
+function webp512 () {
+  const bytes = b4a.alloc(2000)
+  bytes.write('RIFF', 0, 'latin1')
+  bytes.writeUInt32LE(bytes.length - 8, 4)
+  bytes.write('WEBPVP8L', 8, 'latin1')
+  bytes.writeUInt32LE(bytes.length - 20, 16)
+  bytes[20] = 0x2f
+  bytes.writeUInt32LE((511 | (511 << 14)) >>> 0, 21)
+  for (let i = 25; i < bytes.length; i++) bytes[i] = (i * 13) & 0xff
+  return bytes
+}
+
+test('profile.set with an uploaded avatar returns the second block of the pair; profile.read returns it', async (t) => {
+  await testnet(t, 1)
+  const s = await certified(t)
+  const avatar = await upload(s.node, webp512(), { mime: 'image/webp', width: 512, height: 512 })
+  t.is((await s.web.request('log.read', {})).entries.length, 2, 'cert and the media-core declaration')
+  t.alike(await s.web.request('profile.set', { name: 'Bia', avatar }), { seq: 3, ref: s.key + ':3' })
+  const log = await s.web.request('log.read', {})
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2, 3])
+  t.absent('avatar' in log.entries[2].record, 'the plain block first')
+  t.alike(log.entries[3].record.avatar, avatar)
+  const read = await s.web.request('profile.read', { authors: [s.key] })
+  t.alike(read.profiles[0].avatar, avatar)
+  t.is(read.profiles[0].name, 'Bia')
+
+  const other = await upload(s.node, image(2000, 4).bytes, { mime: 'image/webp', width: 512, height: 512 })
+  const err = await errorOf(s.web.request('profile.set', { name: 'Bia', avatar: other }))
+  t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], 'bytes that are not a still image')
+  t.is((await s.web.request('log.read', {})).entries.length, 4, 'nothing appended')
+  t.alike(s.internal, [], 'no internal error')
+})
+
 test('an upload the write gate refuses stores nothing; the retry declares once and appends once', async (t) => {
   await testnet(t, 1)
   const storage = memoryNodeStorage()

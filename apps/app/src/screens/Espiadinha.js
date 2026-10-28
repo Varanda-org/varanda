@@ -489,6 +489,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     return (
       <Busca
         query={query}
+        avatarOf={profileOf}
         header={<View style={styles.searchTop}>{searchBox}</View>}
         ownKey={ownKey}
         active={active}

@@ -521,9 +521,11 @@ function createSession ({
       throw new UsageError('avisos disponíveis só no navegador')
     }),
 
-    'profile.set': serial(async ({ name, bio }) => {
+    // A photo lives in a media core only the browser node writes.
+    'profile.set': serial(async ({ name, bio, avatar }) => {
+      if (avatar !== undefined && avatar !== null) throw new UsageError(MEDIA_WEB_ONLY)
       const own = await requireOwnKey()
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))
+      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
       return { seq, ref: own + ':' + seq }
     }),
 
