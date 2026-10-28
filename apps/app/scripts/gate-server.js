@@ -1,7 +1,8 @@
 'use strict'
 
-// The iOS worklet gate driver (docs/ios-gate.md), run on the Mac:
-//   node scripts/gate-server.js [--port 8790] [--device booted] [--bundle-id app.varanda] [--no-launch]
+// The worklet gate driver (docs/ios-gate.md), run on the host of the iOS
+// simulator or the Android emulator:
+//   node scripts/gate-server.js [--platform ios|android] [--host <ip>] [--port 8790] [--device booted] [--bundle-id app.varanda] [--no-launch]
 // Starts a loopback hyperdht testnet, an association, a certified seeder and
 // a CLI-equivalent member peer (the same core session the CLI and
 // varanda-serve use) with one post, then serves the app's gate harness
@@ -10,8 +11,12 @@
 //   GET  /config  -> { runId, association, bootstrap, peerKey, peerPost, phase }
 //   POST /certify { publicKey } -> { cert }  (a member certificate)
 //   POST /report  { step, ok, detail }
-// and drives the simulator with xcrun simctl (terminate/launch for the kill
-// step, another app then the varanda:// URL for background/resume). Prints
+// and drives the device with xcrun simctl on iOS or adb on Android
+// (terminate/launch for the kill step, another app then the varanda:// URL
+// for background/resume). On Android it also runs adb reverse for the port,
+// and puts the testnet and the seeder on --host (default: this machine's
+// first non-loopback IPv4 address), because the emulator's 127.0.0.1 is the
+// emulator itself while the simulator shares the Mac's loopback. Prints
 // every step, then `GATE OK` when steps a-i all passed, else
 // `GATE FAIL <step>: <detail>`; exit code 0 / 1.
 
@@ -22,6 +27,22 @@ const http = require('http')
 const { execFileSync } = require('child_process')
 
 const corePkg = path.dirname(require.resolve('@varanda/core/package.json'))
+
+// lib/net.js createSwarm keeps hyperdht's firewall probing on for a DHT bound
+// to a non-loopback host, so the seeder and the CLI peer would ask the app to
+// hole-punch through the emulator's NAT, which fails (PEER_CONNECTION_FAILED).
+// The gate's nodes are all directly reachable, so with --host on Android the
+// driver turns probing off. It wraps hyperdht before the core is loaded.
+let dhtFirewalled = true
+const hyperdhtPath = require.resolve('hyperdht', { paths: [corePkg] })
+const HyperDHT = require(hyperdhtPath)
+class GateDHT extends HyperDHT {
+  constructor (opts) {
+    super(dhtFirewalled ? opts : { ...opts, firewalled: false })
+  }
+}
+require.cache[hyperdhtPath].exports = GateDHT
+
 const createTestnet = require(require.resolve('hyperdht/testnet', { paths: [corePkg] }))
 const { initAssociation, issueCertificate, issueSeederCertificate } = require('@varanda/core/lib/assoc')
 const { Seeder } = require('@varanda/core/lib/seeder')
@@ -45,17 +66,30 @@ const PEER_POST = 'post do par CLI (gate)'
 const TOTAL_TIMEOUT_MS = 15 * 60 * 1000
 
 function parseArgs (argv) {
-  const opts = { port: 8790, device: 'booted', bundleId: 'app.varanda', launch: true }
+  const opts = { platform: 'ios', host: null, port: 8790, device: 'booted', bundleId: null, launch: true }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--port') opts.port = Number(argv[++i])
+    if (a === '--platform') opts.platform = argv[++i]
+    else if (a === '--host') opts.host = argv[++i]
+    else if (a === '--port') opts.port = Number(argv[++i])
     else if (a === '--device') opts.device = argv[++i]
     else if (a === '--bundle-id') opts.bundleId = argv[++i]
     else if (a === '--no-launch') opts.launch = false
     else throw new Error('unknown argument: ' + a)
   }
+  if (opts.platform !== 'ios' && opts.platform !== 'android') throw new Error('invalid --platform')
+  // The Android debug build has the .debug application ID suffix (android/app/build.gradle).
+  if (opts.host === null) opts.host = opts.platform === 'android' ? lanAddress() : '127.0.0.1'
+  if (opts.bundleId === null) opts.bundleId = opts.platform === 'android' ? 'app.varanda.debug' : 'app.varanda'
   if (!Number.isInteger(opts.port) || opts.port <= 0 || opts.port > 65535) throw new Error('invalid --port')
   return opts
+}
+
+function lanAddress () {
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) if (a.family === 'IPv4' && !a.internal) return a.address
+  }
+  throw new Error('no non-loopback IPv4 address; pass --host')
 }
 
 function log (line) {
@@ -64,15 +98,57 @@ function log (line) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function simctl (...args) {
-  return execFileSync('xcrun', ['simctl', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+function run (cmd, args) {
+  return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-function trySimctl (...args) {
+function attempt (fn) {
   try {
-    return simctl(...args)
+    return fn()
   } catch (err) {
     return null
+  }
+}
+
+// What the driver does to the app on the device. The data dir lives under
+// Documents on iOS (read from the host through the simulator container) and
+// under the app's files dir on Android (read through run-as, which a debug
+// build allows).
+function iosDevice ({ device, bundleId }) {
+  const simctl = (...args) => run('xcrun', ['simctl', ...args])
+  return {
+    name: 'xcrun simctl',
+    setup () {},
+    teardown () {},
+    launch: () => simctl('launch', device, bundleId),
+    terminate: () => simctl('terminate', device, bundleId),
+    background: () => simctl('launch', device, 'com.apple.Preferences'),
+    foreground: () => simctl('openurl', device, 'varanda://'),
+    lock (runId) {
+      const dir = attempt(() => simctl('get_app_container', device, bundleId, 'data'))
+      if (dir === null) return null
+      const file = path.join(dir, 'Documents', 'varanda-gate-' + runId, '.varanda-lock')
+      return { file, held: () => fs.existsSync(file) }
+    }
+  }
+}
+
+function androidDevice ({ device, bundleId, port }) {
+  const adb = (...args) => run('adb', [...(device === 'booted' ? [] : ['-s', device]), ...args])
+  return {
+    name: 'adb',
+    // The emulator's 127.0.0.1 is the emulator itself: reverse the port so the
+    // app reaches the driver on the same URL as on iOS.
+    setup: () => adb('reverse', 'tcp:' + port, 'tcp:' + port),
+    teardown: () => attempt(() => adb('reverse', '--remove', 'tcp:' + port)),
+    launch: () => adb('shell', 'monkey', '-p', bundleId, '-c', 'android.intent.category.LAUNCHER', '1'),
+    terminate: () => adb('shell', 'am', 'force-stop', bundleId),
+    background: () => adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'),
+    foreground: () => adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'varanda://', bundleId),
+    lock (runId) {
+      const file = 'files/varanda-gate-' + runId + '/.varanda-lock'
+      return { file, held: () => attempt(() => adb('shell', 'run-as', bundleId, 'test', '-e', file)) !== null }
+    }
   }
 }
 
@@ -140,6 +216,7 @@ async function main () {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-gate-'))
   const runId = Date.now().toString(36)
   const cleanups = []
+  const device = (opts.platform === 'android' ? androidDevice : iosDevice)(opts)
   const results = new Map()
   let phase = 'fresh'
   let appKey = null
@@ -148,10 +225,11 @@ async function main () {
 
   log('run ' + runId + ', work dir ' + root)
 
-  const testnet = await createTestnet(3)
+  dhtFirewalled = opts.platform !== 'android'
+  const testnet = await createTestnet(3, { host: opts.host })
   cleanups.push(() => testnet.destroy())
   const bootstrap = testnet.bootstrap.map(({ host, port }) => {
-    const h = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host
+    const h = host === '0.0.0.0' || host === '::' ? opts.host : host
     return h + ':' + port
   })
   log('testnet bootstrap ' + bootstrap.join(','))
@@ -166,7 +244,7 @@ async function main () {
   const seederCertFile = path.join(root, 'seeder-cert.json')
   fs.writeFileSync(seederCertFile, JSON.stringify(issueSeederCertificate(assocDir, { seeder: seederKey })))
   Seeder.addCert(seedDir, seederCertFile, association)
-  const seeder = new Seeder({ dataDir: seedDir, bootstrap, host: '127.0.0.1' })
+  const seeder = new Seeder({ dataDir: seedDir, bootstrap, host: opts.host })
   await seeder.start()
   cleanups.push(() => seeder.close())
   log('certified seeder ' + seederKey.slice(0, 8) + ' started')
@@ -191,13 +269,9 @@ async function main () {
     if (!ok) resolveDone()
   }
 
-  function container () {
-    return trySimctl('get_app_container', opts.device, opts.bundleId, 'data')
-  }
-
   function launchApp () {
-    trySimctl('terminate', opts.device, opts.bundleId)
-    simctl('launch', opts.device, opts.bundleId)
+    attempt(() => device.terminate())
+    device.launch()
   }
 
   // After the app's step f: the CLI peer follows the app, syncs once through
@@ -224,24 +298,22 @@ async function main () {
     log('app: ' + step + ' ' + (ok ? 'ok' : 'failed') + ': ' + detail)
     if (!ok) return record(step, false, detail)
     if (step === 'ready:kill') {
-      const dir = container()
-      const lock = dir === null ? null : path.join(dir, 'Documents', 'varanda-gate-' + runId, '.varanda-lock')
-      const held = lock !== null && fs.existsSync(lock)
-      log('data-dir lock before the kill: ' + (held ? 'present' : 'absent') + (lock ? ' (' + lock + ')' : ''))
+      const lock = device.lock(runId)
+      log('data-dir lock before the kill: ' + (lock !== null && lock.held() ? 'present' : 'absent') + (lock ? ' (' + lock.file + ')' : ''))
       phase = 'relaunched'
-      simctl('terminate', opts.device, opts.bundleId)
-      log('app terminated (xcrun simctl terminate); lock after the kill: ' + (lock !== null && fs.existsSync(lock) ? 'present' : 'absent'))
+      device.terminate()
+      log('app terminated (' + device.name + '); lock after the kill: ' + (lock !== null && lock.held() ? 'present' : 'absent'))
       await sleep(1500)
-      simctl('launch', opts.device, opts.bundleId)
+      device.launch()
       log('app relaunched')
     } else if (step === 'ready:background') {
       if (cliCheck !== null) await cliCheck
       if (results.has('f') && !results.get('f').ok) return
       await sleep(1000)
-      simctl('launch', opts.device, 'com.apple.Preferences')
-      log('app sent to the background (Settings launched)')
+      device.background()
+      log('app sent to the background')
       await sleep(5000)
-      simctl('openurl', opts.device, 'varanda://')
+      device.foreground()
       log('app brought back to the foreground (varanda:// URL)')
     } else if (step === 'done') {
       phase = 'done'
@@ -279,6 +351,8 @@ async function main () {
     })
   })
   await new Promise((resolve) => server.listen(opts.port, '127.0.0.1', resolve))
+  device.setup()
+  cleanups.push(() => device.teardown())
   cleanups.push(() => new Promise((resolve) => server.close(resolve)))
   log('listening on http://127.0.0.1:' + opts.port + ' (build the app with EXPO_PUBLIC_VARANDA_GATE_URL=http://127.0.0.1:' + opts.port + ')')
 

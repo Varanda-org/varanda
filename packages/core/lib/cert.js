@@ -4,6 +4,7 @@ const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const { linkNew } = require('./link-new')
 
 const LF = '\n'
 const MEMBER_PREFIX = 'varanda-cert-v1'
@@ -557,7 +558,7 @@ function saveKeyPairFile (file, kp, { overwrite = false } = {}) {
       return
     }
     try {
-      fs.linkSync(tmp, file)
+      linkNew(tmp, file)
     } catch (err) {
       if (err.code === 'EEXIST') {
         const exists = new Error('arquivo de chave já existe')
