@@ -2074,30 +2074,37 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 
 ### Summary
 
-- User report: the person's own reply showed in A Rua and also in their own Espiadinha. Decision, quoted from the owner: "eu nao vejo os meus mas outros veem os meus posts ou interracoes". So the own diary is no longer an Espiadinha candidate for its owner (their publications, replies, quotes and reposts are already in A Rua), while a person who does not follow them still sees that diary in their own Espiadinha, including a stranger's repost of one of their posts. This reverts section 19.
-- The rule text returns to the pre-section-19 sentence, without "o seu incluído" (`PEEK_RULE`, `packages/core/lib/peek.js`). `peekCandidates` and `createPeeker` take a required `ownKey` again, supplied by the session from its cached key.
+- User report: the person's own reply showed in A Rua and also in their own Espiadinha. Decision, quoted from the owner: "eu nao vejo os meus mas outros veem os meus posts ou interracoes". So the person never sees their own publications, replies, quotes and reposts in their own Espiadinha (they are already in A Rua), while a person who does not follow them still sees that diary in their own Espiadinha, including a stranger's repost of one of their posts. This reverts section 19.
+- The rule text returns to the pre-section-19 sentence, without "o seu incluído" (`PEEK_RULE`, `packages/core/lib/peek.js`). The own diary stays a candidate and is fetched over the anonymous link like any other, so the link keeps requesting the complement of the follows and the blocklist; `buildPeekPage({ hidden })` pages it exactly as if shown (same rounds, `needs`, windows and cursor) and removes its items only from the page returned to its owner, so a non-last page may hold up to 3 fewer items than `limit`. It is counted in neither `diaries` nor `skipped` nor the failed/capped `incomplete` warning. `peekCandidates` is back to `{ inventory, follows, blocked }`; `createPeeker` requires the `ownKey` getter and the session passes a cache-only getter.
 - The "carregar mais" delay is out of scope. Topic search, A Rua, `feed.read` and `diary.peek` are unchanged.
 - Files: `packages/core/lib/peek.js` and `packages/core/test/peek.test.js`; `packages/web-member/lib/peek.js`, `packages/web-member/lib/session.js` and the tests `peek.test.js`, `peek-repost.test.js`, `frame-guard-client.test.js` and `peek-capacity.test.js`; `apps/app/src/peek.js`, `apps/app/src/screens/Espiadinha.js` and `apps/app/test/peek.test.js`; docs `docs/rpc.md`, `docs/protocol.md`, `docs/design.md`, `docs/app.md` and `apps/site/artwork/app-design.md`.
 
 ### Automated (CI)
 
-CI result on the final tree, Node v24.22.1 (run from the worktree root). Node 20 (the other version in `.github/workflows/ci.yml`) was NOT run locally.
+CI result on the final tree (rebased on main 60282a6), Node v24.22.1 (run from the worktree root). Node 20 (the other version in `.github/workflows/ci.yml`) was NOT run locally.
 
 - `npm ci --ignore-scripts`: ok.
 - `npm run lint`: clean (`standard`), exit 0.
-- `npm test` (all workspaces): 160 test files, 0 failures (core 38, rpc 8, web-member 31, app 38, cli 43, site 2).
+- `npm test` (all workspaces): 168 test files, 0 failures (core 39, rpc 8, web-member 31, app 45, cli 43, site 2).
 - `npm run demo`: DEMO OK.
-- `node packages/core/test/peek.test.js`: 26 tests, 858 asserts, all pass.
-- `node packages/web-member/test/peek.test.js`: 32 tests, 318 asserts, all pass.
-- `node packages/web-member/test/peek-repost.test.js`: 8 tests, 66 asserts, all pass.
+- `node packages/core/test/peek.test.js`: 32 tests, 923 asserts, all pass.
+- `node packages/web-member/test/peek.test.js`: 34 tests, about 335 asserts, all pass (the assert count of these network tests moves by a few between runs because of polling waits).
+- `node packages/web-member/test/peek-repost.test.js`: 9 tests, 69 asserts, all pass.
 - `node packages/web-member/test/frame-guard-client.test.js`: 8 tests, 34 asserts, all pass.
 - `node packages/web-member/test/peek-capacity.test.js`: 1 test, 43 asserts, passes.
 - `node apps/app/test/peek.test.js`: 14 tests, 76 asserts, all pass.
-- Regression proof: removing only `if (key === own) continue` from `packages/core/lib/peek.js` makes the core candidate test fail (25/26) and the two new web-member tests fail ("the own diary never shows in the own Espiadinha, but another member sees it" and "only the own diary advertised: an empty Espiadinha", 30/32); restored, all green.
+- Regression proofs: in `packages/core/test/peek.test.js`, "hiding a diary changes nothing but the returned items" generates 200 page configurations and checks, for every diary key in both cases, that `buildPeekPage({ hidden })` returns the same `needs` and `next` as without `hidden` and the same items minus that diary's; dropping the hidden diary before the page is cut instead makes it fail (620 mismatching pages, 29/32 tests). In `packages/web-member/test/peek.test.js`, "regression: the own diary is still requested over the peek link as cover" fails on the first version of this change, which left the own diary out of the candidates (33/34), and passes now; the two tests on the author's and another member's pages pass on both.
 - Reviews: one grok pass on the core change (its only finding, the web-member caller, was fixed in the next task as planned), then codex and grok passes on the web-member and app changes and on the docs, with no defects.
+
+### Security audit
+
+- Auditors: Claude (opus, with the audit brief), Claude built-in security review, GPT (gpt-6-astra) and Grok (grok-4.7).
+- No open findings.
+- Design note: the own diary is fetched and paged exactly as if shown, so the requests on the peek link do not depend on who is reading (see `docs/protocol.md` section 6).
 
 ### Human verification (none performed yet)
 
+- [ ] Hosted web, seeder log at debug: opening the Espiadinha requests the own diary's core like any other diary.
 - [ ] Hosted web: a reply by the signed-in person appears in A Rua and not in their Espiadinha rounds, also after 'atualizar'.
 - [ ] A second passkey that does not follow them sees that reply and their repost in its Espiadinha.
 - [ ] A stranger's repost of the person's post still shows to the person.

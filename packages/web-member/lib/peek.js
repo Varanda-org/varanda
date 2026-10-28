@@ -31,7 +31,9 @@
 // ./sync.js). Peer data never escapes lib/peek.js's copying readers.
 // PRIVACY: the link sends an empty inventory and no announce; it requests
 // the complement of the follow set, which the seeder already learns from
-// the sync link's inventory on the same IP; the seeder logs one `peer`
+// the sync link's inventory on the same IP; the own diary is part of what
+// is requested and only hidden from the page, so the request pattern does
+// not single the member out; the seeder logs one `peer`
 // event per link (lib/seeder.js _attachPeer) with an ephemeral Noise key;
 // nothing is stored anywhere, on any server or in this node's storage.
 // DATA FLOWS: browser memory only. The node keeps one snapshot for at most
@@ -176,8 +178,9 @@ async function pool (items, n, fn) {
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, maxFrame).
-// ownKey() returns the viewer's lowercase hex64 key or a Promise of it:
-// the viewer's diary is never a candidate of their own page.
+// ownKey() returns the viewer's lowercase hex64 key or a Promise of it: the
+// viewer's diary is fetched like any candidate (cover for the anonymous
+// link) and hidden from their own page.
 function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
@@ -338,12 +341,12 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     }
   }
 
-  async function buildSnapshot (run, { follows, blocked, ownKey: own }) {
+  async function buildSnapshot (run, { follows, blocked, own }) {
     const link = await openLink(run)
     checkAborted(run)
-    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked, ownKey: own })
+    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
     const order = shuffle(candidates.map(newDiary))
-    return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0 }
+    return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0, own }
   }
 
   // Keeps only what lib/peek.js retainRecords keeps and accounts its bytes.
@@ -583,12 +586,14 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       throw new UsageError('A lista expirou; atualize para continuar.')
     }
     if (first) {
-      const own = await ownKey()
+      const raw = await ownKey()
       checkAborted(run)
+      const own = typeof raw === 'string' ? raw.toLowerCase() : ''
+      if (!HEX64.test(own)) throw new TypeError('ownKey inválido')
       // The previous snapshot stays until this one exists: a failed refresh
       // must not strand the list on screen. Idle expiry, abort() and close()
       // still drop it.
-      const built = await buildSnapshot(run, { follows, blocked: mod.blocked, ownKey: own })
+      const built = await buildSnapshot(run, { follows, blocked: mod.blocked, own })
       checkAborted(run)
       snapshot = built
     }
@@ -600,7 +605,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     let incomplete = snap.incomplete
     let page
     while (true) {
-      page = buildPeekPage({ diaries: visible(snap), limit, after: cursor })
+      page = buildPeekPage({ diaries: visible(snap), limit, after: cursor, hidden: snap.own })
       if (page.needs.length === 0) break
       // A continuation needing no fetch opens no link; one needing fetches
       // opens a fresh one and reuses the cached blocks. A link destroyed by
@@ -622,7 +627,8 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         page = buildPeekPage({
           diaries: visible(snap).map((d) => (pending.has(d.key) ? { ...d, exhausted: true } : d)),
           limit,
-          after: cursor
+          after: cursor,
+          hidden: snap.own
         })
         break
       }
@@ -644,8 +650,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     }
     // A diary a block did not arrive for (block 0 included: skipped as
     // 'unavailable') or one capped before supplying its posts leaves the
-    // page incomplete, on every page of this snapshot.
-    for (const d of snap.order) {
+    // page incomplete, on every page of this snapshot. The own diary is only
+    // cover there: its failures never warn on its owner's page.
+    const shown = snap.order.filter((d) => d.key !== snap.own)
+    for (const d of shown) {
       if (d.failed || (d.reason === null && d.capped && d.posts.length < PEEK_MAX_ROUNDS)) incomplete = true
     }
     // A link cut by the frame guard never answers a complete page.
@@ -655,10 +663,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // oversized block) or a scan that ended before finding any post. A diary
     // with nothing to show (only a profile or likes, too short) and one
     // followed after this snapshot was built are not problems.
-    const skipped = snap.order.filter((d) =>
+    const skipped = shown.filter((d) =>
       (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short') ||
       (d.reason === null && d.posts.length === 0 && (d.capped || d.failed))).length
-    return { items: page.items, next: page.next, diaries: snap.order.length, skipped, incomplete }
+    return { items: page.items, next: page.next, diaries: shown.length, skipped, incomplete }
   }
 
   // -> { items, next, diaries, skipped, incomplete } (docs/rpc.md 5.22).

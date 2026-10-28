@@ -412,9 +412,9 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
-  // The node leaves the own diary out of the candidates; the guard stays so
-  // that no row offers 'seguir' before the own key is known (it could be the
-  // own one), and, as defence in depth, never on an own-key row.
+  // The node never returns the own diary's rows; the guard stays so that no
+  // row offers 'seguir' before the own key is known (it could be the own
+  // one), and, as defence in depth, never on an own-key row.
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
   const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
