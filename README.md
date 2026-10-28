@@ -402,7 +402,7 @@ Para quem mantém um semeador ligado: comandos de operação, saúde e métricas
 
 ### Comandos de operação
 
-`seed status` mostra a associação, a chave pública do semeador, o estado do certificado, quantos diários estão em `admitted.json`, se o semeador vai segurar admissões por falta de uma lista de bloqueio (linha `admissões: seguradas…`, só quando é o caso) e se algum processo segura o diretório. Não pega o lock, não abre o store e não grava nada: funciona com o semeador ligado ou parado, e sai com 0.
+`seed status` mostra a associação, a chave pública do semeador, o estado do certificado, quantos diários estão em `admitted.json`, se há uma lista de bloqueio ilegível guardada de lado e nenhuma verificada, caso em que a partida segura admissões (linha `admissões: seguradas…`, só quando é o caso; não prevê a primeira partida depois de um arquivo rasgado sem cópia) e se algum processo segura o diretório. Não pega o lock, não abre o store e não grava nada: funciona com o semeador ligado ou parado, e sai com 0.
 
 ```
 associação: <64 hex>

@@ -501,9 +501,9 @@ class Seeder {
     this._blocklistHandles = new Set()
     // True from a start whose blocklist.json was unreadable or missing with no
     // usable copy to fall back to (a list existed and is lost) until a
-    // verified snapshot is adopted: new admissions are refused meanwhile. A
-    // later start with the torn file still kept aside and no list holds again. In memory only: a restart
-    // before a snapshot arrives reads a plain absent file.
+    // verified snapshot is adopted: new admissions are refused meanwhile.
+    // Decided again at every start: a torn file kept aside by an earlier
+    // start and no verified list hold it again.
     this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
     // rebuilt from block 1 by the diary scan on every serve and never
