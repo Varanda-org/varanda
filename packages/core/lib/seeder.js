@@ -38,8 +38,8 @@
 // blocked diary leaves the index the moment its drop starts, and reads filter
 // out any author that is not served, gated and unblocked. Trust model: the
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
-// verify the content from the diaries themselves (indexPost, indexCounts,
-// indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+// verify the content from the diaries themselves (indexPost, indexEngagers,
+// indexCounts, indexMember back the /index routes of apps/cli/lib/seed-ws.js).
 //
 // Name index (lib/name-index.js): fed by the same scan, the folded tokens of
 // each served author's newest display name and its verified @nome. Like the
@@ -2115,6 +2115,35 @@ class Seeder {
       const page = this._index.post(authorHex + ':' + seq, cursor, (hex) => this._indexVisible(hex))
       if (page === null) return null
       return { ...page, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // The likers / reposters page of apps/cli/lib/seed-ws.js: who currently
+  // likes or reposts a post, newest first by each engager's own `at`, with a hint
+  // per listed engager; null for anything unknown (a kind other than likes
+  // or reposts, an author not visible, a post not indexed, a malformed
+  // cursor). As in indexTopic, an engager whose re-gate is pending
+  // (_searchHeld) is left out and the answer says complete false; a held
+  // target author answers null. `total` counts every engager currently on.
+  indexEngagers (kind, authorHex, seq, cursor = null) {
+    try {
+      if (kind !== 'likes' && kind !== 'reposts') return null
+      if (!this._indexVisible(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._index.engagers(authorHex + ':' + seq, kind, cursor, visible, Date.now())
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { ref: page.ref, kind: page.kind, items: page.items, next: page.next, total: page.total, authors: page.authors, indexing: flags.indexing, complete: flags.complete && !held }
     } catch {
       return null
     }

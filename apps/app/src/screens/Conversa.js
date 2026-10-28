@@ -312,7 +312,7 @@ export function identityOf (names, author, item) {
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onReply, onQuote, onReport } = handlers
+  const { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -352,6 +352,8 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     onOpenReposter: undefined,
     onReply: hasSeq && typeof onReply === 'function' ? () => onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
     onQuote: hasSeq && typeof onQuote === 'function' ? () => onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
+    onOpenLikes: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+    onOpenReposts: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
     onLike: eng && hasSeq ? () => eng.toggle('like', ref) : undefined,
     onRepost: eng && hasSeq ? () => eng.toggle('repost', ref) : undefined,
     onReport: reportable ? () => onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
@@ -405,7 +407,7 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onToast }) {
+export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenEngagers, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -534,7 +536,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     return () => { genRef.current += 1 }
   }, [full, load, loadFollows])
 
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
