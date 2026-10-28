@@ -43,7 +43,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {} }) {
               <Icon name={tab.icon} size={27} color={tint} />
               {badged && <View style={styles.dot} />}
             </View>
-            <Text style={[styles.label, { color: tint }, selected && styles.labelOn]} numberOfLines={1}>{tab.label}</Text>
+            <Text style={[styles.label, { color: tint }, selected && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={1.3}>{tab.label}</Text>
           </Pressable>
         )
       })}
