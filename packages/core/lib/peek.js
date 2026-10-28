@@ -6,9 +6,10 @@
 // diary means the publication with the highest seq (last written): a post,
 // a reply, a quote or a repost still in effect (likes are never shown).
 // Within a round, only the author's own `at` orders them, as in A Rua. The same
-// seeder inventory gives every member the same page except for their follows
-// and blocks (the own diary is a candidate too: the person sees their own
-// publications here); anyone can recompute it from hello inventory and diaries.
+// seeder inventory gives every member the same page except for their follows,
+// blocks and their own key: the own diary is left out of its owner's page
+// because those publications already live in A Rua, while it stays a candidate
+// in everyone else's. Anyone can recompute it from hello inventory and diaries.
 // Known limit: `at` is untrusted presentation data; a date up to 24 hours ahead
 // sorts first in its round, just as in A Rua.
 
@@ -28,13 +29,15 @@ const PEEK_PAGE_TIMEOUT_MS = 25000
 const PEEK_CONNECT_TIMEOUT_MS = 15000
 const PEEK_SNAPSHOT_TTL_MS = 300000
 const PEEK_PAGE_MAX_BYTES = 16777216
-const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
+const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
 
 function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
-function peekCandidates ({ inventory, follows, blocked }) {
+function peekCandidates ({ inventory, follows, blocked, ownKey }) {
+  const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  if (!isHex64(own)) throw new TypeError('ownKey inválido')
   const candidates = []
   const seen = new Set()
   for (const [rawKey, length] of inventory) {
@@ -44,6 +47,7 @@ function peekCandidates ({ inventory, follows, blocked }) {
     seen.add(key)
     if (!Number.isSafeInteger(length) || length < 2) continue
     if (follows.has(key) || blocked.has(key)) continue
+    if (key === own) continue
     candidates.push({ key, length })
   }
   return candidates.sort((a, b) => cmp(a.key, b.key))

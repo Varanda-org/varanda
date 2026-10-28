@@ -20,7 +20,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -988,6 +988,7 @@ test('regression: an idle snapshot expires and only an after-less read rebuilds 
   const B = await diary(t, author(assoc, 'B', [now - 2000]))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: seeder.url,
@@ -1032,6 +1033,7 @@ test('regression: a failed refresh keeps the snapshot a continuation still pages
   const B = await diary(t, author(assoc, 'B', [now - 2000]))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: seeder.url,
@@ -1148,20 +1150,44 @@ test('regression: a get cut by the page deadline is no verdict: the delayed diar
   t.alike(internal, [])
 })
 
-test('the own diary shows in the Espiadinha like any unfollowed diary', async (t) => {
+test('the own diary never shows in the own Espiadinha, but another member sees it', async (t) => {
   t.timeout(90000)
   const assoc = association()
   const now = Date.now()
   const keyPair = crypto.keyPair()
-  const mine = await diary(t, author(assoc, 'Eu', [now - HOUR]), keyPair)
-  const other = await diary(t, author(assoc, 'Outro', [now - 2 * HOUR]))
+  const other = await diary(t, author(assoc, 'Outro', [now - 4 * HOUR]))
+  const mine = await diary(t, [
+    ...author(assoc, 'Eu', [now - 3 * HOUR]),
+    (key) => postRecord({ text: 'Eu responde', at: iso(now - 2 * HOUR), replyTo: { author: key, seq: 2 } }),
+    () => repostRecord({ to: { author: hex(other.key), seq: 2 }, on: true, at: iso(now - HOUR) })
+  ], keyPair)
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine, other] })
   const { web, internal, key } = await webNode(t, assoc, seeder.url, { keyPair })
   t.is(key, hex(mine.key), 'the member is the author of `mine`')
   const page = await web.request('peek.read', {})
   t.alike(internal, [])
-  t.is(page.diaries, 2, 'the own diary is a candidate')
-  t.alike(page.items.map((i) => [i.author, i.text]), [[hex(mine.key), 'Eu 1'], [hex(other.key), 'Outro 1']], 'the own post (newer) first')
+  t.is(page.diaries, 1)
+  t.absent(page.items.some((i) => i.author === key))
+  t.alike(page.items.map((i) => [i.author, i.text]), [[hex(other.key), 'Outro 1']])
+
+  const viewer = await webNode(t, assoc, seeder.url)
+  const page2 = await viewer.web.request('peek.read', {})
+  t.is(page2.diaries, 2)
+  t.alike(page2.items.filter((i) => i.author === hex(mine.key)).map((i) => [i.kind, i.text, i.round]), [['repost', null, 0], ['post', 'Eu responde', 1], ['post', 'Eu 1', 2]])
+  t.ok(page2.items.some((i) => i.author === hex(other.key) && i.text === 'Outro 1' && i.round === 0))
+  t.alike(viewer.internal, [])
+})
+
+test('only the own diary advertised: an empty Espiadinha', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const mine = await diary(t, author(assoc, 'Eu', [Date.now() - HOUR]), keyPair)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine] })
+  const { web, internal } = await webNode(t, assoc, seeder.url, { keyPair })
+  const page = await web.request('peek.read', {})
+  t.alike(page, { items: [], next: null, diaries: 0, skipped: 0, incomplete: false })
+  t.alike(internal, [])
 })
 
 // ---- privacy: never the sync link (docs/rpc.md 5.22) ----

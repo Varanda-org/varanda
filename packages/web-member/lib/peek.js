@@ -176,8 +176,11 @@ async function pool (items, n, fn) {
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, maxFrame).
-function createPeeker ({ storage, association, seederUrl, createSocket, log = noop, limits = {} } = {}) {
+// ownKey() returns the viewer's lowercase hex64 key or a Promise of it:
+// the viewer's diary is never a candidate of their own page.
+function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
+  if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
   const L = {
     connectTimeoutMs: PEEK_CONNECT_TIMEOUT_MS,
     pageTimeoutMs: PEEK_PAGE_TIMEOUT_MS,
@@ -335,10 +338,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     }
   }
 
-  async function buildSnapshot (run, { follows, blocked }) {
+  async function buildSnapshot (run, { follows, blocked, ownKey: own }) {
     const link = await openLink(run)
     checkAborted(run)
-    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
+    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked, ownKey: own })
     const order = shuffle(candidates.map(newDiary))
     return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0 }
   }
@@ -580,10 +583,12 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       throw new UsageError('A lista expirou; atualize para continuar.')
     }
     if (first) {
+      const own = await ownKey()
+      checkAborted(run)
       // The previous snapshot stays until this one exists: a failed refresh
       // must not strand the list on screen. Idle expiry, abort() and close()
       // still drop it.
-      const built = await buildSnapshot(run, { follows, blocked: mod.blocked })
+      const built = await buildSnapshot(run, { follows, blocked: mod.blocked, ownKey: own })
       checkAborted(run)
       snapshot = built
     }

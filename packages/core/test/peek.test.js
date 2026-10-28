@@ -59,7 +59,7 @@ function refs (items) {
 test('peek constants and the public rule', (t) => {
   t.alike([PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS], [3, 8, 64, 3])
   t.alike([PEEK_PARALLEL, PEEK_FETCH_TIMEOUT_MS, PEEK_PAGE_TIMEOUT_MS, PEEK_CONNECT_TIMEOUT_MS, PEEK_SNAPSHOT_TTL_MS, PEEK_PAGE_MAX_BYTES], [16, 10000, 25000, 15000, 300000, 16777216])
-  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
+  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
 })
 
 test('peekCandidates filters inventory, lowercases keys and sorts without mutation', (t) => {
@@ -67,17 +67,34 @@ test('peekCandidates filters inventory, lowercases keys and sorts without mutati
   const follows = new Set(['dd'.repeat(32)])
   const blocked = new Set(['ee'.repeat(32)])
   const before = Array.from(inventory)
-  // The own diary is not excluded: B (length 2) is a candidate like any other.
-  t.alike(peekCandidates({ inventory, follows, blocked }), [{ key: A, length: 5 }, { key: B, length: 2 }, { key: C, length: 12 }])
+  // An own key outside the inventory excludes nothing: B stays a candidate.
+  t.alike(peekCandidates({ inventory, follows, blocked, ownKey: '00'.repeat(32) }), [{ key: A, length: 5 }, { key: B, length: 2 }, { key: C, length: 12 }])
+  // The own diary is dropped whatever the spelling of the key.
+  t.alike(peekCandidates({ inventory, follows, blocked, ownKey: B }), [{ key: A, length: 5 }, { key: C, length: 12 }])
+  t.alike(peekCandidates({ inventory, follows, blocked, ownKey: B.toUpperCase() }), [{ key: A, length: 5 }, { key: C, length: 12 }])
   t.alike(Array.from(inventory), before)
   t.alike(Array.from(follows), ['dd'.repeat(32)])
   t.alike(Array.from(blocked), ['ee'.repeat(32)])
 })
 
+test('peekCandidates refuses a missing or invalid own key', (t) => {
+  const inventory = new Map([[A, 5]])
+  const none = new Set()
+  for (const ownKey of [undefined, null, 'zz'.repeat(32), 'aa']) {
+    try {
+      peekCandidates({ inventory, follows: none, blocked: none, ownKey })
+      t.fail('should throw for ' + ownKey)
+    } catch (err) {
+      t.ok(err instanceof TypeError, 'TypeError for ' + ownKey)
+      t.is(err.message, 'ownKey inválido')
+    }
+  }
+})
+
 test('peekCandidates keeps one candidate per key whatever its spelling', (t) => {
   const inventory = new Map([[A.toUpperCase(), 5], [A, 9], [B, 3]])
   const none = new Set()
-  t.alike(peekCandidates({ inventory, follows: none, blocked: none }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
+  t.alike(peekCandidates({ inventory, follows: none, blocked: none, ownKey: '00'.repeat(32) }), [{ key: A, length: 5 }, { key: B, length: 3 }], 'the first spelling wins')
 })
 
 test('peekWindow starts with the head and newest eight, then descends with a strict cap', (t) => {
