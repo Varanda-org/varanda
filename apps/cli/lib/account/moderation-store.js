@@ -439,12 +439,15 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
 
   // 'aberta': oldest first (legal deadlines run from the oldest report,
   // docs/design.md "Moderação e obrigações legais"); 'decidida': newest
-  // decision first.
-  function list ({ status = 'aberta', limit = LIST_DEFAULT } = {}) {
+  // decision first. `exclude` (a member key) leaves out the cases about that
+  // member or filed from it BEFORE the cut at `limit`, so `truncated` counts
+  // only what the caller may see.
+  function list ({ status = 'aberta', limit = LIST_DEFAULT, exclude = null } = {}) {
     usable()
     if (status !== 'aberta' && status !== 'decidida') throw fail('pedido-invalido')
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_REPORTS) throw fail('pedido-invalido')
-    const rows = Object.values(state.reports)
+    if (exclude !== null && typeof exclude !== 'string') throw fail('pedido-invalido')
+    const rows = Object.values(state.reports).filter((r) => exclude === null || (r.target !== exclude && r.reporter !== exclude))
     let out
     if (status === 'aberta') {
       out = rows.filter((r) => r.status === 'aberta')

@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
@@ -632,15 +633,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
   const doCert = async () => {
     setDone('')
-    let cert
-    try {
-      // iOS smart punctuation turns typed " into curly quotes; a certificate
-      // holds only ASCII values, so they are read back as plain quotes.
-      cert = JSON.parse(certText.replace(/[“”„‟″]/g, '"'))
-    } catch {
-      return setCertLocal('JSON inválido')
-    }
-    if (cert === null || typeof cert !== 'object' || Array.isArray(cert)) return setCertLocal('o certificado deve ser um objeto JSON')
+    const parsed = parseCertificateText(certText)
+    if (parsed.error) return setCertLocal(parsed.error)
+    const cert = parsed.cert
     setCertLocal('')
     const r = await add.run(() => node.request('cert.add', { cert }))
     if (r.ok) {
