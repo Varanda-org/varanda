@@ -728,6 +728,7 @@ The totals of the whole run are recorded by the integration run, not here.
 ### Human verification
 
 - [ ] Android, Chrome: install the app (install prompt or Add to Home screen); it opens in its own window with the icon.
+- [ ] Android, Samsung Internet: no "Instalar" note or button and no install icon in the address bar; the menu's add to Home screen gives no Play Protect "App de risco bloqueado".
 - [ ] iOS, Safari: Add to Home Screen; it opens full screen.
 - [ ] Open it offline: the shell loads.
 - [ ] "Entrar" offline works with the platform authenticator (record which platforms do not).

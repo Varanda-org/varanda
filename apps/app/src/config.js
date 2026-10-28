@@ -56,6 +56,20 @@ export function checkForm (form) {
   }
 }
 
+// The pasted certificate text -> { cert } or { error } (pt-BR). iOS smart
+// punctuation turns a typed " into a curly quote; a certificate holds only
+// ASCII values, so curly quotes are read back as plain ones.
+export function parseCertificateText (text) {
+  let cert
+  try {
+    cert = JSON.parse(String(text).replace(/[“”„‟″]/g, '"'))
+  } catch {
+    return { error: 'JSON inválido' }
+  }
+  if (cert === null || typeof cert !== 'object' || Array.isArray(cert)) return { error: 'o certificado deve ser um objeto JSON' }
+  return { cert }
+}
+
 export function formOf (config) {
   if (config === null || config === undefined) {
     return { association: '', bootstrapText: '', publicDht: false, dhtHost: '' }

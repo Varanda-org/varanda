@@ -1,5 +1,7 @@
 // Pure install-offer policy and controller. Browser capabilities and time are
-// injected; failed reads and callbacks must never interrupt the app.
+// injected; failed reads and callbacks must never interrupt the app. Samsung
+// Internet is excluded: its server-built install package is blocked by Play
+// Protect and the page cannot change it, so we offer nothing and drop the manifest.
 
 export const DISMISS_KEY = 'varanda-install-dismissed'
 export const DISMISS_MS = 30 * 24 * 60 * 60 * 1000
@@ -18,7 +20,8 @@ export function deviceOf (arg) {
     ((platform === 'MacIntel' || userAgent.includes('Macintosh')) && typeof touches === 'number' && touches > 1)
   return {
     handheld: read(arg, 'mobileHint') === true || ios || (userAgent.includes('Android') && userAgent.includes('Mobile')),
-    iosSafari: ios && userAgent.includes('Safari/') && !/CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA\/|FBAN|FBAV|Instagram|Line\//.test(userAgent)
+    iosSafari: ios && userAgent.includes('Safari/') && !/CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|GSA\/|FBAN|FBAV|Instagram|Line\//.test(userAgent),
+    samsungInternet: /SamsungBrowser\//.test(userAgent)
   }
 }
 
@@ -33,7 +36,8 @@ export function dismissalActive (at, now) {
 }
 
 export function installView (arg) {
-  if (read(arg, 'eligible') !== true || read(arg, 'standalone') === true || read(arg, 'installed') === true) {
+  if (read(arg, 'eligible') !== true || read(arg, 'standalone') === true || read(arg, 'installed') === true ||
+    read(arg, 'samsungInternet') === true) {
     return { note: 'none', canPrompt: false }
   }
   const canPrompt = read(arg, 'hasPrompt') === true
@@ -74,6 +78,14 @@ export function createInstallOffer (arg) {
     return matches === true || nativeStandalone === true
   }
   let standalone = isStandalone()
+  if (eligible && device.samsungInternet === true && standalone === false) {
+    try {
+      const doc = read(arg, 'doc')
+      for (const link of Array.from(doc.querySelectorAll('link[rel="manifest"]'))) {
+        try { link.remove() } catch {}
+      }
+    } catch {}
+  }
   let deferred = null
   let pending = false
   let installed = false
@@ -164,7 +176,7 @@ export function createInstallOffer (arg) {
   if (eligible && typeof read(win, 'addEventListener') === 'function') {
     attach(win, 'beforeinstallprompt', (event) => {
       try { event.preventDefault() } catch {}
-      if (!installed && typeof read(event, 'prompt') === 'function') {
+      if (!installed && device.samsungInternet !== true && typeof read(event, 'prompt') === 'function') {
         deferred = event
         emit()
       }

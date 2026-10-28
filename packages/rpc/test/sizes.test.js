@@ -4,8 +4,8 @@
 // largest pages whose worst case fits MAX_MESSAGE.
 
 const test = require('brittle')
-const { validateRecord } = require('../../core/lib/records')
-const { isUsername } = require('../../core/lib/account-link')
+const { validateRecord } = require('@varanda/core/lib/records')
+const { isUsername } = require('@varanda/core/lib/account-link')
 const {
   createServerDispatcher,
   utf8ByteLength,
