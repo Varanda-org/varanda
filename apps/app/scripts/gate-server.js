@@ -85,7 +85,6 @@ function parseArgs (argv) {
   return opts
 }
 
-// The first non-loopback IPv4 address: one the emulator reaches through its NAT.
 function lanAddress () {
   for (const list of Object.values(os.networkInterfaces())) {
     for (const a of list || []) if (a.family === 'IPv4' && !a.internal) return a.address
