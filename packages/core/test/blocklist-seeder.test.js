@@ -281,6 +281,32 @@ test('restart keeps the snapshot and purges blocked and revoked-issuer diaries i
   t.ok(await nothingWithin(reader.core, 3000), 'a blocked replica is never served')
 })
 
+test('a torn blocklist.json warns once, is kept aside and the snapshot comes back from a peer', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const file = path.join(dataDir, 'blocklist.json')
+  const mod = makeModerator(assoc)
+  const snap = snapshot(mod, 4, { blocked: ['c'.repeat(64)] })
+  writeBlocklist(dataDir, snap)
+  const whole = fs.readFileSync(file, 'utf8')
+  fs.writeFileSync(file, whole.slice(0, whole.length >> 1))
+
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const warnings = events.filter((e) => e.event === 'warning' && e.reason === 'blocklist-unreadable')
+  t.is(warnings.length, 1, 'one warning')
+  t.is(seeder.stats().blocklistSeq, 0, 'nothing enforced yet')
+  const kept = fs.readdirSync(dataDir).filter((n) => n.startsWith('blocklist.json.ilegivel-'))
+  t.alike(kept, [warnings[0].aside], 'the torn copy is kept aside')
+  t.absent(fs.existsSync(file), 'the torn file is out of the way')
+
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot: snap } })
+  await until(() => seeder.stats().blocklistSeq === 4, { name: 'seq 4 de volta' })
+  t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'stored again')
+  t.is(events.filter((e) => e.reason === 'blocklist-unreadable').length, 1, 'no second warning')
+})
+
 test('an admission-only peer stays connected; a newer peer receives the snapshot; a revocation drops a v2 diary', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)

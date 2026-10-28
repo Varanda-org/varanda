@@ -309,6 +309,33 @@ test('a member stores, enforces and relays the blocklist snapshot', async (t) =>
   t.absent(fs.existsSync(path.join(bob.dir, 'quarantine')), 'quarantine removed')
 })
 
+test('a torn blocklist.json warns once, is kept aside and the snapshot comes back from a peer', async (t) => {
+  t.timeout(175000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, kp)
+  const bob = await makeMember(t, kp)
+  const block1 = createSnapshot({ seq: 1, date: MOD_DATE, blocked: ['c'.repeat(64)] }, modKp, modCert)
+
+  const file = path.join(bob.dir, 'blocklist.json')
+  writeBlocklist(bob.dir, block1)
+  const whole = fs.readFileSync(file, 'utf8')
+  fs.writeFileSync(file, whole.slice(0, whole.length >> 1))
+
+  await rawNode(t, bootstrap, association, { blocklist: () => block1 })
+  const bobRun = longRun(t, bootstrap, bob.dir)
+  await until(() => storedSeq(bob.dir) === 1, { timeoutMs: 30000, name: 'Bob stores seq 1 again' })
+  const warnings = bobRun.logs.filter((line) => line.includes('lista de bloqueio ilegível'))
+  t.is(warnings.length, 1, 'one warning')
+  const kept = fs.readdirSync(bob.dir).filter((n) => n.startsWith('blocklist.json.ilegivel-'))
+  t.is(kept.length, 1, 'the torn copy is kept aside')
+  t.ok(warnings[0].includes(kept[0]), 'the warning names it')
+  t.alike(readBlocklist(bob.dir), { v: 1, snapshot: block1 }, 'the list is stored again')
+  await bobRun.stop()
+})
+
 test('a newly revoked issuer drops the followed diaries it certified', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
