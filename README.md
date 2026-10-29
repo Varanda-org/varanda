@@ -117,6 +117,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -155,7 +156,7 @@ O semeador fica ligado, no tópico da associação, e replica os diários que ad
 
 No `sync`, um par só conta como semeador verificado quando o `hello` traz papel `seeder`, o certificado confere com a chave Noise autenticada da conexão e a associação é a raiz fixada em `config.json`. O resultado `admitted: true` exige esse semeador verificado. Um par que se diz semeador sem esse certificado aparece como `peer seeder <8 hex> não verificado`. O `admitted` desse par não é impresso e não marca o diário como admitido. Um `rejected` para o próprio diário vindo de qualquer par que não seja semeador verificado vira a linha `withdrawn <chave> <8 hex do par> <motivo>` e não decide o sucesso do `sync`.
 
-`sync --once` sai com código 0 quando ao menos um par enviou `hello`, nenhum diário seguido ficou atrás do tamanho que um par anunciou, os pares interessados no próprio diário alcançaram o tamanho dele e, se há semeador verificado e o bloco 0 local é um certificado válido, um semeador verificado enviou `admitted` até esse tamanho. O prazo padrão é 30000 ms (`--timeout-ms`).
+`sync --once` sai com código 0 quando ao menos um par enviou `hello`, nenhum diário seguido ficou atrás do tamanho que um par anunciou, os pares interessados no próprio diário alcançaram o tamanho dele e, se há semeador verificado e o bloco 0 local é um certificado válido, um semeador verificado enviou `admitted` até esse tamanho. O prazo padrão é 30000 ms (`--timeout-ms`, no máximo 2147483647; acima disso o comando sai com erro de uso, código 2).
 
 ### Tópico por associação
 
@@ -236,7 +237,7 @@ Dois diários (Alice e Bob) e um semeador, na mesma máquina, em diretórios nov
 - `data/seeder` — semeador
 - `data/alice` — diário da Alice
 - `data/bob` — diário do Bob
-- `data/certs` — JSON dos certificados (`--out` / `--cert-file`); não é um diretório de papel
+- `data/certs` — JSON dos certificados (`--out` / `--cert-file`); `--out` só grava arquivo novo (recusa arquivo existente e link simbólico, código 1): apague o antigo antes de emitir de novo; não é um diretório de papel
 
 Rode tudo na raiz do repositório, em bash ou zsh (as linhas com `$(...)` e `${var##padrão}` dependem disso). `data/` está no `.gitignore`. Se esses diretórios já existem de uma tentativa anterior, use outros caminhos ou apague-os antes: `assoc init` recusa uma associação já criada, e `cert add` recusa um bloco 0 diferente do que já está no diário.
 
