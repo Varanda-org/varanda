@@ -67,17 +67,26 @@ const hasMember = (record, member) =>
 // What the entry gate shows. `claim` is null or {at} (an acceptance made on
 // this page load before anyone signed in). The order matters: the hosted
 // passkey ceremony must never be interrupted, so nothing is decided until the
-// identity is known.
-export function termsDecision ({ record, version, member, claim, hosted, identityKnown } = {}) {
+// identity is known. `locked` is true only when the hosted passkey identity is
+// locked (at Entrar); only then can the stored record stand in for the member
+// not yet known.
+export function termsDecision ({ record, version, member, claim, hosted, identityKnown, locked } = {}) {
   if (hosted === true && identityKnown === false) return 'loading'
   if (record === null || record === undefined) return 'needed'
   if (record.version !== version) return 'updated'
   const claimed = claim !== null && claim !== undefined
   if (member === null || member === undefined) {
-    // Locked at Entrar we cannot know who will sign in, so ask unless this
-    // page load already holds a claim. Native/serve before the identity
-    // exists: no external data flows yet.
-    if (hosted === true) return claimed ? 'accepted' : 'needed'
+    // A record at the current version exists only because someone accepted
+    // that version on this device (withMember is the only function that sets
+    // its version; nothing stored is 'needed' and an older version is
+    // 'updated' above). Locked at Entrar that is all the device can know, and
+    // whoever unlocks next is checked against the members below. Unlocked
+    // without a key (a first passkey ceremony) is different: the shell learns
+    // the new key only after passkey.refresh, while Identidade already talks
+    // to the account service, so only a claim from this page load lets it
+    // through. Native/serve before the identity exists: no external data
+    // flows yet.
+    if (hosted === true && locked !== true) return claimed ? 'accepted' : 'needed'
     return 'accepted'
   }
   if (hasMember(record, member)) return 'accepted'
