@@ -350,6 +350,56 @@ test('compose.web.yaml and .env.example: usage-stats variables are optional and 
   t.ok(example.includes('VARANDA_STATS_EMAILS='), '.env.example has an empty VARANDA_STATS_EMAILS= line')
 })
 
+// Web push is optional: the shared token defaults to empty (push off), so an
+// existing .env still boots. The seeder gets the token and the loopback URL of
+// the account service; the account service only the token; the web service
+// none. The VAPID key lives in push-vapid.json on account-data, never in env.
+test('compose.web.yaml and env examples: web push variables are optional and scoped to seeder and account', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  function service (name) {
+    const start = webLines.findIndex((l) => l === '  ' + name + ':')
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    return start === -1 ? [] : webLines.slice(start, end)
+  }
+  const account = service('account')
+  const seeder = service('seeder')
+  const web = service('web')
+  t.ok(account.length > 0 && seeder.length > 0 && web.length > 0, 'account, seeder and web found')
+  const keyCount = (ls, name) => ls.filter((l) => new RegExp('^ {6}' + name + ':').test(l)).length
+  const line = (ls, name) => ls.find((l) => new RegExp('^ {6}' + name + ':').test(l)) || ''
+
+  t.is(keyCount(seeder, 'VARANDA_PUSH_TOKEN'), 1, 'VARANDA_PUSH_TOKEN exactly once under seeder')
+  t.is(keyCount(account, 'VARANDA_PUSH_TOKEN'), 1, 'VARANDA_PUSH_TOKEN exactly once under account')
+  t.is(keyCount(web, 'VARANDA_PUSH_TOKEN'), 0, 'VARANDA_PUSH_TOKEN not on web')
+  t.is(webLines.filter((l) => l.includes('VARANDA_PUSH_TOKEN')).length, 2, 'token mentioned only on seeder and account')
+  t.is(line(seeder, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'seeder token optional (:-)')
+  t.is(line(account, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'account token optional (:-)')
+
+  t.is(webLines.filter((l) => l.includes('VARANDA_ACCOUNT_HTTP')).length, 1, 'VARANDA_ACCOUNT_HTTP mentioned exactly once')
+  t.is(keyCount(seeder, 'VARANDA_ACCOUNT_HTTP'), 1, 'VARANDA_ACCOUNT_HTTP under seeder')
+  t.is(line(seeder, 'VARANDA_ACCOUNT_HTTP').trim(), 'VARANDA_ACCOUNT_HTTP: "$' + '{VARANDA_ACCOUNT_HTTP:-http://127.0.0.1:8790}"',
+    'VARANDA_ACCOUNT_HTTP defaults to the account loopback listener')
+  t.ok(account.some((l) => l.trim() === 'VARANDA_ACCOUNT_PORT: "8790"') && account.some((l) => l.trim() === 'VARANDA_ACCOUNT_HOST: 127.0.0.1'),
+    'the account listener is 127.0.0.1:8790')
+  for (const name of ['VARANDA_PUSH_TOKEN', 'VARANDA_ACCOUNT_HTTP']) {
+    t.absent(webLines.some((l) => l.includes('$' + '{' + name + ':?')), name + ' never :?')
+  }
+
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8')
+  t.ok(example.split('\n').includes('VARANDA_PUSH_TOKEN='), '.env.example has an empty VARANDA_PUSH_TOKEN= line')
+  const seederExample = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8')
+  t.ok(seederExample.split('\n').some((l) => /^#VARANDA_PUSH_TOKEN=/.test(l)), 'seeder.env.example documents VARANDA_PUSH_TOKEN')
+  t.ok(seederExample.split('\n').some((l) => /^#VARANDA_ACCOUNT_HTTP=/.test(l)), 'seeder.env.example documents VARANDA_ACCOUNT_HTTP')
+
+  const compose = fs.readFileSync(COMPOSE_WEB, 'utf8')
+  for (const [file, text] of [['compose.web.yaml', compose], ['.env.example', example], ['seeder.env.example', seederExample]]) {
+    t.absent(text.includes('VARANDA_VAPID'), 'no VARANDA_VAPID variable in ' + file)
+  }
+})
+
 for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))

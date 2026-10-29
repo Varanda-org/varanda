@@ -19,7 +19,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
-    'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.quote', 'post.reply',
@@ -112,6 +112,47 @@ test('terms.sign', (t) => {
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'terms.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
+})
+
+test('push.sign', (t) => {
+  const host = 'https://example.com/'
+  const base = {
+    nonce: 'n'.repeat(43),
+    action: 'on',
+    endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/abc',
+    p256dh: 'B'.repeat(87),
+    auth: 'A'.repeat(22)
+  }
+  t.is(isMutating('push.sign'), false)
+  ok(t, 'push.sign', base, base)
+  ok(t, 'push.sign', { ...base, action: 'off' })
+  ok(t, 'push.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'push.sign', { ...base, endpoint: host + 'a'.repeat(2048 - host.length) })
+  ok(t, 'push.sign', { ...base, endpoint: 'https://example.com/push?token=1' })
+  ok(t, 'push.sign', { ...base, p256dh: 'A-_', auth: 'b' })
+  ok(t, 'push.sign', { ...base, p256dh: 'A'.repeat(128), auth: 'B'.repeat(32) })
+  bad(t, 'push.sign', {})
+  for (const k of ['nonce', 'action', 'endpoint', 'p256dh', 'auth']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'push.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association, the hash or the bytes.
+  for (const k of ['member', 'association', 'endpointHash', 'payload', 'bytes', 'key']) {
+    bad(t, 'push.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  bad(t, 'push.sign', { ...base, action: 'add' }, 'action add')
+  bad(t, 'push.sign', { ...base, endpoint: 'http://example.com/push' }, 'http endpoint')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://user:pass@example.com/push' }, 'endpoint with credentials')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://user@example.com/push' }, 'endpoint with a username')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push#frag' }, 'endpoint with a hash')
+  bad(t, 'push.sign', { ...base, endpoint: host + 'a'.repeat(2049 - host.length) }, '2049-char endpoint')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/pu\tsh' }, 'endpoint with a tab')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push\u00e9' }, 'endpoint with a non-ASCII char')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com\\push' }, 'endpoint with a backslash')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push\ud800' }, 'endpoint with a lone surrogate')
+  bad(t, 'push.sign', { ...base, endpoint: host + '\u00e9'.repeat(2048 - host.length) }, 'non-ASCII endpoint within 2048 code points')
+  bad(t, 'push.sign', { ...base, p256dh: 'abc=' }, 'p256dh with =')
 })
 
 test('report.sign', (t) => {
