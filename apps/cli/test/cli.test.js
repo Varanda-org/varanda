@@ -54,7 +54,8 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -265,6 +266,9 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(dashed.name, '-x')
   t.is(dashed.json, true)
   usage(t, ['--timeout-ms', '-1'], 'timeout-ms inválido')
+  t.is(parse(['--timeout-ms', '2147483647']).timeoutMs, 2147483647)
+  usage(t, ['--timeout-ms', '2147483648'], 'timeout-ms acima do máximo de 2147483647')
+  usage(t, ['--timeout-ms', '99999999999999999999'], 'timeout-ms acima do máximo de 2147483647')
   usage(t, ['--member', '-1'], 'chave inválida')
   usage(t, ['post', '--name', 'Ana', '--text'], 'falta o valor de --text')
   for (const flag of ['--bogus', '-x', '--', '--json=true', '--once=false', '--help=true', '--bootstrap=host:1']) {
