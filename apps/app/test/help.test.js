@@ -9,7 +9,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho'
+    'instalar', 'denuncia', 'termosAparelho', 'convites'
   ].sort())
 })
 
@@ -58,6 +58,15 @@ test('link help keeps the account and privacy disclosures', async (t) => {
   for (const fact of ['associação', 'Google', 'e-mail nunca']) {
     t.ok(SHORT.link.includes(fact), fact)
   }
+})
+
+test('invite help keeps the validity, renewal and privacy facts', async (t) => {
+  const { HELP } = await load()
+  const text = HELP.convites.paragraphs.join(' ')
+  for (const fact of ['uma pessoa só', '7 dias', 'segunda-feira', 'horário de Brasília', 'não acumulam', 'nunca o nome, o e-mail']) {
+    t.ok(text.includes(fact), fact)
+  }
+  t.ok(HELP.vinculo.paragraphs.join(' ').includes('Se a rede estiver por convite,'))
 })
 
 test('missing diaries help covers all eight skip reasons', async (t) => {

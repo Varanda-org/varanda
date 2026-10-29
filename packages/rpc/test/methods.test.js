@@ -18,7 +18,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
+    'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
     'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
@@ -111,6 +111,27 @@ test('terms.sign', (t) => {
   for (const version of [0, 10000, 1.5, '1', null, -1]) bad(t, 'terms.sign', { ...base, version }, 'version ' + version)
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'terms.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('invite.sign', (t) => {
+  const base = { action: 'issue', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('invite.sign'))
+  ok(t, 'invite.sign', base, base)
+  ok(t, 'invite.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'invite.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'invite.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'email']) {
+    bad(t, 'invite.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['revoke', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
 })
 

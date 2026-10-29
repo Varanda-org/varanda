@@ -2227,3 +2227,64 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
 - A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
 - `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
+
+## 37. Convites para entrar na rede (2026-10-29)
+
+### O que mudou
+
+- Com `VARANDA_INVITES_PER_WEEK` definido (1 a 100), um vínculo Google que criaria um membro novo só termina com um convite válido. Ausente ou vazio, o cadastro segue aberto como hoje, limitado só por `VARANDA_MAX_MEMBERS`. Remover a variável desliga tudo e o `invites.json` fica no disco, ignorado. Mudar o valor exige reiniciar o serviço `account`.
+- O link é `https://<origem>/convite/<código>`. O código tem 32 bytes em base64url, aparece uma única vez e fica guardado só como SHA-256, e só enquanto o convite não foi usado. Vale para uma pessoa só e por 7 dias depois de criado.
+- Cada membro vinculado ganha N convites por semana civil de Brasília (UTC-3, sem horário de verão), com renovação na segunda 00:00. Um convite criado conta na semana em que foi criado, mesmo sem uso. O que sobra não acumula, não há revogação nem devolução, e baixar N não apaga links já criados na semana. Todos seguem N, o operador também, e não existe comando de emissão. A primeira pessoa de uma rede vazia precisa vincular com a variável vazia, sem exceção. `varanda assoc certify` fica fora do portão: um membro só certificado não é vinculado, logo não emite convite.
+- Uso único estrito: o serviço de conta grava o hash do convite (SHA-256 do código) no vínculo de quem entrou, no diretório (`directory.json` e seu diário, o armazenamento de um só escritor), e esse registro recusa um segundo uso de forma atômica. O `invites.json` apaga o hash quando o convite é usado e guarda só o identificador aleatório, a chave de quem criou, a data de criação e se foi usado. Uma conclusão recusada deixa o convite utilizável. Uma recusa na conclusão por @nome em uso ou conta já vinculada também apaga a linha pendente e libera o convite na hora, para a pessoa recomeçar.
+- O serviço nunca guarda e-mail, nome, `sub` ou chave de quem entrou, e não registra quem usou qual convite. A volta do Google recusa um convite inválido antes de trocar o código do Google, como a lista de espera.
+- Rotas: `GET /account/invites/policy` (`{ required, perWeek }`), `POST /account/invites/start`, `POST /account/invites/finish` (assinatura `invite.sign`, `docs/rpc.md` 5.30, a resposta traz `used`, `remaining` e `resetsAt`). `GET /account/status` não traz contagens de convite. Sem a variável, a política responde `{ "required": false }` e as rotas `POST` de convite respondem 404. Recusas: `convite-obrigatorio` (403), `convite-invalido` (404), `limite-convites` (429) e `indisponivel`. `varanda account status` imprime só `convites: <total> (<usados> usados)`.
+- App (web hospedada): `/convite/<código>` guarda o código na aba (`sessionStorage`, chave `varanda-signup-invite`), limpa o endereço e mostra o botão do Google; sem código, a tela calma pede o link de convite. Ajustes › Convidar pessoas aparece só na web hospedada, só com o portão ligado e só para membro vinculado: quantos convites pode criar por semana (da política), depois de criar quantos restam (da resposta assinada), criar, copiar ou compartilhar, link mostrado uma vez e renovação na segunda em Brasília. O código não é enviado ao Google.
+- LGPD: `docs/design.md` ganhou a linha do `invites.json`, a nota de que o vínculo de quem entrou por convite guarda o hash do convite (dado novo no diretório) e a nota de que quem convidou quem pode ser reconstruído a partir de uma cópia do `invites.json` anterior ao uso e, de forma aproximada, pelas datas.
+
+### Testes automatizados
+
+Nenhum foi rodado por quem escreveu esta seção; o resultado de lint, testes e demo é o da CI. Por arquivo:
+
+- `apps/cli/test/invites-store.test.js`: o armazenamento de `invites.json` (semana de Brasília, limite por membro, validade de 7 dias, poda, arquivo inválido, modo 0600).
+- `packages/core/test/invite.test.js`: a mensagem e a assinatura de `invite.sign`.
+- `apps/cli/test/account-invites.test.js`: as rotas de política, início e conclusão, as recusas, o portão do vínculo e a regressão de que `GET /account/status` nunca traz contagens de convite, com `invites.json` íntegro ou corrompido.
+- `apps/cli/test/account-invites-cli.test.js`: a leitura da variável (`readEnv`), a perda do lock e `varanda account status`. O reinício com e sem a variável é coberto no próprio processo por `account-e2e.test.js`.
+- `apps/cli/test/account-store.test.js` (estendido): o hash do convite no vínculo e a recusa atômica de um segundo uso.
+- `apps/cli/test/deploy.test.js` (estendido): a variável no `.env.example`, no compose e no `deploy.sh`.
+- `packages/rpc/test/methods.test.js` (estendido): o método `invite.sign`.
+- `packages/core/test/session.test.js` e `packages/web-member/test/session.test.js` (estendidos): `invite.sign` nas duas sessões.
+- `apps/app/test/account.test.js` (estendido): política, início e conclusão.
+- `apps/app/test/signupInvite.test.js`: o caminho `/convite`, a guarda na aba, o prazo, a limpeza do endereço e os textos da contagem e do número semanal.
+- `apps/app/test/help.test.js` (estendido): a folha de ajuda dos convites.
+- `apps/cli/test/account-e2e.test.js` (estendido): o fluxo completo com convite.
+
+Sem teste de navegador na CI: as telas (Convidar pessoas, a tela calma) só têm os testes de funções puras e a lista abaixo.
+
+### Verificação humana
+
+Nada abaixo foi feito ainda. Use uma instalação hospedada com o serviço `account` e o Google configurados.
+
+- [ ] Sem `VARANDA_INVITES_PER_WEEK`, um vínculo novo termina normalmente (cadastro aberto) e Ajustes não mostra Convidar pessoas.
+- [ ] Com `VARANDA_INVITES_PER_WEEK=1`, uma pessoa sem link que tenta vincular vê a tela calma, e o `docker logs` do serviço mostra só tokens, nunca um código, um e-mail ou uma chave.
+- [ ] Um membro vinculado abre Ajustes › Convidar pessoas, vê "Você pode criar até 1 convite por semana.", cria o link, copia e compartilha. O link aparece uma vez; depois de criado, aparece "Seus convites desta semana acabaram." e o botão fica desativado.
+- [ ] Abrir `/convite/<código>` troca o endereço para `/` e o botão do Google aparece. O vínculo termina e a pessoa passa a ser membro.
+- [ ] O mesmo código não vincula uma segunda chave (recusa calma), e uma recusa na conclusão deixa o convite utilizável.
+- [ ] Na fronteira da segunda-feira, 03:00Z, a contagem renova e os convites sem uso da semana anterior não acumulam.
+- [ ] `varanda account status` mostra `convites: <total> (<usados> usados)` e nenhum código.
+- [ ] Remover a variável e reiniciar volta ao cadastro aberto, e o `invites.json` continua no disco.
+
+### Limites
+
+- Uma queda ou perda do lock do serviço bem no meio da criação de um convite pode gastar aquele convite da semana sem entregar o link (o código só existe na resposta).
+- Um erro passageiro de leitura do `invites.json` deixa os convites indisponíveis até reiniciar o serviço (mesmo comportamento do `terms.json`).
+- O `invites.json` e o diretório são arquivos separados: uma gravação atrasada de um processo que perdeu o lock pode desfazer a contagem da semana (resíduo do gravador atrasado, como em `terms-store.js`). O uso único não depende disso, porque o diretório registra o convite usado no vínculo.
+- Em navegação privada que recusa o armazenamento da aba, o código fica só na memória da página e não sobrevive à ida ao Google: se o vínculo não terminar, é preciso abrir o link de novo.
+- Uma nova tentativa de início sem assinatura nunca apaga um vínculo pendente que já passou pela assinatura ou pelo Google, a menos que venha do mesmo navegador com o cookie desse vínculo ("começar de novo", "usar outra conta Google"); sem o cookie, o código fica reservado até esse pendente vencer (10 minutos) ou terminar. Uma recusa do convite no início não apaga o código guardado na aba: o formulário continua e a pessoa tenta de novo sem recarregar.
+- `varanda assoc certify` fica fora do portão.
+- Fechar Ajustes enquanto a criação do convite já foi enviada ao serviço pode gastar o convite sem mostrar o link.
+- Quem convidou quem pode ser reconstruído a partir de uma cópia de `invites.json` anterior ao uso e, de forma aproximada, pelas datas. O diretório guarda o hash do convite usado no vínculo de quem entrou (dado novo).
+- Não há revogação: um link enviado à pessoa errada admite um membro até vencer (7 dias). Uma resposta de criação perdida gasta a vaga e a única cópia do código.
+- O número de convites por semana é público (GET /account/invites/policy); quantos cada membro já criou só aparece para o próprio membro, na resposta assinada de criação.
+- Numa instalação com o serviço de conta, o botão de vincular em Conta e @nome espera a leitura da política, que pode levar até 8 segundos (o limite de tempo das chamadas ao serviço). Se a leitura falhar ou passar desse tempo, o formulário de hoje é liberado e o serviço recusa sozinho quem precisar de convite.
+- O teto é de 100000 linhas no `invites.json`. A semana segue o relógio do servidor.
+- Se um operador ligar depois um log de acesso do Caddy, os códigos ficariam nos caminhos `/convite/<código>`; este deploy não tem log de acesso.

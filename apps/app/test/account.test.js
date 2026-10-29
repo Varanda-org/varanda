@@ -176,3 +176,87 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   stub(t, json(200, { version: 1, acceptedAt: null }))
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
 })
+
+const CODE = 'Q'.repeat(43)
+const ISO = '2026-11-02T03:00:00.000Z'
+
+test('invite error tokens and parseReturnInvite', async (t) => {
+  const { toError, parseReturn, parseReturnInvite } = await load()
+  t.is(toError('convite-obrigatorio').code, 'convite-obrigatorio')
+  t.is(toError('convite-obrigatorio').message, 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.')
+  t.is(toError('convite-invalido').message, 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.')
+  t.is(toError('limite-convites').message, 'Você já criou os convites desta semana. Na segunda-feira volta a contar.')
+  t.is(parseReturn('?conta=convite-invalido'), null, 'not a return notice')
+  t.is(parseReturnInvite('?conta=convite-invalido'), toError('convite-invalido').message)
+  t.is(parseReturnInvite('?x=1&conta=convite-invalido'), toError('convite-invalido').message)
+  t.is(parseReturnInvite('?conta=lista-de-espera'), '')
+  t.is(parseReturnInvite('?conta=ok'), '')
+  t.is(parseReturnInvite(''), '')
+  t.is(parseReturnInvite(undefined), '')
+})
+
+test('startLink adds the invite only when it is a well-formed code', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { ok: 1 }))
+  await a.startLink({ member: M, username: 'ana' })
+  await a.startLink({ member: M, username: 'ana', invite: null })
+  await a.startLink({ member: M, username: 'ana', invite: 'abc' })
+  await a.startLink({ member: M, username: 'ana', invite: CODE })
+  t.is(calls[0].init.body, JSON.stringify({ member: M, username: 'ana' }))
+  t.is(calls[1].init.body, JSON.stringify({ member: M, username: 'ana' }))
+  t.is(calls[2].init.body, JSON.stringify({ member: M, username: 'ana' }))
+  t.alike(JSON.parse(calls[3].init.body), { member: M, username: 'ana', invite: CODE })
+})
+
+test('invitePolicy: the two shapes, null on 404, anything else refused', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { required: false }))
+  t.alike(await a.invitePolicy(), { required: false })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/invites/policy')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { required: true, perWeek: 5 }))
+  t.alike(await a.invitePolicy(), { required: true, perWeek: 5 })
+  stub(t, json(200, { required: true, perWeek: 100 }))
+  t.alike(await a.invitePolicy(), { required: true, perWeek: 100 })
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.invitePolicy(), null)
+  const bad = [
+    { required: false, extra: 1 }, { required: false, perWeek: 5 }, { required: true }, { required: true, perWeek: 0 },
+    { required: true, perWeek: 101 }, { required: true, perWeek: 2.5 }, { required: true, perWeek: '5' },
+    { required: true, perWeek: 5, x: 1 }, { required: 'true', perWeek: 5 }, {}, []
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.invitePolicy(); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel', JSON.stringify(body)) }
+  }
+})
+
+test('invitesStart/invitesFinish: shapes and refusals', async (t) => {
+  const a = await load()
+  const ok = { code: CODE, expiresAt: ISO, used: 1, remaining: 4, resetsAt: ISO, extra: 'x' }
+  const calls = stub(t, json(200, { nonce: 'n1', ...ok }))
+  t.alike(await a.invitesStart({ member: M }), { nonce: 'n1' })
+  t.alike(await a.invitesFinish({ member: M, nonce: 'n1', signature: 'ff' }), { code: CODE, expiresAt: ISO, used: 1, remaining: 4, resetsAt: ISO })
+  t.alike(calls.map(c => c.init.method + ' ' + c.url), ['POST /account/invites/start', 'POST /account/invites/finish'])
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce: 'n1', signature: 'ff' })
+  for (const c of calls) {
+    t.is(c.init.credentials, 'same-origin')
+    t.is(c.init.cache, 'no-store')
+  }
+  stub(t, json(200, { nonce: 5 }))
+  try { await a.invitesStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  const bad = [
+    { ...ok, code: 'abc' }, { ...ok, expiresAt: 'amanhã' }, { ...ok, used: -1 }, { ...ok, remaining: -1 },
+    { ...ok, remaining: 1.5 }, { ...ok, resetsAt: null }, { ...ok, used: '1' }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.invitesFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.message, 'serviço indisponível')
+    }
+  }
+  stub(t, json(429, { error: 'limite-convites' }))
+  try { await a.invitesFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'limite-convites') }
+})

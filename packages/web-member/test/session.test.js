@@ -25,6 +25,7 @@ const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
+const { verifyInvite } = require('@varanda/core/lib/invite')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -604,6 +605,51 @@ test('terms.sign: the unlocked key signs the terms-acceptance statement, locked 
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
   t.alike(s.internal, [], 'no internal error')
+})
+
+test('invite.sign: the unlocked key signs the signup-invite request, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'issue', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('invite.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('invite.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: s.key, association: assoc.hex }
+  t.alike(verifyInvite(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyInvite({ ...fields, nonce: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyTerms({ nonce, member: s.key, association: assoc.hex, version: 1 }, r.signature), { ok: false, reason: 'bad-signature' }, 'not a terms acceptance')
+
+  for (const k of ['member', 'association']) {
+    const extra = await errorOf(s.web.request('invite.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('invite.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('invite.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
 })
 
 test('username.add: appends a verified username record once, locked and foreign records refused', async (t) => {

@@ -8,6 +8,12 @@ const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
 const TIMEOUT_MS = 8000
 const MAX_BODY = 4096
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
+
+// Lives here, not in signupInvite.js (which re-exports both), so the two
+// modules never import each other.
+export const INVITE_CODE_RE = /^[A-Za-z0-9_-]{43}$/
+export const INVITE_NEEDED_TEXT = 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.'
 
 const RETURN_NOTICES = {
   ok: 'conta vinculada',
@@ -23,7 +29,10 @@ const ERROR_MESSAGES = {
   expirado: 'o vínculo expirou, comece de novo',
   'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
   // Member cap (503). Already-linked members never receive this token.
-  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.'
+  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
+  'convite-obrigatorio': INVITE_NEEDED_TEXT,
+  'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
+  'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -52,6 +61,15 @@ export function parseReturnWaitlist (search) {
   let value
   try { value = new URLSearchParams(search).get('conta') } catch { return '' }
   return value === 'lista-de-espera' ? ERROR_MESSAGES['lista-de-espera'] : ''
+}
+
+// ?conta=convite-invalido (the invite died between /convite and the Google
+// return) -> the calm sentence, or ''. Like the waitlist, not a return notice.
+export function parseReturnInvite (search) {
+  if (typeof search !== 'string') return ''
+  let value
+  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
+  return value === 'convite-invalido' ? ERROR_MESSAGES['convite-invalido'] : ''
 }
 
 export function usernameMatches (record, member, name) {
@@ -131,8 +149,13 @@ async function call (method, path, body, { allow404 = false } = {}) {
 
 export const accountStatus = (member) =>
   call('GET', '/account/status?member=' + encodeURIComponent(member))
-export const startLink = ({ member, username }) =>
-  call('POST', '/account/start', { member, username })
+// The invite code goes in only when it is well formed: the service decides
+// whether it is still valid.
+export const startLink = ({ member, username, invite }) => {
+  const body = { member, username }
+  if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
+  return call('POST', '/account/start', body)
+}
 export const authorizeLink = ({ signature }) =>
   call('POST', '/account/authorize', { signature })
 export const readPending = () =>
@@ -157,4 +180,38 @@ export const termsFinish = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/terms/finish', { member, nonce, signature })
   if (!Number.isInteger(data.version) || typeof data.acceptedAt !== 'string') throw toError('indisponivel')
   return { version: data.version, acceptedAt: data.acceptedAt }
+}
+
+const isIso = (v) => typeof v === 'string' && ISO_RE.test(v) && !Number.isNaN(Date.parse(v))
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0
+const isPerWeek = (v) => Number.isInteger(v) && v >= 1 && v <= 100
+
+function exactKeys (o, keys) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false
+  const own = Object.keys(o)
+  return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k))
+}
+
+// Signup invites. null on 404: an older service, or one without the feature.
+export const invitePolicy = async () => {
+  const data = await call('GET', '/account/invites/policy', undefined, { allow404: true })
+  if (data === null) return null
+  if (exactKeys(data, ['required']) && data.required === false) return { required: false }
+  if (exactKeys(data, ['required', 'perWeek']) && data.required === true && isPerWeek(data.perWeek)) {
+    return { required: true, perWeek: data.perWeek }
+  }
+  throw toError('indisponivel')
+}
+export const invitesStart = async ({ member }) => {
+  const data = await call('POST', '/account/invites/start', { member })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const invitesFinish = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/invites/finish', { member, nonce, signature })
+  if (typeof data.code !== 'string' || !INVITE_CODE_RE.test(data.code) || !isIso(data.expiresAt) ||
+    !isCount(data.used) || !isCount(data.remaining) || !isIso(data.resetsAt)) {
+    throw toError('indisponivel')
+  }
+  return { code: data.code, expiresAt: data.expiresAt, used: data.used, remaining: data.remaining, resetsAt: data.resetsAt }
 }
