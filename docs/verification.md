@@ -1832,7 +1832,7 @@ Nenhuma destas conferências foi feita ao escrever esta seção.
 
 ### O que mudou
 
-- Antes de Entrar (web hospedada) ou Conectar (nativo), o app mostra os Termos de Uso e a Política de Privacidade (versão 1, `apps/app/src/legal.js`) e só segue depois do aceite. O aceite é por aparelho e por membro: pergunta de novo a cada conta nova e a cada versão nova. Na web hospedada, o portão aparece antes de Entrar sempre que a conta está bloqueada e ainda não houve aceite nesta carga da página (um toque por Entrar depois de Sair ou de a sessão expirar), porque o aparelho não sabe quem vai entrar; uma sessão retomada de um membro que já está no registro do aparelho passa direto. No nativo e no `varanda-serve`, passa enquanto não existe identidade e pergunta quando aparece uma identidade que não está no registro. A decisão é a função pura `termsDecision` (`apps/app/src/terms.js`, com `hosted` e `identityKnown`); o aceite dado na página fica preso à próxima identidade que desbloqueia nessa carga (limite de navegador compartilhado).
+- Antes de Entrar (web hospedada) ou Conectar (nativo), o app mostra os Termos de Uso e a Política de Privacidade (versão vigente, `LEGAL_VERSION` em `apps/app/src/legal.js`) e só segue depois do aceite. O aceite é por aparelho e por membro: pergunta de novo a cada conta nova e a cada versão nova. Na web hospedada, enquanto a conta está bloqueada, o aparelho não sabe quem vai entrar, então o portão aparece antes de Entrar só enquanto não há registro da versão atual no aparelho; com esse registro, recarregar, Sair ou a sessão expirar não pedem de novo antes de Entrar. Quem desbloqueia é conferido no registro: uma conta sem registro próprio é perguntada logo depois da passkey, antes de qualquer pedido ao serviço de conta (numa primeira passkey o shell ainda não conhece a chave, então o registro só dispensa o portão enquanto a conta está bloqueada); uma sessão retomada de um membro que já está no registro do aparelho passa direto. No nativo e no `varanda-serve`, passa enquanto não existe identidade e pergunta quando aparece uma identidade que não está no registro. A decisão é a função pura `termsDecision` (`apps/app/src/terms.js`, com `hosted`, `identityKnown` e `locked`); o aceite dado na página fica preso à próxima identidade que desbloqueia nessa carga (limite de navegador compartilhado). (Regra revista em 2026-10-29: antes, o portão voltava em toda carga bloqueada.)
 - Declaração assinada `varanda-terms-v1` (`packages/core/lib/terms.js`): `'varanda-terms-v1'`, nonce, membro, associação e versão, unidos por LF, sem LF final e sem data. A data é a do serviço de conta. Assinada pela chave do diário do membro; nenhuma outra assinatura do protocolo usa o prefixo.
 - RPC `terms.sign` `{ nonce, version }` -> `{ signature }` (`docs/rpc.md` 5.29): só no nó do navegador; os nós nativo, `varanda-serve` e CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/server.js`): `POST /account/terms/start` `{ member, version }` -> `{ nonce }` e `POST /account/terms/finish` `{ member, nonce, signature }` -> `{ version, acceptedAt }`. Recusas: `pedido-invalido`, `nao-vinculado`, `expirado`, `assinatura-invalida`, `indisponivel` e `limite`. Só membro com vínculo Google aceita no servidor; o nonce vale 10 minutos, uma vez, no máximo 1000 pendentes.
@@ -1864,13 +1864,18 @@ Cobertura no repositório:
 
 Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 
-- [ ] Na web hospedada, sem sessão: o portão aparece antes de Entrar, com os dois documentos abrindo no lugar; "Li e aceito os Termos de Uso e a Política de Privacidade" libera Entrar; sem tocar nele não se entra.
-- [ ] Sair e Entrar de novo: pergunta de novo (um toque); recarregar com a sessão retomada de um membro já aceito não pergunta.
-- [ ] Entrar com uma conta nova no mesmo aparelho: pergunta de novo.
+- [ ] Na web hospedada, sem sessão e sem registro da versão atual neste aparelho (primeira visita): o portão aparece antes de Entrar, com os dois documentos abrindo no lugar; "Li e aceito os Termos de Uso e a Política de Privacidade" libera Entrar; sem tocar nele não se entra.
+- [ ] Sair e Entrar de novo com a mesma conta: não pergunta, nem antes nem depois de Entrar; recarregar com a sessão retomada de um membro já aceito não pergunta.
+- [ ] Escrever um rascunho em Publicar, fechar sem publicar e tocar em Sair; entrar na mesma aba com outra conta que já aceitou neste aparelho: o compositor abre vazio e Ajustes mostra o perfil da conta nova.
+- [ ] Entrar com uma conta nova no mesmo aparelho: não pergunta antes de Entrar; o portão aparece logo depois da passkey.
+- [ ] Aceitar o portão e recarregar antes de Entrar: não pergunta antes de Entrar; a conta que entrar é perguntada uma vez logo depois da passkey.
+- [ ] Nesse mesmo caso, com uma passkey nova (primeira entrada): o portão aparece logo depois da passkey, sem "Continuar com o Google" e sem pedido a `/account/status` antes do aceite (aba Rede); depois do aceite, a configuração segue sem erro e sem pedir a passkey de novo.
+- [ ] Recomeçar com o único membro do aparelho e recarregar: não pergunta antes de Entrar; a nova conta é perguntada logo depois da passkey.
+- [ ] Um valor de `varanda-terms` editado à mão que não passa na validação: o portão aparece antes de Entrar.
 - [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
 - [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
 - [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
-- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para 2 num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (3, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
 - [ ] Recomeçar tira o membro do registro; Sair não.
 - [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
 
@@ -1887,6 +1892,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - O portão pertence ao app oficial: um cliente modificado ou outro cliente do protocolo não passa por ele, e o aceite no servidor é um registro, não uma barreira.
 - Na web hospedada, antes de o nó conectar o modo ainda não é "hospedado": quem tem o registro do aparelho em dia pode ver a tela de erro de conexão antes do portão. Nada sai dessa tela; o portão aparece assim que o nó conecta.
 - Num navegador compartilhado, o aceite dado antes de Entrar vale para a próxima conta que entrar naquela carga da página.
+- Com o registro da versão atual no aparelho, outra conta só vê o portão depois da passkey, não antes do Google; o aceite dado antes de Entrar na mesma carga continua valendo para a primeira conta que entrar (item acima).
 
 ## 30. Android gate on the emulator (issue #150, 2026-10-28)
 
