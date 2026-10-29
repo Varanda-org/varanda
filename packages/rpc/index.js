@@ -9,6 +9,7 @@ const methods = require('./lib/methods')
 const envelope = require('./lib/envelope')
 const framing = require('./lib/framing')
 const text = require('./lib/text')
+const mentions = require('./lib/mentions')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -32,6 +33,11 @@ module.exports = {
   createFrameDecoder: framing.createFrameDecoder,
   parseMessage: framing.parseMessage,
   displayText: text.displayText,
+  findMentions: mentions.findMentions,
+  mentionTokens: mentions.mentionTokens,
+  mentionSegments: mentions.mentionSegments,
+  activeMention: mentions.activeMention,
+  MENTION_MAX: mentions.MENTION_MAX,
   utf8ByteLength: text.utf8ByteLength,
   utf8Encode: text.utf8Encode,
   utf8Decode: text.utf8Decode,

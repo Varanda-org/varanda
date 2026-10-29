@@ -54,6 +54,12 @@ const {
   verifyNoticeProof,
   validateNoticesMessage
 } = require('./notices')
+const {
+  NOTICES_V2_PROTOCOL,
+  noticeV2Payload,
+  verifyNoticeV2Proof,
+  validateNoticesV2Message
+} = require('./notices-v2')
 
 const PROTOCOL = NOTICES_PROTOCOL
 const MAX_BAD_NOTICES = 5 // more than this many bad messages drops the peer
@@ -85,15 +91,31 @@ function emptyPage () {
   return { type: 'items', items: [], next: null, incomplete: true }
 }
 
+function projectItemV1 (it) {
+  return { key: it.key, seq: it.seq, at: it.at }
+}
+
+function projectCursorV1 (cur) {
+  return { at: cur.at, key: cur.key }
+}
+
+function projectItemV2 (it) {
+  return { key: it.key, seq: it.seq, at: it.at, kind: it.kind }
+}
+
+function projectCursorV2 (cur) {
+  return { at: cur.at, key: cur.key, seq: cur.seq }
+}
+
 // Our own items message from a page() result, or null when it would not
 // pass the receiver's validation (never send what the peer counts as bad).
-function itemsMessage (result, maxBytes) {
+function itemsMessage (result, maxBytes, validate, projectItem, projectCursor) {
   try {
     if (result === null || typeof result !== 'object' || !Array.isArray(result.items)) return null
-    const items = result.items.map((it) => ({ key: it.key, seq: it.seq, at: it.at }))
-    const next = result.next === null || result.next === undefined ? null : { at: result.next.at, key: result.next.key }
+    const items = result.items.map(projectItem)
+    const next = result.next === null || result.next === undefined ? null : projectCursor(result.next)
     const msg = { type: 'items', items, next, incomplete: result.incomplete === true }
-    if (!validateNoticesMessage(msg)) return null
+    if (!validate(msg)) return null
     if (b4a.byteLength(JSON.stringify(msg)) > maxBytes) return null
     return msg
   } catch {
@@ -101,8 +123,13 @@ function itemsMessage (result, maxBytes) {
   }
 }
 
+// The defaults are 'varanda/notices/1'; attachNoticesV2 passes its own
+// bundle. Each protocol keeps its handle in its own socket slot so both
+// channels coexist on one connection.
 function attachNotices (socket, opts = {}) {
-  if (socket && socket._varandaNotices) return socket._varandaNotices
+  const slot = opts.slot === undefined ? '_varandaNotices' : opts.slot
+  if (typeof slot !== 'string' || slot === '') throw new TypeError('invalid slot')
+  if (socket && socket[slot]) return socket[slot]
 
   const {
     role,
@@ -114,7 +141,16 @@ function attachNotices (socket, opts = {}) {
     maxBad = MAX_BAD_NOTICES,
     messageBurst = MESSAGE_BURST,
     messageRate = MESSAGE_RATE,
-    requestTimeoutMs = NOTICES_REQUEST_TIMEOUT_MS
+    requestTimeoutMs = NOTICES_REQUEST_TIMEOUT_MS,
+    protocol = PROTOCOL,
+    validate = validateNoticesMessage,
+    payload = noticePayload,
+    verify = verifyNoticeProof,
+    projectItem = projectItemV1,
+    projectCursor = projectCursorV1,
+    dropReason = 'notices',
+    invalidEvent = 'notices-page-invalid',
+    failedEvent = 'notices-page-failed'
   } = opts
 
   if (role !== 'seeder' && role !== 'member') throw new TypeError('role must be seeder or member')
@@ -127,6 +163,10 @@ function attachNotices (socket, opts = {}) {
   if (!Number.isSafeInteger(maxBad) || maxBad < 0) throw new TypeError('invalid maxBad')
   if (!(messageBurst >= 1) || !(messageRate > 0)) throw new TypeError('invalid message rate limits')
   if (!(requestTimeoutMs > 0)) throw new TypeError('invalid requestTimeoutMs')
+  if (typeof protocol !== 'string' || protocol === '') throw new TypeError('invalid protocol')
+  for (const fn of [validate, payload, verify, projectItem, projectCursor]) {
+    if (typeof fn !== 'function') throw new TypeError('invalid protocol bundle')
+  }
 
   const mux = socket && socket.noiseStream && socket.noiseStream.userData && socket.noiseStream.userData.isProtomux
     ? socket.noiseStream.userData
@@ -177,10 +217,10 @@ function attachNotices (socket, opts = {}) {
     handle.proved.catch(noop)
     handle.requestPage = requestPage
   }
-  socket._varandaNotices = handle
+  socket[slot] = handle
 
   // Whichever side opens first is paired (blocklist-net.js).
-  mux.pair({ protocol: PROTOCOL }, onpair)
+  mux.pair({ protocol }, onpair)
   openChannel()
   if (typeof socket.once === 'function') socket.once('close', end)
 
@@ -200,7 +240,7 @@ function attachNotices (socket, opts = {}) {
   }
 
   function openChannel () {
-    const ch = mux.createChannel({ protocol: PROTOCOL, onopen, onclose: onchannelclose })
+    const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose })
     if (ch === null) return
     channel = ch
     nonce = null
@@ -245,11 +285,11 @@ function attachNotices (socket, opts = {}) {
   function end () {
     if (ended) return
     ended = true
-    mux.unpair({ protocol: PROTOCOL })
+    mux.unpair({ protocol })
     failRequest(new Error('notices channel closed'))
     settle(false)
     settleProved(false)
-    if (socket._varandaNotices === handle) delete socket._varandaNotices
+    if (socket[slot] === handle) delete socket[slot]
     // A finished handle must not stay reachable from a live socket that a
     // caller attaches to again.
     if (typeof socket.off === 'function') socket.off('close', end)
@@ -279,7 +319,7 @@ function attachNotices (socket, opts = {}) {
 
   function badMessage () {
     handle.badMessages++
-    if (handle.badMessages > maxBad) drop('notices')
+    if (handle.badMessages > maxBad) drop(dropReason)
   }
 
   function onraw (buf) {
@@ -301,7 +341,7 @@ function attachNotices (socket, opts = {}) {
       badMessage()
       return
     }
-    if (!validateNoticesMessage(msg)) {
+    if (!validate(msg)) {
       badMessage()
       return
     }
@@ -319,7 +359,7 @@ function attachNotices (socket, opts = {}) {
         return
       }
       proofSeen = true
-      if (!verifyNoticeProof({ nonce, noise: hex(socket.remotePublicKey), key: msg.key }, msg.sig)) {
+      if (!verify({ nonce, noise: hex(socket.remotePublicKey), key: msg.key }, msg.sig)) {
         badMessage()
         return
       }
@@ -344,10 +384,10 @@ function attachNotices (socket, opts = {}) {
     let reply = null
     try {
       const result = await page({ target: boundKey, after: msg.after, limit: msg.limit })
-      reply = itemsMessage(result, maxBytes)
-      if (reply === null) log({ event: 'notices-page-invalid', peerKey: handle.peerKey })
+      reply = itemsMessage(result, maxBytes, validate, projectItem, projectCursor)
+      if (reply === null) log({ event: invalidEvent, peerKey: handle.peerKey })
     } catch (err) {
-      log({ event: 'notices-page-failed', peerKey: handle.peerKey, error: err && err.message })
+      log({ event: failedEvent, peerKey: handle.peerKey, error: err && err.message })
     }
     if (ch !== channel || ended || dropped) return
     answering = false
@@ -388,10 +428,10 @@ function attachNotices (socket, opts = {}) {
       return
     }
     // Our own Noise key: the seeder sees it as remotePublicKey.
-    const payload = noticePayload(nonceHex, hex(socket.publicKey), ownKey)
+    const signed = payload(nonceHex, hex(socket.publicKey), ownKey)
     let sig
     try {
-      sig = sign(payload)
+      sig = sign(signed)
       if (!(sig instanceof Uint8Array) || sig.byteLength !== 64) throw new Error('invalid signature')
     } catch (err) {
       // E.g. the identity is locked: no proof, close the channel only.
@@ -413,7 +453,7 @@ function attachNotices (socket, opts = {}) {
     if (ended || dropped) return Promise.reject(new Error('notices channel closed'))
     if (request !== null) return Promise.reject(new Error('a notices page is already in flight'))
     const msg = { type: 'page', after, limit }
-    if (!validateNoticesMessage(msg)) return Promise.reject(new TypeError('invalid page request'))
+    if (!validate(msg)) return Promise.reject(new TypeError('invalid page request'))
     return new Promise((resolve, reject) => {
       const r = { msg, sent: false, resolve, reject, timer: null }
       r.timer = setTimeout(() => {
@@ -445,12 +485,33 @@ function attachNotices (socket, opts = {}) {
   }
 }
 
+// 'varanda/notices/2': the same flow with kinded items and seq cursors
+// (notices-v2.js). Its own slot, drop reason and log events, so a v2 peer
+// never disturbs the v1 channel on the same socket.
+function attachNoticesV2 (socket, opts = {}) {
+  return attachNotices(socket, {
+    ...opts,
+    protocol: NOTICES_V2_PROTOCOL,
+    validate: validateNoticesV2Message,
+    payload: noticeV2Payload,
+    verify: verifyNoticeV2Proof,
+    projectItem: projectItemV2,
+    projectCursor: projectCursorV2,
+    slot: '_varandaNoticesV2',
+    dropReason: 'notices-v2',
+    invalidEvent: 'notices-v2-page-invalid',
+    failedEvent: 'notices-v2-page-failed'
+  })
+}
+
 module.exports = {
   PROTOCOL,
+  NOTICES_V2_PROTOCOL,
   MAX_NOTICES_MESSAGE,
   MAX_BAD_NOTICES,
   NOTICES_REQUEST_TIMEOUT_MS,
   MESSAGE_BURST,
   MESSAGE_RATE,
-  attachNotices
+  attachNotices,
+  attachNoticesV2
 }

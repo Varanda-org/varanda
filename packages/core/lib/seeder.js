@@ -116,7 +116,8 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
-const { attachNotices } = require('./notices-net')
+const { attachNotices, attachNoticesV2 } = require('./notices-net')
+const { createPostNoticeIndex } = require('./post-notices')
 const {
   validateRecord,
   validRecordCopy,
@@ -510,7 +511,12 @@ class Seeder {
     // persisted; the open notices channel of every connection.
     // isMember reads the live sets (both created above); a follow of a key
     // admitted later is picked up on that author's next serve or restart.
+    // Post notices (post-notices.js: replies, quotes, @nome mentions) follow
+    // the same lifecycle in their own index, so a mention spammer never
+    // touches the follow index's budget; both are paged on
+    // varanda/notices/2, and _noticeHandles holds the v1 and v2 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
+    this._postNotices = this._createPostNoticeIndex()
     this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
@@ -1227,6 +1233,7 @@ class Seeder {
       // rescan never counts.
       else if (this._served.get(key) === entry) {
         this._notices.markPending(key)
+        this._postNotices.markPending(key)
         noteGrowth(entry, core.length, Date.now())
       }
     }
@@ -1240,6 +1247,8 @@ class Seeder {
     // scratch, invisible to pages until the scan reaches the signed length.
     this._notices.removeAuthor(key)
     this._notices.markPending(key)
+    this._postNotices.removeAuthor(key)
+    this._postNotices.markPending(key)
     checkQuota()
     if (entry.dropped) return
     // A replica opened for re-gating may already hold block 0.
@@ -1328,6 +1337,7 @@ class Seeder {
     entry.dropped = true
     this._served.delete(key)
     this._notices.removeAuthor(key)
+    this._postNotices.removeAuthor(key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -1417,6 +1427,7 @@ class Seeder {
         // Pending until a pass commits; the read is retried a bounded number
         // of times, as growth alone may never re-queue the scan.
         this._notices.markPending(key)
+        this._postNotices.markPending(key)
         if (entry.scanRetry === null && entry.scanRetries < SCAN_RETRIES_MAX) {
           entry.scanRetries++
           entry.scanRetry = setTimeout(() => {
@@ -1436,6 +1447,16 @@ class Seeder {
         if (r !== null) this._notices.foldFollow(key, i, r)
         continue
       }
+      // Folded here, not in _runIndex: that queue pauses at capacity and
+      // would leave mention targets unknown while the scan commits.
+      if (block.type === 'post' || block.type === 'username') {
+        const r = validRecordCopy(block, i)
+        if (r !== null) {
+          if (r.type === 'post') this._postNotices.foldPost(key, i, r)
+          else this._postNotices.foldUsername(key, i, r)
+        }
+        continue
+      }
       if (block.type !== 'media-core') continue
       const record = validRecordCopy(block, i)
       if (record === null || record.key === key) continue
@@ -1447,8 +1468,13 @@ class Seeder {
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
     // (a pending author marks every page `incomplete`).
-    if (core.contiguousLength >= core.length) this._notices.commit(key)
-    else this._notices.markPending(key)
+    if (core.contiguousLength >= core.length) {
+      this._notices.commit(key)
+      this._postNotices.settle(key)
+    } else {
+      this._notices.markPending(key)
+      this._postNotices.markPending(key)
+    }
     const entries = [...entry.decls].map(([k, { seq, at }]) => ({ seq, record: { type: 'media-core', key: k, at } }))
     entry.latest = latestMediaCores(entries, key, MAX_MEDIA_CORES)
     for (const k of [...entry.refused.keys()]) {
@@ -1935,6 +1961,23 @@ class Seeder {
   // association (revocation is applied per query by indexSearch).
   _createNameIndex () {
     return createNameIndex({
+      maxAuthors: this.maxServed,
+      verifyUsername: (author, record) => {
+        try {
+          return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      }
+    })
+  }
+
+  // The post notice index: same member predicate as the follow index and the
+  // same @nome verification as the name index (revocation is applied per
+  // page by issuerUsable).
+  _createPostNoticeIndex () {
+    return createPostNoticeIndex({
+      isMember: (k) => this._admitted.has(k) || this._served.has(k),
       maxAuthors: this.maxServed,
       verifyUsername: (author, record) => {
         try {
@@ -2600,6 +2643,40 @@ class Seeder {
     }
     this._noticeHandles.add(notices)
     socket.once('close', () => this._noticeHandles.delete(notices))
+    // Post notices merged with follows, under the same rules as v1. A
+    // revoked issuer's names stop matching at once, as in indexSearch.
+    let noticesV2 = null
+    try {
+      noticesV2 = attachNoticesV2(socket, {
+        role: 'seeder',
+        page: ({ target, after, limit }) => {
+          if (this._isBlocked(target)) return { items: [], next: null, incomplete: false }
+          const isBlocked = (k) => this._isBlocked(k)
+          const f = this._notices.rowsFor(target, isBlocked)
+          const opts = this._certOpts()
+          const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+          const result = this._postNotices.pageV2({
+            target,
+            followRows: f.rows,
+            followIncomplete: f.incomplete,
+            isBlocked,
+            issuerUsable: (i) => !revoked.has(i),
+            after,
+            limit,
+            now: Date.now()
+          })
+          const e = this._served.get(target)
+          if (this._closing || !e || !e.gated) result.incomplete = true
+          return result
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._noticeHandles.add(noticesV2)
+    socket.once('close', () => this._noticeHandles.delete(noticesV2))
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
@@ -2682,6 +2759,7 @@ class Seeder {
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
+      this._postNotices = createPostNoticeIndex()
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const socket of [...this._external]) {

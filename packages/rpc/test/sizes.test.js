@@ -102,12 +102,13 @@ function noticesResult (n, ch) {
   // Derive the maximum from core's username rule, which exports no length limit.
   let username = 'uuu'
   while (isUsername(username + 'u')) username += 'u'
-  const item = { key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR }
+  const item = { kind: 'mention', key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR }
   return {
     notices: Array(n).fill(item),
-    next: { at: AT, key: HEX },
+    next: { at: AT, key: HEX, seq: SEQ },
     incomplete: true,
-    supported: true
+    supported: true,
+    activity: true
   }
 }
 

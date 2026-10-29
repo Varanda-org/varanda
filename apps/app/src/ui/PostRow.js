@@ -25,6 +25,10 @@
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
 //   onFollow ('seguir', disabled while followPending), onReport (each button
 //   shows only with its handler).
+// - onOpenMention(username): makes the @nome in the text and in the quote
+//   tappable (./MentionText). A text or quote with a mention is rendered
+//   outside the body's single accessible element, so the link is reachable by
+//   assistive tech and a tap on it never opens the conversation.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -33,6 +37,7 @@ import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
+import { hasMention, MentionText } from './MentionText'
 import { QuoteCard } from './QuoteCard'
 import { colors, type } from './theme'
 
@@ -86,7 +91,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 export function PostRow ({
   author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
+  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport
 }) {
   const likes = countOf(counts, 'likes')
@@ -116,6 +121,30 @@ export function PostRow ({
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
+  const openMention = fn(onOpenMention)
+  const quoteOn = quote && typeof quote === 'object'
+  const textOut = !!openMention && hasText && hasMention(text)
+  // The screen gives a quote its own handler carrying the quoted author.
+  const quoteMention = (quoteOn && fn(quote.onOpenMention)) || openMention
+  const quoteOut = !!quoteMention && quoteOn && typeof quote.text === 'string' && hasMention(quote.text)
+  const quoteProp = quoteMention && quoteOn ? { ...quote, onOpenMention: quoteMention } : quote
+  const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
+  const textNode = hasText
+    ? textOut
+      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} />
+      : (
+        <Pressable
+          accessibilityRole={open ? 'link' : 'text'}
+          accessibilityHint={open ? 'abre a conversa' : undefined}
+          disabled={!open}
+          onPress={open}
+        >
+          <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+        </Pressable>
+        )
+    : null
+  const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
+  const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   return (
     <View style={styles.row}>
       {reposter
@@ -170,7 +199,7 @@ export function PostRow ({
             disabled={!open}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
-            accessibilityLabel={bodyLabel}
+            accessibilityLabel={label}
             accessibilityHint={open ? 'abre a conversa' : undefined}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
@@ -210,22 +239,23 @@ export function PostRow ({
                   </Pressable>
                   )
                 : null}
-              {hasText
-                ? (
-                  <Pressable
-                    accessibilityRole={open ? 'link' : 'text'}
-                    accessibilityHint={open ? 'abre a conversa' : undefined}
-                    disabled={!open}
-                    onPress={open}
-                  >
-                    <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
-                  </Pressable>
-                  )
-                : null}
-              {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
-              {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+              {textOut ? null : textNode}
+              {textOut ? null : mediaNode}
+              {quoteOut || textOut ? null : quoteNode}
             </View>
           </Pressable>
+          {textOut ? textNode : null}
+          {textOut && (mediaNode || (quoteNode && !quoteOut))
+            ? (
+              <Pressable accessible={false} tabIndex={-1} onPress={open} disabled={!open}>
+                <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                  {mediaNode}
+                  {quoteOut ? null : quoteNode}
+                </View>
+              </Pressable>
+              )
+            : null}
+          {quoteOut ? quoteNode : null}
           {bar
             ? (
               <View style={styles.bar}>
