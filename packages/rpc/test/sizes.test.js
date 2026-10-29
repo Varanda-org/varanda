@@ -24,6 +24,7 @@ const {
   MEDIA_MIMES,
   LOG_LIMIT_MAX,
   FEED_LIMIT_MAX,
+  FEED_INCOMPLETE_MAX,
   PEEK_LIMIT_MAX,
   NOTICES_LIMIT_MAX,
   PROFILE_LIMIT_MAX,
@@ -81,7 +82,9 @@ function feedResult (n, ch) {
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
     skippedTruncated: SEQ,
     future: Array(MAX_LIST).fill(HEX + ':' + SEQ),
-    futureTruncated: SEQ
+    futureTruncated: SEQ,
+    incomplete: Array(FEED_INCOMPLETE_MAX).fill(HEX),
+    incompleteTruncated: SEQ
   }
 }
 
@@ -174,6 +177,7 @@ test('feed quote items are no larger than replies, and reposts are smaller', (t)
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
   // With MAX_MEDIA_PER_POST maximal descriptors in every item.
   t.is(FEED_LIMIT_MAX, 31)
+  t.is(FEED_INCOMPLETE_MAX, 16)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800'))
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')

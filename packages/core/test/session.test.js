@@ -10,7 +10,7 @@ const os = require('node:os')
 const path = require('node:path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { MAX_LIST, RpcError } = require('@varanda/rpc')
+const { MAX_LIST, RpcError, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure, scanWire } = require('./helpers/net')
 const { createSession, toRpcError, checkConfig, redactLogLine } = require('../lib/session')
@@ -18,7 +18,7 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
-const { postRecord, profileRecord, profileRecords, validateRecord } = require('../lib/records')
+const { postRecord, profileRecord, profileRecords, validateRecord, memberCertRecord } = require('../lib/records')
 const store = require('../lib/store')
 
 // A bootstrap that is never dialled: these tests start no sync.
@@ -172,13 +172,58 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.alike(feed.items.map((i) => i.text), ['olá varanda', 'eu mesma'])
   t.is(feed.items[0].name, 'Ana')
   t.alike(feed.items[1].replyTo, { author: pk, seq: 2 })
-  t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated], [[], 0, [], 0])
+  t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated, feed.incomplete, feed.incompleteTruncated], [[], 0, [], 0, [], 0])
 
   // profile.read folds duplicates; the own diary has no username record.
   t.alike(await m.call('profile.read', { authors: [pk, pk] }), {
     profiles: [{ author: pk, name: 'Ana', bio: 'oi', avatar: null, username: null }],
     missing: []
   })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('feed.read caps the incomplete list at FEED_INCOMPLETE_MAX', async (t) => {
+  const m = await member(t, { cert: true })
+  const total = FEED_INCOMPLETE_MAX + 1
+  const keys = []
+  // Each follow has its certificate and one post replicated in-process, plus
+  // one more block that stays unfetched: a diary with a hole at the end.
+  for (let i = 0; i < total; i++) {
+    const src = await store.openStore(tmpDir(t))
+    const dst = await store.openStore(m.dataDir)
+    try {
+      const core = src.get({ name: 'diary', valueEncoding: 'json' })
+      await core.ready()
+      const key = b4a.toString(core.key, 'hex')
+      await core.append(memberCertRecord(issueCertificate(m.assoc.dir, { member: key })))
+      await core.append(postRecord({ text: 'parcial ' + i, at: '2020-01-01T00:00:00.000Z' }))
+      await core.append(postRecord({ text: 'faltando ' + i, at: '2020-01-02T00:00:00.000Z' }))
+      const s1 = src.replicate(true)
+      const s2 = dst.replicate(false)
+      s1.pipe(s2).pipe(s1)
+      const replica = dst.get({ key: core.key, valueEncoding: 'json' })
+      await replica.ready()
+      await replica.get(0)
+      await replica.get(1)
+      await replica.update()
+      t.is(replica.length, 3)
+      t.is(replica.contiguousLength, 2)
+      s1.destroy()
+      s2.destroy()
+      keys.push(key)
+    } finally {
+      await dst.close()
+      await src.close()
+    }
+  }
+  // Also follow a key with no local data: it stays no-cert and is not listed.
+  const absent = randomKey()
+  fs.writeFileSync(path.join(m.dataDir, 'follows.json'), JSON.stringify({ v: 1, follows: [absent, ...keys] }))
+  const feed = await m.call('feed.read')
+  t.alike(feed.skipped, [{ key: absent, reason: 'no-cert' }])
+  t.is(feed.incomplete.length, FEED_INCOMPLETE_MAX)
+  t.is(feed.incompleteTruncated, 1)
+  t.alike(feed.incomplete, keys.slice(0, FEED_INCOMPLETE_MAX), 'follow-list order')
   t.alike(m.session.internal, [], 'no internal error')
 })
 

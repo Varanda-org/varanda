@@ -836,6 +836,7 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
   const kept = [own]
   const skipped = []
+  const incomplete = []
   const seen = new Set([own.key])
   for (const raw of await store.readFollows(ctx.storage)) {
     if (typeof raw !== 'string' || !HEX64.test(raw)) continue
@@ -856,20 +857,23 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     let entries
     let reason
     let empty
+    let behind
     try {
       entries = await store.readAll(replica)
       reason = skipReason(replica, entries, key, association, mod)
       empty = replica.contiguousLength === 0
+      behind = replica.length > replica.contiguousLength
     } finally {
       await replica.close()
     }
     // An empty core must not linger in the storage.
     if (empty) await store.purgeReplica(ctx.storage, key)
+    if (reason === null && behind) incomplete.push(key)
     if (reason === null) kept.push({ key, entries })
     else skipped.push({ key, reason })
   }
   const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers, before })
-  return { items: built.items, skipped, future: built.future }
+  return { items: built.items, skipped, future: built.future, incomplete }
 }
 
 // ---- profile.read ----

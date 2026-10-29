@@ -898,7 +898,9 @@ async function runSync ({
     core.on('append', check)
     entry.stopQuota = () => core.off('append', check)
     entry.stopFork = watchFork(core, () => { onFork(entry) })
-    entry.range = core.download({ start: 0, end: -1 })
+    // linear: Hypercore otherwise requests a range from a random offset, so a
+    // follower stores blocks out of order and readAll sees a gap until the end.
+    entry.range = core.download({ start: 0, end: -1, linear: true })
     entry.stopGrow = watchContiguous(core, (length) => { onGrow(entry, length) })
     checkQuota(entry)
   }
