@@ -4,6 +4,8 @@
 // signatures, so usernameMatches is only a consistency check on data the same
 // origin serves.
 
+import { applicationServerKey } from './push-state.js'
+
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
 const TIMEOUT_MS = 8000
@@ -22,6 +24,8 @@ const ERROR_MESSAGES = {
   'assinatura-invalida': 'não foi possível provar a chave',
   expirado: 'o vínculo expirou, comece de novo',
   'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
+  'termos-pendentes': 'aceite os termos atuais antes de ligar os avisos',
+  'pedido-invalido': 'pedido inválido',
   // Member cap (503). Already-linked members never receive this token.
   'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.'
 }
@@ -106,27 +110,35 @@ export function buildRequest (method, path, body) {
   return { url: path, init }
 }
 
-async function call (method, path, body, { allow404 = false } = {}) {
+// `uncertain`: a state-changing call whose outcome is unknown (no answer, a
+// 5xx, or a success without a readable body) says so, so the caller can tell
+// it from a refusal and re-read instead of repeating it (docs/app.md).
+async function call (method, path, body, { allow404 = false, uncertain = false } = {}) {
   const { url, init } = buildRequest(method, path, body)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
+  const fail = (code, nextChangeAt, unknown) => {
+    const err = toError(code, nextChangeAt)
+    if (uncertain && unknown) err.uncertain = true
+    return err
+  }
   let res
   let data
   try {
     res = await fetch(url, { ...init, signal: ctl.signal })
     data = await readJson(res)
   } catch {
-    throw toError('indisponivel')
+    throw fail('indisponivel', undefined, true)
   } finally {
     clearTimeout(timer)
   }
   if (res.ok) {
-    if (data === null || typeof data !== 'object') throw toError('indisponivel')
+    if (data === null || typeof data !== 'object') throw fail('indisponivel', undefined, true)
     return data
   }
   if (allow404 && res.status === 404) return null
   const code = data && typeof data.error === 'string' ? data.error : ''
-  throw toError(code, data && data.nextChangeAt)
+  throw fail(code, data && data.nextChangeAt, res.status >= 500)
 }
 
 export const accountStatus = (member) =>
@@ -157,4 +169,37 @@ export const termsFinish = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/terms/finish', { member, nonce, signature })
   if (!Number.isInteger(data.version) || typeof data.acceptedAt !== 'string') throw toError('indisponivel')
   return { version: data.version, acceptedAt: data.acceptedAt }
+}
+
+// Web Push (pushClient.web.js). The key read and the check answer null on any
+// failure: the Ajustes row then hides or reads "not known", nothing more.
+export const pushKey = async () => {
+  try {
+    const data = await call('GET', '/account/push/key')
+    return applicationServerKey(data.key) !== null ? data.key : null
+  } catch {
+    return null
+  }
+}
+export const pushStart = async ({ member, action }) => {
+  const data = await call('POST', '/account/push/start', { member, action })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const pushFinish = async ({ member, nonce, action, signature, endpoint, p256dh, auth }) => {
+  const data = await call('POST', '/account/push/finish', { member, nonce, action, signature, endpoint, p256dh, auth }, { uncertain: true })
+  if (data.ok !== true || typeof data.changed !== 'boolean') {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return { ok: true, changed: data.changed }
+}
+export const pushCheck = async ({ member, endpoint, p256dh, auth }) => {
+  try {
+    const data = await call('POST', '/account/push/check', { member, endpoint, p256dh, auth })
+    return typeof data.registered === 'boolean' ? { registered: data.registered } : null
+  } catch {
+    return null
+  }
 }

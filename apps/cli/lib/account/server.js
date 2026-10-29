@@ -9,6 +9,7 @@ const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-lin
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { createModRoutes } = require('./mod-routes')
+const { createPushRoutes } = require('./push-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -102,7 +103,9 @@ const ERROR_STATUS = Object.freeze({
   'limite-denuncias': 429,
   limite: 503,
   defasado: 409,
-  'ja-revertido': 409
+  'ja-revertido': 409,
+  // Web Push (./push-routes.js): turning notices on needs the current terms.
+  'termos-pendentes': 409
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -535,7 +538,9 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
 // or null when the stats tab is off) and `panelDir` (tests only) are passed
 // to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
-// null: the terms routes then answer 503 'indisponivel'.
+// null: the terms routes then answer 503 'indisponivel'. `push` is null (the
+// push routes and /push-event are not mounted at all) or the options of
+// ./push-routes.js { pushStore, vapid, send, relayTokenHash }.
 function createAccountServer ({
   association,
   origin,
@@ -552,6 +557,7 @@ function createAccountServer ({
   usage = null,
   panelDir,
   terms = null,
+  push = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -595,6 +601,18 @@ function createAccountServer ({
     now,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow, BASE_HEADERS }
   })
+
+  const pushRoutes = push === null
+    ? null
+    : createPushRoutes({
+      ...push,
+      association,
+      accounts: store,
+      terms,
+      log,
+      now,
+      http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
+    })
 
   // OAuth state -> pending id, written at authorize and deleted at the first
   // callback that presents it (single-use). One entry per pending row at
@@ -865,9 +883,13 @@ function createAccountServer ({
     }
     const pathname = url.pathname
     if (req.method === 'GET' && pathname === '/account/health') return send(res, 200, { status: 'ok' })
+    // The seeder's relay never spends the browsers' global bucket; its own
+    // token, dedupe and caps bound it (./push-routes.js).
+    if (pushRoutes !== null && pathname === '/push-event') return pushRoutes.handleRelay(req, res)
     if (!limits.global()) throw over()
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
+    if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
@@ -934,7 +956,7 @@ function createAccountServer ({
 
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
-  return { listen, modStats: () => mod.stats() }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()) }
 }
 
 module.exports = {

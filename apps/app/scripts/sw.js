@@ -363,9 +363,17 @@ async function openPush (data) {
       }
     })
     if (client) {
-      await client.focus()
-      if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
-      return
+      let focused = true
+      try {
+        await client.focus()
+      } catch {
+        // focus() can reject (InvalidAccessError); the click must still open the app.
+        focused = false
+      }
+      if (focused) {
+        if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
+        return
+      }
     }
     await clients.openWindow(path)
   } catch {}

@@ -176,3 +176,98 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   stub(t, json(200, { version: 1, acceptedAt: null }))
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
 })
+
+// A valid uncompressed P-256 point: 0x04 then 64 bytes, unpadded base64url.
+const VAPID = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString('base64url')
+const SUB = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', p256dh: 'p', auth: 'a' }
+
+test('pushKey: the key, or null on 503, a bad shape or no answer', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { key: VAPID }))
+  t.is(await a.pushKey(), VAPID)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/push/key')
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.pushKey(), null, '503')
+  for (const bad of [VAPID + '=', VAPID.slice(1), 'A' + VAPID.slice(1), 5, null, '']) {
+    stub(t, json(200, { key: bad }))
+    t.is(await a.pushKey(), null, 'shape ' + String(bad).slice(0, 8))
+  }
+  stub(t, json(200, { key: VAPID }, 'text/html'))
+  t.is(await a.pushKey(), null, 'not JSON')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.pushKey(), null, 'transport')
+})
+
+test('pushStart/pushFinish/pushCheck: same-origin POSTs with exactly those keys', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1', ok: true, changed: true, registered: true }))
+  t.alike(await a.pushStart({ member: M, action: 'on' }), { nonce: 'n1' })
+  t.alike(await a.pushFinish({ member: M, nonce: 'n1', action: 'on', signature: 'ff', ...SUB }), { ok: true, changed: true })
+  t.alike(await a.pushCheck({ member: M, ...SUB }), { registered: true })
+  t.alike(calls.map(c => c.init.method + ' ' + c.url), ['POST /account/push/start', 'POST /account/push/finish', 'POST /account/push/check'])
+  for (const c of calls) {
+    t.is(c.init.credentials, 'same-origin')
+    t.is(c.init.cache, 'no-store')
+    t.is(c.init.headers['content-type'], 'application/json')
+    t.ok(c.init.signal)
+  }
+  t.alike(JSON.parse(calls[0].init.body), { member: M, action: 'on' })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce: 'n1', action: 'on', signature: 'ff', ...SUB })
+  t.alike(JSON.parse(calls[2].init.body), { member: M, ...SUB })
+  t.alike(Object.keys(JSON.parse(calls[2].init.body)), ['member', 'endpoint', 'p256dh', 'auth'])
+})
+
+test('push error tokens: refusals are definite, start never uncertain', async (t) => {
+  const a = await load()
+  const finish = () => a.pushFinish({ member: M, nonce: 'n', action: 'on', signature: 'ff', ...SUB })
+  for (const [status, token] of [[400, 'expirado'], [400, 'assinatura-invalida'], [403, 'termos-pendentes'], [400, 'pedido-invalido'], [403, 'nao-vinculado']]) {
+    stub(t, json(status, { error: token }))
+    try { await finish(); t.fail() } catch (e) {
+      t.is(e.code, token)
+      t.absent(e.uncertain, token + ' is a refusal')
+    }
+  }
+  stub(t, json(400, { error: '<b>x</b>' }))
+  try { await finish(); t.fail() } catch (e) {
+    t.is(e.message, 'serviço indisponível')
+    t.absent(e.uncertain)
+  }
+  stub(t, () => { throw new Error('rede') })
+  try { await a.pushStart({ member: M, action: 'on' }); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.absent(e.uncertain, 'start changes nothing')
+  }
+  stub(t, json(200, { nonce: 7 }))
+  try { await a.pushStart({ member: M, action: 'off' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('pushFinish: no answer, a 5xx or an unreadable success is uncertain', async (t) => {
+  const a = await load()
+  const finish = () => a.pushFinish({ member: M, nonce: 'n', action: 'off', signature: 'ff', ...SUB })
+  const cases = [
+    ['transport', () => { throw new Error('rede') }],
+    ['5xx', json(502, {}, 'text/html')],
+    ['5xx token', json(503, { error: 'indisponivel' })],
+    ['bad body', json(200, { ok: 1 })],
+    ['not JSON', json(200, { ok: true, changed: true }, 'text/plain')]
+  ]
+  for (const [name, res] of cases) {
+    const calls = stub(t, res)
+    try { await finish(); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel', name)
+      t.is(e.uncertain, true, name)
+    }
+    t.is(calls.length, 1, name + ': sent once, never retried')
+  }
+})
+
+test('pushCheck: null on any failure or shape', async (t) => {
+  const a = await load()
+  stub(t, json(200, { registered: false }))
+  t.alike(await a.pushCheck({ member: M, ...SUB }), { registered: false })
+  for (const res of [json(200, { registered: 'yes' }), json(429, { error: 'limite' }), () => { throw new Error('rede') }]) {
+    stub(t, res)
+    t.is(await a.pushCheck({ member: M, ...SUB }), null)
+  }
+})

@@ -98,11 +98,16 @@ function freshSenderKeyPair () {
   return { publicKey: ecdh.getPublicKey(), privateKey }
 }
 
-function encryptPayload ({ p256dh, auth, plaintext, salt = crypto.randomBytes(16), senderKeyPair = freshSenderKeyPair() }) {
+// padTo > 0 pads the record (RFC 8188 section 2: the 0x02 delimiter, then
+// zero octets) so plaintext, delimiter and padding fill exactly padTo bytes,
+// and the ciphertext length a push service sees is the same for every notice.
+function encryptPayload ({ p256dh, auth, plaintext, padTo = 0, salt = crypto.randomBytes(16), senderKeyPair = freshSenderKeyPair() }) {
   const uaPublic = fromB64u(p256dh, 'p256dh', 65)
   const authSecret = fromB64u(auth, 'auth', 16)
   const data = Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(String(plaintext), 'utf8')
   if (data.length > MAX_PLAINTEXT) throw new RangeError('mensagem grande demais')
+  if (!Number.isInteger(padTo) || padTo < 0 || padTo + 16 > RECORD_SIZE) throw new RangeError('padTo inválido')
+  const padding = padTo > data.length + 1 ? padTo - data.length - 1 : 0
   if (!Buffer.isBuffer(salt) || salt.length !== 16) throw new TypeError('salt inválido')
 
   const ecdh = crypto.createECDH('prime256v1')
@@ -116,7 +121,7 @@ function encryptPayload ({ p256dh, auth, plaintext, salt = crypto.randomBytes(16
   const nonce = hkdf(salt, ikm, Buffer.from('Content-Encoding: nonce\0'), 12)
 
   const cipher = crypto.createCipheriv('aes-128-gcm', cek, nonce)
-  const body = Buffer.concat([cipher.update(data), cipher.update(Buffer.from([0x02])), cipher.final(), cipher.getAuthTag()])
+  const body = Buffer.concat([cipher.update(data), cipher.update(Buffer.concat([Buffer.from([0x02]), Buffer.alloc(padding)])), cipher.final(), cipher.getAuthTag()])
 
   const header = Buffer.alloc(21)
   salt.copy(header, 0)
@@ -125,7 +130,7 @@ function encryptPayload ({ p256dh, auth, plaintext, salt = crypto.randomBytes(16
   return Buffer.concat([header, asPublic, body])
 }
 
-async function sendPush ({ subscription, payload, vapid, topic, fetch = globalThis.fetch, timeoutMs = 10000, now = Date.now() }) {
+async function sendPush ({ subscription, payload, vapid, topic, padTo = 0, fetch = globalThis.fetch, timeoutMs = 10000, now = Date.now() }) {
   if (typeof payload !== 'string') throw new TypeError('payload inválido')
   if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw new TypeError('topic inválido')
   if (!subscription || !isAllowedEndpoint(subscription.endpoint)) return 'dropped'
@@ -133,7 +138,7 @@ async function sendPush ({ subscription, payload, vapid, topic, fetch = globalTh
   let body
   let authorization
   try {
-    body = encryptPayload({ p256dh: subscription.p256dh, auth: subscription.auth, plaintext: payload })
+    body = encryptPayload({ p256dh: subscription.p256dh, auth: subscription.auth, plaintext: payload, padTo })
     authorization = vapidAuthorization({ endpoint: subscription.endpoint, subject: vapid.subject, publicKey: vapid.publicKey, privateKey: vapid.privateKey, now })
   } catch {
     return 'dropped'

@@ -139,6 +139,12 @@ test('pushName: direction marks are stripped before displayText', (t) => {
   }
 })
 
+test('pushName: nothing visible within the first 64 code points gives null', (t) => {
+  t.is(pushName('\ufffd'.repeat(64) + 'Ana'), null, '64 replacement characters, then a name')
+  t.is(pushName('\ud800'.repeat(64) + 'Ana'), null, '64 lone surrogates, then a name')
+  t.is(pushName('\ufffd'.repeat(63) + 'Ana'), '\ufffd'.repeat(63) + 'A', 'one visible char inside the clip')
+})
+
 test('validatePushEvent: accepts every kind', (t) => {
   t.ok(validatePushEvent(event()))
   t.ok(validatePushEvent(event({ kind: 'repost', name: null })))

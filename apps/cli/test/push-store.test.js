@@ -173,6 +173,18 @@ test('an endpoint stored under another member moves to the proving member', asyn
   t.is(store.count(), 1)
 })
 
+test('knowing an endpoint URL alone never moves it to another member', async (t) => {
+  const { store, file } = setup(t)
+  const a = memberKey()
+  const b = memberKey()
+  await store.put(sub(a, 1))
+  const before = fs.readFileSync(file)
+  await rejects(t, store.put(sub(b, 1, { p256dh: p256dh(9), auth: auth(9) })), 'pedido-invalido', 'other keys are refused')
+  t.is(store.list(a)[0].endpoint, ep(1), 'the owner keeps it')
+  t.alike(store.list(b), [])
+  t.ok(fs.readFileSync(file).equals(before), 'nothing written')
+})
+
 test('removeAll clears the member', async (t) => {
   const { store, file } = setup(t)
   const a = memberKey()
@@ -476,6 +488,42 @@ test('the cap in put keeps the new row even when the clock moved back', async (t
   replaceUnder(file, { v: 1, members: { [m]: [...rows, rowAt(6, T0 + 30 * MIN)] } })
   await store.heal()
   t.alike(store.list(m).map((r) => r.endpoint).sort(), [ep(3), ep(4), ep(5), ep(6)].sort(), 'a later merge keeps the acknowledged row')
+})
+
+test('a transfer adopted from disk buries the previous owner', async (t) => {
+  const { store, file, c } = setup(t)
+  const a = memberKey()
+  const b = memberKey()
+  await store.put(sub(a, 1))
+  const stale = readFile(file)
+  replaceUnder(file, { v: 1, members: { [b]: [rowAt(1, T0 + 5 * MIN)] } })
+  c.t += 6 * MIN
+  await store.heal()
+  t.alike(Object.keys(readFile(file).members), [b], 'the newer owner is adopted')
+  t.alike(await store.remove({ member: b, endpoint: ep(1) }), { changed: true })
+  t.is(store.count(), 0)
+  replaceUnder(file, stale)
+  await store.heal()
+  t.is(store.count(), 0, 'the previous owner does not come back')
+  t.is(store.devices(a), 0)
+  t.alike(readFile(file).members, {})
+})
+
+test('an older disk row of another member that loses the endpoint is buried', async (t) => {
+  const { store, file, c } = setup(t)
+  const a = memberKey()
+  const b = memberKey()
+  c.t = T0 + 10 * MIN
+  await store.put(sub(b, 1))
+  const older = { v: 1, members: { [a]: [rowAt(1, T0)] } }
+  replaceUnder(file, older)
+  t.is(await store.heal(), true, 'memory wins and is written back')
+  t.alike(Object.keys(readFile(file).members), [b])
+  await store.remove({ member: b, endpoint: ep(1) })
+  replaceUnder(file, older)
+  await store.heal()
+  t.is(store.count(), 0, 'the losing row does not come back after the winner left')
+  t.alike(readFile(file).members, {})
 })
 
 test('moving an endpoint between members is accepted at MAX_MEMBERS', async (t) => {

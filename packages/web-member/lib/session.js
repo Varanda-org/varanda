@@ -30,12 +30,13 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign and terms.sign: the domain-separated account-link statement
-// (@varanda/core lib/account-link.js, prefix 'varanda-account-link-v1'),
-// report statement (@varanda/core lib/report.js, prefix 'varanda-report-v1')
-// and terms-acceptance statement (@varanda/core lib/terms.js, prefix
-// 'varanda-terms-v1'), whose member and association the session fills in
-// itself, so a caller can never get
+// report.sign, terms.sign and push.sign: the domain-separated account-link
+// statement (@varanda/core lib/account-link.js, prefix
+// 'varanda-account-link-v1'), report statement (@varanda/core lib/report.js,
+// prefix 'varanda-report-v1'), terms-acceptance statement (@varanda/core
+// lib/terms.js, prefix 'varanda-terms-v1') and push-subscription statement
+// (@varanda/core lib/push-proof.js, prefix 'varanda-push-v1'), whose member
+// and association the session fills in itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
 // signature only.
 //
@@ -210,6 +211,7 @@ const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
+const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
@@ -230,6 +232,7 @@ const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
+const BAD_PUSH = 'inscrição de notificação inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
@@ -271,6 +274,7 @@ const USAGE_MESSAGES = new Set([
   OLD_USERNAME_RECORD,
   SELF_REPORT,
   BAD_REPORT,
+  BAD_PUSH,
   NO_SEEDER,
   PEEK_BUSY,
   NOTICES_BUSY
@@ -1164,6 +1168,32 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signTerms({ nonce, member: own, association: cfg.association, version }, keyPair)
+      return { signature }
+    }),
+
+    // Signs the push-subscription statement with the in-memory key
+    // (docs/rpc.md 5.30), exactly like terms.sign. The session fills in
+    // member, association and the endpoint hash, so the caller never hands
+    // in bytes to sign.
+    'push.sign': serial(async ({ nonce, action, endpoint, p256dh, auth }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      let signature
+      try {
+        signature = signPush({ nonce, member: own, association: cfg.association, action, endpointHash: endpointHash(endpoint), p256dh, auth }, keyPair)
+      } catch (err) {
+        // The RPC layer lets through endpoints and keys the statement
+        // refuses (a fragment marker, a p256dh that is not a P-256 point).
+        if (err instanceof TypeError) throw new UsageError(BAD_PUSH)
+        throw err
+      }
       return { signature }
     }),
 

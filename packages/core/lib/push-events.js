@@ -112,9 +112,10 @@ function pushName (value) {
   try {
     if (typeof value !== 'string' || value === '') return null
     const shown = displayText(stripLeading(Array.from(value)).join(''))
-    const name = Array.from(stripLeading(Array.from(shown)).join('').trim())
+    // Checked after the clip: the visible part may lie past the 64th code point.
+    const name = Array.from(stripLeading(Array.from(shown)).join('').trim()).slice(0, MAX_PUSH_NAME)
     if (!name.some((ch) => ch !== '\ufffd' && !invisible(ch.codePointAt(0)))) return null
-    return name.slice(0, MAX_PUSH_NAME).join('')
+    return name.join('')
   } catch {
     return null
   }

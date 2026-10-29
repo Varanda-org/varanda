@@ -126,11 +126,13 @@ test('pushUiState: on only when the browser and the service agree', async (t) =>
   t.alike(pushUiState({ ...base, subscribed: true, registered: true, pending: true }), { visible: true, on: true, disabled: true, note: null })
 })
 
-test('pushUiState: an outdated worker and a denied permission disable the toggle', async (t) => {
+test('pushUiState: an outdated worker blocks turning on, a denied permission blocks both', async (t) => {
   const { pushUiState, PUSH_RELOAD, PUSH_DENIED } = await load()
   const base = { support: 'ok', keyAvailable: true, permission: 'granted', pending: false }
   t.alike(pushUiState({ ...base, subscribed: false, registered: false, swUpToDate: false }), { visible: true, on: false, disabled: true, note: PUSH_RELOAD })
-  t.alike(pushUiState({ ...base, subscribed: true, registered: true, swUpToDate: false }), { visible: true, on: true, disabled: true, note: PUSH_RELOAD })
+  t.alike(pushUiState({ ...base, subscribed: true, registered: false, swUpToDate: false }), { visible: true, on: false, disabled: true, note: PUSH_RELOAD })
+  t.alike(pushUiState({ ...base, subscribed: true, registered: true, swUpToDate: false }), { visible: true, on: true, disabled: false, note: null }, 'on can still be turned off')
+  t.alike(pushUiState({ ...base, subscribed: true, registered: true, swUpToDate: false, pending: true }), { visible: true, on: true, disabled: true, note: null }, 'disabled only while pending')
   t.alike(pushUiState({ ...base, permission: 'denied', subscribed: true, registered: true, swUpToDate: true }), { visible: true, on: false, disabled: true, note: PUSH_DENIED })
   t.alike(pushUiState({ ...base, permission: 'denied', subscribed: true, registered: true, swUpToDate: false }), { visible: true, on: false, disabled: true, note: PUSH_DENIED }, 'a block wins over the reload note')
 })
@@ -183,4 +185,135 @@ test('stripLaunch drops the launch fields and keeps the rest in order', async (t
   t.is(stripLaunch('?conta=x%20y'), '?conta=x%20y')
   t.is(stripLaunch(''), '')
   t.is(stripLaunch(undefined), '')
+})
+
+const reg = { pushManager: {} }
+const subA = { id: 'a' }
+const endpointA = 'https://fcm.googleapis.com/fcm/send/a'
+const shown = (over = {}) => ({ support: 'ok', permission: 'granted', key: 'K', registration: reg, subscribed: false, subscription: null, endpoint: null, swUpToDate: true, registered: null, ...over })
+
+test('pushStateAfter: a turn-on shows the fresh read, not the stale snapshot', async (t) => {
+  const { pushStateAfter } = await load()
+  // The press saw no subscription; the step and the read agree it is on.
+  const before = shown()
+  const after = shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true })
+  const s = pushStateAfter({ action: 'on', result: { ok: true, subscription: subA, endpoint: endpointA }, before, after })
+  t.is(s.subscribed, true)
+  t.is(s.registered, true)
+  t.is(s.subscription, subA)
+  t.is(s.error, null)
+  // The check failed after a success on the same endpoint: the step stands.
+  const unchecked = pushStateAfter({ action: 'on', result: { ok: true, subscription: subA, endpoint: endpointA }, before, after: { ...after, registered: null } })
+  t.is(unchecked.registered, true)
+  // A refused turn-on that kept a reused subscription shows it still held.
+  const kept = pushStateAfter({ action: 'on', result: { ok: false, reason: 'failed', subscription: subA }, before: shown({ subscribed: true, subscription: subA, endpoint: endpointA }), after: shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true }) })
+  t.is(kept.subscribed, true)
+  t.is(kept.registered, true, 'the service still has it: on')
+  t.is(kept.error, 'failed')
+  // An empty key from the re-read keeps the one already shown.
+  t.is(pushStateAfter({ action: 'on', result: { ok: true, subscription: subA, endpoint: endpointA }, before, after: { ...after, key: null } }).key, 'K')
+})
+
+test('pushStateAfter: a failed turn-off with the subscription still present is not shown as off', async (t) => {
+  const { pushStateAfter, pushUiState } = await load()
+  const before = shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true })
+  // Server refused and the browser unsubscribe also failed.
+  const result = { ok: false, reason: 'failed', unsubscribed: false }
+  const s = pushStateAfter({ action: 'off', result, before, after: shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true }) })
+  t.is(s.subscribed, true)
+  t.is(s.registered, true)
+  t.is(s.error, 'failed')
+  t.is(pushUiState({ ...s, keyAvailable: true }).on, true, 'the toggle still reads on, so a tap retries turning off')
+  // The re-read failed: the step's own report decides, never an assumption.
+  const blind = pushStateAfter({ action: 'off', result, before, after: { support: 'ok', registration: null } })
+  t.is(blind.subscribed, true)
+  t.is(blind.subscription, subA)
+  t.is(blind.error, 'failed')
+  const uncertain = pushStateAfter({ action: 'off', result: { ok: false, reason: 'uncertain', unsubscribed: false }, before, after: null })
+  t.is(uncertain.subscribed, true)
+  t.is(uncertain.registered, null)
+  t.is(uncertain.error, 'uncertain')
+})
+
+test('pushStateAfter: a turn-off that dropped the browser subscription shows off', async (t) => {
+  const { pushStateAfter } = await load()
+  const before = shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true })
+  const s = pushStateAfter({ action: 'off', result: { ok: false, reason: 'failed', unsubscribed: true }, before, after: shown() })
+  t.is(s.subscribed, false)
+  t.is(s.subscription, null)
+  t.is(s.error, null)
+  const blind = pushStateAfter({ action: 'off', result: { ok: true, unsubscribed: true }, before, after: null })
+  t.is(blind.subscribed, false)
+  t.is(blind.subscription, null)
+  // Server row gone but the browser kept the subscription: off, no error.
+  const half = pushStateAfter({ action: 'off', result: { ok: true, unsubscribed: false }, before, after: null })
+  t.is(half.subscribed, true)
+  t.is(half.registered, false)
+  t.is(half.error, null)
+})
+
+test('pushUiState: an unreadable browser subscription is unknown, never off', async (t) => {
+  const { pushUiState, PUSH_UNKNOWN, PUSH_RELOAD } = await load()
+  const base = { support: 'ok', keyAvailable: true, permission: 'granted', pending: false, swUpToDate: true }
+  t.alike(pushUiState({ ...base, subscribed: null, registered: null }), { visible: true, on: false, disabled: false, note: PUSH_UNKNOWN })
+  t.alike(pushUiState({ ...base, subscribed: null, registered: null, pending: true }), { visible: true, on: false, disabled: true, note: PUSH_UNKNOWN })
+  t.alike(pushUiState({ ...base, subscribed: null, registered: null, swUpToDate: false }), { visible: true, on: false, disabled: true, note: PUSH_RELOAD })
+})
+
+// The re-read found the worker registration but getSubscription() failed.
+const unreadable = (over = {}) => shown({ subscribed: null, subscription: null, endpoint: null, registered: null, ...over })
+
+test('pushStateAfter: a failed turn-off followed by a failed read stays unknown with its error', async (t) => {
+  const { pushStateAfter, pushUiState, PUSH_UNKNOWN } = await load()
+  const before = shown({ subscribed: true, subscription: subA, endpoint: endpointA, registered: true })
+  const s = pushStateAfter({ action: 'off', result: { ok: false, reason: 'failed', unsubscribed: false }, before, after: unreadable() })
+  t.is(s.subscribed, null, 'not off')
+  t.is(s.registered, null)
+  t.is(s.error, 'failed', 'the turn-off error stays shown')
+  t.is(s.subscription, subA, 'the held subscription is kept')
+  const ui = pushUiState({ ...s, keyAvailable: true })
+  t.is(ui.on, false)
+  t.is(ui.note, PUSH_UNKNOWN)
+  const uncertain = pushStateAfter({ action: 'off', result: { ok: false, reason: 'uncertain', unsubscribed: false }, before, after: unreadable() })
+  t.is(uncertain.subscribed, null)
+  t.is(uncertain.error, 'uncertain')
+  // A read failure inside disablePush itself reports the same shape.
+  const unread = pushStateAfter({ action: 'off', result: { ok: false, reason: 'failed', unsubscribed: false }, before: shown({ subscribed: null }), after: unreadable() })
+  t.is(unread.subscribed, null)
+  t.is(unread.error, 'failed')
+  // The browser confirmed the drop: off, whatever the later read says.
+  const dropped = pushStateAfter({ action: 'off', result: { ok: false, reason: 'failed', unsubscribed: true }, before, after: unreadable() })
+  t.is(dropped.subscribed, false)
+  t.is(dropped.subscription, null)
+  t.is(dropped.error, null)
+})
+
+test('pushStateAfter: a turn-on followed by a failed read keeps the step report', async (t) => {
+  const { pushStateAfter } = await load()
+  const ok = pushStateAfter({ action: 'on', result: { ok: true, subscription: subA, endpoint: endpointA }, before: shown(), after: unreadable() })
+  t.is(ok.subscribed, true)
+  t.is(ok.registered, true)
+  t.is(ok.subscription, subA)
+  t.is(ok.endpoint, endpointA)
+  t.is(ok.error, null)
+  // The failed turn-on dropped its own subscription for sure.
+  const dropped = pushStateAfter({ action: 'on', result: { ok: false, reason: 'failed', subscription: null }, before: shown(), after: unreadable() })
+  t.is(dropped.subscribed, false)
+  t.is(dropped.error, 'failed')
+  // Cleanup not confirmed: the subscription is still shown as held.
+  const kept = pushStateAfter({ action: 'on', result: { ok: false, reason: 'failed', subscription: subA, endpoint: endpointA }, before: shown(), after: unreadable() })
+  t.is(kept.subscribed, true)
+  t.is(kept.subscription, subA)
+  t.is(kept.registered, null)
+  t.is(kept.error, 'failed')
+})
+
+test('nextLaunch keeps the newest valid intent, also while locked', async (t) => {
+  const { nextLaunch } = await load()
+  const one = { kind: 'follow', actor, recipient, ref: null }
+  const two = { kind: 'like', actor, recipient, ref }
+  t.is(nextLaunch({ held: one, intent: two, locked: true }), two)
+  t.is(nextLaunch({ held: null, intent: one, locked: true }), one)
+  t.is(nextLaunch({ held: one, intent: two, locked: false }), two)
+  t.is(nextLaunch({ held: one, intent: null, locked: true }), one)
 })

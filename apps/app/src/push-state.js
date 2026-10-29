@@ -106,9 +106,10 @@ export function subscriptionJsonOf (value) {
 }
 
 // `registered` is what the account service says about this subscription
-// (null: not known right now). The toggle reads "on" only when both the
-// browser and the service agree, so a lost row on either side is offered
-// again instead of shown as working.
+// (null: not known right now), `subscribed` what the browser says (null: its
+// read failed). The toggle reads "on" only when both the browser and the
+// service agree, so a lost row on either side is offered again instead of
+// shown as working.
 export function pushUiState ({ support, keyAvailable, permission, subscribed, registered = null, pending, swUpToDate = true } = {}) {
   const on = subscribed === true && registered === true
   if (support === 'unsupported') return { visible: true, on: false, disabled: true, note: PUSH_UNSUPPORTED }
@@ -118,9 +119,9 @@ export function pushUiState ({ support, keyAvailable, permission, subscribed, re
   if (permission === 'denied') return { visible: true, on: false, disabled: true, note: PUSH_DENIED }
   // An older worker without the push handler stays in charge until every
   // window closes (sw.js lifecycle): a subscription made now would get
-  // notices nobody shows.
-  if (swUpToDate !== true) return { visible: true, on, disabled: true, note: PUSH_RELOAD }
-  const note = subscribed === true && registered === null ? PUSH_UNKNOWN : null
+  // notices nobody shows. Turning off needs no worker, so it stays open.
+  if (swUpToDate !== true && !on) return { visible: true, on, disabled: true, note: PUSH_RELOAD }
+  const note = subscribed === null || (subscribed === true && registered === null) ? PUSH_UNKNOWN : null
   return { visible: true, on, disabled: pending === true, note }
 }
 
@@ -196,4 +197,59 @@ export function parseMessage (data) {
 export function stripLaunch (search) {
   const kept = splitSearch(search).filter(({ key }) => !LAUNCH_KEYS.includes(key)).map(({ raw }) => raw)
   return kept.length === 0 ? '' : '?' + kept.join('&')
+}
+
+// A notification click while a window is open. The passkey screen does not
+// drop it: the newest valid intent waits for the unlock, which still checks
+// the recipient. A later lock clears it elsewhere.
+export function nextLaunch ({ held = null, intent = null } = {}) {
+  return isPlainObject(intent) ? intent : held
+}
+
+// After a turn on or off the toggle shows what a fresh read says, never what
+// the step assumed. `before` is the state the press saw; `after` the read
+// made once the step settled (getPushState plus pushCheck), unusable when
+// the worker registration could not be read; its `subscribed` is null when
+// the browser's subscription read failed. `result` is what enablePush or
+// disablePush returned: `subscription` (on) is what this browser still
+// holds, `unsubscribed` (off) whether the browser really dropped it.
+// -> the new state plus `error`: the failure reason to show, or null.
+export function pushStateAfter ({ action, result, before, after } = {}) {
+  const r = isPlainObject(result) ? result : { ok: false, reason: 'failed' }
+  const prev = isPlainObject(before) ? before : {}
+  const known = isPlainObject(after) && after.support === 'ok' && !!after.registration
+  const subKnown = known && after.subscribed !== null
+  const prevKey = prev.key != null ? prev.key : null
+  const base = known ? { ...after, key: after.key != null ? after.key : prevKey } : { ...prev }
+  const reason = typeof r.reason === 'string' ? r.reason : 'failed'
+  let subscribed
+  let registered
+  let error
+  if (action === 'off') {
+    // An unreadable subscription after a turn-off that the browser did not
+    // confirm stays unknown: never "off" from a failed read.
+    if (subKnown) subscribed = after.subscribed === true
+    else if (r.unsubscribed === true) subscribed = false
+    else subscribed = known ? null : true
+    registered = known && after.registered != null ? after.registered : (r.ok === true ? false : null)
+    if (!subKnown) {
+      base.subscription = subscribed !== false ? (prev.subscription || null) : null
+      base.endpoint = subscribed !== false ? (prev.endpoint || null) : null
+    }
+    // Dropped in this browser: nothing shows here any more, whatever the
+    // service kept.
+    error = r.ok === true || subscribed === false ? null : reason
+  } else {
+    const held = r.subscription != null
+    subscribed = subKnown ? after.subscribed === true : held
+    if (known && after.registered != null) registered = after.registered
+    else registered = r.ok === true && subscribed && (!subKnown || after.endpoint === r.endpoint) ? true : null
+    if (!subKnown) {
+      base.subscription = held ? r.subscription : null
+      base.endpoint = held && typeof r.endpoint === 'string' ? r.endpoint : null
+    }
+    error = r.ok === true ? null : reason
+  }
+  if (!known && r.permission !== undefined) base.permission = r.permission
+  return { ...base, subscribed, registered: subscribed === true ? registered : null, error }
 }

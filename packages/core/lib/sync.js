@@ -2,6 +2,7 @@
 // the own diary and the accepted replicas with peers and seeders, and in
 // --once mode resolves when the goals G1/G2/G3 hold.
 // TODO(phase1): push notifications when a followed log grows.
+// The hosted Web Push relay (push-events.js) does not cover this case.
 //
 // Follow entry states:
 //   pending  nothing stored; advertised with length 0; the remote (quarantine)

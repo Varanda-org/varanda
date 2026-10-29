@@ -67,7 +67,10 @@ function decrypt (message, uaPrivate, authB64u) {
   const decipher = crypto.createDecipheriv('aes-128-gcm', cek, nonce)
   decipher.setAuthTag(ciphertext.subarray(ciphertext.length - 16))
   const padded = Buffer.concat([decipher.update(ciphertext.subarray(0, ciphertext.length - 16)), decipher.final()])
-  return { rs, idlen, delimiter: padded[padded.length - 1], plaintext: padded.subarray(0, padded.length - 1).toString('utf8') }
+  // RFC 8188 section 2: strip trailing zero padding, then the delimiter.
+  let end = padded.length - 1
+  while (end > 0 && padded[end] === 0) end--
+  return { rs, idlen, length: padded.length, delimiter: padded[end], plaintext: padded.subarray(0, end).toString('utf8') }
 }
 
 function subscriptionKeys () {
@@ -124,6 +127,27 @@ test('encryptPayload refuses oversize plaintext and bad keys', (t) => {
   t.exception.all(() => encryptPayload({ p256dh, auth, plaintext: 'a'.repeat(3994) }))
   t.exception.all(() => encryptPayload({ p256dh: 'AAAA', auth, plaintext: 'x' }))
   t.exception.all(() => encryptPayload({ p256dh, auth: 'AAAA', plaintext: 'x' }))
+})
+
+test('encryptPayload padTo: zero padding after the delimiter, one ciphertext length for any text', (t) => {
+  const { uaPrivate, p256dh, auth } = subscriptionKeys()
+  const short = 'Ana curtiu seu post'
+  const long = 'Maria Aparecida dos Santos Oliveira começou a seguir você'
+  const a = encryptPayload({ p256dh, auth, plaintext: short, padTo: 1024 })
+  const b = encryptPayload({ p256dh, auth, plaintext: long, padTo: 1024 })
+  const got = decrypt(a, uaPrivate, auth)
+  t.is(got.plaintext, short)
+  t.is(got.delimiter, 0x02)
+  t.is(got.length, 1024, 'plaintext, delimiter and padding fill padTo')
+  t.is(decrypt(b, uaPrivate, auth).plaintext, long)
+  t.is(a.length, b.length, 'same ciphertext length')
+  t.is(a.length, 21 + 65 + 1024 + 16)
+  t.is(encryptPayload({ p256dh, auth, plaintext: short, padTo: 0 }).length, 21 + 65 + Buffer.byteLength(short) + 1 + 16, 'padTo 0 adds nothing')
+  t.is(decrypt(encryptPayload({ p256dh, auth, plaintext: 'x'.repeat(2000), padTo: 1024 }), uaPrivate, auth).plaintext, 'x'.repeat(2000), 'longer than padTo: sent unpadded')
+  t.is(decrypt(encryptPayload({ p256dh, auth, plaintext: short, padTo: 4080 }), uaPrivate, auth).length, 4080, 'padTo up to one record')
+  t.exception.all(() => encryptPayload({ p256dh, auth, plaintext: short, padTo: 4081 }), /padTo/)
+  t.exception.all(() => encryptPayload({ p256dh, auth, plaintext: short, padTo: -1 }), /padTo/)
+  t.exception.all(() => encryptPayload({ p256dh, auth, plaintext: short, padTo: 1.5 }), /padTo/)
 })
 
 test('generateVapidKeys: 65-byte uncompressed point and 32-byte scalar, unpadded base64url', (t) => {
@@ -251,6 +275,15 @@ test('sendPush: 201 is ok, request carries the RFC 8030/8291/8292 headers and ci
   t.ok(req.headers.authorization.startsWith('vapid t='))
   t.ok(req.headers.authorization.endsWith(', k=' + args.vapid.publicKey))
   t.is(decrypt(req.body, uaPrivate, args.subscription.auth).plaintext, 'Ana curtiu seu post')
+})
+
+test('sendPush: padTo reaches the encryption', async (t) => {
+  const svc = await fakePushService(t)
+  const { uaPrivate, args } = pushArgs(svc.fetch, { padTo: 1024 })
+  t.is(await sendPush(args), 'ok')
+  const got = decrypt(svc.seen[0].body, uaPrivate, args.subscription.auth)
+  t.is(got.plaintext, 'Ana curtiu seu post')
+  t.is(got.length, 1024)
 })
 
 test('sendPush: status classes', async (t) => {

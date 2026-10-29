@@ -23,6 +23,7 @@ const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
+const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -537,6 +538,62 @@ test('terms.sign: the unlocked key signs the terms-acceptance statement, locked 
 
   await s.node.clearKeyPair()
   const locked = await errorOf(s.web.request('terms.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('push.sign: the unlocked key signs the push-subscription statement, locked refuses', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const b64url = (buf) => b4a.toString(buf, 'base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const point = b4a.alloc(65, 7)
+  point[0] = 0x04
+  const endpoint = 'https://push.example/send/abc?x=1'
+  const params = { nonce, action: 'on', endpoint, p256dh: b64url(point), auth: b64url(b4a.alloc(16, 9)) }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('push.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('push.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const { endpoint: _, ...rest } = params
+  const fields = { ...rest, member: s.key, association: assoc.hex, endpointHash: endpointHash(endpoint) }
+  t.alike(verifyPush(fields, r.signature), { ok: true }, 'verifies over the hash of the raw endpoint')
+  t.alike(verifyPush({ ...fields, action: 'off' }, r.signature), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyPush({ ...fields, endpointHash: endpointHash(endpoint + '2') }, r.signature), { ok: false, reason: 'bad-signature' }, 'another endpoint')
+
+  const off = await s.web.request('push.sign', { ...params, action: 'off' })
+  t.alike(verifyPush({ ...fields, action: 'off' }, off.signature), { ok: true })
+
+  // Keys the RPC layer accepts but the statement refuses.
+  for (const bad of [{ p256dh: 'abc' }, { auth: 'abc' }]) {
+    const invalid = await errorOf(s.web.request('push.sign', { ...params, ...bad }))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'inscrição de notificação inválida'], Object.keys(bad)[0])
+  }
+  // A non-canonical endpoint never reaches the signer: the RPC refuses it.
+  const shouty = await errorOf(s.web.request('push.sign', { ...params, endpoint: 'HTTPS://push.example/send' }))
+  t.alike([shouty.code, shouty.message], ['USAGE', 'parâmetro inválido: endpoint'])
+  for (const k of ['member', 'association', 'endpointHash']) {
+    const extra = await errorOf(s.web.request('push.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('push.sign', params))
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
   t.alike(s.internal, [], 'no internal error')

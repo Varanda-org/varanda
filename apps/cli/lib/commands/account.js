@@ -2,6 +2,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { UsageError } = require('../cli')
@@ -11,6 +12,8 @@ const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
+const { openPushStore } = require('../account/push-store')
+const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -56,7 +59,15 @@ const {
 // e-mails in VARANDA_STATS_EMAILS (a subset of the moderators). Without stats
 // e-mails nothing is sampled, the seeder is never fetched and usage.json is
 // never written.
-const USAGE = 'node bin/varanda.js account [key|cert add|status|export|reports [--member <hex>]]'
+//
+// Web Push for the hosted PWA (apps/cli/lib/account/push-routes.js) is on
+// once `account push-key` wrote push-vapid.json (the VAPID key pair, 0o600);
+// the browser subscriptions live in push.json (./push-store.js). The seeder
+// relays notices to POST /push-event only when both services share
+// VARANDA_PUSH_TOKEN.
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]]'
+const PUSH_VAPID_FILE = 'push-vapid.json'
+const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 const CLIENT_ID_RE = /^[A-Za-z0-9._-]{1,200}$/
 const MAX_SECRET = 256
@@ -167,6 +178,93 @@ function addCert (dataDir, certFile, association) {
   return { issuer: cert.issuer }
 }
 
+// Unpadded, canonical base64url of exactly `bytes` bytes, or null.
+function b64uBytes (value, bytes) {
+  if (typeof value !== 'string' || !B64U_RE.test(value)) return null
+  const buf = Buffer.from(value, 'base64url')
+  return buf.length === bytes && buf.toString('base64url') === value ? buf : null
+}
+
+// Refused while the service runs (it would keep serving the old key) and
+// when a key exists: a new key silently orphans every browser subscription.
+function createPushKey (dataDir) {
+  if (lockHeld(dataDir)) throw new Error('serviço de conta em execução')
+  const file = path.join(dataDir, PUSH_VAPID_FILE)
+  if (fs.existsSync(file)) throw new Error('chave de push já existe')
+  const { publicKey, privateKey } = generateVapidKeys()
+  try {
+    writeJsonExclusive(file, { v: 1, publicKey, privateKey }, 0o600)
+  } catch (err) {
+    if (err.code === 'EEXIST') throw new Error('chave de push já existe')
+    throw err
+  }
+  return publicKey
+}
+
+// Like writeJsonAtomic, but publishing with link() instead of rename(): link
+// fails with EEXIST rather than replacing, so of two concurrent runs past the
+// existence check only the first key is kept.
+function writeJsonExclusive (file, obj, mode) {
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+  const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.' + nodeCrypto.randomBytes(6).toString('hex') + '.tmp')
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+  const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode)
+  try {
+    try {
+      fs.fchmodSync(fd, mode)
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2) + '\n')
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    fs.linkSync(tmp, file)
+  } finally {
+    try { fs.unlinkSync(tmp) } catch {}
+  }
+}
+
+// { publicKey, privateKey } of push-vapid.json, null when there is none, or
+// 'malformed' when it is not a pair this command would have written (the
+// private half must derive the public one).
+function loadVapid (dataDir) {
+  let obj
+  try {
+    obj = JSON.parse(fs.readFileSync(path.join(dataDir, PUSH_VAPID_FILE), 'utf8'))
+  } catch (err) {
+    return err.code === 'ENOENT' ? null : 'malformed'
+  }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return 'malformed'
+  const keys = Object.keys(obj).sort()
+  if (keys.join(',') !== 'privateKey,publicKey,v' || obj.v !== 1) return 'malformed'
+  const pub = b64uBytes(obj.publicKey, 65)
+  const priv = b64uBytes(obj.privateKey, 32)
+  if (pub === null || priv === null || pub[0] !== 0x04) return 'malformed'
+  try {
+    const ecdh = nodeCrypto.createECDH('prime256v1')
+    ecdh.setPrivateKey(priv)
+    if (!ecdh.getPublicKey().equals(pub)) return 'malformed'
+  } catch {
+    return 'malformed'
+  }
+  return { publicKey: obj.publicKey, privateKey: obj.privateKey }
+}
+
+// { enabled, devices }: devices is the number of stored browser
+// subscriptions, or 'indisponivel' when push.json cannot be read. Counts
+// only: never an endpoint.
+function pushStatus (dataDir) {
+  const vapid = loadVapid(dataDir)
+  const store = openPushStore(dataDir, { readOnly: true })
+  return { enabled: vapid !== null && vapid !== 'malformed', devices: store.available() ? store.count() : 'indisponivel' }
+}
+
+function pushLine (push) {
+  if (push.devices === 'indisponivel') return 'avisos push: indisponível (push.json inválido)'
+  if (!push.enabled) return 'avisos push: desligados'
+  return 'avisos push: ligados (' + push.devices + ' aparelhos)'
+}
+
 // 'ok', 'missing' or the reason the certificate fails for this key and association.
 function certificateState (dataDir, association) {
   let cert
@@ -237,7 +335,8 @@ function status (dataDir, given) {
   const moderation = moderationStatus(dataDir, association)
   const triage = triageStatus(dataDir)
   const terms = termsCount(dataDir)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, terms, running: lockHeld(dataDir) }
+  const push = pushStatus(dataDir)
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, terms, push, running: lockHeld(dataDir) }
 }
 
 // The number of members with a recorded acceptance of the terms, or
@@ -294,6 +393,7 @@ function statusLines (s) {
   }
   lines.push(triageLine(s.triage))
   lines.push(termsLine(s.terms))
+  lines.push(pushLine(s.push))
   lines.push('estado: ' + (s.running ? 'em execução' : 'parado'))
   return lines.join('\n')
 }
@@ -473,11 +573,13 @@ async function serve (flags, env) {
   let unavailable = false
   let store = null
   let terms = null
+  let pushStore = null
   let stopHeal = null
+  let stopPushHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms)
+      loseLock(store, log, stop, terms, pushStore)
     }
   })
   let listener = null
@@ -509,6 +611,23 @@ async function serve (flags, env) {
     terms = openTermsStore(flags.dataDir, { guard: () => lock.owned() })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
+    // Web Push: on only with a valid push-vapid.json. A malformed one is
+    // logged as a token (never its bytes) and push stays off; the key route
+    // then answers 'indisponivel' and nothing is delivered.
+    let vapid = loadVapid(flags.dataDir)
+    if (vapid === 'malformed') {
+      log({ event: 'push', reason: 'indisponivel' })
+      vapid = null
+    }
+    pushStore = openPushStore(flags.dataDir, { guard: () => lock.owned() })
+    if (!pushStore.available()) log({ event: 'push', reason: 'indisponivel' })
+    stopPushHeal = startTermsHeal(pushStore, log, LOCK_HEARTBEAT_MS, 'push')
+    const push = {
+      pushStore,
+      vapid: vapid === null ? null : { publicKey: vapid.publicKey, privateKey: vapid.privateKey, subject: origin },
+      relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
+    }
+    log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -535,7 +654,7 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, push, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -566,7 +685,9 @@ async function serve (flags, env) {
     // The terms file is healed one last time (a stale writer's rename may
     // have dropped acknowledged entries) while the lock is still held.
     if (stopHeal !== null) stopHeal()
+    if (stopPushHeal !== null) stopPushHeal()
     if (terms !== null && terms.available()) await terms.heal()
+    if (pushStore !== null && pushStore.available()) await pushStore.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
     // skips the write, as closeIfOwned below does.
@@ -592,9 +713,10 @@ function storeUnavailable (log, stop) {
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
 // stops. The terms store too: its next accept must not write either.
-function loseLock (store, log, stop, terms = null) {
+function loseLock (store, log, stop, terms = null, pushStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
+  if (pushStore !== null) pushStore.fail()
   log({ event: 'lock', reason: 'perdido' })
   stop()
 }
@@ -603,14 +725,15 @@ function loseLock (store, log, stop, terms = null) {
 // acceptances this holder acknowledged; nothing else rewrites the file until
 // the next accept. So the holder merge-writes it on the lock heartbeat's
 // interval (terms-store.js heal(): a no-op unless the file lacks something).
+// push.json has the same window (push-store.js) and uses the same loop.
 // -> stop(), which clears the interval.
-function startTermsHeal (terms, log, ms = LOCK_HEARTBEAT_MS) {
+function startTermsHeal (terms, log, ms = LOCK_HEARTBEAT_MS, event = 'terms') {
   let running = false
   const timer = setInterval(async () => {
     if (running) return
     running = true
     try {
-      if (await terms.heal()) log({ event: 'terms', reason: 'reparado' })
+      if (await terms.heal()) log({ event, reason: 'reparado' })
     } finally {
       running = false
     }
@@ -648,6 +771,14 @@ async function run (flags) {
     return 0
   }
 
+  // Only the public half is ever printed.
+  if (sub === 'push-key' && subsub === undefined) {
+    ensureConfig(flags.dataDir, flags.association)
+    const publicKey = createPushKey(flags.dataDir)
+    print(flags, { publicKey }, 'chave pública de push: ' + publicKey)
+    return 0
+  }
+
   if (sub === 'cert' && subsub === 'add' && flags.positionals.length === 2) {
     if (!flags.certFile) throw new UsageError('informe --cert-file <arquivo>')
     const association = ensureConfig(flags.dataDir, flags.association)
@@ -664,7 +795,8 @@ async function run (flags) {
 
   // One JSON object per line, for the operator (LGPD access requests):
   // member, sub, e-mail, username and date, plus the member's terms
-  // acceptances ({ version, acceptedAt }); never a signature, certificate
+  // acceptances ({ version, acceptedAt }) and the number of browsers with
+  // push notices on (pushDevices); never a signature, certificate, endpoint
   // or secret. Refused while the service runs (its copy is the live one).
   if (sub === 'export' && subsub === undefined) {
     checkConfig(flags.dataDir, flags.association)
@@ -673,8 +805,10 @@ async function run (flags) {
     warnRestored(accounts)
     const terms = openTermsStore(flags.dataDir, { readOnly: true })
     if (!terms.available()) throw new Error('terms.json inválido')
+    const pushStore = openPushStore(flags.dataDir, { readOnly: true })
+    if (!pushStore.available()) throw new Error('push.json inválido')
     for (const link of accounts.exportLinks()) {
-      process.stdout.write(jsonLine({ ...link, terms: terms.list(link.member) }) + '\n')
+      process.stdout.write(jsonLine({ ...link, terms: terms.list(link.member), pushDevices: pushStore.devices(link.member) }) + '\n')
     }
     return 0
   }
@@ -700,5 +834,7 @@ module.exports = {
   closeIfOwned,
   loseLock,
   startTermsHeal,
-  storeUnavailable
+  storeUnavailable,
+  createPushKey,
+  writeJsonExclusive
 }

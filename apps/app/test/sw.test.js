@@ -787,6 +787,16 @@ test('notificationclick: focuses an open same-origin window and posts the target
   t.alike(w.opened, [])
 })
 
+test('notificationclick: a window that refuses focus falls back to a new window', async (t) => {
+  const w = renderedWorker()
+  const mine = fakeWindow(ORIGIN + '/')
+  mine.focus = async () => { throw new Error('InvalidAccessError') }
+  w.windows = [mine]
+  t.ok(await click(w, { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: REF }), 'closed')
+  t.alike(w.opened, ['/?aviso=reply&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + REF])
+  t.is(mine.messages.length, 0)
+})
+
 test('notificationclick: the moderation panel and other bypassed pages are never the app window', async (t) => {
   const w = renderedWorker()
   const panel = fakeWindow(ORIGIN + '/account/mod/')

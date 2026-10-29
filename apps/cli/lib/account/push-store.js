@@ -41,7 +41,8 @@
 // a row this process removed whenever the file still holds it, and a stalled
 // writer's rename can land after a takeover with an old copy (terms-store.js
 // documents that window). So every member+endpoint this process removed,
-// moved away or evicted by the cap (in a put or in any merge) is kept as a
+// moved away (in a put, or a merge that gave the endpoint to another member)
+// or evicted by the cap (in a put or in any merge) is kept as a
 // tombstone with the createdAt of the row it buried, for the whole life of
 // the process (bounded FIFO, TOMBSTONE_MAX). A re-read drops a disk row only
 // when its tombstone is of the same or a later generation; a strictly newer
@@ -203,9 +204,12 @@ function cap (member, list) {
 // Memory and the file: a disk row whose member+endpoint has a tombstone of
 // the same or a later generation (createdAt) is dropped; a strictly newer one
 // is a later registration and stays. Then one owner per endpoint (the latest
-// createdAt, ties keep memory) and the per-member cap.
+// createdAt, ties keep memory) and the per-member cap. The row of the member
+// that loses an endpoint is buried too: otherwise, once the winner removes
+// it, a stale copy of the loser's row would deliver to that member again.
 function merge (mem, disk, tombs) {
   const owner = new Map()
+  const evicted = []
   for (const [member, list] of Object.entries(mem.members)) {
     for (const r of list) owner.set(r.endpoint, { member, row: r })
   }
@@ -215,7 +219,11 @@ function merge (mem, disk, tombs) {
         const g = tombs.get(tombKey(member, r.endpoint))
         if (g !== undefined && g >= r.createdAt) continue
         const cur = owner.get(r.endpoint)
-        if (!cur || r.createdAt > cur.row.createdAt) owner.set(r.endpoint, { member, row: r })
+        const wins = !cur || r.createdAt > cur.row.createdAt
+        if (cur && cur.member !== member) {
+          evicted.push(wins ? [cur.member, r.endpoint, cur.row.createdAt] : [member, r.endpoint, r.createdAt])
+        }
+        if (wins) owner.set(r.endpoint, { member, row: r })
       }
     }
   }
@@ -224,7 +232,6 @@ function merge (mem, disk, tombs) {
     if (!out.members[member]) out.members[member] = []
     out.members[member].push(copyRow(row))
   }
-  const evicted = []
   for (const [member, list] of Object.entries(out.members)) evicted.push(...cap(member, list))
   return { next: out, evicted }
 }
@@ -362,6 +369,16 @@ function openPushStore (dataDir, { now = Date.now, readOnly = false, guard = () 
         if (row.p256dh === p256dh && row.auth === auth) {
           settle(next, evicted, stale)
           return { changed: false }
+        }
+      }
+      // An endpoint moves to another member only with the keys of the same
+      // browser subscription (a new identity after Recomeçar): knowing the
+      // endpoint URL alone must not take someone else's notices.
+      if (found !== null && !own) {
+        const row = next.members[found.member][found.i]
+        if (row.p256dh !== p256dh || row.auth !== auth) {
+          settle(next, evicted, stale)
+          throw fail('pedido-invalido')
         }
       }
       // Counted as after the move: a transfer that does not add a member is

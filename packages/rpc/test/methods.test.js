@@ -152,6 +152,12 @@ test('push.sign', (t) => {
   bad(t, 'push.sign', { ...base, endpoint: 'https://example.com\\push' }, 'endpoint with a backslash')
   bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push\ud800' }, 'endpoint with a lone surrogate')
   bad(t, 'push.sign', { ...base, endpoint: host + '\u00e9'.repeat(2048 - host.length) }, 'non-ASCII endpoint within 2048 code points')
+  ok(t, 'push.sign', { ...base, endpoint: 'https://fcm.googleapis.com/fcm/send/abc:def?x=1&y=2' })
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com:443/push' }, 'endpoint with the default port')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://Example.com/push' }, 'endpoint with an uppercase host')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/a/../b' }, 'endpoint with dot segments')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://' }, 'endpoint with no host')
+  bad(t, 'push.sign', { ...base, endpoint: 'https:///x' }, 'endpoint with an empty authority')
   bad(t, 'push.sign', { ...base, p256dh: 'abc=' }, 'p256dh with =')
 })
 

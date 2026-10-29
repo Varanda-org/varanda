@@ -208,7 +208,9 @@ function isPushEndpoint (v) {
   }
   try {
     const url = new URL(v)
-    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.hash === ''
+    // Canonical only: fetch would request the parsed href (default port,
+    // case of the host, dot segments), not the string that was signed.
+    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.hash === '' && url.href === v
   } catch {
     return false
   }
