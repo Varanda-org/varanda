@@ -210,6 +210,7 @@ test('peek: a verified seeder pushing 16 frames of 2 MiB after the inventory is 
   const warnings = []
   const s = sockets(t)
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: seeder.url,
@@ -243,7 +244,7 @@ test('peek and notices: a seeder closing with 1013 is busy; an older seeder (100
   const own = hex(member.publicKey)
 
   function peeker (url) {
-    const p = createPeeker({ storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, createSocket: sockets(t).create })
+    const p = createPeeker({ ownKey: async () => '00'.repeat(32), storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, createSocket: sockets(t).create })
     t.teardown(() => p.close(), { force: true })
     return p
   }
@@ -437,7 +438,7 @@ test('measured: the largest frame of a full multi-page read from a real seeder w
   const meters = []
   const s = sockets(t, { meters })
   const warnings = []
-  const peeker = createPeeker({ storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, createSocket: s.create, log: (line) => warnings.push(line) })
+  const peeker = createPeeker({ ownKey: async () => '00'.repeat(32), storage: memoryNodeStorage(), association: assoc.hex, seederUrl: url, createSocket: s.create, log: (line) => warnings.push(line) })
   t.teardown(() => peeker.close(), { force: true })
   const pages = []
   let after
@@ -473,7 +474,7 @@ test('measured: a full 4096-key inventory from the real admission code fits the 
   const meters = []
   const s = sockets(t, { meters })
   const warnings = []
-  const peeker = createPeeker({ storage: memoryNodeStorage(), association: assoc.hex, seederUrl: seeder.url, createSocket: s.create, log: (line) => warnings.push(line) })
+  const peeker = createPeeker({ ownKey: async () => '00'.repeat(32), storage: memoryNodeStorage(), association: assoc.hex, seederUrl: seeder.url, createSocket: s.create, log: (line) => warnings.push(line) })
   t.teardown(() => peeker.close(), { force: true })
   const page = await peeker.read({ limit: 31 })
   const max = Math.max(...meters.map((m) => m.max))

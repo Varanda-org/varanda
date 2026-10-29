@@ -1,6 +1,5 @@
 // Espiadinha: up to three publications (posts, replies, quotes, reposts) of
-// each diary the person does not follow, their own included, one round at a
-// time, newest first.
+// each diary the person does not follow, one round at a time, newest first.
 // No algorithm. Hosted web only: on native and varanda-serve the tab explains
 // that and never calls peek.read. The rows live in memory only; nothing is
 // persisted (their photos are fetched no-store: these authors are not
@@ -409,12 +408,13 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   } else if (meta.diaries === 0) {
     empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel={typeof onPublish === 'function' ? 'publicar' : undefined} onAction={typeof onPublish === 'function' ? onPublish : undefined} />
   } else {
-    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue ou suas, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
-  // The own diary shows here too; its rows offer no 'seguir', and neither
-  // does any row before the own key is known (it could be the own one).
+  // The node never returns the own diary's rows; the guard stays so that no
+  // row offers 'seguir' before the own key is known (it could be the own
+  // one), and, as defence in depth, never on an own-key row.
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
   const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
