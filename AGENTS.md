@@ -59,7 +59,7 @@ npm test -w packages/core   # um workspace
 node apps/cli/test/serve.test.js   # um arquivo
 ```
 
-A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24. Rode os quatro passos antes de abrir o PR. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run link:addons -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
+A CI roda `npm ci --ignore-scripts`, lint, test e demo no Node 20 e no 24. Rode os quatro passos antes de abrir o PR. Depois de qualquer `npm install` ou `npm ci`, o build nativo do app precisa de `npm run prepare:native -w apps/app` de novo. Os testes de `packages/web-member` exigem Node 20.19 ou mais novo.
 
 ## Armadilhas
 
