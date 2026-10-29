@@ -63,7 +63,7 @@ const {
   MAX_MEDIA_ITEM_BLOCKS
 } = require('@varanda/core/lib/records')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
-const { latestUsername } = require('@varanda/core/lib/username')
+const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
@@ -507,6 +507,28 @@ async function ownEntries (ctx) {
   return withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
 }
 
+// What the notices read checks a post against (./notices.js): the usernames
+// the own diary verifiably held (username -> issuer, NOT filtered by the
+// revoked issuers, which the reader applies on every read so a cached
+// context never outlives a revocation) and the seqs of its post blocks.
+// -> { key, contiguousLength, length, names, posts }. `cache` (a previous
+// result or null) is returned as is while the own key and both lengths are
+// unchanged: readAll reads up to contiguousLength only.
+async function ownNoticeContext (ctx, cache = null) {
+  return withIdentity(ctx, async ({ diary, ownHex, association }) => {
+    if (cache !== null && cache.key === ownHex && cache.contiguousLength === diary.contiguousLength && cache.length === diary.length) return cache
+    const contiguousLength = diary.contiguousLength
+    const length = diary.length
+    const entries = await store.readAll(diary)
+    const posts = new Set()
+    for (const { seq, record } of entries) {
+      const copy = validRecordCopy(record, seq)
+      if (copy !== null && copy.type === 'post') posts.add(seq)
+    }
+    return { key: ownHex, contiguousLength, length, names: heldUsernames(entries, ownHex, association), posts }
+  })
+}
+
 // ---- follows ----
 
 // Every pending follow op is signed by the identity key over a
@@ -930,6 +952,7 @@ module.exports = {
   engagementRead,
   usernameAdd,
   ownEntries,
+  ownNoticeContext,
   followAdd,
   followRemove,
   followList,

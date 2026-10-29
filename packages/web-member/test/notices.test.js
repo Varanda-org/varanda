@@ -278,11 +278,11 @@ test('against the real seeder: a verified follower shows, then follows, blocks a
     const r = await read()
     return r.notices.length === 1 && !r.incomplete ? r : null
   }, { name: 'A listed', intervalMs: 250, timeoutMs: 30000 })
-  t.alike(withoutSeen(t, first), { notices: [{ key: A.key, seq, at: follow.at, name: 'Ana', avatar: null, username: 'ana' }], next: null, incomplete: false, supported: true })
+  t.alike(withoutSeen(t, first), { notices: [{ key: A.key, seq, at: follow.at, kind: 'follow', name: 'Ana', avatar: null, username: 'ana' }], next: null, incomplete: false, supported: true, activity: true })
 
   // Already followed: omitted.
   await writeFollows(storage, [A.key])
-  t.alike(await read(), { notices: [], next: null, incomplete: false, supported: true }, 'a followed diary is omitted')
+  t.alike(await read(), { notices: [], next: null, incomplete: false, supported: true, activity: true }, 'a followed diary is omitted')
   await writeFollows(storage, [])
 
   // Blocked in the stored blocklist: dropped, and back when unblocked.
@@ -293,7 +293,8 @@ test('against the real seeder: a verified follower shows, then follows, blocks a
 
   // Nothing was stored by the reads (the test's own kv writes aside).
   const own = spy.writes.filter((k) => k !== 'follows' && k !== 'blocklist')
-  t.alike(spy.cores, [], 'no core of the node storage was opened')
+  // A v2 read loads this node's own-diary context, read-only.
+  t.ok(spy.cores.every((name) => name === 'diary'), 'no core but the own diary was opened: ' + spy.cores.join(','))
   t.alike(own, [], 'no kv entry was written')
   t.is(await replicaExists(storage, A.key), false, 'no replica of A')
   spy.recording = false
@@ -305,7 +306,7 @@ test('against the real seeder: a verified follower shows, then follows, blocks a
     const r = await read()
     return r.notices.length === 0 && !r.incomplete ? r : null
   }, { name: 'A gone', intervalMs: 250, timeoutMs: 30000 })
-  t.alike(after, { notices: [], next: null, incomplete: false, supported: true })
+  t.alike(after, { notices: [], next: null, incomplete: false, supported: true, activity: true })
   t.alike(B.internal, [], 'no internal error')
 })
 
@@ -344,7 +345,7 @@ test('a lying seeder: only author-signed follows of this node at the claimed at,
   state.page = (target) => ({ items: target === me ? items : [], next: null, incomplete: false })
 
   const r = await web.request('notices.list', {})
-  t.alike(withoutSeen(t, r), { notices: [{ key: hex(G.key), seq: 2, at: good.at, name: 'Gil', avatar: null, username: null }], next: null, incomplete: false, supported: true })
+  t.alike(withoutSeen(t, r), { notices: [{ key: hex(G.key), seq: 2, at: good.at, kind: 'follow', name: 'Gil', avatar: null, username: null }], next: null, incomplete: false, supported: true, activity: false })
   t.is(seeder.pages.length, 1)
   t.alike(seeder.pages[0], { target: me, after: null, limit: 64 }, 'the proved key, the first page')
   t.alike(internal, [])
@@ -402,7 +403,7 @@ test('a gap of 512 filtered candidates: an empty page with a cursor, and the fol
   }
 
   const p1 = await web.request('notices.list', {})
-  t.alike(p1, { notices: [], next: { at: rows[511].at, key: rows[511].key }, incomplete: true, supported: true }, 'empty, with the cursor past the gap')
+  t.alike(p1, { notices: [], next: { at: rows[511].at, key: rows[511].key }, incomplete: true, supported: true, activity: false }, 'empty, with the cursor past the gap')
   t.is(seeder.pages.length, 8, 'eight pages per read')
   t.is(D.uploads, 0, 'D was not reached')
   const p2 = await web.request('notices.list', { after: p1.next })
@@ -599,7 +600,7 @@ test('a seeder that does not speak the channel: supported false, one warning', a
   const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
   const seeder = await noticesSeeder(t, { signer: assoc.kp, state, notices: false })
   const { web, internal } = await webNode(t, assoc, seeder.url)
-  const expected = { notices: [], next: null, incomplete: false, supported: false }
+  const expected = { notices: [], next: null, incomplete: false, supported: false, activity: true }
   t.alike(await web.request('notices.list', {}), expected)
   t.alike(await web.request('notices.list', {}), expected)
   t.is(warningsOf(web).filter((l) => l === UNSUPPORTED).length, 1, 'warned once')
@@ -659,10 +660,11 @@ test('avatar: notices carry the retained profile and preserve the block 2 name w
   const items = state.cores.map((core, i) => ({ key: hex(core.key), seq: core.length - 1, at: i === 0 ? follow.at : olderFollow.at }))
   state.page = () => ({ items, next: null, incomplete: false })
   const expected = {
-    notices: items.map((item, i) => ({ ...item, name: i === 0 ? 'New name' : 'Block 2', avatar: i === 0 ? avatar : null, username: null })),
+    notices: items.map((item, i) => ({ ...item, kind: 'follow', name: i === 0 ? 'New name' : 'Block 2', avatar: i === 0 ? avatar : null, username: null })),
     next: null,
     incomplete: false,
-    supported: true
+    supported: true,
+    activity: false
   }
   const first = await web.request('notices.list', {})
   t.alike(withoutSeen(t, first), expected)

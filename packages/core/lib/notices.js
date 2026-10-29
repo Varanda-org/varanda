@@ -120,7 +120,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // Exact number of fold entries over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, foldFollow, commit, removeAuthor, page }
+  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor }
 
   function markPending (authorHex) {
     if (!isHex64(authorHex)) return
@@ -252,6 +252,21 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     const last = items[items.length - 1]
     const next = more ? { at: last.at, key: last.key } : null
     return { items, next, incomplete }
+  }
+
+  // -> { rows: [{ key, seq, at }], incomplete }: every published follow of
+  // target in no particular order. The v2 merge needs the whole set at once
+  // because its cursor carries three keys, which compareRows cannot order.
+  function rowsFor (target, isBlocked) {
+    const incomplete = truncated.size > 0 || pending.size > 0
+    const rows = []
+    const followers = isHex64(target) ? published.get(target) : undefined
+    if (!followers) return { rows, incomplete }
+    for (const [key, e] of followers) {
+      if (skip(key, target, isBlocked)) continue
+      rows.push({ key, seq: e.seq, at: e.at })
+    }
+    return { rows, incomplete }
   }
 }
 

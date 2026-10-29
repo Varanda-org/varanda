@@ -181,11 +181,17 @@
 // own-key lookup runs on the chain. One peek at a time ('espiadinha já em
 // andamento'); detach, close, reset and setKeyPair abort a running one.
 //
-// Follow notices (web only, docs/rpc.md 5.28): notices.list is answered by
-// ./notices.js exactly like peek.read (own short-lived link, memory cores,
-// no withStore, no preemption, nothing written); the link's ownership proof
-// is signed by the in-memory identity key (locked -> USAGE 'identidade
-// bloqueada'). One at a time ('avisos já em andamento'), aborted with the peek.
+// Notices (web only, docs/rpc.md 5.28): notices.list is answered by
+// ./notices.js like peek.read (own short-lived link, memory cores, nothing
+// written); the link's ownership proof is signed by the in-memory identity
+// key (locked -> USAGE 'identidade bloqueada'). One at a time ('avisos já
+// em andamento'), aborted with the peek. Against a seeder that speaks
+// 'varanda/notices/2' the read checks replies, quotes and mentions against
+// the own diary: one own-diary read per poll, on the serial chain inside
+// withStore (it may preempt a sync like any read), skipped while the diary
+// length is unchanged (noticeCtxCache, forgotten on lock, reset, setKeyPair
+// and close). The link itself still opens no storage core, and a v1 read
+// never reads the own diary.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS } = require('@varanda/rpc')
@@ -477,6 +483,9 @@ function createBrowserSession ({
   // The one notices.list in flight (its own slot, same rules as `peeking`;
   // its promise joins `unwinding` too).
   let noticing = null
+  // The own context of the last v2 notices read (member-ops
+  // ownNoticeContext), reused while the own diary's length is unchanged.
+  let noticeCtxCache = null
   const unwinding = new Set()
 
   // A run's events carry the connection epoch it started in: once that
@@ -1339,9 +1348,10 @@ function createBrowserSession ({
       }
     },
 
-    // Follow notices (docs/rpc.md 5.28), works only unlocked (the link's
-    // proof is signed by the identity key). Shaped exactly like peek.read:
-    // not serial as a whole, no preemption, its own slot.
+    // Notices (docs/rpc.md 5.28), works only unlocked (the link's proof is
+    // signed by the identity key). Shaped like peek.read: not serial as a
+    // whole, its own slot; only the own-key lookup and, on a v2 read, the
+    // own-diary read run on the chain.
     'notices.list': async (params) => {
       const epoch = connection
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
@@ -1354,7 +1364,14 @@ function createBrowserSession ({
       if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
       if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
       if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
-      const p = noticer.read(params)
+      // Called by the noticer only on a v2 read: the own diary is read on
+      // the chain (withStore alone only preempts; serial is the exclusion).
+      const ownContext = () => serial(async () => {
+        if (keyPair === null) throw new UsageError(store.LOCKED)
+        noticeCtxCache = await withStore((c) => member.ownNoticeContext(c, noticeCtxCache))
+        return noticeCtxCache
+      })(params)
+      const p = noticer.read(params, ownContext)
       noticing = p
       unwinding.add(p)
       p.then(() => unwinding.delete(p), () => unwinding.delete(p))
@@ -1426,6 +1443,7 @@ function createBrowserSession ({
   function zeroKeyPair () {
     noticer.abort()
     noticing = null
+    noticeCtxCache = null
     zeroPair(keyPair)
     keyPair = null
     zeroPair(mediaKeyPair)

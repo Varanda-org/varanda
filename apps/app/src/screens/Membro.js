@@ -69,7 +69,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenEngagers, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -348,7 +348,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => load(false)} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
-  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
     const peeked = peekedRef.current

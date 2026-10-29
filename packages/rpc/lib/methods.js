@@ -97,12 +97,16 @@ function isPeekCursor (v) {
     Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
-// notices.list `after` (docs/rpc.md 5.28): exactly { at, key }, the
-// notices-order position of the last item the caller holds.
+// notices.list `after` (docs/rpc.md 5.28): exactly { at, key }, or exactly
+// { at, key, seq } after a reply, quote or mention notice; the notices-order
+// position of the last item the caller holds.
 function isNoticesCursor (v) {
-  if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
+  if (!isPlainObject(v)) return false
+  const count = Object.keys(v).length
   if (!hasOwn(v, 'at') || !hasOwn(v, 'key')) return false
-  return isCanonicalIso(v.at) && isKey(v.key)
+  if (count === 2) return isCanonicalIso(v.at) && isKey(v.key)
+  if (count !== 3 || !hasOwn(v, 'seq')) return false
+  return isCanonicalIso(v.at) && isKey(v.key) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
@@ -326,18 +330,27 @@ const SPECS = {
       after: opt(isPeekCursor)
     }
   },
-  // People who follow the caller and whom the caller does not follow yet.
-  // Success: { notices: [{ key: hex64, seq: integer >= 1, at: ISO,
-  // name: string|null, username: string|null, seen: hex32 }],
-  // next: null | { at, key }, incomplete: boolean, supported: boolean }.
+  // People who follow the caller and whom the caller does not follow yet, plus
+  // the replies, quotes and mentions that name the caller.
+  // Success: { notices: [{ kind: 'follow' | 'reply' | 'quote' | 'mention',
+  // key: hex64, seq: integer >= 1, at: ISO, name: string|null,
+  // username: string|null, seen: hex32, avatar: AvatarDescriptor|null }],
+  // next: null | { at, key } | { at, key, seq }, incomplete: boolean,
+  // supported: boolean, activity: boolean }.
   // No count or total.
-  // name is the follower's profile name; username is their verified username;
-  // seq is the block of their signed follow record; seen is an opaque token,
-  // stable per identity, keyed by the identity secret and unlinkable to the
-  // follower without it (what the app stores as seen); next is the
-  // next-page cursor.
+  // kind is absent on a notice of a node that predates it, and means 'follow'.
+  // name and avatar come from the author's profile and username is their
+  // verified username, for every kind;
+  // seq is the block of their signed follow record; for a non-follow kind,
+  // key:seq is the author's signed POST block that replied to, quoted or
+  // mentioned the caller. seen is an opaque token, stable per identity, keyed
+  // by the identity secret and unlinkable to the follower without it (what the
+  // app stores as seen); one row per block. next is the next-page cursor; it
+  // carries seq whenever the read went over the notices channel v2.
   // incomplete means the seeder's index or the read's budget was not complete;
-  // supported is false when the seeder does not speak the notices channel.
+  // supported is false when the seeder does not speak the notices channel;
+  // activity is false only when the rows came over the follows-only channel
+  // v1 because the seeder does not speak v2; every other result says true.
   // Hosted web only: the core node answers USAGE 'avisos disponíveis só no navegador'
   // (docs/rpc.md 5.28).
   'notices.list': {
