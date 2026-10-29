@@ -21,7 +21,7 @@ const { createCert, createSeederCert, createModeratorCert, generateAssociationKe
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
@@ -302,6 +302,48 @@ test('re-admission rebuild: restores incoming engagements and repost timelines w
   t.is(seeder.indexPost(A, 1).complete, true)
   t.alike(seeder.indexMember(B).posts, [4, 2, 1], 'the repost is restored to its author timeline')
   t.is(seeder._index.stats().records, 6, 'replay does not double-count operations')
+})
+
+// The fixture stubs _scanDiary; a deletion case runs the real scan, which
+// needs the scan fields _serve gives a served entry.
+function scannable (seeder, entry) {
+  seeder._media = new Map()
+  seeder._topics.removePost = () => false
+  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false })
+  return entry
+}
+
+test('deletion: a tombstoned post leaves counts and timelines, whichever pass runs first, and stays out after a rebuild', async (t) => {
+  for (const scanFirst of [false, true]) {
+    const { seeder, diary } = scanFixture()
+    const A = authorKey(1)
+    const B = authorKey(2)
+    const to = { author: A, seq: 1 }
+    const own = [postRecord({ text: 'owner', at: at(0) }), postRecord({ text: 'kept', at: at(1) }), deleteRecord({ seq: 1, at: at(2) })]
+    const engaged = [likeRecord({ to, on: true, at: at(3) }), postRecord({ text: 'reply', replyTo: to, at: at(4) }), repostRecord({ to, on: true, at: at(5) })]
+    const a = scannable(seeder, diary(A, own.length, (seq) => own[seq - 1]))
+    const b = scannable(seeder, diary(B, engaged.length, (seq) => engaged[seq - 1]))
+    if (scanFirst) await seeder._runScan(A, a)
+    seeder._onGrow(A, a, a.core.contiguousLength)
+    seeder._onGrow(B, b, b.core.contiguousLength)
+    await settleIndex(seeder)
+    if (!scanFirst) await seeder._runScan(A, a)
+    await seeder._runScan(B, b)
+    const label = scanFirst ? ' (scan first)' : ' (index first)'
+    t.alike(seeder.indexCounts([ref(A, 1)]).counts, {}, 'the deleted post is not counted' + label)
+    t.is(seeder.indexPost(A, 1), null, 'no thread page' + label)
+    t.alike(seeder.indexMember(A).posts, [2], 'gone from its author timeline' + label)
+    t.alike(seeder.indexMember(B).posts, [2], 'the repost of it is gone, the reply stays' + label)
+    t.is(seeder.indexPost(B, 2).parent, null, 'the reply no longer points at it' + label)
+
+    seeder._rebuildIndex()
+    await settleIndex(seeder)
+    t.ok(a.deleted.has(1), 'the rebuild keeps the scan result' + label)
+    t.alike(seeder.indexCounts([ref(A, 1)]).counts, {}, 'still not counted after a rebuild' + label)
+    t.alike(seeder.indexMember(A).posts, [2], label)
+    t.alike(seeder.indexMember(B).posts, [2], label)
+    t.is(seeder.indexPost(B, 2).parent, null, label)
+  }
 })
 
 test('re-admission rebuild: pending requests coalesce and reads in flight finish before resetting cursors', async (t) => {

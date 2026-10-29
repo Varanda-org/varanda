@@ -42,8 +42,9 @@
 // one. Mention rows are stored by token, not by owner, so a mention folded
 // before the owner's username record is seen resolves once it is settled.
 //
-// Rows are published at fold: a later block never cancels a post (only an
-// unfollow cancels a follow). Pending only governs `incomplete`.
+// Rows are published at fold: a later block never cancels a post, except a
+// tombstone (removePost, docs/protocol.md "Deletion"); only an unfollow
+// cancels a follow. Pending only governs `incomplete`.
 //
 // Browser-safe: ./records, ./username, ./feed, ./notices-v2 and @varanda/rpc
 // only.
@@ -159,7 +160,7 @@ function createPostNoticeIndex ({
   // Exact number of stored rows over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, settle, removeAuthor, foldPost, foldUsername, pageV2 }
+  return { markPending, settle, removeAuthor, foldPost, foldUsername, removePost, pageV2 }
 
   function admit (authorHex) {
     if (tracked.has(authorHex)) return true
@@ -292,6 +293,15 @@ function createPostNoticeIndex ({
     const first = state.posts.entries().next().value
     if (!first) return
     const [seq, post] = first
+    for (const pair of [...post.edges.keys()]) evict(authorHex, seq, pair)
+  }
+
+  // A deleted post (the seeder's tombstone handling) leaves every page.
+  // lastSeq stays, so the post is never folded again.
+  function removePost (authorHex, seq) {
+    const state = authors.get(authorHex)
+    const post = state ? state.posts.get(seq) : undefined
+    if (!post) return
     for (const pair of [...post.edges.keys()]) evict(authorHex, seq, pair)
   }
 

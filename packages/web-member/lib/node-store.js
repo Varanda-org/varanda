@@ -43,6 +43,7 @@ const {
   MAX_MEDIA_BYTES
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
+const { applyDeletes } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
@@ -264,8 +265,16 @@ function purgeReplica (storage, hex) {
 }
 
 // As @varanda/core readAll: a decode failure is { seq, record: null }; a
-// closed core is an error, never an empty log.
+// closed core is an error, never an empty log. A block an effective
+// tombstone deleted is { seq, record: null, deleted: true }
+// (@varanda/core lib/deletion.js), at its own index.
 async function readAll (core) {
+  return applyDeletes(await readRaw(core))
+}
+
+// Every block as decoded, tombstones not applied (the delete writers check
+// the targeted block itself).
+async function readRaw (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
     err.code = 'SESSION_CLOSED'
@@ -673,6 +682,7 @@ module.exports = {
   replicaExists,
   purgeReplica,
   readAll,
+  readRaw,
   readBlock0,
   appendRecord,
   appendRecords,

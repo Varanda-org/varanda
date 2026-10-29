@@ -347,3 +347,104 @@ test('search over 4096 entries under 50 ms', (t) => {
   t.ok(res.more)
   t.ok(ms < 50, ms.toFixed(2) + ' ms')
 })
+
+test('forget clears only the current profile and permits an older name to be noted', (t) => {
+  const a = hex(1)
+  const verify = counter(true)
+  const idx = createNameIndex({ maxAuthors: 1, verifyUsername: verify })
+  idx.note(a, 1, profile('Ana'))
+  idx.note(a, 2, username(a, 'bia_costa'))
+  idx.settle(a)
+  idx.note(a, 3, profile('Cai'))
+  t.is(idx.forget(a, 4), false)
+  t.is(idx.forget(a, 2), false)
+  t.ok(idx.forget(a, 3))
+  t.is(idx.forget(a, 3), false)
+  t.alike(idx.search(['cai'], ...ALL), { members: [], more: false })
+  t.alike(idx.search(['bia', 'costa'], ...ALL).members, [{ author: a, profileSeq: null, usernameSeq: 2 }])
+  idx.note(a, 1, profile('Ana'))
+  idx.note(a, 1, username(a, 'zed_one'))
+  idx.settle(a)
+  t.is(verify.calls.length, 1, 'username watermark survives profile removal')
+  t.alike(idx.search(['ana'], ...ALL).members, [{ author: a, profileSeq: 1, usernameSeq: 2 }])
+  t.alike(idx.search(['zed'], ...ALL).members, [])
+  t.alike(idx.stats(), { authors: 1, maxAuthors: 1 })
+  for (const value of [null, undefined, {}, 0, -1, 1.5, NaN, '1', Infinity]) {
+    t.is(idx.forget(a, value), false)
+    t.is(idx.forget(value, 1), false)
+  }
+  t.is(idx.forget(hex(2), 1), false)
+})
+
+test('forget preserves a pending username candidate', (t) => {
+  const a = hex(1)
+  const idx = createNameIndex({ verifyUsername: yes })
+  idx.note(a, 1, profile('Ana'))
+  idx.note(a, 2, username(a, 'bia_costa'))
+  t.ok(idx.forget(a, 1))
+  idx.settle(a)
+  t.alike(idx.search(['bia', 'costa'], ...ALL).members, [{ author: a, profileSeq: null, usernameSeq: 2 }])
+  t.is(idx.forget(a, null), false)
+})
+
+test('forget tombstones that profile seq so a rescan cannot restore it', (t) => {
+  const a = hex(1)
+  function build () {
+    const idx = createNameIndex()
+    idx.note(a, 2, profile('Nova'))
+    idx.note(a, 5, profile('Apagada'))
+    t.ok(idx.forget(a, 5))
+    return idx
+  }
+  // Rescan of the forgotten seq before the older survivor is noted again.
+  const rescanFirst = build()
+  t.ok(rescanFirst.note(a, 5, profile('Apagada')))
+  t.alike(rescanFirst.search(['apagada'], ...ALL), { members: [], more: false })
+  t.ok(rescanFirst.note(a, 2, profile('Nova')))
+  t.alike(rescanFirst.search(['nova'], ...ALL).members, [{ author: a, profileSeq: 2, usernameSeq: null }])
+  t.ok(rescanFirst.note(a, 5, profile('Apagada')))
+  t.alike(rescanFirst.search(['nova'], ...ALL).members, [{ author: a, profileSeq: 2, usernameSeq: null }])
+  t.alike(rescanFirst.search(['apagada'], ...ALL).members, [])
+
+  // Older survivor first: the forgotten seq must not replace it.
+  const olderFirst = build()
+  t.ok(olderFirst.note(a, 2, profile('Nova')))
+  t.alike(olderFirst.search(['nova'], ...ALL).members, [{ author: a, profileSeq: 2, usernameSeq: null }])
+  t.ok(olderFirst.note(a, 5, profile('Apagada')))
+  t.alike(olderFirst.search(['apagada'], ...ALL).members, [])
+  t.alike(olderFirst.search(['nova'], ...ALL).members, [{ author: a, profileSeq: 2, usernameSeq: null }])
+})
+
+test('forget tombstones a non-current profile seq too', (t) => {
+  const a = hex(1)
+  const idx = createNameIndex()
+  idx.note(a, 1, profile('Velha'))
+  idx.note(a, 2, profile('Nova'))
+  t.is(idx.forget(a, 1), false)
+  t.ok(idx.forget(a, 2))
+  t.ok(idx.note(a, 1, profile('Velha')))
+  t.alike(idx.search(['velha'], ...ALL), { members: [], more: false })
+  t.alike(idx.search(['nova'], ...ALL), { members: [], more: false })
+
+  // An author the full index never noted: the tombstone takes no entry slot.
+  const b = hex(2)
+  const full = createNameIndex({ maxAuthors: 1 })
+  full.note(a, 1, profile('Ana'))
+  t.is(full.forget(b, 3), false)
+  t.alike(full.stats(), { authors: 1, maxAuthors: 1 })
+  t.ok(full.remove(a))
+  t.ok(full.note(b, 3, profile('Bia')))
+  t.alike(full.search(['bia'], ...ALL), { members: [], more: false })
+})
+
+test('replaying a forgotten profile seq never takes an author slot', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ maxAuthors: 1 })
+  t.is(idx.forget(a, 1), false)
+  t.ok(idx.note(a, 1, profile('Apagada')))
+  t.alike(idx.stats(), { authors: 0, maxAuthors: 1 })
+  t.ok(idx.note(b, 2, profile('Bia')))
+  t.is(idx.search(['bia'], ...ALL).members.length, 1)
+  t.ok(idx.note(a, 1, profile('Apagada')), 'a full index still answers true for the forgotten seq')
+})

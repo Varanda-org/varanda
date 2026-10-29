@@ -23,12 +23,14 @@ const {
   followRecord,
   likeRecord,
   repostRecord,
+  deleteRecord,
   validRecordCopy,
   validateRecord,
   formatRef,
   latestProfile
 } = require('./records')
-const { followSet } = require('./media')
+const { followSet, latestMediaCores } = require('./media')
+const { deletedSeqs, applyDeletes, liveMediaRefs, overlaps } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -38,7 +40,9 @@ const {
   openReplica,
   purgeReplica,
   readAll,
+  readRaw,
   appendRecord,
+  appendRecords,
   readConfig,
   readFollows,
   writeFollows,
@@ -294,6 +298,109 @@ async function postReply (ctx, { to, text }) {
 async function postQuote (ctx, { to, text }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   return publish(ctx, buildRecord(() => postRecord({ text, quote: to })))
+}
+
+// ---- delete ----
+
+const BAD_REF = 'referência inválida'
+const NOT_A_POST = 'o registro não é uma publicação'
+const NOT_A_PROFILE = 'o registro não é um perfil'
+const NOT_DELETABLE = 'não é possível apagar este registro'
+
+// The valid record of block `seq` as written, or null.
+function recordAt (raw, seq) {
+  const entry = raw[seq]
+  if (!(seq >= 1) || entry === undefined || entry.record === null) return null
+  return validRecordCopy(entry.record, seq)
+}
+
+// profileRecords writes a plain block followed by the same version with the
+// avatar; only that order pairs, so two versions saved in the same
+// millisecond never merge.
+function isCompatPair (plain, withAvatar) {
+  return plain !== null && withAvatar !== null &&
+    plain.type === 'profile' && withAvatar.type === 'profile' &&
+    plain.avatar === undefined && withAvatar.avatar !== undefined &&
+    plain.name === withAvatar.name && plain.bio === withAvatar.bio && plain.at === withAvatar.at
+}
+
+// On the unfolded diary, so a half-deleted pair is still recognized as one
+// version.
+function targetedSeqs (raw, seq, copy) {
+  if (copy.type !== 'profile') return [seq]
+  if (copy.avatar === undefined) {
+    if (isCompatPair(copy, recordAt(raw, seq + 1))) return [seq, seq + 1]
+  } else if (isCompatPair(recordAt(raw, seq - 1), copy)) {
+    return [seq - 1, seq]
+  }
+  return [seq]
+}
+
+// The highest effective tombstone that targets one of `seqs`, or null.
+function tombstoneOf (raw, deleted, seqs) {
+  for (let i = raw.length - 1; i >= 1; i--) {
+    if (deleted.has(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'delete' && seqs.includes(copy.seq)) return i
+  }
+  return null
+}
+
+// Media ranges a tombstone of `copy` may carry: only in a core this diary
+// declared, and only where no surviving own post or profile overlaps.
+function freedRanges (copy, cores, live) {
+  const descriptors = copy.type === 'post' ? (copy.media || []) : (copy.avatar === undefined ? [] : [copy.avatar])
+  const out = []
+  for (const d of descriptors) {
+    const r = { core: d.core, start: d.start, blocks: d.blocks }
+    if (cores.has(r.core) && !live.some((l) => overlaps(l, r))) out.push(r)
+  }
+  return out
+}
+
+// Deletes one own post (reply and quote included) or profile version ->
+// { seq, ref, changed, deleted } (docs/rpc.md 5.33, 5.34), checking in the
+// same order as the browser writer (@varanda/web-member member-ops.js).
+// The target is judged as written, so a deleted block keeps its kind.
+// Idempotent: a version already deleted writes nothing and reports its
+// existing tombstone; half of a pair already deleted gets only the missing
+// tombstone. `to` is the parsed { author, seq } reference.
+async function recordDelete (ctx, { to, kind }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= diary.length) throw new UsageError(BAD_REF)
+    const raw = await readRaw(diary)
+    const copy = recordAt(raw, to.seq)
+    if (copy === null) throw new UsageError(BAD_REF)
+    if (copy.type !== kind) {
+      if (copy.type === 'profile') throw new UsageError(NOT_A_POST)
+      if (copy.type === 'post') throw new UsageError(NOT_A_PROFILE)
+      throw new UsageError(NOT_DELETABLE)
+    }
+    const seqs = targetedSeqs(raw, to.seq, copy)
+    const deleted = deletedSeqs(raw)
+    const pending = seqs.filter((seq) => !deleted.has(seq))
+    if (pending.length === 0) {
+      const seq = tombstoneOf(raw, deleted, seqs)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
+    }
+    const cores = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+    const live = liveMediaRefs(raw, seqs)
+    const records = pending.map((seq) => {
+      const media = freedRanges(recordAt(raw, seq), cores, live)
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, media } : { seq }))
+    })
+    const seq = await appendRecords(diary, records)
+    return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+  })
+}
+
+function postDelete (ctx, { to }) {
+  return recordDelete(ctx, { to, kind: 'post' })
+}
+
+function profileDelete (ctx, { to }) {
+  return recordDelete(ctx, { to, kind: 'profile' })
 }
 
 // ---- likes / reposts ----
@@ -622,6 +729,8 @@ module.exports = {
   postCreate,
   postReply,
   postQuote,
+  postDelete,
+  profileDelete,
   likeSet,
   repostSet,
   engagementRead,

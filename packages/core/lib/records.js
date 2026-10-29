@@ -47,6 +47,11 @@ const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
+// A tombstone: no author field, the diary signature is the authority, so a
+// tombstone in another diary targets nothing (lib/deletion.js).
+const DELETE_KEYS = ['type', 'seq', 'at']
+const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
+const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -228,7 +233,19 @@ function validMediaList (media) {
   return true
 }
 
-const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost']
+// By index, never every(): a hole in a sparse array is undefined and invalid.
+function validDeleteRanges (media) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+  for (let i = 0; i < media.length; i++) {
+    const r = media[i]
+    if (!isPlainObject(r) || !hasExactKeys(r, DELETE_RANGE_KEYS)) return false
+    if (!isHex64(r.core) || !isIntIn(r.start, 1, MAX_MEDIA_BLOCKS - 1) || !isIntIn(r.blocks, 1, MAX_MEDIA_ITEM_BLOCKS)) return false
+    if (r.start + r.blocks > MAX_MEDIA_BLOCKS) return false
+  }
+  return true
+}
+
+const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'delete']
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -238,6 +255,15 @@ function check (record, seq) {
   if (type === 'member-cert') {
     if (seq !== 0) return 'cert-not-first'
     return validCertShape(record.cert) ? null : 'malformed'
+  }
+  // `seq` is the tombstone's own block index: it can only target an earlier block.
+  if (type === 'delete') {
+    const withMedia = hasExactKeys(record, DELETE_MEDIA_KEYS)
+    if (!withMedia && !hasExactKeys(record, DELETE_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'delete-invalid'
+    if (!isCanonicalIso(record.at)) return 'date-invalid'
+    if (withMedia && !validDeleteRanges(record.media)) return 'media-invalid'
+    return null
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
@@ -358,6 +384,21 @@ function followRecord ({ key, on, at = nowIso() } = {}) {
   return build({ type: 'follow', key, on, at }, 1)
 }
 
+// A copy with exactly the range keys (anything else is passed through for
+// validation to reject).
+function copyRange (r) {
+  if (!isPlainObject(r)) return r
+  return { core: r.core, start: r.start, blocks: r.blocks }
+}
+
+// Validated as if appended right after its target; the store validates it
+// again at its real block index. `media` is added only when given.
+function deleteRecord ({ seq, at = nowIso(), media } = {}) {
+  const record = { type: 'delete', seq, at }
+  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyRange) : media
+  return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
 function parseRef (str) {
   if (typeof str !== 'string') return null
   // Canonical decimal only: no leading zeros (except '0'), no rounding.
@@ -464,6 +505,7 @@ module.exports = {
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
   PROFILE_AVATAR_KEYS,
+  DELETE_RANGE_KEYS,
   nowIso,
   isHex64,
   isCanonicalIso,
@@ -476,6 +518,7 @@ module.exports = {
   followRecord,
   likeRecord,
   repostRecord,
+  deleteRecord,
   validDescriptor,
   validAvatar,
   validateRecord,

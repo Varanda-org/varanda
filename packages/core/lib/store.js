@@ -7,6 +7,7 @@ const { randomBytes, discoveryKey } = require('hypercore-crypto')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
+const { applyDeletes } = require('./deletion')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -458,8 +459,15 @@ async function purgeReplica (store, hex) {
 // Only a decode failure becomes { seq, record: null } (decodeBlock never
 // throws); an error from core.get itself (closed session, storage error)
 // propagates to the caller. A closed session reports contiguousLength 0, so
-// it is rejected explicitly instead of looking like an empty log.
+// it is rejected explicitly instead of looking like an empty log. Blocks a
+// tombstone deleted come back as { seq, record: null, deleted: true }.
 async function readAll (core) {
+  return applyDeletes(await readRaw(core))
+}
+
+// Every block as decoded, tombstones not applied (the delete writers check
+// the targeted block itself).
+async function readRaw (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
     err.code = 'SESSION_CLOSED'
@@ -493,14 +501,24 @@ const DEFAULT_LIMITS = Object.freeze({
 // the next call computes its seq.
 const appendQueues = new WeakMap()
 
-async function appendRecord (core, record, limits) {
+async function enqueueAppend (core, run) {
   await core.ready()
   const queueKey = core.core !== null && typeof core.core === 'object' ? core.core : core
   const prev = appendQueues.get(queueKey) || Promise.resolve()
-  const run = () => appendNow(core, record, { ...DEFAULT_LIMITS, ...limits })
   const next = prev.then(run, run)
   appendQueues.set(queueKey, next.catch(() => {}))
   return next
+}
+
+async function appendRecord (core, record, limits) {
+  return enqueueAppend(core, () => appendNow(core, record, { ...DEFAULT_LIMITS, ...limits }))
+}
+
+// One atomic append of 1..8 records (the profile compat pair): each is
+// validated at its own seq, and either all are appended or none. Returns the
+// seq of the last one.
+async function appendRecords (core, records, limits) {
+  return enqueueAppend(core, () => appendManyNow(core, records, { ...DEFAULT_LIMITS, ...limits }))
 }
 
 async function appendNow (core, record, limits) {
@@ -523,6 +541,32 @@ async function appendNow (core, record, limits) {
     throw new Error('limite do diário atingido')
   }
   await core.append(plain)
+  return core.length - 1
+}
+
+async function appendManyNow (core, records, limits) {
+  await core.ready()
+  if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw invalidRecord('malformed')
+  const plains = []
+  let bytes = 0
+  for (let i = 0; i < records.length; i++) {
+    let plain = null
+    try {
+      plain = decodeBlock(b4a.from(JSON.stringify(records[i])))
+    } catch {}
+    if (plain === null) throw invalidRecord('malformed')
+    const reason = validateRecord(plain, core.length + i)
+    if (reason) throw invalidRecord(reason)
+    const blockBytes = b4a.byteLength(JSON.stringify(plain))
+    bytes += blockBytes
+    if (blockBytes > limits.maxBlockBytes ||
+        core.length + i >= limits.maxLogBlocks ||
+        core.byteLength + bytes > limits.maxLogBytes) {
+      throw new Error('limite do diário atingido')
+    }
+    plains.push(plain)
+  }
+  await core.append(plains)
   return core.length - 1
 }
 
@@ -688,7 +732,9 @@ module.exports = {
   removeQuarantine,
   purgeReplica,
   readAll,
+  readRaw,
   appendRecord,
+  appendRecords,
   readConfig,
   writeConfig,
   readFollows,

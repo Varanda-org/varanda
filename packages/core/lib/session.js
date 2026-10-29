@@ -56,6 +56,9 @@ const USAGE_MESSAGES = new Set([
   'associação diferente da configurada',
   'registro de nome inválido',
   'registro de nome antigo',
+  'o registro não é uma publicação',
+  'o registro não é um perfil',
+  'não é possível apagar este registro',
   MEDIA_WEB_ONLY,
   PEEK_WEB_ONLY
 ])
@@ -592,6 +595,20 @@ function createSession ({
       return withStore((c) => member.repostSet(c, { to: ref, on }))
     }),
 
+    // The core node writes the tombstone only: it neither clears media bytes
+    // nor writes media.
+    'post.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.postDelete(c, { to: ref }))
+    }),
+
+    'profile.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.profileDelete(c, { to: ref }))
+    }),
+
     // Which refs the own diary likes / reposts (docs/rpc.md), local data only.
     'engagement.read': serial(async ({ refs }) => {
       const r = await withStore((c) => member.engagementRead(c, { refs }))
@@ -629,9 +646,9 @@ function createSession ({
       const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
-      for (const { seq, record } of window) {
+      for (const { seq, record, deleted } of window) {
         if (record === null) {
-          invalid.push({ seq, reason: 'malformed' })
+          invalid.push({ seq, reason: deleted === true ? 'deleted' : 'malformed' })
           continue
         }
         const copy = validRecordCopy(record, seq)

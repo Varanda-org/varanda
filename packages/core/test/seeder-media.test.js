@@ -432,11 +432,12 @@ test('restart: a healthy binding is served at ready without a rescan; a binding 
   t.is(servedAtReady, true, 'K served at ready, before any block of D was scanned')
   t.alike(second.ready.admitted, [m.key])
   t.alike(second.seeder.mediaKeys(), [K])
+  // The background scan confirms the binding (no drop, no re-admission).
+  await until(() => second.seeder._served.get(m.key).scanned === 3, { name: 'varredura de fundo' })
+  // Reads wait for the scan: a tombstone not yet scanned may delete a range.
   const read = await second.seeder.mediaRead(m.key, K, 1, 2)
   t.is(read.bytes, MEDIA_BLOCK_BYTES + 1000)
   t.is((await collect(read.blocks)).length, 2)
-  // The background scan confirms the binding (no drop, no re-admission).
-  await until(() => second.seeder._served.get(m.key).scanned === 3, { name: 'varredura de fundo' })
   t.alike(second.seeder.mediaKeys(), [K])
   t.is(second.events.filter((e) => e.event === 'media-admitted' || e.event === 'media-rejected').length, 0)
   await second.seeder.close()

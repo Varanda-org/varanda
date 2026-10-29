@@ -210,8 +210,9 @@ test('a cap is not a full scan: an old post can remain undiscovered', (t) => {
   t.alike(peekWindow(all.length, fetched), [])
 })
 
-test('retainRecords keeps copied certificate, profiles, usernames, posts and reposts only', (t) => {
+test('retainRecords keeps copied certificate, profiles, usernames, posts, reposts and tombstones only', (t) => {
   const f = fixture()
+  const tomb = { type: 'delete', seq: 9, at: AT }
   const entries = [...f.entries,
     { seq: 3, record: { ...post('foto'), media: MEDIA } },
     { seq: 4, record: post('reply', AT, { author: B, seq: 1 }) },
@@ -221,17 +222,22 @@ test('retainRecords keeps copied certificate, profiles, usernames, posts and rep
     { seq: 8, record: null },
     { seq: 9, record: post('plain') },
     { seq: 10, record: { type: 'like', to: { author: B, seq: 1 }, on: true, at: AT } },
-    { seq: 11, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
+    { seq: 11, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } },
+    { seq: 12, record: tomb },
+    { seq: 13, record: { type: 'delete', seq: 0, at: AT } }
   ]
   const before = JSON.stringify(entries)
   const kept = retainRecords(entries)
-  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 4, 9, 11])
+  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 4, 9, 11, 12])
   t.not(kept, entries)
   t.not(kept[0].record.cert, entries[0].record.cert)
   t.not(kept[3].record.media[0], MEDIA[0])
   t.alike(kept[3].record.media, MEDIA)
-  const input = { ...f, length: 12, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
+  t.not(kept[7].record, tomb)
+  t.alike(kept[7].record, tomb)
+  const input = { ...f, length: 14, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
   t.alike(diaryPeek({ ...input, entries: kept }), diaryPeek(input))
+  t.alike(diaryPeek(input).posts.map((p) => p.seq), [11, 4, 3], 'the tombstone hides seq 9')
   t.is(JSON.stringify(entries), before, 'inputs unchanged')
 })
 
@@ -687,6 +693,118 @@ test('avatar: diaryPeek uses the newest retained profile and page items copy its
   t.ok(buildPeekPage({ diaries: [{ key: A, ...removed, exhausted: true }], limit: 35 }).items.every(({ avatar }) => avatar === null))
   t.is(diaryPeek({ ...f, entries: [f.entries[0]] }).avatar, null, 'no profile')
   t.is(diaryPeek(null).avatar, null, 'invalid input')
+})
+
+function tombstone (block, target) {
+  return { seq: block, record: { type: 'delete', seq: target, at: AT } }
+}
+
+test('a deleted tail post vanishes and a deletion at either end still folds the rest', (t) => {
+  const f = fixture()
+  const target = { author: B, seq: 1 }
+  const repost = { type: 'repost', to: target, on: true, at: AT }
+  const run = (entries) => {
+    const fetched = new Set(entries.map((e) => e.seq))
+    const length = Math.max(...entries.map((e) => e.seq)) + 1
+    return diaryPeek({ ...f, length, entries, fetched })
+  }
+  // Lowest seq first: the deleted post is the first record the tail reads.
+  const lowFirst = [
+    { seq: 3, record: post('gone') },
+    ...f.entries,
+    tombstone(4, 3),
+    { seq: 5, record: post('keep') },
+    { seq: 6, record: repost },
+    { seq: 7, record: post('also') }
+  ]
+  const low = run(lowFirst)
+  t.alike(low.posts.map((p) => [p.kind, p.seq]), [['post', 7], ['repost', 6], ['post', 5]])
+  t.alike(low.posts[1].to, target)
+  t.absent(low.posts.some((p) => p.seq === 3))
+  // Highest seq first: the deleted post is the first entry of the tail.
+  const highFirst = [
+    { seq: 6, record: post('gone') },
+    tombstone(7, 6),
+    { seq: 5, record: repost },
+    { seq: 4, record: post('keep') },
+    { seq: 3, record: post('also') },
+    ...[...f.entries].reverse()
+  ]
+  const high = run(highFirst)
+  t.alike(high.posts.map((p) => [p.kind, p.seq]), [['repost', 5], ['post', 4], ['post', 3]])
+  t.alike(high.posts[0].to, target)
+  t.absent(high.posts.some((p) => p.seq === 6))
+})
+
+test('a deleted newest profile falls back to the previous name', (t) => {
+  const f = fixture()
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: profile('Nova') },
+    { seq: 4, record: post('oi') },
+    tombstone(5, 3)
+  ]
+  const fetched = new Set(entries.map((e) => e.seq))
+  const result = diaryPeek({ ...f, length: 6, entries, fetched })
+  t.is(result.name, 'Ana')
+  t.is(result.username, 'ana')
+  t.alike(result.posts.map((p) => p.text), ['oi'])
+  const none = [...entries, tombstone(6, 1)]
+  const cleared = diaryPeek({ ...f, length: 7, entries: none, fetched: new Set(none.map((e) => e.seq)) })
+  t.is(cleared.name, null, 'no surviving profile')
+  t.is(cleared.username, 'ana', 'a username is not a profile')
+  t.alike(cleared.posts.map((p) => p.seq), [4])
+})
+
+test('a tombstone is retained across pages', (t) => {
+  const f = fixture()
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: post('some') },
+    { seq: 4, record: post('fica') },
+    tombstone(5, 3),
+    { seq: 6, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
+  ]
+  const fetched = new Set(entries.map((e) => e.seq))
+  const input = { ...f, length: 7, entries, fetched }
+  const result = diaryPeek(input)
+  t.alike(result.posts.map((p) => [p.kind, p.seq]), [['repost', 6], ['post', 4]])
+  const kept = retainRecords(entries)
+  t.ok(kept.some((e) => e.seq === 5 && e.record.type === 'delete'))
+  t.alike(diaryPeek({ ...input, entries: kept }), result)
+  // The next page only has what the previous page retained, plus a new post.
+  const more = { seq: 7, record: post('nova') }
+  const page2 = retainRecords([...kept, more])
+  const again = diaryPeek({ ...f, length: 8, entries: page2, fetched: new Set([...fetched, 7]) })
+  t.alike(again.posts.map((p) => [p.kind, p.seq]), [['post', 7], ['repost', 6], ['post', 4]])
+  t.absent(again.posts.some((p) => p.seq === 3 || p.text === 'some'))
+  t.alike(diaryPeek({ ...f, length: 8, entries: retainRecords(page2), fetched: new Set([...fetched, 7]) }), again)
+})
+
+test('a tombstone below the floor is never seen', (t) => {
+  const f = fixture()
+  // Length 20: head 0..2 and tail 12..19. Seq 5 sits in the unfetched gap.
+  // A tombstone can only name an earlier block, so this one names the head.
+  const gap = tombstone(5, 2)
+  const entries = [
+    f.entries[0],
+    { seq: 1, record: profile('Old') },
+    { seq: 2, record: profile('Head') },
+    gap,
+    { seq: 13, record: post('tail post') },
+    { seq: 19, record: post('newest') }
+  ]
+  const fetched = new Set([0, 1, 2, 12, 13, 14, 15, 16, 17, 18, 19])
+  const seen = entries.filter((e) => fetched.has(e.seq))
+  const result = diaryPeek({ ...f, length: 20, entries: seen, fetched })
+  t.is(result.name, 'Head', 'the gap tombstone was not fetched')
+  t.alike(result.posts.map((p) => p.seq), [19, 13])
+  const fetchedGap = diaryPeek({ ...f, length: 20, entries: [...seen, gap], fetched })
+  t.is(fetchedGap.name, 'Old', 'the same tombstone counts once it is in the entries')
+  t.alike(fetchedGap.posts.map((p) => p.seq), [19, 13])
+  const hidden = diaryPeek({ ...f, length: 20, entries: [...seen, tombstone(18, 13)], fetched })
+  t.alike(hidden.posts.map((p) => [p.kind, p.seq]), [['post', 19]], 'a tail tombstone hides the tail post')
+  t.is(hidden.name, 'Head')
 })
 
 test('avatar: profiles outside the head and tail preserve the older retained value and block 2 name', (t) => {

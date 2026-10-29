@@ -3,7 +3,7 @@
 // validRecordCopy without structuredClone (the plain-data fallback) must give
 // the same verdict and the same copy as with it.
 const test = require('brittle')
-const { validRecordCopy, postRecord, profileRecord } = require('../lib/records')
+const { validRecordCopy, postRecord, profileRecord, deleteRecord } = require('../lib/records')
 
 function withoutStructuredClone (t) {
   const original = globalThis.structuredClone
@@ -49,4 +49,29 @@ test('fallback refuses what is not plain data, never throws', (t) => {
   for (const record of [cyclic, getter, fn, big, undef]) t.is(validRecordCopy(record, 1), null)
   const copy = validRecordCopy(post, 1)
   t.ok(copy !== null && Object.getPrototypeOf(copy) === Object.prototype, 'a plain object copy')
+})
+
+test('fallback and structuredClone agree on delete records', (t) => {
+  const at = '2026-10-22T10:00:00.000Z'
+  const range = { core: 'a'.repeat(64), start: 1, blocks: 2 }
+  const make = () => {
+    const plain = deleteRecord({ seq: 2, at })
+    const withMedia = deleteRecord({ seq: 2, at, media: [range] })
+    const extraRange = { ...withMedia, media: [{ ...range, extra: 1 }] }
+    const getter = { ...plain }
+    Object.defineProperty(getter, 'seq', { enumerable: true, get () { throw new Error('boom') } })
+    return { plain, withMedia, extraRange, getter }
+  }
+  const native = {}
+  for (const [name, record] of Object.entries(make())) native[name] = validRecordCopy(record, 5)
+  withoutStructuredClone(t)
+  for (const [name, record] of Object.entries(make())) {
+    const copy = validRecordCopy(record, 5)
+    t.alike(copy, native[name], name)
+    if (copy !== null) t.not(copy, record, name + ' is a copy')
+    if (copy !== null && copy.media) t.not(copy.media[0], record.media[0], name + ' ranges are copies')
+  }
+  t.ok(native.plain !== null && native.withMedia !== null)
+  t.is(native.extraRange, null)
+  t.is(native.getter, null)
 })

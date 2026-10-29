@@ -51,6 +51,7 @@ const {
   followRecord,
   likeRecord,
   repostRecord,
+  deleteRecord,
   validAvatar,
   validateRecord,
   validRecordCopy,
@@ -66,6 +67,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { applyDeletes, deletedSeqs, liveMediaRefs, overlaps } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -298,6 +300,93 @@ async function postQuote (ctx, { to, text, media }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   if (hasMedia(media)) await verifyMedia(ctx, media)
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media } : { text, quote: to })))
+}
+
+// ---- delete ----
+
+const NOT_DELETABLE = 'não é possível apagar este registro'
+const DELETE_KINDS = {
+  post: { other: 'profile', wrong: 'o registro não é uma publicação' },
+  profile: { other: 'post', wrong: 'o registro não é um perfil' }
+}
+
+// The compat pair profileRecords writes: a plain profile immediately
+// followed by the same profile with an avatar (never the other order).
+function compatPair (plain, withAvatar) {
+  return plain !== null && withAvatar !== null &&
+    plain.type === 'profile' && withAvatar.type === 'profile' &&
+    plain.avatar === undefined && withAvatar.avatar !== undefined &&
+    plain.name === withAvatar.name && plain.bio === withAvatar.bio && plain.at === withAvatar.at
+}
+
+function recordAt (raw, seq) {
+  return seq >= 1 && seq < raw.length ? validRecordCopy(raw[seq].record, seq) : null
+}
+
+function descriptorsOf (record) {
+  if (record.type === 'post') return Array.isArray(record.media) ? record.media : []
+  return record.avatar !== undefined ? [record.avatar] : []
+}
+
+// The seq of the highest effective tombstone whose target is in targets.
+function existingTombstone (raw, deleted, targets) {
+  let last = null
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'delete' && targets.includes(copy.seq) && (last === null || seq > last)) last = seq
+  }
+  return last
+}
+
+// Tombstones for the caller's own post or profile block `to` -> { seq, ref,
+// changed, deleted } (docs/rpc.md 5.33, 5.34). A compat pair is one version:
+// both tombstones go in one append. A target already deleted writes nothing.
+// Media ranges are only the target's descriptors in a core the diary
+// declared that no surviving own post or profile overlaps; no media core is
+// opened, so an avatar in another device's core needs no media key.
+async function recordDelete (ctx, kind, { to }) {
+  const rules = DELETE_KINDS[kind]
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    const target = recordAt(raw, to.seq)
+    if (target === null) throw new UsageError('referência inválida')
+    if (target.type === rules.other) throw new UsageError(rules.wrong)
+    if (target.type !== kind) throw new UsageError(NOT_DELETABLE)
+    let targets = [to.seq]
+    if (kind === 'profile') {
+      if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
+      else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
+    }
+    const deleted = deletedSeqs(raw)
+    const pending = targets.filter((seq) => !deleted.has(seq))
+    if (pending.length === 0) {
+      const seq = existingTombstone(raw, deleted, targets)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
+    }
+    const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+    const live = liveMediaRefs(raw, targets)
+    const records = pending.map((seq) => {
+      const media = descriptorsOf(recordAt(raw, seq))
+        .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
+        .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, media } : { seq }))
+    })
+    const seq = records.length === 1
+      ? await appendOwn(ctx, diary, records[0])
+      : await store.appendRecords(diary, records, ctx.limits)
+    return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
+  })
+}
+
+function postDelete (ctx, params) {
+  return recordDelete(ctx, 'post', params)
+}
+
+function profileDelete (ctx, params) {
+  return recordDelete(ctx, 'profile', params)
 }
 
 // ---- likes / reposts ----
@@ -951,6 +1040,8 @@ module.exports = {
   postCreate,
   postReply,
   postQuote,
+  postDelete,
+  profileDelete,
   likeSet,
   repostSet,
   engagementRead,

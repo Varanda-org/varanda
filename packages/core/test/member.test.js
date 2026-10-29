@@ -158,6 +158,23 @@ test('profileSet refuses an avatar and keeps an existing photo', async (t) => {
   t.alike(await member.profileSet(ctx, { name: 'Cris' }), { seq: 4 }, 'no photo left: a plain change is allowed')
 })
 
+test('postDelete and profileDelete write a tombstone of the own block only', async (t) => {
+  const { ctx, publicKey } = await setup(t, { cert: true })
+  const bare = await setup(t)
+  await rejectsWith(t, member.postDelete(bare.ctx, { to: { author: bare.publicKey, seq: 1 } }), GENESIS_REQUIRED, undefined)
+  await rejectsWith(t, member.profileDelete(bare.ctx, { to: { author: 'ab'.repeat(32), seq: 1 } }), GENESIS_REQUIRED, undefined)
+  const { seq } = await member.postCreate(ctx, { text: 'olá' })
+  await rejectsWith(t, member.postDelete(ctx, { to: { author: 'ab'.repeat(32), seq } }), 'referência inválida', 'USAGE')
+  await rejectsWith(t, member.profileDelete(ctx, { to: { author: publicKey, seq } }), 'o registro não é um perfil', 'USAGE')
+  const r = await member.postDelete(ctx, { to: { author: publicKey, seq } })
+  t.alike(r, { seq: seq + 1, ref: publicKey + ':' + (seq + 1), changed: true, deleted: [seq] })
+  const { entries } = await member.logRead(ctx)
+  t.alike(entries[seq], { seq, record: null, deleted: true })
+  t.alike(Object.keys(entries[seq + 1].record).sort(), ['at', 'seq', 'type'])
+  await rejectsWith(t, member.postDelete(ctx, { to: { author: publicKey, seq: seq + 1 } }), 'não é possível apagar este registro', 'USAGE')
+  t.alike(await member.postDelete(ctx, { to: { author: publicKey, seq } }), { ...r, changed: false })
+})
+
 test('follows', async (t) => {
   const { ctx, publicKey } = await setup(t)
   const a = 'ab'.repeat(32)

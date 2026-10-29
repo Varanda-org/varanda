@@ -23,8 +23,8 @@
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
-//   onFollow ('seguir', disabled while followPending), onReport (each button
-//   shows only with its handler).
+//   onFollow ('seguir', disabled while followPending), onReport, onDelete (each
+//   button shows only with its handler).
 // - onOpenMention(username): makes the @nome in the text and in the quote
 //   tappable (./MentionText). A text or quote with a mention is rendered
 //   outside the body's single accessible element, so the link is reachable by
@@ -92,7 +92,7 @@ export function PostRow ({
   author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete
 }) {
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
@@ -111,7 +111,7 @@ export function PostRow ({
   // On the reposter's line, never the action bar: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? fn(onFollowReposter) : undefined
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport) || fn(onDelete)
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
   const bodyParts = [
@@ -358,6 +358,13 @@ export function PostRow ({
                   ? (
                     <Action label={'denunciar publicação de ' + title} onPress={onReport}>
                       <Icon name='bandeira' size={ICON} color={colors.soft} />
+                    </Action>
+                    )
+                  : null}
+                {fn(onDelete)
+                  ? (
+                    <Action label='apagar publicação' onPress={onDelete}>
+                      <Icon name='lixeira' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}

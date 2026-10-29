@@ -219,6 +219,10 @@ function Member () {
     setVersion((v) => v + 1)
     setFollowsSignal((v) => v + 1)
   }, [])
+  const deletedPost = useCallback(() => {
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
+  }, [])
   // Avisos has something unseen: a plain dot on its tab, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
@@ -1260,7 +1264,8 @@ function Member () {
       onOpenMember: openMember,
       onOpenMention: mentionHandler,
       onToast: showToast,
-      onFollowsChanged: followsChanged
+      onFollowsChanged: followsChanged,
+      onDeletedPost: deletedPost
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
@@ -1274,10 +1279,12 @@ function Member () {
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
+              onDeletedPost={deletedPost}
               active={on('rua')}
               refresh={version}
               onReply={startReply}
               onReport={setReport}
+              onToast={showToast}
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
@@ -1335,9 +1342,11 @@ function Member () {
           </View>
           <View style={shown('diario')}>
             <Diario
+              onDeletedPost={deletedPost}
               active={on('diario')}
               refresh={version}
               onSettings={setAjustes}
+              onToast={showToast}
               onReply={startReply}
               onPublish={openComposer}
               onOpenThread={openThread}

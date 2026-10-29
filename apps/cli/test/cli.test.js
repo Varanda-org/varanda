@@ -22,6 +22,7 @@ Comandos:
   profile set                define nome e bio
   post                       publica um texto (--text)
   reply                      responde a uma publicação (--to <chave>:<seq> --text)
+  delete                     apaga uma publicação ou versão do perfil (--to <chave>:<seq>)
   follow|unfollow|follows    segue ou deixa de seguir uma chave pública
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
@@ -463,4 +464,20 @@ test('CLI parser, R5 help and command router', async (t) => {
   })
   t.is(duplicate.process.exitCode, 1)
   t.is(duplicate.stderr, 'erro: comando duplicado: fixture\n')
+})
+
+test('README and protocol help blocks match the root CLI byte for byte', (t) => {
+  const repo = path.resolve(root, '../..')
+  const result = spawnSync(process.execPath, [path.join(repo, 'bin/varanda.js'), 'help'], { encoding: 'utf8' })
+  t.is(result.status, 0)
+  t.is(result.stdout, HELP + '\n')
+  for (const [file, heading] of [['README.md', '### Ajuda'], ['docs/protocol.md', '### Help (R5.12, exact)']]) {
+    const text = fs.readFileSync(path.join(repo, file), 'utf8')
+    const section = text.slice(text.indexOf(heading))
+    const block = section.split('```\n')[1]
+    t.is(block, result.stdout, file + ' help matches stdout byte for byte')
+  }
+  const flags = parse(['delete', '--to', upperKey + ':42'])
+  t.is(flags.command, 'delete')
+  t.alike(flags.to, { author: lowerKey, seq: 42 })
 })

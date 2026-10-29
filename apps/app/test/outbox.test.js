@@ -480,6 +480,28 @@ test('maxSeq', async (t) => {
   t.is(o.maxSeq({ entries: [{ seq: 3 }] }), -1, 'missing entriesTruncated')
 })
 
+test('reconcile: a deleted slot above the floor is uncertain, never requeued', async (t) => {
+  const o = await load()
+  const items = o.claim(add(o, [], {}), idOf(1), { now: T0, floorSeq: 5 })
+  const r = o.reconcile(items, A, ASSOC, page([], 0, [{ seq: 6, reason: 'deleted' }]), T0)
+  t.is(r.status, 'unknown')
+  t.is(r.sent, null)
+  t.alike(r.items.map((i) => [i.id, i.state]), [[idOf(1), 'uncertain']])
+  t.is(o.reconcile(items, A, ASSOC, page([], 0, [{ seq: 5, reason: 'deleted' }]), T0).status, 'absent', 'at the floor')
+  t.is(o.reconcile(items, A, ASSOC, page([], 0, [{ seq: 6, reason: 'malformed' }]), T0).status, 'absent', 'other reasons')
+})
+
+test('reconcile: our post found beside an unrelated deleted slot is sent', async (t) => {
+  const o = await load()
+  const attemptAt = T0 + 3600000
+  const items = o.claim(add(o, [], {}), idOf(1), { now: attemptAt, floorSeq: 5 })
+  const at = (ms) => new Date(ms).toISOString()
+  const r = o.reconcile(items, A, ASSOC, page([entry(8, 'olá', null, at(attemptAt + 1000))], 6, [{ seq: 7, reason: 'deleted' }]), T0)
+  t.is(r.status, 'sent')
+  t.is(r.sent.seq, 8)
+  t.alike(r.items, [])
+})
+
 test('hexId', async (t) => {
   const o = await load()
   const id = o.hexId(new Uint8Array([0, 1, 15, 16, 127, 128, 254, 255]))

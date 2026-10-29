@@ -14,6 +14,7 @@ Comandos:
   profile set                define nome e bio
   post                       publica um texto (--text)
   reply                      responde a uma publicação (--to <chave>:<seq> --text)
+  delete                     apaga uma publicação ou versão do perfil (--to <chave>:<seq>)
   follow|unfollow|follows    segue ou deixa de seguir uma chave pública
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos

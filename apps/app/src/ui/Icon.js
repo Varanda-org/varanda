@@ -31,7 +31,8 @@ const GLYPHS = {
   sino: 'bell',
   coracao: 'heart',
   republicar: 'repeat',
-  citar: 'edit-3'
+  citar: 'edit-3',
+  lixeira: 'trash-2'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
