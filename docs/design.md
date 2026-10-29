@@ -14,13 +14,13 @@ A rede precisa funcionar sem servidor central, nos celulares dos brasileiros, e 
 | --- | --- |
 | Roda nos aparelhos dos brasileiros | Cada celular guarda e repassa as próprias publicações e as de quem a pessoa segue; os semeadores guardam cópias dos diários públicos admitidos, e nenhum servidor tem os demais dados |
 | Funciona com o celular desligado | Semeadores sempre ligados, mantidos por parceiros no Brasil, guardam cópias e ajudam nas conexões |
-| Verificação de idade (ECA Digital) | A faixa etária é confirmada antes de a identidade existir; autodeclaração não basta |
+| Verificação de idade (ECA Digital) | A faixa etária é confirmada antes de a identidade valer na rede; na web hospedada, uma chave local nasce antes só para provar quem é o dono, e o vínculo com a conta e o certificado esperam o resultado da idade; autodeclaração não basta |
 | LGPD | Coleta mínima, dados no Brasil sempre que possível, direitos dos titulares atendidos, encarregado nomeado |
 | Recuperação de login | Perder o celular não pode significar perder a conta |
 | Custo baixo | Nenhuma conta de servidor por usuário; a infraestrutura é doada por parceiros |
 | Remoção de conteúdo | Atender notificações (decisão do STF sobre o Art. 19 do Marco Civil) e ordens judiciais |
 
-**Fora do escopo do MVP:** pagamentos e carteiras (evita as regras do Banco Central para ativos virtuais), publicidade e contas de menores de 18 anos, que entram numa fase seguinte.
+**Fora do escopo do MVP:** pagamentos e carteiras (evita as regras do Banco Central para ativos virtuais), publicidade. Quem tem 16 ou 17 anos entra, por enquanto, com as mesmas regras de quem tem 18 ou mais; o modo restritivo para adolescentes (issue #74) ainda está pendente.
 
 ## Nomes no app
 
@@ -163,27 +163,31 @@ A chave de cada pessoa é dividida em três partes e quaisquer duas assinam: nin
 
 ## Verificação de idade
 
-A idade é confirmada antes de a identidade existir, e a rede guarda só a faixa etária, nunca documento ou foto.
+A idade é confirmada antes de a identidade valer na rede, e a rede guarda só a faixa etária, nunca documento ou foto.
+
+**Idade mínima: 16 anos.** Decisão do dono do produto (2026-10-29), com base no ECA Digital; é uma regra adotada pela Varanda, não um limite fixado pela lei, e está sujeita a parecer jurídico.
+
+**Web hospedada (Didit).** O nó do navegador cria a chave local antes, só para provar quem é o dono nas rotas de idade; o vínculo com a conta Google e o certificado esperam o resultado. A verificação usa o fluxo hospedado da Didit: estimativa por rosto, com o documento como alternativa configurada no fluxo (workflow) da Didit. Uma estimativa por rosto abaixo de 21 anos nunca libera: pede documento. Só o documento pode recusar (menos de 16). O serviço de conta guarda no `age.json` só a faixa (`16-17` ou `18+`), o método (`didit`) e a data. O certificado v2 continua com `ageBand: 'unchecked'`. Todo membro da web hospedada, inclusive quem já tinha vínculo, fica bloqueado até verificar. O sinal da loja e a credencial do gov.br continuam planejados. O app nativo não muda: segue o certificado dado pelo operador.
 
 ```mermaid
 flowchart TD
-  A[Instala o app] --> B[Cria par de chaves no aparelho]
+  A[Instala o app ou abre a web] --> B[Cria par de chaves no aparelho]
   B --> C{Sinal da loja disponível?}
-  C -->|Sim| D[Faixa etária da loja]
-  C -->|Não| E[Estimativa por rosto — imagem apagada na hora]
-  E --> F{Resultado perto do limite ou inconclusivo?}
-  F -->|Sim| G[Documento e selfie — só a faixa é guardada]
+  C -->|Sim, planejado| D[Faixa etária da loja]
+  C -->|Não; web hospedada| E[Estimativa por rosto na Didit: a Varanda não recebe a imagem]
+  E --> F{Abaixo de 21 anos ou inconclusivo?}
+  F -->|Sim| G[Documento na Didit: só a faixa é guardada]
   F -->|Não| D
+  G --> D
   D --> H{Faixa etária}
-  H -->|18+| I[Emite certificado de membro — MVP]
-  H -->|16–17| J[Fase 2 — privacidade restritiva]
-  H -->|até 15| K[Fase 3 — conta vinculada ao responsável]
+  H -->|18+| I[Membro com faixa 18+]
+  H -->|16-17| J[Membro com faixa 16-17]
+  H -->|até 15| K[Bloqueado]
   I --> L[Divide a chave para recuperação]
-  J -.->|fora do MVP| L
-  K -.->|fora do MVP| L
+  J --> L
 ```
 
-No MVP só a saída de 18 anos ou mais existe; as saídas tracejadas (fases 2 e 3) entram depois.
+Na web hospedada, as saídas 18+ e 16-17 existem e viram membro com a faixa guardada no `age.json`; até 15 anos fica bloqueado. O modo restritivo para 16 e 17 anos (issue #74) e a conta vinculada a um responsável ainda não existem.
 
 | Método | Quando entra | O que a rede recebe | Custo |
 | --- | --- | --- | --- |
@@ -222,8 +226,8 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Publicações e perfil (inclui a foto do perfil, uma imagem 512x512 sem metadados) | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia. Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |
 | Lista de quem a pessoa segue (registros `follow` no diário), curtidas e republicações (registros `like` e `repost`) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário. O app guarda a lista de quem curtiu ou republicou só na memória, enquanto a tela está aberta | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; a lista na tela, só enquanto ela está aberta |
 | Mensagens diretas | Só nos aparelhos dos participantes, cifradas de ponta a ponta | Execução de contrato | Até apagarem |
-| Certificado de membro (chave, faixa etária, método, data) | Serviço de idade, no Brasil | Obrigação legal, ECA Digital (Art. 7º, II) | Enquanto a conta existir |
-| Imagem do rosto, só na estimativa de idade | Processada e apagada na hora | Dado sensível: consentimento específico ou obrigação legal (Art. 11), a definir | Nenhuma |
+| Faixa etária do membro | `age.json` do serviço de conta (chave, faixa, método, data), no Brasil | Obrigação legal, ECA Digital (Art. 7º, II), a confirmar em parecer | Enquanto a conta existir |
+| Imagem do rosto e documento, só na verificação de idade | Processada pelo parceiro (Didit); a Varanda nunca a recebe; a sessão é apagada no parceiro logo após a decisão (retenção mínima configurada) | Dado sensível: consentimento específico ou obrigação legal (Art. 11), a definir em parecer | Mínima no parceiro; nenhuma na Varanda |
 | Vínculo com a conta Google (sub do Google, e-mail, chave do membro, @nome atual e os já usados, datas, certificado) | Serviço de conta, no Brasil | Execução de contrato (Art. 7º, V), para dar o certificado e o @nome; e atender pedidos legais e bloqueios | Em aberto (issue #38) |
 | Denúncias de membros (chave de quem denuncia e de quem é denunciado, publicação, motivo, texto de quem denuncia, trecho citado, data, assinatura) e registro de decisões dos moderadores (e-mail do moderador, decisão, data) | Serviço de conta, no Brasil (`moderation.json`) | Moderação e pedido legal (a base legal ainda precisa de parecer) | Em aberto (issue #38); nada é apagado automaticamente |
 | Precedentes humanos da triagem (texto verificado, motivo, decisão, hash e vetor quantizado; no máximo 4000) | Serviço de conta, no Brasil (`exemplars.json`, modo 0600, volume `account-data`) | Moderação (a base legal ainda precisa de parecer) | Em aberto (issue #38); uma linha inválida torna o arquivo indisponível e ele nunca é regravado |
@@ -242,7 +246,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 - O @nome troca no máximo uma vez a cada 7 dias, e um nome já usado por um membro nunca é dado a outro. Um nó antigo ou um seguidor que ainda não sincronizou pode mostrar por um tempo o nome anterior.
 - Com o teto de membros (`VARANDA_MAX_MEMBERS`), um vínculo recusado com "lista de espera" não é guardado: não fica linha pendente, nem `sub`, e-mail ou @nome escolhido, nem certificado ou registro de nome; a linha que a conclusão recusa é apagada. Quem já é membro não muda. Essa regra não altera as conclusões jurídicas desta seção: a base legal, a retenção (issue #38) e os papéis seguem como estão.
 - Com o convite de entrada (`VARANDA_INVITES_PER_WEEK`), um convite recusado não guarda nada sobre a pessoa convidada e o Google não é chamado: a volta do Google é recusada antes de o código ser trocado, e a linha pendente é apagada. O código do convite não vai para o Google. O `invites.json` guarda a chave de quem convidou, mas nunca dado de quem recebeu o link. O registro de vínculo de quem entrou por convite guarda o hash do convite usado (dado novo no diretório). Quem convidou quem pode ser reconstruído a partir de uma cópia de `invites.json` anterior ao uso e, de forma aproximada, pelas datas. Essa regra também não altera as conclusões jurídicas desta seção: a base legal, a retenção (issue #38) e os papéis seguem como estão.
-- O certificado v2 não afirma idade (`ageBand: 'unchecked'`): o vínculo com a conta Google não é verificação de idade, e a lacuna do ECA Digital descrita acima continua aberta.
+- O certificado v2 não afirma idade (`ageBand: 'unchecked'`): o vínculo com a conta Google não é verificação de idade. A faixa verificada fica no serviço de conta (`age.json`), não no certificado.
 - Dois segredos, dois lugares: o segredo da associação (que certifica o emissor) fica na máquina do operador; o segredo do emissor (que assina certificados v2 e registros de @nome) fica só no serviço de conta.
 
 **Denúncias e painel de moderação (hipóteses de desenho).**
@@ -261,14 +265,14 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 **Onde os dados ficam**
 
-- Semeadores, serviço de idade, guardiões e o serviço de conta (onde fica a inscrição de Web Push, `push.json`) ficam em datacenters no Brasil. O serviço de push do navegador pode estar fora.
-- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
+- Semeadores, guardiões e o serviço de conta (onde ficam a inscrição de Web Push, `push.json`, e a faixa etária, `age.json`) ficam em datacenters no Brasil. O serviço de push do navegador e o parceiro de verificação de idade (Didit) podem estar fora.
+- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), a selfie e o documento da verificação de idade, tratados pela Didit, e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
 
 **Antes do lançamento**
 
 - [ ] Nomear o encarregado (Art. 41) e publicar o canal de contato
 - [ ] Fazer o relatório de impacto (RIPD, Art. 38): há dado biométrico, menores e grande escala
-- [ ] Política de privacidade em português simples (versão 3 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
+- [ ] Política de privacidade em português simples (versão 4 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
 - [ ] Plano de resposta a incidentes, com aviso à ANPD e aos titulares (Art. 48)
 
 ## Moderação e obrigações legais

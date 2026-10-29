@@ -112,7 +112,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign` and `push.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30 and 5.31).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign`, `push.sign` and `age.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30, 5.31 and 5.32).
 
 Params have an exact key set: every key not listed for the method -> `USAGE` `'parâmetro desconhecido'`; a missing required key -> `'parâmetro obrigatório: <name>'`; a wrong type or bound -> `'parâmetro inválido: <name>'`. Defaults listed below are filled in by `validateRequest` / `validateParams(method, params)` before the handler runs; the client sends the params exactly as given.
 
@@ -413,6 +413,24 @@ Who started following the caller and whom the caller does not follow yet ("follo
 - Where it runs: browser node only (`packages/web-member/lib/session.js`), like `account.sign`: not a diary write, no append, no network. Not mutating.
 - Errors: the core node (`packages/core/lib/session.js`), `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'` (with or without an identity, and nothing is opened); no identity on the browser node -> `NOT_FOUND` `'identidade não encontrada'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an endpoint or key the statement refuses although the params passed (`packages/core/lib/push-proof.js`) -> `USAGE` `'inscrição de notificação inválida'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
 
+### 5.32 `age.sign`
+
+- Params: `{ action, nonce }`, nothing else: `action` is `'session'` or `'result'`; `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/age/start`).
+- The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF, no date (`agePayload`, `packages/core/lib/age.js`):
+
+  ```
+  varanda-age-v1
+  <action>       ('session' or 'result')
+  <nonce>
+  <member hex64>
+  <association hex64>
+  ```
+
+  The prefix separates this statement from every other signature of the protocol (certificates, account links, terms acceptances, signup invites, push subscriptions, reports, moderation requests, Hypercore blocks).
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyAge(fields, signature)`, using `member` as the public key. It proves that this diary key asks the account service to open an age-verification session (`'session'`, `POST /account/age/session`) or to read its result (`'result'`, `POST /account/age/result`) for this association, bound to a single-use nonce (`docs/protocol.md`). It never carries an age, a birth date or anything about the person: the age band comes from the verification provider and is recorded by the account service alone.
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `invite.sign`: not a diary write, no append, no network. Not mutating. It needs an identity but no member certificate (the age check runs before the account link).
+- Errors: the core node (`packages/core/lib/session.js`), `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'` (with or without an identity, and nothing is opened); no identity on the browser node -> `NOT_FOUND` `'identidade não encontrada'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; a pair for another diary -> `USAGE` `'passkey não corresponde ao diário guardado'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -549,6 +567,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 
 - `diary.peek` exists only on the browser node and only while a verified seeder link is live (5.27); the core node reads local data only.
 - `push.sign` is browser-only (5.31): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
+- `age.sign` is browser-only (5.32): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. Native and `varanda-serve` members keep the operator certificate path (`assoc certify`).
 - `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are 31 items and 36 blocks (lowered from 35 and 42 when posts gained media). `follow.list` pages with `offset` and `limit`.
 - The app treats a missing `incomplete` field as not syncing (an older node), and `incomplete` is relative to the length the node knows locally: a diary nobody serves is not reported.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit, 4 maximal descriptors per post). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

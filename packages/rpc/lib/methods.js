@@ -189,6 +189,12 @@ const INVITE_ACTIONS = ['issue']
 
 const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
 
+// age.sign (docs/rpc.md 5.32). Duplicated from @varanda/core lib/age.js
+// (ACTIONS) because this package has no dependencies.
+const AGE_ACTIONS = ['session', 'result']
+
+const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
+
 // push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
 // lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
 // characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
@@ -307,6 +313,14 @@ const SPECS = {
   'invite.sign': {
     fields: {
       action: req(isInviteAction),
+      nonce: req(isNonce)
+    }
+  },
+  // Signs the age-verification request with the identity key; the node fills
+  // in member and association itself, so a caller never chooses the bytes.
+  'age.sign': {
+    fields: {
+      action: req(isAgeAction),
       nonce: req(isNonce)
     }
   },

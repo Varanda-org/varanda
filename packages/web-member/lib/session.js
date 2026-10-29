@@ -30,14 +30,16 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, terms.sign, invite.sign and push.sign: the domain-separated
-// account-link statement (@varanda/core lib/account-link.js, prefix
-// 'varanda-account-link-v1'), report statement (@varanda/core lib/report.js,
-// prefix 'varanda-report-v1'), terms-acceptance statement (@varanda/core
-// lib/terms.js, prefix 'varanda-terms-v1'), signup-invite request
-// (@varanda/core lib/invite.js, prefix 'varanda-invite-v1') and
+// report.sign, terms.sign, invite.sign, push.sign and age.sign: the
+// domain-separated account-link statement (@varanda/core lib/account-link.js,
+// prefix 'varanda-account-link-v1'), report statement (@varanda/core
+// lib/report.js, prefix 'varanda-report-v1'), terms-acceptance statement
+// (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'), signup-invite
+// request (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
-// 'varanda-push-v1'), whose member and association the session fills in
+// 'varanda-push-v1') and age-verification request (@varanda/core
+// lib/age.js, prefix 'varanda-age-v1'), whose member and association the
+// session fills in
 // itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
 // signature only.
@@ -214,6 +216,7 @@ const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
+const { signAge } = require('@varanda/core/lib/age')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
@@ -1188,6 +1191,23 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signInvite({ action, nonce, member: own, association: cfg.association }, keyPair)
+      return { signature }
+    }),
+
+    // Signs the age-verification request with the in-memory key (docs/rpc.md
+    // 5.32), exactly like invite.sign. It needs no member certificate: the
+    // age check runs before the account link.
+    'age.sign': serial(async ({ action, nonce }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const signature = signAge({ action, nonce, member: own, association: cfg.association }, keyPair)
       return { signature }
     }),
 
