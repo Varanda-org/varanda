@@ -6,7 +6,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert } = require('@varanda/core/lib/cert')
-const { postRecord, profileRecords } = require('@varanda/core/lib/records')
+const { postRecord, profileRecords, memberCertRecord } = require('@varanda/core/lib/records')
 const storeLib = require('../lib/store')
 const member = require('../lib/member')
 const { UsageError } = require('../lib/errors')
@@ -201,12 +201,77 @@ test('feedRead reports warnings through onWarn', async (t) => {
   t.is(result.items[0].seq, 1)
   t.alike(result.skipped, [{ key: missing, reason: 'no-cert' }])
   t.alike(result.future, [publicKey + ':2'])
+  t.alike(result.incomplete, [], 'the missing follow stays no-cert, not incomplete')
 
   const quiet = await member.feedRead(ctx)
   t.alike(quiet, result, 'onWarn is optional')
   await member.postCreate(ctx, { text: 'mais' })
   const limited = await member.feedRead(ctx, { limit: 1 })
   t.alike(limited.items.map((i) => i.text), ['mais'])
+})
+
+// A 6-block diary (certificate, profile, four posts) in its own store, and a
+// helper that replicates chosen blocks of it in-process into the member's
+// store: the follow ends up with holes, as after an interrupted sync.
+async function sourceDiary (t, kp) {
+  const srcDir = tmpDir(t)
+  const src = await storeLib.openStore(srcDir)
+  try {
+    const core = src.get({ name: 'diary', valueEncoding: 'json' })
+    await core.ready()
+    const key = b4a.toString(core.key, 'hex')
+    await core.append(memberCertRecord(createCert({ member: key }, kp)))
+    await core.append(profileRecords({ name: 'Fonte', bio: '' })[0])
+    for (let i = 1; i <= 4; i++) {
+      await core.append(postRecord({ text: 'post ' + i, at: '2020-01-0' + i + 'T00:00:00.000Z' }))
+    }
+    return { srcDir, key }
+  } finally {
+    await src.close()
+  }
+}
+
+async function fetchBlocks ({ srcDir, key }, dataDir, indexes) {
+  const src = await storeLib.openStore(srcDir)
+  const dst = await storeLib.openStore(dataDir)
+  try {
+    const s1 = src.replicate(true)
+    const s2 = dst.replicate(false)
+    s1.pipe(s2).pipe(s1)
+    const core = src.get({ name: 'diary', valueEncoding: 'json' })
+    await core.ready()
+    const replica = dst.get({ key: core.key, valueEncoding: 'json' })
+    await replica.ready()
+    for (const i of indexes) await replica.get(i)
+    await replica.update()
+    s1.destroy()
+    s2.destroy()
+    return { length: replica.length, contiguousLength: replica.contiguousLength }
+  } finally {
+    await dst.close()
+    await src.close()
+  }
+}
+
+test('feedRead reports a shown diary with holes as incomplete', async (t) => {
+  const { ctx, dataDir, kp } = await setup(t, { cert: true })
+  const diary = await sourceDiary(t, kp)
+  const partial = await fetchBlocks(diary, dataDir, [0, 1, 2])
+  t.alike(partial, { length: 6, contiguousLength: 3 }, 'fixture: blocks 3-5 are missing')
+  await member.followAdd(ctx, diary.key)
+
+  const lines = []
+  const half = await member.feedRead(ctx, { onWarn: (line) => lines.push(line) })
+  t.alike(half.incomplete, [diary.key])
+  t.alike(half.skipped, [])
+  t.alike(half.items.map((i) => i.text), ['post 1'], 'only the block fetched so far')
+  t.alike(lines, [], 'no new warning line')
+
+  const full = await fetchBlocks(diary, dataDir, [3, 4, 5])
+  t.alike(full, { length: 6, contiguousLength: 6 })
+  const done = await member.feedRead(ctx)
+  t.alike(done.incomplete, [])
+  t.alike(done.items.map((i) => i.text), ['post 1', 'post 2', 'post 3', 'post 4'])
 })
 
 test('storeOptions reach openStore', async (t) => {

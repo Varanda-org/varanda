@@ -33,7 +33,7 @@ import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
-import { cursorMoved, cursorOf, feedKey, isLastFeedPage, mergeOlder, resetWith, shouldReloadOnShow } from '../paging'
+import { FEED_SYNCING_END, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, rearmDelay, replacesQuietly, resetWith, shouldReloadOnShow, syncAdvanced, syncBaseline, syncTruncated } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
@@ -698,6 +698,20 @@ export function SocialToast ({ text }) {
   )
 }
 
+// Never after a failed read: only a manual action clears the error.
+function canAutoReload (feed, lengths, active) {
+  return active && feed.loadedAt !== null && feed.atEnd && !feed.loading && !feed.loadingMore && !feed.refreshing &&
+    !feed.loadError && !feed.moreError &&
+    (Object.keys(feed.syncBase).length > 0 || feed.syncTruncated > 0) &&
+    syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)
+}
+
+const pageIncomplete = (page) => ({
+  incomplete: Array.isArray(page.incomplete) ? page.incomplete : [],
+  incompleteTruncated: Number.isSafeInteger(page.incompleteTruncated) ? page.incompleteTruncated : 0,
+  syncTruncated: syncTruncated(page)
+})
+
 // The refs a feed page needs: counts and own state for every row's target,
 // originals for reposts, quoted posts, reply parents; feed posts are already
 // at hand.
@@ -748,14 +762,24 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     refreshing: false,
     loadError: '',
     moreError: '',
+    retryKind: 'older',
     loadedAt: null,
-    meta: { skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0 }
+    meta: { skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0 },
+    incomplete: [],
+    incompleteTruncated: 0,
+    syncTruncated: 0,
+    syncBase: {},
+    emptyStreak: 0,
+    deep: false
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
   const listRef = useRef(null)
   const signalsRef = useRef(node.signals)
   signalsRef.current = node.signals
+  const activeRef = useRef(active)
+  activeRef.current = active
+  const rearmRef = useRef(null)
   // Only the latest read may commit; the ref also blocks duplicate end reaches
   // before React renders. Rows and their loading flags always change together.
   const seqRef = useRef(0)
@@ -773,7 +797,46 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   }, [learnMany, resolveMany])
 
   const ownSeenRef = useRef(null)
-  const loadNewest = useCallback(async () => {
+  const loadNewest = useCallback(async ({ quiet = false } = {}) => {
+    if (quiet) {
+      const current = feedRef.current
+      if (!activeRef.current || current.loading || current.refreshing || current.loadingMore) return
+      const mine = ++seqRef.current
+      const seen = signalsRef.current
+      const base = seen && seen.lengths ? seen.lengths : {}
+      commit({ loadingMore: true, moreError: '' })
+      try {
+        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
+        if (mine !== seqRef.current) return
+        const { skipped, skippedTruncated, future, futureTruncated } = page
+        // A full page would cut rows off the end of the list being read: the
+        // list stays and the unacknowledged 'ver novidades' pill shows the
+        // rest. The list is no longer the whole local feed, so it leaves its
+        // end: 'mostrar mais' pages on, and automatic reads (each one
+        // preempting the sync) stop.
+        if (!replacesQuietly(page, FEED_LIMIT_DEFAULT, feedRef.current.items)) {
+          commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), atEnd: false, loadingMore: false })
+          return
+        }
+        commit({
+          items: resetWith(page.items),
+          cursor: cursorOf(page.items),
+          atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
+          meta: { skipped, skippedTruncated, future, futureTruncated },
+          ...pageIncomplete(page),
+          syncBase: syncBaseline(page, base),
+          emptyStreak: 0,
+          deep: false,
+          loadingMore: false
+        })
+        learnPage(page.items)
+        // No ack and no reset: any other request would preempt the sync again.
+        ingest(pageNeeds(page.items))
+      } catch (err) {
+        if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'newest' })
+      }
+      return
+    }
     const mine = ++seqRef.current
     const seen = signalsRef.current
     ownSeenRef.current = seen && typeof seen.ownLength === 'number' ? seen.ownLength : null
@@ -784,6 +847,8 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       loadError: '',
       moreError: ''
     })
+    // Taken before the read so growth during it stays visible to the next pass.
+    const base = seen && seen.lengths ? seen.lengths : {}
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
@@ -794,6 +859,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
         loadedAt: Date.now(),
         meta: { skipped, skippedTruncated, future, futureTruncated },
+        ...pageIncomplete(page),
+        syncBase: syncBaseline(page, base),
+        emptyStreak: 0,
+        deep: false,
         loading: false,
         refreshing: false
       })
@@ -806,26 +875,34 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     }
   }, [request, ackFresh, commit, learnPage, ingest])
 
-  const loadOlder = useCallback(async () => {
+  const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
-    if (!active || current.loading || current.refreshing || current.loadingMore || current.atEnd || current.cursor === null) return
+    if (!active || current.loading || current.refreshing || current.loadingMore || (current.atEnd && !fromSync) || current.cursor === null) return
     const mine = ++seqRef.current
     const before = current.cursor
+    const seen = signalsRef.current
+    const base = seen && seen.lengths ? seen.lengths : {}
     commit({ loadingMore: true, moreError: '' })
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before })
       if (mine !== seqRef.current) return
       const cursor = cursorOf(page.items)
+      const prev = feedRef.current
       commit({
-        items: mergeOlder(feedRef.current.items, page.items).items,
-        cursor,
+        items: mergeOlder(prev.items, page.items).items,
+        // An empty page keeps the cursor so a later sync pass can ask again.
+        cursor: cursor === null ? before : cursor,
         atEnd: isLastFeedPage(page, FEED_LIMIT_MAX) || !cursorMoved(before, cursor),
+        ...pageIncomplete(page),
+        syncBase: syncBaseline(page, base),
+        emptyStreak: page.items.length > 0 ? 0 : fromSync ? prev.emptyStreak + 1 : prev.emptyStreak,
+        deep: prev.deep || page.items.length > 0,
         loadingMore: false
       })
       learnPage(page.items)
       ingest(pageNeeds(page.items))
     } catch (err) {
-      if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err) })
+      if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'older' })
     }
   }, [active, request, commit, learnPage, ingest])
 
@@ -853,7 +930,40 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadNewest()
   }, [active, refresh, scrollToTop, fresh, loadNewest])
 
+  // Every feed.read preempts the sync run on both nodes and the continuous
+  // run restarts after it (docs/rpc.md section 6.1), so the first growth past
+  // the baseline starts one timer (longer after empty older reads): later
+  // growth neither resets it nor adds another, and this effect has no cleanup,
+  // which would debounce it on every lengths change. With only the newest page loaded, re-reading it
+  // shows arrivals that sort inside the shown range; a before read would
+  // rarely return them.
+  const lengths = node.signals ? node.signals.lengths : undefined
+  const loadersRef = useRef(null)
+  loadersRef.current = { loadNewest, loadOlder }
+  useEffect(() => {
+    if (rearmRef.current !== null || !canAutoReload(feedRef.current, lengths, active)) return
+    rearmRef.current = setTimeout(() => {
+      rearmRef.current = null
+      const current = feedRef.current
+      const now = signalsRef.current ? signalsRef.current.lengths : undefined
+      if (!canAutoReload(current, now, activeRef.current)) return
+      if (current.deep) loadersRef.current.loadOlder({ fromSync: true })
+      else loadersRef.current.loadNewest({ quiet: true })
+    }, rearmDelay(feedRef.current.deep ? feedRef.current.emptyStreak : 0))
+  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak])
+
+  useEffect(() => {
+    if (!active && rearmRef.current !== null) {
+      clearTimeout(rearmRef.current)
+      rearmRef.current = null
+    }
+  }, [active])
+
   useEffect(() => () => {
+    if (rearmRef.current !== null) {
+      clearTimeout(rearmRef.current)
+      rearmRef.current = null
+    }
     seqRef.current += 1
     // Effect replay may show the mounted screen again after cancelling a read.
     previous.current.active = false
@@ -868,14 +978,17 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // Only the association's blocklist gets a sentence (plain words); other
   // skipped or future-dated entries are not shown to people.
   const blocked = meta.skipped.filter((s) => MODERATION_REASONS.includes(s.reason)).length
+  // A failed manual read never commits atEnd, so an older error with atEnd
+  // true came from an automatic read and its retry must bypass the end guard.
+  const stillSyncing = feedStillSyncing(feed)
   const footer = (
     <View>
       <ListFooter
         loading={loadingMore}
         atEnd={loadedAt !== null && atEnd && items.length > 0}
-        endText='Isso é tudo por enquanto.'
+        endText={stillSyncing ? FEED_SYNCING_END : 'Isso é tudo por enquanto.'}
         error={moreError}
-        onRetry={loadOlder}
+        onRetry={() => feedRef.current.retryKind === 'newest' ? loadNewest({ quiet: true }) : loadOlder({ fromSync: feedRef.current.atEnd })}
         pending={loadingMore || refreshing}
       />
       {blocked > 0

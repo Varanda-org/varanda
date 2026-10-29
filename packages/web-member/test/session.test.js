@@ -7,6 +7,7 @@
 // runs the gate against a fake seeder (sync-gate.test.js's stand-in) to see
 // the record of another device arrive before the duplicate check.
 const test = require('brittle')
+const assert = require('node:assert/strict')
 const net = require('node:net')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -16,7 +17,8 @@ const { WebSocket, WebSocketServer } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createIssuerCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
+const { FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { latestUsername } = require('@varanda/core/lib/username')
@@ -78,17 +80,19 @@ function snapshot (mod, { seq = 1, blocked = [], revokedIssuers = [] }) {
   return createSnapshot({ seq, blocked, revokedIssuers }, mod.keyPair, mod.cert)
 }
 
-// Stores a full local replica of `source` (a Hypercore 10 core) in the node
+// Stores a local replica of `source` (a Hypercore 10 core) in the node
 // storage, as a sync run would, by replicating in memory; the replica core
 // is closed again before the node opens it.
-async function storeReplica (storage, source) {
+async function storeReplica (storage, source, upto = source.length) {
   const key = hex(source.key)
   const replica = new Hypercore(storage.core('replica/' + key), source.key, { valueEncoding: 'binary' })
   await replica.ready()
   const a = source.replicate(true)
   const b = replica.replicate(false)
   a.pipe(b).pipe(a)
-  await replica.download({ start: 0, end: source.length }).done()
+  await replica.download({ start: 0, end: upto }).done()
+  if (replica.length !== source.length) await replica.update()
+  assert.equal(replica.length, source.length)
   a.destroy()
   b.destroy()
   await replica.close()
@@ -256,6 +260,8 @@ test('profile, posts, replies, log and feed of the own diary', async (t) => {
   t.alike(feed.items[1].replyTo, { author: key, seq: 2 })
   t.alike(feed.skipped, [])
   t.is(feed.skippedTruncated, 0)
+  t.alike(feed.incomplete, [])
+  t.is(feed.incompleteTruncated, 0)
 
   // profile.read of the own key (duplicates folded).
   t.alike(await web.request('profile.read', { authors: [key, key] }), {
@@ -296,6 +302,7 @@ test('follows, and reads of diaries with no local data', async (t) => {
 
   const feed = await web.request('feed.read', {})
   t.alike(feed.skipped, [{ key: other, reason: 'no-cert' }])
+  t.alike(feed.incomplete, [])
   const missing = await errorOf(web.request('log.read', { author: other }))
   t.is(missing.code, 'NOT_FOUND')
   t.is(missing.message, 'sem dados locais para este diário')
@@ -308,6 +315,63 @@ test('follows, and reads of diaries with no local data', async (t) => {
 
   t.alike(await web.request('follow.remove', { key: other }), { changed: true, followCount: 0 })
   t.alike(await web.request('follow.remove', { key: other }), { changed: false, followCount: 0 })
+})
+
+test('feed.read reports incomplete followed diaries until their full download', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await certified(t)
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+  await source.append(profileRecord({ name: 'Autor', at: '2026-01-01T00:00:00.000Z' }))
+  for (let i = 1; i <= 4; i++) {
+    await source.append(postRecord({ text: 'post ' + i, at: '2026-01-01T00:00:0' + i + '.000Z' }))
+  }
+  const key = await storeReplica(storage, source, 3)
+  await web.request('follow.add', { key })
+
+  const partial = await web.request('feed.read', {})
+  t.alike(partial.incomplete, [key])
+  t.is(partial.incompleteTruncated, 0)
+  t.alike(partial.skipped, [])
+  t.alike(partial.items.map((item) => [item.author, item.seq, item.text]), [[key, 2, 'post 1']])
+
+  await storeReplica(storage, source)
+  const full = await web.request('feed.read', {})
+  t.alike(full.incomplete, [])
+  t.is(full.incompleteTruncated, 0)
+  t.alike(full.items.map((item) => [item.author, item.seq, item.text]), [
+    [key, 2, 'post 1'],
+    [key, 3, 'post 2'],
+    [key, 4, 'post 3'],
+    [key, 5, 'post 4']
+  ])
+})
+
+test('feed.read caps incomplete followed diaries in follow-list order', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await certified(t)
+  const keys = []
+  for (let i = 0; i <= FEED_INCOMPLETE_MAX; i++) {
+    const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+    await source.ready()
+    t.teardown(() => source.close(), { force: true })
+    await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+    await source.append(postRecord({ text: 'post', at: '2026-01-01T00:00:00.000Z' }))
+    const key = await storeReplica(storage, source, 1)
+    keys.push(key)
+    await web.request('follow.add', { key })
+  }
+
+  const follows = await web.request('follow.list')
+  t.alike(follows.follows, keys.sort())
+  const feed = await web.request('feed.read', {})
+  t.is(feed.incomplete.length, FEED_INCOMPLETE_MAX)
+  t.is(feed.incompleteTruncated, 1)
+  t.alike(feed.incomplete, follows.follows.slice(0, FEED_INCOMPLETE_MAX))
+  t.alike(feed.skipped, [])
+  t.alike(feed.items, [])
 })
 
 test('the own diary quota is enforced', async (t) => {
