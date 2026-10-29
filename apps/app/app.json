@@ -31,6 +31,7 @@
       "lang": "pt-BR"
     },
     "plugins": [
+      "./plugins/with-hardening",
       [
         "expo-build-properties",
         {

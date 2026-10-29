@@ -32,7 +32,7 @@ npm install
 
 Only the root `package-lock.json` exists. Do not create one inside a workspace and do not run `npm install` inside a workspace directory with a lockfile of its own: the workspaces share one tree under the root `node_modules`.
 
-After every `npm install` or `npm ci`, the native app needs `npm run link:addons -w apps/app` again (see "iOS").
+After every `npm install` or `npm ci`, the native app needs `npm run prepare:native -w apps/app` again (see "iOS").
 
 ## Lint
 
@@ -122,17 +122,15 @@ The detail, with the simulator commands and the evidence, is in [ios-gate.md](io
 
 ```sh
 npm ci
-npm run link:addons -w apps/app      # bare-link into react-native-bare-kit's addon directories
-npm run pack:worklet -w apps/app     # bare-pack the worklet, then scan for Node built-ins
-cd apps/app/ios
-LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
-cd ..
+npm run prepare:native -w apps/app   # link:addons, pack:worklet and, on macOS, pod install
+cd apps/app
 npm run ios                          # expo run:ios
 ```
 
+- `prepare:native` runs `scripts/prepare-native.sh [ios|android|all]`: the three steps below in order, then checks again that every addon is linked. `npm run ios` and `npm run android` run the same check (`scripts/link-addons.sh check`) before `expo run:*`, so a build without the addons fails with a message instead of producing an app whose worklet cannot load them.
 - `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native and bare-fs are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
 - `pack:worklet` runs `scripts/pack-worklet.sh` and writes `apps/app/assets/worklet/main.bundle.js` (generated and ignored by version control).
-- `ios/` and `android/` are committed. They are hand-maintained and must never be regenerated with `expo prebuild`, which would overwrite three hand edits it does not generate: `ios/Varanda/AppDelegate.swift` marks `Documents/varanda` (the node's key material) as excluded from iCloud and device backups; `android/app/build.gradle` signs release builds only with a key supplied outside the repository and gives debug builds the `.debug` application ID suffix. Android's `allowBackup: false` is in `app.json`, so prebuild keeps it.
+- `ios/` and `android/` are committed and hand-maintained: do not run `expo prebuild` in `apps/app`. `plugins/with-hardening.js` (registered in `app.json`) reapplies the edits a prebuild would drop, and `test/hardening.test.js` runs a real `expo prebuild --clean --no-install` in a temporary copy, never in `apps/app`, and compares the three patched files with the committed ones. The edits: `ios/Varanda/AppDelegate.swift` marks `Documents/varanda` (the node's key material) as excluded from iCloud and device backups; `android/app/build.gradle` signs release builds only with a key supplied outside the repository and gives debug builds the `.debug` application ID suffix; `android/gradle.properties` limits `reactNativeArchitectures` to the two ABIs `link:addons` produces. Android's `allowBackup: false` is in `app.json`, so prebuild keeps it. A fresh prebuild still differs from the committed projects in generated files that are not security edits (the icon and splash images, `Info.plist`, `styles.xml`, `project.pbxproj` before `pod install`), so the two apps are not byte for byte the same; only the patched files are checked.
 - `npm run gate -w apps/app` is the gate driver (`scripts/gate-server.js`), used with a Metro started with `EXPO_PUBLIC_VARANDA_GATE_URL`. See ios-gate.md.
 
 ## Android
