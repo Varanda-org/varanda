@@ -41,7 +41,7 @@ node apps/site/scripts/render-assets.js --check  # verifica sem gravar
 
 Precisa de `rsvg-convert` (`brew install librsvg`). O `cwebp` (`brew install webp`) só serve para a receita de capturas em `apps/site/artwork/screens.md`. Os mipmaps do Android são bytes PNG com nome `.webp`, como o Expo grava.
 
-Nunca use `npx expo prebuild` para regenerar ícones: `apps/app/ios/Varanda/AppDelegate.swift` (exclusão de backup) e `apps/app/android/app/build.gradle` (assinatura de release) têm correções de segurança feitas à mão que o prebuild sobrescreveria (veja [development.md](development.md) e [verification.md](verification.md)). Depois de qualquer `npm ci`, rode `npm run link:addons -w apps/app` de novo antes de um build iOS.
+Nunca use `npx expo prebuild` para regenerar ícones: `apps/app/ios/Varanda/AppDelegate.swift` (exclusão de backup) e `apps/app/android/app/build.gradle` (assinatura de release) têm correções de segurança feitas à mão que o prebuild sobrescreveria (veja [development.md](development.md) e [verification.md](verification.md)). Depois de qualquer `npm ci`, rode `npm run prepare:native -w apps/app` de novo antes de um build iOS.
 
 ## Publicação: passos do usuário
 
