@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { linkNew } = require('@varanda/core/lib/link-new')
+const { fsyncDir } = require('@varanda/core/lib/member')
 
 function exists (file) {
   return new Error('o arquivo de saída já existe: ' + file)
@@ -24,7 +25,8 @@ function refuseExisting (file) {
 }
 
 // Writes `text` to a new file: a unique temp file next to it ('wx', fsynced),
-// published by linkNew, which never replaces a file or follows a symlink.
+// published by linkNew, which never replaces a file or follows a symlink, and
+// the new entry is fsynced in its directory.
 function writeNew (file, text) {
   refuseExisting(file)
   const tmp = path.join(path.dirname(file), '.' + path.basename(file) + '.' + crypto.randomBytes(12).toString('hex') + '.tmp')
@@ -42,6 +44,7 @@ function writeNew (file, text) {
       if (err.code === 'EEXIST') throw exists(file)
       throw err
     }
+    fsyncDir(path.dirname(file))
   } finally {
     try { fs.unlinkSync(tmp) } catch {}
   }
