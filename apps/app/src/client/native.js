@@ -14,6 +14,15 @@
 // END_TIMEOUT_MS, is therefore taken over, and a live worklet of this
 // context never is. The gate (src/gate) starts with recover: false to prove
 // that node.close released the lock.
+//
+// Full JS reload (dev only): the new JS context starts with an empty
+// globalThis, so the previous context's worklet is out of reach from here.
+// The node's worklet is therefore created under a fixed id (NODE_WORKLET_ID):
+// react-native-bare-kit keeps a native registry of worklets by id, and starting
+// a new one under an id terminates the previous one, whichever context made
+// it. If that termination loses the race with the new worklet's store open,
+// the takeover is refused by RocksDB's own per-process lock (verified in
+// packages/core/test/worklet-lock.test.js), never by sharing the store.
 
 import { Worklet } from 'react-native-bare-kit'
 import { Paths } from 'expo-file-system'
@@ -21,6 +30,7 @@ import { createClient, encodeFrame, createFrameDecoder, MAX_REQUEST, MAX_MESSAGE
 import bundle from '../../assets/worklet/main.bundle.js'
 
 const KEY = '__varandaNode'
+const NODE_WORKLET_ID = 'app.varanda.node'
 const END_TIMEOUT_MS = 10000
 
 function state () {
@@ -52,9 +62,10 @@ export function defaultDataDir () {
 
 // Starts a worklet with the node session and connects a client. Internal:
 // returns { worklet, client, ended } where `ended` resolves once the IPC
-// stream ended or closed (the worklet's session closed its store).
-function launch (args, { onEvent } = {}) {
-  const worklet = new Worklet()
+// stream ended or closed (the worklet's session closed its store). `id` is
+// the worklet registry id (null: not registered).
+function launch (args, { onEvent, id = null } = {}) {
+  const worklet = new Worklet(id)
   const ipc = worklet.IPC
   let client = null
   let resolveEnded
@@ -134,7 +145,7 @@ export async function startNode (config, { onEvent, recover = true } = {}) {
   const s = state()
   if (s.node !== null) throw new Error('nó já iniciado')
   const args = argsOf(config, recover === true)
-  const node = launch(args, { onEvent })
+  const node = launch(args, { onEvent, id: NODE_WORKLET_ID })
   node.config = args
   s.node = node
   node.ended.then(() => {
@@ -176,7 +187,8 @@ export async function terminateNode () {
 }
 
 // Gate only (src/gate): a SECOND worklet on a data dir, never with recover,
-// to prove the data-dir lock refuses it. Not tracked as the app's node.
+// to prove the data-dir lock refuses it. Not tracked as the app's node, and
+// registered under no id: under NODE_WORKLET_ID it would terminate the node.
 export async function startProbe (config) {
   const node = launch(argsOf(config, false))
   try {

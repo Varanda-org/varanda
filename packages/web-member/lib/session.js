@@ -195,7 +195,7 @@
 // never reads the own diary.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -1318,12 +1318,15 @@ function createBrowserSession ({
       const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
+      const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
       return {
         items: r.items,
         skipped: skipped.list,
         skippedTruncated: skipped.truncated,
         future: future.list,
-        futureTruncated: future.truncated
+        futureTruncated: future.truncated,
+        incomplete: incomplete.list,
+        incompleteTruncated: incomplete.truncated
       }
     }),
 

@@ -204,6 +204,53 @@ test('a followed diary is stored only when its block 0 verifies and it fits the 
   t.absent(feed.items.some((i) => i.author === hex(foreign.key)), 'nothing from the foreign diary')
 })
 
+test('a followed diary downloads in block order so its prefix is readable', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name: 'Dani', bio: '' }),
+    ...Array.from({ length: 298 }, (_, i) => () => postRecord({
+      text: 'post ' + i,
+      at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
+    }))
+  ])
+  const uploads = []
+  served.on('upload', (index) => uploads.push(index))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [served] })
+  const { node, web, storage } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key: hex(served.key) })
+
+  const random = Math.random
+  t.teardown(() => { Math.random = random }, { force: true })
+  // A random-order range would start near the middle of this diary. The
+  // values stay varied (HyperDHT draws stream ids from Math.random and
+  // retries on a collision) but within 0.4..0.6.
+  let seed = 1
+  Math.random = () => {
+    seed = (seed * 16807) % 2147483647
+    return 0.4 + 0.2 * (seed / 2147483647)
+  }
+  const stopped = await onceRun(web)
+  Math.random = random
+  t.is(stopped.reason, 'done')
+  t.ok(uploads.length > 0, 'the seeder uploaded blocks')
+  // Requests in flight complete out of order (0, 1, 2, 4, 8, ... observed),
+  // so only the window is checked: a random start would sit near block 150.
+  const first = [...new Set(uploads)].slice(0, 32)
+  t.ok(first.every((i) => i < 64), 'the first blocks come from the start of the diary')
+  t.ok([0, 1, 2, 3].every((i) => first.includes(i)), 'blocks 0 to 3 come first')
+  t.is((await web.request('feed.read', { limit: 31 })).items.length, 31)
+
+  await node.close()
+  const replica = new Hypercore(storage.core('replica/' + hex(served.key)), served.key, { valueEncoding: 'json' })
+  t.teardown(() => replica.close(), { force: true })
+  await replica.ready()
+  t.is(replica.length, served.length, 'the stored replica has the full diary length')
+  t.is(replica.contiguousLength, served.length, 'every block is stored locally')
+})
+
 test('an endpoint whose seeder certificate does not verify gets nothing', async (t) => {
   t.timeout(60000)
   await testnet(t)

@@ -32,7 +32,7 @@ npm install
 
 Only the root `package-lock.json` exists. Do not create one inside a workspace and do not run `npm install` inside a workspace directory with a lockfile of its own: the workspaces share one tree under the root `node_modules`.
 
-After every `npm install` or `npm ci`, the native app needs `npm run link:addons -w apps/app` again (see "iOS").
+After every `npm install` or `npm ci`, the native app needs `npm run prepare:native -w apps/app` again (see "iOS").
 
 ## Lint
 
@@ -122,17 +122,15 @@ The detail, with the simulator commands and the evidence, is in [ios-gate.md](io
 
 ```sh
 npm ci
-npm run link:addons -w apps/app      # bare-link into react-native-bare-kit's addon directories
-npm run pack:worklet -w apps/app     # bare-pack the worklet, then scan for Node built-ins
-cd apps/app/ios
-LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
-cd ..
+npm run prepare:native -w apps/app   # link:addons, pack:worklet and, on macOS, pod install
+cd apps/app
 npm run ios                          # expo run:ios
 ```
 
+- `prepare:native` runs `scripts/prepare-native.sh [ios|android|all]`: the three steps below in order, then checks again that every addon is linked. `npm run ios` and `npm run android` run the same check (`scripts/link-addons.sh check`) before `expo run:*`, so a build without the addons fails with a message instead of producing an app whose worklet cannot load them.
 - `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native and bare-fs are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
 - `pack:worklet` runs `scripts/pack-worklet.sh` and writes `apps/app/assets/worklet/main.bundle.js` (generated and ignored by version control).
-- `ios/` and `android/` are committed. They are hand-maintained and must never be regenerated with `expo prebuild`, which would overwrite three hand edits it does not generate: `ios/Varanda/AppDelegate.swift` marks `Documents/varanda` (the node's key material) as excluded from iCloud and device backups; `android/app/build.gradle` signs release builds only with a key supplied outside the repository and gives debug builds the `.debug` application ID suffix. Android's `allowBackup: false` is in `app.json`, so prebuild keeps it.
+- `ios/` and `android/` are committed and hand-maintained: do not run `expo prebuild` in `apps/app`. `plugins/with-hardening.js` (registered in `app.json`) reapplies the edits a prebuild would drop, and `test/hardening.test.js` runs a real `expo prebuild --clean --no-install` in a temporary copy, never in `apps/app`, and compares the three patched files with the committed ones. The edits: `ios/Varanda/AppDelegate.swift` marks `Documents/varanda` (the node's key material) as excluded from iCloud and device backups; `android/app/build.gradle` signs release builds only with a key supplied outside the repository and gives debug builds the `.debug` application ID suffix; `android/gradle.properties` limits `reactNativeArchitectures` to the two ABIs `link:addons` produces. Android's `allowBackup: false` and the iOS privacy manifest (`ios.privacyManifests`, which becomes `ios/Varanda/PrivacyInfo.xcprivacy`: no tracking and the required-reason API declarations) are in `app.json`, so prebuild keeps them; the test compares the generated manifest with the committed one. A fresh prebuild still differs from the committed projects in generated files that are not security edits (the icon and splash images, `Info.plist` without `RCTNewArchEnabled`, `styles.xml` without `windowSplashScreenBackground`, `project.pbxproj` before `pod install`), so the two apps are not byte for byte the same; only the patched files and the privacy manifest are checked.
 - `npm run gate -w apps/app` is the gate driver (`scripts/gate-server.js`), used with a Metro started with `EXPO_PUBLIC_VARANDA_GATE_URL`. See ios-gate.md.
 
 ## Android
@@ -169,7 +167,7 @@ node apps/site/scripts/render-assets.js                   # regenerate every ico
 node apps/site/scripts/render-assets.js --check           # verify without writing
 ```
 
-`render-assets.js` needs `rsvg-convert` (`brew install librsvg`); `cwebp` (`brew install webp`) is only for the screenshot recipe in `apps/site/artwork/screens.md`. The Android mipmaps are PNG bytes under `.webp` names, as Expo writes them. Never use `npx expo prebuild` to regenerate icons: `apps/app/ios/Varanda/AppDelegate.swift` (backup exclusion) and `apps/app/android/app/build.gradle` (release signing) carry hand-made security fixes that prebuild would overwrite (see [verification.md](verification.md)). After any `npm ci`, run `npm run link:addons -w apps/app` again before an iOS build.
+`render-assets.js` needs `rsvg-convert` (`brew install librsvg`); `cwebp` (`brew install webp`) is only for the screenshot recipe in `apps/site/artwork/screens.md`. The Android mipmaps are PNG bytes under `.webp` names, as Expo writes them. Never use `npx expo prebuild` to regenerate icons: `apps/app/ios/Varanda/AppDelegate.swift` (backup exclusion) and `apps/app/android/app/build.gradle` (release signing) carry hand-made security fixes that prebuild would overwrite (see [verification.md](verification.md)). After any `npm ci`, run `npm run prepare:native -w apps/app` again before a native build.
 
 ## Adding a dependency
 
@@ -187,5 +185,17 @@ Why some pins are what they are (chosen on 2026-10-22, preferring releases at le
 - `expo` 55.0.31 and `react-native` 0.83.10, from `expo-template-blank` 55.1.38. SDK 55 is the line Holepunch's bare-expo example uses; the later 55.0.32 was one day old.
 - The Expo-managed packages (`react-dom`, `react-native-web`, `@expo/metro-runtime`, `expo-file-system`, `expo-build-properties`, `react-native-safe-area-context`) take the versions in `expo/bundledNativeModules.json`. `react-native-web` is 0.21.3 rather than 0.21.4, which was two weeks old.
 - `bare-pack` 2.2.4, not the 3.x line. 3.0.0 is a major released after `react-native-bare-kit` 0.16.0; 2.2.4 shipped the same day as bare-kit 0.16.0 and has the same `--linked`, `--host` and `--format` options.
-- `bare-runtime` 1.34.1 (dev only, packages/core), for the desktop Bare smoke test.
-- `npm audit` reports advisories in the Expo and React Native build toolchain (braces/micromatch, node-forge). npm's only fixes are majors outside SDK 55, and these packages run at build time on the developer's machine, not in the app.
+- `bare-runtime` 1.33.4 (dev only, packages/core), for the desktop Bare smoke test. It is the Bare that `react-native-bare-kit` 0.16.0 embeds (the gate prints `bare=v1.33.4`), so the smoke test and the app run the same runtime. 1.34.1 was used until 2026-10-29.
+
+### Accepted `npm audit` advisories
+
+Reviewed on 2026-10-29 (`npm audit`: 11 vulnerabilities, 5 low and 6 high, all below). The Expo and React Native packages run at build time on the developer's machine and are not in the app bundle, the worklet or any server.
+
+| Package (path) | Advisory | Kind | Exposure and decision |
+|---|---|---|---|
+| `zod` 3.25.76 (`expo` > `@expo/cli`) | memory exhaustion validating oversized constrained collections | build | `@expo/cli` validates our own `app.json` and Expo's manifests, never data from a peer. Accepted. npm's only fix is `expo@51.0.39`, a downgrade outside SDK 55. |
+| `deepmerge` 4.3.1 (`expo` > `@expo/config`), and the `@expo/*` packages that depend on it | `mergeObject()` prototype poisoning (low) | build | It merges our own config files. Accepted, same fix as above. |
+| `node-forge` 1.4.0 (`expo` > `@expo/cli`, `@expo/code-signing-certificates`) | RSA PKCS#1 v1.5 signature verification accepts extra nested DigestAlgorithm elements | build | Used by Expo Updates code signing, which the app does not configure. The fix, 1.4.1 and 1.4.2, was published on 2026-10-27, under the two weeks we wait for. Accepted until the next review, then `npm update node-forge` (within `@expo/cli`'s `^1.3.3`). |
+| `sharp` 0.34.5 (`@huggingface/transformers` 3.8.1, `apps/cli`) | libvips, libheif and librsvg vulnerabilities | runtime, account service only | The abuse triage reads text only: no image, HEIF or SVG ever reaches `sharp`, which `transformers.js` loads at require time. The model runs in a child process with an empty environment, off by default (`VARANDA_AI`). Accepted. The fix is `@huggingface/transformers` 4.x, a major: decide it together with the model files, not alone. |
+
+Review routine: before each release, and whenever `react-native-bare-kit` or `expo` changes, run `npm audit`, compare it with this table and update it. Remove a row once the package is fixed; add a row, with its kind and exposure, for any new advisory or fix the build with a pin bump instead. In the same review check the pins above: `npm view react-native-bare-kit version`, and make `bare-runtime` match the Bare it embeds (the `bare=v...` line of the worklet gate), then run `npm test -w packages/core`.

@@ -502,6 +502,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
     // The own diary is always shown, even when the association blocked it.
     const kept = [{ key: ownHex, entries: await readAll(diary) }]
     const skippedLogs = []
+    const incomplete = []
     const seen = new Set([ownHex])
     for (const raw of readFollows(ctx.dataDir)) {
       // Entries are hand-editable: skip the own key, bad entries and duplicates.
@@ -527,6 +528,9 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
       // The reason (fork check included) is computed BEFORE an empty core is
       // purged, so an empty forked replica is still reported 'fork'.
       const reason = skipReason(replica, entries, key, association, blocked, revokedIssuers)
+      // Shown diaries with holes are reported so the app can keep syncing
+      // them; read while the core is open (a closed one reports 0).
+      if (reason === null && replica.length > replica.contiguousLength) incomplete.push(key)
       // An empty core must not linger in the main store.
       if (replica.contiguousLength === 0) await purgeReplica(store, key)
       if (reason === null) {
@@ -537,7 +541,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
     }
     const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
-    return { items: built.items, skipped: skippedLogs, future: built.future }
+    return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })
 }
 

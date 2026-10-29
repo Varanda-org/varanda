@@ -2173,7 +2173,62 @@ None of these was performed for this change. Use two hosted accounts, A and B, i
 - [ ] A seeder with only `varanda/notices/1`: the follow rows show and the quiet line "O semeador desta associação ainda só envia avisos de quem seguiu você." appears.
 - [ ] The seeder log shows no new route, no key and no text of a post.
 
-## 36. Convites para entrar na rede (2026-10-29)
+## 36. A Rua com diários seguidos ainda incompletos (2026-10-28)
+
+### Summary
+
+- User report (screenshot): A Rua ended with "Isso é tudo por enquanto." right after a post from "ontem", while older posts of people they follow were missing. Owner's decisions: download followed diaries in order; `feed.read` reports the followed diaries that are still incomplete; A Rua shows a syncing footer instead of the end and loads more when the sync advances. Starvation (reads preempting the sync run, `discardRegate`, the run-start purge) is out of scope.
+- Cause: followed replicas (and the browser node's own-diary recovery range) were downloaded with `core.download({ start: 0, end: -1 })`, which starts at a random offset, while `readAll` reads only `0..contiguousLength-1`. Stored blocks after the first gap were invisible and a short page looked like the end of the feed. Reproduced before the change with a scratch script (not in the repo): a 400-block followed diary, sync stopped mid-download, held 240 blocks of which 7 were contiguous, and `feed.read` showed 4 posts; with `linear: true` every stored block was contiguous and every stored post showed.
+- Ordered downloads: `linear: true` in `packages/web-member/lib/sync.js` (follow range and own-diary recovery range) and `packages/core/lib/sync.js` (follow range). Seeder ranges are unchanged.
+- `feed.read` (docs/rpc.md 5.13): new `incomplete` and `incompleteTruncated`, capped at `FEED_INCOMPLETE_MAX` = 16 (the 31-item worst case is 261,964 bytes, 180 under `MAX_MESSAGE`). Listed: shown followed diaries whose replica has `length > contiguousLength`, in follow order; a follow with no local replica stays `no-cert` in `skipped` and is not listed. Same rule on the core and browser nodes; the CLI `feed` is unchanged.
+- A Rua (`apps/app/src/screens/ARua.js`, `apps/app/src/paging.js`): the footer says "Ainda sincronizando quem você segue." instead of "Isso é tudo por enquanto." while the last page reported incomplete diaries; `atEnd`, 'mostrar mais' and the end-reached load are unchanged; an empty older page keeps the cursor. When the downloaded length of a listed diary, or of a follow skipped as `no-cert`, grows past the lengths seen before the last read, one timer (`FEED_REARM_MS` = 2 s) runs exactly one `feed.read`: a quiet re-read of the newest page when only it is loaded (no pull spinner, no 'ver novidades' acknowledgement, no other request; if the new page would cut rows already shown, the list stays and leaves its end so 'mostrar mais' pages on), otherwise an older page. Empty automatic older reads back off (2 s doubling to 32 s). No automatic read follows a failed read; the footer retry repeats the read that failed. A capped `skipped` or `incomplete` list makes growth of any key count.
+
+### Automated (CI)
+
+CI result on the final tree (rebased on main 17ec1d8, after the mentions PR), Node v24.22.1 (run from the worktree root). Node 20 (the other version in `.github/workflows/ci.yml`) was NOT run locally.
+
+- `npm ci --ignore-scripts`: ok.
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 177 test files, 0 failures (core 42, rpc 10, web-member 33, app 46, cli 44, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 13 tests, 78 asserts, all pass (the `feed.read` worst case is unchanged by the mentions PR).
+- `node packages/core/test/sync.test.js`: 42 tests, 239 asserts, all pass.
+- `node packages/core/test/member.test.js`: 11 tests, 132 asserts, all pass.
+- `node packages/core/test/session.test.js`: 29 tests, 350 asserts, all pass.
+- `node packages/web-member/test/sync-gate.test.js`: 5 tests, 53 asserts, all pass.
+- `node packages/web-member/test/session.test.js`: 26 tests, 327 asserts, all pass.
+- `node apps/app/test/paging.test.js`: 10 tests, 89 asserts, all pass.
+- New tests: core `sync.test.js` "a follower downloads a followed diary in block order" (the in-test fake seeder gains an optional `have`, so a peer that connects later learns about a diary it already holds); web-member `sync-gate.test.js` "a followed diary downloads in block order so its prefix is readable"; core `member.test.js` "feedRead reports a shown diary with holes as incomplete"; core `session.test.js` "feed.read caps the incomplete list at FEED_INCOMPLETE_MAX"; web-member `session.test.js` "feed.read reports incomplete followed diaries until their full download" and "feed.read caps incomplete followed diaries in follow-list order"; app `paging.test.js` "feed footer says syncing only while the last page reported incomplete diaries", "sync baseline covers incomplete and no-cert follows, plus every length when truncated", "sync advances only on growth past the baseline", "a capped skipped or incomplete list opens the trigger to every key", "only a short newest page replaces the list quietly" and "empty automatic reads back off with a capped delay". `sizes.test.js` adds the two fields to the `feed.read` worst case.
+- The ordering tests replace `Math.random` during the follower's run with a seeded generator in 0.4..0.6 (HyperDHT draws stream ids from `Math.random` and retries on a collision, so a constant could loop), which puts a random-order range far from block 0. In-flight requests complete out of order (0, 1, 2, 4, 8, ... was observed), so they check that the first 32 distinct uploaded blocks are below 64 (and include 0 to 3 on the browser node) and that the follower stored every block.
+- Regression proofs: without `linear: true` on the follow range both ordering tests fail (core 41/42, web-member 4/5). Without the `incomplete` push the new `feed.read` tests fail (core member 10/11, core session 28/29, web-member session 24/26). The new paging tests fail without the paging helpers, without counting `skippedTruncated`, and without the shown-rows rule for quiet replacement.
+- Reviews: every task by a vendor other than its author (GPT, Grok or Claude). A Rua took three review-fix rounds: the first "settle" rule could hide a diary's later posts and became the backoff; the automatic newest-page read behaved like a pull-to-refresh and became the quiet read with its footer retry; capped `skipped` lists, a full page that would cut shown rows, and an empty list were then handled.
+
+### Security audit
+
+- Auditors: Claude (opus, with the audit brief), Claude built-in security review, GPT (gpt-6-astra) and Grok (grok-4.7).
+- One low finding (automatic reads kept repeating while a full newest page left the list unchanged), fixed by leaving the end in that case. No open findings.
+
+### Human verification (none performed yet)
+
+Check the hosted web (browser node) and the native app (core node) separately.
+
+- [ ] A partially synced follow: after a short page the footer reads "Ainda sincronizando quem você segue.".
+- [ ] The list fills without pull-to-refresh as the follow downloads; on native no pull spinner appears.
+- [ ] A fully synced follow: the footer reads "Isso é tudo por enquanto." as before.
+- [ ] 'mostrar mais' still pages 30 then 31 items.
+- [ ] Follow a diary with hundreds of posts, keep A Rua open at the end of the list, and confirm the download finishes (every automatic read preempts the sync run).
+
+### Limits
+
+- Every automatic read preempts the sync run, which restarts; `FEED_REARM_MS` (2 s) is a starting value to tune after the check above.
+- A download usually costs one extra read at its end, because the stopped run reports growth the read already saw.
+- A follow with no local replica is not reported, so a follow nobody serves keeps the old footer; an author who signs a length nobody serves keeps the syncing footer.
+- Arrivals that sort inside the range already shown come through 'ver novidades' or pull-to-refresh; once the download ends the footer can say "Isso é tudo por enquanto." while such arrivals wait behind the pill.
+- An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
+- A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
+- `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
+
+## 37. Convites para entrar na rede (2026-10-29)
 
 ### O que mudou
 
