@@ -16,7 +16,7 @@ Pontos de entrada:
 - `worklet/main.js`: o código que roda no Bare e serve a sessão do `@varanda/core` por IPC.
 - `src/gate/` e `scripts/gate-server.js`: a prova do nó no simulador iOS ([docs/ios-gate.md](../../docs/ios-gate.md)).
 
-Comandos (a partir da raiz, com `-w apps/app`, ou aqui dentro): `npm run link:addons`, `npm run pack:worklet`, `npm run ios`, `npm run android`, `npm run build:node` (gera `public/varanda-node.js`, o nó do navegador; ignorado pelo git), `npm run web` e `npm run export:web` (os dois rodam `build:node` antes), `npm run start`, `npm run gate`, `npm test` (os testes em `test/`: as regras dos formulários de conexão, os ajudantes de exibição e a lógica pura listada acima). Depois de qualquer `npm install`, rode `link:addons` de novo antes de um build nativo.
+Comandos (a partir da raiz, com `-w apps/app`, ou aqui dentro): `npm run prepare:native` (liga os addons, empacota o worklet e roda `pod install` no macOS), `npm run link:addons`, `npm run pack:worklet`, `npm run ios`, `npm run android`, `npm run build:node` (gera `public/varanda-node.js`, o nó do navegador; ignorado pelo git), `npm run web` e `npm run export:web` (os dois rodam `build:node` antes), `npm run start`, `npm run gate`, `npm test` (os testes em `test/`: as regras dos formulários de conexão, os ajudantes de exibição e a lógica pura listada acima). Depois de qualquer `npm install`, rode `prepare:native` de novo antes de um build nativo; `ios` e `android` falham se os addons não estão ligados.
 
 Os PNGs do ícone e da tela de abertura são gerados a partir de `apps/site/artwork/logo` por `apps/site/scripts/render-assets.js`; nunca os regenere com `expo prebuild`, que sobrescreveria as correções de segurança feitas à mão em `ios/` e `android/`.
 
