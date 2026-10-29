@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 3
+export const LEGAL_VERSION = 4
 export const LEGAL_DATE = '29/10/2026'
-export const REVIEW_NOTE = 'Versão 3, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 4, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -28,9 +28,11 @@ export const TERMS = {
       heading: 'Sua conta e sua passkey',
       paragraphs: [
         'Na versão web, sua conta vem de uma passkey. Perder a passkey é perder a conta. Outra passkey cria outra conta. A passkey fica no gerenciador de senhas do seu aparelho. Não há arquivo de recuperação nem exportação da chave.',
-        'Na web hospedada, o vínculo com a conta Google dá o certificado de membro e o @nome. Esse vínculo não verifica sua idade. A idade não é verificada nesta versão.',
-        'A verificação de idade que o ECA Digital exige ainda não existe nesta versão. A regra para menores de idade ainda está sendo definida, com revisão jurídica.',
-        'O guardião e a recuperação por e-mail são planejados. O serviço de verificação de idade e o uso de imagem do rosto para essa verificação também são planejados.'
+        'Na web hospedada, o vínculo com a conta Google dá o certificado de membro e o @nome.',
+        'O Varanda é para pessoas com 16 anos ou mais. Esse limite é uma regra adotada pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo.',
+        'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
+        'No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
+        'O guardião e a recuperação por e-mail são planejados.'
       ]
     },
     {
@@ -106,7 +108,9 @@ export const PRIVACY = {
       paragraphs: [
         'O serviço de conta, no Brasil, guarda o identificador interno da conta Google (chamado de sub), o e-mail, a chave pública do membro, o @nome atual e os @nomes já usados, as datas e o certificado. Os nomes passados ficam associados ao membro para nunca serem dados a outra pessoa.',
         'Esses dados servem para dar o certificado e o @nome, atender ordens judiciais e bloquear contas. O e-mail nunca entra no diário, no certificado nem no navegador.',
-        'A idade não é verificada. O vínculo com o Google e o certificado atual não afirmam a idade. A verificação de idade que o ECA Digital exige ainda não existe nesta versão, e a regra para menores de idade ainda está sendo definida, com revisão jurídica. O serviço de idade e o uso de imagem do rosto são planejados. O guardião e o e-mail de recuperação também são planejados.'
+        'O Varanda é para pessoas com 16 anos ou mais, um limite adotado pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo. No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
+        'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. A selfie e o documento são tratados pelo parceiro e nunca chegam ao Varanda. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), a forma de verificação e a data, nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
+        'O Varanda pede ao parceiro que apague a sessão de verificação logo depois da decisão, e as configurações de retenção do parceiro ficam no mínimo. A imagem do rosto é um dado sensível; a base legal para esse tratamento ainda será confirmada por parecer jurídico. O vínculo com o Google e o certificado atual não afirmam a idade. O guardião e o e-mail de recuperação são planejados.'
       ]
     },
     {
@@ -138,6 +142,7 @@ export const PRIVACY = {
         'As bases legais descritas aqui são uma proposta, ainda sem parecer jurídico.',
         'Para publicações, perfil, seguidos, fotos e o vínculo Google que dá o certificado e o @nome, a proposta é execução de contrato, Art. 7º, V.',
         'Registro do aceite: a finalidade é registrar qual versão cada conta aceitou. A base legal é uma proposta, ainda sem parecer jurídico.',
+        'Faixa de idade: a finalidade é cumprir a regra de idade mínima. A base legal proposta é obrigação legal (ECA Digital), a confirmar em parecer jurídico.',
         'Denúncias, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
         'Registros de acesso, com IP, data e hora, ficam nos semeadores e serviços, se aplicável. A proposta é obrigação legal caso o Art. 15 do Marco Civil se aplique.'
       ]
@@ -153,8 +158,8 @@ export const PRIVACY = {
     {
       heading: 'Compartilhamento e cópias fora do Brasil',
       paragraphs: [
-        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação.',
-        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
+        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação. A Didit é o serviço parceiro que faz a verificação de idade na web hospedada.',
+        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O tratamento da verificação de idade pela Didit também pode acontecer fora do Brasil. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
         'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas são planejadas e não fazem parte dos fluxos atuais descritos aqui.'
       ]
     },

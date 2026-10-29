@@ -355,3 +355,125 @@ test('invitesStart/invitesFinish: shapes and refusals', async (t) => {
   stub(t, json(429, { error: 'limite-convites' }))
   try { await a.invitesFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'limite-convites') }
 })
+
+test('age error tokens map to fixed messages', async (t) => {
+  const { toError } = await load()
+  t.is(toError('idade-pendente').code, 'idade-pendente')
+  t.is(toError('idade-pendente').message, 'Confirme sua idade antes de continuar.')
+  t.is(toError('limite-idade').code, 'limite-idade')
+  t.is(toError('limite-idade').message, 'Muitas tentativas de verificação. Tente de novo amanhã.')
+})
+
+test('agePolicy: { required } or null on any failure', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { required: true }))
+  t.alike(await a.agePolicy(), { required: true })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/age/policy')
+  t.is(calls[0].init.body, undefined)
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(200, { required: false }))
+  t.alike(await a.agePolicy(), { required: false })
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.agePolicy(), null, '404')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.agePolicy(), null, '503')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.agePolicy(), null, 'network')
+  stub(t, json(200, { required: false }, 'text/html'))
+  t.is(await a.agePolicy(), null, 'not JSON')
+  for (const body of [{ required: 'false' }, { required: 0 }, { required: false, x: 1 }, {}, [], { required: null }]) {
+    stub(t, json(200, body))
+    t.is(await a.agePolicy(), null, JSON.stringify(body))
+  }
+})
+
+test('ageStart: nonce, refusals', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1' }))
+  t.alike(await a.ageStart({ member: M }), { nonce: 'n1' })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/age/start')
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.is(calls[0].init.credentials, 'same-origin')
+  stub(t, json(200, { nonce: 5 }))
+  try { await a.ageStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  stub(t, json(429, { error: 'limite-idade' }))
+  try { await a.ageStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'limite-idade') }
+})
+
+test('ageSession: https url or verificado, anything else refused', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const url = 'https://verify.example.test/session/abc'
+  const calls = stub(t, json(200, { url }))
+  t.alike(await a.ageSession(args), { url })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/age/session')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  stub(t, json(200, { state: 'verificado' }))
+  t.alike(await a.ageSession(args), { state: 'verificado' })
+  const bad = [
+    { url: 'http://verify.example.test/s' }, { url: 'https://user:pw@verify.example.test/s' },
+    { url: 'https://user@verify.example.test/s' }, { url: 'javascript:alert(1)' }, { url: 'https://' },
+    { url: 5 }, { state: 'pendente' }, { state: 'Verificado' }, {}, { ok: true }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.ageSession(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, JSON.stringify(body))
+    }
+  }
+})
+
+test('ageSession: invite only when well formed; no answer is uncertain, refusals definite', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const calls = stub(t, json(200, { state: 'verificado' }))
+  await a.ageSession({ ...args, invite: 'abc' })
+  await a.ageSession({ ...args, invite: null })
+  await a.ageSession({ ...args, invite: CODE })
+  t.alike(JSON.parse(calls[0].init.body), args)
+  t.alike(JSON.parse(calls[1].init.body), args)
+  t.alike(JSON.parse(calls[2].init.body), { ...args, invite: CODE })
+  const sent = stub(t, () => { throw new Error('rede') })
+  try { await a.ageSession(args); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.is(e.uncertain, true)
+  }
+  t.is(sent.length, 1, 'never retried')
+  for (const [status, token] of [[400, 'convite-invalido'], [400, 'assinatura-invalida'], [429, 'limite-idade']]) {
+    stub(t, json(status, { error: token }))
+    try { await a.ageSession(args); t.fail() } catch (e) {
+      t.is(e.code, token)
+      t.absent(e.uncertain, token)
+    }
+  }
+})
+
+test('ageResult: known states only', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const state of ['verificado', 'pendente', 'recusado', 'inconclusivo', 'expirado', 'nenhum']) {
+    const calls = stub(t, json(200, { state }))
+    t.alike(await a.ageResult(args), { state })
+    t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/age/result')
+    t.alike(JSON.parse(calls[0].init.body), args)
+  }
+  for (const body of [{ state: 'aprovado' }, { state: 'Verificado' }, { state: 1 }, {}, { state: ['verificado'] }]) {
+    stub(t, json(200, body))
+    try { await a.ageResult(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, 'a malformed answer is uncertain: ' + JSON.stringify(body))
+    }
+  }
+  const sent = stub(t, () => { throw new Error('rede') })
+  try { await a.ageResult(args); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.is(e.uncertain, true, 'no answer is uncertain')
+  }
+  t.is(sent.length, 1, 'never retried')
+  stub(t, json(429, { error: 'limite-idade' }))
+  try { await a.ageResult(args); t.fail() } catch (e) {
+    t.is(e.code, 'limite-idade')
+    t.absent(e.uncertain, 'a refusal is definite')
+  }
+})

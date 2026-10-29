@@ -12,6 +12,7 @@ const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varand
 const { createModRoutes } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
+const { createAgeRoutes } = require('./age-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -112,7 +113,11 @@ const ERROR_STATUS = Object.freeze({
   'convite-invalido': 404,
   'limite-convites': 429,
   // Web Push (./push-routes.js): turning notices on needs the current terms.
-  'termos-pendentes': 409
+  'termos-pendentes': 409,
+  // Hosted age verification (./age-routes.js): no certificate, rename or
+  // invite for a key whose age band is not on record.
+  'idade-pendente': 403,
+  'limite-idade': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -551,7 +556,13 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // 404 and start ignores `invite`); otherwise every new link needs a
 // usable invite code, held in memory from start to finish. `push` is null
 // (the push routes and /push-event are not mounted at all) or the options of
-// ./push-routes.js { pushStore, vapid, send, relayTokenHash }.
+// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `didit` (a
+// createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
+// turn on hosted age verification when both are set: authorize, finish,
+// rename/start and invites/start then refuse 'idade-pendente' until the
+// member's band is on record. Either null keeps today's behaviour and the
+// age policy route answers { required: false }. `ageDailyLimit` caps the
+// paid Didit sessions opened per day across all members.
 function createAccountServer ({
   association,
   origin,
@@ -570,6 +581,9 @@ function createAccountServer ({
   terms = null,
   invites = null,
   push = null,
+  didit = null,
+  ages = null,
+  ageDailyLimit = 200,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -626,6 +640,27 @@ function createAccountServer ({
       now,
       http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
     })
+
+  // Always mounted, so /account/age/policy answers even when the feature is off.
+  const ageRoutes = createAgeRoutes({
+    didit,
+    ages,
+    association,
+    origin,
+    store,
+    invites,
+    inviting: invites !== null,
+    log,
+    now,
+    dailyLimit: ageDailyLimit,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // With age verification on, no key without a band on record gets a Google
+  // sign-in, a certificate, a rename or an invite. Off, it never refuses.
+  function ageChecked (member) {
+    if (ageRoutes.required() && !ageRoutes.verified(member)) throw refuse('idade-pendente')
+  }
 
   // OAuth state -> pending id, written at authorize and deleted at the first
   // callback that presents it (single-use). One entry per pending row at
@@ -755,6 +790,9 @@ function createAccountServer ({
     // authorized again (its state would otherwise be minted twice).
     if (row.phase !== 'reserve') throw refuse('assinatura-invalida')
     proof({ phase: 'reserve', nonce: row.nonce, member: row.member, username: row.username, association, sub: '' }, signature)
+    // Before reserve: the row stays in 'reserve', so the same row can be
+    // authorized once the member has verified.
+    ageChecked(row.member)
     if (!limits.authorize(row.member)) throw over()
     try {
       store.reserve(row.id)
@@ -855,6 +893,7 @@ function createAccountServer ({
     if (typeof row.sub !== 'string') throw refuse('expirado')
     proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
     if (!limits.finish(row.member)) throw over()
+    ageChecked(row.member)
     if (!inviting) return finishRow(res, row, signature, false)
     // The same answer store.finish gives once the first finish removed the row.
     if (finishing.has(row.id)) throw refuse('expirado')
@@ -959,6 +998,8 @@ function createAccountServer ({
     const name = usernameParam(body.username)
     const current = store.status(member)
     if (!current.linked) throw refuse('nao-encontrado')
+    // The age gate waits for the signed finish: this unsigned answer must not
+    // tell anyone whether a given key passed the age check.
     if (name !== current.username) {
       if (now() < Date.parse(current.nextChangeAt)) throw refuse('troca-bloqueada', { nextChangeAt: current.nextChangeAt })
       const holder = store.lookup(name)
@@ -981,6 +1022,7 @@ function createAccountServer ({
     if (nonce !== null) renames.delete(nonce)
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     proof({ phase: 'rename', nonce, member, username: row.username, association, sub: '' }, signature)
+    ageChecked(member)
     if (!limits.renameFinish(member)) throw over()
     let result
     try {
@@ -1052,6 +1094,7 @@ function createAccountServer ({
     const member = memberParam(body.member)
     invitesAvailable()
     linked(member)
+    // The age gate waits for the signed finish (see renameStart).
     sweep(inviteNonces)
     while (inviteNonces.size >= MAX_TERMS_NONCES) inviteNonces.delete(inviteNonces.keys().next().value)
     const nonce = base64url(nodeCrypto.randomBytes(32))
@@ -1067,6 +1110,7 @@ function createAccountServer ({
     if (nonce !== null) inviteNonces.delete(nonce)
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     if (!verifyInvite({ action: 'issue', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
+    ageChecked(member)
     if (!limits.invitesFinish(member)) throw over()
     invitesAvailable()
     linked(member)
@@ -1115,6 +1159,7 @@ function createAccountServer ({
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
+    if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
@@ -1182,7 +1227,7 @@ function createAccountServer ({
 
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()) }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats() }
 }
 
 module.exports = {

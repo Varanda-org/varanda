@@ -141,6 +141,14 @@ services:
       # mudar. Com a rede vazia ninguém entra: a primeira pessoa precisa se
       # vincular com a variável vazia.
       VARANDA_INVITES_PER_WEEK: "${VARANDA_INVITES_PER_WEEK:-}"
+      # Verificação de idade (Didit), opcional. Os dois vazios mantêm a
+      # checagem desligada; os dois definidos a ligam para todo membro
+      # hospedado, inclusive quem já está vinculado. Só o account recebe estas
+      # variáveis. O age.json fica no volume account-data. O teto diário de
+      # sessões vazio mantém o padrão do serviço.
+      VARANDA_DIDIT_API_KEY: "${VARANDA_DIDIT_API_KEY:-}"
+      VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
+      VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"

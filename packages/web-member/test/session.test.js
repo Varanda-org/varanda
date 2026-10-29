@@ -26,6 +26,7 @@ const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
+const { verifyAge } = require('@varanda/core/lib/age')
 const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
@@ -650,6 +651,66 @@ test('invite.sign: the unlocked key signs the signup-invite request, locked and 
 
   const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
   const mismatch = await errorOf(other.web.request('invite.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('age.sign: the unlocked key signs the age-verification request without a certificate, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'session', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('age.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  // A fresh identity with no member certificate: the age check comes first.
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.is((await s.web.request('node.info')).memberCert, false, 'no certificate')
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('age.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: key, association: assoc.hex }
+  t.alike(verifyAge(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyAge({ ...fields, action: 'result' }, r.signature), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyAge({ ...fields, nonce: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' }, 'another nonce')
+
+  const result = await s.web.request('age.sign', { ...params, action: 'result' })
+  t.alike(verifyAge({ ...fields, action: 'result' }, result.signature), { ok: true }, 'the result action')
+
+  // Domain separation both ways against the terms acceptance.
+  const terms = { nonce, member: key, association: assoc.hex, version: 1 }
+  t.alike(verifyTerms(terms, r.signature), { ok: false, reason: 'bad-signature' }, 'an age request is not a terms acceptance')
+  const termsSig = await s.web.request('terms.sign', { nonce, version: 1 })
+  t.alike(verifyTerms(terms, termsSig.signature), { ok: true })
+  t.alike(verifyAge(fields, termsSig.signature), { ok: false, reason: 'bad-signature' }, 'a terms acceptance is not an age request')
+
+  for (const k of ['member', 'association']) {
+    const extra = await errorOf(s.web.request('age.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const unknown = await errorOf(s.web.request('age.sign', { ...params, action: 'issue' }))
+  t.is(unknown.code, 'USAGE', 'an unknown action is refused')
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('age.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('age.sign', params))
   t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
 })
 

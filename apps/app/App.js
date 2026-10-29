@@ -31,6 +31,10 @@
 // for the key it names; nothing is written, followed or retried.
 // A splash shows while the app loads; the intro cards (src/intro.js) follow
 // once per device, before the Termos.
+// The age gate (hosted web only, src/age.js) holds every member, linked or
+// not, at 'Confirme sua idade' until the account service answers
+// 'verificado'; it fails closed while the policy or the result is unknown,
+// and nothing about it is stored on the device.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -38,13 +42,15 @@ import { StatusBar } from 'expo-status-bar'
 import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
+import { hostedPage } from './src/configStore'
 import { NamesProvider, useNames } from './src/names'
-import { lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { ageBlocking, ageGate, parseReturnAge } from './src/age'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureSignupInvite } from './src/signupInviteStore'
+import { captureSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
@@ -79,6 +85,7 @@ import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
+import Idade from './src/screens/Idade'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -100,10 +107,14 @@ const READY_TOAST = 'Tudo pronto. Siga pessoas para encher a Rua.'
 // A link confirmed in Ajustes re-arms the terms sync at most this many times
 // per member in a page load (Ajustes re-reads the info often).
 const TERMS_REARM_MAX = 5
+// A failed age policy read is tried again after 5 s, 15 s, then every 60 s
+// (and when the connection comes back); the member stays blocked meanwhile.
+const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
+const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
 
-// The steps the setup branch (Identidade) renders; the others belong to the
-// shell (spinner, Perfil, the tabs).
-const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', 'certificado'])
+// The steps the setup branch (Identidade, Idade) renders; the others belong
+// to the shell (spinner, Perfil, the tabs).
+const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado'])
 
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
@@ -115,6 +126,23 @@ const LINK_RETURN = (() => {
     return parseReturn(search) !== null || parseReturnWaitlist(search) !== '' || parseReturnInvite(search) !== ''
   } catch { return false }
 })()
+
+// True when this page load is the return from the age verification
+// (?idade=volta). Only skips the intro cards: the result is always asked of
+// the account service after the unlock. The query it carries (idade and the
+// provider's untrusted verificationSessionId and status) is removed here, once;
+// the pathname (read by the captures below), other params and hash are kept.
+const AGE_RETURN = (() => { try { return parseReturnAge(globalThis.location?.search) } catch { return false } })()
+if (AGE_RETURN) {
+  try {
+    const loc = globalThis.location
+    const hist = globalThis.history
+    const params = new URLSearchParams(loc.search)
+    for (const name of ['idade', 'verificationSessionId', 'status']) params.delete(name)
+    const query = params.toString()
+    hist.replaceState(hist.state, '', loc.pathname + (query ? '?' + query : '') + loc.hash)
+  } catch {}
+}
 
 // A profile link (/@ana, /m/<key>) is read and cleaned to '/' here, once,
 // before any render, takeReturnNotice or bindHistory, so neither the history
@@ -286,8 +314,11 @@ function Member () {
     setComposer({ open: false, reply: null, quote: null })
     setAjustes(null)
   }, [locked])
-  const setupStep = locked || (!setupDone && !confirmed)
   const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
+  // The age gate follows the origin, not the config source: a configuration
+  // typed by hand on the hosted page (Conectar, "usar outra configuração")
+  // turns node.hosted off but keeps the same passkey and account here.
+  const ageHosted = passkey !== null && (node.hosted || hostedPage)
 
   // --- the Termos de Uso and the Política de Privacidade (src/terms.js) ---
   // The device's record says which member accepted which version; the gate
@@ -329,6 +360,124 @@ function Member () {
   }, [decision, member, terms.claim, bindTerms])
   const memberRef = useRef(member)
   memberRef.current = member
+  const recovering = passkey !== null && passkey.recovering === true
+  const onceSync = !!(node.sync.active && node.sync.active.once) || node.sync.starting === true
+
+  // --- the age gate (src/age.js; hosted web only) ---
+  // The policy is read once the node is ready; a failed read (null) keeps
+  // everyone blocked and is tried again with a backoff and when the
+  // connection comes back.
+  const [agePolicy, setAgePolicy] = useState(undefined)
+  const [agePolicyTick, setAgePolicyTick] = useState(0)
+  const agePolicyTries = useRef(0)
+  const agePolicyKnown = agePolicy !== undefined && agePolicy !== null
+  useEffect(() => {
+    if (!ageHosted || !ready || agePolicyKnown) return
+    let cancelled = false
+    let timer = null
+    readAgePolicy().then((p) => {
+      if (cancelled) return
+      setAgePolicy(p)
+      if (p !== null) return
+      timer = setTimeout(() => setAgePolicyTick((n) => n + 1), agePolicyDelay(agePolicyTries.current))
+      agePolicyTries.current += 1
+    })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageHosted, ready, agePolicyKnown, agePolicyTick])
+  const agePolicyOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = agePolicyOnlineRef.current
+    agePolicyOnlineRef.current = node.online
+    if (was !== false || node.online !== true || agePolicyKnown) return
+    setAgePolicyTick((n) => n + 1)
+  }, [node.online, agePolicyKnown])
+
+  // The member's result, asked of the account service (never taken from the
+  // URL or from storage): once per generation and member, and again on
+  // 'Conferir de novo'. Not while the recovery after an unlock or a once sync
+  // runs: age.sign is a member request and would preempt that run.
+  const [ageState, setAgeState] = useState(undefined)
+  const [ageBusy, setAgeBusy] = useState(false)
+  const [ageError, setAgeError] = useState('')
+  const [ageNote, setAgeNote] = useState('')
+  const [ageCheckTick, setAgeCheckTick] = useState(0)
+  // Bumped by every age request and by a lock or generation change: an
+  // answer that arrives under another number is dropped.
+  const ageSeq = useRef(0)
+  const ageRan = useRef(null)
+  useEffect(() => {
+    ageSeq.current += 1
+    ageRan.current = null
+    setAgeState(undefined)
+    setAgeBusy(false)
+    setAgeError('')
+    setAgeNote('')
+  }, [generation, locked])
+  // termsOk: reading the result records the band and closes the partner's
+  // session, which must not happen before the current terms are accepted.
+  // Only once the service said the check is required: an unknown policy keeps
+  // the member blocked (ageGate) and is retried, without calling the age routes.
+  const ageReadNow = ageHosted && ready && termsOk && !locked && member !== null && !recovering && !onceSync &&
+    agePolicyKnown && agePolicy.required === true
+  const ageRequest = (work) => {
+    const seq = ++ageSeq.current
+    const gen = generationRef.current
+    const who = memberRef.current
+    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current
+    setAgeBusy(true)
+    setAgeError('')
+    setAgeNote('')
+    work(stale).catch((err) => {
+      if (!stale()) setAgeError(errorText(err))
+    }).finally(() => {
+      if (!stale()) setAgeBusy(false)
+    })
+  }
+  useEffect(() => {
+    if (!ageReadNow) return
+    const key = generation + '#' + member + '#' + ageCheckTick
+    if (ageRan.current === key) return
+    ageRan.current = key
+    ageRequest(async (stale) => {
+      const { nonce } = await ageStart({ member })
+      if (stale()) return
+      const { signature } = await node.request('age.sign', { action: 'result', nonce })
+      if (stale()) return
+      const { state } = await ageResult({ member, nonce, signature })
+      if (!stale()) setAgeState(state)
+    })
+  }, [ageReadNow, generation, member, ageCheckTick])
+  const checkAge = () => setAgeCheckTick((n) => n + 1)
+  // A new verification session: the service answers 'verificado' when the
+  // band is already recorded, otherwise the provider's page, opened as a full
+  // page navigation (it comes back with ?idade=volta).
+  const startAge = () => {
+    if (member === null || ageBusy) return
+    ageRequest(async (stale) => {
+      const { nonce } = await ageStart({ member })
+      if (stale()) return
+      const { signature } = await node.request('age.sign', { action: 'session', nonce })
+      if (stale()) return
+      const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
+      if (stale()) return
+      if (r.state === 'verificado') return setAgeState('verificado')
+      if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
+      setAgeNote(AGE_REDIRECT_TEXT)
+      globalThis.location.assign(r.url)
+    })
+  }
+  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageState })
+  const ageClear = !ageBlocking(ageNeeded)
+
+  // The gates: `confirmed` can latch setupDone for a member already linked,
+  // so setupDone alone never opens the tabs, autosync, the outbox, the terms
+  // sync or the profile invite; ageClear is required everywhere too. Not
+  // gated by age (documented, as for the terms): the post-unlock recovery of
+  // the member's own diary, which runs before the age check.
+  const setupStep = locked || (!setupDone && !confirmed) || !ageClear
 
   // The acceptance sent to the account service (hosted, linked members): one
   // start, one signature by the node, one finish, per member and version and
@@ -350,15 +499,15 @@ function Member () {
     Object.hasOwn(terms.record.members, member)
     ? terms.record.members[member]
     : null
-  const syncTermsNow = shouldSyncTerms({
+  const syncTermsNow = ageClear && shouldSyncTerms({
     hosted: mode === 'hosted',
     termsOk,
     ready,
     online: node.online,
     locked,
     setupDone,
-    recovering: passkey !== null && passkey.recovering === true,
-    onceSync: !!(node.sync.active && node.sync.active.once) || node.sync.starting === true,
+    recovering,
+    onceSync,
     member,
     record: terms.record,
     version: LEGAL_VERSION,
@@ -468,12 +617,12 @@ function Member () {
 
   // The sync intent: continuous sync is wanted as soon as the certificate is
   // confirmed (the profile step does not gate it), never while locked or
-  // while the recovery run after an unlock is on. The provider does the rest.
-  const recovering = passkey !== null && passkey.recovering === true
+  // while the recovery run after an unlock is on, never before the age check
+  // clears. The provider does the rest.
   const { setAutoSync } = node
   useEffect(() => {
-    setAutoSync(ready && !locked && setupDone && !recovering && termsOk)
-  }, [ready, locked, setupDone, recovering, termsOk, setAutoSync])
+    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
+  }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
 
   // Back from the Google step with a certificate already held: the tabs show
   // after the unlock, so open Ajustes → Conta once, where the account card offers
@@ -504,13 +653,23 @@ function Member () {
     memberCert: info !== null && info.memberCert === true,
     profileKnown: ownProfile !== undefined || names.unsupported === true,
     hasName: !!(ownProfile && ownProfile.name),
-    skippedName
+    skippedName,
+    // No own key yet (the diary creation after the passkey failed): Identidade
+    // keeps the screen, with its error and retry, since the age check needs the
+    // key. Nothing is released: setupStep still holds while the age gate does,
+    // and the service refuses the link without the check.
+    ageVerified: ageClear || member === null
   })
   // The latched setupDone rule above decides between the setup branch and the
   // shell's steps; the step machine only names the step within each.
   let { step, index, total } = onboarding
-  if (setupStep && !SETUP_STEPS.has(step)) {
-    step = mode === 'hosted' ? 'vinculo' : 'certificado'
+  if (setupStep && mode !== 'hosted' && !ageClear && member !== null && !locked && !recovering) {
+    // A hand-typed configuration on the hosted page: the native steps do not
+    // know the age check, so it takes the screen here.
+    step = 'idade'
+    index = 1
+  } else if (setupStep && !SETUP_STEPS.has(step)) {
+    step = mode === 'hosted' ? (ageClear || member === null ? 'vinculo' : 'idade') : 'certificado'
     index = 1
   } else if (!setupStep && SETUP_STEPS.has(step)) {
     step = 'pronto'
@@ -560,7 +719,7 @@ function Member () {
   // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
-    enabled: ready && !locked && setupDone && termsOk && !(passkey && passkey.recovering) &&
+    enabled: ready && !locked && setupDone && termsOk && ageClear && !(passkey && passkey.recovering) &&
       node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
@@ -739,7 +898,10 @@ function Member () {
     invite,
     hosted: mode === 'hosted',
     // The passkey status was read at least once (or there is no passkey).
-    // Nothing about the invite moves while the terms gate shows.
+    // Nothing about the invite moves while the terms gate shows. The age gate
+    // is not needed here: the card shows on Entrar and the consent is only a
+    // tab-storage record, while the follow waits for atTabs, which needs the
+    // age check passed (setupStep includes it).
     statusKnown: ready && termsOk && (passkey === null || pkStatus !== null),
     locked,
     resumed: !!(pkStatus && pkStatus.resumed === true),
@@ -953,7 +1115,7 @@ function Member () {
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
   if (decision === 'loading' || introState === 'loading') return splash
-  if (introState === 'show' && !LINK_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -997,7 +1159,23 @@ function Member () {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
     let body
-    if (passkey !== null || info !== null) {
+    if (step === 'idade') {
+      // Unknown and not failed yet counts as busy: an already verified member
+      // sees the spinner, not the start button, while the result is read.
+      body = (
+        <Idade
+          state={ageState}
+          busy={ageBusy || (ageState === undefined && !ageError)}
+          error={ageError}
+          note={ageNote}
+          offline={node.online === false}
+          onStart={startAge}
+          onCheck={checkAge}
+          index={index}
+          total={total}
+        />
+      )
+    } else if (passkey !== null || info !== null) {
       // embedded: the top bar above already carries the step's title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
       const inviteProp = action === 'card'

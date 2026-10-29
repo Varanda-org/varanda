@@ -3,12 +3,17 @@
 // absent: `profileKnown` is true only when the cache answered (profile or
 // null) or the node is known not to support `profile.read`. Skipping the name
 // ('Continuar mesmo assim', 'Pular por enquanto') bypasses both the loading and
-// the name steps, so the user can always reach the tabs.
+// the name steps, so the user can always reach the tabs. Hosted members must
+// confirm their age (`ageVerified === false` shows 'idade'), linked or not;
+// the step comes after 'recuperando' so the screen stays mounted while the
+// post-unlock recovery runs, and skipping the name never skips it. An absent
+// `ageVerified` counts as verified, for callers that do not gate on age.
 const TOTAL = 3
 
 export const STEP_TITLES = {
   entrar: 'Bem-vindo à Varanda',
   recuperando: 'Buscando sua conta…',
+  idade: 'Confirme sua idade',
   vinculo: 'Escolha seu @nome',
   identidade: 'Criar sua conta',
   // Native and manual setups only.
@@ -21,6 +26,7 @@ export const STEP_TITLES = {
 export const STEP_HINTS = {
   entrar: 'Entre com a passkey deste aparelho.',
   recuperando: 'Estamos trazendo de volta o que já é seu.',
+  idade: 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.',
   vinculo: 'Seu @nome é como as pessoas encontram você.',
   identidade: 'Sua conta é criada neste aparelho.',
   certificado: 'Envie o código à associação e cole o que ela devolver.',
@@ -31,10 +37,11 @@ export const STEP_HINTS = {
 
 const at = (step, index) => ({ step, index, total: TOTAL })
 
-export function onboardingStep ({ mode, locked, recovering, hasIdentity, memberCert, profileKnown, hasName, skippedName }) {
+export function onboardingStep ({ mode, locked, recovering, hasIdentity, memberCert, profileKnown, hasName, skippedName, ageVerified = true }) {
   if (mode === 'hosted') {
     if (locked) return at('entrar', 0)
     if (recovering) return at('recuperando', 1)
+    if (ageVerified === false) return at('idade', 1)
     if (!memberCert) return at('vinculo', 1)
   } else {
     if (!hasIdentity) return at('identidade', 0)

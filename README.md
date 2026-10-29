@@ -189,6 +189,9 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_WS_ORIGIN` | Origens de navegador aceitas na entrada WebSocket, separadas por vírgula (ex.: `https://app.exemplo.org`). O mesmo que `--ws-origin` (repetível). Ausente, só páginas `http` em loopback. |
 | `VARANDA_MAX_MEMBERS` | Teto de contas vinculadas no serviço `account` (em `deploy/seeder/.env`), de 1 a 4096. Ausente ou vazio, sem teto. Ao chegar ao teto, um vínculo novo recebe "lista de espera" (HTTP 503); quem já é membro não muda. Ver "Vínculo de conta Google e @nome". |
 | `VARANDA_INVITES_PER_WEEK` | Convites por membro e por semana, de 1 a 100 (em `deploy/seeder/.env`; reiniciar o serviço `account` para mudar). Ausente ou vazio, o cadastro segue aberto como hoje, só limitado por `VARANDA_MAX_MEMBERS`. Definido, um vínculo Google novo só termina com um convite válido e cada membro vinculado ganha esse número de convites por semana civil de Brasília. Remover a variável desliga tudo: o `invites.json` fica no disco e é ignorado pelo serviço (o `account status` ainda mostra as contagens). Ver "Convites", em "Vínculo de conta Google e @nome". |
+| `VARANDA_DIDIT_API_KEY` | Chave da API do Didit para a verificação de idade (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar). Segredo. Vazia junto com `VARANDA_DIDIT_WORKFLOW_ID`, a checagem fica desligada. Ver "Verificação de idade (Didit)". |
+| `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
+| `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
@@ -567,6 +570,39 @@ Antes de voltar a uma versão anterior a esta, pare o serviço com a parada limp
 Os aceites dos Termos de Uso e da Política de Privacidade ficam num arquivo à parte no mesmo volume, `terms.json` (modo `0600`): para cada chave de membro, a versão aceita, a data (do relógio do serviço), o nonce e a assinatura que provaram o aceite; nunca o e-mail. Só um membro já vinculado registra aceite (`POST /account/terms/start` e `/account/terms/finish`, com uma prova da chave do diário). Inclua `terms.json` no backup do volume `account-data`, junto do diretório de contas. Restaurar uma cópia mais antiga perde os aceites feitos depois dela, e os aparelhos que já sincronizaram o aceite não o reenviam. `account export` traz em cada linha o campo `terms`, a lista `[{ "version", "acceptedAt" }]` dos aceites daquele membro (`[]` sem aceite; nunca o nonce nem a assinatura), e sai com `terms.json inválido` (código 1) se o arquivo estiver corrompido; `account status` mostra `aceites dos termos: <n>` ou `aceites dos termos: indisponível (terms.json inválido)`. Com o arquivo inválido o serviço continua no ar, registra `terms indisponivel` e responde "indisponível" (HTTP 503) só nessas duas rotas. Uma versão anterior a esta ignora o `terms.json` e responde 404 nas duas rotas: voltar a ela não perde os aceites gravados, que reaparecem quando esta versão volta.
 
 Se houver um `directory.journal.*` antes de voltar (um diário órfão), suba esta versão de novo, espere mais de 40 segundos para que a limpeza de órfãos o remova, pare-a com a parada limpa e confira de novo. O `deploy.sh` desfaz o deploy sozinho recriando o contêiner `account` com um fechamento por SIGTERM, que deixa a versão 1 só se esse fechamento der certo; se o contêiner `account` estava parado ou reiniciando naquele momento, o diretório continua na versão 2 e a imagem anterior o recusa até que os passos manuais acima sejam seguidos.
+
+#### Verificação de idade (Didit, serviço `account`)
+
+Na web hospedada, todo membro, novo ou já vinculado, confirma a idade antes de usar o app. A idade mínima é 16 (decisão do produto com base no ECA Digital, sujeita a parecer jurídico). A pessoa é enviada à página do Didit, por navegação de página inteira como no passo do Google (por isso o CSP do `Caddyfile` não muda), e volta para `https://<domínio>/?idade=volta`. O serviço `account` pergunta a decisão ao Didit por conta própria e nunca confia na URL de volta.
+
+Configuração do operador:
+
+- Crie a aplicação no Didit e um workflow com estimativa de idade por rosto e documento de reserva.
+- Defina o domínio permitido como a origem pública. O callback é `https://<domínio>/?idade=volta`.
+- A chave da API precisa dos privilégios `read:sessions` e `delete:sessions` e não pode ser restrita a um workflow ou a um status: o Didit responde 404 a uma chave restrita, e o serviço trata 404 como sessão já apagada, então uma chave restrita deixaria imagens guardadas sem aviso.
+- Ponha `VARANDA_DIDIT_API_KEY` e `VARANDA_DIDIT_WORKFLOW_ID` no `.env`. O teto diário opcional é `VARANDA_DIDIT_DAILY_LIMIT` (padrão: 200 sessões por dia).
+- Em produção, defina as duas variáveis. Sem elas ninguém é consultado (útil só no desenvolvimento e na demo) e o serviço registra isso na partida. Para desligar, remova as duas.
+
+O que fica guardado: o `age.json` no volume `account-data` (modo `0600`), com a chave do membro, a faixa (`16-17` ou `18+`), o método `didit` e a data. Nada além disso. Faça o backup junto com o resto do `account-data`. A imagem do rosto e o documento nunca chegam ao Varanda.
+
+Retenção no Didit: depois de cada decisão final o serviço pede ao Didit que apague a sessão (`DELETE` com `retain_face_embeddings` falso). Se falhar, tenta de novo algumas vezes, em memória. Como reserva, defina a retenção mínima no console do Didit e recuse ali qualquer uso para treinamento ou reaproveitamento.
+
+Limites: 3 sessões por membro em 24 h e, para quem ainda não tem vínculo, 3 por código de convite em 24 h (com convites ligados). O teto diário conta à parte as chaves novas e os membros já vinculados, então chaves descartáveis não tiram a vez de quem já é membro. Com o cadastro aberto (sem convites), só o teto diário segura chaves descartáveis: acompanhe o registro `idade`/`sessao` e use convites se o teto encher. As sessões pendentes ficam só na memória, então um reinício pede que a pessoa recomece e a sessão aberta não é apagada no Didit (a retenção mínima do console cobre esse caso). Uma estimativa por rosto abaixo de 21 anos pede o documento, e só o documento pode recusar (menos de 16).
+
+Teste de fumaça no sandbox, ANTES de ligar em produção. O serviço falha fechado (todos continuam bloqueados) se o formato das respostas do Didit for diferente do esperado. Com uma chave de sandbox e o id do seu workflow:
+
+```sh
+curl -sS -X POST https://verification.didit.me/v3/session/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY" \
+  -H "content-type: application/json" \
+  -d "{\"workflow_id\": \"$VARANDA_DIDIT_WORKFLOW_ID\", \"callback\": \"https://<domínio>/?idade=volta\"}"
+curl -sS https://verification.didit.me/v3/session/<id>/decision/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY"
+```
+
+Confira que as respostas trazem `session_id`, `url` e um campo `status`.
+
+Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
 
 ### Implantação automática pelo GitHub Actions
 
