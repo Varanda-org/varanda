@@ -1,6 +1,6 @@
 'use strict'
 
-const fs = require('node:fs')
+const { refuseExisting, writeNew } = require('../write-new')
 const { initAssociation, showAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate, issueModeratorCertificate } = require('@varanda/core/lib/assoc')
 
 function usage (message) {
@@ -14,12 +14,13 @@ function print (flags, result, line) {
 }
 
 function writePretty (file, value) {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+  writeNew(file, JSON.stringify(value, null, 2) + '\n')
 }
 
 async function run (flags) {
   const sub = flags.positionals[0]
   const dir = flags.dataDir
+  if (flags.out && sub && sub.startsWith('certify')) refuseExisting(flags.out)
   if (sub === 'init') {
     const { publicKey } = initAssociation(dir)
     print(flags, { publicKey }, 'chave pública da associação: ' + publicKey)
