@@ -33,11 +33,12 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { NamesProvider, useNames } from './src/names'
-import { lookupUsername, parseReturn, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
+import { captureSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
@@ -99,7 +100,7 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', '
 const LINK_RETURN = (() => {
   try {
     const search = globalThis.location?.search
-    return parseReturn(search) !== null || parseReturnWaitlist(search) !== ''
+    return parseReturn(search) !== null || parseReturnWaitlist(search) !== '' || parseReturnInvite(search) !== ''
   } catch { return false }
 })()
 
@@ -108,6 +109,11 @@ const LINK_RETURN = (() => {
 // stack nor the account flow ever sees that path; search and hash are kept
 // (?conta= and #token= are read later). No pathname listener: only a page load
 // carries a profile link. Null off the hosted web page.
+// A signup invite (/convite/<code>) is cleaned to '/' first, keeping ?conta=
+// and #token=. It is stored under its own key, so this capture and the profile
+// one below never clear each other. Caddy already serves index.html for
+// extensionless paths, so /convite/ needs no Caddyfile route.
+captureSignupInvite()
 const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.

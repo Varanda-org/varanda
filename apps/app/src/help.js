@@ -64,7 +64,8 @@ export const HELP = Object.freeze({
       'O e-mail nunca vai para o seu diário, para o seu perfil nem para este navegador. A idade não é verificada.',
       'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).',
       'Vamos abrir o Google e, na volta, pedir sua passkey de novo.',
-      'O @nome tem de 3 a 20 letras minúsculas, números ou _, começando por letra. Você pode trocá-lo depois, uma vez a cada 7 dias.'
+      'O @nome tem de 3 a 20 letras minúsculas, números ou _, começando por letra. Você pode trocá-lo depois, uma vez a cada 7 dias.',
+      'Se a rede estiver por convite, a entrada é pelo link que alguém que já está na Varanda te enviou.'
     ])
   }),
   identidade: Object.freeze({
@@ -127,6 +128,14 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'A denúncia vai para a moderação da associação. A pessoa denunciada não vê quem denunciou.',
       'Se a moderação bloquear, a conta inteira deixa de aparecer para quem usa o app oficial.'
+    ])
+  }),
+  convites: Object.freeze({
+    title: 'Como funcionam os convites',
+    paragraphs: Object.freeze([
+      'Quem já está na Varanda pode criar alguns links de convite por semana e mandar como quiser.',
+      'Cada link serve para uma pessoa só e vale 7 dias. Os convites renovam toda segunda-feira, no horário de Brasília, e os que sobram não acumulam.',
+      'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.'
     ])
   }),
   termosAparelho: Object.freeze({

@@ -11,6 +11,7 @@ const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
+const { openInvitesStore } = require('../account/invites-store')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -78,7 +79,10 @@ const LIMIT_ENV = Object.freeze({
   VARANDA_ACCOUNT_MAX_PENDING: ['maxPending', 1, 100000],
   VARANDA_ACCOUNT_MAX_CONNECTIONS: ['maxConnections', 1, 4096],
   VARANDA_ACCOUNT_RATE: ['ratePerSecond', 1, 10000],
-  VARANDA_ACCOUNT_BURST: ['burst', 1, 100000]
+  VARANDA_ACCOUNT_BURST: ['burst', 1, 100000],
+  // Unset is open signup; set, a new member needs an invite. There is no
+  // "off" value: removing the feature is unsetting the variable.
+  VARANDA_INVITES_PER_WEEK: ['invitesPerWeek', 1, 100]
 })
 const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 
@@ -237,7 +241,8 @@ function status (dataDir, given) {
   const moderation = moderationStatus(dataDir, association)
   const triage = triageStatus(dataDir)
   const terms = termsCount(dataDir)
-  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, terms, running: lockHeld(dataDir) }
+  const invites = invitesCount(dataDir)
+  return { association, publicKey, certificate, configured: publicKey !== null && certificate === 'ok', links, restored: accounts.restored, moderation, triage, terms, invites, running: lockHeld(dataDir) }
 }
 
 // The number of members with a recorded acceptance of the terms, or
@@ -245,6 +250,20 @@ function status (dataDir, given) {
 function termsCount (dataDir) {
   const terms = openTermsStore(dataDir, { readOnly: true })
   return terms.available() ? terms.count() : 'indisponivel'
+}
+
+// { total, used } over invites.json (a missing file is no invite yet), or
+// 'indisponivel' when it is not one the store would have written. Never a
+// code or an inviter key; the weekly allowance is environment, not file
+// state, so it is not reported here.
+function invitesCount (dataDir) {
+  const invites = openInvitesStore(dataDir, { readOnly: true })
+  return invites.available() ? invites.count() : 'indisponivel'
+}
+
+function invitesLine (count) {
+  if (count === 'indisponivel') return 'convites: indisponível (invites.json inválido)'
+  return 'convites: ' + count.total + ' (' + count.used + ' usados)'
 }
 
 function termsLine (count) {
@@ -294,6 +313,7 @@ function statusLines (s) {
   }
   lines.push(triageLine(s.triage))
   lines.push(termsLine(s.terms))
+  lines.push(invitesLine(s.invites))
   lines.push('estado: ' + (s.running ? 'em execução' : 'parado'))
   return lines.join('\n')
 }
@@ -448,7 +468,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
-  const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
+  const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -473,11 +493,13 @@ async function serve (flags, env) {
   let unavailable = false
   let store = null
   let terms = null
+  let invites = null
   let stopHeal = null
+  let stopInvitesHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms)
+      loseLock(store, log, stop, terms, invites)
     }
   })
   let listener = null
@@ -509,6 +531,15 @@ async function serve (flags, env) {
     terms = openTermsStore(flags.dataDir, { guard: () => lock.owned() })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
+    // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
+    // set: unset, nothing is opened or created. The directory is the
+    // single-use authority (isUsed). An invalid file keeps the service up and
+    // the server refuses new members (fail closed).
+    if (invitesPerWeek !== null) {
+      invites = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id) })
+      if (!invites.available()) log({ event: 'invites', reason: 'indisponivel' })
+      stopInvitesHeal = startHeal(invites, 'invites', log)
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -535,7 +566,7 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, invites, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -543,7 +574,7 @@ async function serve (flags, env) {
         throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
       }
       log({ event: 'listening', host: listener.host, port: listener.port })
-      log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }) })
+      log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }), ...(invitesPerWeek === null ? {} : { invitesPerWeek }) })
       if (triage !== null) triage.worker.start()
       if (usage !== null) usage.start()
       await stopped
@@ -566,7 +597,9 @@ async function serve (flags, env) {
     // The terms file is healed one last time (a stale writer's rename may
     // have dropped acknowledged entries) while the lock is still held.
     if (stopHeal !== null) stopHeal()
+    if (stopInvitesHeal !== null) stopInvitesHeal()
     if (terms !== null && terms.available()) await terms.heal()
+    if (invites !== null && invites.available()) await invites.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
     // skips the write, as closeIfOwned below does.
@@ -591,10 +624,12 @@ function storeUnavailable (log, stop) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms store too: its next accept must not write either.
-function loseLock (store, log, stop, terms = null) {
+// stops. The terms and invites stores too: their next write must not land
+// either.
+function loseLock (store, log, stop, terms = null, invites = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
+  if (invites !== null) invites.fail()
   log({ event: 'lock', reason: 'perdido' })
   stop()
 }
@@ -603,14 +638,19 @@ function loseLock (store, log, stop, terms = null) {
 // acceptances this holder acknowledged; nothing else rewrites the file until
 // the next accept. So the holder merge-writes it on the lock heartbeat's
 // interval (terms-store.js heal(): a no-op unless the file lacks something).
+// The invites sidecar has the same window (invites-store.js heal()).
 // -> stop(), which clears the interval.
 function startTermsHeal (terms, log, ms = LOCK_HEARTBEAT_MS) {
+  return startHeal(terms, 'terms', log, ms)
+}
+
+function startHeal (sidecar, event, log, ms = LOCK_HEARTBEAT_MS) {
   let running = false
   const timer = setInterval(async () => {
     if (running) return
     running = true
     try {
-      if (await terms.heal()) log({ event: 'terms', reason: 'reparado' })
+      if (await sidecar.heal()) log({ event, reason: 'reparado' })
     } finally {
       running = false
     }

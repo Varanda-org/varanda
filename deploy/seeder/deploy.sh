@@ -56,7 +56,7 @@ moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
 # LIMIT_ENV em apps/cli/lib/commands/account.js (um teste compara as duas):
 # um valor fora dela derrubaria o serviço só depois de trocar o contêiner.
 limite_re='^[1-9][0-9]{0,7}$'
-limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000'
+limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100'
 
 root=''
 www=''

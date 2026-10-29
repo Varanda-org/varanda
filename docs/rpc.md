@@ -111,7 +111,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign` and `terms.sign` sign but write nothing, 5.18, 5.20 and 5.29).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign` and `invite.sign` sign but write nothing, 5.18, 5.20, 5.29 and 5.30).
 
 Params have an exact key set: every key not listed for the method -> `USAGE` `'parâmetro desconhecido'`; a missing required key -> `'parâmetro obrigatório: <name>'`; a wrong type or bound -> `'parâmetro inválido: <name>'`. Defaults listed below are filled in by `validateRequest` / `validateParams(method, params)` before the handler runs; the client sends the params exactly as given.
 
@@ -370,6 +370,24 @@ Who started following the caller and whom the caller does not follow yet ("follo
   The prefix separates this statement from every other signature of the protocol (certificates, account links, reports, moderation requests, Hypercore blocks).
 - Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyTerms(fields, signature)`, using `member` as the public key. It proves that this diary key accepted that version of the Termos de Uso and the Política de Privacidade for this association, bound to a single-use nonce (`POST /account/terms/finish`, `docs/protocol.md`).
 - Where it runs: browser node only (`packages/web-member/lib/session.js`), like `account.sign`: not a diary write, no append, no network. Not mutating.
+- Errors: the node session (`packages/core/lib/session.js`, the CLI and `varanda-serve`) answers `USAGE` `'assinatura disponível só no navegador'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
+
+### 5.30 `invite.sign`
+
+- Params: `{ action, nonce }`, nothing else: `action` is `'issue'` (the only action today; the field exists so a later action does not need a new prefix); `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/invites/start`).
+- The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF, no date (`invitePayload`, `packages/core/lib/invite.js`):
+
+  ```
+  varanda-invite-v1
+  <action>
+  <nonce>
+  <member hex64>
+  <association hex64>
+  ```
+
+  The prefix separates this statement from every other signature of the protocol (certificates, account links, terms acceptances, reports, moderation requests, Hypercore blocks).
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyInvite(fields, signature)`, using `member` as the public key. It proves that this linked member asks the account service to mint one signup invite for this association, bound to a single-use nonce (`POST /account/invites/start`, then `POST /account/invites/finish`, `docs/protocol.md`). The statement carries no e-mail and nothing about the invited person.
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `terms.sign`: not a diary write, no append, no network. Not mutating.
 - Errors: the node session (`packages/core/lib/session.js`, the CLI and `varanda-serve`) answers `USAGE` `'assinatura disponível só no navegador'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
 
 ### Errors common to every method

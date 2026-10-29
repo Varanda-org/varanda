@@ -2190,3 +2190,140 @@ test('onUnavailable: called once on a writer guard trip, never for fail() or a r
   await rejects(t, ro.finish(row3.id, { signature: SIG }, iss.kp, iss.cert, iss.association), 'indisponivel', 'readOnly refuses')
   t.is(readOnlyCalls, 0, 'a readOnly store never calls it')
 })
+
+// Sign-up invites: the id rides on the memory-only pending row and, once the
+// link is finished, on the link record (strict single use).
+const INVITE = 'c'.repeat(64)
+
+async function inviteLink (s, iss, member, username, invite = INVITE, sub = 'sub-' + member.slice(0, 8), email = 'm@example.test') {
+  const row = s.start({ member, username, invite })
+  s.reserve(row.id)
+  s.putGoogle(row.id, { sub, email })
+  return s.finish(row.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+}
+
+function snapshotLink (dir, member) {
+  return readSnapshotFile(dir).links[member]
+}
+
+test('invite: the pending row keeps a lowercase hex64 invite or null; anything else is a TypeError', (t) => {
+  const { store } = setup(t)
+  const member = memberKey()
+  t.is(store.get(store.start({ member, username: 'ana' }).id).invite, null, 'no invite: null')
+  t.is(store.get(store.start({ member, username: 'ana', invite: INVITE }).id).invite, INVITE, 'kept on the row')
+  for (const bad of ['C'.repeat(64), 'c'.repeat(63), 'g'.repeat(64), 'xyz', 42, {}, ['c'.repeat(64)]]) {
+    t.exception.all(() => store.start({ member, username: 'ana', invite: bad }), TypeError, JSON.stringify(bad))
+  }
+})
+
+test('invite: a finished link stores it in the journal and the snapshot; inviteUsed survives close, reopen and a rename', async (t) => {
+  const { store, iss, dir, open, c } = setup(t)
+  const a = memberKey()
+  t.is(store.inviteUsed(INVITE), false, 'unused before the link')
+  await inviteLink(store, iss, a, 'alba')
+  t.is(journalLines(dir)[0].link.invite, INVITE, 'the link line carries the invite')
+  t.is(store.inviteUsed(INVITE), true)
+  t.is(store.inviteUsed('d'.repeat(64)), false, 'another invite is unused')
+  t.exception.all(() => store.inviteUsed('C'.repeat(64)), TypeError, 'a malformed id is a TypeError')
+  t.exception.all(() => store.inviteUsed(null), TypeError, 'null is a TypeError')
+  await store.close()
+  t.is(snapshotLink(dir, a).invite, INVITE, 'the v 1 snapshot keeps it')
+  const two = open()
+  t.is(two.inviteUsed(INVITE), true, 'after reopen')
+  c.t += COOLDOWN_MS
+  await two.rename(a, 'albinha', iss.kp, iss.cert)
+  t.is(two.inviteUsed(INVITE), true, 'after a rename')
+  await two.close()
+  const link = snapshotLink(dir, a)
+  t.is(link.username, 'albinha')
+  t.is(link.invite, INVITE, 'the rename kept it on the link')
+  t.is(openAccountStore(dir, { readOnly: true }).inviteUsed(INVITE), true, 'a readOnly open reads it')
+})
+
+test('invite: a second member finishing with the same invite is convite-invalido and its row is dropped', async (t) => {
+  const { store, iss, dir } = setup(t)
+  const b = memberKey()
+  const late = store.start({ member: b, username: 'bia', invite: INVITE })
+  store.reserve(late.id)
+  store.putGoogle(late.id, { sub: 'sub-bia', email: 'b@example.test' })
+  await inviteLink(store, iss, memberKey(), 'alba')
+  const before = fs.readFileSync(journalFile(dir), 'utf8')
+  await rejects(t, store.finish(late.id, { signature: SIG }, iss.kp, iss.cert, iss.association), 'convite-invalido', 'the invite was used meanwhile')
+  t.is(store.get(late.id), null, 'the row is dropped')
+  t.is(store.status(b).linked, false, 'nothing linked')
+  t.is(fs.readFileSync(journalFile(dir), 'utf8'), before, 'nothing written')
+  t.ok(await inviteLink(store, iss, b, 'bia', 'd'.repeat(64), 'sub-bia'), 'another invite still links')
+})
+
+test('invite: the e-mail update of a linked member is not refused and keeps the invite', async (t) => {
+  const { store, iss, dir } = setup(t)
+  const member = memberKey()
+  const r1 = store.start({ member, username: 'eva', invite: INVITE })
+  const r2 = store.start({ member, username: 'eva', invite: INVITE })
+  for (const r of [r1, r2]) store.reserve(r.id)
+  store.putGoogle(r1.id, { sub: 'sub-eva', email: 'old@example.test' })
+  store.putGoogle(r2.id, { sub: 'sub-eva', email: 'new@example.test' })
+  await store.finish(r1.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+  await store.finish(r2.id, { signature: SIG }, iss.kp, iss.cert, iss.association)
+  t.is(store.exportLinks()[0].email, 'new@example.test')
+  await store.close()
+  t.is(snapshotLink(dir, member).invite, INVITE, 'kept through the e-mail line')
+})
+
+test('invite: inviteUsed survives a compaction', async (t) => {
+  const { store, iss, dir, open } = setup(t)
+  const a = memberKey()
+  await inviteLink(store, iss, a, 'alba')
+  await fill(store, iss, 0, COMPACT_EVERY + 1)
+  const disk = readSnapshotFile(dir)
+  t.is(disk.v, 2)
+  t.ok(disk.seq >= COMPACT_EVERY, 'compacted')
+  t.is(disk.links[a].invite, INVITE, 'the compacted snapshot keeps it')
+  t.is(store.inviteUsed(INVITE), true, 'after the compaction')
+  t.is(open().inviteUsed(INVITE), true, 'after a rw open')
+})
+
+test('invite: a link made without one has no invite key on disk, nor in exportLinks', async (t) => {
+  const { store, iss, dir } = setup(t)
+  const a = memberKey()
+  await link(store, iss, a, 'alba')
+  t.absent(JSON.stringify(journalLines(dir)).includes('invite'), 'no invite in the journal')
+  await inviteLink(store, iss, memberKey(), 'bia')
+  for (const row of store.exportLinks()) {
+    t.alike(Object.keys(row).sort(), ['email', 'linkedAt', 'member', 'sub', 'username'], 'no invite in the export')
+  }
+  await store.close()
+  t.absent(Object.hasOwn(snapshotLink(dir, a), 'invite'), 'no invite key in directory.json')
+})
+
+test('invite: a directory.json whose link has an invite that is not lowercase hex64 is refused', async (t) => {
+  const { store, iss, dir } = setup(t)
+  const a = memberKey()
+  await inviteLink(store, iss, a, 'alba')
+  await store.close()
+  const good = readSnapshotFile(dir)
+  for (const bad of ['XYZ', 'C'.repeat(64), null, 7]) {
+    const snap = JSON.parse(JSON.stringify(good))
+    snap.links[a].invite = bad
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify(snap))
+    t.exception(() => openAccountStore(dir, { readOnly: true }), /diretório de contas inválido/, JSON.stringify(bad))
+  }
+})
+
+test('invite: a journal where two links carry the same invite still opens and the invite reads as used', async (t) => {
+  const { store, iss, dir, open } = setup(t)
+  await inviteLink(store, iss, memberKey(), 'alba')
+  await link(store, iss, memberKey(), 'bia')
+  const log = journalFile(dir)
+  const [header, first, second] = fs.readFileSync(log, 'utf8').trim().split('\n')
+  const planted = JSON.parse(second)
+  planted.link.invite = INVITE
+  fs.writeFileSync(log, [header, first, JSON.stringify(planted)].join('\n') + '\n')
+  const ro = openAccountStore(dir, { readOnly: true })
+  t.is(ro.exportLinks().length, 2, 'both links replayed')
+  t.is(ro.inviteUsed(INVITE), true)
+  const rw = open()
+  t.is(rw.inviteUsed(INVITE), true, 'a rw open compacts them too')
+  await rw.close()
+  t.is(Object.values(readSnapshotFile(dir).links).filter((l) => l.invite === INVITE).length, 2)
+})

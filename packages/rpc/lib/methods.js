@@ -183,6 +183,12 @@ const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
 
+// invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
+// lib/invite.js (ACTIONS), which this package cannot import.
+const INVITE_ACTIONS = ['issue']
+
+const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -261,6 +267,14 @@ const SPECS = {
     fields: {
       nonce: req(isNonce),
       version: req(int(1, TERMS_VERSION_MAX))
+    }
+  },
+  // Signs the signup-invite request with the identity key; the node fills in
+  // member and association itself, so a caller never chooses the bytes.
+  'invite.sign': {
+    fields: {
+      action: req(isInviteAction),
+      nonce: req(isNonce)
     }
   },
   'profile.set': {

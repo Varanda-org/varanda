@@ -194,6 +194,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_ACCOUNT_RATE',
     'VARANDA_ACCOUNT_BURST',
     'VARANDA_ACCOUNT_MAX_PENDING',
+    'VARANDA_INVITES_PER_WEEK',
     '/account/mod/api/me',
     // The optional seeder limits are validated by shape before anything changes.
     ...SEEDER_LIMITS
@@ -350,7 +351,7 @@ test('compose.web.yaml and .env.example: usage-stats variables are optional and 
   t.ok(example.includes('VARANDA_STATS_EMAILS='), '.env.example has an empty VARANDA_STATS_EMAILS= line')
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -669,7 +670,7 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
     const [name, min, max] = entry.split(':')
     fromSh[name] = [Number(min), Number(max)]
   }
-  t.is(Object.keys(fromJs).length, 5, 'five limits in account.js')
+  t.is(Object.keys(fromJs).length, 6, 'six limits in account.js')
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')

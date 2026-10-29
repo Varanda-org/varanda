@@ -29,11 +29,13 @@ import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
+import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
+import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpLink } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -165,16 +167,22 @@ const CERT_RECEIVED = 'Conta vinculada.'
 // Finish errors (account.js ERROR_MESSAGES) after which the pending row is
 // useless: the member may pick another Google account. 'lista-de-espera' is
 // not one of them: the cap is full, this key stays, and the form retries by hand.
-const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
+// 'convite-invalido' is: the invite died while the member was at Google.
+const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado', 'convite-invalido'])
+// Start refusals for a network that is by invite: a calm state, not an error.
+const INVITE_REFUSALS = new Set(['convite-obrigatorio', 'convite-invalido'])
 
 // ?conta=ok|erro|cancelado|lista-de-espera, read once per page load (every
 // mounted Identidade shows it, including the one App.js opens in Ajustes
 // after the return) and removed from the address bar. The value is cached
 // here, so a LinkCard mounted after the removal still shows it; App.js only
 // reads the query, this is the only place that removes it.
-// 'lista-de-espera' is not a notice: it opens the card in its waitlist state.
+// 'lista-de-espera' is not a notice: it opens the card in its waitlist state,
+// and 'convite-invalido' opens it in its invite state (the stored code is
+// dead, so it is dropped here).
 let returnNotice
 let returnWaitlist = ''
+let returnInvite = ''
 function takeReturnNotice () {
   if (returnNotice !== undefined) return returnNotice
   returnNotice = null
@@ -184,6 +192,8 @@ function takeReturnNotice () {
     if (!loc || typeof loc.search !== 'string' || !hist) return null
     returnNotice = parseReturn(loc.search)
     returnWaitlist = parseReturnWaitlist(loc.search)
+    returnInvite = parseReturnInvite(loc.search)
+    if (returnInvite !== '') dropSignupInvite()
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
@@ -191,6 +201,10 @@ function takeReturnNotice () {
 function takeReturnWaitlist () {
   takeReturnNotice()
   return returnWaitlist
+}
+function takeReturnInvite () {
+  takeReturnNotice()
+  return returnInvite
 }
 
 // username.add runs at most once per record per page load (the RPC is
@@ -238,7 +252,23 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const [note, setNote] = useState('')
   // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
   const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
+  // Sentence for an invite refusal ('convite-obrigatorio', 'convite-invalido'),
+  // or ''. Not an error either.
+  const [inviteNote, setInviteNote] = useState(takeReturnInvite)
+  // undefined while unread; null when the network is open (no endpoint, a
+  // failed read or required false: the service still refuses on its own).
+  const [policy, setPolicy] = useState(undefined)
+  const policyAsked = useRef(false)
   const seqRef = useRef(0)
+
+  useEffect(() => {
+    if (!active || policyAsked.current) return
+    policyAsked.current = true
+    invitePolicy().then(
+      (p) => setPolicy(p && p.required === true ? p : null),
+      () => setPolicy(null)
+    )
+  }, [active])
 
   const load = useCallback(async () => {
     const mine = ++seqRef.current
@@ -352,20 +382,28 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     if (username === null) return setError(NAME_RULE)
     run(async () => {
       try {
-        const { nonce } = await startLink({ member: publicKey, username })
+        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code })
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
         const { authorizeUrl } = await authorizeLink({ signature })
         if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
         setWaitlist('')
+        setInviteNote('')
         setNote(RELOAD_TEXT)
         globalThis.location.assign(authorizeUrl)
       } catch (err) {
         // Full cap: a calm notice. The name stays; nothing retries on its own.
         if (err && err.code === 'lista-de-espera') {
+          setInviteNote('')
           setWaitlist(err.message)
           return
         }
         setWaitlist('')
+        if (err && INVITE_REFUSALS.has(err.code)) {
+          // The code stays stored: start answers 'convite-invalido' for a
+          // code held by another pending link too, and that one may free up.
+          setInviteNote(err.message)
+          return
+        }
         throw err
       }
     })
@@ -381,6 +419,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       const done = await finishLink({ signature })
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
+      dropSignupInvite()
       setWaitlist('')
       setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
     } catch (err) {
@@ -394,6 +433,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
       setWaitlist('')
+      if (err && err.code === 'convite-invalido') dropSignupInvite()
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -477,6 +517,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     // stays, including the setup step, with a manual retry and no spinner.
     const confirmable = !waiting && row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
     const showForm = !confirmable && (!memberCert || formOpen || waiting)
+    // No code stored, by invite or after an invite refusal: no @nome field
+    // and no Google button, so Google is never reached without a code. With
+    // a stored code a refusal keeps the form: the code may have been held
+    // by an earlier attempt and work again. The code itself is never shown.
+    const required = policy !== undefined && policy !== null
+    const hasInvite = loadSignupInvite() !== null
+    const inviteBlocked = !waiting && !hasInvite && (inviteNote !== '' || required)
     const waitlistNote = waiting
       ? (
         <>
@@ -485,6 +532,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         </>
         )
       : null
+    const inviteLine = inviteBlocked
+      ? null
+      : inviteNote !== ''
+        ? <Body>{inviteNote}</Body>
+        : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
+    // Until the policy answers, the button waits rather than racing it.
+    const linkDisabled = name.trim() === '' || policy === undefined
     body = (
       <>
         {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
@@ -511,10 +565,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         {showForm && setup
           ? (
             <>
-              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+              {inviteBlocked ? null : <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />}
               <Body>{SHORT.link}</Body>
               <HelpLink doc={HELP.vinculo} />
-              {waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
+              {inviteLine}
+              {inviteBlocked
+                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
             </>
             )
           : null}
@@ -523,8 +580,15 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
             <>
               <Body>{SHORT.link}</Body>
               <HelpLink doc={HELP.vinculo} />
-              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
+              {inviteLine}
+              {inviteBlocked
+                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                : (
+                  <>
+                    <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+                    {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
+                  </>
+                  )}
             </>
             )
           : null}
