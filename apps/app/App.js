@@ -658,6 +658,30 @@ function Member () {
   }, [pushScreen, clearStack, ownKey])
   // A lock, unlock or reset closes the pushed screens too.
   useEffect(() => clearStack(), [generation, locked, clearStack])
+  // A tap on @nome in a post. The row author's own verified name opens with
+  // no request; any other name goes through the account lookup (current
+  // holder only). No seed: Membro re-verifies and a seed would flash.
+  const mentionSeq = useRef(0)
+  const lockedRef = useRef(locked)
+  lockedRef.current = locked
+  const openMention = useCallback(async (username, ctx) => {
+    const tap = ++mentionSeq.current
+    if (ctx && ctx.username === username) {
+      openMember(ctx.author)
+      return
+    }
+    if (node.online === false) {
+      showToast('Sem conexão para abrir o @nome.')
+      return
+    }
+    const gen = generationRef.current
+    const r = await resolveInvite({ username }, lookupUsername)
+    // A newer tap, a lock or an identity change meanwhile drops this answer.
+    if (tap !== mentionSeq.current || gen !== generationRef.current || lockedRef.current) return
+    if (r.status === 'ready') openMember(r.key)
+    else showToast(r.status === 'not-found' ? NOT_FOUND_TEXT : 'Não foi possível abrir o @nome agora.')
+  }, [openMember, node.online])
+  const mentionHandler = node.hosted === true ? openMention : undefined
 
   // A sheet open over the screens closes first (its Modal handles Back and
   // Escape itself).
@@ -987,6 +1011,7 @@ function Member () {
       onOpenThread: openThread,
       onOpenEngagers: openEngagers,
       onOpenMember: openMember,
+      onOpenMention: mentionHandler,
       onToast: showToast,
       onFollowsChanged: followsChanged
     }
@@ -1009,6 +1034,7 @@ function Member () {
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
@@ -1027,6 +1053,7 @@ function Member () {
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.espiadinha}
@@ -1052,6 +1079,7 @@ function Member () {
               active={on('avisos')}
               refresh={version}
               ownKey={ownKey}
+              onOpenThread={openThread}
               scrollToTop={scrollSignal.avisos}
               onFollowsChanged={followsChanged}
               onToast={showToast}
@@ -1068,6 +1096,7 @@ function Member () {
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}

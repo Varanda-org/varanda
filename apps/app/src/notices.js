@@ -1,14 +1,16 @@
-// The Avisos tab's building blocks: follow lines, seen ids (the node's
-// opaque `seen` tokens, never follower keys), page merging, the notice shown
-// in place of the list and the fixed texts. Pure: no imports and no globals,
-// so Node tests load it directly.
+// The Avisos tab's building blocks: lines for a follow, a reply, a quote and
+// a mention, seen ids (the node's opaque `seen` tokens, never follower keys),
+// page merging, the notice shown in place of the list and the fixed texts.
+// Pure: no imports and no globals, so Node tests load it directly.
 
 export const FOLLOW_BACK_LABEL = 'Seguir de volta'
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
-export const EMPTY_TEXT = 'Quando alguém começar a seguir você, aparece aqui.'
+export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.'
 export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
+// activity false: this seeder still speaks the follows-only notices channel.
+export const ACTIVITY_QUIET_TEXT = 'O semeador desta associação ainda só envia avisos de quem seguiu você.'
 export const NOTICES_INCOMPLETE_TEXT = 'Alguns avisos ainda podem chegar.'
 export const SEEN_STORAGE_KEY = 'varanda-notices-seen'
 // Five minutes between polls while the tab is on screen.
@@ -22,14 +24,42 @@ const UNNAMED_TITLE = 'sem nome'
 
 const WEB_ONLY_MESSAGES = ['método desconhecido', 'avisos disponíveis só no navegador']
 
-// "Bia começou a seguir você", or "Alguém" when the title is "sem nome" or
-// not a non-empty string. The title is the only text used.
-export function noticeLine (who) {
+// A row from an older node has no kind. Anything else is not one of the four
+// notices this tab shows, so it reads as a follow too.
+export function noticeKind (item) {
+  const kind = item && item.kind
+  if (kind === 'follow' || kind === 'reply' || kind === 'quote' || kind === 'mention') return kind
+  return 'follow'
+}
+
+// "Bia começou a seguir você" (respondeu, citou, mencionou for the other
+// kinds), or "Alguém" when the title is "sem nome" or not a non-empty
+// string. The title is the only text used. kind defaults to follow.
+export function noticeLine (who, kind = 'follow') {
   const title = who.title
-  if (typeof title !== 'string' || title.length === 0 || title === UNNAMED_TITLE) {
-    return 'Alguém começou a seguir você'
-  }
-  return title + ' começou a seguir você'
+  const name = typeof title !== 'string' || title.length === 0 || title === UNNAMED_TITLE ? 'Alguém' : title
+  if (kind === 'reply') return name + ' respondeu à sua publicação'
+  if (kind === 'quote') return name + ' citou sua publicação'
+  if (kind === 'mention') return name + ' mencionou você'
+  return name + ' começou a seguir você'
+}
+
+// A follow opens no post. A reply, quote or mention points at the signed
+// block, in the '<key>:<seq>' form a conversa screen uses (nav.js).
+export function noticeRef (item) {
+  if (noticeKind(item) === 'follow') return null
+  return item.key + ':' + item.seq
+}
+
+// Newest first by Date.parse(at): string order breaks for negative-year ISO
+// dates (feed.js). Same instant: key ascending, then seq descending, so a
+// later block of the same diary stays above the earlier one.
+export function compareNotices (a, b) {
+  const byTime = Date.parse(b.at) - Date.parse(a.at)
+  if (byTime) return byTime
+  if (a.key < b.key) return -1
+  if (a.key > b.key) return 1
+  return (b.seq - a.seq) || 0
 }
 
 // seq identifies the signed follow, so a later follow of the same diary is a
@@ -230,30 +260,43 @@ export function isLastNoticesPage (page) {
 // fewer rows than `limit` and the node still has a cursor (a gap of filtered
 // candidates), the pages after it, at most NOTICES_AUTO_PAGES more per call;
 // past that the cursor is returned for the person to continue. A cursor
-// that does not move ends the list (compared by value). `live` false between
-// pages stops early with what was read. -> { notices, next, incomplete,
-// supported }, one page's shape; a page with supported false is returned as
-// is. request: (method, params) => Promise.
+// that does not move ends the list (compared by value, seq included; two
+// cursors with no seq still match). `live` false between pages stops early
+// with what was read. -> { notices, next, incomplete, supported, activity }.
+// activity is false when any page said so, and true when every page omits it
+// or says true: an older node has no activity field and only sends follows.
+// A page with supported false is returned as is.
+// request: (method, params) => Promise.
 export async function readNotices (request, { limit, after = null, maxContinuations = NOTICES_AUTO_PAGES, live = () => true }) {
   let notices = []
   let cursor = after
   let incomplete = false
+  // Omitted activity is a node that only knows follows: not the quiet state.
+  let activity = true
   for (let reads = 0; ; reads++) {
     const page = await request('notices.list', cursor === null ? { limit } : { limit, after: cursor })
     if (page.supported === false) return page
     notices = mergePage(notices, page.notices).items
     incomplete = incomplete || page.incomplete === true
-    const stuck = page.next !== null && cursor !== null && page.next.at === cursor.at && page.next.key === cursor.key
-    const next = stuck ? null : page.next
+    if (page.activity === false) activity = false
+    // No seq on either side (undefined === undefined) still counts as stuck,
+    // which is how a node that only sends follows pages today. A cursor that
+    // advances only in seq is a new page.
+    const nextPage = page.next
+    const stuck = nextPage !== null && cursor !== null &&
+      nextPage.at === cursor.at && nextPage.key === cursor.key && nextPage.seq === cursor.seq
+    const next = stuck ? null : nextPage
     if (next === null || notices.length >= limit || reads >= maxContinuations || !live()) {
-      return { notices, next, incomplete, supported: true }
+      return { notices, next, incomplete, supported: true, activity }
     }
     cursor = next
   }
 }
 
+// Following back clears that diary's follow notice. A reply, quote or
+// mention from the same key is about a post and stays in the list.
 export function withoutAuthor (items, key) {
-  return items.filter((item) => item.key !== key)
+  return items.filter((item) => item.key !== key || noticeKind(item) !== 'follow')
 }
 
 export function isWebOnlyError (err) {

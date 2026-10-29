@@ -347,6 +347,66 @@ test('no count, total, size or length anywhere', (t) => {
   }
 })
 
+test('rowsFor is the union of every page, without self or blocked rows', (t) => {
+  const idx = createNoticeIndex()
+  for (let i = 1; i <= 70; i++) {
+    idx.foldFollow(k(i), 1, follow(ME, true, D(1 + (i % 5))))
+    idx.commit(k(i))
+  }
+  idx.foldFollow(ME, 1, follow(ME, true, D(1)))
+  idx.commit(ME)
+  const blocked = new Set([k(2), k(3), k(4)])
+  const isBlocked = (key) => blocked.has(key)
+
+  const paged = []
+  let after = null
+  for (let n = 0; n < 100; n++) {
+    const p = idx.page({ target: ME, isBlocked, after, limit: 7 })
+    paged.push(...p.items)
+    if (p.next === null) break
+    after = p.next
+  }
+  const { rows, incomplete } = idx.rowsFor(ME, isBlocked)
+  t.is(rows.length, 67, 'all followers except the blocked three')
+  t.is(new Set(rows.map((r) => r.key)).size, rows.length, 'no duplicates')
+  t.alike(
+    rows.map((r) => r.key).sort(),
+    paged.map((r) => r.key).sort(),
+    'same set as every page'
+  )
+  for (const r of rows) {
+    const pageRow = paged.find((p) => p.key === r.key)
+    t.alike(r, pageRow, 'row matches page ' + r.key)
+  }
+  t.absent(rows.some((r) => r.key === ME), 'target itself is absent')
+  t.absent(rows.some((r) => blocked.has(r.key)), 'blocked keys are absent')
+  t.is(incomplete, idx.page({ target: ME }).incomplete, 'incomplete mirrors page()')
+  t.alike(idx.rowsFor(ME).rows.length, 70, 'without isBlocked only self is dropped')
+
+  t.alike(idx.rowsFor(k(9999), null), { rows: [], incomplete: false }, 'no followers')
+  t.alike(idx.rowsFor('not-hex'), { rows: [], incomplete: false }, 'non-hex target')
+  t.alike(idx.rowsFor(undefined), { rows: [], incomplete: false }, 'undefined target')
+  t.is(idx.rowsFor(ME, () => { throw new Error('x') }).rows.length, 0, 'throwing isBlocked hides rows')
+  t.absent(allKeys(idx.rowsFor(ME, isBlocked)).some((key) => ['count', 'total', 'size', 'length'].includes(key)), 'no count in result')
+})
+
+test('rowsFor reports incomplete while a follower is pending or truncated', (t) => {
+  const idx = createNoticeIndex({ maxPerAuthor: 1 })
+  idx.foldFollow(k(1), 1, follow(ME, true, D(1)))
+  idx.commit(k(1))
+  idx.foldFollow(k(1), 2, follow(k(2), true, D(1)))
+  idx.commit(k(1))
+  const truncatedRes = idx.rowsFor(ME)
+  t.is(truncatedRes.incomplete, true, 'truncated')
+  t.is(truncatedRes.incomplete, idx.page({ target: ME }).incomplete)
+  t.alike(truncatedRes.rows.map((r) => r.key), [k(1)])
+
+  const pend = createNoticeIndex()
+  pend.markPending(k(5))
+  t.is(pend.rowsFor(ME).incomplete, true, 'pending')
+  t.is(pend.rowsFor(ME).incomplete, pend.page({ target: ME }).incomplete)
+})
+
 test('proof sign and verify', (t) => {
   const kp = hcrypto.keyPair()
   const other = hcrypto.keyPair()

@@ -52,7 +52,51 @@ function latestUsername (entries, memberHex, associationHex, opts) {
   return record === null ? null : record.username
 }
 
+// Upper bound on the username records heldUsernames verifies per call.
+const MAX_HELD_USERNAMES = 64
+
+// Map username -> issuer hex of every name this diary verifiably held, or an
+// empty Map. Never throws.
+//
+// For the reader's OWN diary and the seeder's bounded window only, not for a
+// per-peer feed path: it may cost up to MAX_HELD_USERNAMES verifications.
+// A name once held is never given to another member by the account service,
+// so every verified historical name still identifies this member, and a
+// renamed member keeps receiving mentions of the old name. Unlike
+// latestUsernameRecord a bad newest record does not hide an earlier good one,
+// but only the MAX_HELD_USERNAMES highest-seq shape-valid own records are
+// candidates, so junk records can push old names out of the window and never
+// make the caller pay more than that bound. Copied records naming another
+// member are dropped by the shape/member filter at no crypto cost, and
+// `opts.revokedIssuers` drops only the records of a revoked issuer.
+function heldUsernames (entries, memberHex, associationHex, opts) {
+  const held = new Map()
+  try {
+    const member = cert.normalizeHex(memberHex)
+    if (member === null) return held
+    const bySeq = new Map()
+    for (const { seq, record } of entries) {
+      if (!Number.isSafeInteger(seq) || bySeq.has(seq)) continue
+      const copy = validRecordCopy(record, seq)
+      if (copy === null || copy.type !== 'username' || copy.member !== member) continue
+      bySeq.set(seq, copy)
+    }
+    const newest = [...bySeq.keys()].sort((a, b) => b - a).slice(0, MAX_HELD_USERNAMES)
+    for (const seq of newest) {
+      const record = bySeq.get(seq)
+      // Newest first, so a name held twice maps to its newest issuer.
+      if (held.has(record.username)) continue
+      if (cert.verifyUsernameRecord(record, member, associationHex, opts).ok) held.set(record.username, record.issuer)
+    }
+    return held
+  } catch {
+    return new Map()
+  }
+}
+
 module.exports = {
+  MAX_HELD_USERNAMES,
   latestUsernameRecord,
-  latestUsername
+  latestUsername,
+  heldUsernames
 }

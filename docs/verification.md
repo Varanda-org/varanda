@@ -2109,3 +2109,60 @@ CI result on the final tree (rebased on main 60282a6), Node v24.22.1 (run from t
 - [ ] A second passkey that does not follow them sees that reply and their repost in its Espiadinha.
 - [ ] A stranger's repost of the person's post still shows to the person.
 - [ ] A lone member sees 'Ninguém para espiar ainda'.
+
+## 35. Menções e avisos de resposta, citação e menção (2026-10-28)
+
+### Summary
+
+- Shipped: `@nome` mentions in the text of a post, and notices in the Avisos tab when someone replies to, quotes or mentions the member, next to the follow notices of section 20. The row opens the conversation of that post. In-app only, hosted web only, never a count, no push.
+- Contract: `@varanda/rpc` exports `findMentions`, `mentionTokens`, `mentionSegments`, `activeMention` and `MENTION_MAX` (`packages/rpc/lib/mentions.js`, `docs/rpc.md` section 12); `notices.list` (`docs/rpc.md` 5.28) gains `kind` on each notice, `activity` on the result and a three-key cursor `{ at, key, seq }`, with no new param; the channel `'varanda/notices/2'` (`docs/protocol.md`, "Notices channel v2"); the browser read (`docs/protocol.md`, "Notices link"). No record change (a post gains no key, protocol section 2) and no new RPC method. `NOTICE_KINDS` lives in `@varanda/core` (`packages/core/lib/notices-v2.js`), not in `@varanda/rpc`.
+- Files: `packages/rpc/lib/mentions.js`, `packages/rpc/index.js`, `packages/rpc/lib/methods.js`; `packages/core/lib/notices-v2.js` (the v2 messages and proof), `packages/core/lib/notices-net.js` (`attachNoticesV2`, slot `_varandaNoticesV2`), `packages/core/lib/post-notices.js` (the post index), `packages/core/lib/username.js` (`heldUsernames`, `MAX_HELD_USERNAMES`), `packages/core/lib/seeder.js` (fold in `_runScan`, v2 page in `_attachPeer`); `packages/web-member/lib/notices.js`, `member-ops.js` (`ownNoticeContext`) and `session.js`; `apps/app/src/mentions.js`, `apps/app/src/notices.js`, `apps/app/src/ui/MentionText.js`, `apps/app/src/ui/MentionSuggest.js`, `apps/app/src/ui/PostRow.js`, `apps/app/src/ui/QuoteCard.js`, `apps/app/src/screens/Avisos.js`, `Publicar.js`, `Conversa.js`, `Membro.js`, `ARua.js`, `Diario.js`, `Espiadinha.js`, `Busca.js` and `apps/app/App.js` (`openMention`).
+- Trust model: the seeder is not trusted for facts or for kinds. A v2 item is `{ key, seq, at, kind }` and `kind` is a hint only. The browser re-reads the named signed block from the author's diary (block 0 gate, then the block `seq` with the claimed `at`) and derives the kind itself from the signed post and its own diary: a reply to or a quote of one of the member's own post blocks, else an `@nome` in the signed text naming a username the own diary verifiably held (current revoked issuers applied on every read). A post that earns none is dropped. A seeder can withhold a notice, never forge one or change its kind. A v1 proof cannot open v2 pages (different proof prefix).
+- Mentions fail closed: invisible characters are looked past, and the visible neighbour must be one of an allowlist of separators, otherwise the token is not a mention (a missed link, never a wrong notice).
+- Data flows: the post index is in memory only, separate from the follow index, rebuilt from block 1 on every serve and at start. Nothing new is stored on the device; the seen tokens are unchanged. The `@` suggestions in Publicar send the typed fragment (2 or more characters, 400 ms debounce) to the seeder's account search (`/index/search/<segment>`), as the Buscar field already does, so the association's seeder can see which names a member starts to mention, even in a draft that is never published.
+
+### Limits
+
+- Constants: `MENTION_MAX` 8 names per post; `MAX_POST_NOTICES_PER_PAIR` 32; `MAX_POST_NOTICES_PER_AUTHOR` 1024; `POST_NOTICES_MAX_EDGES` 262144; `MAX_UNRESOLVED_TOKENS_PER_AUTHOR` 64 (distinct unresolved targets); `MAX_HELD_USERNAMES` 64 (the newest username records of an author, per seeder and per reader); future rule 24 h (`MAX_FUTURE_MS`); page 30 / 64; `MAX_NOTICES_MESSAGE` 16384. Authors are bounded by the seeder's `maxServed`. @ suggestions: 5 rows, queries of 2 or more characters.
+- What evicts and what marks incomplete: the per-pair and per-author caps evict the author's own lowest-seq post whole and do NOT mark pages incomplete. The global edge cap refuses the new row and marks pages incomplete (never evicting another author). Unresolved targets beyond 64 per author are skipped silently. An author refused at `maxAuthors`, or a refusal the bounded set cannot record, keeps pages incomplete (sticky until `removeAuthor` or a restart).
+- Worst case of one `notices.list` page (64 notices, with the widest avatar): 61751 bytes against `MAX_MESSAGE` 262144 (`node packages/rpc/test/sizes.test.js`).
+- Capacity: a read is still one extra external socket (two channels on it), like a peek; a busy seeder can refuse it.
+- Known limit: a self-mention folded before the author's own username record settles can still evict that author's older rows inside the author's own budget; it never touches another author's rows, and the row is dropped once the name is verified.
+- Known limit: a mention next to an unlisted character (a letter, mark or digit of any script, or another `@`) is not linked and does not notify (fail closed).
+- Known limit: a seeder from before v2 serves follow rows only; the tab says so (`activity: false`). Native, `varanda-serve` and the CLI show the web-only text.
+- Human checks are not done yet (below).
+
+### Automated tests
+
+New test files, one per area:
+
+- `packages/rpc/test/mentions.test.js`: the grammar, the boundaries (separator allowlist, skipped invisible characters), `MENTION_MAX`, `mentionSegments`, `activeMention`.
+- `packages/core/test/notices-v2.test.js`: v2 messages, proof prefix, cursors, items, hostile input.
+- `packages/core/test/username.test.js`: `heldUsernames` and `MAX_HELD_USERNAMES`.
+- `packages/core/test/post-notices.test.js`: the post index (priority, caps, unresolved targets, name window, self-mentions, whole-post eviction, sticky incomplete, 24 h rule).
+- `packages/web-member/test/post-notices.test.js`: the browser read of reply, quote and mention notices over v2 (kind derived from the signed block, v1 fallback with `activity: false`, cursors).
+- `packages/web-member/test/post-notices-e2e.test.js`: seeder and browser node end to end on the loopback DHT.
+- `apps/cli/test/seeder-post-notices.test.js`: the seeder's fold and the v2 pages.
+- `apps/app/test/mentions.test.js`: `insertMention` and `suggestionRows`.
+
+Extended: `packages/core/test/notices.test.js`, `packages/core/test/session.test.js`, `packages/rpc/test/methods.test.js`, `packages/rpc/test/sizes.test.js`, `packages/web-member/test/notices.test.js`, `apps/app/test/notices.test.js`, `apps/cli/test/seeder-index.test.js`, `apps/cli/test/seeder-topic.test.js`.
+
+No browser pass in CI: there is no component harness, so the screens (Avisos rows, the suggestion strip, the tappable `@nome`) are covered only by the pure helper tests and the checklist below. The final CI result (lint, tests, demo) is the orchestrator's and is not repeated here.
+
+### Human verification
+
+None of these was performed for this change. Use two hosted accounts, A and B, in two browsers against a seeder with the change.
+
+- [ ] Publicar, hosted web, online: typing `@` and 2 letters shows the suggestion strip with up to 5 verified members; tapping one writes `@nome ` at the caret without a double space. Offline, on native and with the sheet closed there is no strip.
+- [ ] A publishes a post that says `@b`. In A Rua, in Conversa and in a quote card, `@b` is a link; tapping it (and Enter or Space from the keyboard) opens B's profile and does NOT open the thread. A tap on the rest of the text still opens the thread.
+- [ ] Tapping a name that nobody holds shows the not-found message; offline it says "Sem conexão para abrir o @nome."
+- [ ] B (page visible, or after opening the app) sees the dot on Avisos with no number; the row says "<A> mencionou você"; tapping it opens the conversation.
+- [ ] A replies to a post of B: the row says "<A> respondeu à sua publicação". A quotes it: "<A> citou sua publicação". A post that replies and mentions B shows one row, as a reply.
+- [ ] B follows A back from the follow row: the follow row leaves, the reply, quote and mention rows of A stay.
+- [ ] B renames to another @nome; a later post of A that mentions the OLD name still notifies B.
+- [ ] A mentions A's own name: no notice for A. A text like `x@b` or `@b1é` is not linked and notifies nobody.
+- [ ] The operator blocks A: A's rows are gone on B's next load.
+- [ ] Nowhere in the app is there a count of mentions, replies or followers.
+- [ ] Native app and `varanda-serve`: the Avisos tab shows the web-only text, mentions are plain text, no `notices.list` call.
+- [ ] A seeder with only `varanda/notices/1`: the follow rows show and the quiet line "O semeador desta associação ainda só envia avisos de quem seguiu você." appears.
+- [ ] The seeder log shows no new route, no key and no text of a post.

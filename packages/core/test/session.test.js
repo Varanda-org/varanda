@@ -316,6 +316,8 @@ test('notices.list is refused by the node session (USAGE), nothing opened or wri
   const before = await m.call('log.read')
   t.alike(await failure(m.call('notices.list', {})), NO, 'after an identity')
   t.alike(await failure(m.call('notices.list', { limit: 5 })), NO, 'with a limit')
+  const at = '2026-10-24T12:00:00.000Z'
+  t.alike(await failure(m.call('notices.list', { limit: 5, after: { at, key: 'ab'.repeat(32), seq: 1 } })), NO, 'with a 3-key cursor')
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })

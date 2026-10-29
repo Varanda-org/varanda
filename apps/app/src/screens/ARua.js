@@ -551,8 +551,9 @@ export function useSocial ({ ownKey, onToast }) {
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport } (each
-// optional). A repost passes the ORIGINAL as `post` and `repostedBy`.
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport } (each
+// optional; onOpenMention(username, { author, username }) gets the row author's verified
+// name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
   const prof = profileOf(post.author) || null
   const name = post.name || (prof ? prof.name : null) || null
@@ -576,7 +577,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       hasQuote: !!(q && q.quote),
       onOpen: q === undefined && social.transient(quoteRef)
         ? () => social.retry(quoteRef)
-        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined
+        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined,
+      onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.quote.author, username: quote.username }) : undefined
     }
   }
   const s = social.social
@@ -614,6 +616,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     pending: s.pending.get(ref) || null,
     onOpen: typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref, seed: post }) : undefined,
     onOpenAuthor: typeof h.onOpenMember === 'function' ? () => h.onOpenMember(post.author, { name, username }) : undefined,
+    onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.author, username }) : undefined,
     onOpenParent: parentRef !== null && typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: parentRef }) : undefined,
     onOpenReposter: repostedBy && typeof h.onOpenMember === 'function' && repostedBy.author !== own
       ? () => h.onOpenMember(repostedBy.author, { name: repostedBy.name, username: repostedBy.username })
@@ -729,7 +732,7 @@ function pageNeeds (pageItems) {
   return { local, shown, need, parents: [...parents], authors }
 }
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenEngagers, onQuote, onToast }) {
+export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -912,7 +915,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // Reply names re-render when the cache changes; relative dates on each tick.
   // Originals, counts and the own state re-render the rows too.
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social }), [names.profileOf, now, social.social])
-  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   const renderItem = ({ item }) => {

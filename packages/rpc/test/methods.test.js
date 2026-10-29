@@ -554,6 +554,20 @@ test('notices.list after', (t) => {
   bad(t, 'notices.list', { after, x: 1 })
 })
 
+test('notices.list after with seq', (t) => {
+  const after = { at: '2026-10-24T12:00:00.000Z', key: KEY }
+  ok(t, 'notices.list', { limit: 5, after: { ...after, seq: 1 } }, { limit: 5, after: { ...after, seq: 1 } })
+  ok(t, 'notices.list', { after: { ...after, seq: Number.MAX_SAFE_INTEGER } }, { limit: 30, after: { ...after, seq: Number.MAX_SAFE_INTEGER } })
+  ok(t, 'notices.list', { after }, { limit: 30, after })
+  bad(t, 'notices.list', { after: { ...after, seq: 0 } }, 'seq 0')
+  bad(t, 'notices.list', { after: { ...after, seq: -1 } }, 'seq -1')
+  bad(t, 'notices.list', { after: { ...after, seq: 1.5 } }, 'seq 1.5')
+  bad(t, 'notices.list', { after: { ...after, seq: '1' } }, 'string seq')
+  bad(t, 'notices.list', { after: { ...after, seq: 1, kind: 'x' } }, '4 keys')
+  bad(t, 'notices.list', { after: { ...after, x: 1 } }, '2 keys plus an extra key')
+  bad(t, 'notices.list', { after: { at: after.at, seq: 1 } }, 'seq without key')
+})
+
 test('profile.read', (t) => {
   t.absent(isMutating('profile.read'))
   ok(t, 'profile.read', { authors: [KEY] }, { authors: [KEY] })

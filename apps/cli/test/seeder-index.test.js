@@ -25,6 +25,7 @@ const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord } 
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
+const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
 const { startSeedWs } = require('../lib/seed-ws')
 const http = require('node:http')
 
@@ -155,8 +156,9 @@ function scanFixture (options = {}) {
   const { maxServed, ...indexOptions } = options
   Object.assign(seeder, {
     _index: createEngagementIndex({ ...indexOptions, onFreed: () => seeder._scheduleIndexResume() }),
-    // _drop also leaves the follow-notices index (seeder.js).
+    // _drop also leaves the follow and post notices indexes (seeder.js).
     _notices: createNoticeIndex(),
+    _postNotices: createPostNoticeIndex(),
     // The topic search scan is stubbed out: a second reader would steal the
     // reads holdIndexRead holds (apps/cli/test/seeder-topic.test.js covers it).
     _topics: { removeDiary () { return false }, stats () { return { posts: 0, saturated: false } } },

@@ -312,7 +312,7 @@ export function identityOf (names, author, item) {
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport } = handlers
+  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -322,7 +322,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     const q = peeked ? postAt(peeked, qref) : null
     if (q) {
       const qwho = identityOf(names, q.author, q)
-      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }) }
+      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }), onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
     } else {
       quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
     }
@@ -348,6 +348,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     pending: eng && eng.pending.has(ref) ? eng.pending.get(ref) : null,
     onOpen: hasSeq ? () => onOpenThread({ ref, seed: item }) : undefined,
     onOpenAuthor: () => onOpenMember(item.author, who),
+    onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: item.author, username: who.username }) : undefined,
     onOpenParent: parentRef ? () => onOpenThread({ ref: parentRef }) : undefined,
     onOpenReposter: undefined,
     onReply: hasSeq && typeof onReply === 'function' ? () => onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
@@ -407,7 +408,7 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenEngagers, onToast }) {
+export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -536,7 +537,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     return () => { genRef.current += 1 }
   }, [full, load, loadFollows])
 
-  const handlers = { onOpenThread, onOpenMember, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
