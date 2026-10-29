@@ -972,7 +972,8 @@ test('equivocation without truncation: two writable copies of one key are droppe
   await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 3, 'have 3')
 
   // The second copy was never truncated: it just holds another, longer history.
-  const twin = await client(t, bootstrap, assoc, { blocks: validBlocks(assoc), primaryKey })
+  const twinBlocks = (key) => [memberCertRecord(validCert(assoc, key)), post('um, de outro jeito'), post('dois, de outro jeito')]
+  const twin = await client(t, bootstrap, assoc, { blocks: twinBlocks, primaryKey })
   t.is(twin.key, author.key, 'the second copy holds the same key')
   await twin.core.append(post('versão do gêmeo'))
   t.is(twin.core.length, author.core.length + 1, 'the second copy has another, longer history')
