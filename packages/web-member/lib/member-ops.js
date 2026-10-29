@@ -67,7 +67,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
-const { applyDeletes, deletedSeqs, liveMediaRefs, overlaps } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -339,18 +339,85 @@ function existingTombstone (raw, deleted, targets) {
   return last
 }
 
+// The tombstone that deleted `seq` and, for a profile, the other half of a
+// compat pair, when the target block itself is already cleared and cannot be
+// read. The pair writer appends both tombstones in one append, in seq order
+// and with one `at`, so only consecutive tombstones of seq n then n + 1
+// carrying the same `at` are taken as one pair; two separate deletions of
+// adjacent versions stay apart (same rule as @varanda/core member.js).
+function clearedTargets (raw, deleted, seq, kind) {
+  const own = existingTombstone(raw, deleted, [seq])
+  if (kind !== 'profile' || own === null) return [seq]
+  const tomb = (i) => {
+    const copy = deleted.has(i) ? null : recordAt(raw, i)
+    return copy !== null && copy.type === 'delete' ? copy : null
+  }
+  const ownCopy = tomb(own)
+  const next = tomb(own + 1)
+  if (next !== null && next.seq === seq + 1 && next.at === ownCopy.at) return [seq, seq + 1]
+  const prev = tomb(own - 1)
+  if (prev !== null && prev.seq === seq - 1 && prev.at === ownCopy.at) return [seq - 1, seq]
+  return [seq]
+}
+
+// Clears what a deletion hides on this device: the targeted diary blocks
+// and the tombstones' media ranges on every stored own media core (this
+// device's and other devices' replicated read-only) whose header names the
+// diary. No media key is needed to clear. Best effort: the tombstone is
+// already appended, and the next sync clears again.
+async function clearAfterDelete (ctx, diary, ownHex, targets, records) {
+  if (ctx.noClear === true) return
+  try {
+    await clearDeleted(diary, targets)
+  } catch {}
+  const byCore = new Map()
+  for (const r of records) {
+    for (const m of Array.isArray(r.media) ? r.media : []) {
+      if (!byCore.has(m.core)) byCore.set(m.core, [])
+      byCore.get(m.core).push({ start: m.start, blocks: m.blocks })
+    }
+  }
+  if (byCore.size === 0) return
+  let stored = []
+  try {
+    stored = await store.readMediaCores(ctx.storage)
+  } catch {}
+  for (const key of stored) {
+    if (!byCore.has(key)) continue
+    let core = null
+    try {
+      core = await store.openMediaCoreReadOnly(ctx.storage, key)
+      if (core === null || core.length < 1 || !(await core.has(0))) continue
+      const header = decodeBlock(await core.get(0, { wait: false }))
+      if (header === null || validateMediaHeader(header) !== null || header.diary !== ownHex) continue
+      await store.clearMediaRanges(core, byCore.get(key))
+    } catch {} finally {
+      if (core !== null) await core.close().catch(() => {})
+    }
+  }
+}
+
 // Tombstones for the caller's own post or profile block `to` -> { seq, ref,
 // changed, deleted } (docs/rpc.md 5.33, 5.34). A compat pair is one version:
-// both tombstones go in one append. A target already deleted writes nothing.
-// Media ranges are only the target's descriptors in a core the diary
-// declared that no surviving own post or profile overlaps; no media core is
-// opened, so an avatar in another device's core needs no media key.
+// both tombstones go in one append. A target already deleted writes nothing,
+// even once its block was cleared. Media ranges are only the target's
+// descriptors in a core the diary declared that no surviving own post or
+// profile overlaps; after the append the targets and those ranges are
+// cleared on this device (clearAfterDelete).
 async function recordDelete (ctx, kind, { to }) {
   const rules = DELETE_KINDS[kind]
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
     const raw = await store.readRaw(diary)
+    if (to.seq < raw.length && raw[to.seq].record === null) {
+      const gone = deletedSeqs(raw)
+      if (gone.has(to.seq)) {
+        const targets = clearedTargets(raw, gone, to.seq, kind)
+        const seq = existingTombstone(raw, gone, targets)
+        return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
+      }
+    }
     const target = recordAt(raw, to.seq)
     if (target === null) throw new UsageError('referência inválida')
     if (target.type === rules.other) throw new UsageError(rules.wrong)
@@ -368,15 +435,18 @@ async function recordDelete (ctx, kind, { to }) {
     }
     const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
     const live = liveMediaRefs(raw, targets)
+    // One `at` for the whole append marks the tombstones of a pair as one.
+    const at = nowIso()
     const records = pending.map((seq) => {
       const media = descriptorsOf(recordAt(raw, seq))
         .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
         .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
-      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, media } : { seq }))
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
     const seq = records.length === 1
       ? await appendOwn(ctx, diary, records[0])
       : await store.appendRecords(diary, records, ctx.limits)
+    await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
 }
@@ -600,21 +670,24 @@ async function ownEntries (ctx) {
 // the own diary verifiably held (username -> issuer, NOT filtered by the
 // revoked issuers, which the reader applies on every read so a cached
 // context never outlives a revocation) and the seqs of its post blocks.
-// -> { key, contiguousLength, length, names, posts }. `cache` (a previous
-// result or null) is returned as is while the own key and both lengths are
-// unchanged: readAll reads up to contiguousLength only.
+// -> { key, present, length, deleted, names, posts }. `cache` (a previous
+// result or null) is returned as is while the own key, the length and the
+// present length (walked with the cached deleted set) are unchanged:
+// readAll reads up to the present length only.
 async function ownNoticeContext (ctx, cache = null) {
   return withIdentity(ctx, async ({ diary, ownHex, association }) => {
-    if (cache !== null && cache.key === ownHex && cache.contiguousLength === diary.contiguousLength && cache.length === diary.length) return cache
-    const contiguousLength = diary.contiguousLength
+    if (cache !== null && cache.key === ownHex && cache.length === diary.length &&
+        cache.present === await presentLength(diary, cache.deleted)) return cache
     const length = diary.length
     const entries = await store.readAll(diary)
     const posts = new Set()
-    for (const { seq, record } of entries) {
+    const deleted = new Set()
+    for (const { seq, record, deleted: gone } of entries) {
+      if (gone === true) deleted.add(seq)
       const copy = validRecordCopy(record, seq)
       if (copy !== null && copy.type === 'post') posts.add(seq)
     }
-    return { key: ownHex, contiguousLength, length, names: heldUsernames(entries, ownHex, association), posts }
+    return { key: ownHex, present: entries.length, length, deleted, names: heldUsernames(entries, ownHex, association), posts }
   })
 }
 
@@ -872,7 +945,7 @@ async function readReplica (ctx, key) {
   let empty
   try {
     entries = await store.readAll(replica)
-    empty = replica.contiguousLength === 0
+    empty = entries.length === 0
   } finally {
     await replica.close()
   }
@@ -950,8 +1023,8 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     try {
       entries = await store.readAll(replica)
       reason = skipReason(replica, entries, key, association, mod)
-      empty = replica.contiguousLength === 0
-      behind = replica.length > replica.contiguousLength
+      empty = entries.length === 0
+      behind = replica.length > entries.length
     } finally {
       await replica.close()
     }
@@ -980,7 +1053,7 @@ async function admittedEntries (ctx, key, association, mod) {
   try {
     entries = await store.readAll(replica)
     reason = skipReason(replica, entries, key, association, mod)
-    empty = replica.contiguousLength === 0
+    empty = entries.length === 0
   } finally {
     await replica.close()
   }

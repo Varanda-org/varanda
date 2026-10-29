@@ -445,8 +445,9 @@ test('a revoked issuer purges the unfollowed and failed replicas it certified', 
   }
 
   // 2. Bob unfollows Dana (her replica stays stored) and runs with a quota
-  //    Fay is over (her active replica keeps its blocks, follow failed). A
-  //    snapshot revoking the issuer then purges both, and only them.
+  //    Fay is over (her active replica keeps its blocks, follow failed).
+  //    Sync startup already purges the unfollowed replica; a snapshot
+  //    revoking the issuer then purges Fay, and nothing else.
   {
     writeFollows(bob.dir, [fay.key, gus.key])
     t.ok(await stored(bob.dir, dana.key), 'the unfollowed replica is still stored')
@@ -469,7 +470,8 @@ test('a revoked issuer purges the unfollowed and failed replicas it certified', 
     })
     t.teardown(() => controller.abort(), { force: true })
     await until(() => events.some((ev) => ev.event === 'skipped' && ev.key === fay.key && ev.reason === 'quota'), { timeoutMs: 30000, name: 'Fay fails on quota' })
-    t.is(purged.length, 0, 'nothing purged before the revocation (a quota failure keeps the blocks)')
+    await until(() => purged.includes(dana.key), { timeoutMs: 30000, name: 'startup purge of the unfollowed replica' })
+    t.alike(purged, [dana.key], 'before the revocation only the unfollowed replica is purged (a quota failure keeps the blocks)')
 
     const moderator = await rawNode(t, bootstrap, association, { blocklist: () => revoke })
     await until(() => storedSeq(bob.dir) === 1, { timeoutMs: 30000, name: 'Bob stores the revocation' })

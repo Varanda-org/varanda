@@ -48,6 +48,30 @@ export function avatarKey (author, d) {
   return String(author).toLowerCase() + ':' + FIELDS.map((k) => d[k]).join(':')
 }
 
+const HEX64 = /^[0-9a-f]{64}$/
+
+function canonicalInt (s) {
+  if (typeof s !== 'string' || !/^[0-9]+$/.test(s)) return null
+  const n = Number(s)
+  return Number.isSafeInteger(n) ? n : null
+}
+
+// The { core, start, blocks } an avatarKey names, or null. Deletion drops a
+// cached photo by that interval (cache.js), so the author and the hash do
+// not have to match the post-photo key format.
+export function avatarKeyRange (key) {
+  if (typeof key !== 'string') return null
+  const parts = key.split(':')
+  if (parts.length !== FIELDS.length + 1) return null
+  const core = parts[1 + FIELDS.indexOf('core')]
+  const mime = parts[1 + FIELDS.indexOf('mime')]
+  if (!HEX64.test(core) || !AVATAR_MIMES.includes(mime)) return null
+  const start = canonicalInt(parts[1 + FIELDS.indexOf('start')])
+  const blocks = canonicalInt(parts[1 + FIELDS.indexOf('blocks')])
+  if (start === null || start < 0 || blocks === null || blocks < 1) return null
+  return { core, start, blocks }
+}
+
 const be16 = (b, i) => (b[i] << 8) | b[i + 1]
 const le16 = (b, i) => b[i] | (b[i + 1] << 8)
 const le24 = (b, i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16)

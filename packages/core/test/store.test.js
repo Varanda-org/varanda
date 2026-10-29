@@ -502,6 +502,43 @@ test('readAll reports a deleted block as record null with deleted true', async (
   t.alike(raw[1], { seq: 1, record: postRecord({ text: 'some', at: AT }) }, 'readRaw leaves the deleted block as written')
 })
 
+test('readAll reads past a cleared deleted block and stops at a hole nothing deleted', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  const s = await open(t, dir)
+  const diary = await store.openDiary(s)
+  const hex = b4a.toString(diary.key, 'hex')
+  await store.appendRecord(diary, memberCertRecord(certFixture(hex)))
+  await store.appendRecord(diary, postRecord({ text: 'some', at: AT }))
+  await store.appendRecord(diary, postRecord({ text: 'fica', at: AT }))
+  await store.appendRecord(diary, deleteRecord({ seq: 1, at: AT }))
+  await store.appendRecord(diary, postRecord({ text: 'depois', at: AT }))
+  await diary.clear(1)
+  t.is(diary.contiguousLength, 1)
+
+  const entries = await store.readAll(diary)
+  t.is(entries.length, 5, 'the cleared block does not hide later ones')
+  t.alike(entries[1], { seq: 1, record: null, deleted: true })
+  t.is(entries[4].record.text, 'depois')
+  const raw = await store.readRaw(diary)
+  t.is(raw.length, 5)
+  t.alike(raw[1], { seq: 1, record: null }, 'readRaw has a cleared block as record null')
+
+  await store.appendRecord(diary, postRecord({ text: 'mais', at: AT }))
+  await s.closeOnce()
+  const again = await open(t, dir)
+  const reopened = await store.openDiary(again)
+  const after = await store.readAll(reopened)
+  t.is(after.length, 6, 'the hole survives a reopen without hiding anything')
+  t.alike(after[1], { seq: 1, record: null, deleted: true })
+  t.is(after[5].record.text, 'mais')
+
+  await reopened.clear(2)
+  const stopped = await store.readAll(reopened)
+  t.is(stopped.length, 2, 'a hole no tombstone covers ends the entries')
+  t.alike(stopped.map((e) => e.seq), [0, 1])
+})
+
 test('appendRecords appends 1..8 records in one atomic append', async (t) => {
   await testnet(t)
   const s = await open(t, tmpDir(t))

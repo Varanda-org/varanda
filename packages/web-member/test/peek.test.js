@@ -20,7 +20,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -1297,5 +1297,27 @@ test('avatar: a retained compat pair reaches every page while an unseen pair pre
     t.is(item.name, visible ? 'New name' : 'Block 2')
     t.alike(item.avatar, visible ? avatar : null)
   }
+  t.alike(internal, [])
+})
+
+test('regression: a head tombstone that times out never lets the profile it deletes show, nor reads as fetched', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const A = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name: 'Antigo', bio: '' }),
+    () => deleteRecord({ seq: 1 }),
+    () => postRecord({ text: 'a 1' }),
+    () => postRecord({ text: 'a 2' })
+  ])
+  // The seeder no longer holds the tombstone: its get times out.
+  await A.clear(2)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs: 1000 } })
+  const page = await web.request('peek.read', { limit: 5 })
+  t.ok(page.items.length >= 1, 'the posts still show')
+  for (const item of page.items) t.is(item.name, null, 'the deleted profile never names the diary')
+  t.is(page.incomplete, true, 'the unread head block leaves the page incomplete')
+  t.absent(seeder.uploads.some((u) => u.seq === 1), 'the block below the unread tombstone is never fetched')
   t.alike(internal, [])
 })

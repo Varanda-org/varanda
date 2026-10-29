@@ -200,7 +200,17 @@ function scanFixture (options = {}) {
       stopQuota: () => {},
       gated: true,
       dropped: false,
-      core: { contiguousLength: length + 1, get: async (seq) => Buffer.from(JSON.stringify(recordAt(seq))) }
+      // Every block is local: the present length follows contiguousLength,
+      // which the tests raise by hand.
+      get present () { return this.core.contiguousLength },
+      set present (v) {},
+      gone: new Set(),
+      core: {
+        contiguousLength: length + 1,
+        get length () { return this.contiguousLength },
+        async has (seq) { return seq < this.contiguousLength },
+        get: async (seq) => Buffer.from(JSON.stringify(recordAt(seq)))
+      }
     }
     seeder._served.set(key, entry)
     seeder._admitted.set(key, true)
@@ -309,7 +319,7 @@ test('re-admission rebuild: restores incoming engagements and repost timelines w
 function scannable (seeder, entry) {
   seeder._media = new Map()
   seeder._topics.removePost = () => false
-  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false })
+  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false, gone: new Set(), excluded: new Set(), arrived: new Set(), mediaStart: new Map(), tombMedia: new Map(), tombMax: -1, tombNew: [], irrDirty: true, irrMemo: null, clearedEffective: null })
   return entry
 }
 

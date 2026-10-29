@@ -97,6 +97,20 @@ function bySeq (list) {
 }
 
 test('a follower stops showing deleted posts; a foreign tombstone changes nothing; an undo is deterministic', async (t) => {
+  await deletionScenario(t, { clearing: true })
+})
+
+test('with byte clearing off (VARANDA_NO_CLEAR=1), an undone deletion brings the post back', async (t) => {
+  const before = process.env.VARANDA_NO_CLEAR
+  process.env.VARANDA_NO_CLEAR = '1'
+  t.teardown(() => {
+    if (before === undefined) delete process.env.VARANDA_NO_CLEAR
+    else process.env.VARANDA_NO_CLEAR = before
+  }, { order: Infinity })
+  await deletionScenario(t, { clearing: false })
+})
+
+async function deletionScenario (t, { clearing }) {
   t.timeout(300000)
   const { bootstrap } = await testnet(t)
   const assoc = association(t)
@@ -145,17 +159,25 @@ test('a follower stops showing deleted posts; a foreign tombstone changes nothin
 
   // A tombstone of a tombstone: the writer never emits it, and a replica that
   // folds it makes the first tombstone ineffective, as on the author's node.
+  // With clearing on, the post's bytes are already gone everywhere, so it
+  // stays absent, and the hole never hides the blocks after it.
   t.alike(await failure(a.call('post.delete', { to: d1.ref })), NOT_DELETABLE, 'the writer refuses to delete a tombstone')
   t.is(await appendDirect(a.dataDir, [deleteRecord({ seq: d1.seq })]), 9)
-  t.alike(postTexts(await a.call('feed.read'), a.publicKey), [[2, 'um'], [5, 'fica']], 'the post is back on the author\'s node')
+  const after = await a.call('post.create', { text: 'depois' })
+  t.is(after.seq, 10)
+  const shown = clearing ? [[5, 'fica'], [10, 'depois']] : [[2, 'um'], [5, 'fica'], [10, 'depois']]
+  t.alike(postTexts(await a.call('feed.read'), a.publicKey), shown, clearing ? 'the cleared post stays absent on the author\'s node, later posts stay visible' : 'the post is back on the author\'s node')
   await syncOnce(t, a, 'author sync after undo')
-  await followerSync(t, b, a.publicKey, 10, 'follower sync after undo')
-  t.alike(postTexts(await b.call('feed.read'), a.publicKey), [[2, 'um'], [5, 'fica']], 'and on the follower')
+  await followerSync(t, b, a.publicKey, 11, 'follower sync after undo')
+  t.alike(postTexts(await b.call('feed.read'), a.publicKey), shown, 'and on the follower')
   const undone = await b.call('log.read', { author: a.publicKey })
-  t.alike(bySeq(undone.invalid), [3, 4, 6].map((seq) => ({ seq, reason: 'deleted' })), 'the undone tombstone is the deleted slot now')
+  const slots = [3, 4, 6].map((seq) => ({ seq, reason: 'deleted' }))
+  if (clearing) slots.unshift({ seq: 2, reason: 'malformed' })
+  t.alike(bySeq(undone.invalid), slots, clearing ? 'the undone tombstone is the deleted slot now, the revived seq has no record' : 'the undone tombstone is the deleted slot now')
+  t.ok(undone.entries.some((e) => e.seq === 10), 'the follower reads past the revived seq')
 
   for (const m of [a, b, c]) t.alike(m.session.internal, [], 'no internal error')
-})
+}
 
 test('a truncated author diary is still a fork on the follower', async (t) => {
   t.timeout(300000)

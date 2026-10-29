@@ -76,7 +76,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -134,6 +134,22 @@ function noop () {}
 
 function key8 (hex) {
   return String(hex).slice(0, 8)
+}
+
+// The seq a valid tombstone at `seq` deletes, or null.
+function tombstoneTarget (record, seq, length) {
+  const copy = validRecordCopy(record, seq)
+  return copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length ? copy.seq : null
+}
+
+// The targets of the retained tombstones of a diary.
+function deletedTargets (records, length) {
+  const out = new Set()
+  for (const { seq, record } of records) {
+    const target = tombstoneTarget(record, seq, length)
+    if (target !== null) out.add(target)
+  }
+  return out
 }
 
 function overQuota (core) {
@@ -522,18 +538,33 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       // PEEK_PARALLEL blocks. The blocks are buffered in `got` until the
       // window is accepted.
       const got = []
+      const absent = []
+      const gone = deletedTargets(diary.records, diary.length)
       let hole = false
       for (const seq of seqs) {
         if (ctx.cut()) break
+        // A block a tombstone already read deleted (the window is read
+        // highest seq first, so the tombstone comes before its target) is
+        // never asked for: seeders clear it, and a get would only wait for
+        // the timeout. It counts as fetched, absent.
+        if (gone.has(seq)) {
+          absent.push(seq)
+          continue
+        }
         let raw
         const t = timeout()
         try {
           raw = await q.get(seq, { raw: true, timeout: t })
         } catch {
+          const timedOut = !run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs
           // A hole the seeder left: the window is never extended past it.
           // A get ended by the budget cut, a lost link or the page deadline
-          // (a timeout shorter than the fetch timeout) is not one.
-          if (!run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs) hole = true
+          // (a timeout shorter than the fetch timeout) is not one. A head
+          // block too: only a block a tombstone already read deleted counts
+          // as absent (above); any other one may be a live profile or the
+          // tombstone of the block below it, so it is never cached as
+          // fetched and nothing below it is read.
+          if (timedOut) hole = true
           break
         }
         if (!charge(run, raw)) {
@@ -552,10 +583,14 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
           changed(diary, ctx)
           return
         }
-        got.push({ seq, record: decodeBlock(raw) })
+        const record = decodeBlock(raw)
+        got.push({ seq, record })
+        const target = tombstoneTarget(record, seq, diary.length)
+        if (target !== null) gone.add(target)
       }
       if (hole) diary.failed = true
       for (const e of got) diary.seqs.add(e.seq)
+      for (const seq of absent) diary.seqs.add(seq)
       setRecords(snap, diary, got)
       // The signed length and byteLength advance on upgrade.
       if (q.fork !== 0) diary.fail = 'fork'

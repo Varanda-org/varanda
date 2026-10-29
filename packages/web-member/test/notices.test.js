@@ -16,7 +16,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, followRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, followRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachNotices, PROTOCOL } = require('@varanda/core/lib/notices-net')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -672,5 +672,32 @@ test('avatar: notices carry the retained profile and preserve the block 2 name w
   first.notices[0].avatar.start = 99
   t.alike(withoutSeen(t, await web.request('notices.list', {})), expected, 'cached evidence produces a fresh avatar')
   t.alike(state.cores.map((core) => core.uploads), uploads, 'the second read uses cached evidence')
+  t.alike(internal, [])
+})
+
+test('regression: a head tombstone that times out never lets the profile it deletes name the row, and is never cached', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { notices: { blockTimeoutMs: 1000 } })
+  const follow = followRecord({ key: me, on: true })
+  const A = await diary(t, [
+    certOf(assoc),
+    () => profileRecord({ name: 'Antigo', bio: '' }),
+    () => deleteRecord({ seq: 1 }),
+    () => follow
+  ])
+  // The seeder no longer holds the tombstone: its get times out.
+  await A.clear(2)
+  state.cores = [A]
+  state.page = () => ({ items: [{ key: hex(A.key), seq: 3, at: follow.at }], next: null, incomplete: false })
+  const first = await web.request('notices.list', {})
+  t.alike(first.notices.map((n) => [n.key, n.name]), [[hex(A.key), null]], 'the row stands without the deleted profile')
+  t.is(first.incomplete, true, 'the unread head block leaves the read incomplete')
+  const uploads = A.uploads
+  const second = await web.request('notices.list', {})
+  t.alike(second.notices.map((n) => [n.key, n.name]), [[hex(A.key), null]])
+  t.ok(A.uploads > uploads, 'the evidence was not cached: the second read fetched again')
   t.alike(internal, [])
 })

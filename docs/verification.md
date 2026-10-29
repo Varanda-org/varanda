@@ -1875,7 +1875,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
 - [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
 - [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
-- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (6, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (7, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
 - [ ] Recomeçar tira o membro do registro; Sair não.
 - [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
 
@@ -2517,3 +2517,44 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Apagar não remove os bytes: quem já tem cópia do diário, ou da foto, continua com ela; a lápide só diz aos clientes e ao semeador que o bloco não vale mais.
 - Uma lápide que aponta para outra lápide desfaz a primeira. O escritor nunca grava isso; só o próprio autor, escrevendo à mão, consegue, e o efeito vale só para o diário dele.
 - O semeador não aplica nesta etapa lápides que apontam para `follow` ou para a declaração de núcleo de mídia (os escritores nunca as gravam).
+
+## 42. Descarte dos bytes apagados (PR feat/delete-posts-purge, 2026-10-29)
+
+### O que mudou
+
+- Os bytes de um bloco apagado são descartados (`core.clear`) no aparelho do autor, em quem segue, no semeador e no nó do navegador. Só se descarta o que a dobra dos leitores esconde (`deletedSeqs` / `applyDeletes` em `packages/core/lib/deletion.js`); o bloco 0 e as lápides nunca são descartados. As faixas de mídia da lápide saem do núcleo de mídia, menos o cabeçalho e o que uma publicação sobrevivente ainda mostra.
+- O comprimento presente (primeiro buraco que não é bloco apagado) substitui o `contiguousLength` como valor em `hello`, `have` e `admitted`; o formato das mensagens não muda. Um buraco apagado não segura o comprimento, e o bloco descartado nunca é baixado de novo de um par desatualizado.
+- Na partida, o semeador e o nó descartam o que as lápides guardadas apagam antes de servir ou baixar qualquer coisa. Uma réplica que deixou de ser seguida é removida.
+- Chave de emergência: `VARANDA_NO_CLEAR=1` (ou `noClear`) guarda os bytes como antes; a lápide continua escondendo o item.
+
+### Testes automatizados
+
+- Descarte no motor e no armazenamento: `packages/core/test/clear.test.js`, `packages/web-member/test/node-storage.test.js`.
+- Escritor e sincronização do nó do núcleo (par desatualizado, chave de emergência, réplica não seguida, seguidor novo): `packages/core/test/sync-delete.test.js`, `delete-session.test.js`, `store.test.js`, `sync.test.js`.
+- Semeador (descarte, partida, `mediaRead`, lápide de lápide): `packages/core/test/seeder-delete.test.js`; `apps/cli/test/seeder-index.test.js`, `seed-ws.test.js`.
+- Nó do navegador (escritor, reabertura, sincronização sem reabastecer o buraco): `packages/web-member/test/delete-purge.test.js`, `delete.test.js`.
+- Ponta a ponta, novo: `packages/core/test/delete-purge-e2e.test.js` (sessões do nó, semeador real e um par cru desatualizado na DHT local). Depois de `post.delete` e das sincronizações, o bloco some do semeador e de quem segue (`has` falso; uma réplica crua nova pede o bloco e não recebe nada, e como controle recebe o mesmo bloco do par desatualizado). Reiniciados o semeador e a sessão de quem segue, cada um sozinho continua servindo os blocos seguintes e a lápide e não serve o bloco apagado. O par desatualizado volta com o bloco, o autor escreve de novo, e nem o semeador nem quem segue buscam o bloco de volta. Um seguidor novo, com o autor fora da rede, sincroniza pelo semeador e pelo par desatualizado e fica sem o bloco depois da varredura. Uma lápide forjada (no diário de outro membro, apontando para o seq do autor e inválida lá) não apaga nem descarta nada. Um diário de teste truncado continua sendo `fork` no semeador (`rejected` com `fork`) e em quem segue. Com `VARANDA_NO_CLEAR=1` o semeador e quem segue guardam os bytes e o item continua escondido (`postBlock` null, `feed.read` sem ele).
+- Ponta a ponta, novo: `packages/web-member/test/e2e-delete-purge.test.js` (nó do navegador sobre o IndexedDB de teste e semeador real pelo WebSocket). Apagada uma publicação com foto de três blocos, o semeador descarta o bloco do post e os três blocos da foto e guarda o cabeçalho e a outra foto; `mediaRead` recusa a faixa, um bloco dentro dela e faixas que a cruzam; GET e HEAD `/media` dão 404 para essas faixas e 200 para a foto que fica; a Espiadinha de outro nó não mostra o post. Depois de recarregar o nó (armazenamento fechado e reaberto, sincronização de novo), o buraco continua no navegador e no semeador.
+- A lápide de lápide com bytes já descartados não traz nada de volta: o post fica ausente no autor e em quem segue, e os blocos seguintes continuam visíveis (`packages/core/test/delete-e2e.test.js`, primeiro teste; `seeder-delete.test.js`, "a post a later tombstone gives back stays absent once cleared").
+
+Resultados (2026-10-29, macOS, rodados um a um): `node packages/core/test/delete-purge-e2e.test.js` com 3 testes e 76 asserções, todos passam, no Node 24.22.1 e no 20.20.2; `node packages/web-member/test/e2e-delete-purge.test.js` com 1 teste e 34 asserções, passa no Node 24.22.1 e no 20.20.2. Com `VARANDA_NO_CLEAR=1` no ambiente, o teste do navegador falha (o semeador não descarta), como esperado. A sequência completa da CI (`npm ci --ignore-scripts`, lint, test, demo) ainda não foi registrada aqui para esta PR.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Ordem de implantação: semeadores primeiro, depois o pacote web, depois o app, por último a CLI. Leitores anteriores a esta PR veem o diário cortado no primeiro buraco; conferir que cada etapa só entra depois da anterior estar no ar (não realizada ainda).
+- [ ] Semeador de produção: apagar uma publicação com foto no app; depois da sincronização, `/media/...` da foto dá 404 em GET e em HEAD, e o diretório de dados do semeador, depois de um reinício, continua sem servir o bloco (não realizada ainda).
+- [ ] Reinício do semeador com `VARANDA_NO_CLEAR=1` e depois sem: com a chave, os bytes ficam e o item continua escondido; sem a chave, o reinício descarta os bytes antes de servir (não realizada ainda).
+- [ ] Um aparelho com o app desatualizado (anterior a esta PR) que já tinha a publicação volta a se conectar: o semeador e os aparelhos atualizados não buscam o bloco de volta, e o app desatualizado mostra o diário do autor só até o primeiro buraco, sem erro (não realizada ainda).
+- [ ] Depois de atualizar esse app, ele descarta o bloco apagado na primeira sincronização e mostra as publicações seguintes do autor (não realizada ainda).
+- [ ] Navegador: apagar uma publicação com foto na web hospedada, recarregar a página; a foto não volta, as publicações seguintes aparecem e a Espiadinha de outra pessoa não mostra o post (não realizada ainda).
+- [ ] Um segundo aparelho que segue o autor, depois de sincronizar e reiniciar o app, continua sem a publicação e sem a foto, inclusive com um par antigo ainda online (não realizada ainda).
+- [ ] CLI: `varanda log` de um diário com bloco descartado mostra `#<seq> apagado` e lê os blocos seguintes (não realizada ainda).
+
+### Limites
+
+- Quem já obteve uma cópia (par desatualizado, réplica de navegador fora do registro, captura de tela, cache imutável de `/media`) continua com ela; o descarte vale para as cópias oficiais atualizadas.
+- Uma réplica nova ainda pode baixar o bloco de um par desatualizado antes de varrer a lápide; ela o descarta na varredura.
+- Uma lápide de lápide desfaz a primeira na dobra, mas não traz de volta bytes já descartados: o seq aparece sem registro (`malformed`) e os blocos seguintes continuam visíveis.
+- No Hypercore 10 do navegador o `contiguousLength` não é durável depois de `clear`; o nó usa o comprimento presente calculado com `has(i)`, e um par do navegador pode anunciar um intervalo contíguo que cruza um buraco descartado: o pedido desse bloco só expira.

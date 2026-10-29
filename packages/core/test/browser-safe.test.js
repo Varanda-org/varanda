@@ -20,6 +20,19 @@ test('admission.js loads without the node-only network stack', (t) => {
   }
 })
 
+// deletion.js runs in the browser node too: the hypercore session is passed
+// in, never required.
+test('deletion.js loads without the node-only network stack', (t) => {
+  const code = "require('./lib/deletion.js'); process.stdout.write(JSON.stringify(Object.keys(require.cache)))"
+  const r = spawnSync(process.execPath, ['-e', code], { cwd: coreRoot, encoding: 'utf8' })
+  t.is(r.status, 0, r.stderr)
+  const cached = JSON.parse(r.stdout)
+  t.ok(cached.some((p) => p.endsWith(path.join('lib', 'deletion.js'))), 'deletion.js was loaded')
+  for (const frag of ['/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/', '/udx/', '/rocksdb/', '/corestore/']) {
+    t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+  }
+})
+
 // The notices, push-proof and age modules ship in the web bundle, which stubs
 // `crypto` and `fs` to throw: neither may be required, by them or anything
 // they load from lib/ (hypercore-crypto's Node backend, sodium-native, requires `fs` to
@@ -71,6 +84,7 @@ test('net.js re-exports the admission functions', (t) => {
   t.is(net.validateMessage, admission.validateMessage)
   t.is(net.MAX_CONNECTIONS, admission.MAX_CONNECTIONS)
   t.ok(net.watchContiguous)
+  t.ok(net.watchPresent)
 })
 
 test('browser import stubs', (t) => {

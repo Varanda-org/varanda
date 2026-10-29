@@ -7,7 +7,7 @@ const { randomBytes, discoveryKey } = require('hypercore-crypto')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
-const { applyDeletes } = require('./deletion')
+const { presentState } = require('./deletion')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -457,28 +457,33 @@ async function purgeReplica (store, hex) {
 }
 
 // Only a decode failure becomes { seq, record: null } (decodeBlock never
-// throws); an error from core.get itself (closed session, storage error)
-// propagates to the caller. A closed session reports contiguousLength 0, so
-// it is rejected explicitly instead of looking like an empty log. Blocks a
-// tombstone deleted come back as { seq, record: null, deleted: true }.
+// throws); an error from the core itself (closed session, storage error)
+// propagates to the caller. A closed session is rejected explicitly instead
+// of looking like an empty log. Blocks a
+// tombstone deleted come back as { seq, record: null, deleted: true }, held
+// or cleared. The result ends at the first hole no tombstone covers, so an
+// unknown block never shows as a malformed one.
 async function readAll (core) {
-  return applyDeletes(await readRaw(core))
+  assertOpen(core)
+  const { entries, present } = await presentState(core)
+  return entries.slice(0, present)
 }
 
-// Every block as decoded, tombstones not applied (the delete writers check
-// the targeted block itself).
+// Every block as decoded up to the same end, tombstones not applied (the
+// delete writers check the targeted block itself); a cleared block is
+// { seq, record: null }.
 async function readRaw (core) {
+  assertOpen(core)
+  const { raw, present } = await presentState(core)
+  return raw.slice(0, present)
+}
+
+function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
     err.code = 'SESSION_CLOSED'
     throw err
   }
-  const entries = []
-  for (let i = 0; i < core.contiguousLength; i++) {
-    const block = await core.get(i, { wait: false, raw: true })
-    entries.push({ seq: i, record: decodeBlock(block) })
-  }
-  return entries
 }
 
 function invalidRecord (reason) {

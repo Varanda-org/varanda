@@ -70,6 +70,7 @@
 // /index/topic route of apps/cli/lib/seed-ws.js).
 const fs = require('#fs')
 const path = require('#path')
+const process = require('#process')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const {
@@ -130,6 +131,7 @@ const {
   MAX_MEDIA_CORES
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
+const { presentState, presentLength, clearDeleted, downloadExcept, deletedRanges } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { parseQuery } = require('./search-text')
@@ -158,6 +160,14 @@ const REDISCOVER_MS = 10000
 // stay pending, and its pages incomplete, for the life of the process.
 const SCAN_RETRY_MS = 2000
 const SCAN_RETRIES_MAX = 8
+// Diaries prepared at once (_prepareDiary decodes every stored block of
+// one diary into memory): at start every surviving diary is served
+// together, and unbounded the peak heap is the sum of all of them.
+const PREPARE_CONCURRENCY = 2
+// Tombstones queued for an incremental irregular media memo update; more
+// before the memo is next used rebuild it (bounds the queue of a regular
+// diary, which never uses it).
+const TOMB_NEW_MAX = 1024
 const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
@@ -184,6 +194,19 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
 const EXTERNAL_IDLE_MS = 30000
 
 function noop () {}
+
+// Below the present length a block that is not local is one a local
+// tombstone above it targets (presentLength passes only those holes), even
+// before the scan has learned that tombstone: a cursor passes it instead of
+// waiting for a block no peer may serve any more. A null read of a local
+// block stays a read failure.
+async function deletedHole (core, seq) {
+  try {
+    return !(await core.has(seq))
+  } catch {
+    return false
+  }
+}
 
 // Media cores whose deletion counters one diary keeps (a diary entry's
 // `media`). Only the latest MAX_MEDIA_CORES are ever bound, so twice that
@@ -240,6 +263,17 @@ function countShown (counts, declared, seq, r) {
     counted.push({ core, start, blocks })
   }
   if (counted.length > 0) counts.mediaRefs.set(seq, counted)
+}
+
+// Adds the ranges `media` of one tombstone (undefined: none) to the
+// per-core block sets in `sets`, for the cores it holds only.
+function addTombRanges (sets, media) {
+  if (media === undefined) return
+  for (const { core, start, blocks } of media) {
+    const set = sets.get(core)
+    if (set === undefined) continue
+    for (let b = start; b < Math.min(start + blocks, MAX_MEDIA_BLOCKS); b++) set.add(b)
+  }
 }
 
 // Whether tombstone `record` makes the diary irregular for media: it
@@ -299,8 +333,9 @@ function mediaBump (state, start, blocks, field, delta) {
 // The deletion state of a diary describes its whole log only once the scan
 // has read every block of the signed length: before that, after every
 // restart, while a new diary syncs or while a block is missing below
-// blocks already stored, a tombstone may still be unread. (The scan stops
-// at contiguousLength, so a gap keeps this false until it is filled.)
+// blocks already stored, a tombstone may still be unread. (The scan skips
+// the holes a tombstone explains and stops at any other one, so an unknown
+// gap keeps this false until it is filled.)
 function scanCaughtUp (entry) {
   return entry.scanned >= entry.core.length
 }
@@ -487,6 +522,9 @@ class Seeder {
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per follow, reply, like or repost appended to a served diary past
   // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
+  // the bytes of deleted diary blocks and media ranges: they are only
+  // hidden, as before byte deletion.
   constructor ({
     dataDir,
     associationKey = null,
@@ -499,6 +537,7 @@ class Seeder {
     regateHook = null,
     storeHook = null,
     onPush = null,
+    noClear = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -547,6 +586,7 @@ class Seeder {
     this.storeHook = storeHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
+    this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
     // Two independent caps: maxConnections bounds swarm sockets only and
@@ -618,6 +658,8 @@ class Seeder {
     this._mediaReserved = new Set() // media keys holding a media slot mid-admission
     this._mediaFetches = new Map() // media key -> quarantine fetch in flight (new peers are attached to it)
     this._scanQueue = Promise.resolve() // diary scans for media-core records run one at a time
+    this._preparing = 0 // _prepareDiary calls running (at most PREPARE_CONCURRENCY)
+    this._prepareWaiters = []
     // Engagement index (header comment): its own scan queue (one diary at a
     // time, never the media scan's), and the keys served at start whose
     // first index pass has not finished yet (null until step 4 of start():
@@ -977,8 +1019,13 @@ class Seeder {
       // a pass that pauses at the cap must still count as covered.
       this._indexStartup = new Set(survivors.map(([key]) => key))
       this._topicStartup = new Set(survivors.map(([key]) => key))
+      // Each diary first clears what its stored tombstones delete (and the
+      // ranges they list in its bound media cores), before any download
+      // or peer can bring those bytes back.
       for (const [key, core] of survivors) this._serve(key, core, { regate: false })
+      await Promise.all(survivors.map(([key]) => this._served.has(key) ? this._served.get(key).prepared : null))
       for (const [key, diary, core] of mediaSurvivors) this._serveMedia(key, diary, core, { headerOk: true })
+      await Promise.all(mediaSurvivors.map(([key]) => this._mediaServed.has(key) ? this._mediaServed.get(key).prepared : null))
 
       // Step 5: the swarm, with the seeder's Noise key pair.
       this.topic = topicFor(this.association)
@@ -1035,7 +1082,7 @@ class Seeder {
     let blocks = 0
     let bytes = 0
     for (const entry of this._served.values()) {
-      blocks += entry.core.contiguousLength
+      blocks += entry.present
       bytes += entry.core.byteLength
     }
     let mediaBytes = 0
@@ -1151,7 +1198,7 @@ class Seeder {
     // (b) already admitted: idempotent answer.
     const served = this._served.get(key)
     if (this._admitted.has(key) && served) {
-      const length = served.core.contiguousLength
+      const length = served.present
       peer.send({ type: 'admitted', key, length })
       return { type: 'admitted', length, shared: true }
     }
@@ -1287,8 +1334,10 @@ class Seeder {
     // _serve (rejected sent, purge under way): no join, no admitted (item 6).
     const entry = this._served.get(key)
     if (!entry || entry.dropped) return { type: 'rejected', reason: 'quota' }
+    await entry.prepared
+    if (this._closing || entry.dropped || this._served.get(key) !== entry) return
     this.swarm.join(core.discoveryKey, { server: true, client: true })
-    const length = core.contiguousLength
+    const length = entry.present
     peer.send({ type: 'admitted', key, length })
     this.log({ event: 'admitted', key, length })
     return { type: 'admitted', length, shared: true }
@@ -1382,6 +1431,39 @@ class Seeder {
       mediaIrregular: false,
       mediaRecounts: 0,
       mediaRecounting: false,
+      // Byte deletion (in memory only, recomputed from the stored
+      // tombstones at every serve): `gone` the target of every tombstone
+      // read so far, effective or not (a hole there is known, so the scans
+      // and the present length skip it), `excluded` every seq the readers'
+      // fold has deleted in this serve (cleared, and left out of the
+      // download; never shrinks, so a seq a later tombstone gives back is
+      // not fetched again), `arrived` blocks downloaded above the scan
+      // cursor (a tombstone among them is applied before the scan gets
+      // there), `mediaStart` media core -> blocks the stored tombstones
+      // delete (lib/deletion.js deletedRanges, for the cores bound at
+      // serve), `present` the present length (lib/deletion.js; replaces
+      // contiguousLength, which a clear pulls back) and `prepared` the
+      // startup clear, before which nothing is downloaded.
+      gone: new Set(),
+      excluded: new Set(),
+      arrived: new Set(),
+      mediaStart: new Map(),
+      present: 0,
+      prepared: null,
+      clearing: null,
+      clearAgain: false,
+      // Irregular media clear without reading tombstones back (_noteTombstone,
+      // _mediaGone): `tombMedia` tombstone seq -> the ranges it lists,
+      // `tombMax` the highest tombstone seq learned, `tombNew` tombstones
+      // learned since `irrMemo` (per-core blocks for one effective set) that
+      // only add their own ranges, `irrDirty` that the memo must be rebuilt,
+      // and `clearedEffective` the effective set already in `excluded`.
+      tombMedia: new Map(),
+      tombMax: -1,
+      tombNew: [],
+      irrDirty: true,
+      irrMemo: null,
+      clearedEffective: null,
       // Active-diary state (lib/activity.js; in memory only, never persisted
       // or logged): openReplica already awaited core.ready(), so core.length
       // is the stored signed length, and only growth past it counts.
@@ -1415,8 +1497,6 @@ class Seeder {
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
     entry.stopFork = watchFork(core, (reason) => this._drop(key, reason))
-    entry.download = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, (length) => this._onGrow(key, entry, length))
     this._served.set(key, entry)
     // Every serve scans from block 1: rebuild this author's follows from
     // scratch, invisible to pages until the scan reaches the signed length.
@@ -1426,23 +1506,147 @@ class Seeder {
     this._postNotices.markPending(key)
     checkQuota()
     if (entry.dropped) return
-    // A replica opened for re-gating may already hold block 0.
-    if (regate && core.contiguousLength >= 1) this._onGrow(key, entry, core.contiguousLength)
-    if (core.contiguousLength > entry.pushNext) this._pushDiary(key, entry)
+    entry.prepared = this._prepareBounded(key, entry, regate).catch(noop)
   }
 
+  // The download starts inside _prepareDiary, after the clear, so waiting
+  // here keeps a diary's deleted bytes from being fetched back.
+  async _prepareBounded (key, entry, regate) {
+    while (this._preparing >= PREPARE_CONCURRENCY) {
+      await new Promise((resolve) => this._prepareWaiters.push(resolve))
+    }
+    this._preparing++
+    try {
+      if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+      await this._prepareDiary(key, entry, regate)
+    } finally {
+      this._preparing--
+      const next = this._prepareWaiters.shift()
+      if (next) next()
+    }
+  }
+
+  // Local reads only (lib/deletion.js presentState walks every stored
+  // block, past holes too): learn the stored tombstones, clear the blocks
+  // their fold deletes, and only then start the download (one range per
+  // gap, so no peer is asked for a deleted block) and the growth watcher.
+  async _prepareDiary (key, entry, regate) {
+    const core = entry.core
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    let state = null
+    try {
+      state = await presentState(core)
+    } catch {}
+    if (stale()) return
+    if (state !== null) {
+      for (const { seq, record } of state.raw) {
+        const r = record !== null && record.type === 'delete' ? validRecordCopy(record, seq) : null
+        if (r === null) continue
+        this._noteTombstone(entry, seq, r)
+        entry.tombstones.set(seq, r.seq)
+        entry.gone.add(r.seq)
+        // Above a hole no tombstone explains, the scan cannot reach it yet.
+        if (seq >= state.present) entry.arrived.add(seq)
+      }
+      entry.effective = null
+      const bound = []
+      for (const [k, binding] of this._media) if (binding !== null && binding.diary === key) bound.push(k)
+      for (const r of deletedRanges(state.raw, bound)) {
+        if (!entry.mediaStart.has(r.core)) entry.mediaStart.set(r.core, new Set())
+        const blocks = entry.mediaStart.get(r.core)
+        for (let b = r.start; b < Math.min(r.start + r.blocks, MAX_MEDIA_BLOCKS); b++) blocks.add(b)
+      }
+      // Only the sets above are kept: the decoded blocks go before the
+      // clear and the present walk, which may wait on the disk a while.
+      state = null
+    }
+    for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
+    if (!this.noClear) {
+      try {
+        await clearDeleted(core, entry.excluded)
+      } catch {}
+    }
+    let present = 0
+    try {
+      present = await presentLength(core, entry.gone)
+    } catch {}
+    if (stale()) return
+    entry.present = Math.max(entry.present, present)
+    entry.download = this._downloader(core, entry.excluded)
+    // Growth is measured on the present length (has() only: no block is
+    // read here, the scan reads each one). A block arriving above the scan
+    // cursor queues a pass, which applies a tombstone among such blocks
+    // even when an unknown hole stops it (_applyArrived).
+    let running = false
+    let again = false
+    let above = false
+    const check = async () => {
+      if (running) {
+        again = true
+        return
+      }
+      running = true
+      try {
+        do {
+          again = false
+          const len = await presentLength(core, entry.gone, entry.present)
+          if (stale()) return
+          const arrivedAbove = above
+          above = false
+          this._onPresent(key, entry, len, arrivedAbove)
+        } while (again)
+      } catch {} finally {
+        running = false
+      }
+    }
+    const onAppend = () => { check() }
+    const onDownload = (index) => {
+      if (index >= entry.scanned) entry.arrived.add(index)
+      if (index > entry.scanned) above = true
+      check()
+    }
+    core.on('append', onAppend)
+    core.on('download', onDownload)
+    entry.stopGrow = () => {
+      core.off('append', onAppend)
+      core.off('download', onDownload)
+    }
+    // A replica opened for re-gating may already hold block 0.
+    if (regate && entry.present >= 1) this._onGrow(key, entry, entry.present)
+    if (entry.present > entry.pushNext) this._pushDiary(key, entry)
+  }
+
+  // The live download of a diary or media core minus `deleted`
+  // (lib/deletion.js downloadExcept: update() clears and re-ranges). With
+  // noClear every block is downloaded and kept, as before byte deletion.
+  _downloader (core, deleted) {
+    if (!this.noClear) return downloadExcept(core, deleted)
+    const range = core.download({ start: 0, end: -1 })
+    return { update: async () => [], destroy: () => range.destroy(), idle: async () => {} }
+  }
+
+  // Growth goes through _onGrow; a block that arrived above the scan
+  // cursor without growth only queues a scan (the block AT the cursor is
+  // the one a running or retrying pass reads).
+  _onPresent (key, entry, length, above) {
+    if (length > entry.present) return this._onGrow(key, entry, length)
+    if (above && entry.gated) this._scanDiary(key, entry)
+  }
+
+  // `length` is a present length: it only ever raises entry.present.
   _onGrow (key, entry, length) {
     if (entry.dropped || this._closing) return
+    if (!(entry.present >= length)) entry.present = length
     if (this._overQuota(entry.core)) return this._drop(key, 'quota')
     if (!entry.gated) {
       // Re-gate on arrival: the main store may have received a different
-      // block 0 than the quarantine did.
-      if (entry.gating) return
+      // block 0 than the quarantine did. Not before block 0 is local.
+      if (entry.gating || !(entry.present >= 1)) return
       entry.gating = true
       this._gate(key, entry)
       return
     }
-    this._broadcastHave(key, length)
+    this._broadcastHave(key, entry.present)
     this._scanDiary(key, entry)
     this._indexDiary(key, entry)
     this._topicDiary(key, entry)
@@ -1471,7 +1675,7 @@ class Seeder {
       entry.gating = false
       if (reason !== null) return this._drop(key, reason)
       entry.gated = true
-      this._broadcastHave(key, entry.core.contiguousLength)
+      this._broadcastHave(key, entry.present)
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
@@ -1580,8 +1784,10 @@ class Seeder {
 
   // Queues a scan of a gated diary for media-core records. Scans run one at
   // a time across all diaries (_scanQueue) and at most one is queued per
-  // diary; a scan reads from the diary's cursor to its contiguous length
-  // (checking again before it ends), so growth during a scan is not lost.
+  // diary; a scan walks the local blocks from the diary's cursor up to its
+  // signed length, skipping the holes a tombstone explains and stopping at
+  // any other (checking again before it ends), so growth during a scan is
+  // not lost.
   _scanDiary (key, entry) {
     if (entry.scanQueued || entry.dropped || !entry.gated || this._closing) return
     entry.scanQueued = true
@@ -1592,19 +1798,45 @@ class Seeder {
   async _runScan (key, entry) {
     entry.scanQueued = false
     const core = entry.core
-    while (!entry.dropped && !this._closing && entry.scanned < core.contiguousLength) {
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    while (!entry.dropped && !this._closing && entry.scanned < core.length) {
       const i = entry.scanned
+      // Below the present length a block is local or a known hole, so it
+      // is read right away; above it, only once has() says it is local.
+      let local = i < entry.present
+      if (!local) {
+        try {
+          local = await core.has(i)
+        } catch {}
+      }
       let raw = null
-      try {
-        raw = await core.get(i, { wait: false, raw: true })
-      } catch {}
+      if (local) {
+        try {
+          raw = await core.get(i, { wait: false, raw: true })
+        } catch {}
+      }
       // The read suspended this scan: a drop, close or re-serve meanwhile
       // (all call _notices.removeAuthor) makes this entry stale, and a fold
       // for it would be an orphan (edge budget held for good) or, after a
       // re-serve, a seq high-water mark the new scan's records fall under.
       // Nothing below touches the index for a stale entry.
-      if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+      if (stale()) return
+      if (raw === null && entry.gone.has(i)) {
+        entry.scanned = i + 1
+        entry.scanRetries = 0
+        continue
+      }
+      // A hole no tombstone explains: its arrival queues the scan again.
+      if (!local) break
       if (raw === null) {
+        // Below the present length a hole is one a local tombstone above it
+        // targets (presentLength), possibly cleared by every peer before
+        // this replica opened: learn that tombstone now, or no pass ever
+        // gets past the hole (_applyArrived only runs after an unknown one).
+        for (let b = i + 1; b < entry.present; b++) entry.arrived.add(b)
+        await this._applyArrived(key, entry)
+        if (stale()) return
+        if (entry.gone.has(i)) continue
         this._retryScan(key, entry)
         return
       }
@@ -1613,9 +1845,11 @@ class Seeder {
         const r = validRecordCopy(block, i)
         if (r !== null && tombstoneIrregular(entry.decls, entry.tombstones, r)) entry.mediaIrregular = true
         if (r !== null && !entry.tombstones.has(i)) {
+          this._noteTombstone(entry, i, r)
           entry.tombstones.set(i, r.seq)
           entry.effective = null
         }
+        if (r !== null) entry.gone.add(r.seq)
         if (r !== null && !entry.deleted.has(i)) {
           const done = await this._applyDelete(key, entry, i, r)
           if (entry.dropped || this._closing || this._served.get(key) !== entry) return
@@ -1665,12 +1899,24 @@ class Seeder {
       countDeclaration(entry, entry.decls, record.key, i)
       if (prev === undefined || i > prev.seq) entry.decls.set(record.key, { seq: i, at: record.at })
     }
-    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-    // The loop stops at contiguousLength, while the signed length advances
+    if (stale()) return
+    // Stopped at an unknown hole: tombstones that arrived above it are
+    // applied now, never after the hole is filled (it may be a deleted
+    // block no peer serves any more). One whose target is the hole lets
+    // the next pass skip it.
+    if (entry.scanned < core.length) {
+      await this._applyArrived(key, entry)
+      if (stale()) return
+      if (entry.gone.has(entry.scanned)) this._scanDiary(key, entry)
+    }
+    for (const index of entry.arrived) {
+      if (index < entry.scanned) entry.arrived.delete(index)
+    }
+    // The loop stops at an unknown hole, while the signed length advances
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
     // (a pending author marks every page `incomplete`).
-    if (core.contiguousLength >= core.length) {
+    if (entry.scanned >= core.length) {
       this._notices.commit(key)
       this._postNotices.settle(key)
     } else {
@@ -1686,6 +1932,191 @@ class Seeder {
     if (scanCaughtUp(entry) && !entry.mediaIrregular && entry.mediaRecounts < MEDIA_TRACK_MAX &&
       entry.latest.some((b) => !entry.media.has(b.key))) {
       await this._recountMedia(key, entry)
+      if (stale()) return
+    }
+    // Never behind an index pass paused at a cap, and never holding up the
+    // scan queue.
+    this._scheduleClear(key, entry)
+    let present = entry.present
+    try {
+      present = await presentLength(core, entry.gone, entry.present)
+    } catch {}
+    if (!stale() && present > entry.present) this._onGrow(key, entry, present)
+  }
+
+  // Applies the tombstones among the blocks that arrived above the scan
+  // cursor (or were stored above a hole at serve) to the indexes and to
+  // what is cleared. Their media counters wait for the scan: it counts each
+  // tombstone once all the declarations below it are known.
+  async _applyArrived (key, entry) {
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    for (const index of [...entry.arrived].sort((a, b) => a - b)) {
+      entry.arrived.delete(index)
+      if (index < entry.scanned) continue
+      let raw = null
+      try {
+        if (await entry.core.has(index)) raw = await entry.core.get(index, { wait: false, raw: true })
+      } catch {}
+      if (stale()) return
+      const block = raw === null ? null : decodeBlock(raw)
+      const r = block !== null && block.type === 'delete' ? validRecordCopy(block, index) : null
+      if (r === null) continue
+      if (!entry.tombstones.has(index)) {
+        this._noteTombstone(entry, index, r)
+        entry.tombstones.set(index, r.seq)
+        entry.effective = null
+      }
+      entry.gone.add(r.seq)
+      if (!entry.deleted.has(index)) await this._applyDelete(key, entry, index, r, { media: false })
+      if (stale()) return
+    }
+  }
+
+  // One clear at a time per diary; requests made while one runs coalesce
+  // into a single next run (an update re-ranges the whole download, so a
+  // stream of tombstones must not re-range once per scan pass).
+  _scheduleClear (key, entry) {
+    if (entry.clearing) {
+      entry.clearAgain = true
+      return
+    }
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    entry.clearing = (async () => {
+      try {
+        do {
+          entry.clearAgain = false
+          await this._clearDiary(key, entry)
+        } while (entry.clearAgain && !stale())
+      } finally {
+        entry.clearing = null
+      }
+    })().catch(noop)
+  }
+
+  // Clears the diary blocks the readers' fold deletes (never block 0 nor a
+  // tombstone: lib/deletion.js clearDeleted) and takes them out of the
+  // download, then the media blocks of the cores bound to this diary.
+  // A pass that learned no tombstone keeps the same cached effective set,
+  // so the walk over it is skipped (excluded never shrinks). Under the kill
+  // switch nothing is cleared, so the media side does not run at all.
+  async _clearDiary (key, entry) {
+    let changed = false
+    const effective = this._effectiveDeleted(entry)
+    if (entry.clearedEffective !== effective) {
+      for (const seq of effective) {
+        if (seq > 0 && !entry.excluded.has(seq)) {
+          entry.excluded.add(seq)
+          changed = true
+        }
+      }
+      entry.clearedEffective = effective
+    }
+    if (changed && entry.download) {
+      try {
+        await entry.download.update(entry.excluded)
+      } catch {}
+    }
+    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+    if (this.noClear) return
+    await this._clearMedia(key, entry)
+  }
+
+  // Records what the irregular media clear needs from a tombstone just
+  // learned, so _mediaGone never reads tombstones back from disk. A new
+  // highest tombstone whose target is not a tombstone changes no earlier
+  // one's effect and only adds its own ranges to the memo; any other
+  // (learned out of order, or deleting a tombstone) rebuilds it.
+  _noteTombstone (entry, seq, r) {
+    if (Array.isArray(r.media) && r.media.length > 0) entry.tombMedia.set(seq, r.media)
+    if (seq <= entry.tombMax || entry.tombstones.has(r.seq) || entry.tombNew.length >= TOMB_NEW_MAX) {
+      entry.irrDirty = true
+      entry.tombNew = []
+    } else if (!entry.irrDirty) {
+      entry.tombNew.push(seq)
+    }
+    entry.tombMax = Math.max(entry.tombMax, seq)
+  }
+
+  // The media blocks of core K that diary D deletes, or null while that is
+  // not known: for a regular diary the blocks its counters say are listed
+  // by an effective tombstone and shown by no survivor (once its scan
+  // caught up); for an irregular one every block an effective tombstone of
+  // the readers' fold lists, survivors or not (self-only: its media is
+  // refused anyway), from the ranges kept when each tombstone was learned
+  // (_noteTombstone), memoized per effective set and grown incrementally.
+  // The returned sets are shared: callers only read them.
+  async _mediaGone (key, entry, cores) {
+    const out = new Map()
+    if (entry.mediaIrregular) {
+      const deleted = this._effectiveDeleted(entry)
+      let memo = entry.irrMemo
+      if (memo === null || entry.irrDirty) {
+        memo = entry.irrMemo = { effective: deleted, sets: new Map() }
+        entry.irrDirty = false
+        entry.tombNew = []
+      } else if (memo.effective !== deleted) {
+        for (const seq of entry.tombNew) addTombRanges(memo.sets, entry.tombMedia.get(seq))
+        entry.tombNew = []
+        memo.effective = deleted
+      }
+      const missing = new Map()
+      for (const k of cores) if (!memo.sets.has(k)) missing.set(k, new Set())
+      if (missing.size > 0) {
+        for (const [seq, media] of entry.tombMedia) {
+          if (!deleted.has(seq)) addTombRanges(missing, media)
+        }
+        for (const [k, set] of missing) memo.sets.set(k, set)
+      }
+      for (const k of cores) out.set(k, memo.sets.get(k))
+      return out
+    }
+    for (const k of cores) out.set(k, new Set())
+    if (!scanCaughtUp(entry) || entry.mediaRecounting) return null
+    for (const k of cores) {
+      const state = entry.media.get(k)
+      if (state === undefined || state.dead === 0) continue
+      const set = out.get(k)
+      for (const b of state.del.keys()) {
+        if (!state.live.has(b)) set.add(b)
+      }
+    }
+    return out
+  }
+
+  // Never a core bound to another diary: only the served cores whose
+  // binding names this one.
+  async _clearMedia (key, entry) {
+    const cores = []
+    for (const [k, m] of this._mediaServed) {
+      const binding = this._media.get(k)
+      if (!m.dropped && m.diary === key && binding && binding.diary === key) cores.push(k)
+    }
+    if (cores.length === 0) return
+    // The irregular blocks depend only on the effective set (and the core):
+    // a core already cleared for this set has nothing new to exclude.
+    const effective = entry.mediaIrregular ? this._effectiveDeleted(entry) : null
+    if (effective !== null && cores.every((k) => this._mediaServed.get(k).clearedFor === effective)) return
+    const gone = await this._mediaGone(key, entry, cores)
+    if (gone === null) return
+    for (const k of cores) {
+      const m = this._mediaServed.get(k)
+      if (!m || m.dropped || m.diary !== key) continue
+      if (effective !== null) {
+        if (m.clearedFor === effective) continue
+        m.clearedFor = effective
+      }
+      let changed = false
+      for (const b of gone.get(k)) {
+        if (b > 0 && !m.excluded.has(b)) {
+          m.excluded.add(b)
+          changed = true
+        }
+      }
+      if (changed && m.download) {
+        try {
+          await m.download.update(m.excluded)
+        } catch {}
+      }
     }
   }
 
@@ -1717,7 +2148,10 @@ class Seeder {
       }
       for (let i = 1; i < end; i++) {
         const raw = await read(i)
-        if (stale() || raw === null) return
+        if (stale()) return
+        // A block cleared or never fetched because a tombstone deletes it.
+        if (raw === null && entry.gone.has(i)) continue
+        if (raw === null) return
         const block = decodeBlock(raw)
         if (block === null) continue
         if (block.type === 'delete') {
@@ -1770,8 +2204,10 @@ class Seeder {
   // the readers' fold instead, see _effectiveDeleted). A follow or
   // media-core target is left alone: writers never emit one, and the
   // follow fold and media bindings do not apply deletions yet. Returns false
-  // when the scan must retry this tombstone before moving past it.
-  async _applyDelete (key, entry, seq, record) {
+  // when the scan must retry this tombstone before moving past it. `media`
+  // false (a tombstone above the scan cursor, _applyArrived) leaves the
+  // media counters to the scan, which applies it again on reaching it.
+  async _applyDelete (key, entry, seq, record, { media = true } = {}) {
     const target = record.seq
     let raw = null
     try {
@@ -1781,7 +2217,7 @@ class Seeder {
     const block = raw === null ? null : decodeBlock(raw)
     if (block !== null && (block.type === 'follow' || block.type === 'media-core')) return true
     entry.deleted.add(target)
-    countTombstone(entry, seq, record, block)
+    if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
     this._postNotices.removePost(key, target)
@@ -1849,13 +2285,12 @@ class Seeder {
   // down, one takes effect only if no effective tombstone deleted it. Unlike
   // `deleted`, a tombstone deleted by a later one gives its target back, so
   // moderation sees exactly what readers show. Cached until a tombstone is
-  // added. The scan inserts tombstones in ascending seq order (each seq
-  // once, guarded by tombstones.has), so the Map's insertion order is
-  // already sorted: walking its keys backwards is the descending fold.
+  // added. Tombstones are learned out of order (stored ones at serve,
+  // arrivals above the scan cursor), so the seqs are sorted first.
   _effectiveDeleted (entry) {
     if (entry.effective === null) {
       const out = new Set()
-      const seqs = Array.from(entry.tombstones.keys())
+      const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
         if (!out.has(seqs[n])) out.add(entry.tombstones.get(seqs[n]))
       }
@@ -2034,6 +2469,8 @@ class Seeder {
     this._serveMedia(key, diary, core, { expected: res.raw })
     const served = this._mediaServed.get(key)
     if (!served || served.dropped) return
+    await served.prepared
+    if (this._closing || served.dropped || this._mediaServed.get(key) !== served) return
     this.swarm.join(core.discoveryKey, { server: true, client: true })
     this.log({ event: 'media-admitted', key, diary, length: core.contiguousLength })
   }
@@ -2055,7 +2492,15 @@ class Seeder {
       dropped: false,
       headerOk,
       gating: false,
-      expected
+      expected,
+      // The blocks a tombstone of D deletes (cleared and left out of the
+      // download; never shrinks) and the clear that runs before the
+      // download starts.
+      excluded: new Set(),
+      prepared: null,
+      // The effective set of D whose irregular media blocks are already in
+      // `excluded` (_clearMedia).
+      clearedFor: null
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
@@ -2064,11 +2509,35 @@ class Seeder {
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
     entry.stopFork = watchFork(core, (reason) => this._dropMedia(key, reason))
-    entry.download = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, () => this._gateMedia(key, entry))
     this._mediaServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
+    entry.prepared = this._prepareMedia(key, entry).catch(noop)
+  }
+
+  // What D's stored tombstones delete (at serve) and, once D's scan caught
+  // up, its counters, cleared before the first download range opens.
+  async _prepareMedia (key, entry) {
+    const core = entry.core
+    const stale = () => entry.dropped || this._closing || this._mediaServed.get(key) !== entry
+    const d = this._served.get(entry.diary)
+    if (d && !d.dropped) {
+      if (d.prepared) await d.prepared
+      if (stale()) return
+      for (const b of d.mediaStart.get(key) || []) entry.excluded.add(b)
+      const gone = await this._mediaGone(entry.diary, d, [key])
+      if (stale()) return
+      if (gone !== null) for (const b of gone.get(key)) entry.excluded.add(b)
+    }
+    entry.excluded.delete(0)
+    if (!this.noClear) {
+      try {
+        await clearDeleted(core, entry.excluded)
+      } catch {}
+    }
+    if (stale()) return
+    entry.download = this._downloader(core, entry.excluded)
+    entry.stopGrow = watchContiguous(core, () => this._gateMedia(key, entry))
     if (!entry.headerOk && core.contiguousLength >= 1) this._gateMedia(key, entry)
   }
 
@@ -2150,7 +2619,7 @@ class Seeder {
   // and EVERY block is local. `bytes` is the exact total (summed from a first local
   // read, since hypercore exposes no per-block sizes), `blocks` yields each
   // block with { wait: false }: nothing here ever waits on the network, and
-  // a block gone meanwhile (K purged or closed mid-stream) makes next()
+  // a block gone meanwhile (K purged, cleared or closed mid-stream) makes next()
   // reject promptly instead of stalling the response.
   async mediaRead (diaryHex, coreHex, start, blocks) {
     try {
@@ -2196,8 +2665,10 @@ class Seeder {
         for (let i = start; i < end; i++) {
           if (deleted()) return
           const raw = await core.get(i, { wait: false, raw: true })
-          if (raw === null) throw new Error('bloco indisponível')
+          // A block cleared because its range was deleted ends the stream
+          // like any deletion; any other missing block is an error.
           if (deleted()) return
+          if (raw === null) throw new Error('bloco indisponível')
           yield raw
         }
       }
@@ -2305,14 +2776,15 @@ class Seeder {
     this._indexQueue = this._indexQueue.then(rebuild, rebuild).catch(noop)
   }
 
-  // Reads from the index cursor to the contiguous length: each block is
+  // Reads from the index cursor to the present length (a hole below it is
+  // a block a tombstone deletes, skipped): each block is
   // decoded once, copied and validated (validRecordCopy) and, when it is one
   // of INDEX_TYPES, handed to the index. A refused add (cap reached) leaves
   // the cursor AT that block and pauses the diary: nothing is ever skipped.
   async _runIndex (key, entry) {
     const core = entry.core
     try {
-      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.indexed < core.contiguousLength) {
+      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.indexed < entry.present) {
         const i = entry.indexed
         let raw
         try {
@@ -2322,11 +2794,11 @@ class Seeder {
           return
         }
         if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-        if (raw === null) {
+        if (raw === null && !entry.gone?.has(i) && !(await deletedHole(core, i))) {
           this._retryIndex(key, entry)
           return
         }
-        const block = entry.deleted?.has(i) ? null : decodeBlock(raw)
+        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
           // The name index refuses only a new author at its cap: pause like
@@ -2350,7 +2822,7 @@ class Seeder {
       // The first pass over a diary served at start is over once its cursor
       // reached the length, paused at the cap, or failed three retries at
       // the same cursor. A behind cursor still makes `complete` false.
-      if (this._indexStartup !== null && (entry.indexPaused || entry.indexReadFailures >= 4 || entry.indexed >= core.contiguousLength)) {
+      if (this._indexStartup !== null && (entry.indexPaused || entry.indexReadFailures >= 4 || entry.indexed >= entry.present)) {
         this._indexStartup.delete(key)
       }
     }
@@ -2445,7 +2917,7 @@ class Seeder {
     if (complete) {
       for (const entry of this._served.values()) {
         if (!entry.gated || entry.dropped) continue
-        if (entry.indexPaused || entry.indexed < entry.core.contiguousLength || entry.scanned < entry.core.contiguousLength) {
+        if (entry.indexPaused || entry.indexed < entry.present || entry.scanned < entry.present) {
           complete = false
           break
         }
@@ -2478,7 +2950,7 @@ class Seeder {
   async _runTopic (key, entry) {
     const core = entry.core
     try {
-      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.topicIndexed < core.contiguousLength) {
+      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.topicIndexed < entry.present) {
         const i = entry.topicIndexed
         let raw
         try {
@@ -2488,11 +2960,11 @@ class Seeder {
           return
         }
         if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-        if (raw === null) {
+        if (raw === null && !entry.gone?.has(i) && !(await deletedHole(core, i))) {
           this._retryTopic(key, entry)
           return
         }
-        const block = entry.deleted?.has(i) ? null : decodeBlock(raw)
+        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && block.type === 'post') {
           const record = validRecordCopy(block, i)
           if (record !== null && !this._topics.add(key, i, record)) {
@@ -2506,7 +2978,7 @@ class Seeder {
     } finally {
       entry.topicQueued = false
       // Same startup accounting as _runIndex, over the search fields.
-      if (this._topicStartup !== null && (entry.topicPaused || entry.topicReadFailures >= 4 || entry.topicIndexed >= core.contiguousLength)) {
+      if (this._topicStartup !== null && (entry.topicPaused || entry.topicReadFailures >= 4 || entry.topicIndexed >= entry.present)) {
         this._topicStartup.delete(key)
       }
     }
@@ -2537,7 +3009,8 @@ class Seeder {
     this._pushQueue = this._pushQueue.then(run, run).catch(noop)
   }
 
-  // Reads from the push cursor to the contiguous length. A failed read of
+  // Reads from the push cursor to the present length (a hole below it is a
+  // deleted block, passed without a push). A failed read of
   // the diary's own block keeps the cursor there and retries; every block
   // read is then passed exactly once, emitted or not (at-most-once: a push
   // is a hint, the in-app notices stay the record).
@@ -2545,7 +3018,7 @@ class Seeder {
     const core = entry.core
     const live = () => !entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry
     try {
-      while (live() && entry.pushNext < core.contiguousLength) {
+      while (live() && entry.pushNext < entry.present) {
         const i = entry.pushNext
         let raw
         try {
@@ -2554,12 +3027,12 @@ class Seeder {
           raw = null
         }
         if (!live()) return
-        if (raw === null) {
+        if (raw === null && !entry.gone.has(i) && !(await deletedHole(core, i))) {
           this._retryPush(key, entry)
           return
         }
         entry.pushReadFailures = 0
-        const block = decodeBlock(raw)
+        const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
         const c = record && pushCandidate({
           author: key,
@@ -2597,7 +3070,7 @@ class Seeder {
   // without waiting, and accept only a valid post there.
   async _pushTargetIsPost (recipient, seq) {
     const re = this._served.get(recipient)
-    if (!re || re.dropped || !re.gated || seq >= re.core.contiguousLength) return false
+    if (!re || re.dropped || !re.gated || seq >= re.present) return false
     let raw
     try {
       raw = await re.core.get(seq, { wait: false, raw: true })
@@ -2614,7 +3087,7 @@ class Seeder {
   // newest profile block the index has seen, or null when it is not held.
   async _pushActorName (key, entry) {
     const ps = this._index.hints(key).profileSeq
-    if (!Number.isSafeInteger(ps) || ps < 1 || ps >= entry.core.contiguousLength) return null
+    if (!Number.isSafeInteger(ps) || ps < 1 || ps >= entry.present) return null
     let raw
     try {
       raw = await entry.core.get(ps, { wait: false, raw: true })
@@ -2667,7 +3140,7 @@ class Seeder {
     if (complete) {
       for (const entry of this._served.values()) {
         if (!entry.gated || entry.dropped) continue
-        if (entry.topicPaused || entry.topicIndexed < entry.core.contiguousLength || entry.scanned < entry.core.contiguousLength) {
+        if (entry.topicPaused || entry.topicIndexed < entry.present || entry.scanned < entry.present) {
           complete = false
           break
         }
@@ -2742,7 +3215,7 @@ class Seeder {
       if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
-      return { length: entry.core.contiguousLength, ...page, ...this._indexFlags() }
+      return { length: entry.present, ...page, ...this._indexFlags() }
     } catch {
       return null
     }
@@ -3210,7 +3683,7 @@ class Seeder {
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
       if (have.length >= MAX_INVENTORY) break
-      have.push({ key, length: entry.gated ? entry.core.contiguousLength : 0 })
+      have.push({ key, length: entry.gated ? entry.present : 0 })
     }
     let peer
     try {
