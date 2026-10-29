@@ -45,7 +45,8 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--help', '-h'])
 const stringFlags = new Set([
@@ -62,12 +63,16 @@ function key (value, message = 'chave inválida') {
   return value.toLowerCase()
 }
 
-function integer (value, name) {
+// setTimeout runs a delay above this at 1 ms, so --timeout-ms stops here.
+const MAX_TIMEOUT_MS = 2147483647
+
+function integer (value, name, max = Infinity) {
   if (value == null) return null
   const number = Number(value)
   if (!/^[0-9]+$/.test(value) || !Number.isInteger(number) || number < 1) {
     throw new UsageError(name + ' inválido')
   }
+  if (number > max) throw new UsageError(name + ' acima do máximo de ' + max)
   return number
 }
 
@@ -211,7 +216,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
-    timeoutMs: integer(get('timeout-ms'), 'timeout-ms'),
+    timeoutMs: integer(get('timeout-ms'), 'timeout-ms', MAX_TIMEOUT_MS),
     member: key(get('member')),
     seeder: key(get('seeder')),
     issuer: key(get('issuer')),
