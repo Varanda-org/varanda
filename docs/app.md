@@ -27,6 +27,14 @@ Há três jeitos de ter um nó, e a interface é a mesma:
 
 ## Primeira configuração
 
+### Abertura e cartões de apresentação
+
+Ao abrir o app, aparece uma marca animada (a cadeira e "Varanda", com "conectando…") sobre o mesmo fundo das telas de abertura nativas. Ela substitui o texto simples que aparecia enquanto o registro dos Termos carregava e enquanto o nó conectava. A animação respeita a opção "reduzir movimento" do aparelho.
+
+Na primeira abertura do aparelho, antes dos Termos, três cartões explicam o app: o diário que fica no aparelho, o que é seu continua seu, e a varanda para conversar. Dá para pular, voltar, avançar ou começar. Na web, deslizar, os botões e as setas do teclado funcionam, e cada cartão é anunciado para leitor de tela. Os cartões são só apresentação e não são aceite de nada. O registro, `varanda-intro` no `localStorage` (web) ou `varanda-intro.json` na pasta de documentos (nativo), guarda só a versão vista e a data. Não há telemetria nem dependência nova.
+
+Limites: o registro vale por aparelho, não por conta. Se o armazenamento for recusado (modo privado), os cartões voltam na próxima abertura, e Pular continua funcionando. Quem abre `/@nome` ou `/convite/<código>` pela primeira vez no aparelho vê os cartões antes, e o link é mantido. A volta do Google (`?conta=`) não mostra os cartões e não os marca como vistos. Verificação em `docs/verification.md` seção 39.
+
 ### No app nativo: tela Conectar
 
 No app nativo, a tela pede:

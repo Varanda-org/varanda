@@ -29,6 +29,8 @@
 // /?aviso=... at load or as a worker message: held in memory only, it opens
 // Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
 // for the key it names; nothing is written, followed or retried.
+// A splash shows while the app loads; the intro cards (src/intro.js) follow
+// once per device, before the Termos.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -48,8 +50,11 @@ import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
 import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
 import { useTerms } from './src/useTerms'
+import { INTRO_VERSION, introDecision } from './src/intro'
+import { useIntro } from './src/useIntro'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
+import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
 import { UpdateNote } from './src/ui/UpdateNote'
@@ -72,6 +77,7 @@ import Curtidas from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
+import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
@@ -290,6 +296,8 @@ function Member () {
   // list that member. The member is the unlocked passkey's key (browser node)
   // or node.info's identity.
   const terms = useTerms(LEGAL_VERSION)
+  const intro = useIntro()
+  const introState = introDecision({ status: intro.status, record: intro.record, version: INTRO_VERSION })
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
     : ((info && info.publicKey) || null)
@@ -933,13 +941,10 @@ function Member () {
   const sidePad = Math.max(insets.left, insets.right)
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
-  const splash = (
-    <SafeAreaView style={[styles.center, { paddingHorizontal: sidePad }]} edges={sideEdges}>
-      <Text style={styles.brand}>Varanda</Text>
-      <Text style={styles.soft}>conectando…</Text>
-      <StatusBar style='dark' />
-    </SafeAreaView>
-  )
+  const splash = <Splash sidePad={sidePad} edges={sideEdges} />
+  // The intro cards come first, once per device (src/intro.js): presentation
+  // only, so autosync, the outbox and the invite keep waiting for termsOk. A
+  // Google return skips them for that page load without marking them seen.
   // The terms gate, before everything else: Conexao, Entrar (so before
   // Google) while this device has no record of the current version, and the
   // tabs. Once it has one, an account that unlocks without its own entry
@@ -947,7 +952,8 @@ function Member () {
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  if (decision === 'loading') return splash
+  if (decision === 'loading' || introState === 'loading') return splash
+  if (introState === 'show' && !LINK_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -1287,8 +1293,6 @@ const styles = StyleSheet.create({
   hidden: { display: 'none' },
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg },
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  brand: { fontSize: 18, fontWeight: '700', color: colors.accent },
-  soft: { fontSize: 14, color: colors.soft },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
   setupBody: { padding: 16, gap: 12 },
