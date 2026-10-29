@@ -219,3 +219,39 @@ test('worklet: the diary works and the lock content is identical to posix', asyn
   t.is(b4a.toString(d2.key, 'hex'), key, 'the same store opens in posix mode')
   await s2.closeOnce()
 })
+
+// A dev reload leaves the previous JS context's worklet alive while the new
+// one starts with recover: true. Each context has its own copy of lib/store.js
+// (its own held-lock set), here a fresh module instance in the same process,
+// as two worklets share the app's process. The lock directory cannot tell them
+// apart, so the takeover goes through; RocksDB's per-process file lock is what
+// refuses the second open.
+test('worklet: a second context taking over a live context lock is refused by RocksDB', async (t) => {
+  const dir = tmpDir(t)
+  const first = await open(t, dir, { lock: 'worklet' })
+  const core = first.get({ name: 'diary' })
+  await core.ready()
+  await core.append(b4a.from('antes do reload'))
+
+  const path2 = require.resolve('../lib/store')
+  const saved = require.cache[path2]
+  delete require.cache[path2]
+  const second = require('../lib/store')
+  t.teardown(() => { require.cache[path2] = saved })
+  t.not(second, store, 'a fresh module instance has its own held set')
+
+  let err = null
+  try { await second.openStore(dir, { lock: 'worklet', recover: true }) } catch (e) { err = e }
+  t.ok(err, 'the second open fails')
+  t.ok(/could not be locked/.test(err && err.message), 'RocksDB refuses the lock')
+
+  t.is((await core.get(0)).toString(), 'antes do reload', 'the live store keeps its data')
+  await core.append(b4a.from('depois'))
+  t.is(core.length, 2, 'and keeps working')
+  await first.closeOnce()
+  const third = await open(t, dir, { lock: 'worklet' })
+  const again = third.get({ name: 'diary' })
+  await again.ready()
+  t.is(again.length, 2, 'nothing was lost or corrupted')
+  await third.closeOnce()
+})
