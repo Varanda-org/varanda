@@ -1875,7 +1875,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
 - [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
 - [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
-- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (3, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (4, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
 - [ ] Recomeçar tira o membro do registro; Sair não.
 - [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
 
