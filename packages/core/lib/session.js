@@ -22,7 +22,7 @@
 
 const fs = require('#fs')
 const path = require('#path')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, storeExists } = require('./store')
@@ -633,12 +633,15 @@ function createSession ({
       const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
+      const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
       return {
         items: r.items,
         skipped: skipped.list,
         skippedTruncated: skipped.truncated,
         future: future.list,
-        futureTruncated: future.truncated
+        futureTruncated: future.truncated,
+        incomplete: incomplete.list,
+        incompleteTruncated: incomplete.truncated
       }
     }),
 

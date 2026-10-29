@@ -1015,7 +1015,9 @@ async function runSync ({
     core.on('append', check)
     entry.stopQuota = () => core.off('append', check)
     entry.stopFork = watchFork(core, () => { onFork(entry) })
-    entry.range = core.download({ start: 0, end: -1 })
+    // readAll only reads the contiguous prefix, so random-order downloads
+    // leave stored blocks invisible to the feed until the gaps are filled.
+    entry.range = core.download({ start: 0, end: -1, linear: true })
     entry.stopGrow = watchContiguous(core, (length) => { onGrow(entry, length) })
     if (checkQuota(entry)) return
     const l = seederLink()
@@ -1854,7 +1856,7 @@ async function runSync ({
       })
       // Whatever the verified seeder holds beyond us is fetched (only a
       // verified link replicates the diary, onVerified).
-      ownRange = diary.download({ start: 0, end: -1 })
+      ownRange = diary.download({ start: 0, end: -1, linear: true })
       connect()
     }
 
