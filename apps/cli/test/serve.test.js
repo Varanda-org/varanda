@@ -249,16 +249,31 @@ function leaked (texts, sentinels) {
   return Object.keys(sentinels).filter((label) => texts.some((text) => text.includes(sentinels[label])))
 }
 
-// The member's secret material, from its own closed store: the seed half of
-// the diary's secret key (the other half is the public key) and the
+// The member's secret material as bytes, from its own closed store: the seed
+// half of the diary's secret key (the other half is the public key) and the
 // store's primary key.
+// Each secret as it could slip out of a handler: hex, base64 (unpadded, so
+// padded matches too), base64url, and the byte list a Buffer takes in JSON
+// ({"type":"Buffer","data":[...]}).
+function secretForms (secrets) {
+  const out = {}
+  for (const [label, bytes] of Object.entries(secrets)) {
+    out[label + ' (hex)'] = bytes.toString('hex')
+    out[label + ' (base64)'] = bytes.toString('base64').replace(/=+$/, '')
+    // The same text as base64 when the key has no '+' or '/'.
+    if (bytes.toString('base64url') !== out[label + ' (base64)']) out[label + ' (base64url)'] = bytes.toString('base64url')
+    out[label + ' (byte list)'] = JSON.stringify([...bytes])
+  }
+  return out
+}
+
 async function secretsOf (dataDir) {
   const store = await openStore(dataDir)
   try {
     const diary = await openDiary(store)
     return {
-      'diary secret key': Buffer.from(diary.keyPair.secretKey).toString('hex').slice(0, 64),
-      'store primary key': Buffer.from(store.primaryKey).toString('hex')
+      'diary secret key': Buffer.from(diary.keyPair.secretKey).subarray(0, 32),
+      'store primary key': Buffer.from(store.primaryKey)
     }
   } finally {
     await store.close()
@@ -309,12 +324,13 @@ test('WebSocket frames and HTTP bodies carry no path, secret key, token or boots
   s.child.kill('SIGTERM')
   await s.exit
 
+  const secrets = await secretsOf(m.dataDir)
   const sentinels = {
     'data dir': m.dataDir,
     'association dir': m.assocDir,
     token: s.token,
     ...Object.fromEntries(m.bootstrap.map((address, i) => ['bootstrap ' + (i + 1), address])),
-    ...await secretsOf(m.dataDir)
+    ...secretForms(secrets)
   }
   t.ok(s.seen.length > 20, 'a broad script (' + s.seen.length + ' texts)')
   t.alike(leaked(s.seen, sentinels), [], 'no sentinel in any frame or body')
@@ -322,6 +338,11 @@ test('WebSocket frames and HTTP bodies carry no path, secret key, token or boots
   // Control: the scan names every sentinel it is given when one leaks.
   for (const label of Object.keys(sentinels)) {
     t.alike(leaked(['{"v":1,"id":1,"ok":true,"result":{"x":"' + sentinels[label] + '"}}'], sentinels), [label], 'control: ' + label)
+  }
+
+  // Control: a Buffer left in a result takes its JSON form, {"type":"Buffer","data":[...]}.
+  for (const [label, bytes] of Object.entries(secrets)) {
+    t.alike(leaked([JSON.stringify({ v: 1, id: 1, ok: true, result: { key: bytes } })], sentinels), [label + ' (byte list)'], 'control: ' + label + ' as a Buffer')
   }
 })
 

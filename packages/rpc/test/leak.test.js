@@ -30,16 +30,31 @@ function leaked (texts, sentinels) {
   return Object.keys(sentinels).filter((label) => texts.some((text) => text.includes(sentinels[label])))
 }
 
-// The member's secret material, from its own closed store: the seed half of
-// the diary's secret key (the other half is the public key) and the
+// The member's secret material as bytes, from its own closed store: the seed
+// half of the diary's secret key (the other half is the public key) and the
 // store's primary key.
+// Each secret as it could slip out of a handler: hex, base64 (unpadded, so
+// padded matches too), base64url, and the byte list a Buffer takes in JSON
+// ({"type":"Buffer","data":[...]}).
+function secretForms (secrets) {
+  const out = {}
+  for (const [label, bytes] of Object.entries(secrets)) {
+    out[label + ' (hex)'] = bytes.toString('hex')
+    out[label + ' (base64)'] = bytes.toString('base64').replace(/=+$/, '')
+    // The same text as base64 when the key has no '+' or '/'.
+    if (bytes.toString('base64url') !== out[label + ' (base64)']) out[label + ' (base64url)'] = bytes.toString('base64url')
+    out[label + ' (byte list)'] = JSON.stringify([...bytes])
+  }
+  return out
+}
+
 async function secretsOf (dataDir) {
   const store = await openStore(dataDir)
   try {
     const diary = await openDiary(store)
     return {
-      'diary secret key': Buffer.from(diary.keyPair.secretKey).toString('hex').slice(0, 64),
-      'store primary key': Buffer.from(store.primaryKey).toString('hex')
+      'diary secret key': Buffer.from(diary.keyPair.secretKey).subarray(0, 32),
+      'store primary key': Buffer.from(store.primaryKey)
     }
   } finally {
     await store.close()
@@ -113,7 +128,8 @@ test('IPC frames carry no path, secret key or bootstrap address', async (t) => {
   await session.detach()
   await session.close()
 
-  const sentinels = { 'data dir': dataDir, 'association dir': assocDir, bootstrap: BOOTSTRAP, ...await secretsOf(dataDir) }
+  const secrets = await secretsOf(dataDir)
+  const sentinels = { 'data dir': dataDir, 'association dir': assocDir, bootstrap: BOOTSTRAP, ...secretForms(secrets) }
 
   // The stream is decoded back, so the scan covers what a host would read.
   const stream = Buffer.concat(frames)
@@ -130,5 +146,10 @@ test('IPC frames carry no path, secret key or bootstrap address', async (t) => {
   // Control: the scan names every sentinel it is given when one leaks.
   for (const label of Object.keys(sentinels)) {
     t.alike(leaked(['{"v":1,"id":1,"ok":true,"result":{"x":"' + sentinels[label] + '"}}'], sentinels), [label], 'control: ' + label)
+  }
+
+  // Control: a Buffer left in a result takes its JSON form, {"type":"Buffer","data":[...]}.
+  for (const [label, bytes] of Object.entries(secrets)) {
+    t.alike(leaked([JSON.stringify({ v: 1, id: 1, ok: true, result: { key: bytes } })], sentinels), [label + ' (byte list)'], 'control: ' + label + ' as a Buffer')
   }
 })
