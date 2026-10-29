@@ -7,12 +7,14 @@ const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
 const http = require('node:http')
+const net = require('node:net')
 const crypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
 const { testnet, tmpDir, bootstrapFlags, until } = require('./helpers/net')
 const { connect, openSession } = require('./helpers/ws-client')
 const { initAssociation } = require('@varanda/core/lib/assoc')
-const { MAX_REQUEST } = require('@varanda/rpc')
+const WebSocket = require('ws')
+const { MAX_REQUEST, createClient } = require('@varanda/rpc')
 
 const SERVE = path.join(__dirname, '..', 'bin', 'varanda-serve.js')
 const CLI = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -441,5 +443,149 @@ test('EADDRINUSE and SIGTERM releases the data dir', async (t) => {
 
   const show = spawnSync(process.execPath, [CLI, 'id', 'show', '--data', m.dataDir], { env: baseEnv, encoding: 'utf8', timeout: 30000 })
   t.is(show.status, 0, 'the data dir is free for the CLI: ' + show.stderr)
+  noLeak(t, s)
+})
+
+// A member data dir with an identity and its certificate as block 0, which
+// post.create needs.
+async function certifiedMember (t) {
+  const m = await member(t)
+  const run = (args) => {
+    const r = spawnSync(process.execPath, [CLI, ...args, '--json'], { env: baseEnv, encoding: 'utf8', timeout: 30000 })
+    if (r.status !== 0) throw new Error('varanda ' + args.join(' ') + ': ' + r.stderr)
+    return JSON.parse(r.stdout)
+  }
+  const { publicKey } = run(['id', 'create', '--data', m.dataDir, '--association', m.association])
+  const certFile = path.join(tmpDir(t), 'cert.json')
+  run(['assoc', 'certify', '--data', m.assocDir, '--member', publicKey, '--out', certFile])
+  run(['cert', 'add', '--data', m.dataDir, '--cert-file', certFile])
+  return m
+}
+
+// A TCP relay in front of varanda-serve for one connection: hold() keeps what
+// the server says from reaching the client, release() delivers it, cut() drops
+// the connection. The request always reaches the server.
+async function relay (t, server) {
+  let down = null
+  let up = null
+  let held = false
+  const chunks = []
+  const state = { port: null, heldBytes: 0 }
+  const tcp = net.createServer((socket) => {
+    down = socket
+    up = net.connect(server.port, '127.0.0.1')
+    for (const s of [down, up]) s.on('error', () => {})
+    down.on('data', (d) => up.write(d))
+    up.on('data', (d) => {
+      server.seen.push(d.toString())
+      if (!held) return down.write(d)
+      chunks.push(d)
+      state.heldBytes += d.length
+    })
+    down.on('close', () => up.destroy())
+    up.on('close', () => down.destroy())
+  })
+  await new Promise((resolve) => tcp.listen(0, '127.0.0.1', resolve))
+  state.port = tcp.address().port
+  t.teardown(() => {
+    down?.destroy()
+    up?.destroy()
+    tcp.close()
+  }, { order: 0, force: true })
+  state.hold = () => { held = true }
+  state.release = () => {
+    held = false
+    for (const d of chunks.splice(0)) down.write(d)
+  }
+  state.cut = () => {
+    down.destroy()
+    up.destroy()
+  }
+  return state
+}
+
+// The real rpc client over a WebSocket to the relay, with every request it sent.
+async function rpcThrough (server, rel, timeoutMs) {
+  const ws = new WebSocket('ws://127.0.0.1:' + rel.port + '/rpc', { origin: ORIGIN, headers: { host: '127.0.0.1:' + server.port } })
+  const sent = []
+  const ignored = []
+  const c = createClient({ send (message, text) { sent.push(message); ws.send(text) }, timeoutMs })
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString())
+    if (!c.receive(msg)) ignored.push(msg)
+  })
+  ws.on('close', () => c.close())
+  ws.on('error', () => {})
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  await c.request('session.open', { token: server.token })
+  return { c, ws, sent, ignored }
+}
+
+const ONCE = 'só uma vez'
+const onceBlocks = (result) => result.entries.filter((e) => e.record.type === 'post' && e.record.text === ONCE)
+const sentCount = (sent, method) => sent.filter((m) => m.method === method).length
+
+test('uncertain mutation: response held past the timeout -> TIMEOUT uncertain, never resent, one block', async (t) => {
+  const m = await certifiedMember(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const rel = await relay(t, s)
+  const { c, ws, sent, ignored } = await rpcThrough(s, rel, 1000)
+
+  rel.hold()
+  const [write, read] = await Promise.all([
+    c.request('post.create', { text: ONCE }).catch((e) => e),
+    c.request('log.read').catch((e) => e)
+  ])
+  t.is(write.code, 'TIMEOUT')
+  t.is(write.uncertain, true, 'the mutation may have happened')
+  t.is(read.code, 'TIMEOUT')
+  t.is(read.uncertain, false, 'a read is certain')
+  t.is(c.pending, 0)
+
+  rel.release()
+  await until(() => ignored.length === 2, { name: 'late responses ignored' })
+  t.is(sentCount(sent, 'post.create'), 1, 'not resent')
+  t.is(sentCount(sent, 'log.read'), 1, 'not resent')
+  const seen = await until(async () => {
+    const log = await c.request('log.read')
+    return onceBlocks(log).length > 0 && log
+  }, { name: 'the post in the diary' })
+  t.is(onceBlocks(seen).length, 1, 'one block')
+  t.is(sentCount(sent, 'post.create'), 1, 'still not resent')
+  ws.close()
+  noLeak(t, s)
+})
+
+test('uncertain mutation: connection lost after the server answered -> CLOSED uncertain, never resent, one block', async (t) => {
+  const m = await certifiedMember(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const rel = await relay(t, s)
+  const { c, sent } = await rpcThrough(s, rel, 15000)
+
+  rel.hold()
+  const write = c.request('post.create', { text: ONCE }).catch((e) => e)
+  await until(() => rel.heldBytes > 0, { name: 'post.create answered by the server' })
+  const heldBefore = rel.heldBytes
+  const read = c.request('log.read').catch((e) => e)
+  await until(() => rel.heldBytes > heldBefore, { name: 'log.read answered by the server' })
+  rel.cut()
+
+  const w = await write
+  const r = await read
+  t.is(w.code, 'CLOSED')
+  t.is(w.uncertain, true, 'the mutation may have happened')
+  t.is(r.code, 'CLOSED')
+  t.is(r.uncertain, false, 'a read is certain')
+  t.is(c.pending, 0)
+  t.is(sentCount(sent, 'post.create'), 1, 'not resent')
+
+  const fresh = await openSession(s, ORIGIN)
+  const log = await fresh.c.call('log.read')
+  t.is(log.ok, true)
+  t.is(onceBlocks(log.result).length, 1, 'one block')
+  fresh.c.ws.close()
   noLeak(t, s)
 })
