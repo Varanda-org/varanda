@@ -118,6 +118,7 @@ const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
 const { attachNotices, attachNoticesV2 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
+const { pushCandidate, pushName } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -347,6 +348,9 @@ class Seeder {
   // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
+  // onPush(event) is not a test hook: called synchronously, never awaited,
+  // once per follow, reply, like or repost appended to a served diary past
+  // its push cursor (push-events.js shapes the event; a throw is ignored).
   constructor ({
     dataDir,
     associationKey = null,
@@ -358,6 +362,7 @@ class Seeder {
     admitHook = null,
     regateHook = null,
     storeHook = null,
+    onPush = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -404,6 +409,8 @@ class Seeder {
     this.admitHook = admitHook
     this.regateHook = regateHook
     this.storeHook = storeHook
+    if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
+    this.onPush = onPush
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
     // Two independent caps: maxConnections bounds swarm sockets only and
@@ -493,6 +500,7 @@ class Seeder {
     this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
     this._topicQueue = Promise.resolve()
     this._topicStartup = null
+    this._pushQueue = Promise.resolve()
     this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
     // The signed moderation snapshot (blocklist.js createBlocklistState),
@@ -1135,7 +1143,10 @@ class Seeder {
       if (this._closing) return
       return this._reject(peer, key, after)
     }
-    this._serve(key, core, { regate: true })
+    // The main replica may still be empty here while res.length is the
+    // signed length the quarantine verified: the history up to it was
+    // written before this admission and must never become a push.
+    this._serve(key, core, { regate: true, pushFrom: Math.max(core.length, res.length) })
     // A resumed main-store core already over the quota was dropped inside
     // _serve (rejected sent, purge under way): no join, no admitted (item 6).
     const entry = this._served.get(key)
@@ -1174,7 +1185,7 @@ class Seeder {
     return length > this.maxLogBlocks || byteLength > this.maxLogBytes
   }
 
-  _serve (key, core, { regate }) {
+  _serve (key, core, { regate, pushFrom = core.length }) {
     // Media scan state (header comment): `scanned` is the next block to read
     // for media-core records (block 0 is the certificate), `decls` the
     // declared cores seen so far (key -> { seq, at }, newest seq; a seq/key
@@ -1184,7 +1195,10 @@ class Seeder {
     // `indexed` is the next block the engagement index reads, `indexPaused`
     // that the index refused a record at that block (cap reached) and the
     // cursor waits there until room is freed. The topic* fields are the
-    // same state for the topic search index, on its own cursor.
+    // same state for the topic search index, on its own cursor. `pushNext`
+    // is the next block the push scanner reads: set once here and only ever
+    // advanced, never by a rescan or an index rebuild, so a block is pushed
+    // at most once per serve and history at serve time never is.
     const entry = {
       core,
       download: null,
@@ -1215,7 +1229,11 @@ class Seeder {
       // or logged): openReplica already awaited core.ready(), so core.length
       // is the stored signed length, and only growth past it counts.
       activityLength: core.length,
-      activeAt: null
+      activeAt: null,
+      pushNext: pushFrom,
+      pushQueued: false,
+      pushRetry: null,
+      pushReadFailures: 0
     }
     // Log quota on growth (S3): length/byteLength advance on the signed
     // upgrade ('append' fires) before the blocks arrive, so an admitted log
@@ -1253,6 +1271,7 @@ class Seeder {
     if (entry.dropped) return
     // A replica opened for re-gating may already hold block 0.
     if (regate && core.contiguousLength >= 1) this._onGrow(key, entry, core.contiguousLength)
+    if (core.contiguousLength > entry.pushNext) this._pushDiary(key, entry)
   }
 
   _onGrow (key, entry, length) {
@@ -1270,6 +1289,7 @@ class Seeder {
     this._scanDiary(key, entry)
     this._indexDiary(key, entry)
     this._topicDiary(key, entry)
+    this._pushDiary(key, entry)
   }
 
   // Local gate of a served, not yet gated replica. The verdict is computed
@@ -1298,6 +1318,8 @@ class Seeder {
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
+      // Growth during the gate returned early from _onGrow.
+      this._pushDiary(key, entry)
     }).catch(() => {
       // Only a throwing test hook gets here: fail closed (never gated).
       entry.gating = false
@@ -1315,6 +1337,8 @@ class Seeder {
     entry.indexRetry = null
     clearTimeout(entry.topicRetry)
     entry.topicRetry = null
+    clearTimeout(entry.pushRetry)
+    entry.pushRetry = null
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
@@ -2108,6 +2132,121 @@ class Seeder {
       this._topicDiary(key, entry)
     }, delay)
     entry.topicRetry.unref()
+  }
+
+  // ---- Web Push (onPush) -----------------------------------------------
+
+  // Queues a push pass over a gated diary on the push queue (one diary at a
+  // time, at most one queued per diary). Nothing runs without onPush.
+  _pushDiary (key, entry) {
+    if (!this.onPush) return
+    if (entry.dropped || !entry.gated || this._closing || this._served.get(key) !== entry) return
+    if (entry.pushQueued || entry.pushRetry) return
+    entry.pushQueued = true
+    const run = () => this._runPush(key, entry)
+    this._pushQueue = this._pushQueue.then(run, run).catch(noop)
+  }
+
+  // Reads from the push cursor to the contiguous length. A failed read of
+  // the diary's own block keeps the cursor there and retries; every block
+  // read is then passed exactly once, emitted or not (at-most-once: a push
+  // is a hint, the in-app notices stay the record).
+  async _runPush (key, entry) {
+    const core = entry.core
+    const live = () => !entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry
+    try {
+      while (live() && entry.pushNext < core.contiguousLength) {
+        const i = entry.pushNext
+        let raw
+        try {
+          raw = await core.get(i, { wait: false, raw: true })
+        } catch {
+          raw = null
+        }
+        if (!live()) return
+        if (raw === null) {
+          this._retryPush(key, entry)
+          return
+        }
+        entry.pushReadFailures = 0
+        const block = decodeBlock(raw)
+        const record = block && validRecordCopy(block, i)
+        const c = record && pushCandidate({
+          author: key,
+          seq: i,
+          record,
+          now: Date.now(),
+          isMember: (k) => this._admitted.has(k) || this._served.has(k),
+          isBlocked: (k) => this._isBlocked(k)
+        })
+        if (c) {
+          const exists = c.kind === 'follow' || await this._pushTargetIsPost(c.recipient, record.type === 'post' ? record.replyTo.seq : record.to.seq)
+          if (!live()) return
+          const name = exists ? await this._pushActorName(key, entry) : null
+          if (!live()) return
+          // The recipient may have been dropped or blocked, or the actor
+          // blocked, while the reads above were pending: decide again on the
+          // current state. The cursor still advances (at-most-once).
+          const r = c.recipient
+          const eligible = (this._admitted.has(r) || this._served.has(r)) && !this._isBlocked(r) && !this._isBlocked(key)
+          if (exists && eligible && this.onPush !== null) {
+            try {
+              this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
+            } catch {}
+          }
+        }
+        entry.pushNext = i + 1
+      }
+    } finally {
+      entry.pushQueued = false
+    }
+  }
+
+  // The engagement index only checks a reference's shape and keeps targets
+  // that do not exist: read the target from the recipient's own replica,
+  // without waiting, and accept only a valid post there.
+  async _pushTargetIsPost (recipient, seq) {
+    const re = this._served.get(recipient)
+    if (!re || re.dropped || !re.gated || seq >= re.core.contiguousLength) return false
+    let raw
+    try {
+      raw = await re.core.get(seq, { wait: false, raw: true })
+    } catch {
+      return false
+    }
+    if (raw === null || this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return false
+    const block = decodeBlock(raw)
+    const record = block && validRecordCopy(block, seq)
+    return !!record && record.type === 'post'
+  }
+
+  // The actor's sanitized profile name (never bio or post text), from the
+  // newest profile block the index has seen, or null when it is not held.
+  async _pushActorName (key, entry) {
+    const ps = this._index.hints(key).profileSeq
+    if (!Number.isSafeInteger(ps) || ps < 1 || ps >= entry.core.contiguousLength) return null
+    let raw
+    try {
+      raw = await entry.core.get(ps, { wait: false, raw: true })
+    } catch {
+      return null
+    }
+    if (raw === null) return null
+    const block = decodeBlock(raw)
+    const record = block && validRecordCopy(block, ps)
+    return record && record.type === 'profile' ? pushName(record.name) : null
+  }
+
+  // As _retryIndex: one timer per served diary, backoff 2/10/30/60 s.
+  _retryPush (key, entry) {
+    if (entry.pushRetry || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    entry.pushReadFailures = Math.min(entry.pushReadFailures + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.pushReadFailures - 1]
+    entry.pushRetry = setTimeout(() => {
+      entry.pushRetry = null
+      this._pushDiary(key, entry)
+    }, delay)
+    entry.pushRetry.unref()
   }
 
   // As _scheduleIndexResume: resume paused search cursors once, next tick.

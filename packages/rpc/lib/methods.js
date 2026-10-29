@@ -189,6 +189,39 @@ const INVITE_ACTIONS = ['issue']
 
 const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
 
+// push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
+// lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
+// characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
+// [A-Za-z0-9_-]), which this package cannot import.
+const PUSH_ENDPOINT_MAX = 2048
+const PUSH_P256DH_RE = /^[A-Za-z0-9_-]{1,128}$/
+const PUSH_AUTH_RE = /^[A-Za-z0-9_-]{1,32}$/
+
+const isPushAction = (v) => v === 'on' || v === 'off'
+const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
+const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
+
+// Global URL, not an import: this package stays free of @varanda/core. The
+// signed statement hashes the exact string, so it must be the string fetch
+// would request: the URL parser strips tab, CR and LF and reads a backslash
+// as '/', hence printable ASCII only (counted in UTF-16 units, so a lone
+// surrogate cannot slip through) and no backslash or '#'.
+function isPushEndpoint (v) {
+  if (typeof v !== 'string' || v.length < 1 || v.length > PUSH_ENDPOINT_MAX) return false
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i)
+    if (c < 0x21 || c > 0x7e || c === 0x5c || c === 0x23) return false
+  }
+  try {
+    const url = new URL(v)
+    // Canonical only: fetch would request the parsed href (default port,
+    // case of the host, dot segments), not the string that was signed.
+    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.hash === '' && url.href === v
+  } catch {
+    return false
+  }
+}
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -275,6 +308,18 @@ const SPECS = {
     fields: {
       action: req(isInviteAction),
       nonce: req(isNonce)
+    }
+  },
+  // Signs the push opt-in statement with the identity key; the node fills
+  // in member, association and the endpoint hash itself, so a caller never
+  // chooses the bytes.
+  'push.sign': {
+    fields: {
+      nonce: req(isNonce),
+      action: req(isPushAction),
+      endpoint: req(isPushEndpoint),
+      p256dh: req(isPushP256dh),
+      auth: req(isPushAuth)
     }
   },
   'profile.set': {

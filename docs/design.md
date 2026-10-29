@@ -130,7 +130,7 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 **Curtidas e republicações são públicas.** Curtidas e republicações são registros públicos do diário (`like` e `repost`). Na versão web hospedada, o app lista, para quem pode ver a publicação, as pessoas cujo registro o nó conferiu.
 
-**Quem foi seguido é avisado, em particular.** Quem começa a seguir alguém aparece para essa pessoa na aba Avisos do app, com "Seguir de volta". Isso é só dentro do app (versão web hospedada), sem contagem de seguidores e sem lista de seguidores: só quem acabou de seguir e ainda não foi seguido de volta, e a linha some ao seguir de volta. O semeador responde apenas à própria pessoa (ela prova que tem a chave do diário) e o app confere cada seguidor no diário assinado dele. Respostas, citações e menções (`@nome` no texto da publicação) também aparecem em Avisos, com as mesmas regras: só dentro do app, na versão web hospedada, sem contagem e sem lista; o app confere cada uma na publicação assinada e no próprio diário. Isso não substitui as notificações abaixo: o aviso cifrado por push (APNs e FCM) continua um desenho futuro, e os Avisos não o usam.
+**Quem foi seguido é avisado, em particular.** Quem começa a seguir alguém aparece para essa pessoa na aba Avisos do app, com "Seguir de volta". Isso é só dentro do app (versão web hospedada), sem contagem de seguidores e sem lista de seguidores: só quem acabou de seguir e ainda não foi seguido de volta, e a linha some ao seguir de volta. O semeador responde apenas à própria pessoa (ela prova que tem a chave do diário) e o app confere cada seguidor no diário assinado dele. Respostas, citações e menções (`@nome` no texto da publicação) também aparecem em Avisos, com as mesmas regras: só dentro do app, na versão web hospedada, sem contagem e sem lista; o app confere cada uma na publicação assinada e no próprio diário. A lista de Avisos não usa push. Os avisos da versão web hospedada, em Notificações, são um caminho à parte (seguir, resposta, curtida e republicação) e não incluem citação nem menção. O aviso cifrado nativo (APNs e FCM) continua um desenho futuro.
 
 **Ler e sincronizar**
 
@@ -140,9 +140,9 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 **Notificações**
 
-1. O iPhone corta conexões em segundo plano, então avisos precisam passar pela Apple (APNs) e pelo Google (FCM).
-2. Quem responde, menciona ou manda mensagem pede ao serviço de push um aviso cifrado para o destinatário.
-3. O serviço vê só a chave do destinatário e um texto cifrado; o celular decifra antes de mostrar e depois sincroniza por P2P.
+1. Na versão web hospedada, a pessoa liga os avisos em Ajustes ("Avisos no aparelho"). Vêm desligados. São quatro eventos: alguém começou a seguir, respondeu, curtiu ou republicou. Cada aviso é uma frase com o nome e a ação. Citação, menção e o crescimento de um diário seguido não geram push. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+2. O semeador, ao ver um desses registros num diário que serve, manda o candidato em loopback ao serviço de conta. O semeador não vê a inscrição do aparelho.
+3. O serviço de conta monta "nome + ação" e cifra de ponta a ponta (RFC 8291). O serviço de push do navegador vê só o texto cifrado e o endereço do aparelho. O texto cifrado tem sempre o mesmo tamanho, mas o momento da entrega é visível para o serviço de push e pode ser cruzado com os registros públicos. O aparelho decifra e mostra. O aviso nativo pela Apple (APNs) e pelo Google (FCM) continua um desenho futuro.
 
 ## Identidade e recuperação de login
 
@@ -232,7 +232,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Registro de aceite dos Termos de Uso e da Política de Privacidade (versão e data; no serviço de conta também chave do membro, nonce e assinatura) | Aparelho; serviço de conta, no Brasil (`terms.json`, modo 0600, volume `account-data`), só para membros com vínculo Google | Execução de contrato (a confirmar em parecer) | Em aberto (issue #38) |
 | Convites de entrada (`invites.json`: chave de quem criou o convite, identificador aleatório, hash do código só enquanto não usado, data de criação, usado sim ou não; nada de quem recebeu nem de quem usou) | Serviço de conta, no Brasil (`invites.json`, modo 0600, volume `account-data`), só quando `VARANDA_INVITES_PER_WEEK` está definido | Execução de contrato (a confirmar em parecer); finalidade: entrada por convite | A semana atual e os convites ainda dentro dos 7 dias de validade (até 14 dias no total); o resto é apagado na próxima criação de convite |
 | E-mail de recuperação | Guardião, no Brasil | Execução de contrato | Enquanto a conta existir |
-| Token de push | Serviço de push no Brasil; passa por Apple e Google | Execução de contrato | Até a pessoa desligar os avisos |
+| Inscrição de Web Push (endereço do aparelho, `endpoint`, e as chaves `p256dh` e `auth`) | Serviço de conta no Brasil (`push.json`, modo 0600, volume `account-data`). O texto cifrado atravessa o serviço de push do fabricante, que pode estar fora do Brasil | Consentimento (a confirmar no parecer) | Até a pessoa desligar ou o serviço responder 404 ou 410 |
 | Registros de acesso (IP, data, hora) | Semeadores e serviços | Obrigação legal, se o Art. 15 do Marco Civil se aplicar | 6 meses, se aplicável |
 
 **Vínculo com a conta Google (hipóteses de desenho).**
@@ -261,14 +261,14 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 **Onde os dados ficam**
 
-- Semeadores, serviço de idade, guardiões e push ficam em datacenters no Brasil.
-- Saem do Brasil: avisos pela Apple e pelo Google, e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024; a política de privacidade informa isso.
+- Semeadores, serviço de idade, guardiões e o serviço de conta (onde fica a inscrição de Web Push, `push.json`) ficam em datacenters no Brasil. O serviço de push do navegador pode estar fora.
+- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
 
 **Antes do lançamento**
 
 - [ ] Nomear o encarregado (Art. 41) e publicar o canal de contato
 - [ ] Fazer o relatório de impacto (RIPD, Art. 38): há dado biométrico, menores e grande escala
-- [ ] Política de privacidade em português simples (versão 1 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
+- [ ] Política de privacidade em português simples (versão 3 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
 - [ ] Plano de resposta a incidentes, com aviso à ANPD e aos titulares (Art. 48)
 
 ## Moderação e obrigações legais

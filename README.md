@@ -96,6 +96,7 @@ Comandos:
   account                    serviço de vínculo de conta Google (--account-port, --account-host)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
+  account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
@@ -192,6 +193,8 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
 | `VARANDA_ACCOUNT_MAX_PENDING` | Vínculos pendentes ao mesmo tempo no serviço `account`, de 1 a 100000. Padrão 1000. |
+| `VARANDA_PUSH_TOKEN` | Segredo do `POST /push-event` entre o semeador e o serviço de conta: 64 hex minúsculos, o mesmo valor nos dois (`openssl rand -hex 32`). Vazio ou ausente desliga os avisos push (a rota responde 404). Em `deploy/seeder/.env`. O erro de formato não repete o valor (`uso: VARANDA_PUSH_TOKEN inválido`). |
+| `VARANDA_ACCOUNT_HTTP` | Onde o semeador alcança o HTTP do serviço de conta. Padrão `http://127.0.0.1:8790`. Só HTTP em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com porta explícita. Outra forma é `uso: VARANDA_ACCOUNT_HTTP inválido`. |
 | `VARANDA_MAX_EXTERNAL` | Conexões externas (WebSocket) que o `seed` aceita ao mesmo tempo, de 1 a 4096. Padrão 32, independente do limite do enxame. No pior caso cada uma segura até 8 MiB de quadro: a memória fica em ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY`. |
 | `VARANDA_FRAME_MEMORY` | Memória total, em bytes, para quadros grandes em montagem no `seed`, de 8454144 (8 MiB + 64 KiB, o maior quadro válido) a 1073741824 (1 GiB). Padrão 64 MiB. Some à regra de memória: ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY` no pior caso. |
 | `VARANDA_MAX_SOCKETS` | Sockets abertos ao mesmo tempo na porta do `--ws-port` (WebSocket, `/media`, `/index` e conexões mantidas pelo proxy), de 1 a 8192. Padrão: externas + `/media` + `/index` em andamento + 64, ao menos 128. |
@@ -798,6 +801,33 @@ Numa instalação local, prefira `npm ci --ignore-scripts` (ou defina `ONNXRUNTI
 
 `account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json` e `triage.json` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
 
+##### Avisos push (opcional)
+
+Avisos do sistema na versão web hospedada, para quem ligar em Ajustes ("Avisos no aparelho"). São quatro eventos: alguém começou a seguir, respondeu, curtiu ou republicou. Citação, menção e o crescimento de um diário seguido não entram aqui. A lista de Avisos do app (resposta, citação e menção inclusive) continua sem usar este caminho.
+
+O serviço de conta precisa estar parado na primeira vez. No diretório de dados da conta:
+
+```sh
+node bin/varanda.js account push-key --data <dataDir>
+```
+
+O comando grava `push-vapid.json` (modo `0600`, `{ v: 1, publicKey, privateKey }`) no volume `account-data` e imprime só a chave pública (`chave pública de push: ...`). Recusa com `serviço de conta em execução` se o lock está preso, e com `chave de push já existe` se o arquivo já está lá. Para girar a chave: apague `push-vapid.json` com o serviço parado, rode `account push-key` outra vez e peça que cada pessoa ligue os avisos de novo neste navegador. A chave nova deixa as inscrições antigas órfãs.
+
+No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado; depois de gravar, recrie o semeador e o serviço `account`):
+
+- `VARANDA_PUSH_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta. Gere com `openssl rand -hex 32`. Vazio ou ausente desliga: o semeador não faz o repasse e `POST /push-event` responde 404.
+- `VARANDA_ACCOUNT_HTTP`: onde o semeador alcança o HTTP do serviço de conta. Padrão `http://127.0.0.1:8790`. Só HTTP em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com porta explícita.
+
+O que fica guardado: `push-vapid.json` (o par VAPID) e `push.json` (a inscrição de cada aparelho: `endpoint`, `p256dh`, `auth` e `createdAt`), os dois modo `0600` no volume `account-data`. No máximo 4 aparelhos por membro. `account export` soma `pushDevices` e nunca o endereço. `account status` mostra `avisos push: ligados (N aparelhos)`, `avisos push: desligados` ou `avisos push: indisponível (push.json inválido)`.
+
+Nada de inscrição, chave, nome ou texto do aviso entra no registro. As linhas são só `{ event: 'push', reason }`.
+
+O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível. `isEndpoint` (`packages/core/lib/push-proof.js`) exige `https`, de 1 a 2048 caracteres, ASCII imprimível, sem barra invertida, sem `#` e sem usuário na autoridade. `isPushEndpoint` (`packages/rpc/lib/methods.js`, no `push.sign`) e `endpointParam` (`POST /account/push/finish` e `POST /account/push/check`) exigem o mesmo e ainda `new URL(valor).href === valor`: porta `443` explícita, host em maiúsculas e segmentos `.` ou `..` não entram.
+
+O semeador nunca vê a inscrição. Ele só manda o candidato em loopback (`POST /push-event`, `Authorization: Bearer` com `VARANDA_PUSH_TOKEN`). O Caddy não encaminha essa rota (`apps/cli/test/caddyfile.test.js`). O serviço compara o sha256 do token com `timingSafeEqual`. Sem o token, a rota não existe (404) e o corpo não é lido.
+
+Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
+
 #### Aplicar as decisões do painel
 
 Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.
@@ -1038,13 +1068,13 @@ Limites desta fase:
 - Certificados de membro individuais não são revogáveis (bloqueie a chave do diário). A chave do emissor do serviço de conta é revogada com `mod revoke-issuer`; depois disso gere outra (`account key`), certifique (`assoc certify-issuer`), `account cert add`, reinicie o serviço e peça que os membros vinculem de novo, porque os certificados v2 antigos deixam de valer. A reemissão automática fica para uma PR futura.
 - O app pagina para trás por cursor (`before` em `feed.read` e `log.read`: 30 e depois páginas de 31 publicações, páginas de 36 blocos no diário), e os comandos `feed` e `log` da CLI paginam do mesmo jeito com `--limit` e `--before`. Não há paginação para a frente (`since`); dados novos pedem recarregar a página mais nova.
 - A Espiadinha (quarta aba) só existe na versão web hospedada: o app nativo e o `varanda-serve` avisam disso. Cada página abre uma conexão curta com o semeador (uma conexão externa a mais, entre as conexões externas que ele aceita, `VARANDA_MAX_EXTERNAL`, padrão 32; com muitos membros online o semeador responde lotado (a mensagem do nó, "Semeador ocupado; tente novamente em instantes.", não muda) e a tela mostra "Muitas pessoas conectadas agora. Tente de novo em instantes."; medido em laço local, 40 membros conectados com o padrão de 32 dão 32 vagas ocupadas e 8 recusas, e cada leitura segura uma vaga por cerca de 10 a 20 ms. Quadros grandes demais vindos do semeador cortam a ligação), o custo cresce de forma linear com o número de diários do semeador (páginas cortadas em 25 s ou 16 MiB aparecem como incompletas), nada é guardado no aparelho além da memória da página, nomes são o melhor possível, mostra até 3 publicações por diário (respostas, citações e republicações incluídas) e a data é a que o autor escreveu. Regra e detalhes em `docs/rpc.md` (5.22) e `docs/verification.md` seção 17. A pesquisa por assunto da Espiadinha acha só palavras inteiras (sem prefixo, sem acentos nem alfabetos fora de a-z depois de tirar os acentos), em ordem de data e sem pesos, apenas no que o semeador indexou na memória (pode estar incompleto), sem "assuntos do momento"; uma publicação ainda não pode ser apagada, então continua pesquisável até o diário sair do semeador (`docs/protocol.md` seção 5).
-- Os Avisos (a quarta das cinco abas, com o sino, antes do Diário) só existem na versão web hospedada: o app nativo, o `varanda-serve` e a CLI mostram "só na versão web". Quem começou a seguir você aparece com "Seguir de volta", e quem responde, cita ou menciona (`@nome` no texto) você aparece numa linha que abre a conversa; sem contagem, sem lista de seguidores e sem rota HTTP nova; o semeador guarda os índices só em memória (canais `varanda/notices/1`, só de seguir, e `varanda/notices/2`, com os quatro tipos, [docs/protocol.md](docs/protocol.md)) e cada leitura usa uma conexão externa curta a mais, como a Espiadinha. Detalhes em `docs/rpc.md` (5.28) e `docs/verification.md` seções 20 e 35.
+- Os Avisos (a quarta das cinco abas, com o sino, antes do Diário) só existem na versão web hospedada: o app nativo, o `varanda-serve` e a CLI mostram "só na versão web". Quem começou a seguir você aparece com "Seguir de volta", e quem responde, cita ou menciona (`@nome` no texto) você aparece numa linha que abre a conversa; sem contagem, sem lista de seguidores e sem rota HTTP nova; o semeador guarda os índices só em memória (canais `varanda/notices/1`, só de seguir, e `varanda/notices/2`, com os quatro tipos, [docs/protocol.md](docs/protocol.md)) e cada leitura usa uma conexão externa curta a mais, como a Espiadinha. Detalhes em `docs/rpc.md` (5.28) e `docs/verification.md` seções 20 e 35. O push da versão web hospedada (seguir, resposta, curtida e republicação) é outro caminho e entra nesta fase: "Avisos push" acima e `docs/verification.md` seção 38.
 - O app sincroniza sozinho sempre que está aberto e com rede, também com dados móveis; a preferência por Wi-Fi não existe (issue #48). Toda leitura de membro ainda interrompe e reinicia a rodada contínua (issue #66); o app reduz o efeito com leituras em lote (`profile.read` com até 100 chaves, no máximo um pedido por segundo), uma janela de 5 s antes das buscas de fundo e a pílula "ver novidades" no lugar de recarregar sozinho. A pílula é só uma dica das linhas `downloaded`, nunca uma contagem. Veja [docs/app.md](docs/app.md).
 
 Fora desta fase:
 
 - Verificação de idade real. Hoje o operador de `assoc certify` afirma `--age-band`. Comentário `TODO(phase1): the real age-check vendor decides here; today the operator asserts the age band.` em `packages/core/lib/assoc.js`. O mesmo limite está em `docs/protocol.md` (certificados).
-- Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync). Já existem avisos de "começou a seguir você" (com "Seguir de volta") e de resposta, citação e menção, mas só dentro do app, na aba Avisos do PWA hospedado: sem contagem de seguidores, sem lista de seguidores e sem notificação do sistema.
+- Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync). Esse caso, um aviso quando um diário seguido cresce, continua fora. Os quatro eventos (seguir, resposta, curtida e republicação) já têm push na versão web hospedada, com adesão em Ajustes. Citação e menção ficam só na aba Avisos, dentro do app, junto com o aviso de seguir. Sem contagem de seguidores e sem lista de seguidores. O app nativo, o `varanda-serve` e a CLI não têm push.
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
 - Denúncias pelo app nativo e pela CLI (a denúncia pela versão web, inclusive do perfil de outro membro, o painel e a lista de bloqueio assinada já existem). Conversas completas e perfis de quem a pessoa não segue só pela versão web hospedada (índice de engajamento do semeador e leitura sob demanda; `docs/protocol.md` seções 5 e 7). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista.
 - Vídeo e a comparação de fotos com listas de hashes de material ilegal (`docs/design.md`, Moderação). Hoje só a versão web hospedada publica fotos e GIFs (até 4 por publicação, 8 MiB cada, 256 MiB por núcleo de fotos, um núcleo por aparelho sem troca); a CLI, o app nativo e o `varanda-serve` só mostram que a publicação tem fotos. Veja `docs/verification.md` seção 16.

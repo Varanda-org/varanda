@@ -25,6 +25,10 @@
 // consent was given in this page load; after a reload (the Google return) the
 // profile opens for one tap on Seguir, and a visitor already signed in only
 // gets the profile opened.
+// A notification click (hosted web, src/pushClient.web.js) arrives as
+// /?aviso=... at load or as a worker message: held in memory only, it opens
+// Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
+// for the key it names; nothing is written, followed or retried.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -51,6 +55,8 @@ import { InstallNote } from './src/ui/InstallNote'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { watchRelease } from './src/pwa'
+import { captureLaunch, listenLaunch } from './src/pushClient'
+import { nextLaunch } from './src/push-state'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
@@ -124,6 +130,10 @@ const INVITE_RETRIES = 10
 const inviteRetryDelay = (n) => (n === 0 ? 15000 : n === 1 ? 30000 : 60000)
 // Two invite records name the same profile (the @nome or the key).
 const sameTarget = (a, b) => !!a && !!b && a.username === b.username && a.key === b.key
+// A notification click's /?aviso=... query, read and stripped once at load
+// after the profile link (search and hash otherwise kept). Null off the
+// hosted web page.
+const CAPTURED_LAUNCH = captureLaunch()
 
 // True when node.info confirms an identity and a member certificate.
 function setupComplete (info) {
@@ -732,6 +742,44 @@ function Member () {
     acceptedHere
   })
   actionRef.current = action
+
+  // --- a notification click (src/pushClient.web.js) ---
+  // The newest intent (at load or from a click while the passkey screen is
+  // up) waits for the unlock; a later lock and any other key drop it.
+  const launchRef = useRef(CAPTURED_LAUNCH)
+  const [launchSeq, setLaunchSeq] = useState(0)
+  // The screen a click opens reloads even when it is already showing:
+  // Avisos through its refresh prop, the top Conversa by a remount.
+  const [avisosReload, setAvisosReload] = useState(0)
+  const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
+  useEffect(() => listenLaunch((intent) => {
+    launchRef.current = nextLaunch({ held: launchRef.current, intent })
+    setLaunchSeq((n) => n + 1)
+  }), [])
+  const wasUnlocked = useRef(false)
+  useEffect(() => {
+    if (locked && wasUnlocked.current) launchRef.current = null
+    wasUnlocked.current = !locked
+  }, [locked])
+  const launchKey = !locked && pkStatus ? pkStatus.publicKey : null
+  useEffect(() => {
+    const intent = launchRef.current
+    if (intent === null || !atTabs || typeof launchKey !== 'string') return
+    launchRef.current = null
+    if (intent.recipient !== launchKey.toLowerCase()) return
+    if (intent.kind === 'follow') {
+      clearStack()
+      setTab('avisos')
+      setAvisosReload((n) => n + 1)
+    } else {
+      const shownNow = nav.top(stackRef.current)
+      if (shownNow && shownNow.screen === 'conversa' && shownNow.key === intent.ref) {
+        setThreadReload((r) => ({ ref: intent.ref, n: r.n + 1 }))
+      } else {
+        openThread({ ref: intent.ref })
+      }
+    }
+  }, [launchSeq, atTabs, launchKey, clearStack, openThread])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -1092,7 +1140,7 @@ function Member () {
           <View style={shown('avisos')}>
             <Avisos
               active={on('avisos')}
-              refresh={version}
+              refresh={version + avisosReload}
               ownKey={ownKey}
               onOpenThread={openThread}
               scrollToTop={scrollSignal.avisos}
@@ -1124,7 +1172,7 @@ function Member () {
               {stack.map((entry, i) => {
                 const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
                 return (
-                  <View key={i + ':' + entry.screen + ':' + entry.key} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                  <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                     <Screen entry={entry} {...screenProps} />
                   </View>
                 )

@@ -20,7 +20,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv, closeIfOwned, loseLock, startTermsHeal, storeUnavailable } = require('../lib/commands/account')
+const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -837,6 +837,16 @@ test('serve wiring: startTermsHeal heals on its interval and logs only a repair'
   t.is(heals, after, 'stop() clears the interval')
 })
 
+test('serve wiring: the push store heals on the same loop, logged as push', async (t) => {
+  const results = [true, false]
+  let heals = 0
+  const events = []
+  const stop = startHeal({ heal: async () => results[heals++] ?? false }, 'push', (event) => events.push(event), 5)
+  await until(() => heals >= 2)
+  stop()
+  t.alike(events, [{ event: 'push', reason: 'reparado' }])
+})
+
 test('serve wiring: a store that fails at runtime logs store:indisponivel once and stops the service', async (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const calls = []
@@ -1011,7 +1021,7 @@ test('account key, cert add, status and export', async (t) => {
   t.is(exported.code, 0, exported.stderr)
   const lines = exported.stdout.trim().split('\n').map((l) => JSON.parse(l))
   t.is(lines.length, 1)
-  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'sub', 'terms', 'username'])
+  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'pushDevices', 'sub', 'terms', 'username'])
   t.alike(lines[0].terms, [], 'no terms.json: no acceptance')
   t.is(lines[0].email, EMAIL)
   t.is(lines[0].sub, SUB)

@@ -112,7 +112,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign` and `invite.sign` sign but write nothing, 5.18, 5.20, 5.29 and 5.30).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `username.add`, `post.create`, `post.reply`, `post.quote`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign` and `push.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30 and 5.31).
 
 Params have an exact key set: every key not listed for the method -> `USAGE` `'parâmetro desconhecido'`; a missing required key -> `'parâmetro obrigatório: <name>'`; a wrong type or bound -> `'parâmetro inválido: <name>'`. Defaults listed below are filled in by `validateRequest` / `validateParams(method, params)` before the handler runs; the client sends the params exactly as given.
 
@@ -392,6 +392,27 @@ Who started following the caller and whom the caller does not follow yet ("follo
 - Where it runs: browser node only (`packages/web-member/lib/session.js`), like `terms.sign`: not a diary write, no append, no network. Not mutating.
 - Errors: the node session (`packages/core/lib/session.js`, the CLI and `varanda-serve`) answers `USAGE` `'assinatura disponível só no navegador'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
 
+### 5.31 `push.sign`
+
+- Params: `{ nonce, action, endpoint, p256dh, auth }`, all required, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce); `action` is `'on'` or `'off'`; `endpoint` is printable ASCII (0x21-0x7E), 1..2048 characters, `https:` (the global URL parser must accept it with an empty username, password and hash) and canonical: `new URL(endpoint).href === endpoint` (no explicit `:443`, no uppercase host, no `.` or `..` segments); a query string is accepted; a URL with credentials, a fragment or a backslash is rejected; `p256dh` matches `/^[A-Za-z0-9_-]{1,128}$/` and `auth` matches `/^[A-Za-z0-9_-]{1,32}$/` (base64url, no padding). Not mutating.
+- The caller never passes the member, the association, the endpoint hash or any bytes: the node fills in `member` = its own diary key, `association` = its configured association and `endpointHash` = the lowercase hex64 BLAKE2b-256 hash (`hypercore-crypto` `hash`) of the UTF-8 bytes of `endpoint`, and signs exactly the UTF-8 bytes of these eight lines joined by LF (`0x0a`), no trailing LF (`pushPayload`, `packages/core/lib/push-proof.js`):
+
+  ```
+  varanda-push-v1
+  <nonce>
+  <member hex64>
+  <association hex64>
+  <action>       ('on' or 'off')
+  <endpointHash> (hex64 hash of the UTF-8 endpoint)
+  <p256dh>
+  <auth>
+  ```
+
+  The hash keeps the endpoint out of the framing. The prefix separates this statement from every other signature of the protocol (certificates, account links, reports, terms acceptances, moderation requests, Hypercore blocks).
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service verifies it at `POST /account/push/finish` (`docs/protocol.md`), using `member` as the public key. It proves that this diary key set this browser push subscription `on` or `off` for this association, bound to a single-use nonce. The HTTP call that stores the subscription is separate from this RPC and is never retried by the client.
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `account.sign`: not a diary write, no append, no network. Not mutating.
+- Errors: the core node (`packages/core/lib/session.js`), `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'` (with or without an identity, and nothing is opened); no identity on the browser node -> `NOT_FOUND` `'identidade não encontrada'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an endpoint or key the statement refuses although the params passed (`packages/core/lib/push-proof.js`) -> `USAGE` `'inscrição de notificação inválida'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -527,6 +548,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 ## 13. Known limits (v1)
 
 - `diary.peek` exists only on the browser node and only while a verified seeder link is live (5.27); the core node reads local data only.
+- `push.sign` is browser-only (5.31): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
 - `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are 31 items and 36 blocks (lowered from 35 and 42 when posts gained media). `follow.list` pages with `offset` and `limit`.
 - The app treats a missing `incomplete` field as not syncing (an older node), and `incomplete` is relative to the length the node knows locally: a diary nobody serves is not reported.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit, 4 maximal descriptors per post). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

@@ -25,6 +25,7 @@ Comandos:
   account                    serviço de vínculo de conta Google (--account-port, --account-host)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
+  account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
@@ -204,6 +205,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const triageToken = env.VARANDA_TRIAGE_TOKEN === undefined || env.VARANDA_TRIAGE_TOKEN === '' ? null : env.VARANDA_TRIAGE_TOKEN
   if (triageToken !== null && !/^[0-9a-f]{64}$/.test(triageToken)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
 
+  const pushToken = env.VARANDA_PUSH_TOKEN === undefined || env.VARANDA_PUSH_TOKEN === '' ? null : env.VARANDA_PUSH_TOKEN
+  if (pushToken !== null && !/^[0-9a-f]{64}$/.test(pushToken)) throw new UsageError('VARANDA_PUSH_TOKEN inválido')
+
+  const accountHttp = env.VARANDA_ACCOUNT_HTTP === undefined || env.VARANDA_ACCOUNT_HTTP === '' ? 'http://127.0.0.1:8790' : env.VARANDA_ACCOUNT_HTTP
+  const accountHttpMatch = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/.exec(accountHttp)
+  if (!accountHttpMatch || Number(accountHttpMatch[2]) < 1 || Number(accountHttpMatch[2]) > 65535) throw new UsageError('VARANDA_ACCOUNT_HTTP inválido')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -228,6 +236,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     wsHost,
     wsOrigins: wsOrigins.length ? wsOrigins : null,
     triageToken,
+    pushToken,
+    accountHttp: accountHttp.replace(/\/$/, ''),
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
     // The seeder's web limits, environment only (README, "Variáveis de ambiente").

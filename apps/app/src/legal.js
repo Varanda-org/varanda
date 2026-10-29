@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 2
-export const LEGAL_DATE = '28/10/2026'
-export const REVIEW_NOTE = 'Versão 2, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const LEGAL_VERSION = 3
+export const LEGAL_DATE = '29/10/2026'
+export const REVIEW_NOTE = 'Versão 3, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -62,7 +62,7 @@ export const TERMS = {
       heading: 'Fotos e recursos planejados',
       paragraphs: [
         'A mídia aceita nesta etapa é só imagem, pela web hospedada: fotos e GIFs nas publicações e a foto do perfil. A foto do perfil é sempre uma imagem parada e quadrada; um GIF escolhido para ela vira imagem parada. Vídeos não são aceitos. A comparação com listas de hashes de mídia ilegal é planejada e ainda não existe. Hoje, denúncias e bloqueio da conta são os meios de moderação dessas imagens. Uma foto de perfil imprópria se denuncia pela conta toda, e essa denúncia sempre é decidida por uma pessoa.',
-        'Mensagens diretas e notificações push são planejadas. Os avisos atuais aparecem dentro do app aberto, sem push.'
+        'Na versão web hospedada, você pode ligar em Ajustes os avisos no aparelho (notificações push) de novo seguidor, resposta, curtida e republicação. São opcionais e vêm desligados por padrão. Cada aviso leva o nome de quem agiu e a ação, nunca o texto da publicação. Aceitar estes documentos não liga os avisos: isso depende de uma escolha separada. Mensagens diretas continuam planejadas.'
       ]
     },
     {
@@ -154,8 +154,8 @@ export const PRIVACY = {
       heading: 'Compartilhamento e cópias fora do Brasil',
       paragraphs: [
         'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação.',
-        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. Avisos por Apple e Google (push) são só planejados e hoje não existem. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
-        'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas e push são planejados e não fazem parte dos fluxos atuais descritos aqui.'
+        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
+        'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas são planejadas e não fazem parte dos fluxos atuais descritos aqui.'
       ]
     },
     {
