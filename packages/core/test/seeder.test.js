@@ -11,7 +11,7 @@ const { createSwarm, joinAndFlush, topicFor, attachAdmission, generateNoiseKeyPa
 const { memberCertRecord, MAX_BLOCK_BYTES } = require('../lib/records')
 const { openReplica } = require('../lib/store')
 const { localDay } = require('../lib/activity')
-const { discoveryKey } = require('hypercore-crypto')
+const { discoveryKey, randomBytes } = require('hypercore-crypto')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -78,8 +78,8 @@ async function startSeeder (t, bootstrap, dataDir, opts) {
 
 // A raw member client: its own core (blocks(key) as JSON records, or raw
 // buffers), an admission channel per connection, and every received message.
-async function client (t, bootstrap, assoc, { blocks = null, rawBlocks = null, follow = null, joinPeer = null } = {}) {
-  const store = new Corestore(tmpDir(t, 'varanda-client-'))
+async function client (t, bootstrap, assoc, { blocks = null, rawBlocks = null, follow = null, joinPeer = null, primaryKey = null } = {}) {
+  const store = new Corestore(tmpDir(t, 'varanda-client-'), primaryKey ? { primaryKey, unsafe: true } : undefined)
   await store.ready()
   let core = null
   let key = null
@@ -948,6 +948,47 @@ test('runtime fork: the seeder drops, withdraws and purges the log', async (t) =
   t.ok(events.some((e) => e.event === 'rejected' && e.key === author.key && e.reason === 'fork'))
   t.absent(seeder.admittedKeys().includes(author.key))
   await until(() => !(author.key in readAdmitted(dataDir)), { name: 'admitted.json sem a chave' })
+})
+
+test('equivocation without truncation: two writable copies of one key are dropped, withdrawn and purged', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const purged = []
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    purgeHook: async (core) => {
+      purged.push(hex(core.key))
+      await core.purge()
+    }
+  })
+
+  // Same primary key and name: the same core key, writable in both stores.
+  const primaryKey = randomBytes(32)
+  const author = await client(t, bootstrap, assoc, { blocks: validBlocks(assoc), primaryKey })
+  const peer = await author.seederPeer()
+  peer.send({ type: 'announce', key: author.key, cert: validCert(assoc, author.key) })
+  await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 3, 'have 3')
+
+  // The second copy was never truncated: it just holds another, longer history.
+  const twinBlocks = (key) => [memberCertRecord(validCert(assoc, key)), post('um, de outro jeito'), post('dois, de outro jeito')]
+  const twin = await client(t, bootstrap, assoc, { blocks: twinBlocks, primaryKey })
+  t.is(twin.key, author.key, 'the second copy holds the same key')
+  await twin.core.append(post('versão do gêmeo'))
+  t.is(twin.core.length, author.core.length + 1, 'the second copy has another, longer history')
+
+  await author.message((m) => m.type === 'rejected' && m.key === author.key && m.reason === 'fork', 'rejected fork')
+  t.ok(events.some((e) => e.event === 'rejected' && e.key === author.key && e.reason === 'fork'))
+  t.absent(seeder.admittedKeys().includes(author.key))
+  await until(() => !(author.key in readAdmitted(dataDir)), { name: 'admitted.json sem a chave' })
+  t.alike(purged, [author.key], 'purged once, through a fresh session')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+
+  const after = seeder.store.get({ key: b4a.from(author.key, 'hex') })
+  await after.ready()
+  t.is(after.length, 0, 'nothing of the log is left in the seeder store')
+  await after.close()
 })
 
 test('a drop wins over a queued announce: purge first, then a fresh gate', async (t) => {

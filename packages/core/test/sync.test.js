@@ -19,6 +19,7 @@ const {
 const { memberCertRecord, profileRecord, postRecord, MAX_LOG_BLOCKS } = require('../lib/records')
 const c = require('compact-encoding')
 const Hypercore = require('hypercore')
+const { randomBytes } = require('hypercore-crypto')
 const { createCert, createSeederCert, certForKey, generateAssociationKeyPair } = require('../lib/cert')
 const {
   createSwarm,
@@ -58,8 +59,8 @@ async function makeMember (t, kp, { certKp = kp, posts = 2, trustKp = kp } = {})
 // A raw node: a Corestore and a loopback swarm (optionally with a fixed Noise
 // key pair) that attaches an admission channel with the given role/cert/have
 // on every connection. onpeer(peer) runs after attach.
-async function rawNode (t, bootstrap, { keyPair, role = 'member', cert = null, have = () => [], onmessage = () => {}, onpeer = () => {} } = {}) {
-  const store = new Corestore(tmpDir(t, 'varanda-raw-'))
+async function rawNode (t, bootstrap, { keyPair, role = 'member', cert = null, have = () => [], onmessage = () => {}, onpeer = () => {}, primaryKey = null } = {}) {
+  const store = new Corestore(tmpDir(t, 'varanda-raw-'), primaryKey ? { primaryKey, unsafe: true } : undefined)
   await store.ready()
   const swarm = createSwarm({ ...localSwarmOptions(bootstrap), keyPair })
   t.teardown(() => swarm.destroy(), { force: true })
@@ -501,6 +502,66 @@ test('fork on a followed log: skipped, purged and withdrawn', async (t) => {
 
   await diary.truncate(1, { fork: 1 })
   await diary.append(postRecord({ text: 'reescrito' }))
+  await until(() => ev.events.some((e) => e.event === 'skipped' && e.key === key && e.reason === 'fork'), { timeoutMs: 30000, name: 'skipped fork' })
+  await until(() => got.some((m) => m.key === key && m.reason === 'fork'), { timeoutMs: 30000, name: 'author sees withdrawal' })
+
+  controller.abort()
+  const rb = await pb
+  t.is(rb.ok, true)
+  t.alike(rb.skipped, [{ key, reason: 'fork' }])
+  t.absent(key in rb.downloaded)
+
+  const store = await openStore(b.dir)
+  try {
+    const replica = await openReplica(store, key)
+    t.is(replica.contiguousLength, 0, 'purged')
+  } finally {
+    await store.close()
+  }
+})
+
+test('equivocation on a followed log: two writable copies of the key, skipped, purged and withdrawn', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const got = []
+  // Same primary key and name: the same core key, writable in both stores.
+  const primaryKey = randomBytes(32)
+  const author = await rawNode(t, bootstrap, {
+    primaryKey,
+    have: () => [{ key: hex(diary.key), length: diary.length }],
+    onmessage: (msg) => { if (msg.type === 'rejected') got.push(msg) }
+  })
+  const diary = author.store.get({ name: 'diary', valueEncoding: 'json' })
+  await diary.ready()
+  const key = hex(diary.key)
+  await diary.append(memberCertRecord(createCert({ member: key }, kp)))
+  await diary.append(postRecord({ text: 'um' }))
+  await diary.append(postRecord({ text: 'dois' }))
+  await joinAndFlush(author.swarm, [topicFor(hex(kp.publicKey)), diary.discoveryKey])
+
+  const b = await makeMember(t, kp, { posts: 0 })
+  writeFollows(b.dir, [key])
+  const ev = collector()
+  const controller = new AbortController()
+  const pb = runSync({ ...localSwarmOptions(bootstrap), dataDir: b.dir, signal: controller.signal, onEvent: ev.onEvent })
+  t.teardown(() => controller.abort(), { force: true })
+  await until(() => ev.events.some((e) => e.event === 'downloaded' && e.key === key && e.length === 3), { timeoutMs: 30000, name: 'downloaded 3' })
+
+  // The second copy was never truncated: it just holds another, longer history.
+  const twinNode = await rawNode(t, bootstrap, {
+    primaryKey,
+    have: () => [{ key: hex(twin.key), length: twin.length }]
+  })
+  const twin = twinNode.store.get({ name: 'diary', valueEncoding: 'json' })
+  await twin.ready()
+  t.is(hex(twin.key), key, 'the second copy holds the same key')
+  await twin.append(memberCertRecord(createCert({ member: key }, kp)))
+  await twin.append(postRecord({ text: 'um, de outro jeito' }))
+  await twin.append(postRecord({ text: 'dois, de outro jeito' }))
+  await twin.append(postRecord({ text: 'tres, de outro jeito' }))
+  await joinAndFlush(twinNode.swarm, [topicFor(hex(kp.publicKey)), twin.discoveryKey])
+
   await until(() => ev.events.some((e) => e.event === 'skipped' && e.key === key && e.reason === 'fork'), { timeoutMs: 30000, name: 'skipped fork' })
   await until(() => got.some((m) => m.key === key && m.reason === 'fork'), { timeoutMs: 30000, name: 'author sees withdrawal' })
 
