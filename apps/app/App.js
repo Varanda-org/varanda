@@ -259,20 +259,26 @@ function Member () {
   // A lock, unlock or reset discards the report sheet (and with it any
   // signature still held in its memory).
   useEffect(() => setReport(null), [generation, locked])
+  // A lock ends this account's session in the tab: nothing it opened or
+  // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
+  // next account.
   useEffect(() => {
     if (!locked) return
     setSetupDone(false)
     setReachedTabs(false)
     setInfo(null)
+    setComposer({ open: false, reply: null, quote: null })
+    setAjustes(null)
   }, [locked])
   const setupStep = locked || (!setupDone && !confirmed)
   const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
 
   // --- the Termos de Uso and the Política de Privacidade (src/terms.js) ---
   // The device's record says which member accepted which version; the gate
-  // (before Conexao, Entrar and the tabs) asks whenever it cannot tell that
-  // the member in front of it accepted the current one. The member is the
-  // unlocked passkey's key (browser node) or node.info's identity.
+  // asks when the device has no record of the current version (before
+  // Conexao and Entrar) and, once a member is known, when the record does not
+  // list that member. The member is the unlocked passkey's key (browser node)
+  // or node.info's identity.
   const terms = useTerms(LEGAL_VERSION)
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
@@ -287,7 +293,8 @@ function Member () {
       hosted: mode === 'hosted',
       // A failed first status read is known too: nobody (member null), so
       // the gate shows and then Identidade's error and its retry.
-      identityKnown: passkey === null || pkStatus !== null || !!passkey.error
+      identityKnown: passkey === null || pkStatus !== null || !!passkey.error,
+      locked
     })
   // Past the setup a hosted member is never null (unlocked means a known
   // key). On native or varanda-serve a node reached later without an identity
@@ -886,8 +893,10 @@ function Member () {
     </SafeAreaView>
   )
   // The terms gate, before everything else: Conexao, Entrar (so before
-  // Google), a resumed hosted session and the tabs. Nothing renders behind
-  // it, and autosync, the outbox and the invite wait for termsOk. Not gated
+  // Google) while this device has no record of the current version, and the
+  // tabs. Once it has one, an account that unlocks without its own entry
+  // meets the gate right after the passkey. Nothing renders behind it, and
+  // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
   if (decision === 'loading') return splash
@@ -1154,29 +1163,38 @@ function Member () {
   return (
     <View style={[styles.root, { paddingHorizontal: sidePad }]}>
       {content}
-      <Publicar
-        open={composer.open}
-        reply={composer.reply}
-        quote={composer.quote}
-        me={me}
-        onClose={() => setComposer((c) => ({ ...c, open: false }))}
-        onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
-        onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
-        onPublished={(kind, sentRef) => {
-          // The reply context is dropped only if it is still the one sent; a
-          // sent quote always drops the quote context.
-          setComposer((c) => ({
-            open: false,
-            reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
-            quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
-          }))
-          // Kept in the outbox: nothing new in the diary yet.
-          if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
-          setVersion((v) => v + 1)
-          setPeekVersion((v) => v + 1)
-          showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
-        }}
-      />
+      {/* The terms gate used to unmount these sheets on a hosted lock as a
+          side effect, and a current terms record no longer brings it up. So
+          Publicar is not mounted while locked (its draft and photo go) and
+          Ajustes remounts on every lock and unlock (its cached key goes) but
+          stays reachable at Entrar for the 'Conexão' footer. With the lock
+          effect clearing the composer context, nothing reaches the next
+          account in this tab. */}
+      {!locked && (
+        <Publicar
+          open={composer.open}
+          reply={composer.reply}
+          quote={composer.quote}
+          me={me}
+          onClose={() => setComposer((c) => ({ ...c, open: false }))}
+          onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
+          onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
+          onPublished={(kind, sentRef) => {
+            // The reply context is dropped only if it is still the one sent; a
+            // sent quote always drops the quote context.
+            setComposer((c) => ({
+              open: false,
+              reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
+              quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
+            }))
+            // Kept in the outbox: nothing new in the diary yet.
+            if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
+            setVersion((v) => v + 1)
+            setPeekVersion((v) => v + 1)
+            showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
+          }}
+        />
+      )}
       <Denunciar
         open={report !== null}
         target={report}
@@ -1186,7 +1204,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
       <StatusBar style={light ? 'light' : 'dark'} />
     </View>
   )
