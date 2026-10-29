@@ -134,6 +134,13 @@ services:
       # O semeador tem o próprio limite de 4096 diários, então mantenha este
       # valor igual ou abaixo dele.
       VARANDA_MAX_MEMBERS: "${VARANDA_MAX_MEMBERS:-}"
+      # Convites. Vazio = cadastro aberto. De 1 a 100 = só entra quem tem um
+      # convite, e cada membro vinculado, operador incluído, ganha esse número
+      # de convites por semana (de segunda a domingo, no horário de Brasília;
+      # renova na segunda). Cada link vale 7 dias. Reinicie o account para
+      # mudar. Com a rede vazia ninguém entra: a primeira pessoa precisa se
+      # vincular com a variável vazia.
+      VARANDA_INVITES_PER_WEEK: "${VARANDA_INVITES_PER_WEEK:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"

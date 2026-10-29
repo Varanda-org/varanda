@@ -26,12 +26,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
+import { invitePolicy, pushCheck, pushKey } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
-import { pushCheck, pushKey } from '../account'
 import { disablePush, enablePush, getPushState, pushSupportNow } from '../pushClient'
 import { PUSH_DENIED, PUSH_FAILED, PUSH_LABEL, PUSH_UNCERTAIN, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushStateAfter, pushUiState } from '../push-state'
 import { HELP, SHORT } from '../help'
@@ -41,6 +41,7 @@ import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
 import Conexao from './Conexao'
+import Convites from './Convites'
 import Identidade from './Identidade'
 import Perfil from './Perfil'
 import Sincronizar from './Sincronizar'
@@ -54,7 +55,8 @@ const TITLES = {
   instalar: 'Instalar o app',
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
-  identidade: 'Identidade técnica'
+  identidade: 'Identidade técnica',
+  convites: 'Convidar pessoas'
 }
 
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
@@ -103,7 +105,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [persistPending, setPersistPending] = useState(false)
   // The own key and profile for the editor (read when it opens).
   const [own, setOwn] = useState({ key: null })
+  // node.info failed for Convidar pessoas; infoTick re-asks it.
+  const [ownFailed, setOwnFailed] = useState(false)
+  const [infoTick, setInfoTick] = useState(0)
   const [saved, setSaved] = useState('')
+  // The signup invite policy, read once per opening of the sheet (null: off,
+  // unknown or unreadable, so the Convidar pessoas row hides).
+  const [policy, setPolicy] = useState(null)
+  const sheetOpen = screen !== null
+  const policySeq = useRef(0)
   // Avisos no aparelho, read when the sheet opens (null: not read yet).
   const [push, setPush] = useState(null)
   const [pushPending, setPushPending] = useState(false)
@@ -111,7 +121,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const pushBusy = useRef(false)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   const pushEligible = node.hosted === true && member !== null
-  const open = screen !== null
 
   // A closed sheet forgets the open confirmations.
   useEffect(() => {
@@ -140,7 +149,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   useEffect(() => {
     const seq = ++pushSeq.current
     setPushError('')
-    if (!open || !pushEligible) {
+    if (!sheetOpen || !pushEligible) {
       setPush(null)
       return
     }
@@ -156,7 +165,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       const state = await readPush(member)
       if (seq === pushSeq.current) setPush(state)
     })().catch(() => {})
-  }, [open, pushEligible, member])
+  }, [sheetOpen, pushEligible, member])
 
   // Called straight from the press: enablePush awaits nothing before
   // subscribe(), and neither may this handler. The outcome shown is a fresh
@@ -201,17 +210,30 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     } catch {}
   }
 
+  // Only the hosted web node has an account service on its own origin.
+  const hosted = node.hosted === true
   useEffect(() => {
-    if (screen !== 'perfil' || !ready) return
+    const mine = ++policySeq.current
+    setPolicy(null)
+    if (!sheetOpen || !hosted) return
+    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p) }, () => {})
+  }, [sheetOpen, hosted])
+
+  useEffect(() => {
+    if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
     let alive = true
+    setOwnFailed(false)
     node.request('node.info', {}).then((i) => {
-      if (alive && typeof i.publicKey === 'string') {
+      if (!alive) return
+      if (typeof i.publicKey === 'string') {
         setOwn({ key: i.publicKey })
         names.resolve(i.publicKey)
+      } else {
+        setOwnFailed(true)
       }
-    }, () => {})
+    }, () => { if (alive) setOwnFailed(true) })
     return () => { alive = false }
-  }, [screen, ready, node.request])
+  }, [screen, ready, node.request, infoTick])
 
   const doExit = async () => {
     const out = typeof passkey.signOut === 'function' ? passkey.signOut : passkey.lock
@@ -288,6 +310,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const pushRow = pushUi !== null && push.support === 'ok' && push.key !== null
   // A state that could not be confirmed is never labelled "Desligados".
   const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
+  const inviting = account && policy !== null && policy.required === true
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -303,6 +326,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
+              {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               {pushRow
                 ? (
@@ -412,6 +436,20 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {inviting
+          ? (
+            <View style={shown('convites')}>
+              <Convites
+                open={screen === 'convites'}
+                active={ready && screen === 'convites'}
+                ownKey={own.key}
+                perWeek={policy.perWeek}
+                keyFailed={ownFailed}
+                onRetryKey={() => setInfoTick((n) => n + 1)}
+              />
+            </View>
+            )
+          : null}
         <View style={shown('termos')}>
           <Termos
             version={termsInfo ? termsInfo.version : LEGAL_VERSION}

@@ -20,7 +20,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv, closeIfOwned, loseLock, startTermsHeal, storeUnavailable } = require('../lib/commands/account')
+const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -841,7 +841,7 @@ test('serve wiring: the push store heals on the same loop, logged as push', asyn
   const results = [true, false]
   let heals = 0
   const events = []
-  const stop = startTermsHeal({ heal: async () => results[heals++] ?? false }, (event) => events.push(event), 5, 'push')
+  const stop = startHeal({ heal: async () => results[heals++] ?? false }, 'push', (event) => events.push(event), 5)
   await until(() => heals >= 2)
   stop()
   t.alike(events, [{ event: 'push', reason: 'reparado' }])

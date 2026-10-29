@@ -183,7 +183,13 @@ const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
 
-// push.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
+// invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
+// lib/invite.js (ACTIONS), which this package cannot import.
+const INVITE_ACTIONS = ['issue']
+
+const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
+
+// push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
 // lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
 // characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
 // [A-Za-z0-9_-]), which this package cannot import.
@@ -294,6 +300,14 @@ const SPECS = {
     fields: {
       nonce: req(isNonce),
       version: req(int(1, TERMS_VERSION_MAX))
+    }
+  },
+  // Signs the signup-invite request with the identity key; the node fills in
+  // member and association itself, so a caller never chooses the bytes.
+  'invite.sign': {
+    fields: {
+      action: req(isInviteAction),
+      nonce: req(isNonce)
     }
   },
   // Signs the push opt-in statement with the identity key; the node fills

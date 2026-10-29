@@ -35,6 +35,9 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
+const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signInvite } = require('@varanda/core/lib/invite')
+const { openInvitesStore, inviteId, CODE_RE } = require('../lib/account/invites-store')
 const { createAccountServer, loadIssuer, COOKIE } = require('../lib/account/server')
 // The browser node lives in packages/web-member; apps/cli does not depend
 // on it, so it is reached by path (as passkey-e2e.test.js reaches this BIN).
@@ -114,6 +117,8 @@ function readBody (req) {
 // matches the challenge; /userinfo answers the account.
 async function fakeGoogle (t) {
   const seen = []
+  // The subject the next exchange answers; the invite scenario links several members.
+  const account = { sub: SUB }
   let challenge = null
   const server = http.createServer(async (req, res) => {
     const body = await readBody(req)
@@ -133,13 +138,13 @@ async function fakeGoogle (t) {
       if (form.get('code') !== CODE || challenge === null || s256 !== challenge || form.get('client_secret') !== CLIENT_SECRET) {
         return json(res, 400, { error: 'invalid_grant' })
       }
-      const claims = { iss: 'https://accounts.google.com', aud: CLIENT_ID, sub: SUB, exp: Math.floor(Date.now() / 1000) + 3600 }
+      const claims = { iss: 'https://accounts.google.com', aud: CLIENT_ID, sub: account.sub, exp: Math.floor(Date.now() / 1000) + 3600 }
       const idToken = b64url({ alg: 'RS256', typ: 'JWT' }) + '.' + b64url(claims) + '.c2ln'
       return json(res, 200, { access_token: ACCESS, token_type: 'Bearer', expires_in: 3599, id_token: idToken })
     }
     if (req.method === 'GET' && url.pathname === '/userinfo') {
       if (req.headers.authorization !== 'Bearer ' + ACCESS) return json(res, 401, { error: 'invalid_token' })
-      return json(res, 200, { sub: SUB, email: EMAIL, email_verified: true })
+      return json(res, 200, { sub: account.sub, email: EMAIL, email_verified: true })
     }
     res.writeHead(404).end()
   })
@@ -155,7 +160,7 @@ async function fakeGoogle (t) {
     if (!String(url).startsWith(base + '/')) throw new Error('non-loopback request')
     return globalThis.fetch(url, init)
   }
-  return { base, endpoints, fetch, seen, tokenCalls: () => seen.filter((p) => p === '/token').length }
+  return { base, endpoints, fetch, seen, account, tokenCalls: () => seen.filter((p) => p === '/token').length }
 }
 
 // The browser side of the account service: a cookie jar holding the one
@@ -492,4 +497,188 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   t.is(b.internal.length, 0, 'no internal error on B')
   seed.kill()
   await seed.exited
+})
+
+// Sign-up invites through the real service, HTTP and the CLI status output.
+// The service is rebuilt over the same account dir the way `account serve`
+// builds it with VARANDA_INVITES_PER_WEEK set or unset (the harness env drops
+// every VARANDA_* variable, and that mapping is tested in
+// account-invites-cli.test.js).
+test('sign-up invites: open, invite-only, single use, restart and back to open', async (t) => {
+  t.timeout(60000)
+  const assocDir = tmpDir(t, 'varanda-inv-assoc-')
+  const association = (await run(t, ['assoc', 'init', '--data', assocDir, '--json'])).publicKey
+  const accountDir = path.join(tmpDir(t, 'varanda-inv-svc-'), 'account')
+  const issuerKey = (await run(t, ['account', 'key', '--data', accountDir, '--association', association, '--json'])).publicKey
+  const issuerCertFile = path.join(tmpDir(t, 'varanda-inv-ic-'), 'issuer-cert.json')
+  await run(t, ['assoc', 'certify-issuer', '--data', assocDir, '--issuer', issuerKey, '--out', issuerCertFile, '--json'])
+  await run(t, ['account', 'cert', 'add', '--data', accountDir, '--cert-file', issuerCertFile, '--json'])
+  const issuer = loadIssuer(accountDir, association)
+
+  const google = await fakeGoogle(t)
+  // Frozen mid-week (Wednesday, Brasília quota week) so a run crossing
+  // Monday 00:00 never resets the allowance; every restart shares it.
+  const clock = { at: Date.parse('2026-10-28T15:00:00.000Z') }
+  const now = () => clock.at
+  const logs = []
+  const texts = []
+  let seq = 0
+
+  // One service lifetime over accountDir; perWeek null is open sign-up.
+  async function serve (perWeek) {
+    const store = openAccountStore(accountDir, { now })
+    const invites = perWeek === null ? null : openInvitesStore(accountDir, { now, perWeek, isUsed: (id) => store.inviteUsed(id) })
+    const server = createAccountServer({
+      association,
+      origin: ORIGIN,
+      google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
+      store,
+      issuer,
+      invites,
+      log: (e) => logs.push(JSON.stringify(e)),
+      now
+    })
+    const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+    const svc = { listener, closed: false, base: 'http://127.0.0.1:' + listener.port }
+    svc.stop = async () => {
+      if (svc.closed) return
+      svc.closed = true
+      await listener.close()
+      store.close()
+    }
+    t.teardown(() => svc.stop(), { force: true })
+    return svc
+  }
+
+  // Every body, redirect and cookie is kept for the leak check, except the
+  // one 200 that returns a fresh code.
+  async function api (svc, method, pathname, { body, cookie } = {}) {
+    const init = { method, redirect: 'manual', headers: {} }
+    if (cookie) init.headers.cookie = COOKIE + '=' + cookie
+    if (body !== undefined) {
+      init.headers.origin = ORIGIN
+      init.headers['content-type'] = 'application/json'
+      init.body = JSON.stringify(body)
+    }
+    const res = await fetch(svc.base + pathname, init)
+    const text = await res.text()
+    if (!(pathname === '/account/invites/finish' && res.status === 200)) texts.push(text)
+    texts.push(res.headers.get('location') || '', res.headers.get('set-cookie') || '')
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch {}
+    const m = /^__Host-varanda-link=([A-Za-z0-9_-]+);/.exec(res.headers.get('set-cookie') || '')
+    return { status: res.status, location: res.headers.get('location'), body: parsed, cookie: m ? m[1] : null }
+  }
+
+  const member = () => {
+    const kp = crypto.keyPair()
+    return { kp, hex: b4a.toString(kp.publicKey, 'hex') }
+  }
+  const sign = (m, phase, nonce, username, sub = '') => signAccountLink({ phase, nonce, member: m.hex, username, association, sub }, m.kp)
+
+  async function issue (svc, m) {
+    const started = await api(svc, 'POST', '/account/invites/start', { body: { member: m.hex } })
+    if (started.status !== 200) return started
+    const nonce = started.body.nonce
+    const signature = signInvite({ action: 'issue', nonce, member: m.hex, association }, m.kp)
+    return api(svc, 'POST', '/account/invites/finish', { body: { member: m.hex, nonce, signature } })
+  }
+
+  // start (with the code, if any) through finish.
+  async function link (svc, m, username, code) {
+    const body = { member: m.hex, username }
+    if (code !== undefined) body.invite = code
+    const started = await api(svc, 'POST', '/account/start', { body })
+    if (started.status !== 200) return { started }
+    const cookie = started.cookie
+    const auth = await api(svc, 'POST', '/account/authorize', { cookie, body: { signature: sign(m, 'reserve', started.body.nonce, username) } })
+    const consent = await fetch(new URL(auth.body.authorizeUrl), { redirect: 'manual' })
+    await consent.text()
+    google.account.sub = '30000000000000000' + String(1000 + seq++)
+    const back = new URL(consent.headers.get('location'))
+    const cb = await api(svc, 'GET', back.pathname + back.search, { cookie })
+    const pending = await api(svc, 'GET', '/account/pending', { cookie })
+    const done = pending.status === 200
+      ? await api(svc, 'POST', '/account/finish', { cookie, body: { signature: sign(m, 'finish', pending.body.nonce, username, pending.body.sub) } })
+      : pending
+    return { started, cb, done }
+  }
+
+  const readJson = (file) => JSON.parse(fs.readFileSync(path.join(accountDir, file), 'utf8'))
+
+  // ---- open mode: A links without a code ----
+  let svc = await serve(null)
+  t.alike((await api(svc, 'GET', '/account/invites/policy')).body, { required: false }, 'open: no code required')
+  const a = member()
+  t.is((await link(svc, a, 'ana')).done.status, 200, 'open: A links without a code')
+  t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + a.hex)).body, 'open: status carries no invites')
+  await svc.stop()
+
+  // ---- invite-only, 3 per week ----
+  svc = await serve(3)
+  t.alike((await api(svc, 'GET', '/account/invites/policy')).body, { required: true, perWeek: 3 })
+  const codes = []
+  for (let i = 0; i < 3; i++) {
+    const res = await issue(svc, a)
+    t.is(res.status, 200, 'A issues link ' + (i + 1))
+    t.ok(CODE_RE.test(res.body.code), 'a 43-char code')
+    t.is(res.body.used, i + 1)
+    t.is(res.body.remaining, 2 - i)
+    t.is(res.body.expiresAt, new Date(clock.at + 7 * 86400000).toISOString(), 'valid for 7 days')
+    codes.push(res.body.code)
+  }
+  const fourth = await issue(svc, a)
+  t.is(fourth.status, 429, 'the fourth is refused')
+  t.alike(fourth.body, { error: 'limite-convites' })
+
+  const b = member()
+  const noCode = await api(svc, 'POST', '/account/start', { body: { member: b.hex, username: 'bia' } })
+  t.is(noCode.status, 403, 'a new key without a code is refused')
+  t.alike(noCode.body, { error: 'convite-obrigatorio' })
+
+  // ---- B links with A's first code ----
+  const linkedB = await link(svc, b, 'bia', codes[0])
+  t.is(linkedB.started.status, 200, 'B starts with the code')
+  t.is(linkedB.cb.location, ORIGIN + '/?conta=ok', 'the redirect carries no code')
+  t.is(linkedB.done.status, 200, 'B links')
+  t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + b.hex)).body, 'B\'s status carries no invite counts')
+  const fromB = await issue(svc, b)
+  t.is(fromB.status, 200, 'B issues one link')
+  t.alike([fromB.body.used, fromB.body.remaining], [1, 2], 'B has its own allowance')
+
+  // ---- strict single use ----
+  const reused = await api(svc, 'POST', '/account/start', { body: { member: member().hex, username: 'carla', invite: codes[0] } })
+  t.is(reused.status, 404, 'a used code is refused at start')
+  t.alike(reused.body, { error: 'convite-invalido' })
+  t.absent(JSON.stringify(readJson('invites.json')).includes(inviteId(codes[0])), 'invites.json: the used hash is gone')
+
+  // ---- restart: counts persist, an older code still links ----
+  await svc.stop()
+  // The clean close above wrote the snapshot.
+  t.is(readJson('directory.json').links[b.hex].invite, inviteId(codes[0]), 'directory.json: B\'s link carries sha256(code)')
+  svc = await serve(3)
+  t.is((await issue(svc, a)).status, 429, 'A\'s used count persisted')
+  t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + a.hex)).body, 'A\'s status carries no invite counts')
+  t.is((await link(svc, member(), 'duda', codes[1])).done.status, 200, 'a code issued before the restart still links')
+  t.is((await api(svc, 'POST', '/account/start', { body: { member: member().hex, username: 'eva', invite: codes[1] } })).status, 404, 'and is then spent')
+
+  // ---- account status: counts, never a code ----
+  const out = await varanda(t, ['account', 'status', '--data', accountDir]).exited
+  t.is(out.code, 0, out.stderr)
+  t.ok(/^convites: \d+ \(\d+ usados\)$/m.test(out.stdout), 'account status prints the convites line')
+  // Keys and paths are long hex or path text, so match the issued codes, not a length.
+  t.absent(codes.some((code) => out.stdout.includes(code) || out.stderr.includes(code)), 'and none of the issued codes')
+  await svc.stop()
+
+  // ---- back to open: no code needed ----
+  svc = await serve(null)
+  t.alike((await api(svc, 'GET', '/account/invites/policy')).body, { required: false }, 'open again')
+  t.is((await link(svc, member(), 'eva')).done.status, 200, 'open again: a link without a code works')
+  t.is((await api(svc, 'POST', '/account/invites/start', { body: { member: a.hex } })).status, 404, 'no invite routes in open mode')
+  await svc.stop()
+
+  // ---- no code anywhere but its issue response ----
+  const everything = texts.join('\n') + '\n' + logs.join('\n') + '\n' + fs.readFileSync(path.join(accountDir, 'directory.json'), 'utf8') + fs.readFileSync(path.join(accountDir, 'invites.json'), 'utf8')
+  for (const code of codes) t.absent(everything.includes(code), 'a code appears in no response, redirect, cookie, log line or file')
+  t.absent(logs.join('\n').includes(EMAIL), 'no e-mail in the log')
 })

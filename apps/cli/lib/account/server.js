@@ -7,8 +7,10 @@ const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
+const { verifyInvite } = require('@varanda/core/lib/invite')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { createModRoutes } = require('./mod-routes')
+const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
@@ -104,6 +106,11 @@ const ERROR_STATUS = Object.freeze({
   limite: 503,
   defasado: 409,
   'ja-revertido': 409,
+  // Sign-up invites (./invites-store.js): one public token for an unknown,
+  // used, expired or held code.
+  'convite-obrigatorio': 403,
+  'convite-invalido': 404,
+  'limite-convites': 429,
   // Web Push (./push-routes.js): turning notices on needs the current terms.
   'termos-pendentes': 409
 })
@@ -524,7 +531,7 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms })
+// terms, invites })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -538,8 +545,12 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
 // or null when the stats tab is off) and `panelDir` (tests only) are passed
 // to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
-// null: the terms routes then answer 503 'indisponivel'. `push` is null (the
-// push routes and /push-event are not mounted at all) or the options of
+// null: the terms routes then answer 503 'indisponivel'. `invites` is an
+// openInvitesStore (./invites-store.js) or null: null is open sign-up (the
+// policy route answers { required: false }, the two POST invite routes are
+// 404 and start ignores `invite`); otherwise every new link needs a
+// usable invite code, held in memory from start to finish. `push` is null
+// (the push routes and /push-event are not mounted at all) or the options of
 // ./push-routes.js { pushStore, vapid, send, relayTokenHash }.
 function createAccountServer ({
   association,
@@ -557,6 +568,7 @@ function createAccountServer ({
   usage = null,
   panelDir,
   terms = null,
+  invites = null,
   push = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
@@ -581,6 +593,7 @@ function createAccountServer ({
     finish: keyedWindow(10, 600 * 1000, now),
     renameFinish: keyedWindow(5, 600 * 1000, now),
     termsFinish: keyedWindow(5, 600 * 1000, now),
+    invitesFinish: keyedWindow(10, 600 * 1000, now),
     callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
@@ -626,6 +639,15 @@ function createAccountServer ({
   // Pending terms acceptances by nonce: { member, version, expiresAt }, the
   // same rules as `renames` (terms/start needs no proof either).
   const termsNonces = new Map()
+  // Invite issue requests by nonce: { member, expiresAt }, the same rules.
+  const inviteNonces = new Map()
+  // Sign-up invite reservations: invite id -> { pendingId, expiresAt }. In
+  // memory beside the pending rows, which are memory-only too, so a
+  // reservation never outlives its row across a restart.
+  const inviting = invites !== null
+  const held = new Map()
+  // Pending ids with a finish in progress: never dropped meanwhile.
+  const finishing = new Set()
 
   function sweep (map) {
     const t = now()
@@ -648,15 +670,79 @@ function createAccountServer ({
     if (!verifyAccountLink(fields, signature).ok) throw refuse('assinatura-invalida')
   }
 
+  // Usable = known, unused and unexpired in the sidecar AND held by no link
+  // in the directory (the authority on single use). -> null or the token.
+  // Throws 'indisponivel' when the sidecar is unavailable.
+  function inviteRefusal (id) {
+    if (!invites.available()) throw refuse('indisponivel')
+    let why
+    try {
+      why = invites.check(id)
+    } catch (err) {
+      throw fromStore(err)
+    }
+    if (why !== null || store.inviteUsed(id)) return 'convite-invalido'
+    return null
+  }
+
+  // Deletes the reservation of `row` (if it still names that row).
+  function release (row) {
+    if (!inviting || row.invite === null || row.invite === undefined) return
+    const entry = held.get(row.invite)
+    if (entry !== undefined && entry.pendingId === row.id) held.delete(row.invite)
+  }
+
+  // -> { id, takeover } for start, or throws. A reservation whose row is
+  // gone is stale; one held by the same member (a retry) is taken over by
+  // the caller only once the new row exists; a live row of another member,
+  // or one with a finish in flight, keeps it. `cookie` is the link cookie
+  // of the request (or null).
+  function reserveInvite (member, code, cookie) {
+    if (typeof code !== 'string') throw refuse('convite-obrigatorio')
+    if (!CODE_RE.test(code)) throw refuse('convite-invalido')
+    const id = inviteId(code)
+    if (inviteRefusal(id) !== null) throw refuse('convite-invalido')
+    sweep(held)
+    const entry = held.get(id)
+    if (entry === undefined) return { id, takeover: null }
+    const old = store.get(entry.pendingId)
+    if (old === null) {
+      held.delete(id)
+      return { id, takeover: null }
+    }
+    if (old.member !== member || finishing.has(old.id)) throw refuse('convite-invalido')
+    // start is unsigned: without more it may replace only a bare row, never
+    // one past the signed authorize or the Google callback. The link cookie
+    // naming that very row is the bearer proof of owning it (an outsider
+    // with only the code and the public key has no cookie), so its own
+    // browser may start over, for instance with another Google account.
+    const owner = cookie === old.id
+    if (!owner && (old.phase !== 'reserve' || typeof old.sub === 'string')) throw refuse('convite-invalido')
+    return { id, takeover: old.id }
+  }
+
   async function start (req, res, body) {
     configured()
     const member = memberParam(body.member)
     const username = usernameParam(body.username)
+    let reserved = null
+    if (inviting) {
+      // A linked key never reaches the sidecar: store.start refuses it.
+      if (store.status(member).linked) throw refuse('conta-vinculada')
+      if (!invites.available()) throw refuse('indisponivel')
+      reserved = reserveInvite(member, body.invite, cookieId(req))
+    }
     let row
     try {
-      row = store.start({ member, username })
+      row = inviting ? store.start({ member, username, invite: reserved.id }) : store.start({ member, username })
     } catch (err) {
+      // The previous row and its reservation stay as they were.
       throw fromStore(err)
+    }
+    if (inviting) {
+      const old = reserved.takeover
+      if (old !== null && !finishing.has(old)) store.dropPending(old)
+      held.set(reserved.id, { pendingId: row.id, expiresAt: row.expiresAt })
     }
     send(res, 200, { nonce: row.nonce }, { 'Set-Cookie': cookieHeader(row.id) })
   }
@@ -698,10 +784,16 @@ function createAccountServer ({
     states.delete(state)
     const row = store.get(id)
     if (row === null || row.state !== state || row.phase !== 'finish') return back('erro')
+    // From here every exit short of putGoogle frees the row's invite, so a
+    // fresh start can take the code.
+    const out = (outcome) => {
+      release(row)
+      return back(outcome)
+    }
     // A top-level navigation: answer with the page, not a JSON 429.
-    if (!limits.callback(id)) return back('erro')
+    if (!limits.callback(id)) return out('erro')
     const error = url.searchParams.get('error')
-    if (error !== null) return back('cancelado')
+    if (error !== null) return out('cancelado')
     // Cap reached since start: refuse BEFORE the code is exchanged, so no
     // Google subject or e-mail is ever held for a link finish() would
     // refuse. The row goes and the cookie is cleared, as finish() does on
@@ -709,18 +801,41 @@ function createAccountServer ({
     // A key that is already linked is never a new member: its callback goes
     // on to finish(), whose same-account branch the cap does not touch.
     if (store.isFull() && !store.status(row.member).linked) {
+      release(row)
       store.dropPending(id)
       log({ event: 'lista-de-espera' })
       return redirect(res, origin + '/?conta=lista-de-espera', { 'Set-Cookie': cookieHeader(id, 0) })
     }
+    // Invite-only: a new member reaches the token exchange only with a live
+    // reservation on a usable code, so nothing from Google is collected for
+    // a link finish() would refuse.
+    if (inviting && !store.status(row.member).linked) {
+      let why
+      if (row.invite === null) why = 'convite-obrigatorio'
+      else if (held.get(row.invite)?.pendingId !== id) why = 'convite-invalido'
+      else {
+        try {
+          why = inviteRefusal(row.invite)
+        } catch {
+          why = 'indisponivel'
+        }
+      }
+      if (why !== null) {
+        release(row)
+        store.dropPending(id)
+        log({ event: 'convite', reason: why })
+        const outcome = why === 'indisponivel' ? 'erro' : 'convite-invalido'
+        return redirect(res, origin + '/?conta=' + outcome, { 'Set-Cookie': cookieHeader(id, 0) })
+      }
+    }
     const code = url.searchParams.get('code')
-    if (typeof code !== 'string' || !PARAM_RE.test(code)) return back('erro')
+    if (typeof code !== 'string' || !PARAM_RE.test(code)) return out('erro')
     const result = await google.exchange({ code, codeVerifier: row.verifier })
-    if (!result.ok) return back('erro')
+    if (!result.ok) return out('erro')
     try {
       store.putGoogle(id, { sub: result.sub, email: result.email })
     } catch {
-      return back('erro')
+      return out('erro')
     }
     back('ok')
   }
@@ -740,17 +855,75 @@ function createAccountServer ({
     if (typeof row.sub !== 'string') throw refuse('expirado')
     proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
     if (!limits.finish(row.member)) throw over()
+    if (!inviting) return finishRow(res, row, signature, false)
+    // The same answer store.finish gives once the first finish removed the row.
+    if (finishing.has(row.id)) throw refuse('expirado')
+    finishing.add(row.id)
+    try {
+      await finishInvited(res, row, signature)
+    } finally {
+      finishing.delete(row.id)
+      // A row that survived the refusal keeps its code, so a retry works.
+      if (store.get(row.id) === null) release(row)
+    }
+  }
+
+  // Invite-only finish. An e-mail update, an already linked key or sub, a
+  // full cap and a name held by another member are store.finish's own
+  // answers and need no invite. A new link needs the reservation on a
+  // usable code; store.finish then refuses atomically, inside its queue, an
+  // invite another link took meanwhile and records it on the link, and only
+  // after the link is on disk is the sidecar marked. A refusal never marks
+  // it, so the invite stays usable. A failed mark does not undo the link:
+  // the sidecar heals through isUsed (the directory is the authority).
+  async function finishInvited (res, row, signature) {
+    const holder = store.lookup(row.username)
+    const known = store.memberForSub(row.sub) !== null || store.status(row.member).linked
+    const plain = known || store.isFull() || (holder !== null && holder.member !== row.member)
+    if (!plain) {
+      const entry = row.invite === null ? undefined : held.get(row.invite)
+      const why = entry === undefined || entry.pendingId !== row.id ? 'convite-invalido' : inviteRefusal(row.invite)
+      if (why !== null) {
+        store.dropPending(row.id)
+        log({ event: 'convite', reason: why })
+        const err = refuse('convite-invalido')
+        err.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
+        throw err
+      }
+    }
+    await finishRow(res, row, signature, true)
+  }
+
+  // `mark`: the sidecar is marked only when the directory recorded this
+  // row's invite on a link. The classification above runs outside the store
+  // queue, so an overlapping finish may turn this one into an e-mail update
+  // that records no invite.
+  async function finishRow (res, row, signature, mark) {
     let result
     try {
       result = await store.finish(row.id, { signature }, issuer.keyPair, issuer.cert, association)
     } catch (err) {
       const routeErr = fromStore(err)
-      // A waitlist refusal deleted the row too: clear the cookie as on
-      // success, so a retry starts over instead of answering 'expirado'.
-      if (routeErr.token === 'lista-de-espera') routeErr.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
+      // A row whose name or key is taken can never produce this link, and
+      // keeping it would hold the invite until it expires. The refused
+      // finish is signed, so dropping a proven row here is safe; the caller
+      // then releases the reservation and the code works at once.
+      const taken = mark && row.invite !== null && row.invite !== undefined && (routeErr.token === 'nome-em-uso' || routeErr.token === 'conta-vinculada')
+      if (taken) store.dropPending(row.id)
+      // A waitlist or invite refusal deleted the row too: clear the cookie
+      // as on success, so a retry starts over instead of answering 'expirado'.
+      if (taken || routeErr.token === 'lista-de-espera' || routeErr.token === 'convite-invalido') routeErr.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
       throw routeErr
     }
     log({ event: 'linked' })
+    if (mark && row.invite !== null && store.inviteUsed(row.invite)) {
+      try {
+        await invites.consume(row.invite)
+        log({ event: 'convite', reason: 'usado' })
+      } catch {
+        log({ event: 'convite', reason: 'marca-falhou' })
+      }
+    }
     // The row is gone (C8): the cookie has nothing left to name.
     send(res, 200, result, { 'Set-Cookie': cookieHeader(row.id, 0) })
   }
@@ -758,7 +931,16 @@ function createAccountServer ({
   async function status (req, res, url) {
     if (!limits.lookup()) throw over()
     const member = memberParam(url.searchParams.get('member'))
+    // Member keys are public: the weekly invite counts reach a member only
+    // in the signed /account/invites/finish answer, never here.
     send(res, 200, store.status(member))
+  }
+
+  // Exact keys: the app decides from `required` alone whether start needs a
+  // code, even while the sidecar is unavailable.
+  async function invitesPolicy (req, res) {
+    if (!limits.lookup()) throw over()
+    send(res, 200, inviting ? { required: true, perWeek: invites.perWeek } : { required: false })
   }
 
   async function username (req, res, name) {
@@ -860,6 +1042,44 @@ function createAccountServer ({
     send(res, 200, { version: result.version, acceptedAt: result.acceptedAt })
   }
 
+  function invitesAvailable () {
+    if (!inviting || !invites.available()) throw refuse('indisponivel')
+  }
+
+  // Issue routes: the terms pattern. Every linked member may issue, the
+  // operator included; the code is only ever in this response.
+  async function invitesStart (req, res, body) {
+    const member = memberParam(body.member)
+    invitesAvailable()
+    linked(member)
+    sweep(inviteNonces)
+    while (inviteNonces.size >= MAX_TERMS_NONCES) inviteNonces.delete(inviteNonces.keys().next().value)
+    const nonce = base64url(nodeCrypto.randomBytes(32))
+    inviteNonces.set(nonce, { member, expiresAt: now() + TERMS_TTL_MS })
+    send(res, 200, { nonce })
+  }
+
+  async function invitesFinish (req, res, body) {
+    const member = memberParam(body.member)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    const signature = signatureParam(body.signature)
+    const row = nonce === null ? undefined : inviteNonces.get(nonce)
+    if (nonce !== null) inviteNonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    if (!verifyInvite({ action: 'issue', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
+    if (!limits.invitesFinish(member)) throw over()
+    invitesAvailable()
+    linked(member)
+    let result
+    try {
+      result = await invites.issue(member)
+    } catch (err) {
+      throw fromStore(err)
+    }
+    log({ event: 'convite', reason: 'emitido' })
+    send(res, 200, { code: result.code, expiresAt: result.expiresAt, used: result.used, remaining: result.remaining, resetsAt: result.resetsAt })
+  }
+
   const POST = {
     '/account/start': start,
     '/account/authorize': authorize,
@@ -868,6 +1088,11 @@ function createAccountServer ({
     '/account/rename/finish': renameFinish,
     '/account/terms/start': termsStart,
     '/account/terms/finish': termsFinish
+  }
+  // Open sign-up has no POST invite routes; the policy route still answers.
+  if (inviting) {
+    POST['/account/invites/start'] = invitesStart
+    POST['/account/invites/finish'] = invitesFinish
   }
 
   async function route (req, res, hostOk) {
@@ -894,6 +1119,7 @@ function createAccountServer ({
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
       if (pathname === '/account/status') return status(req, res, url)
+      if (pathname === '/account/invites/policy') return invitesPolicy(req, res)
       if (pathname.startsWith('/account/username/')) return username(req, res, pathname.slice('/account/username/'.length))
       throw refuse('nao-encontrado')
     }

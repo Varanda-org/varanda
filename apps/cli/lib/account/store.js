@@ -157,6 +157,14 @@
 // isFull() lets the server's Google callback refuse (and dropPending() the
 // row) before the Google code is exchanged, so no Google data is collected
 // for a link that would be refused.
+//
+// Sign-up invites (strict single use): a link finished with an invite keeps
+// its id as `link.invite` (absent for a link made without one, so those
+// records stay byte-identical). finish() refuses an invite another link
+// already holds ('convite-invalido'); applyEntry never does, so a journal an
+// earlier build accepted always replays. Older builds keep the field: their
+// validLink checks only the fields they need and fromJson / applyEntry copy
+// the record whole ({ ...link }), as rename and e-mail lines do here.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -254,6 +262,10 @@ function isPlain (x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x)
 }
 
+function isInvite (x) {
+  return typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)
+}
+
 function isDate (x) {
   return typeof x === 'string' && Number.isFinite(Date.parse(x))
 }
@@ -268,7 +280,8 @@ function utcDay (ms) {
 function validLink (link) {
   return isPlain(link) && typeof link.sub === 'string' && isUsername(link.username) &&
     typeof link.email === 'string' && isDate(link.usernameChangedAt) && isDate(link.linkedAt) &&
-    isPlain(link.cert) && isPlain(link.usernameRecord)
+    isPlain(link.cert) && isPlain(link.usernameRecord) &&
+    (link.invite === undefined || isInvite(link.invite))
 }
 
 // Validates a snapshot (v 1 or v 2) -> the state; `seq` is read by snapshotSeq.
@@ -661,6 +674,9 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   // directory.json's { dev, ino } as last read or written (null: no file);
   // orphans: journal ids the snapshot does not name, as read at open.
   let state, seq, snapV, journalId, headerBytes, journalBytes, journalLines, snapStat, orphans
+  // The invites state.links holds, rebuilt on demand: null after any change
+  // to state (adopt() and every applyEntry that writes).
+  let invites = null
   const loaded = readDirectory(dataDir)
   adopt(loaded)
   const isRestored = belowMark(loaded)
@@ -735,6 +751,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   function adopt (loaded) {
     if (fd !== null && loaded.id !== journalId) dropFd()
     state = loaded.state
+    invites = null
     seq = loaded.seqless && loaded.hwm !== null ? Math.max(loaded.seq, loaded.hwm.seq) : loaded.seq
     snapV = loaded.v
     journalId = loaded.id
@@ -1128,6 +1145,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       applyEntry(state, line, true)
       append(Buffer.from(JSON.stringify(line) + '\n'))
       applyEntry(state, line)
+      invites = null
       seq = line.seq
       journalLines++
     }
@@ -1146,8 +1164,19 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     const line = { seq: seq + 1, ...entry }
     append(Buffer.from(JSON.stringify(line) + '\n'))
     applyEntry(state, line)
+    invites = null
     seq = line.seq
     journalLines++
+  }
+
+  function usedInvites () {
+    if (invites === null) {
+      invites = new Set()
+      for (const link of Object.values(state.links)) {
+        if (link.invite !== undefined) invites.add(link.invite)
+      }
+    }
+    return invites
   }
 
   // After an error raised before any byte reached the journal, or a failed
@@ -1234,8 +1263,9 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return false
   }
 
-  function start ({ member, username } = {}) {
+  function start ({ member, username, invite = null } = {}) {
     member = normalizeMember(member)
+    if (invite !== null && !isInvite(invite)) throw new TypeError('invite must be 64 lowercase hex characters')
     if (!validName(username)) throw fail('nome-invalido')
     if (has(state.links, member)) throw fail('conta-vinculada')
     // Sweep before the cap check: while the cap is full this is the only
@@ -1260,6 +1290,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       state: randomToken(),
       verifier: randomToken(),
       phase: 'reserve',
+      // Memory only, like the row: the account server (server.js) holds the
+      // reservation and consumes the invite in invites-store.js; finish()
+      // keeps it on the link (strict single use, see the header).
+      invite,
       expiresAt: now() + PENDING_TTL_MS
     }
     pending.set(row.id, row)
@@ -1308,6 +1342,12 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return full()
   }
 
+  // Read-only: true when a link already holds this invite.
+  function inviteUsed (id) {
+    if (!isInvite(id)) throw new TypeError('invite must be 64 lowercase hex characters')
+    return usedInvites().has(id)
+  }
+
   // Deletes a pending row (a callback refused while the cap is full).
   function dropPending (id) {
     pending.delete(id)
@@ -1345,27 +1385,32 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
         sweep()
         throw fail('lista-de-espera')
       }
+      // Another link took this invite while the row was at Google: dropped
+      // the same way.
+      if (row.invite !== null && usedInvites().has(row.invite)) {
+        pending.delete(id)
+        sweep()
+        throw fail('convite-invalido')
+      }
       if (!validName(username)) throw fail('nome-invalido')
       if (nameTaken(state, username, member)) throw fail('nome-em-uso')
 
       const date = iso(now())
       const cert = createIssuedCert({ member, date }, issuerKeyPair, issuerCert)
       const usernameRecord = createUsernameRecord({ member, username, date }, issuerKeyPair, issuerCert)
-      commit({
-        op: 'link',
-        member,
-        link: {
-          sub,
-          email,
-          username,
-          usernameRecord,
-          usernameChangedAt: date,
-          linkedAt: date,
-          nonce: row.nonce,
-          signature,
-          cert
-        }
-      })
+      const link = {
+        sub,
+        email,
+        username,
+        usernameRecord,
+        usernameChangedAt: date,
+        linkedAt: date,
+        nonce: row.nonce,
+        signature,
+        cert
+      }
+      if (row.invite !== null) link.invite = row.invite
+      commit({ op: 'link', member, link })
       pending.delete(id)
       return linkResult(state.links[member])
     })
@@ -1510,7 +1555,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, get, isFull, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {

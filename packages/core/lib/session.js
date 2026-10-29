@@ -506,7 +506,12 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
-    // And for the push-subscription statement (docs/rpc.md 5.30).
+    // And for the signup-invite request (docs/rpc.md 5.30).
+    'invite.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // And for the push-subscription statement (docs/rpc.md 5.31).
     'push.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
     }),
