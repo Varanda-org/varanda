@@ -2366,3 +2366,104 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - A limpeza de Sair e Recomeçar não espera uma troca do interruptor em andamento, e o interruptor continua tocável durante ela: ligar os avisos de novo no meio de Sair pode deixar a nova inscrição ativa.
 - Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
 - Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
+
+## 39. Abertura do app: splash e cartões (feat/app-startup, 2026-10-29)
+
+As seções 1 a 38 não mudam. Esta seção documenta a primeira parte da abertura do app (PR A): a marca animada e os três cartões de apresentação antes dos Termos.
+
+### O que mudou
+
+- Splash animado (`apps/app/src/ui/Splash.js`): a cadeira (`assets/cadeira.png`) aparece com efeito de fade e escala, junto com a palavra "Varanda" e "conectando…", sobre o fundo `#fbf8f3`, o mesmo das telas de abertura nativas e da página web. Respeita "reduzir movimento". Substitui o splash só com texto que aparecia enquanto o registro dos Termos carregava e enquanto o nó conectava.
+- Cartões de apresentação (`apps/app/src/screens/Introducao.js`, lógica em `apps/app/src/intro.js`): três cartões, mostrados uma vez por aparelho, antes do portão dos Termos. Botões Pular, Voltar, Próximo e Começar. Na web, deslizar, os botões e as setas do teclado; na tela nativa, deslizar e os botões. Cada cartão é anunciado para leitor de tela.
+- Registro do aparelho: `varanda-intro` no `localStorage` (web, `introStore.web.js`) ou `varanda-intro.json` na pasta de documentos do app (nativo, `introStore.native.js`). Guarda só `{ v, seenVersion, at }`. É apresentação: não é aceite dos Termos nem de nada.
+- Não há telemetria e não há dependência nova. As telas de abertura nativas (`ios/` e `android/`) não mudam.
+
+### Testes automatizados
+
+- `node apps/app/test/intro.test.js`: validação do registro (formato, versão, data), a decisão de mostrar ou não (carregando tem prioridade, versão nova mostra de novo), o registro novo, os três cartões congelados e a ida e volta do armazenamento web (o nativo copia `termsStore.native.js` e fica na verificação manual).
+
+Esses testes cobrem os módulos puros e o armazenamento. Não cobrem a animação, a tela nem a ordem de carga no app: essa parte está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Primeira carga em aparelho novo: aparecem o splash, depois os três cartões, depois os Termos (não realizada ainda).
+2. [ ] Recarregar depois de Começar: os cartões não aparecem de novo (não realizada ainda).
+3. [ ] Pular no primeiro ou no segundo cartão (o último só tem Começar): vai direto para os Termos e não aparece de novo na recarga (não realizada ainda).
+4. [ ] Armazenamento recusado (navegador em modo privado): os cartões voltam a cada carga, e Pular continua funcionando (não realizada ainda).
+5. [ ] "Reduzir movimento" ligado no sistema: o splash não anima e os cartões trocam sem movimento (não realizada ainda).
+6. [ ] Web em celular estreito e em desktop largo: sem rolagem horizontal, botões acessíveis, cartões legíveis (não realizada ainda).
+7. [ ] iOS (app nativo): splash, cartões e Termos na ordem certa, e o arquivo `varanda-intro.json` aparece depois de Começar (não realizada ainda).
+8. [ ] Android (app nativo): o mesmo roteiro do iOS (não realizada ainda).
+9. [ ] Volta do Google (`?conta=` na URL): os cartões não aparecem, e o registro não é marcado como visto (não realizada ainda).
+10. [ ] Aparelho novo abrindo `/convite/<código>`: os cartões aparecem antes, e depois de Começar o convite continua na tela de entrada (não realizada ainda).
+11. [ ] Aparelho novo abrindo `/@nome`: os cartões aparecem antes, e depois de Começar o perfil continua aberto (não realizada ainda).
+12. [ ] Leitor de tela (VoiceOver ou TalkBack, ou leitor do navegador): cada cartão é anunciado ao trocar (não realizada ainda).
+
+### Limites
+
+- O registro vale por aparelho, não por conta. Quem usa outra conta no mesmo aparelho não vê os cartões de novo.
+- Sem armazenamento (modo privado ou dados bloqueados), os cartões voltam a cada carga. Pular continua funcionando na mesma carga.
+- Quem abre `/@nome` ou `/convite/<código>` pela primeira vez no aparelho vê os cartões antes do destino. O link é mantido enquanto os cartões estão na tela, e a checagem 10 e 11 confirma que ele não se perde.
+- A volta do Google (`?conta=`) pula os cartões nessa carga e não os marca como vistos, então eles podem aparecer na próxima abertura normal.
+- Os cartões são de apresentação. Não dizem nada sobre os Termos, e o texto deles não substitui o aceite.
+
+## 40. Verificação de idade na web hospedada (feat/hosted-age-verification, 2026-10-29)
+
+As seções 1 a 39 não mudam. Esta seção documenta o PR B: a verificação de idade com a Didit para quem usa a web hospedada. Idade mínima 16.
+
+### O que mudou
+
+- Declaração assinada `varanda-age-v1` (`packages/core/lib/age.js`) e método RPC `age.sign` (`docs/rpc.md` §5.32), só no nó do navegador.
+- Cliente da Didit (`apps/cli/lib/account/didit.js`): cria a sessão, lê a decisão e apaga a sessão. A decisão por rosto vale pela MENOR estimativa aprovada; abaixo de 21 anos pede o documento, e só o documento recusa (menos de 16).
+- Sidecar `age.json` (`apps/cli/lib/account/age-store.js`, modo 0600, volume `account-data`): por chave do membro, só a faixa (`16-17` ou `18+`), o método `didit` e a data.
+- Rotas (`apps/cli/lib/account/age-routes.js`): `GET /account/age/policy` e `POST /account/age/start|session|result`. Pedidos simultâneos de sessão dividem uma só sessão paga. Sem `age.json` disponível, nenhuma sessão é criada. A sessão que expira (24 h) ou é substituída é apagada na Didit. Limites de sessões pagas: 3 por membro em 24 h e, para chaves ainda sem vínculo, 3 por código de convite em 24 h (`limite-idade`, 429); teto diário `VARANDA_DIDIT_DAILY_LIMIT` (padrão 200), contado à parte para chaves novas e para membros já vinculados, que respondem `indisponivel` (503) quando cheio. Chaves sem vínculo e sem convite, com convites ligados, recebem `convite-obrigatorio`.
+- Portões no `server.js`: `idade-pendente` (403) em `/account/authorize`, `/account/finish`, `/account/rename/finish` e `/account/invites/finish` enquanto a verificação estiver ligada, sempre depois de conferir a assinatura (as rotas `start` sem assinatura não revelam se uma chave já verificou).
+- App: tela "Confirme sua idade" (`apps/app/src/screens/Idade.js`, lógica em `apps/app/src/age.js`) para toda pessoa da web hospedada, inclusive quem já tinha conta; antes do vínculo Google. A volta é `/?idade=volta`; `verificationSessionId` e `status` na URL são ignorados. Falha vira "verificação necessária".
+- Termos e Política versão 4 (novo aceite para todos).
+- Variáveis: `VARANDA_DIDIT_API_KEY`, `VARANDA_DIDIT_WORKFLOW_ID` (as duas definidas ligam; as duas vazias desligam; uma só é erro de uso) e `VARANDA_DIDIT_DAILY_LIMIT`. A chave precisa de `read:sessions` e `delete:sessions` e não pode ser restrita (README, "Verificação de idade").
+
+### Testes automatizados
+
+- `node packages/core/test/age.test.js`
+- `node apps/cli/test/didit.test.js`
+- `node apps/cli/test/age-store.test.js`
+- `node apps/cli/test/account-age.test.js`
+- `node apps/cli/test/account-age-e2e.test.js`
+- `node apps/app/test/age.test.js`
+- `node apps/app/test/onboarding.test.js`
+- `node apps/app/test/account.test.js`
+
+Todos usam servidores falsos em `127.0.0.1`, sem rede externa. Não cobrem a Didit real, a tela no navegador nem o modelo de idade do parceiro: isso está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Recurso desligado (sem as duas variáveis): nada muda, o passo não aparece e o serviço registra isso na partida (não realizada ainda).
+2. [ ] Teste de fumaça no sandbox da Didit, com os dois `curl` do README, antes de ligar em produção (não realizada ainda).
+3. [ ] Membro novo de ponta a ponta: Entrar, "Confirme sua idade", Didit, volta, @nome, Google, certificado (não realizada ainda).
+4. [ ] Membro já vinculado: fica bloqueado em "Confirme sua idade" e é liberado depois de passar (não realizada ainda).
+5. [ ] Menor de 16 pelo documento: recusado, sem acesso (não realizada ainda).
+6. [ ] Rosto inconclusivo, depois documento: o fluxo segue para o documento e termina bem (não realizada ainda).
+7. [ ] Revisão pendente, depois aprovada: o estado "pendente" some quando a Didit aprova (não realizada ainda).
+8. [ ] Reiniciar o serviço `account` com a sessão pendente: a pessoa recomeça e o app não trava (não realizada ainda).
+9. [ ] Teto diário atingido: aparece "serviço indisponível" (503) para chaves novas, um membro já vinculado ainda consegue a sessão, e no dia seguinte tudo volta a funcionar (não realizada ainda).
+10. [ ] Volta forjada, com `?idade=volta&status=Approved` sem ter passado: continua bloqueado (não realizada ainda).
+11. [ ] Abrir o app hospedado sem rede: fica bloqueado até conseguir consultar o serviço de conta (não realizada ainda).
+12. [ ] Console da Didit: retenção mínima definida e exclusão da sessão confirmada depois da decisão (não realizada ainda).
+13. [ ] Parecer jurídico sobre os textos da versão 4 dos Termos e da Política e sobre a idade mínima de 16 (não realizada ainda).
+
+### Limites
+
+- As sessões pendentes ficam só na memória: reiniciar pede para começar de novo.
+- A faixa não entra no certificado (v2 continua `unchecked`). A camada P2P ainda admite um certificado existente (`docs/protocol.md`), então um cliente antigo ou modificado não é bloqueado pela rede, só pelo app e pelo serviço de conta.
+- Não há o modo restritivo de 16 e 17 anos (#74).
+- O resultado depende do modelo do parceiro.
+- A exclusão na Didit é pedida logo após a decisão, com novas tentativas só em memória.
+- Sem as variáveis, ninguém é verificado (só para desenvolvimento e demo).
+- Aberto offline, o app hospedado fica bloqueado até conseguir consultar o serviço de conta.
+- Uma faixa fica guardada para uma chave que fez a verificação e não concluiu o vínculo.
+- A verificação prova a idade de quem terminou a página da Didit, não de quem tem a passkey: o endereço da sessão pode ser repassado, e um adulto pode fazer a selfie no lugar de um menor (no mesmo aparelho ou em outro). Prender a sessão ao aparelho não fecha isso; é uma questão de produto e de parecer (#39, #82).
+- Um membro que já tinha certificado é bloqueado pelo app e pelo serviço de conta, mas um cliente modificado ainda publica e sincroniza, porque os semeadores não conferem a faixa (#68).

@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
+    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
     'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
@@ -132,6 +132,28 @@ test('invite.sign', (t) => {
   for (const action of ['revoke', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('age.sign', (t) => {
+  const base = { action: 'session', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('age.sign'))
+  ok(t, 'age.sign', base, base)
+  ok(t, 'age.sign', { ...base, action: 'result' })
+  ok(t, 'age.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'age.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'age.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'age', 'band']) {
+    bad(t, 'age.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['SESSION', 'issue', '', null, 1]) bad(t, 'age.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'age.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
 })
 

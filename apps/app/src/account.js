@@ -5,6 +5,7 @@
 // origin serves.
 
 import { applicationServerKey } from './push-state.js'
+import { AGE_STATES } from './age.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -36,7 +37,9 @@ const ERROR_MESSAGES = {
   'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
   'convite-obrigatorio': INVITE_NEEDED_TEXT,
   'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
-  'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.'
+  'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
+  'idade-pendente': 'Confirme sua idade antes de continuar.',
+  'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -259,4 +262,50 @@ export const invitesFinish = async ({ member, nonce, signature }) => {
     throw toError('indisponivel')
   }
   return { code: data.code, expiresAt: data.expiresAt, used: data.used, remaining: data.remaining, resetsAt: data.resetsAt }
+}
+
+// Hosted age check (src/age.js). The policy read answers null on any failure;
+// ageGate treats null as required, so a broken read never lets anyone past.
+export const agePolicy = async () => {
+  try {
+    const data = await call('GET', '/account/age/policy')
+    return exactKeys(data, ['required']) && typeof data.required === 'boolean' ? { required: data.required } : null
+  } catch {
+    return null
+  }
+}
+export const ageStart = async ({ member }) => {
+  const data = await call('POST', '/account/age/start', { member })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+
+function isVerificationUrl (v) {
+  if (typeof v !== 'string' || !v.startsWith('https://')) return false
+  let u
+  try { u = new URL(v) } catch { return false }
+  return u.protocol === 'https:' && u.username === '' && u.password === ''
+}
+
+// Creates a provider session on the service, so an unknown outcome is
+// uncertain. The invite goes in only when well formed: the service checks it
+// before sending anyone to the provider.
+export const ageSession = async ({ member, nonce, signature, invite }) => {
+  const body = { member, nonce, signature }
+  if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
+  const data = await call('POST', '/account/age/session', body, { uncertain: true })
+  if (isVerificationUrl(data.url)) return { url: data.url }
+  if (data.state === 'verificado') return { state: 'verificado' }
+  const err = toError('indisponivel')
+  err.uncertain = true
+  throw err
+}
+// The service may record the band and close the provider session before it
+// answers, so an unknown outcome is uncertain too.
+export const ageResult = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/age/result', { member, nonce, signature }, { uncertain: true })
+  if (typeof data.state === 'string' && AGE_STATES.includes(data.state)) return { state: data.state }
+  const err = toError('indisponivel')
+  err.uncertain = true
+  throw err
 }

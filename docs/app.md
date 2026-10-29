@@ -27,6 +27,14 @@ Há três jeitos de ter um nó, e a interface é a mesma:
 
 ## Primeira configuração
 
+### Abertura e cartões de apresentação
+
+Ao abrir o app, aparece uma marca animada (a cadeira e "Varanda", com "conectando…") sobre o mesmo fundo das telas de abertura nativas. Ela substitui o texto simples que aparecia enquanto o registro dos Termos carregava e enquanto o nó conectava. A animação respeita a opção "reduzir movimento" do aparelho.
+
+Na primeira abertura do aparelho, antes dos Termos, três cartões explicam o app: o diário que fica no aparelho, o que é seu continua seu, e a varanda para conversar. Dá para pular, voltar, avançar ou começar. Na web, deslizar, os botões e as setas do teclado funcionam, e cada cartão é anunciado para leitor de tela. Os cartões são só apresentação e não são aceite de nada. O registro, `varanda-intro` no `localStorage` (web) ou `varanda-intro.json` na pasta de documentos (nativo), guarda só a versão vista e a data. Não há telemetria nem dependência nova.
+
+Limites: o registro vale por aparelho, não por conta. Se o armazenamento for recusado (modo privado), os cartões voltam na próxima abertura, e Pular continua funcionando. Quem abre `/@nome` ou `/convite/<código>` pela primeira vez no aparelho vê os cartões antes, e o link é mantido. A volta do Google (`?conta=`) não mostra os cartões e não os marca como vistos. Verificação em `docs/verification.md` seção 39.
+
 ### No app nativo: tela Conectar
 
 No app nativo, a tela pede:
@@ -48,6 +56,8 @@ Antes de Conectar (nativo) ou de Entrar (web hospedada), o app mostra os dois do
 ### Na web, com o nó no navegador: Entrar
 
 **Os três passos na web hospedada.** Depois do botão Entrar, o app mostra "Passo n de 3": **Bem-vindo à Varanda** (Entrar com a passkey ou criar a passkey; o passo diz "Entre com a passkey deste aparelho." e "Se perder a passkey, perde a conta.", e "Saiba mais" abre "Como funciona a entrada"), **Escolha seu @nome** (o vínculo com a conta Google, abaixo; com o portão de convites ligado, só com o link de convite, veja "Convites para entrar") e **Como você quer aparecer** (nome e bio opcional, com "Continuar" e "Pular por enquanto"; pular vale só para esta sessão e o nome é pedido de novo na próxima carga). Quem entra num aparelho novo vê antes "Buscando sua conta…" enquanto a sincronização de recuperação busca no semeador o que já existe dessa identidade; se o certificado volta de lá, o passo da conta é pulado. A mesma regra do "Um instante" e do "Continuar mesmo assim" vale aqui, e o aviso final é "Tudo pronto. Siga pessoas para encher a Rua.". A sincronização contínua começa quando o certificado está confirmado, sem esperar o nome.
+
+**Confirme sua idade.** Quando o operador liga a verificação de idade, a web hospedada mostra a tela "Confirme sua idade" depois de Entrar (ou da recuperação) e antes de "Escolha seu @nome". Quem já tinha conta também passa por ela: fica nessa tela até concluir. O botão leva à página da Didit (selfie e, quando preciso, documento), que devolve a pessoa para `/?idade=volta`. A idade mínima é 16. Só a faixa (`16-17` ou `18+`) fica guardada, no serviço de conta; a foto e o documento não chegam ao Varanda. Se a consulta falha, o app continua pedindo a verificação. Sem a verificação ligada no servidor, o passo não aparece. Detalhes em `docs/verification.md`, seção 40.
 
 **Primeira visita numa instalação hospedada.** A página busca `/varanda.json` na própria origem (`{"v":1,"association":"<chave>"}`), monta sozinha a configuração (a associação e o semeador `wss://<este host>/seeder`) e mostra só o botão **Entrar**. Ninguém preenche a tela Conectar. Enquanto conecta, a tela Conectar diz "conectando…". Se o `/varanda.json` falha numa página hospedada, o app mostra uma frase simples ("Não foi possível conectar agora. Confira sua internet e tente de novo.", ou "O Varanda já está aberto em outra aba ou janela. Feche a outra e toque em Tentar de novo.") com o botão "Tentar de novo". O mesmo vale numa página hospedada em que uma configuração manual foi gravada antes. Um "Detalhes técnicos" recolhido guarda a mensagem original, a configuração em uso, "usar outra configuração" (ou "configurar manualmente" quando a descoberta falhou) e o aviso de que limpar os dados do site apaga os diários guardados; o formulário manual só aparece se a pessoa pedir. Em Ajustes › Avançado › Conexão a visão técnica continua aberta.
 
