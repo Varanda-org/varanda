@@ -89,8 +89,8 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(PEEK_WEB_ONLY_MESSAGE, 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.')
   t.is(PEEK_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(PEEK_RULE_TEXT, PEEK_RULE, 'the rule is the node\'s, word for word')
-  t.ok(PEEK_RULE_TEXT.includes('que você não segue, o seu incluído,'))
-  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue, o seu incluído.')
+  t.ok(!PEEK_RULE_TEXT.includes('o seu incluído'))
+  t.is(PEEK_SHORT_TEXT, 'Até três publicações de cada diário que você não segue.')
 })
 
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {

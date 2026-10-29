@@ -500,6 +500,7 @@ test('(d) two browser nodes: repost.set through the session, synced to the real 
 
   const page = await N2.web.request('peek.read', {})
   t.alike(page.items.filter((i) => i.author === N1.key), expected, 'node 1\'s three reposts, one per round (an unfollowed, a followed and the reader\'s own original)')
+  t.absent(page.items.some((i) => i.author === N2.key), 'the reader\'s own diary is absent')
   t.alike(page.items.filter((i) => i.author === X.key), [postItem({ author: X.key, name: 'Xavi', seq: 2, at: iso(now - 2 * HOUR), text: 'xavi 1', round: 0 })])
   t.absent(page.items.some((i) => i.author === A.key), 'the followed diary is absent')
   t.is(page.incomplete, false)

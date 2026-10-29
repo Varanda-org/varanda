@@ -237,6 +237,7 @@ function observedFactory (t, sockets) {
 async function peekOnce (t, stack, assoc, { limit = 10 } = {}) {
   const sockets = []
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: stack.url,

@@ -59,7 +59,7 @@ function refs (items) {
 test('peek constants and the public rule', (t) => {
   t.alike([PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS], [3, 8, 64, 3])
   t.alike([PEEK_PARALLEL, PEEK_FETCH_TIMEOUT_MS, PEEK_PAGE_TIMEOUT_MS, PEEK_CONNECT_TIMEOUT_MS, PEEK_SNAPSHOT_TTL_MS, PEEK_PAGE_MAX_BYTES], [16, 10000, 25000, 15000, 300000, 16777216])
-  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
+  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
 })
 
 test('peekCandidates filters inventory, lowercases keys and sorts without mutation', (t) => {
@@ -323,6 +323,135 @@ test('needs completes a touched round before finalizing even a full page', (t) =
   t.alike(final.items.map((i) => i.round), [0, 1, 2])
   t.is(final.next, null)
   t.alike(buildPeekPage({ diaries: [], limit: 35 }), { items: [], next: null, needs: [] })
+})
+
+test('buildPeekPage: the hidden diary never becomes an item on any round, in any case', (t) => {
+  // B is the newest in every round, so its items sit at the head of each round.
+  const diaries = [diary(A, 3), diary(B, 3, 5000), diary(C, 3)]
+  const plain = buildPeekPage({ diaries, limit: 35 })
+  t.is(plain.items.filter((i) => i.author === B).length, 3)
+  for (const hidden of [B, B.toUpperCase()]) {
+    const all = buildPeekPage({ diaries, limit: 35, hidden })
+    t.alike(refs(all.items), refs(plain.items.filter((i) => i.author !== B)), 'rounds 0, 1 and 2 without B: ' + hidden.slice(0, 2))
+    t.alike(all.next, plain.next)
+    t.alike(all.needs, plain.needs)
+    // The hidden diary still takes its slots: a full page keeps the cursor
+    // of the unhidden page and shows fewer than `limit` items.
+    const first = buildPeekPage({ diaries, limit: 4, hidden })
+    const firstPlain = buildPeekPage({ diaries, limit: 4 })
+    t.alike(refs(first.items), refs(firstPlain.items.filter((i) => i.author !== B)))
+    t.is(first.items.length, 2)
+    t.alike(first.next, firstPlain.next)
+    const rest = buildPeekPage({ diaries, limit: 35, after: first.next, hidden })
+    t.alike(refs(rest.items), refs(plain.items.slice(4).filter((i) => i.author !== B)))
+    t.is(rest.next, null)
+  }
+  t.alike(buildPeekPage({ diaries: [diary(B, 3)], limit: 35, hidden: B }), { items: [], next: null, needs: [] })
+})
+
+test('buildPeekPage: the hidden diary lands in needs like a shown one', (t) => {
+  const a = diary(A, 3)
+  const pending = (key) => ({ ...diary(key, 0), exhausted: false })
+  const plain = buildPeekPage({ diaries: [a, pending(B), pending(C)], limit: 35 })
+  const hidden = buildPeekPage({ diaries: [a, pending(B), pending(C)], limit: 35, hidden: B })
+  t.alike(plain.needs, [B, C])
+  t.alike(hidden.needs, [B, C], 'requested exactly like an unhidden diary')
+  t.is(hidden.next, null)
+  // With one post fetched, round 1 is still pending for the hidden diary.
+  const one = { ...diary(B, 1, 5000), exhausted: false }
+  const later = buildPeekPage({ diaries: [a, one], limit: 35, hidden: B })
+  t.alike(later.needs, [B])
+  t.ok(later.items.every((i) => i.author !== B))
+  t.alike(buildPeekPage({ diaries: [a, one], limit: 35 }).needs, [B])
+})
+
+test('buildPeekPage refuses an invalid hidden key and keeps null as no-op', (t) => {
+  for (const hidden of ['zz'.repeat(32), 'aa', 42]) {
+    t.exception.all(() => buildPeekPage({ diaries: [], limit: 1, hidden }), { name: 'TypeError', message: 'hidden inválido' })
+  }
+  const diaries = [diary(A, 3), diary(B, 3, 5000)]
+  t.alike(buildPeekPage({ diaries, limit: 35, hidden: null }), buildPeekPage({ diaries, limit: 35 }))
+})
+
+function prng (seed) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let x = Math.imul(a ^ (a >>> 15), 1 | a)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function randomDiaries (rand) {
+  const count = 2 + Math.floor(rand() * 19)
+  const diaries = []
+  for (let d = 0; d < count; d++) {
+    const key = d.toString(16).padStart(2, '0').repeat(32)
+    const fetched = Math.floor(rand() * 4)
+    const posts = []
+    for (let i = 0; i < fetched; i++) {
+      const seq = 10 - i
+      // Few distinct dates, so ties broken by author are common.
+      const at = new Date(NOW - Math.floor(rand() * 6) * 1000).toISOString()
+      if (rand() < 0.3) {
+        posts.push({ kind: 'repost', seq, at, to: { author: A, seq: 1 } })
+      } else {
+        posts.push({ kind: 'post', seq, at, text: key.slice(0, 2) + ' ' + i, replyTo: null, quote: null, media: null })
+      }
+    }
+    diaries.push({ key, name: key.slice(0, 2), username: null, posts, exhausted: rand() < 0.5 })
+  }
+  return diaries
+}
+
+test('buildPeekPage: hiding a diary changes nothing but the returned items', (t) => {
+  const rand = prng(20261028)
+  const limits = [1, 2, 3, 4, 30, 31]
+  const mismatches = []
+  let checked = 0
+  let withCursor = 0
+  let withNeeds = 0
+  for (let n = 0; n < 200; n++) {
+    const diaries = randomDiaries(rand)
+    const limit = limits[Math.floor(rand() * limits.length)]
+    let after = null
+    if (rand() < 0.5) {
+      const settled = diaries.map((d) => ({ ...d, exhausted: true }))
+      after = buildPeekPage({ diaries: settled, limit: limits[Math.floor(rand() * 4)] }).next
+    }
+    if (after !== null) withCursor++
+    const args = { diaries, limit, after }
+    const plain = buildPeekPage(args)
+    if (plain.needs.length > 0) withNeeds++
+    for (const { key } of diaries) {
+      for (const hidden of [key, key.toUpperCase()]) {
+        const page = buildPeekPage({ ...args, hidden })
+        checked++
+        const expected = { items: plain.items.filter((i) => i.author !== key), next: plain.next, needs: plain.needs }
+        if (JSON.stringify(page) !== JSON.stringify(expected)) mismatches.push({ n, limit, hidden: key.slice(0, 2), page, expected })
+      }
+    }
+  }
+  t.is(mismatches.length, 0, 'every hidden page equals the unhidden one minus its items')
+  if (mismatches.length > 0) t.comment(JSON.stringify(mismatches[0]))
+  t.ok(checked > 1000, 'checked ' + checked + ' hidden pages')
+  t.ok(withCursor > 20 && withNeeds > 20, 'cases with a cursor and with needs')
+})
+
+test('buildPeekPage: a hidden item filling round 0 does not open round 1', (t) => {
+  // Round 0 has exactly `limit` items, one of them hidden. B is not exhausted
+  // and has one fetched post: round 1 would add it to needs.
+  const x = diary(C, 3, 5000)
+  const b = { ...diary(B, 1), exhausted: false }
+  const plain = buildPeekPage({ diaries: [x, b], limit: 2 })
+  t.alike(plain.needs, [])
+  t.ok(plain.next !== null)
+  const hidden = buildPeekPage({ diaries: [x, b], limit: 2, hidden: C })
+  t.alike(hidden.needs, [], 'no needs from a round the unhidden page never visits')
+  t.alike(hidden.next, plain.next)
+  t.alike(refs(hidden.items), refs(plain.items.filter((i) => i.author !== C)))
+  t.is(hidden.items.length, 1)
 })
 
 test('needs accumulates every round the page touches', (t) => {

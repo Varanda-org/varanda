@@ -497,6 +497,13 @@ function createBrowserSession ({
     association: cfg.association,
     seederUrl: cfg.seederUrl,
     createSocket,
+    // peek.read already resolved the key on the serial chain. A cache miss
+    // means setKeyPair/reset aborted it: reject without reopening storage
+    // through requireOwnKey/identity outside that chain.
+    ownKey: () => {
+      if (ownKey === null) throw new Error('identidade não encontrada')
+      return ownKey
+    },
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
   })
