@@ -5,7 +5,8 @@
 // ABI list). The last test runs a real `expo prebuild --clean --no-install`
 // in a temp copy of the app (never in apps/app: prebuild would overwrite
 // ios/ and android/) and compares the three patched files with the committed
-// ones.
+// ones, and the generated privacy manifest with the committed one ignoring
+// the whitespace between tags.
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -15,10 +16,12 @@ const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('.
 
 const root = path.join(__dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
+const compact = (xml) => xml.replace(/>\s+</g, '><').trim()
 
 const APP_DELEGATE = 'ios/Varanda/AppDelegate.swift'
 const BUILD_GRADLE = 'android/app/build.gradle'
 const GRADLE_PROPERTIES = 'android/gradle.properties'
+const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
 
 test('the patches change nothing in the committed files', (t) => {
   t.is(patchAppDelegate(read(APP_DELEGATE)), read(APP_DELEGATE))
@@ -76,4 +79,5 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   for (const file of [APP_DELEGATE, BUILD_GRADLE, GRADLE_PROPERTIES]) {
     t.is(fs.readFileSync(path.join(dir, file), 'utf8'), read(file), file)
   }
+  t.is(compact(fs.readFileSync(path.join(dir, PRIVACY_MANIFEST), 'utf8')), compact(read(PRIVACY_MANIFEST)), PRIVACY_MANIFEST)
 })
