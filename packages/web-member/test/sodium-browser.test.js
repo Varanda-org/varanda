@@ -47,6 +47,10 @@ function shimPeer ({ port, initiator, seed }) {
   const chunks = []
   let received = 0
 
+  // process.exit() drops what a pipe has not taken yet, and the report is
+  // bigger than a macOS pipe buffer: leave once stdout is flushed.
+  const exit = (code) => process.stdout.write('', () => process.exit(code))
+
   const report = (extra) => {
     process.stdout.write(JSON.stringify({
       usedShim,
@@ -56,7 +60,7 @@ function shimPeer ({ port, initiator, seed }) {
     }) + '\n')
   }
 
-  stream.on('error', (err) => { report({ error: err.message }); process.exit(1) })
+  stream.on('error', (err) => { report({ error: err.message }); exit(1) })
   stream.on('connect', () => {
     stream.write(sent)
   })
@@ -71,7 +75,7 @@ function shimPeer ({ port, initiator, seed }) {
     })
     stream.end()
   })
-  stream.on('close', () => process.exit(0))
+  stream.on('close', () => exit(0))
 }
 
 function tests () {
@@ -290,7 +294,10 @@ function tests () {
     const sent = crypto.randomBytes(PAYLOAD)
 
     const childReport = {}
-    const child = new Promise((resolve) => { childReport.resolve = resolve })
+    const child = new Promise((resolve, reject) => {
+      childReport.resolve = resolve
+      childReport.reject = reject
+    })
 
     const native = new Promise((resolve, reject) => {
       const server = net.createServer((socket) => {
@@ -328,14 +335,13 @@ function tests () {
           const line = out.split('\n').find((l) => l.startsWith('{'))
           let report = null
           try { report = JSON.parse(line) } catch {}
-          if (!report || report.error) reject(new Error('peer: ' + (report && report.error) + ' exit ' + code + ' ' + err.trim()))
+          if (!report || report.error) childReport.reject(new Error('peer: ' + (report && report.error) + ' exit ' + code + ' ' + err.trim()))
           else childReport.resolve({ ...report, code, stderr: err.trim() })
         })
       })
     })
 
-    const n = await native
-    const c = await child
+    const [n, c] = await Promise.all([native, child])
     return { native: n, child: c, sent, expectedChildPk, nativePk: nativeKeyPair.publicKey }
   }
 
