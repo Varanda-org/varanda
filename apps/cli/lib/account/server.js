@@ -117,7 +117,11 @@ const ERROR_STATUS = Object.freeze({
   // Hosted age verification (./age-routes.js): no certificate, rename or
   // invite for a key whose age band is not on record.
   'idade-pendente': 403,
-  'limite-idade': 429
+  'limite-idade': 429,
+  // The age routes could not tell whether something was applied (the provider
+  // timed out after maybe creating a session, a write that may have landed):
+  // unlike 'indisponivel', the app must not read this as a plain refusal.
+  'resultado-incerto': 503
 })
 
 const BASE_HEADERS = Object.freeze({

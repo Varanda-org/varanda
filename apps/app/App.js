@@ -45,7 +45,7 @@ import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
 import { NamesProvider, useNames } from './src/names'
 import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
-import { ageBlocking, ageGate, parseReturnAge } from './src/age'
+import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -431,7 +431,7 @@ function Member () {
     setAgeError('')
     setAgeNote('')
     work(stale).catch((err) => {
-      if (!stale()) setAgeError(errorText(err))
+      if (!stale()) setAgeError(ageErrorText(err) || errorText(err))
     }).finally(() => {
       if (!stale()) setAgeBusy(false)
     })

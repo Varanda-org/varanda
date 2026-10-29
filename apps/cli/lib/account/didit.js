@@ -3,8 +3,11 @@
 // Outbound-only client for Didit hosted age verification, used by the account
 // service. Only an opaque session id, the hosted page URL and a coarse age
 // outcome leave this module: the session token, the vendor JSON, birth dates,
-// names and images never do. Every failure collapses into { ok: false }, so no
-// key, token or provider body ever reaches an error or a log.
+// names and images never do. Every failure collapses into { ok: false } plus a
+// coarse `reason` token ('http-403', 'tempo', 'rede', 'formato', 'entrada')
+// and, for a 4xx, the names (never the values) of the fields the provider
+// complained about, so the operator can tell a wrong key from a refused
+// callback without any key, token or provider body reaching a log.
 
 const DEFAULT_ENDPOINTS = Object.freeze({ base: 'https://verification.didit.me' })
 
@@ -31,8 +34,26 @@ const MAX_AGE = 150
 const PENDING = new Set(['In Review', 'In Progress', 'Not Started', 'Awaiting User', 'Resubmitted'])
 const EXPIRED = new Set(['Abandoned', 'Expired', 'Kyc Expired'])
 
-const FAIL = Object.freeze({ ok: false })
+const FAIL = Object.freeze({ ok: false, reason: 'entrada' })
 const RETRY = Object.freeze({ ok: false, retry: true })
+// Field names a provider error body may name: schema words, never values.
+const FIELD_RE = /^[a-z][a-z_]{0,39}$/
+const MAX_FIELDS = 5
+
+class DiditError extends Error {
+  constructor (reason, fields = []) {
+    super(reason)
+    this.reason = reason
+    this.fields = fields
+  }
+}
+
+// -> { ok: false, reason, fields } from whatever a request threw.
+function failure (err) {
+  if (err instanceof DiditError) return { ok: false, reason: err.reason, fields: err.fields }
+  if (err && err.name === 'AbortError') return { ok: false, reason: 'tempo', fields: [] }
+  return { ok: false, reason: 'rede', fields: [] }
+}
 const NO_RETRY = Object.freeze({ ok: false, retry: false })
 
 function isObject (v) {
@@ -172,8 +193,30 @@ function createDidit (opts = {}) {
   }
 
   async function getJson (res) {
-    if (!res.ok) throw new Error('status')
-    return readJson(res)
+    if (!res.ok) throw new DiditError('http-' + res.status, await errorFields(res))
+    try {
+      return await readJson(res)
+    } catch (err) {
+      // A body that stalls past the deadline or a connection that drops while
+      // streaming is not a format problem: failure() reports 'tempo'/'rede'.
+      if (err instanceof SyntaxError || (err && (err.message === 'not json' || err.message === 'too large'))) {
+        throw new DiditError('formato')
+      }
+      throw err
+    }
+  }
+
+  // The top-level keys of a 4xx JSON body (e.g. 'callback', 'workflow_id'),
+  // filtered to schema-like names; the values are dropped unread.
+  async function errorFields (res) {
+    if (res.status < 400 || res.status >= 500) return []
+    try {
+      const body = await readJson(res)
+      if (!isObject(body)) return []
+      return Object.keys(body).filter((k) => FIELD_RE.test(k)).slice(0, MAX_FIELDS)
+    } catch {
+      return []
+    }
   }
 
   async function createSession ({ vendorData, callback, language = 'pt' } = {}) {
@@ -187,13 +230,13 @@ function createDidit (opts = {}) {
         callback,
         language
       }, getJson)
-      if (!isObject(json)) return FAIL
+      if (!isObject(json)) return { ok: false, reason: 'formato', fields: [] }
       const sessionId = json.session_id
       const url = json.url
-      if (!validSessionId(sessionId) || !validHostedUrl(url)) return FAIL
+      if (!validSessionId(sessionId) || !validHostedUrl(url)) return { ok: false, reason: 'formato', fields: [] }
       return { ok: true, sessionId, url }
-    } catch {
-      return FAIL
+    } catch (err) {
+      return failure(err)
     }
   }
 
@@ -202,8 +245,8 @@ function createDidit (opts = {}) {
     try {
       const json = await request('GET', '/v3/session/' + encodeURIComponent(sessionId) + '/decision/', undefined, getJson)
       return { ok: true, outcome: ageOutcome(json) }
-    } catch {
-      return FAIL
+    } catch (err) {
+      return failure(err)
     }
   }
 

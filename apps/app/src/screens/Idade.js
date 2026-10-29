@@ -9,7 +9,8 @@ import { Body, Btn, Card, ErrorText, Notice, Page, Row, Soft, Spinner } from '..
 import { Stepper } from '../ui/Stepper'
 
 const WHO_TEXT = 'A verificação é feita por um serviço parceiro, a Didit, em geral com uma selfie e às vezes com um documento.'
-const KEPT_TEXT = 'A foto e o documento não chegam à Varanda. Só a sua faixa de idade fica guardada.'
+// The step hint already says that only the age band is kept.
+const KEPT_TEXT = 'A foto e o documento não chegam à Varanda.'
 const OFFLINE_TEXT = 'Sem conexão. A verificação precisa de internet.'
 const START_LABEL = 'Verificar minha idade'
 const DOCUMENT_LABEL = 'Tentar com um documento'

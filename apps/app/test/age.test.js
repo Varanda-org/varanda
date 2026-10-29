@@ -69,6 +69,15 @@ test('ageBlocking', async (t) => {
   t.is(ageBlocking('off'), false)
 })
 
+test('ageErrorText: a definite unavailable gets the age wording; uncertain and others fall through', async (t) => {
+  const { ageErrorText, AGE_UNAVAILABLE_TEXT } = await load()
+  t.is(ageErrorText({ code: 'indisponivel' }), AGE_UNAVAILABLE_TEXT)
+  t.is(ageErrorText({ code: 'indisponivel', uncertain: true }), null)
+  t.is(ageErrorText({ code: 'limite-idade' }), null)
+  t.is(ageErrorText(null), null)
+  t.absent(AGE_UNAVAILABLE_TEXT.includes(String.fromCharCode(0x2014)))
+})
+
 test('AGE_TEXTS: every state, plain words, no em dash', async (t) => {
   const { AGE_TEXTS, AGE_STATES } = await load()
   t.alike(Object.keys(AGE_TEXTS).sort(), [...AGE_STATES].sort())
