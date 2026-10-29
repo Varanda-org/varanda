@@ -12,7 +12,8 @@ const crypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
 const { testnet, tmpDir, bootstrapFlags, until } = require('./helpers/net')
 const { connect, openSession } = require('./helpers/ws-client')
-const { initAssociation } = require('@varanda/core/lib/assoc')
+const { initAssociation, issueCertificate } = require('@varanda/core/lib/assoc')
+const { openStore, openDiary } = require('@varanda/core/lib/store')
 const WebSocket = require('ws')
 const { MAX_REQUEST, createClient } = require('@varanda/rpc')
 
@@ -241,6 +242,108 @@ test('scripted client: errors and the sync events of the contract', async (t) =>
   t.is((await c.call('sync.stop')).result.stopped, false, 'nothing left to stop')
   c.ws.close()
   noLeak(t, s)
+})
+
+// The labels (never the values) of the sentinels found in any of the texts.
+function leaked (texts, sentinels) {
+  return Object.keys(sentinels).filter((label) => texts.some((text) => text.includes(sentinels[label])))
+}
+
+// The member's secret material as bytes, from its own closed store: the seed
+// half of the diary's secret key (the other half is the public key) and the
+// store's primary key.
+// Each secret as it could slip out of a handler: hex, base64 (unpadded, so
+// padded matches too), base64url, and the byte list a Buffer takes in JSON
+// ({"type":"Buffer","data":[...]}).
+function secretForms (secrets) {
+  const out = {}
+  for (const [label, bytes] of Object.entries(secrets)) {
+    out[label + ' (hex)'] = bytes.toString('hex')
+    out[label + ' (base64)'] = bytes.toString('base64').replace(/=+$/, '')
+    // The same text as base64 when the key has no '+' or '/'.
+    if (bytes.toString('base64url') !== out[label + ' (base64)']) out[label + ' (base64url)'] = bytes.toString('base64url')
+    out[label + ' (byte list)'] = JSON.stringify([...bytes])
+  }
+  return out
+}
+
+async function secretsOf (dataDir) {
+  const store = await openStore(dataDir)
+  try {
+    const diary = await openDiary(store)
+    return {
+      'diary secret key': Buffer.from(diary.keyPair.secretKey).subarray(0, 32),
+      'store primary key': Buffer.from(store.primaryKey)
+    }
+  } finally {
+    await store.close()
+  }
+}
+
+test('WebSocket frames and HTTP bodies carry no path, secret key, token or bootstrap address', async (t) => {
+  const m = await member(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const bad = connect(s, ORIGIN)
+  await bad.opened
+  t.is((await bad.call('session.open', { token: 'x'.repeat(64) })).error.code, 'UNAUTHORIZED')
+  await bad.closed
+  t.is((await request(s, { path: '/nada' })).status, 404)
+
+  const { c } = await openSession(s, ORIGIN)
+  const ok = async (method, params) => {
+    const r = await c.call(method, params)
+    t.is(r.ok, true, method)
+    return r.result
+  }
+  const refused = async (method, params, code) => t.is((await c.call(method, params)).error.code, code, method + ' -> ' + code)
+
+  await refused('identity.show', {}, 'NOT_FOUND')
+  const { publicKey } = await ok('identity.create')
+  await ok('identity.show')
+  await ok('cert.add', { cert: issueCertificate(m.assocDir, { member: publicKey }) })
+  await ok('node.info')
+  await ok('profile.set', { name: 'Ana', bio: 'bio' })
+  const post = await ok('post.create', { text: 'olá' })
+  await ok('post.reply', { to: post.ref, text: 'de novo' })
+  await refused('post.create', { text: '' }, 'USAGE')
+  await refused('node.info', { extra: 1 }, 'USAGE')
+  await refused('nao.existe', {}, 'USAGE')
+  await ok('follow.add', { key: 'ab'.repeat(32) })
+  await ok('follow.list')
+  await ok('follow.remove', { key: 'ab'.repeat(32) })
+  await ok('log.read')
+  await refused('log.read', { author: 'ab'.repeat(32) }, 'NOT_FOUND')
+  await ok('feed.read')
+  await ok('profile.read', { authors: [publicKey] })
+  await ok('sync.status')
+  const { runId } = await ok('sync.start', { once: true, timeoutMs: 1000 })
+  await c.event('sync.stopped', (data) => data.runId === runId)
+  await ok('sync.status')
+  t.ok(c.events('sync.started').length > 0 && c.events('sync.event').length > 0, 'sync events crossed the socket')
+  c.ws.close()
+  s.child.kill('SIGTERM')
+  await s.exit
+
+  const secrets = await secretsOf(m.dataDir)
+  const sentinels = {
+    'data dir': m.dataDir,
+    'association dir': m.assocDir,
+    token: s.token,
+    ...Object.fromEntries(m.bootstrap.map((address, i) => ['bootstrap ' + (i + 1), address])),
+    ...secretForms(secrets)
+  }
+  t.ok(s.seen.length > 20, 'a broad script (' + s.seen.length + ' texts)')
+  t.alike(leaked(s.seen, sentinels), [], 'no sentinel in any frame or body')
+
+  // Control: the scan names every sentinel it is given when one leaks.
+  for (const label of Object.keys(sentinels)) {
+    t.alike(leaked(['{"v":1,"id":1,"ok":true,"result":{"x":"' + sentinels[label] + '"}}'], sentinels), [label], 'control: ' + label)
+  }
+
+  // Control: a Buffer left in a result takes its JSON form, {"type":"Buffer","data":[...]}.
+  for (const [label, bytes] of Object.entries(secrets)) {
+    t.alike(leaked([JSON.stringify({ v: 1, id: 1, ok: true, result: { key: bytes } })], sentinels), [label + ' (byte list)'], 'control: ' + label + ' as a Buffer')
+  }
 })
 
 test('reconnection: closing the socket stops the run and keeps the identity', async (t) => {
