@@ -43,7 +43,7 @@ import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } 
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
-import { dropsHeldInvite } from '../linkReturn'
+import { dropsHeldInvite, planAccountReturn } from '../linkReturn'
 import { InvitePaste } from './Idade'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
@@ -214,7 +214,8 @@ function takeReturnWaitlist () {
 
 // The native sign-in (apps/cli/lib/account/app-return.js). V is held in this
 // process's memory only, never in storage or a log, for the member that
-// started; R is the one-time code of the last varanda://conta?conta=ok.
+// started; R is the one-time code of the first varanda://conta?conta=ok
+// since that start (each start clears it).
 // A restarted app holds no V, so its return cannot be redeemed ('expirado').
 let appLink = null
 let appRedeem = null
@@ -222,16 +223,19 @@ let appExpired = false
 const returnListeners = new Set()
 
 // App.js hands every parsed varanda://conta return here (src/linkReturn.js).
-// It only sets what the card shows; the card then asks the service again.
+// Any app can open that URL: it only sets what the card shows and, during a
+// link, a fresh R (planAccountReturn); the card then asks the service again,
+// whose answers alone expire the link or drop the held invite.
 export function receiveAccountReturn (ret) {
   if (!ret || ret.kind !== 'conta') return
   const search = '?conta=' + ret.outcome
-  appRedeem = ret.outcome === 'ok' && typeof ret.code === 'string' ? ret.code : null
-  appExpired = ret.outcome === 'ok' && (appRedeem === null || appLink === null)
-  returnNotice = appExpired ? null : parseReturn(search)
+  const plan = planAccountReturn(ret, { linkInProgress: appLink !== null, held: appRedeem })
+  appRedeem = plan.redeem
+  appExpired = plan.expired
+  returnNotice = parseReturn(search)
   returnWaitlist = parseReturnWaitlist(search)
   returnInvite = parseReturnInvite(search)
-  if (returnInvite !== '') dropSignupInvite()
+  if (plan.dropInvite) dropSignupInvite()
   for (const fn of returnListeners) fn()
 }
 

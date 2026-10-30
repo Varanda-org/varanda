@@ -155,3 +155,17 @@ export function createLinkToken () {
     isCurrent: (t) => t === n
   }
 }
+
+// What a varanda://conta return may change in the app's sign-in state. Any
+// app can open that URL, so it is a hint only: a well-formed code is taken
+// only while a native link is in progress (V held) and no R is held yet
+// (authorize is single use per row, so one R exists per V: the first wins,
+// and a new start clears it). Nothing from a URL replaces or clears a held
+// R, marks the link expired or drops the held invite. The service's own
+// answers ('expirado', 'convite-invalido') do.
+export function planAccountReturn (ret, { linkInProgress = false, held = null } = {}) {
+  const keep = typeof held === 'string' ? held : null
+  const fresh = linkInProgress === true && !!ret && ret.kind === 'conta' &&
+    ret.outcome === 'ok' && isRedeemCode(ret.code)
+  return { redeem: keep !== null ? keep : (fresh ? ret.code : null), expired: false, dropInvite: false }
+}
