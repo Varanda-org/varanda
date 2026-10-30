@@ -1,5 +1,3 @@
-/* global Blob, URL */
-
 // Perfil: the "Editar perfil" sheet and, with `page`, the onboarding step
 // 'Como você quer aparecer' (no Sheet: a Stepper with the same form, 'Continuar'
 // and 'Pular por enquanto'). Name (1..80 code points, not only whitespace) and
@@ -29,6 +27,7 @@ import { pickImage } from '../media/attach'
 import { openImage } from '../media/avatarEncode'
 import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
 import { revokeDeletedMedia } from '../media/cache'
+import { revokeUrl, urlFromBytes } from '../media/display'
 import { confirmSaved, planSave } from '../profileSave'
 import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Avatar, primeAvatar } from '../ui/Avatar'
@@ -52,7 +51,7 @@ async function readOwnProfile (node, ownKey) {
 
 const revokeDraft = (d) => {
   if (d && typeof d === 'object' && d.previewUrl) {
-    try { URL.revokeObjectURL(d.previewUrl) } catch {}
+    revokeUrl(d.previewUrl)
   }
 }
 
@@ -354,7 +353,14 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       setEditorPending(false)
       return
     }
-    const previewUrl = URL.createObjectURL(new Blob([encoded.bytes], { type: encoded.mime }))
+    let previewUrl
+    try {
+      previewUrl = urlFromBytes(encoded.bytes, encoded.mime)
+    } catch {
+      setEditorError('não foi possível preparar a foto')
+      setEditorPending(false)
+      return
+    }
     setDraft({ encoded, previewUrl, descriptor: null })
     closeEditor()
   }
@@ -475,8 +481,8 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
   let soft = hasUpload
     ? 'A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'
     : knownAvatar
-      ? 'Este perfil tem foto. Aqui dá para tirar a foto; para mudar o nome ou a bio mantendo a foto, use a versão web.'
-      : 'A foto do perfil pode ser colocada na versão web.'
+      ? 'Este perfil tem foto. Aqui dá para tirar a foto, ou mudar o nome e a bio mantendo a foto.'
+      : 'A foto do perfil não pode ser colocada neste momento.'
   if (draft === null) soft = 'A foto sai quando você salvar.'
 
   const photo = (

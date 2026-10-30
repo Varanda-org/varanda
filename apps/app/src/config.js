@@ -4,6 +4,8 @@
 // packages/core/lib/config.js validBootstrap, so a bad value is caught before
 // the node starts; the node still has the last word.
 
+import { hostOf, rpIdOf } from './installation.js'
+
 const HEX64 = /^[0-9a-fA-F]{64}$/
 
 // Hostname or IPv4, exactly one colon, port 1..65535 with no leading zeros.
@@ -131,6 +133,50 @@ export function hostedConfigOf (json, { host, secure = false }) {
   }
   if (typeof host !== 'string' || host === '' || /[\s/@?#]/.test(host)) return { error: 'endereço da instalação inválido' }
   return checkWebForm({ association: json.association, seederUrl: (secure ? 'wss://' : 'ws://') + host + '/seeder' }, { secure })
+}
+
+// Native app, hosted installation: the same /varanda.json, fetched from the
+// installation the person chose. The app has no page origin to inherit, so the
+// installation must be an https origin (no cleartext, not even the dev
+// server), spelled canonically, and its host must be a valid passkey rp.id.
+// -> { config: { kind: 'hosted', installationUrl, association, seederUrl,
+// rpId } } or { error } (pt-BR).
+export function nativeHostedConfigOf (json, { installation } = {}) {
+  const origin = nativeInstallationOf(installation)
+  if (origin === null) return { error: 'endereço da instalação inválido' }
+  const host = hostOf(origin)
+  const checked = hostedConfigOf(json, { host, secure: true })
+  if (checked.error) return checked
+  return {
+    config: {
+      kind: 'hosted',
+      installationUrl: origin,
+      association: checked.config.association,
+      seederUrl: 'wss://' + host + '/seeder',
+      rpId: rpIdOf(origin)
+    }
+  }
+}
+
+function nativeInstallationOf (value) {
+  if (typeof value !== 'string') return null
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:') return null
+  // Anything the parser would rewrite (case, a default port, a path, a
+  // query, credentials) is refused rather than silently normalised.
+  if (value !== url.origin && value !== url.origin + '/') return null
+  try {
+    hostOf(url.origin)
+    rpIdOf(url.origin)
+  } catch {
+    return null
+  }
+  return url.origin
 }
 
 // A hosted page: the node in the browser (not varanda-serve), served over

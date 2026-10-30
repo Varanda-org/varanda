@@ -32,8 +32,6 @@
 // text is sent exactly as typed: names are never resolved at send time.
 // Design: apps/site/artwork/app-design.md.
 
-/* global URL, Blob */
-
 import { useEffect, useRef, useState } from 'react'
 import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
@@ -49,6 +47,7 @@ import { countAfterInsert, insertAt } from '../emoji'
 import { MAX_MEDIA_PER_POST } from '../media/plan'
 import { validDescriptor } from '../media/fetch'
 import { pickImages } from '../media/attach'
+import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
 import { ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -106,11 +105,6 @@ function fractionOf (p) {
 
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
-
-function revokeUrl (url) {
-  if (!url) return
-  try { URL.revokeObjectURL(url) } catch {}
-}
 
 // Progress ring: a grey track and a green arc drawn with two half masks.
 // Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
@@ -212,7 +206,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const mediaReady = hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
   const busy = action.pending || checking || uploading
   const self = me || { publicKey: null, name: null }
-  const canQueue = outbox.available && typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
+  // Natively only the installation's node needs the queue: the manual (core)
+  // node writes its own diary offline.
+  const canQueue = outbox.available && (Platform.OS === 'web' || node.hosted === true) &&
+    typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
     !!(node.config && node.config.association)
   // Quotes are never queued: offline they wait for the network.
   const offlineQueue = canQueue && node.online === false && !quote
@@ -324,7 +321,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       if (gen !== genRef.current || !liveRef.current.has(id)) continue
       let thumb = null
       try {
-        thumb = URL.createObjectURL(new Blob([encoded.bytes], { type: encoded.mime }))
+        thumb = urlFromBytes(encoded.bytes, encoded.mime)
         thumbsRef.current.set(id, thumb)
       } catch {}
       patch(id, { status: 'ready', encoded, thumb })

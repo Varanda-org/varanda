@@ -11,6 +11,8 @@ const { createBrowserNode } = require('./lib/node')
 const { createBrowserSession } = require('./lib/session')
 const { idbNodeStorage, memoryNodeStorage } = require('./lib/node-storage')
 const { checkSeederUrl } = require('./lib/seeder-url')
+const { duplexSocket } = require('./lib/duplex-socket')
+const { hkdfSha256 } = require('./lib/hkdf')
 
 module.exports = {
   createMember,
@@ -24,5 +26,7 @@ module.exports = {
   createBrowserSession,
   idbNodeStorage,
   memoryNodeStorage,
-  checkSeederUrl
+  checkSeederUrl,
+  duplexSocket,
+  hkdfSha256
 }
