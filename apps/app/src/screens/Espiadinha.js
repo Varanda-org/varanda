@@ -1,6 +1,5 @@
 // Espiadinha: up to three publications (posts, replies, quotes, reposts) of
-// each diary the person does not follow, their own included, one round at a
-// time, newest first.
+// each diary the person does not follow, one round at a time, newest first.
 // No algorithm. Hosted web only: on native and varanda-serve the tab explains
 // that and never calls peek.read. The rows live in memory only; nothing is
 // persisted (their photos are fetched no-store: these authors are not
@@ -11,21 +10,22 @@
 // the counts and offers curtir, republicar and citar; a reply names its
 // parent, a quote shows the quoted post and a repost the original, each
 // read and verified by the node.
-// Hosted web only, a field "pesquisar por assunto" above the explanation: on
+// Hosted web only, a field "pesquisar por assunto" above the short note and help: on
 // submit (never per keystroke) the Busca screen replaces the rounds with the
 // posts of any diary the seeder indexed that contain the words; 'limpar'
 // brings the rounds back from memory, unchanged.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
+import { HELP } from '../help'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  roundLabel, roundStarts, skippedText, withoutAuthor
+  skippedText, withoutAuthor
 } from '../peek'
 import { whoOf } from '../who'
 import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
@@ -33,12 +33,11 @@ import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { Pill } from '../ui/Pill'
 import { type } from '../ui/theme'
-
-const MEMORY_TEXT = 'As publicações ficam só na memória do navegador enquanto a aba está aberta.'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
 // most 4095 diaries, so nine pages is the whole list and a hard stop.
@@ -46,7 +45,7 @@ const FOLLOW_PAGES_MAX = 9
 
 const noop = () => {}
 
-export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
+export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
   const node = useNode()
   const names = useNames()
   const social = useSocial({ ownKey, onToast })
@@ -75,7 +74,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     following: new Set()
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
-  const [rule, setRule] = useState(false)
   // The typed text and the active search ({ tokens, path } or null).
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState(null)
@@ -305,7 +303,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
-  const starts = useMemo(() => roundStarts(items), [items])
 
   // Submit only: the seeder allows a few /index requests per client per 10 s.
   const submit = () => {
@@ -362,17 +359,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     <View style={styles.header}>
       {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel='como funciona'
-        accessibilityState={{ expanded: rule }}
-        onPress={() => setRule((v) => !v)}
-        hitSlop={6}
-      >
-        <Text style={styles.toggle}>{rule ? 'esconder' : 'como funciona'}</Text>
-      </Pressable>
-      {rule ? <Soft>{PEEK_RULE_TEXT}</Soft> : null}
-      <Soft>{MEMORY_TEXT}</Soft>
       <CountsNote social={social} />
     </View>
   )
@@ -399,7 +385,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       {skipped || meta.incomplete
         ? (
           <View style={styles.footer}>
-            {skipped ? <Soft>{skipped}</Soft> : null}
+            {skipped ? <HelpNote doc={HELP.ausentes}><Soft>{skipped}</Soft></HelpNote> : null}
             {meta.incomplete ? <Soft>A lista pode estar incompleta; puxe para atualizar.</Soft> : null}
           </View>
           )
@@ -419,14 +405,15 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   } else if (meta.diaries === 0) {
     empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel={typeof onPublish === 'function' ? 'publicar' : undefined} onAction={typeof onPublish === 'function' ? onPublish : undefined} />
   } else {
-    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue ou suas, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
-  // The own diary shows here too; its rows offer no 'seguir', and neither
-  // does any row before the own key is known (it could be the own one).
+  // The node never returns the own diary's rows; the guard stays so that no
+  // row offers 'seguir' before the own key is known (it could be the own
+  // one), and, as defence in depth, never on an own-key row.
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
     ? () => onOpenMember(item.author, { name: item.name, username: item.username })
     : undefined
@@ -473,23 +460,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       />
     )
   }
-  const renderItem = ({ item, index }) => {
-    // Every round is labelled, the first one too; only a separator below
-    // other rows draws a top border.
-    const label = starts.has(index) ? roundLabel(item.round) : null
-    return (
-      <View>
-        {label
-          ? (
-            <View style={[styles.separator, index > 0 && styles.separatorLine]}>
-              <Text accessibilityRole='header' style={styles.separatorText}>{label}</Text>
-            </View>
-            )
-          : null}
-        {rowOf(item)}
-      </View>
-    )
-  }
+  const renderItem = ({ item }) => rowOf(item)
 
   const shownItems = notice === null ? items : []
   // The rounds stay mounted (state and social cache) under the search. Only
@@ -499,6 +470,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     return (
       <Busca
         query={query}
+        avatarOf={profileOf}
         header={<View style={styles.searchTop}>{searchBox}</View>}
         ownKey={ownKey}
         active={active}
@@ -509,6 +481,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         onQuote={onQuote}
         onOpenThread={onOpenThread}
         onOpenMember={onOpenMember}
+        onOpenMention={onOpenMention}
+        onOpenEngagers={onOpenEngagers}
         onFollowsChanged={onFollowsChanged}
         onFollowed={(author) => commit({ items: withoutAuthor(stateRef.current.items, author) })}
         onSocialChanged={() => { socialDirtyRef.current = true }}
@@ -521,7 +495,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       data={shownItems}
       keyExtractor={peekKey}
       renderItem={renderItem}
-      extraData={{ now, following, starts, social: social.social, names: names.profileOf }}
+      extraData={{ now, following, social: social.social, names: names.profileOf }}
       ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : (notice === null ? header : null)}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}
@@ -542,8 +516,5 @@ const styles = StyleSheet.create({
   header: { padding: 16, gap: 8 },
   searchTop: { padding: 16 },
   searchBox: { gap: 8 },
-  footer: { padding: 16, gap: 8 },
-  separator: { paddingHorizontal: 16, paddingVertical: 10 },
-  separatorLine: { borderTopWidth: 1, borderTopColor: colors.line },
-  separatorText: { fontSize: 14, lineHeight: 20, color: colors.soft }
+  footer: { padding: 16, gap: 8 }
 })

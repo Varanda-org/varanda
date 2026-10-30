@@ -22,6 +22,7 @@ Comandos:
   profile set                define nome e bio
   post                       publica um texto (--text)
   reply                      responde a uma publicação (--to <chave>:<seq> --text)
+  delete                     apaga uma publicação ou versão do perfil (--to <chave>:<seq>)
   follow|unfollow|follows    segue ou deixa de seguir uma chave pública
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
@@ -33,6 +34,7 @@ Comandos:
   account                    serviço de vínculo de conta Google (--account-port, --account-host)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
+  account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
@@ -63,7 +65,8 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo`
+  --join --undo
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -83,6 +86,8 @@ function usage (t, argv, message, env = {}) {
 
 function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
+  delete env.VARANDA_PUSH_TOKEN
+  delete env.VARANDA_ACCOUNT_HTTP
   for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
@@ -121,6 +126,41 @@ async function route (modules) {
   return { ...state, process: processStub }
 }
 
+test('CLI push settings are environment only and validate without echoing values', (t) => {
+  for (const command of ['seed', 'account']) {
+    const defaults = parse([command])
+    t.is(defaults.pushToken, null)
+    t.is(defaults.accountHttp, 'http://127.0.0.1:8790')
+    t.alike(parse([command], { VARANDA_PUSH_TOKEN: '', VARANDA_ACCOUNT_HTTP: '' }), defaults)
+  }
+  const pushToken = 'ab0123456789cdef'.repeat(4)
+  t.is(parse([], { VARANDA_PUSH_TOKEN: pushToken }).pushToken, pushToken)
+  for (const value of [' ', pushToken.toUpperCase(), pushToken.slice(1), pushToken + 'a', 'z'.repeat(64), pushToken + '\n', ' ' + pushToken]) {
+    usage(t, [], 'VARANDA_PUSH_TOKEN inválido', { VARANDA_PUSH_TOKEN: value })
+  }
+  usage(t, ['--push-token', pushToken], 'opção desconhecida --push-token')
+
+  for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+    for (const port of ['1', '8790', '65535', '00001']) {
+      const url = 'http://' + host + ':' + port
+      t.is(parse([], { VARANDA_ACCOUNT_HTTP: url }).accountHttp, url)
+      t.is(parse([], { VARANDA_ACCOUNT_HTTP: url + '/' }).accountHttp, url)
+    }
+  }
+  for (const value of [
+    ' ', 'http://127.0.0.1', 'http://127.0.0.1:0', 'http://127.0.0.1:00000',
+    'http://127.0.0.1:65536', 'http://127.0.0.1:100000', 'http://127.0.0.1:-1',
+    'http://127.0.0.1:1.5', 'https://127.0.0.1:8790', 'http://0.0.0.0:8790',
+    'http://example.com:8790', 'http://localhost.example:8790', 'http://user@localhost:8790',
+    'http://127.0.0.1:8790/path', 'http://127.0.0.1:8790//',
+    'http://127.0.0.1:8790?query', 'http://127.0.0.1:8790#fragment',
+    ' http://127.0.0.1:8790', 'http://127.0.0.1:8790\n'
+  ]) {
+    usage(t, [], 'VARANDA_ACCOUNT_HTTP inválido', { VARANDA_ACCOUNT_HTTP: value })
+  }
+  usage(t, ['--account-http', 'http://127.0.0.1:8790'], 'opção desconhecida --account-http')
+})
+
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
   await testnet(t)
@@ -151,6 +191,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     wsHost: null,
     wsOrigins: null,
     triageToken: null,
+    pushToken: null,
+    accountHttp: 'http://127.0.0.1:8790',
     accountPort: null,
     accountHost: null,
     maxExternal: null,
@@ -237,6 +279,9 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(dashed.name, '-x')
   t.is(dashed.json, true)
   usage(t, ['--timeout-ms', '-1'], 'timeout-ms inválido')
+  t.is(parse(['--timeout-ms', '2147483647']).timeoutMs, 2147483647)
+  usage(t, ['--timeout-ms', '2147483648'], 'timeout-ms acima do máximo de 2147483647')
+  usage(t, ['--timeout-ms', '99999999999999999999'], 'timeout-ms acima do máximo de 2147483647')
   usage(t, ['--member', '-1'], 'chave inválida')
   usage(t, ['post', '--name', 'Ana', '--text'], 'falta o valor de --text')
   for (const flag of ['--bogus', '-x', '--', '--json=true', '--once=false', '--help=true', '--bootstrap=host:1']) {
@@ -431,4 +476,20 @@ test('CLI parser, R5 help and command router', async (t) => {
   })
   t.is(duplicate.process.exitCode, 1)
   t.is(duplicate.stderr, 'erro: comando duplicado: fixture\n')
+})
+
+test('README and protocol help blocks match the root CLI byte for byte', (t) => {
+  const repo = path.resolve(root, '../..')
+  const result = spawnSync(process.execPath, [path.join(repo, 'bin/varanda.js'), 'help'], { encoding: 'utf8' })
+  t.is(result.status, 0)
+  t.is(result.stdout, HELP + '\n')
+  for (const [file, heading] of [['README.md', '### Ajuda'], ['docs/protocol.md', '### Help (R5.12, exact)']]) {
+    const text = fs.readFileSync(path.join(repo, file), 'utf8')
+    const section = text.slice(text.indexOf(heading))
+    const block = section.split('```\n')[1]
+    t.is(block, result.stdout, file + ' help matches stdout byte for byte')
+  }
+  const flags = parse(['delete', '--to', upperKey + ':42'])
+  t.is(flags.command, 'delete')
+  t.alike(flags.to, { author: lowerKey, seq: 42 })
 })

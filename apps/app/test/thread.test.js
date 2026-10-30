@@ -13,6 +13,8 @@ const C = 'cc'.repeat(32)
 const AT = '2026-10-20T10:00:00.000Z'
 
 const post = (text, replyTo = null, extra = {}) => ({ type: 'post', text, at: AT, replyTo, ...extra })
+const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 512, height: 512 }
+
 const peek = (key, entries, extra = {}) => ({ key, length: 100, entries, invalid: [], missing: [], profile: null, username: null, ...extra })
 
 test('planPeeks groups by author, sorts, chunks at 36 with hints first', async (t) => {
@@ -130,13 +132,31 @@ test('assembleMember: posts and reposts in index order', async (t) => {
     { seq: 7, record: post('olá') },
     { seq: 6, record: { type: 'repost', to: { author: B, seq: 3 }, on: false, at: AT } },
     { seq: 3, record: { type: 'like', to: { author: B, seq: 2 }, on: true, at: AT } }
-  ], { profile: { name: 'Ana', bio: 'oi' }, username: 'ana' })]])
+  ], { profile: { name: 'Ana', bio: 'oi', avatar: AV }, username: 'ana' })]])
   const out = assembleMember({ author: A, index: { posts: [9, 7, 6, 3, 2] }, peeked })
-  t.alike(out.profile, { name: 'Ana', bio: 'oi' })
+  t.alike(out.profile, { name: 'Ana', bio: 'oi', avatar: AV })
+  t.not(out.profile.avatar, AV, 'a copy, never the peer object')
   t.is(out.username, 'ana')
   t.alike(out.items.map((i) => [i.kind, i.seq]), [['repost', 9], ['post', 7]])
-  t.alike(out.items[0], { kind: 'repost', author: A, seq: 9, at: AT, to: { author: B, seq: 2 }, name: 'Ana', username: 'ana' })
+  t.alike(out.items[0], { kind: 'repost', author: A, seq: 9, at: AT, to: { author: B, seq: 2 }, name: 'Ana', username: 'ana', avatar: AV })
+  t.alike(out.items[1].avatar, AV)
   t.is(out.unavailable, 3, 'repost off, like, missing')
   t.alike(assembleMember({ author: 'x' }), { profile: null, username: null, items: [], unavailable: 0 })
   t.alike(assembleMember({ author: A, index: null, peeked: new Map() }), { profile: null, username: null, items: [], unavailable: 0 })
+})
+
+test('avatar: a valid peeked one is copied, an invalid one or none gives null', async (t) => {
+  const { assembleThread, assembleMember } = await load()
+  const at = (profile) => {
+    const peeked = new Map([[A, peek(A, [{ seq: 5, record: post('foco') }], { profile })]])
+    const thread = assembleThread({ focal: A + ':5', index: { ref: A + ':5', parent: null, replies: [] }, peeked })
+    const member = assembleMember({ author: A, index: { posts: [5] }, peeked })
+    return { item: thread.post.avatar, member: member.profile && member.profile.avatar, memberItem: member.items[0].avatar }
+  }
+  t.alike(at({ name: 'Ana', bio: '', avatar: AV }), { item: AV, member: AV, memberItem: AV })
+  t.alike(at({ name: 'Ana', bio: '' }), { item: null, member: null, memberItem: null }, 'no avatar')
+  t.alike(at({ name: 'Ana', bio: '', avatar: { ...AV, width: 256 } }), { item: null, member: null, memberItem: null }, 'not 512x512')
+  t.alike(at({ name: 'Ana', bio: '', avatar: { ...AV, mime: 'image/gif' } }), { item: null, member: null, memberItem: null }, 'bad mime')
+  t.alike(at({ name: 'Ana', bio: '', avatar: { ...AV, extra: 1 } }), { item: null, member: null, memberItem: null }, 'extra key')
+  t.alike(at(null), { item: null, member: null, memberItem: null }, 'no profile')
 })

@@ -23,8 +23,12 @@
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
-//   onFollow ('seguir', disabled while followPending), onReport (each button
-//   shows only with its handler).
+//   onFollow ('seguir', disabled while followPending), onReport, onDelete (each
+//   button shows only with its handler).
+// - onOpenMention(username): makes the @nome in the text and in the quote
+//   tappable (./MentionText). A text or quote with a mention is rendered
+//   outside the body's single accessible element, so the link is reachable by
+//   assistive tech and a tap on it never opens the conversation.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -33,10 +37,15 @@ import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
+import { hasMention, MentionText } from './MentionText'
 import { QuoteCard } from './QuoteCard'
 import { colors, type } from './theme'
 
 const ICON = 18
+// A split toggle and its number never share touch area: a mis-tap on the
+// toggle writes a public signed record.
+const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
+const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
 
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
@@ -60,16 +69,16 @@ function Heart ({ filled, color }) {
   )
 }
 
-function Action ({ label, onPress, disabled, on, count, children }) {
+function Action ({ label, onPress, disabled, on, count, split, children }) {
   return (
     <Pressable
       accessibilityRole='button'
       accessibilityLabel={label}
       accessibilityState={{ disabled: !!disabled, selected: !!on }}
       disabled={disabled}
-      hitSlop={6}
+      hitSlop={split ? SPLIT_SLOP : 6}
       onPress={onPress}
-      style={({ pressed }) => [styles.action, disabled && styles.disabled, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.action, split && styles.actionSplit, disabled && styles.disabled, pressed && styles.pressed]}
     >
       {children}
       {count !== null && count !== undefined
@@ -80,11 +89,13 @@ function Action ({ label, onPress, disabled, on, count, children }) {
 }
 
 export function PostRow ({
-  author, name, username, at, text, replyToName, media, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
-  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter,
-  onReply, onQuote, onLike, onRepost, onFollow, followPending, onReport
+  onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete
 }) {
+  const likes = countOf(counts, 'likes')
+  const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
   const hasText = typeof text === 'string' && text !== ''
   const time = relativeTime(at, now) ?? displayText(at)
@@ -100,7 +111,7 @@ export function PostRow ({
   // On the reposter's line, never the action bar: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? fn(onFollowReposter) : undefined
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport)
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport) || fn(onDelete)
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
   const bodyParts = [
@@ -110,6 +121,30 @@ export function PostRow ({
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
+  const openMention = fn(onOpenMention)
+  const quoteOn = quote && typeof quote === 'object'
+  const textOut = !!openMention && hasText && hasMention(text)
+  // The screen gives a quote its own handler carrying the quoted author.
+  const quoteMention = (quoteOn && fn(quote.onOpenMention)) || openMention
+  const quoteOut = !!quoteMention && quoteOn && typeof quote.text === 'string' && hasMention(quote.text)
+  const quoteProp = quoteMention && quoteOn ? { ...quote, onOpenMention: quoteMention } : quote
+  const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
+  const textNode = hasText
+    ? textOut
+      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} />
+      : (
+        <Pressable
+          accessibilityRole={open ? 'link' : 'text'}
+          accessibilityHint={open ? 'abre a conversa' : undefined}
+          disabled={!open}
+          onPress={open}
+        >
+          <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+        </Pressable>
+        )
+    : null
+  const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
+  const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   return (
     <View style={styles.row}>
       {reposter
@@ -152,7 +187,7 @@ export function PostRow ({
           onPress={openAuthor}
           style={({ pressed }) => pressed && openAuthor && styles.pressed}
         >
-          <Avatar name={who.avatarName} publicKey={author} size={44} />
+          <Avatar name={who.avatarName} publicKey={author} size={44} picture={avatar} persist={persistMedia !== false} />
         </Pressable>
         {/* Body: a single accessible element (author, text, date) so screen
             readers read in the order: avatar → post content → actions.
@@ -164,7 +199,7 @@ export function PostRow ({
             disabled={!open}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
-            accessibilityLabel={bodyLabel}
+            accessibilityLabel={label}
             accessibilityHint={open ? 'abre a conversa' : undefined}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
@@ -204,22 +239,23 @@ export function PostRow ({
                   </Pressable>
                   )
                 : null}
-              {hasText
-                ? (
-                  <Pressable
-                    accessibilityRole={open ? 'link' : 'text'}
-                    accessibilityHint={open ? 'abre a conversa' : undefined}
-                    disabled={!open}
-                    onPress={open}
-                  >
-                    <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
-                  </Pressable>
-                  )
-                : null}
-              {hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null}
-              {quote && typeof quote === 'object' ? <QuoteCard quote={quote} now={now} /> : null}
+              {textOut ? null : textNode}
+              {textOut ? null : mediaNode}
+              {quoteOut || textOut ? null : quoteNode}
             </View>
           </Pressable>
+          {textOut ? textNode : null}
+          {textOut && (mediaNode || (quoteNode && !quoteOut))
+            ? (
+              <Pressable accessible={false} tabIndex={-1} onPress={open} disabled={!open}>
+                <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                  {mediaNode}
+                  {quoteOut ? null : quoteNode}
+                </View>
+              </Pressable>
+              )
+            : null}
+          {quoteOut ? quoteNode : null}
           {bar
             ? (
               <View style={styles.bar}>
@@ -231,17 +267,41 @@ export function PostRow ({
                     )
                   : null}
                 {fn(onRepost)
-                  ? (
-                    <Action
-                      label={reposted ? 'desfazer republicação' : 'republicar'}
-                      onPress={onRepost}
-                      disabled={pending === 'repost'}
-                      on={!!reposted}
-                      count={countOf(counts, 'reposts')}
-                    >
-                      <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
-                    </Action>
-                    )
+                  ? fn(onOpenReposts) && reposts !== null
+                    ? (
+                      <View style={styles.splitAction}>
+                        <Action
+                          label={reposted ? 'desfazer republicação' : 'republicar'}
+                          onPress={onRepost}
+                          disabled={pending === 'repost'}
+                          on={!!reposted}
+                          count={null}
+                          split
+                        >
+                          <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                        </Action>
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel={'ver quem republicou, ' + reposts}
+                          hitSlop={COUNT_SLOP}
+                          onPress={onOpenReposts}
+                          style={styles.countAction}
+                        >
+                          <Text style={[styles.count, reposted && styles.countOn]}>{displayText(String(reposts))}</Text>
+                        </Pressable>
+                      </View>
+                      )
+                    : (
+                      <Action
+                        label={reposted ? 'desfazer republicação' : 'republicar'}
+                        onPress={onRepost}
+                        disabled={pending === 'repost'}
+                        on={!!reposted}
+                        count={reposts}
+                      >
+                        <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                      </Action>
+                      )
                   : null}
                 {fn(onQuote)
                   ? (
@@ -251,17 +311,41 @@ export function PostRow ({
                     )
                   : null}
                 {fn(onLike)
-                  ? (
-                    <Action
-                      label={liked ? 'descurtir' : 'curtir'}
-                      onPress={onLike}
-                      disabled={pending === 'like'}
-                      on={!!liked}
-                      count={countOf(counts, 'likes')}
-                    >
-                      <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
-                    </Action>
-                    )
+                  ? fn(onOpenLikes) && likes !== null
+                    ? (
+                      <View style={styles.splitAction}>
+                        <Action
+                          label={liked ? 'descurtir' : 'curtir'}
+                          onPress={onLike}
+                          disabled={pending === 'like'}
+                          on={!!liked}
+                          count={null}
+                          split
+                        >
+                          <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                        </Action>
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel={'ver quem curtiu, ' + likes}
+                          hitSlop={COUNT_SLOP}
+                          onPress={onOpenLikes}
+                          style={styles.countAction}
+                        >
+                          <Text style={[styles.count, liked && styles.countOn]}>{displayText(String(likes))}</Text>
+                        </Pressable>
+                      </View>
+                      )
+                    : (
+                      <Action
+                        label={liked ? 'descurtir' : 'curtir'}
+                        onPress={onLike}
+                        disabled={pending === 'like'}
+                        on={!!liked}
+                        count={likes}
+                      >
+                        <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                      </Action>
+                      )
                   : null}
                 {fn(onFollow)
                   ? (
@@ -274,6 +358,13 @@ export function PostRow ({
                   ? (
                     <Action label={'denunciar publicação de ' + title} onPress={onReport}>
                       <Icon name='bandeira' size={ICON} color={colors.soft} />
+                    </Action>
+                    )
+                  : null}
+                {fn(onDelete)
+                  ? (
+                    <Action label='apagar publicação' onPress={onDelete}>
+                      <Icon name='lixeira' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
@@ -312,6 +403,11 @@ const styles = StyleSheet.create({
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 36, minWidth: 44, paddingHorizontal: 8 },
+  // A split pair is as wide as the combined button (8 + icon + gap + digits +
+  // 8), so the bar still fits a 320 pt screen.
+  actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },
+  splitAction: { flexDirection: 'row', alignItems: 'center' },
+  countAction: { minHeight: 36, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
   count: { ...type.counter, color: colors.soft },
   countOn: { color: colors.accent },
   heart: { width: ICON, height: ICON, alignItems: 'center', justifyContent: 'center' },

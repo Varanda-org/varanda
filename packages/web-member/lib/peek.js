@@ -31,7 +31,9 @@
 // ./sync.js). Peer data never escapes lib/peek.js's copying readers.
 // PRIVACY: the link sends an empty inventory and no announce; it requests
 // the complement of the follow set, which the seeder already learns from
-// the sync link's inventory on the same IP; the seeder logs one `peer`
+// the sync link's inventory on the same IP; the own diary is part of what
+// is requested and only hidden from the page, so the request pattern does
+// not single the member out; the seeder logs one `peer`
 // event per link (lib/seeder.js _attachPeer) with an ephemeral Noise key;
 // nothing is stored anywhere, on any server or in this node's storage.
 // DATA FLOWS: browser memory only. The node keeps one snapshot for at most
@@ -74,7 +76,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -134,6 +136,22 @@ function key8 (hex) {
   return String(hex).slice(0, 8)
 }
 
+// The seq a valid tombstone at `seq` deletes, or null.
+function tombstoneTarget (record, seq, length) {
+  const copy = validRecordCopy(record, seq)
+  return copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length ? copy.seq : null
+}
+
+// The targets of the retained tombstones of a diary.
+function deletedTargets (records, length) {
+  const out = new Set()
+  for (const { seq, record } of records) {
+    const target = tombstoneTarget(record, seq, length)
+    if (target !== null) out.add(target)
+  }
+  return out
+}
+
 function overQuota (core) {
   return core.length > MAX_LOG_BLOCKS || core.byteLength > MAX_LOG_BYTES
 }
@@ -176,8 +194,12 @@ async function pool (items, n, fn) {
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, maxFrame).
-function createPeeker ({ storage, association, seederUrl, createSocket, log = noop, limits = {} } = {}) {
+// ownKey() returns the viewer's lowercase hex64 key or a Promise of it: the
+// viewer's diary is fetched like any candidate (cover for the anonymous
+// link) and hidden from their own page.
+function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
+  if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
   const L = {
     connectTimeoutMs: PEEK_CONNECT_TIMEOUT_MS,
     pageTimeoutMs: PEEK_PAGE_TIMEOUT_MS,
@@ -326,6 +348,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       changed: false,
       reason: null,
       name: null,
+      avatar: null,
       username: null,
       posts: [],
       scanned: false,
@@ -334,12 +357,12 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     }
   }
 
-  async function buildSnapshot (run, { follows, blocked }) {
+  async function buildSnapshot (run, { follows, blocked, own }) {
     const link = await openLink(run)
     checkAborted(run)
     const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
     const order = shuffle(candidates.map(newDiary))
-    return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0 }
+    return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0, own }
   }
 
   // Keeps only what lib/peek.js retainRecords keeps and accounts its bytes.
@@ -372,6 +395,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       })
       diary.reason = r.reason
       diary.name = r.name
+      diary.avatar = r.avatar
       diary.username = r.username
       diary.posts = r.posts
       diary.scanned = r.scanned
@@ -514,18 +538,33 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       // PEEK_PARALLEL blocks. The blocks are buffered in `got` until the
       // window is accepted.
       const got = []
+      const absent = []
+      const gone = deletedTargets(diary.records, diary.length)
       let hole = false
       for (const seq of seqs) {
         if (ctx.cut()) break
+        // A block a tombstone already read deleted (the window is read
+        // highest seq first, so the tombstone comes before its target) is
+        // never asked for: seeders clear it, and a get would only wait for
+        // the timeout. It counts as fetched, absent.
+        if (gone.has(seq)) {
+          absent.push(seq)
+          continue
+        }
         let raw
         const t = timeout()
         try {
           raw = await q.get(seq, { raw: true, timeout: t })
         } catch {
+          const timedOut = !run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs
           // A hole the seeder left: the window is never extended past it.
           // A get ended by the budget cut, a lost link or the page deadline
-          // (a timeout shorter than the fetch timeout) is not one.
-          if (!run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs) hole = true
+          // (a timeout shorter than the fetch timeout) is not one. A head
+          // block too: only a block a tombstone already read deleted counts
+          // as absent (above); any other one may be a live profile or the
+          // tombstone of the block below it, so it is never cached as
+          // fetched and nothing below it is read.
+          if (timedOut) hole = true
           break
         }
         if (!charge(run, raw)) {
@@ -544,10 +583,14 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
           changed(diary, ctx)
           return
         }
-        got.push({ seq, record: decodeBlock(raw) })
+        const record = decodeBlock(raw)
+        got.push({ seq, record })
+        const target = tombstoneTarget(record, seq, diary.length)
+        if (target !== null) gone.add(target)
       }
       if (hole) diary.failed = true
       for (const e of got) diary.seqs.add(e.seq)
+      for (const seq of absent) diary.seqs.add(seq)
       setRecords(snap, diary, got)
       // The signed length and byteLength advance on upgrade.
       if (q.fork !== 0) diary.fail = 'fork'
@@ -578,10 +621,14 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
       throw new UsageError('A lista expirou; atualize para continuar.')
     }
     if (first) {
+      const raw = await ownKey()
+      checkAborted(run)
+      const own = typeof raw === 'string' ? raw.toLowerCase() : ''
+      if (!HEX64.test(own)) throw new TypeError('ownKey inválido')
       // The previous snapshot stays until this one exists: a failed refresh
       // must not strand the list on screen. Idle expiry, abort() and close()
       // still drop it.
-      const built = await buildSnapshot(run, { follows, blocked: mod.blocked })
+      const built = await buildSnapshot(run, { follows, blocked: mod.blocked, own })
       checkAborted(run)
       snapshot = built
     }
@@ -593,7 +640,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     let incomplete = snap.incomplete
     let page
     while (true) {
-      page = buildPeekPage({ diaries: visible(snap), limit, after: cursor })
+      page = buildPeekPage({ diaries: visible(snap), limit, after: cursor, hidden: snap.own })
       if (page.needs.length === 0) break
       // A continuation needing no fetch opens no link; one needing fetches
       // opens a fresh one and reuses the cached blocks. A link destroyed by
@@ -615,7 +662,8 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
         page = buildPeekPage({
           diaries: visible(snap).map((d) => (pending.has(d.key) ? { ...d, exhausted: true } : d)),
           limit,
-          after: cursor
+          after: cursor,
+          hidden: snap.own
         })
         break
       }
@@ -637,8 +685,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     }
     // A diary a block did not arrive for (block 0 included: skipped as
     // 'unavailable') or one capped before supplying its posts leaves the
-    // page incomplete, on every page of this snapshot.
-    for (const d of snap.order) {
+    // page incomplete, on every page of this snapshot. The own diary is only
+    // cover there: its failures never warn on its owner's page.
+    const shown = snap.order.filter((d) => d.key !== snap.own)
+    for (const d of shown) {
       if (d.failed || (d.reason === null && d.capped && d.posts.length < PEEK_MAX_ROUNDS)) incomplete = true
     }
     // A link cut by the frame guard never answers a complete page.
@@ -648,10 +698,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, log = no
     // oversized block) or a scan that ended before finding any post. A diary
     // with nothing to show (only a profile or likes, too short) and one
     // followed after this snapshot was built are not problems.
-    const skipped = snap.order.filter((d) =>
+    const skipped = shown.filter((d) =>
       (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short') ||
       (d.reason === null && d.posts.length === 0 && (d.capped || d.failed))).length
-    return { items: page.items, next: page.next, diaries: snap.order.length, skipped, incomplete }
+    return { items: page.items, next: page.next, diaries: shown.length, skipped, incomplete }
   }
 
   // -> { items, next, diaries, skipped, incomplete } (docs/rpc.md 5.22).

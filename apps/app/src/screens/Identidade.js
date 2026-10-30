@@ -8,7 +8,9 @@
 // a passkey: the first card is 'Entrar' (entrar com a passkey, criar passkey,
 // concluir a criação when the PRF only arrives on a second ceremony,
 // recomeçar for an account of another identity), a blocking notice when the
-// browser cannot derive it (no PRF), and after a successful unlock the diary
+// browser cannot derive it (no PRF), steps and 'tentar de novo' when the
+// chosen passkey's manager gives no PRF (src/passkeyTrouble.js), and after a
+// successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
 // the certificate and the posts back from the seeder). The native node and
 // varanda-serve keep the plain identity card.
@@ -17,37 +19,45 @@
 // onboarding Stepper (src/onboarding.js decides the step) with welcome copy,
 // and the technical card (key, association, certificate state) stays for
 // Ajustes › Identidade. The setup changes presentation only: every ceremony,
-// link, certificate, reset and rename path is the one Ajustes uses.
+// link, certificate, reset and rename path is the one Ajustes uses. The setup
+// names the key a code and the certificate the association's release.
+//
+// The cards keep one short line each; the passkey and Google-link
+// explanations sit behind the info button (src/help.js), whose sheet nests in the
+// Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, isUsername, parseReturn, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
+import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
+import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
+import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
 import { atName } from '../who'
 
 const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
-const ENTRAR_TEXT = 'Você entra com uma passkey. Guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador. Se perder a passkey, perde a conta; outra passkey é outra conta.'
 // Shown wherever the own key is shown during the setup (the association
 // issues the certificate for it).
 const KEY_NOTE = 'Esta chave é só sua; a associação usa ela para emitir o certificado.'
 const NO_NAME = 'ainda sem @nome'
-// A passkey created but unusable (no PRF) is named so it can be deleted.
-function staleText (userId) {
-  return typeof userId === 'string' && /^[0-9a-f]{6,}$/i.test(userId)
-    ? 'Apague do gerenciador de senhas a passkey "Varanda ' + userId.slice(0, 6).toLowerCase() + '", que foi criada mas não serve.'
-    : ''
-}
-
-const NO_PRF_TEXT = 'Este navegador não consegue usar passkeys com o Varanda. Use o Chrome ou o Edge, ou o Safari 18 ou mais novo.'
+// The setup's certificate step in plain words; HELP.certificado names PLAIN_SUBMIT.
+const PLAIN_CODE_LABEL = 'Código para enviar à associação'
+const PLAIN_SEND_TEXT = 'Envie este código à associação. Cole abaixo o que ela devolver.'
+const PLAIN_CERT_LABEL = 'O que a associação devolveu'
+const PLAIN_SUBMIT = 'gravar e continuar'
+// Replaces parseCertificateText's JSON wording in the setup only.
+const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
 const EXISTS_TEXT = 'Já existe uma conta neste navegador; outra passkey é outra conta.'
 const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
 const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
@@ -59,8 +69,9 @@ function mismatchText (legacy) {
 
 // The certificate step: the public key to send to the association (copy or
 // share) and the field for the certificate it issues. PR B puts the account
-// link before this step.
-export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, error, pending }) {
+// link before this step. `plain` (the setup) names the key a code and the
+// certificate what the association returns.
+export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, error, pending, plain = false }) {
   const [copyNote, setCopyNote] = useState('')
   const [manual, setManual] = useState(false)
   const manualRef = useRef(null)
@@ -85,10 +96,10 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
       if (nav === null || !nav.clipboard || typeof nav.clipboard.writeText !== 'function') throw new Error('sem área de transferência')
       await nav.clipboard.writeText(String(publicKey))
       setManual(false)
-      setCopyNote('chave copiada')
+      setCopyNote(plain ? 'código copiado' : 'chave copiada')
     } catch {
       setManual(true)
-      setCopyNote('não foi possível copiar: a chave está selecionada abaixo, copie-a')
+      setCopyNote(plain ? 'não foi possível copiar: o código está selecionado acima, copie-o' : 'não foi possível copiar: a chave está selecionada abaixo, copie-a')
     }
   }
 
@@ -101,9 +112,9 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 
   return (
     <Card>
-      <Label>sua chave pública</Label>
+      <Label>{plain ? PLAIN_CODE_LABEL : 'sua chave pública'}</Label>
       <Mono>{key}</Mono>
-      <Soft>{KEY_NOTE}</Soft>
+      {plain ? null : <Soft>{KEY_NOTE}</Soft>}
       {manual
         ? (
           <TextInput
@@ -115,21 +126,21 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
             autoCapitalize='none'
             autoCorrect={false}
             spellCheck={false}
-            accessibilityLabel='sua chave pública'
+            accessibilityLabel={plain ? 'código para enviar à associação' : 'sua chave pública'}
             onChangeText={() => {}}
           />
           )
         : null}
       <Row>
-        <Btn label='copiar chave' secondary onPress={copy} />
+        <Btn label={plain ? 'copiar código' : 'copiar chave'} secondary onPress={copy} />
         {canShare ? <Btn label='compartilhar' secondary onPress={share} /> : null}
       </Row>
       {copyNote ? <Soft>{copyNote}</Soft> : null}
-      <Body>Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.</Body>
-      <Label>certificado de membro (JSON emitido pela associação)</Label>
+      <Body>{plain ? PLAIN_SEND_TEXT : 'Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.'}</Body>
+      <Label>{plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
       <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
-      <Btn label='gravar certificado' onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
+      <Btn label={plain ? PLAIN_SUBMIT : 'gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
     </Card>
   )
 }
@@ -141,7 +152,6 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // this same tab and nothing of the link is kept across the reload, except the
 // profile invite in sessionStorage (src/profileLink.js), which is never sent
 // to /account/*.
-const LINK_TEXT = 'Para entrar na rede, confirme uma conta Google e escolha seu @nome. A associação guarda o vínculo entre a conta Google e a sua conta Varanda para emitir seu certificado e seu @nome, atender uma ordem judicial ou bloquear a conta; o e-mail nunca vai para o seu diário nem para este navegador, e a idade não é verificada. O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade). Você pode trocar o @nome depois, uma vez a cada 7 dias.'
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
@@ -152,16 +162,22 @@ const CERT_RECEIVED = 'Conta vinculada.'
 // Finish errors (account.js ERROR_MESSAGES) after which the pending row is
 // useless: the member may pick another Google account. 'lista-de-espera' is
 // not one of them: the cap is full, this key stays, and the form retries by hand.
-const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado'])
+// 'convite-invalido' is: the invite died while the member was at Google.
+const RESTARTABLE = new Set(['conta-vinculada', 'nome-em-uso', 'expirado', 'convite-invalido'])
+// Start refusals for a network that is by invite: a calm state, not an error.
+const INVITE_REFUSALS = new Set(['convite-obrigatorio', 'convite-invalido'])
 
 // ?conta=ok|erro|cancelado|lista-de-espera, read once per page load (every
 // mounted Identidade shows it, including the one App.js opens in Ajustes
 // after the return) and removed from the address bar. The value is cached
 // here, so a LinkCard mounted after the removal still shows it; App.js only
 // reads the query, this is the only place that removes it.
-// 'lista-de-espera' is not a notice: it opens the card in its waitlist state.
+// 'lista-de-espera' is not a notice: it opens the card in its waitlist state,
+// and 'convite-invalido' opens it in its invite state (the stored code is
+// dead, so it is dropped here).
 let returnNotice
 let returnWaitlist = ''
+let returnInvite = ''
 function takeReturnNotice () {
   if (returnNotice !== undefined) return returnNotice
   returnNotice = null
@@ -171,6 +187,8 @@ function takeReturnNotice () {
     if (!loc || typeof loc.search !== 'string' || !hist) return null
     returnNotice = parseReturn(loc.search)
     returnWaitlist = parseReturnWaitlist(loc.search)
+    returnInvite = parseReturnInvite(loc.search)
+    if (returnInvite !== '') dropSignupInvite()
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
@@ -178,6 +196,10 @@ function takeReturnNotice () {
 function takeReturnWaitlist () {
   takeReturnNotice()
   return returnWaitlist
+}
+function takeReturnInvite () {
+  takeReturnNotice()
+  return returnInvite
 }
 
 // username.add runs at most once per record per page load (the RPC is
@@ -225,7 +247,23 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const [note, setNote] = useState('')
   // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
   const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
+  // Sentence for an invite refusal ('convite-obrigatorio', 'convite-invalido'),
+  // or ''. Not an error either.
+  const [inviteNote, setInviteNote] = useState(takeReturnInvite)
+  // undefined while unread; null when the network is open (no endpoint, a
+  // failed read or required false: the service still refuses on its own).
+  const [policy, setPolicy] = useState(undefined)
+  const policyAsked = useRef(false)
   const seqRef = useRef(0)
+
+  useEffect(() => {
+    if (!active || policyAsked.current) return
+    policyAsked.current = true
+    invitePolicy().then(
+      (p) => setPolicy(p && p.required === true ? p : null),
+      () => setPolicy(null)
+    )
+  }, [active])
 
   const load = useCallback(async () => {
     const mine = ++seqRef.current
@@ -339,20 +377,28 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     if (username === null) return setError(NAME_RULE)
     run(async () => {
       try {
-        const { nonce } = await startLink({ member: publicKey, username })
+        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code })
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
         const { authorizeUrl } = await authorizeLink({ signature })
         if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
         setWaitlist('')
+        setInviteNote('')
         setNote(RELOAD_TEXT)
         globalThis.location.assign(authorizeUrl)
       } catch (err) {
         // Full cap: a calm notice. The name stays; nothing retries on its own.
         if (err && err.code === 'lista-de-espera') {
+          setInviteNote('')
           setWaitlist(err.message)
           return
         }
         setWaitlist('')
+        if (err && INVITE_REFUSALS.has(err.code)) {
+          // The code stays stored: start answers 'convite-invalido' for a
+          // code held by another pending link too, and that one may free up.
+          setInviteNote(err.message)
+          return
+        }
         throw err
       }
     })
@@ -368,6 +414,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       const done = await finishLink({ signature })
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
+      dropSignupInvite()
       setWaitlist('')
       setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)
     } catch (err) {
@@ -381,6 +428,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
       setWaitlist('')
+      if (err && err.code === 'convite-invalido') dropSignupInvite()
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -464,6 +512,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     // stays, including the setup step, with a manual retry and no spinner.
     const confirmable = !waiting && row !== null && !foreign && typeof row.sub === 'string' && row.sub !== ''
     const showForm = !confirmable && (!memberCert || formOpen || waiting)
+    // No code stored, by invite or after an invite refusal: no @nome field
+    // and no Google button, so Google is never reached without a code. With
+    // a stored code a refusal keeps the form: the code may have been held
+    // by an earlier attempt and work again. The code itself is never shown.
+    const required = policy !== undefined && policy !== null
+    const hasInvite = loadSignupInvite() !== null
+    const inviteBlocked = !waiting && !hasInvite && (inviteNote !== '' || required)
     const waitlistNote = waiting
       ? (
         <>
@@ -472,6 +527,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         </>
         )
       : null
+    const inviteLine = inviteBlocked
+      ? null
+      : inviteNote !== ''
+        ? <Body>{inviteNote}</Body>
+        : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
+    // Until the policy answers, the button waits rather than racing it.
+    const linkDisabled = name.trim() === '' || policy === undefined
     body = (
       <>
         {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
@@ -498,21 +560,28 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         {showForm && setup
           ? (
             <>
-              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              <Soft>De 3 a 20 letras minúsculas, números ou _.</Soft>
-              <Body>{LINK_TEXT}</Body>
-              <Soft>{RELOAD_TEXT}</Soft>
-              {waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
+              {inviteBlocked ? null : <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />}
+              <Body>{SHORT.link}</Body>
+              {inviteLine}
+              {inviteBlocked
+                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
             </>
             )
           : null}
         {showForm && !setup
           ? (
             <>
-              <Body>{LINK_TEXT}</Body>
-              <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-              <Soft>{RELOAD_TEXT}</Soft>
-              {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={name.trim() === ''} />}
+              <HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>
+              {inviteLine}
+              {inviteBlocked
+                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                : (
+                  <>
+                    <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
+                    {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
+                  </>
+                  )}
             </>
             )
           : null}
@@ -559,8 +628,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [pkPending, setPkPending] = useState(false)
   const [pkError, setPkError] = useState('')
   const [pkNote, setPkNote] = useState('')
-  // null, or { userId } once a ceremony reported NO_PRF.
+  // null, or { created } once a ceremony reported NO_PRF, until 'tentar de
+  // novo'. staleIds: the user ids of every unusable passkey this page created
+  // (they stay in the password manager, so they outlive a retry).
   const [noPrf, setNoPrf] = useState(null)
+  const [staleIds, setStaleIds] = useState([])
   // null, or { legacy } once a ceremony reported MISMATCH (the stored diary
   // belongs to another identity): offers "recomeçar".
   const [mismatch, setMismatch] = useState(null)
@@ -568,6 +640,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [confirmCreate, setConfirmCreate] = useState(false)
   const [showKey, setShowKey] = useState(false)
   const [awaitingComplete, setAwaitingComplete] = useState(false)
+  // A passkey chosen at Entrar failed: a creation awaiting 'concluir' may be
+  // gone, so 'Criar passkey' is offered beside it (no effect when none awaits).
+  const [createToo, setCreateToo] = useState(false)
   // The once sync after an unlock (node.passkey.recovering, shared by every
   // mounted Identidade): no instance sends a request while it runs (any
   // member request would preempt and end it); the one that unlocked reads
@@ -640,7 +715,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     const r = await add.run(() => node.request('cert.add', { cert }))
     if (r.ok) {
       setCertText('')
-      setDone('Certificado gravado.')
+      setDone(setup ? 'Conta liberada.' : 'Certificado gravado.')
       refresh()
     }
   }
@@ -659,9 +734,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     pkBusy.current = false
     setPkPending(false)
   }
-  const pkFail = (err) => {
+  // created: the failing passkey was made on this page (Criar or concluir),
+  // so it can be named for deletion; one chosen at Entrar may be the account.
+  const pkFail = (err, created = false) => {
     const code = err && err.code
-    if (code === 'NO_PRF') return setNoPrf({ userId: err.userId })
+    if (code === 'NO_PRF') {
+      const id = err.userId
+      if (created && typeof id === 'string') setStaleIds((ids) => ids.includes(id) ? ids : [...ids, id])
+      // After a failure at Entrar a pending creation may be gone (that same
+      // passkey) or still live (another one): 'Criar passkey' shows beside
+      // 'concluir'.
+      if (!created) setCreateToo(true)
+      return setNoPrf({ created })
+    }
     if (code === 'MISMATCH') return setMismatch({ legacy: err.legacy === true })
     setPkError(errorText(err))
   }
@@ -694,7 +779,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // The handle's unlock/complete is called synchronously in the click
   // handler: the WebAuthn ceremony needs this click's user activation, so
   // nothing is awaited before it.
-  const ceremony = (call) => {
+  const ceremony = (call, created = false, completing = false) => {
     if (!pkStart()) return
     passkey.beginRecovery()
     let pending
@@ -704,22 +789,26 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         if (r && r.pending === true) {
           passkey.endRecovery()
           setAwaitingComplete(true)
+          setCreateToo(false)
           return
         }
         setAwaitingComplete(false)
+        setCreateToo(false)
         setMismatch(null)
         setNoPrf(null)
         await afterUnlock()
       }, (err) => {
         passkey.endRecovery()
-        pkFail(err)
+        // The node drops the pending creation only when its own passkey fails.
+        if (completing && err && err.code === 'NO_PRF') setAwaitingComplete(false)
+        pkFail(err, created)
       })
       .finally(pkEnd)
   }
 
   const doUnlock = () => ceremony(() => passkey.unlock({}))
-  const doRegister = () => ceremony(() => passkey.unlock({ register: true }))
-  const doComplete = () => ceremony(() => passkey.complete())
+  const doRegister = () => ceremony(() => passkey.unlock({ register: true }), true)
+  const doComplete = () => ceremony(() => passkey.complete(), true, true)
 
   const onCreatePress = () => {
     if (pkStatus !== null && pkStatus.exists && !confirmCreate) return setConfirmCreate(true)
@@ -742,6 +831,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     passkey.reset().then(() => {
       setMismatch(null)
       setAwaitingComplete(false)
+      setCreateToo(false)
       setPkNote('A conta antiga foi apagada deste navegador. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
@@ -761,7 +851,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     : null
   let entrar = null
   if (passkey !== null && locked) {
-    const blocked = noPrf !== null || (pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no' || !!pkStatus.rpIdError))
+    // The browser itself cannot (no WebAuthn, or it reports no PRF): only
+    // another browser helps.
+    const browserBlocked = pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no')
     // A diary of an older version is known before any ceremony.
     const shownMismatch = mismatch || (pkStatus !== null && pkStatus.legacy ? { legacy: true } : null)
     if (pkStatus === null) {
@@ -782,12 +874,25 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           {blockedInvite}
         </Card>
       )
-    } else if (blocked) {
-      const stale = noPrf !== null ? staleText(noPrf.userId) : ''
+    } else if (browserBlocked) {
+      const stale = deleteStep(staleIds)
       entrar = (
         <Card>
-          <Notice>{NO_PRF_TEXT}</Notice>
-          {stale ? <Notice>{stale}</Notice> : null}
+          <Notice>{BROWSER_TEXT}</Notice>
+          {stale ? <Body>{stale}</Body> : null}
+          {blockedInvite}
+        </Card>
+      )
+    } else if (noPrf !== null) {
+      // A passkey was created or chosen but its password manager gives no
+      // PRF. The node keeps a created one out of the next creation, so
+      // another try can save the new one elsewhere.
+      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true })
+      entrar = (
+        <Card>
+          <Notice>{UNUSABLE_TITLE}</Notice>
+          {steps.map((step) => <Body key={step}>{step}</Body>)}
+          <Btn label={RETRY_LABEL} onPress={() => setNoPrf(null)} disabled={pkPending} />
           {blockedInvite}
         </Card>
       )
@@ -796,7 +901,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // with no passkey known, 'Entrar com a passkey' otherwise; the other is
       // secondary. Same handlers as before (doUnlock, onCreatePress, doRegister,
       // doComplete): only the order and the labels changed.
-      const createFirst = !pkStatus.passkeyKnown && !awaitingComplete
+      const createFirst = !pkStatus.passkeyKnown && (!awaitingComplete || createToo)
       const entrarBtn = (
         <Btn
           label='Entrar com a passkey'
@@ -831,7 +936,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               )
             : null}
           <Body>{WELCOME_TEXT}</Body>
-          <Soft>{ENTRAR_TEXT}</Soft>
+          <Soft>{SHORT.passkeyLoss}</Soft>
           {shownMismatch
             ? (
               <>
@@ -889,6 +994,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   if (entrar !== null) return frame('Entrar', entrar)
 
   const withPasskey = passkey !== null
+  // certLocal only ever holds a parseCertificateText error.
+  const certError = setup && certLocal ? PLAIN_PARSE_ERROR : certLocal
   const needsCert = info !== null && info.publicKey !== null && !info.memberCert
   // Hosted page with a passkey: the account link replaces the pasted
   // certificate. Native and varanda-serve keep CertificateStep / the field.
@@ -926,7 +1033,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           </Card>
           )
         : null}
-      {needsCert && showTech ? <Soft>Sem o certificado, este aparelho não publica nem sincroniza.</Soft> : null}
+      {needsCert && showTech
+        ? <Soft>{setup ? 'Sem a liberação da associação, este aparelho não publica nem sincroniza.' : 'Sem o certificado, este aparelho não publica nem sincroniza.'}</Soft>
+        : null}
       {showLink && linkMode && info !== null && info.publicKey !== null
         ? (
           <LinkCard
@@ -946,8 +1055,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             certText={certText}
             onCertText={setCertText}
             onSubmit={doCert}
-            error={certLocal || add.error}
+            error={certError || add.error}
             pending={add.pending}
+            plain={setup}
           />
           )
         : null}
@@ -956,13 +1066,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           <Card>
             {/* The setup hides the technical card: the association issues
                 the certificate for this key, so it is shown here. */}
-            {setup ? <Label>sua chave pública</Label> : null}
+            {setup ? <Label>{PLAIN_CODE_LABEL}</Label> : null}
             {setup ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-            {setup ? <Soft>{KEY_NOTE}</Soft> : null}
-            <Label>certificado de membro (JSON emitido pela associação)</Label>
+            <Label>{setup ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
             <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
-            <ErrorText>{certLocal || add.error}</ErrorText>
-            <Btn label='gravar certificado' onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
+            <ErrorText>{certError || add.error}</ErrorText>
+            <Btn label={setup ? PLAIN_SUBMIT : 'gravar certificado'} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
           </Card>
           )
         : null}

@@ -1,9 +1,9 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
 // @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
-// infinite scroll and pull to refresh. On the hosted web the header also
-// offers the member's profile link (copiar / compartilhar; the /m/<key> form
-// is never printed). Only publications are listed (PostRows):
-// technical records and invalid blocks are not shown. Posts still in the
+// infinite scroll and pull to refresh. On the hosted web, 'Compartilhar'
+// under the profile data opens a sheet with the link (copiar link /
+// compartilhar; the /m/<key> form is never printed). Only publications are
+// listed (PostRows): technical records and invalid blocks are not shown. Posts still in the
 // outbox ('Aguardando envio', browser node) are listed above them; they are
 // not PostRows (no reply, no publication date yet). The public key is shown
 // only in Ajustes > Avançado. A queued item this page session did not write waits for the person
@@ -25,6 +25,8 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
+import { deletePostRows } from '../deletion'
+import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
@@ -36,11 +38,15 @@ import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
+import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
+import { HelpButton } from '../ui/Help'
+import { HELP } from '../help'
 import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
+import { DeletePrompt, useDelete } from './Conversa'
 
 const BAND = 96
 const MAX_EMPTY_PAGES = 5
@@ -124,7 +130,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onQuote, onToast, ownKey, scrollToTop }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -137,6 +143,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
   const [editing, setEditing] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -194,24 +201,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     try {
       const log = await request('log.read', { limit: LOG_LIMIT_MAX, before: oldestSeq(current.rows) })
       // The cursor came from `current`: a newest page that replaced it
-      // meanwhile (a reload from activation or a refresh bump) would leave a
-      // gap between the two, so this page is dropped (that reload reset the
-      // paging state).
+      // meanwhile would leave a gap between the two. A deletion also replaces
+      // it, so a stale page must not restore the deleted content.
       if (mine !== seqRef.current || dataRef.current !== current) return
       const base = dataRef.current
       setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log) })
-      setLoadingMore(false)
-      olderBusy.current = false
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
       if (typeof base.info.publicKey === 'string') ingest(rowNeeds(logRows(log), base.info.publicKey))
     } catch (err) {
-      if (mine !== seqRef.current) return
+      if (mine !== seqRef.current || dataRef.current !== current) return
       setOlderError(errorText(err))
-      setLoadingMore(false)
-      olderBusy.current = false
+    } finally {
+      if (mine === seqRef.current) {
+        setLoadingMore(false)
+        olderBusy.current = false
+      }
     }
   }, [request, resolve, ingest])
 
@@ -261,6 +268,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
+  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
 
@@ -330,6 +338,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     : (
       <View>
         <SunsetBand height={bandHeight}>
+          <HelpButton doc={HELP.diario} color='#ffffff' style={styles.info} />
           <Pressable
             accessibilityRole='button'
             accessibilityLabel='ajustes'
@@ -342,10 +351,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         </SunsetBand>
         {/* The row rises into the band (marginTop -44) and is drawn after it,
             so its empty space would take the gear's touches: only the avatar
-            and the pill receive them. */}
+            takes touches. */}
         <View style={styles.headRow} pointerEvents='box-none'>
-          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} ring />
-          <Pill label='Editar perfil' onPress={() => setEditing(true)} />
+          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} picture={profile && profile.avatar} persist ring />
         </View>
         <View style={styles.data}>
           <Text style={styles.name}>{displayText(who.title)}</Text>
@@ -356,7 +364,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
           </Text>
-          {node.hosted === true && publicKey ? <ShareProfile url={buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey })} /> : null}
+          <View style={styles.actions}>
+            <View style={styles.action}><Pill label='Editar perfil' onPress={() => setEditing(true)} /></View>
+            {profileUrl !== null ? <View style={styles.action}><Pill label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /></View> : null}
+          </View>
         </View>
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
@@ -399,7 +410,28 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         )
   }
 
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote }
+  const del = useDelete({
+    request,
+    onToast,
+    recheck: () => loadNewest(false),
+    // The slot stays (as the node reports it) so the paging cursor holds.
+    onDeleted: async (t) => {
+      social.deleteOriginal(t.ref)
+      const cur = dataRef.current
+      if (cur !== null) {
+        dataRef.current = { ...cur, rows: deletePostRows(cur.rows, t.ref, cur.info.publicKey) }
+        setData(dataRef.current)
+      }
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+      // The row is gone. The tombstone's ranges leave the image cache too,
+      // so a photo still mounted (the header avatar, another tile) loses
+      // its blob URL. A range a surviving post or profile shows stays.
+      if (t !== null && typeof t === 'object' && Number.isSafeInteger(t.seq)) {
+        await revokeDeletedMedia(request, [t.seq], LOG_LIMIT_MAX)
+      }
+    }
+  })
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {
@@ -417,10 +449,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   // Rows re-render when a name is learned, the clock ticks or the originals,
   // counts or own state change.
-  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social }), [profileOf, now, profile, social.social])
+  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered }), [profileOf, now, profile, social.social, del.offered])
 
   return (
     <View style={styles.list}>
+      <DeletePrompt del={del} />
       <RefreshableList
         data={posts}
         keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}
@@ -446,11 +479,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       <Perfil
         open={editing}
         ownKey={info ? info.publicKey : null}
-        current={{ name: (profile && profile.name) || '', bio }}
+        current={{ name: (profile && profile.name) || '', bio, avatar: profile ? profile.avatar : undefined }}
         onClose={() => setEditing(false)}
         onSaved={(values) => {
           if (info && info.publicKey) {
-            learn(info.publicKey, { name: values.name, bio: values.bio })
+            learn(info.publicKey, values)
             // The authoritative answer also replaces a cleared bio.
             invalidate([info.publicKey])
           }
@@ -458,6 +491,15 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           pull.run(loadNewest)
         }}
       />
+      {profileUrl !== null
+        ? (
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+            <View style={styles.shareBody}>
+              <ShareProfile url={profileUrl} />
+            </View>
+          </Sheet>
+          )
+        : null}
       <SocialToast text={social.toast} />
     </View>
   )
@@ -469,6 +511,17 @@ const styles = StyleSheet.create({
   gear: {
     position: 'absolute',
     right: 16,
+    bottom: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.dim,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  info: {
+    position: 'absolute',
+    right: 58,
     bottom: 12,
     width: 34,
     height: 34,
@@ -490,6 +543,10 @@ const styles = StyleSheet.create({
   bio: { ...type.postText, color: colors.ink, marginTop: 8 },
   counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
   countsNum: { color: colors.ink, fontWeight: '700' },
+  // Pill sets no width, so the column has to stretch it.
+  actions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  action: { flex: 1, alignItems: 'stretch' },
+  shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,
     paddingHorizontal: 16,

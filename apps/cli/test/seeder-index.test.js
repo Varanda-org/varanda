@@ -21,10 +21,11 @@ const { createCert, createSeederCert, createModeratorCert, generateAssociationKe
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
+const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
 const { startSeedWs } = require('../lib/seed-ws')
 const http = require('node:http')
 
@@ -155,8 +156,9 @@ function scanFixture (options = {}) {
   const { maxServed, ...indexOptions } = options
   Object.assign(seeder, {
     _index: createEngagementIndex({ ...indexOptions, onFreed: () => seeder._scheduleIndexResume() }),
-    // _drop also leaves the follow-notices index (seeder.js).
+    // _drop also leaves the follow and post notices indexes (seeder.js).
     _notices: createNoticeIndex(),
+    _postNotices: createPostNoticeIndex(),
     // The topic search scan is stubbed out: a second reader would steal the
     // reads holdIndexRead holds (apps/cli/test/seeder-topic.test.js covers it).
     _topics: { removeDiary () { return false }, stats () { return { posts: 0, saturated: false } } },
@@ -175,6 +177,9 @@ function scanFixture (options = {}) {
     _groupServed: new Map(),
     _groupIndex: { removeDiary () {} },
     _groupRootStartup: null,
+    // The scan also reconciles group joins (none in these records).
+    _groups: new Map(),
+    _groupBackoff: new Map(),
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),
@@ -202,7 +207,17 @@ function scanFixture (options = {}) {
       stopQuota: () => {},
       gated: true,
       dropped: false,
-      core: { contiguousLength: length + 1, get: async (seq) => Buffer.from(JSON.stringify(recordAt(seq))) }
+      // Every block is local: the present length follows contiguousLength,
+      // which the tests raise by hand.
+      get present () { return this.core.contiguousLength },
+      set present (v) {},
+      gone: new Set(),
+      core: {
+        contiguousLength: length + 1,
+        get length () { return this.contiguousLength },
+        async has (seq) { return seq < this.contiguousLength },
+        get: async (seq) => Buffer.from(JSON.stringify(recordAt(seq)))
+      }
     }
     seeder._served.set(key, entry)
     seeder._admitted.set(key, true)
@@ -304,6 +319,48 @@ test('re-admission rebuild: restores incoming engagements and repost timelines w
   t.is(seeder.indexPost(A, 1).complete, true)
   t.alike(seeder.indexMember(B).posts, [4, 2, 1], 'the repost is restored to its author timeline')
   t.is(seeder._index.stats().records, 6, 'replay does not double-count operations')
+})
+
+// The fixture stubs _scanDiary; a deletion case runs the real scan, which
+// needs the scan fields _serve gives a served entry.
+function scannable (seeder, entry) {
+  seeder._media = new Map()
+  seeder._topics.removePost = () => false
+  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false, gone: new Set(), excluded: new Set(), arrived: new Set(), mediaStart: new Map(), tombMedia: new Map(), tombMax: -1, tombNew: [], irrDirty: true, irrMemo: null, clearedEffective: null, groupDecls: new Map(), groupBound: new Map(), groupFirst: new Map(), groupLive: new Map(), groupRefused: new Map() })
+  return entry
+}
+
+test('deletion: a tombstoned post leaves counts and timelines, whichever pass runs first, and stays out after a rebuild', async (t) => {
+  for (const scanFirst of [false, true]) {
+    const { seeder, diary } = scanFixture()
+    const A = authorKey(1)
+    const B = authorKey(2)
+    const to = { author: A, seq: 1 }
+    const own = [postRecord({ text: 'owner', at: at(0) }), postRecord({ text: 'kept', at: at(1) }), deleteRecord({ seq: 1, at: at(2) })]
+    const engaged = [likeRecord({ to, on: true, at: at(3) }), postRecord({ text: 'reply', replyTo: to, at: at(4) }), repostRecord({ to, on: true, at: at(5) })]
+    const a = scannable(seeder, diary(A, own.length, (seq) => own[seq - 1]))
+    const b = scannable(seeder, diary(B, engaged.length, (seq) => engaged[seq - 1]))
+    if (scanFirst) await seeder._runScan(A, a)
+    seeder._onGrow(A, a, a.core.contiguousLength)
+    seeder._onGrow(B, b, b.core.contiguousLength)
+    await settleIndex(seeder)
+    if (!scanFirst) await seeder._runScan(A, a)
+    await seeder._runScan(B, b)
+    const label = scanFirst ? ' (scan first)' : ' (index first)'
+    t.alike(seeder.indexCounts([ref(A, 1)]).counts, {}, 'the deleted post is not counted' + label)
+    t.is(seeder.indexPost(A, 1), null, 'no thread page' + label)
+    t.alike(seeder.indexMember(A).posts, [2], 'gone from its author timeline' + label)
+    t.alike(seeder.indexMember(B).posts, [2], 'the repost of it is gone, the reply stays' + label)
+    t.is(seeder.indexPost(B, 2).parent, null, 'the reply no longer points at it' + label)
+
+    seeder._rebuildIndex()
+    await settleIndex(seeder)
+    t.ok(a.deleted.has(1), 'the rebuild keeps the scan result' + label)
+    t.alike(seeder.indexCounts([ref(A, 1)]).counts, {}, 'still not counted after a rebuild' + label)
+    t.alike(seeder.indexMember(A).posts, [2], label)
+    t.alike(seeder.indexMember(B).posts, [2], label)
+    t.is(seeder.indexPost(B, 2).parent, null, label)
+  }
 })
 
 test('re-admission rebuild: pending requests coalesce and reads in flight finish before resetting cursors', async (t) => {
@@ -730,6 +787,33 @@ test('target cap: refusal is atomic, existing targets still accept records, and 
   t.ok(ix.add(B, 1, { type: 'post', replyTo: null, at: at(0) }), 'plain posts need no target')
 })
 
+// Engager pages: every fixture date is in the past of this clock.
+const NOW = BASE_MS + 10 * 86400000
+
+// Newest first, the documented order of an engager page.
+function newestFirst (a, b) {
+  if (a.at !== b.at) return a.at > b.at ? -1 : 1
+  if (a.author !== b.author) return a.author < b.author ? -1 : 1
+  return b.seq - a.seq
+}
+
+// Every page of a likers / reposters list, concatenated, with the sizes of
+// the pages; null when any page is null or the cursors do not end.
+function allEngagers (ix, target, kind, visible, now = NOW) {
+  const items = []
+  const sizes = []
+  let cursor = null
+  for (let n = 0; n < 10000; n++) {
+    const page = ix.engagers(target, kind, cursor, visible, now)
+    if (page === null) return null
+    items.push(...page.items)
+    sizes.push(page.items.length)
+    if (page.next === null) return { items, total: page.total, sizes }
+    cursor = page.next
+  }
+  return null
+}
+
 test('counters match a seeded reference reducer across additions, toggles, removals and re-admission', (t) => {
   const perAuthorMax = 24
   const ix = createEngagementIndex({ perAuthorMax })
@@ -783,9 +867,9 @@ test('counters match a seeded reference reducer across additions, toggles, remov
     }
     if (step % 20 !== 0 && step !== 1999) continue
     const expected = Object.fromEntries(refs.map((ref) => [ref, { replies: 0, quotes: 0, likes: 0, reposts: 0 }]))
-    const ordered = Object.fromEntries(refs.map((ref) => [ref, { replies: [], quotes: [] }]))
+    const ordered = Object.fromEntries(refs.map((ref) => [ref, { replies: [], quotes: [], likes: [], reposts: [] }]))
     for (const [author, log] of logs) {
-      const likes = new Set()
+      const likes = new Map()
       const reposts = new Map()
       const posts = []
       for (const { seq, record, epoch: addedEpoch } of log) {
@@ -800,14 +884,19 @@ test('counters match a seeded reference reducer across additions, toggles, remov
         } else {
           const set = record.type === 'like' ? likes : reposts
           const target = ref(record.to.author, record.to.seq)
-          if (record.on && record.type === 'repost') set.set(target, seq)
-          else if (record.on) set.add(target)
+          if (record.on) set.set(target, { at: record.at, seq })
           else set.delete(target)
         }
       }
-      for (const target of likes) expected[target].likes++
-      for (const target of reposts.keys()) expected[target].reposts++
-      const timeline = [...posts, ...reposts.values()].sort((a, b) => b - a)
+      for (const [target, on] of likes) {
+        expected[target].likes++
+        ordered[target].likes.push({ at: on.at, author, seq: on.seq })
+      }
+      for (const [target, on] of reposts) {
+        expected[target].reposts++
+        ordered[target].reposts.push({ at: on.at, author, seq: on.seq })
+      }
+      const timeline = [...posts, ...[...reposts.values()].map((on) => on.seq)].sort((a, b) => b - a)
       t.alike(ix.member(author).posts, timeline, 'timeline after toggles and author drops')
       t.is(ix.member(author).postsTotal, timeline.length)
     }
@@ -823,12 +912,355 @@ test('counters match a seeded reference reducer across additions, toggles, remov
       const replies = ordered[target].replies.sort(compare)
       t.alike(page.replies, replies.slice(0, 50).map((e) => ref(e.author, e.seq)))
       t.alike(page.quotes, ordered[target].quotes.sort(compare).reverse().slice(0, 50).map((e) => ref(e.author, e.seq)))
+      for (const kind of ['likes', 'reposts']) {
+        const listed = allEngagers(ix, target, kind)
+        const want = ordered[target][kind].sort(newestFirst).map((e) => ref(e.author, e.seq))
+        t.alike(listed && [listed.items, listed.total], [want, count[kind]], kind + ' pages of ' + target.slice(-4) + ' at step ' + step)
+      }
     }
   }
   t.ok(ownerDrops > 0, 'random sequence includes target-author drops and re-admission')
   for (const author of logs.keys()) ix.removeDiary(author)
   t.is(ix.stats().targets, 0, 'all empty targets reclaimed')
   t.is(ix.stats().records, refs.length)
+})
+
+test('engager pages: 75 likers in pages of 20, newest first, cursors without gaps or duplicates; ties by author', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  // A scrambled insertion order: the page order must come from the index.
+  for (let k = 0; k < 75; k++) {
+    const i = 1 + ((k * 31) % 75)
+    ix.add(authorKey(i), 1, { type: 'like', to, on: true, at: at(i) })
+  }
+  const pages = []
+  let cursor = null
+  do {
+    const page = ix.engagers(target, 'likes', cursor, undefined, NOW)
+    pages.push(page)
+    cursor = page.next
+  } while (cursor !== null && pages.length < 10)
+  t.alike(pages.map((p) => p.items.length), [20, 20, 20, 15])
+  t.alike(pages.map((p) => p.next === null), [false, false, false, true], 'next is null only on the last page')
+  t.alike(pages.flatMap((p) => p.items), Array.from({ length: 75 }, (_, i) => ref(authorKey(75 - i), 1)))
+  t.ok(pages.every((p) => p.ref === target && p.kind === 'likes' && p.total === 75))
+  t.is(pages[0].next, (BASE_MS + 56000) + '.' + authorKey(56) + '.1')
+  t.alike(Object.keys(pages[0].authors).sort(), Array.from({ length: 20 }, (_, i) => authorKey(56 + i)))
+  t.alike(pages[0].authors[authorKey(75)], { profileSeq: null, usernameSeq: null })
+
+  // Equal atMs: the lower engager hex first, across a cursor inside the tie.
+  ix.add(owner, 2, { type: 'post', replyTo: null, at: at(0) })
+  for (let i = 130; i >= 101; i--) ix.add(authorKey(i), 2, { type: 'like', to: { author: owner, seq: 2 }, on: true, at: at(5) })
+  const first = ix.engagers(ref(owner, 2), 'likes', null, undefined, NOW)
+  t.alike(first.items, Array.from({ length: 20 }, (_, i) => ref(authorKey(101 + i), 2)))
+  t.is(first.next, (BASE_MS + 5000) + '.' + authorKey(120) + '.2')
+  const second = ix.engagers(ref(owner, 2), 'likes', first.next, undefined, NOW)
+  t.alike(second.items, Array.from({ length: 10 }, (_, i) => ref(authorKey(121 + i), 2)))
+  t.is(second.next, null)
+})
+
+test('engager pages: an unlike removes, a newer on moves, an older seq never overrides; reposts alike, timelines unchanged', (t) => {
+  for (const kind of ['likes', 'reposts']) {
+    const type = kind === 'likes' ? 'like' : 'repost'
+    const ix = createEngagementIndex()
+    const owner = authorKey(0)
+    const to = { author: owner, seq: 1 }
+    const target = ref(owner, 1)
+    ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+    for (let i = 1; i <= 30; i++) ix.add(authorKey(i), 1, { type, to, on: true, at: at(i) })
+    const E = authorKey(3)
+    const before = allEngagers(ix, target, kind)
+    t.alike(before.sizes, [20, 10])
+    t.is(before.items[27], ref(E, 1), kind + ': E starts on the second page')
+
+    t.ok(ix.add(E, 2, { type, to, on: true, at: at(100) }))
+    const moved = allEngagers(ix, target, kind)
+    t.is(moved.items[0], ref(E, 2), kind + ': a newer on with a newer at moves E to the first page')
+    t.is(moved.total, 30)
+    t.is(moved.items.length, 30)
+    t.absent(moved.items.includes(ref(E, 1)))
+    t.alike(ix.member(E).posts, kind === 'reposts' ? [2] : [])
+
+    ix.add(E, 1, { type, to, on: false, at: at(200) })
+    ix.add(E, 1, { type, to, on: true, at: at(300) })
+    t.alike(allEngagers(ix, target, kind), moved, kind + ': an older seq neither removes nor moves the newer record')
+    t.alike(ix.member(E).posts, kind === 'reposts' ? [2] : [])
+
+    t.ok(ix.add(E, 3, { type, to, on: false, at: at(101) }))
+    const after = allEngagers(ix, target, kind)
+    t.is(after.total, 29)
+    t.is(after.items.length, 29)
+    t.absent(after.items.some((r) => r.startsWith(E)), kind + ': an unlike removes the engager')
+    t.is(ix.post(target)[kind], 29)
+    t.alike(ix.member(E).posts, [])
+    t.alike(ix.member(authorKey(4)).posts, kind === 'reposts' ? [1] : [])
+  }
+})
+
+test('engager pages: an edge dated more than a day ahead is hidden and never examined; totals count it', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  const near = authorKey(1)
+  const far = authorKey(2)
+  const past = authorKey(3)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  ix.add(near, 1, { type: 'like', to, on: true, at: new Date(NOW + 86400000).toISOString() })
+  ix.add(far, 1, { type: 'like', to, on: true, at: new Date(NOW + 86400001).toISOString() })
+  ix.add(past, 1, { type: 'like', to, on: true, at: at(1) })
+  const seen = []
+  const page = ix.engagers(target, 'likes', null, (a) => { seen.push(a); return true }, NOW)
+  t.alike(page.items, [ref(near, 1), ref(past, 1)])
+  t.alike(seen, [owner, near, past], 'the future edge is never examined')
+  t.is(page.total, 3)
+  t.is(page.next, null)
+  t.is(ix.post(target).likes, 3)
+  t.alike(ix.engagers(target, 'likes', null, undefined, NOW + 1).items, [ref(far, 1), ref(near, 1), ref(past, 1)], 'listed once the clock catches up')
+})
+
+test('engager pages: hidden engagers count against the 200-edge budget; a throwing predicate answers null', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  for (let i = 1; i <= 300; i++) ix.add(authorKey(i), 1, { type: 'like', to, on: true, at: at(i) })
+  let calls = 0
+  const visible = (a) => { calls++; return a === owner || parseInt(a, 16) <= 50 }
+  const page = ix.engagers(target, 'likes', null, visible, NOW)
+  t.alike(page.items, [], 'the 250 newest are hidden')
+  t.is(page.next, null, '200 examined edges with nobody listed end the list')
+  t.ok(calls <= 201, 'visibility calls: ' + calls)
+  t.is(page.total, 300)
+  t.alike(page.authors, {})
+  t.is(ix.engagers(target, 'likes', null, () => { throw new Error('hostile predicate') }, NOW), null)
+  t.is(ix.engagers(target, 'likes', null, (a) => { if (a !== owner) throw new Error('hostile'); return true }, NOW), null)
+})
+
+test('engager pages: next never carries a hidden engager and resumes from the last listed one', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  // 300..298 visible, a run of 197 hidden (297..101), then 100..1 visible:
+  // the first page lists 3 and stops on the scan budget at a hidden edge.
+  for (let i = 1; i <= 300; i++) ix.add(authorKey(i), 1, { type: 'like', to, on: true, at: at(i) })
+  const isHidden = (i) => i >= 101 && i <= 297
+  const hidden = []
+  for (let i = 101; i <= 297; i++) hidden.push(authorKey(i))
+  const visible = (a) => a === owner || !isHidden(parseInt(a, 16))
+  const leaks = (page) => {
+    const json = JSON.stringify(page)
+    return hidden.some((k) => json.includes(k))
+  }
+  const listedCursor = (page) => {
+    const last = page.items[page.items.length - 1]
+    const [key, seq] = last.split(':')
+    return (BASE_MS + parseInt(key, 16) * 1000) + '.' + key + '.' + seq
+  }
+
+  const first = ix.engagers(target, 'likes', null, visible, NOW)
+  t.alike(first.items, [300, 299, 298].map((i) => ref(authorKey(i), 1)))
+  t.is(first.next, listedCursor(first), 'next is the last listed engager, not the last examined')
+  t.absent(leaks(first), 'no hidden key in the first page')
+
+  const seen = []
+  let page = first
+  let pages = 0
+  while (true) {
+    t.absent(leaks(page), 'no hidden key in page ' + pages)
+    if (page.next !== null) t.is(page.next, listedCursor(page), 'next of page ' + pages + ' is a listed engager')
+    seen.push(...page.items)
+    pages++
+    if (page.next === null || pages > 50) break
+    page = ix.engagers(target, 'likes', page.next, visible, NOW)
+  }
+  const expected = [300, 299, 298]
+  for (let i = 100; i >= 1; i--) expected.push(i)
+  t.alike(seen, expected.map((i) => ref(authorKey(i), 1)), 'every visible engager once, in order, past the hidden run')
+
+  // Every examined edge hidden: an empty page that ends the list.
+  const allHidden = (a) => a === owner || parseInt(a, 16) <= 50
+  const empty = ix.engagers(target, 'likes', null, allHidden, NOW)
+  t.alike(empty.items, [])
+  t.is(empty.next, null)
+  const hiddenNewest = []
+  for (let i = 51; i <= 300; i++) hiddenNewest.push(authorKey(i))
+  const json = JSON.stringify(empty)
+  t.absent(hiddenNewest.some((k) => json.includes(k)), 'no hidden key in an all-hidden page')
+})
+
+test('engager pages: null for bad input or an unknown post, an exact empty page without engagement', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  ix.add(owner, 2, { type: 'post', replyTo: null, at: at(0) })
+  ix.add(authorKey(1), 1, { type: 'like', to, on: true, at: at(1) })
+  ix.add(authorKey(1), 2, { type: 'like', to: { author: authorKey(50), seq: 1 }, on: true, at: at(1) })
+  t.is(ix.engagers(target, 'likes', null, undefined, NOW).items.length, 1)
+  for (const kind of ['replies', 'quotes', 'Likes', 'like', '', null, undefined, 1]) {
+    t.is(ix.engagers(target, kind, null, undefined, NOW), null, 'bad kind ' + String(kind))
+  }
+  for (const cursor of ['x', 5, {}, '1.' + owner + '.0', '1.' + 'A'.repeat(64) + '.1', '99999999999999999.' + owner + '.1']) {
+    t.is(ix.engagers(target, 'likes', cursor, undefined, NOW), null, 'malformed cursor')
+  }
+  for (const bad of ['zz', owner + ':0', owner + ':1x', owner + ':01', null, 5, undefined]) {
+    t.is(ix.engagers(bad, 'likes', null, undefined, NOW), null, 'bad ref')
+  }
+  const lettered = 'ab'.repeat(32)
+  ix.add(lettered, 1, { type: 'post', replyTo: null, at: at(0) })
+  t.ok(ix.engagers(ref(lettered, 1), 'likes', null, undefined, NOW))
+  t.is(ix.engagers(ref(lettered.toUpperCase(), 1), 'likes', null, undefined, NOW), null, 'a non-canonical ref')
+  for (const now of [NaN, Infinity, -Infinity, undefined, null, '1']) {
+    t.is(ix.engagers(target, 'likes', null, undefined, now), null, 'non-finite now')
+  }
+  t.is(ix.engagers(ref(owner, 9), 'likes', null, undefined, NOW), null, 'post not indexed')
+  t.is(ix.engagers(ref(authorKey(50), 1), 'likes', null, undefined, NOW), null, 'engaged but unindexed post')
+  t.is(ix.engagers(target, 'likes', null, (a) => a !== owner, NOW), null, 'invisible target author')
+  t.alike(ix.engagers(ref(owner, 2), 'reposts', null, undefined, NOW), { ref: ref(owner, 2), kind: 'reposts', items: [], next: null, total: 0, authors: {} })
+  t.alike(ix.engagers(target, 'reposts', null, undefined, NOW), { ref: target, kind: 'reposts', items: [], next: null, total: 0, authors: {} })
+  t.is(ix.engagers(target, 'likes', null, 'not a function', NOW).total, 1, 'a non-function visible shows everything')
+})
+
+test('engager pages: 0 -> 1 -> 2 -> 1 -> 0 transitions in both orders and removeDiary keep pages and totals exact', (t) => {
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  const E1 = authorKey(1)
+  const E2 = authorKey(2)
+  const E3 = authorKey(3)
+  for (const kind of ['likes', 'reposts']) {
+    const type = kind === 'likes' ? 'like' : 'repost'
+    for (const firstOff of [E1, E2]) {
+      const ix = createEngagementIndex()
+      const list = () => { const all = allEngagers(ix, target, kind); return all && [all.items, all.total] }
+      ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+      t.alike(list(), [[], 0])
+      ix.add(E1, 1, { type, to, on: true, at: at(1) })
+      t.alike(list(), [[ref(E1, 1)], 1])
+      ix.add(E1, 2, { type, to, on: true, at: at(3) })
+      t.alike(list(), [[ref(E1, 2)], 1], 'a singleton moves without growing')
+      ix.add(E2, 1, { type, to, on: true, at: at(2) })
+      t.alike(list(), [[ref(E1, 2), ref(E2, 1)], 2])
+      const secondOff = firstOff === E1 ? E2 : E1
+      ix.add(firstOff, 5, { type, to, on: false, at: at(4) })
+      t.alike(list(), [[secondOff === E1 ? ref(E1, 2) : ref(E2, 1)], 1])
+      ix.add(firstOff, 6, { type, to, on: true, at: at(5) })
+      t.alike(list(), [[ref(firstOff, 6), secondOff === E1 ? ref(E1, 2) : ref(E2, 1)], 2], 'back to two')
+      ix.add(firstOff, 7, { type, to, on: false, at: at(6) })
+      ix.add(secondOff, 8, { type, to, on: false, at: at(6) })
+      t.alike(list(), [[], 0])
+      t.alike(ix.counts([target])[target], { replies: 0, likes: 0, reposts: 0, quotes: 0 })
+    }
+
+    const ix = createEngagementIndex()
+    const list = () => { const all = allEngagers(ix, target, kind); return all && [all.items, all.total] }
+    ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+    for (const [i, E] of [E1, E2, E3].entries()) ix.add(E, 1, { type, to, on: true, at: at(i + 1) })
+    t.alike(list(), [[ref(E3, 1), ref(E2, 1), ref(E1, 1)], 3])
+    ix.removeDiary(E2)
+    t.alike(list(), [[ref(E3, 1), ref(E1, 1)], 2], 'removeDiary(engager) leaves the list and the total')
+    ix.removeDiary(E3)
+    t.alike(list(), [[ref(E1, 1)], 1])
+    ix.add(E3, 1, { type, to, on: true, at: at(9) })
+    t.alike(list(), [[ref(E3, 1), ref(E1, 1)], 2], 'a re-admitted engager comes back')
+    ix.removeDiary(E1)
+    ix.removeDiary(E3)
+    t.alike(list(), [[], 0])
+    ix.add(E1, 1, { type, to, on: true, at: at(1) })
+    ix.removeDiary(owner)
+    t.is(ix.engagers(target, kind, null, undefined, NOW), null, 'removeDiary(target author) answers null')
+    ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+    t.alike(list(), [[], 0], 'a re-admitted author starts without the old engagers')
+  }
+})
+
+test('engager pages: 20,000 likers on one target have bounded visibility work', (t) => {
+  const ix = createEngagementIndex()
+  const owner = authorKey(0)
+  const to = { author: owner, seq: 1 }
+  const target = ref(owner, 1)
+  ix.add(owner, 1, { type: 'post', replyTo: null, at: at(0) })
+  for (let i = 1; i <= 20000; i++) ix.add(authorKey(i), 1, { type: 'like', to, on: true, at: at(i % 5000) })
+  let calls = 0
+  const start = performance.now()
+  const page = ix.engagers(target, 'likes', null, () => { calls++; return true }, NOW)
+  const pageMs = performance.now() - start
+  t.is(page.total, 20000)
+  t.is(page.items.length, 20)
+  t.ok(calls <= 201, 'first page visibility calls: ' + calls)
+  calls = 0
+  const deep = ix.engagers(target, 'likes', page.next, (a) => { calls++; return a === owner }, NOW)
+  t.alike(deep.items, [])
+  t.is(deep.next, null, 'an all-hidden page ends the list')
+  t.ok(calls <= 201, 'all-hidden page visibility calls: ' + calls)
+  t.comment('20k likers: first page ' + pageMs.toFixed(3) + ' ms')
+})
+
+test('indexEngagers: likers and reposters of a served post without blocked, dropped, held or future engagers', async (t) => {
+  const { seeder, diary } = scanFixture()
+  const A = authorKey(1)
+  const to = { author: A, seq: 1 }
+  const engagers = [2, 3, 4, 5, 6].map(authorKey)
+  const F = authorKey(7)
+  const entries = [[A, diary(A, 1, () => postRecord({ text: 'owner', at: at(0) }))]]
+  for (const [i, E] of engagers.entries()) {
+    entries.push([E, diary(E, 2, (seq) => seq === 1
+      ? likeRecord({ to, on: true, at: at(i + 1) })
+      : repostRecord({ to, on: true, at: at(i + 1) }))])
+  }
+  const future = new Date(Date.now() + 2 * 86400000).toISOString()
+  entries.push([F, diary(F, 1, () => likeRecord({ to, on: true, at: future }))])
+  for (const [key, entry] of entries) seeder._indexDiary(key, entry)
+  await settleIndex(seeder)
+
+  const newest = [...engagers].reverse()
+  const page = seeder.indexEngagers('likes', A, 1)
+  t.alike(Object.keys(page).sort(), ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total'])
+  t.alike(page, {
+    ref: ref(A, 1),
+    kind: 'likes',
+    items: newest.map((E) => ref(E, 1)),
+    next: null,
+    total: 6,
+    authors: Object.fromEntries(newest.map((E) => [E, { profileSeq: null, usernameSeq: null }])),
+    indexing: false,
+    complete: true
+  }, 'the like dated two days ahead is absent but counted')
+  t.is(seeder.indexCounts([ref(A, 1)]).counts[ref(A, 1)].likes, 6)
+  t.alike(seeder.indexEngagers('reposts', A, 1).items, newest.map((E) => ref(E, 2)))
+
+  const [E2, E3, E4] = engagers
+  seeder._isBlocked = (hex) => hex === E2
+  t.absent(seeder.indexEngagers('likes', A, 1).items.includes(ref(E2, 1)), 'a blocked engager is absent')
+  seeder._isBlocked = () => false
+  seeder._drop(E3, 'blocked')
+  await seeder._drops.get(E3)
+  const dropped = seeder.indexEngagers('likes', A, 1)
+  t.absent(dropped.items.includes(ref(E3, 1)), 'a dropped engager is absent')
+  t.is(dropped.total, 5)
+  seeder._served.get(E4).searchHold = 1
+  const held = seeder.indexEngagers('reposts', A, 1)
+  t.absent(held.items.includes(ref(E4, 2)), 'an engager held by a pending re-gate is absent')
+  t.is(held.complete, false)
+  seeder._served.get(E4).searchHold = 0
+  t.is(seeder.indexEngagers('reposts', A, 1).complete, true)
+  seeder._served.get(A).searchHold = 1
+  t.is(seeder.indexEngagers('likes', A, 1), null, 'a held target author answers null')
+  seeder._served.get(A).searchHold = 0
+
+  t.is(seeder.indexEngagers('replies', A, 1), null)
+  t.is(seeder.indexEngagers('likes', A, 0), null)
+  t.is(seeder.indexEngagers('likes', authorKey(99), 1), null)
+  t.is(seeder.indexEngagers('likes', A, 1, 'nope'), null)
+  t.is(seeder.indexEngagers('likes', A, 2), null, 'a post not indexed')
 })
 
 test('200k reply edges: cursor pages and counts have bounded visibility work and latency', (t) => {

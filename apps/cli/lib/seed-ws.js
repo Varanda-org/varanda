@@ -98,6 +98,8 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
+// - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
+//   (at most 20 like/repost record refs, newest first by the engager's at).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -192,6 +194,7 @@ const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7
 const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -416,8 +419,9 @@ function refuse (socket, code, reason) {
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs), indexMember(authorHex, before) and
-// indexSearch(segment) -> null | plain object back /index; indexSearch's
+// cursor), indexCounts(refs), indexMember(authorHex, before),
+// indexSearch(segment) and indexEngagers(kind, authorHex, seq, cursor) ->
+// null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
 // and in-flight cap and is never logged or echoed. triageToken: optional
@@ -464,6 +468,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function indexCall (url) {
     let m = INDEX_POST_RE.exec(url)
     if (m) return ['indexPost', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]]]
+    m = INDEX_ENGAGERS_RE.exec(url)
+    if (m) return ['indexEngagers', [m[1], m[2], Number(m[3]), m[4] === undefined ? null : m[4]]]
     m = INDEX_COUNTS_RE.exec(url)
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
@@ -877,6 +883,7 @@ module.exports = {
   INDEX_GROUP_RE,
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
+  INDEX_ENGAGERS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

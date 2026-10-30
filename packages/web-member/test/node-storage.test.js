@@ -7,7 +7,8 @@
 // memory twin is held to the same core-level behaviour. Lazy mode (a media
 // core's 'data' file): randomized concurrent interleavings against a
 // reference buffer with a two-page cache, and a Hypercore 10 core whose
-// blocks survive a reopen while the cache stays bounded.
+// blocks survive a reopen while the cache stays bounded. Clear of middle
+// blocks (a diary and a lazy media core) across a reopen.
 require('fake-indexeddb/auto')
 /* global indexedDB, IDBKeyRange */
 const test = require('brittle')
@@ -53,15 +54,15 @@ async function diaryFiles (storage) {
   return out
 }
 
-// The raw 'pages' rows of the 'diary' core straight from IndexedDB.
-function diaryPages (name) {
+// The raw 'pages' rows of the 'diary' core (or `core`) straight from IndexedDB.
+function diaryPages (name, core = 'diary') {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(name)
     req.onerror = () => reject(req.error)
     req.onsuccess = () => {
       const db = req.result
       const tx = db.transaction(['pages'], 'readonly')
-      const all = tx.objectStore('pages').getAll(IDBKeyRange.bound(['diary'], ['diary', []]))
+      const all = tx.objectStore('pages').getAll(IDBKeyRange.bound([core], [core, []]))
       all.onsuccess = () => {
         db.close()
         resolve(all.result.map((p) => new Uint8Array(p)))
@@ -699,4 +700,140 @@ test('a Hypercore 10 core over a lazy data file: 200 blocks of 32 KiB in bursts,
   t.is(createHash('sha256').update(await core.get(10)).digest('hex'), hashes[10], 'the others stay')
   await core.close()
   await storage.close()
+})
+
+const sha = (buf) => createHash('sha256').update(buf).digest('hex')
+
+// Hypercore 10 clear() of a middle block, as byte deletion relies on it: the
+// whole-file _del zero-fills the block's bytes inside their pages, and the
+// hole, the neighbours, the length and the fork survive a reopen. On 10.38.2
+// contiguousLength is NOT durable across a reopen after a clear: clear lowers
+// the hint in memory only, and the oplog replay (lib/core.js updateContig)
+// downgrades it only when the hint lies inside the dropped range, so whether
+// the pin survives depends on an auto-flush. Callers compute the present
+// length with has(i) instead.
+test('a Hypercore 10 diary on IndexedDB: clear of a middle block survives a reopen', async (t) => {
+  await testnet(t, 1)
+  const name = dbName()
+  const keyPair = crypto.keyPair()
+  const GONE = 5
+  const marker = (i) => 'marcador-' + i + '-' + 'y'.repeat(300)
+  let storage = await idbNodeStorage(name)
+  let diary = await openDiary(storage, keyPair)
+  await diary.append({ type: 'filler' })
+  for (let i = 1; i <= 10; i++) await appendRecord(diary, postRecord({ text: marker(i) }))
+  const hashes = []
+  for (let i = 0; i < diary.length; i++) hashes.push(sha(await diary.get(i, { valueEncoding: 'binary' })))
+  const events = { truncate: 0, conflict: 0 }
+  diary.on('truncate', () => events.truncate++)
+  diary.on('conflict', () => events.conflict++)
+  const byteLength = diary.byteLength
+  t.is(diary.contiguousLength, 11)
+
+  await diary.clear(GONE)
+  t.absent(await diary.has(GONE), 'the cleared block is gone')
+  t.is(await diary.get(GONE, { wait: false }), null)
+  t.is(sha(await diary.get(GONE - 1, { valueEncoding: 'binary' })), hashes[GONE - 1], 'left neighbour intact by hash')
+  t.is(sha(await diary.get(GONE + 1, { valueEncoding: 'binary' })), hashes[GONE + 1], 'right neighbour intact by hash')
+  t.is(diary.length, 11, 'length unchanged')
+  t.is(diary.byteLength, byteLength, 'byteLength unchanged')
+  t.is(diary.fork, 0, 'fork unchanged')
+  t.is(diary.contiguousLength, GONE, 'contiguousLength pinned at the cleared seq')
+  t.is(events.truncate, 0, 'no truncate event')
+  t.is(events.conflict, 0, 'no conflict event')
+  await diary.close()
+  await storage.close()
+
+  const pages = await diaryPages(name)
+  t.absent(holds(pages, b4a.from(marker(GONE))), 'no IndexedDB page holds the cleared block: its bytes were zero-filled')
+  t.ok(holds(pages, b4a.from(marker(GONE - 1))) && holds(pages, b4a.from(marker(GONE + 1))), 'the neighbours share its page and stay')
+
+  storage = await idbNodeStorage(name)
+  diary = await openDiary(storage, keyPair)
+  t.is(diary.length, 11, 'length survives the reopen')
+  t.is(diary.fork, 0, 'fork survives the reopen')
+  t.absent(await diary.has(GONE), 'the hole survives the reopen')
+  t.ok(diary.contiguousLength >= GONE, 'contiguousLength is only a hint after the reopen')
+  t.is(sha(await diary.get(GONE - 1, { valueEncoding: 'binary' })), hashes[GONE - 1])
+  t.is(sha(await diary.get(GONE + 1, { valueEncoding: 'binary' })), hashes[GONE + 1])
+  await appendRecord(diary, postRecord({ text: 'depois da limpeza' }))
+  t.is(diary.length, 12, 'a later append works')
+  t.is((await diary.get(11)).text, 'depois da limpeza')
+  t.absent(await diary.has(GONE), 'the hole survives the append')
+  await diary.close()
+  await storage.close()
+  t.absent(holds(await diaryPages(name), b4a.from(marker(GONE))), 'still no page holds the cleared block after the reopen and append')
+})
+
+// The same over a lazy media core: block 0 a small header, then 32 KiB
+// blocks, so a middle range starts and ends inside pages. The lazy _del drops
+// the whole pages and zero-fills the partial ones.
+test('a Hypercore 10 core over a lazy data file: clear of a middle range survives a reopen', async (t) => {
+  await testnet(t, 1)
+  const name = dbName()
+  const CORE = 'media/' + 'ef'.repeat(32)
+  const keyPair = crypto.keyPair()
+  const FROM = 3
+  const TO = 6
+  const rnd = prng(11)
+  const files = () => storage.core(CORE, { lazy: ['data'], cachePages: 4 })
+  let storage = await idbNodeStorage(name)
+  let core = new Hypercore(files(), { keyPair, valueEncoding: 'binary' })
+  await core.ready()
+  await core.append(b4a.from(JSON.stringify({ type: 'media', diary: 'ab'.repeat(32) })))
+  const blocks = [null]
+  for (let i = 1; i <= 9; i++) {
+    const block = b4a.alloc(32768)
+    for (let j = 0; j < block.length; j += 4) block.writeUInt32LE(rnd(0x100000000), j)
+    blocks.push(block)
+    await core.append(block)
+  }
+  const hashes = []
+  for (let i = 0; i < core.length; i++) hashes.push(sha(await core.get(i)))
+  const byteLength = core.byteLength
+  const offset = await core.core.tree.byteOffset(FROM * 2)
+  t.not(offset % PAGE_SIZE, 0, 'the range starts inside a page')
+
+  await core.clear(FROM, TO)
+  for (let i = FROM; i < TO; i++) t.absent(await core.has(i), 'block ' + i + ' is gone')
+  t.is(sha(await core.get(FROM - 1)), hashes[FROM - 1], 'left neighbour intact by hash')
+  t.is(sha(await core.get(TO)), hashes[TO], 'right neighbour intact by hash')
+  t.is(core.length, 10)
+  t.is(core.byteLength, byteLength)
+  t.is(core.fork, 0)
+  t.is(core.contiguousLength, FROM, 'contiguousLength pinned at the start of the range')
+  await core.close()
+  await storage.close()
+
+  const leaked = (pages) => {
+    const out = []
+    for (let i = FROM; i < TO; i++) {
+      for (let j = 0; j < 32768; j += 64) {
+        if (holds(pages, blocks[i].subarray(j, j + 64))) out.push(i + ':' + j)
+      }
+    }
+    return out
+  }
+  const pages = await diaryPages(name, CORE)
+  t.alike(leaked(pages), [], 'no IndexedDB page holds any 64-byte window of the cleared blocks')
+  t.absent(holds(pages, blocks[TO - 1].subarray(32768 - 64)), 'the tail of the last cleared block, in the page it shares with the next block, is gone')
+  t.ok(holds(pages, blocks[FROM - 1].subarray(32768 - 64)) && holds(pages, blocks[TO].subarray(0, 64)), 'the neighbours\' bytes in the partial pages stay')
+
+  storage = await idbNodeStorage(name)
+  core = new Hypercore(files(), keyPair.publicKey, { keyPair, valueEncoding: 'binary' })
+  await core.ready()
+  t.is(core.length, 10, 'length survives the reopen')
+  t.is(core.fork, 0, 'fork survives the reopen')
+  for (let i = FROM; i < TO; i++) t.absent(await core.has(i), 'block ' + i + ' still gone after the reopen')
+  t.ok(core.contiguousLength >= FROM, 'contiguousLength is only a hint after the reopen')
+  t.is(sha(await core.get(FROM - 1)), hashes[FROM - 1])
+  t.is(sha(await core.get(TO)), hashes[TO])
+  t.ok(core.writable)
+  await core.append(blocks[1])
+  t.is(core.length, 11, 'a later append works')
+  t.is(sha(await core.get(10)), hashes[1])
+  for (let i = FROM; i < TO; i++) t.absent(await core.has(i), 'block ' + i + ' still gone after the append')
+  await core.close()
+  await storage.close()
+  t.alike(leaked(await diaryPages(name, CORE)), [], 'still no page holds the cleared blocks after the reopen and append')
 })

@@ -21,6 +21,10 @@ export function getInstall () {
   return offer.getSnapshot()
 }
 
+export function getInstallCard () {
+  return offer.getCard()
+}
+
 export function subscribeInstall (fn) {
   return offer.subscribe(fn)
 }
@@ -35,5 +39,6 @@ export function dismissInstall () {
 
 export function useInstall () {
   const { note, canPrompt } = useSyncExternalStore(subscribeInstall, getInstall, getInstall)
-  return { note, canPrompt, promptInstall, dismissInstall }
+  const card = useSyncExternalStore(subscribeInstall, getInstallCard, getInstallCard)
+  return { note, canPrompt, card, promptInstall, dismissInstall }
 }

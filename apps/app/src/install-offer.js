@@ -49,6 +49,21 @@ export function installView (arg) {
   return { note, canPrompt }
 }
 
+export const INSTALL_CARD_TITLE = 'Instale o Varanda'
+export const INSTALL_CARD_TEXT = Object.freeze({
+  prompt: 'Abra direto da tela inicial, como um app.',
+  ios: 'No Safari, toque em Compartilhar e depois em Adicionar à Tela de Início.'
+})
+
+export function installCard (arg) {
+  if (read(arg, 'eligible') !== true || read(arg, 'standalone') === true || read(arg, 'installed') === true ||
+    read(arg, 'samsungInternet') === true || dismissalActive(read(arg, 'dismissedAt'), read(arg, 'now'))) {
+    return 'none'
+  }
+  if (read(arg, 'hasPrompt') === true) return 'prompt'
+  return read(arg, 'iosSafari') === true ? 'ios' : 'none'
+}
+
 export function createInstallOffer (arg) {
   const eligible = read(arg, 'eligible') === true
   const win = read(arg, 'win')
@@ -105,6 +120,18 @@ export function createInstallOffer (arg) {
     })
     if (!snapshot || snapshot.note !== next.note || snapshot.canPrompt !== next.canPrompt) snapshot = next
     return snapshot
+  }
+
+  function getCard () {
+    return installCard({
+      eligible,
+      standalone,
+      installed,
+      hasPrompt: deferred !== null && !pending,
+      ...device,
+      dismissedAt,
+      now: now()
+    })
   }
 
   function emit () {
@@ -199,5 +226,5 @@ export function createInstallOffer (arg) {
     }
   }
 
-  return { getSnapshot, subscribe, prompt, dismiss, stop }
+  return { getSnapshot, getCard, subscribe, prompt, dismiss, stop }
 }

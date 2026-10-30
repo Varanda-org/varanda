@@ -22,6 +22,7 @@ const { startHealth } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createTopicIndex } = require('@varanda/core/lib/topic-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
+const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
 
 const HEX64_ANYWHERE = /[0-9a-f]{64}/
 
@@ -53,6 +54,7 @@ function scanFixture ({ index = {}, search = {} } = {}) {
   Object.assign(seeder, {
     _index: createEngagementIndex({ ...index, onFreed: () => seeder._scheduleIndexResume() }),
     _notices: createNoticeIndex(),
+    _postNotices: createPostNoticeIndex(),
     _indexQueue: Promise.resolve(),
     _indexStartup: new Set(),
     _indexDropped: new Set(),

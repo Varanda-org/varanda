@@ -35,6 +35,15 @@ services:
       # triagem por IA (leitura do post denunciado). Opcional: vazio deixa a
       # rota desligada, então um .env sem esta linha continua subindo.
       VARANDA_TRIAGE_TOKEN: "${VARANDA_TRIAGE_TOKEN:-}"
+      # Segredo compartilhado com o serviço account para repassar os avisos
+      # push (novo seguidor, resposta, curtida, repostagem). Opcional: vazio
+      # deixa os avisos desligados, então um .env sem esta linha continua
+      # subindo. A chave VAPID fica no volume account-data, nunca aqui.
+      VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
+      # O serviço account (rede do host) escuta só em 127.0.0.1:8790
+      # (VARANDA_ACCOUNT_PORT nele); o semeador o alcança ali para entregar
+      # os avisos. Só loopback.
+      VARANDA_ACCOUNT_HTTP: "${VARANDA_ACCOUNT_HTTP:-http://127.0.0.1:8790}"
 
   web:
     # O Caddy oficial (2.11.6, por digest) mais o módulo de limite por cliente
@@ -125,6 +134,21 @@ services:
       # O semeador tem o próprio limite de 4096 diários, então mantenha este
       # valor igual ou abaixo dele.
       VARANDA_MAX_MEMBERS: "${VARANDA_MAX_MEMBERS:-}"
+      # Convites. Vazio = cadastro aberto. De 1 a 100 = só entra quem tem um
+      # convite, e cada membro vinculado, operador incluído, ganha esse número
+      # de convites por semana (de segunda a domingo, no horário de Brasília;
+      # renova na segunda). Cada link vale 7 dias. Reinicie o account para
+      # mudar. Com a rede vazia ninguém entra: a primeira pessoa precisa se
+      # vincular com a variável vazia.
+      VARANDA_INVITES_PER_WEEK: "${VARANDA_INVITES_PER_WEEK:-}"
+      # Verificação de idade (Didit), opcional. Os dois vazios mantêm a
+      # checagem desligada; os dois definidos a ligam para todo membro
+      # hospedado, inclusive quem já está vinculado. Só o account recebe estas
+      # variáveis. O age.json fica no volume account-data. O teto diário de
+      # sessões vazio mantém o padrão do serviço.
+      VARANDA_DIDIT_API_KEY: "${VARANDA_DIDIT_API_KEY:-}"
+      VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
+      VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"
@@ -142,6 +166,9 @@ services:
       # O mesmo segredo do serviço seeder, também sem a triagem por IA; vazio
       # desliga as leituras (denúncias de grupo só podem ser descartadas).
       VARANDA_TRIAGE_TOKEN: "${VARANDA_TRIAGE_TOKEN:-}"
+      # O mesmo segredo do serviço seeder para os avisos push; vazio desliga
+      # os avisos. A chave VAPID fica em push-vapid.json, em account-data.
+      VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
       VARANDA_AI_MODEL_DIR: "/data/ai-model"

@@ -36,10 +36,16 @@ const MAX_GROUP_CUTS = 16
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
 const MAX_GROUP_NAME = 80
+// Profile avatar: one square still image in this device's media core.
+const AVATAR_SIDE = 512
+const MAX_AVATAR_BLOCKS = 8
+const MAX_AVATAR_BYTES = 8 * MEDIA_BLOCK_BYTES
+const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const PROFILE_KEYS = ['type', 'name', 'bio', 'at']
+const PROFILE_AVATAR_KEYS = ['type', 'name', 'bio', 'at', 'avatar']
 const POST_KEYS = ['type', 'text', 'at', 'replyTo']
 const POST_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'media']
 const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
@@ -50,6 +56,11 @@ const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', '
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 const GROUP_JOIN_KEYS = ['type', 'group', 'writer', 'on', 'at']
+// A tombstone: no author field, the diary signature is the authority, so a
+// tombstone in another diary targets nothing (lib/deletion.js).
+const DELETE_KEYS = ['type', 'seq', 'at']
+const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
+const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -208,6 +219,20 @@ function validDescriptor (d) {
   }
 }
 
+// Never throws.
+function validAvatar (d) {
+  try {
+    return validDescriptor(d) &&
+      AVATAR_MIMES.includes(d.mime) &&
+      d.width === AVATAR_SIDE &&
+      d.height === AVATAR_SIDE &&
+      d.blocks <= MAX_AVATAR_BLOCKS &&
+      d.bytes <= MAX_AVATAR_BYTES
+  } catch {
+    return false
+  }
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function validMediaList (media) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
@@ -217,7 +242,19 @@ function validMediaList (media) {
   return true
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join'])
+// By index, never every(): a hole in a sparse array is undefined and invalid.
+function validDeleteRanges (media) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+  for (let i = 0; i < media.length; i++) {
+    const r = media[i]
+    if (!isPlainObject(r) || !hasExactKeys(r, DELETE_RANGE_KEYS)) return false
+    if (!isHex64(r.core) || !isIntIn(r.start, 1, MAX_MEDIA_BLOCKS - 1) || !isIntIn(r.blocks, 1, MAX_MEDIA_ITEM_BLOCKS)) return false
+    if (r.start + r.blocks > MAX_MEDIA_BLOCKS) return false
+  }
+  return true
+}
+
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'])
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -228,11 +265,22 @@ function check (record, seq) {
     if (seq !== 0) return 'cert-not-first'
     return validCertShape(record.cert) ? null : 'malformed'
   }
+  // `seq` is the tombstone's own block index: it can only target an earlier block.
+  if (type === 'delete') {
+    const withMedia = hasExactKeys(record, DELETE_MEDIA_KEYS)
+    if (!withMedia && !hasExactKeys(record, DELETE_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'delete-invalid'
+    if (!isCanonicalIso(record.at)) return 'date-invalid'
+    if (withMedia && !validDeleteRanges(record.media)) return 'media-invalid'
+    return null
+  }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
   if (type === 'username') return validUsernameShape(record) ? null : 'malformed'
   if (type === 'profile') {
-    if (!hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
+    const withAvatar = hasExactKeys(record, PROFILE_AVATAR_KEYS)
+    if (!withAvatar && !hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
+    if (withAvatar && !validAvatar(record.avatar)) return 'media-invalid'
     const { name, bio, at } = record
     if (typeof name !== 'string' || charLength(name) < 1 || charLength(name) > MAX_NAME) return 'name-length'
     if (typeof bio !== 'string' || charLength(bio) > MAX_BIO) return 'bio-length'
@@ -295,8 +343,19 @@ function memberCertRecord (cert) {
   return build({ type: 'member-cert', cert }, 0)
 }
 
-function profileRecord ({ name, bio = '', at = nowIso() } = {}) {
-  return build({ type: 'profile', name, bio, at }, 1)
+// `avatar` is added only when given and not null.
+function profileRecord ({ name, bio = '', avatar, at = nowIso() } = {}) {
+  const record = { type: 'profile', name, bio, at }
+  if (avatar !== undefined && avatar !== null) record.avatar = copyDescriptor(avatar)
+  return build(record, 1)
+}
+
+// With an avatar, a plain profile followed by the same profile with the
+// avatar: a reader that only knows the 4-key form keeps the name and bio.
+function profileRecords ({ name, bio = '', avatar = null, at = nowIso() } = {}) {
+  const plain = profileRecord({ name, bio, at })
+  if (avatar === undefined || avatar === null) return [plain]
+  return [plain, profileRecord({ name, bio, avatar, at })]
 }
 
 // A copy with exactly the descriptor keys (anything else is passed through
@@ -341,6 +400,21 @@ function followRecord ({ key, on, at = nowIso() } = {}) {
 
 function groupJoinRecord ({ group, writer, on, at = nowIso() } = {}) {
   return build({ type: 'group-join', group, writer, on, at }, 1)
+}
+
+// A copy with exactly the range keys (anything else is passed through for
+// validation to reject).
+function copyRange (r) {
+  if (!isPlainObject(r)) return r
+  return { core: r.core, start: r.start, blocks: r.blocks }
+}
+
+// Validated as if appended right after its target; the store validates it
+// again at its real block index. `media` is added only when given.
+function deleteRecord ({ seq, at = nowIso(), media } = {}) {
+  const record = { type: 'delete', seq, at }
+  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyRange) : media
+  return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
 function parseRef (str) {
@@ -425,9 +499,10 @@ function latestProfile (entries) {
   for (const { seq, record } of entries) {
     const copy = validRecordCopy(record, seq)
     if (copy === null || copy.type !== 'profile') continue
-    if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio }
+    if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
-  return best ? { name: best.name, bio: best.bio } : null
+  if (!best) return null
+  return { name: best.name, bio: best.bio, avatar: best.avatar === undefined ? null : copyDescriptor(best.avatar) }
 }
 
 function genesisCert (entries) {
@@ -460,6 +535,12 @@ module.exports = {
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,
+  AVATAR_SIDE,
+  MAX_AVATAR_BLOCKS,
+  MAX_AVATAR_BYTES,
+  AVATAR_MIMES,
+  PROFILE_AVATAR_KEYS,
+  DELETE_RANGE_KEYS,
   nowIso,
   isPlainObject,
   hasExactKeys,
@@ -471,13 +552,16 @@ module.exports = {
   decodeBlock,
   memberCertRecord,
   profileRecord,
+  profileRecords,
   postRecord,
   mediaCoreRecord,
   followRecord,
   groupJoinRecord,
   likeRecord,
   repostRecord,
+  deleteRecord,
   validDescriptor,
+  validAvatar,
   validateRecord,
   validRecordCopy,
   parseRef,

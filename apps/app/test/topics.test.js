@@ -10,6 +10,7 @@ const NOW = Date.parse('2026-10-26T12:00:00.000Z')
 const AT = '2026-10-25T12:00:00.000Z'
 
 const post = (seq, text, extra = {}) => ({ seq, record: { type: 'post', text, at: AT, replyTo: null, ...extra } })
+const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 512, height: 512 }
 const peekOf = (key, entries, extra = {}) => ({ key, entries, ...extra })
 
 test('fold and tokens (same vectors as the core index)', async (t) => {
@@ -72,14 +73,15 @@ test('matchesAll needs every whole token', async (t) => {
 test('assembleSearch keeps verified matches only', async (t) => {
   const { assembleSearch } = await load()
   const peeked = new Map([
-    [A, peekOf(A, [post(1, 'Que Céu azul'), post(2, 'sem nada'), { seq: 3, record: { type: 'repost', on: true, to: { author: B, seq: 1 }, at: AT } }], { profile: { name: 'Ana' }, username: 'ana' })],
+    [A, peekOf(A, [post(1, 'Que Céu azul'), post(2, 'sem nada'), { seq: 3, record: { type: 'repost', on: true, to: { author: B, seq: 1 }, at: AT } }], { profile: { name: 'Ana', avatar: AV }, username: 'ana' })],
     [B, peekOf(B, [post(1, 'céu no futuro', { at: '2026-12-01T00:00:00.000Z' }), post(2, 'ceu em resposta', { replyTo: { author: A, seq: 1 } }), post(3, 'ceu citado', { quote: { author: A, seq: 1 } }), post(4, 'ceu com fotos', { media: [{ id: 'x' }] }), post(5, 'ceu sem fotos', { media: [] })])],
     [C, peekOf(A, [post(1, 'céu')])]
   ])
   const refs = [A + ':1', A + ':2', A + ':3', B + ':1', B + ':2', B + ':3', B + ':4', B + ':5', C + ':1', 'x', A + ':1', A + ':0', A + ':9']
   const { items, unavailable } = assembleSearch({ refs, peeked, tokens: ['ceu'], now: NOW })
   t.alike(items.map((i) => i.author.slice(0, 1) + i.seq), ['a1', 'b2', 'b3', 'b4', 'b5'], 'order preserved')
-  t.alike(items[0], { kind: 'post', author: A, seq: 1, at: AT, text: 'Que Céu azul', replyTo: null, quote: null, media: null, name: 'Ana', username: 'ana' })
+  t.alike(items[0], { kind: 'post', author: A, seq: 1, at: AT, text: 'Que Céu azul', replyTo: null, quote: null, media: null, name: 'Ana', username: 'ana', avatar: AV })
+  t.not(items[0].avatar, AV, 'a copy, never the peer object')
   t.alike(items[1].replyTo, { author: A, seq: 1 })
   t.alike(items[2].quote, { author: A, seq: 1 })
   t.alike(items[3].media, [{ id: 'x' }])
@@ -96,6 +98,9 @@ test('assembleSearch ignores bad refs and takes names only from the profile', as
   t.is(r.unavailable, 0)
   t.is(r.items[0].name, null)
   t.is(r.items[0].username, null)
+  t.is(r.items[0].avatar, null)
+  const bad = new Map([[A, peekOf(A, [post(1, 'ceu')], { profile: { name: 'Ana', avatar: { ...AV, mime: 'image/png' } } })]])
+  t.is(assembleSearch({ refs: [A + ':1'], peeked: bad, tokens: ['ceu'], now: NOW }).items[0].avatar, null, 'an invalid avatar is null')
   t.alike(assembleSearch({ refs: [A + ':1'], peeked: new Map(), tokens: ['ceu'], now: NOW }), { items: [], unavailable: 1 }, 'a missing author is unavailable')
   t.alike(assembleSearch({}), { items: [], unavailable: 0 })
   t.alike(assembleSearch({ refs: [A + ':1'], peeked: null, tokens: ['ceu'] }), { items: [], unavailable: 1 })
@@ -151,6 +156,9 @@ test('fixed texts and constants', async (t) => {
   t.is(s.SEARCH_INPUT_MAX, 100)
   t.is(s.MAX_FUTURE_MS, 86400000)
   t.is(s.SEARCH_EMPTY_TITLE, 'Nada encontrado')
-  t.is(s.SEARCH_BUSY, 'Muitas consultas ao semeador agora. Tente de novo em alguns segundos.')
+  t.is(s.SEARCH_BUSY, 'Muitas pesquisas agora. Tente de novo em alguns segundos.')
   t.ok(s.SEARCH_HINT.includes('"ceu" encontra "Céu" e "#Céu"'))
+  for (const name of ['SEARCH_HINT', 'SEARCH_INDEXING_NOTE', 'SEARCH_OFFLINE_MESSAGE', 'SEARCH_UNAVAILABLE', 'SEARCH_BUSY']) {
+    t.absent(/semeador|índice/.test(s[name]), name + ' uses plain language')
+  }
 })

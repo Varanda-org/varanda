@@ -6,6 +6,7 @@ const b4a = require('b4a')
 const HyperDHT = require('hyperdht')
 const Hyperswarm = require('hyperswarm')
 const admission = require('./admission')
+const deletion = require('./deletion')
 const {
   MAX_CONNECTIONS,
   MAX_FETCH_ATTACHMENTS,
@@ -173,6 +174,100 @@ function watchContiguous (core, onGrow) {
   }
 }
 
+// watchContiguous for a diary with cleared blocks: a clear pulls
+// contiguousLength back, so growth is measured on the present length
+// (lib/deletion.js) with getDeleted() as the current deleted set. Also
+// fires on a downloaded tombstone even without growth, since a tombstone
+// above an unknown hole is what lets the present length move past it.
+// The length is advanced from the last value; a deleted set that lost a
+// seq (an undone deletion) restarts the walk from 0. onGrow is awaited, and
+// a deleted set that changed during the pass (onGrow often adds a new
+// tombstone's target) walks again, since no event may follow.
+function watchPresent (core, getDeleted, onGrow) {
+  let last = -1
+  let from = 0
+  let seen = new Set()
+  let stopped = false
+  let running = false
+  let again = false
+  let duringInit = false
+  const arrived = []
+  const changed = (snapshot) => {
+    const deleted = getDeleted()
+    const now = deleted instanceof Set ? deleted : new Set()
+    if (now.size !== snapshot.size) return true
+    for (const seq of now) if (!snapshot.has(seq)) return true
+    return false
+  }
+  const pass = async () => {
+    if (stopped) return
+    let tombstone = false
+    for (const index of arrived.splice(0)) {
+      if (await deletion.tombstoneAt(core, index)) tombstone = true
+    }
+    const deleted = getDeleted()
+    const now = deleted instanceof Set ? deleted : new Set()
+    for (const seq of seen) {
+      if (!now.has(seq)) {
+        from = 0
+        break
+      }
+    }
+    const snapshot = new Set(now)
+    seen = snapshot
+    const len = await deletion.presentLength(core, snapshot, from)
+    if (stopped) return
+    from = len
+    const first = last === -1
+    const grew = !first && len > last
+    last = len
+    // A block that arrived during the first walk may already be in the
+    // baseline, so it is reported once here.
+    if (!first && (grew || tombstone || duringInit)) {
+      duringInit = false
+      const p = onGrow(len)
+      if (p !== null && typeof p === 'object' && typeof p.then === 'function') await p
+    }
+    if (!stopped && changed(snapshot)) again = true
+  }
+  const run = async () => {
+    if (running) {
+      again = true
+      return
+    }
+    running = true
+    try {
+      do {
+        again = false
+        // A failed pass is not reported (nothing here is logged, so no
+        // secret can leak) and never drops a rerun queued meanwhile.
+        try {
+          await pass()
+        } catch {}
+      } while (again)
+    } finally {
+      running = false
+    }
+  }
+  const event = () => {
+    if (last === -1) duringInit = true
+    run()
+  }
+  const onAppend = () => { event() }
+  const onDownload = (index) => {
+    arrived.push(index)
+    event()
+  }
+  core.on('append', onAppend)
+  core.on('download', onDownload)
+  run()
+  return function stop () {
+    stopped = true
+    core.off('append', onAppend)
+    core.off('download', onDownload)
+  }
+}
+
 function watchFork (core, onFork) {
   let fired = false
   const handler = () => {
@@ -289,6 +384,7 @@ module.exports = {
   attachAdmission: admission.attachAdmission,
   validateMessage: admission.validateMessage,
   watchContiguous,
+  watchPresent,
   watchFork,
   startQuarantineFetch,
   quarantineGet0

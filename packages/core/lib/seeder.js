@@ -38,8 +38,8 @@
 // blocked diary leaves the index the moment its drop starts, and reads filter
 // out any author that is not served, gated and unblocked. Trust model: the
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
-// verify the content from the diaries themselves (indexPost, indexCounts,
-// indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+// verify the content from the diaries themselves (indexPost, indexEngagers,
+// indexCounts, indexMember back the /index routes of apps/cli/lib/seed-ws.js).
 //
 // Name index (lib/name-index.js): fed by the same scan, the folded tokens of
 // each served author's newest display name and its verified @nome. Like the
@@ -88,6 +88,7 @@
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
 const fs = require('#fs')
 const path = require('#path')
+const process = require('#process')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const {
@@ -127,13 +128,16 @@ const {
   readJson,
   writeJsonAtomic,
   readBlocklist,
+  hasUnreadableBlocklist,
   writeBlocklist
 } = require('./store')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
-const { attachNotices } = require('./notices-net')
+const { attachNotices, attachNoticesV2 } = require('./notices-net')
+const { createPostNoticeIndex } = require('./post-notices')
+const { pushCandidate, pushName } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -151,6 +155,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
+const { presentState, presentLength, clearDeleted, downloadExcept, deletedRanges } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { parseQuery } = require('./search-text')
@@ -174,11 +179,19 @@ const {
 const GATE_TIMEOUT_MS = 15000
 const REDISCOVER_MS = 10000
 // A diary scan whose block read fails is retried after this delay, at most
-// this many times in a row (a successful read resets the count): without
+// this many times in a row (moving past a block resets the count): without
 // it a fully contiguous log (no further growth to re-queue the scan) would
 // stay pending, and its pages incomplete, for the life of the process.
 const SCAN_RETRY_MS = 2000
 const SCAN_RETRIES_MAX = 8
+// Diaries prepared at once (_prepareDiary decodes every stored block of
+// one diary into memory): at start every surviving diary is served
+// together, and unbounded the peak heap is the sum of all of them.
+const PREPARE_CONCURRENCY = 2
+// Tombstones queued for an incremental irregular media memo update; more
+// before the memo is next used rebuild it (bounds the queue of a regular
+// diary, which never uses it).
+const TOMB_NEW_MAX = 1024
 const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
@@ -205,6 +218,167 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
 const EXTERNAL_IDLE_MS = 30000
 
 function noop () {}
+
+// Below the present length a block that is not local is one a local
+// tombstone above it targets (presentLength passes only those holes), even
+// before the scan has learned that tombstone: a cursor passes it instead of
+// waiting for a block no peer may serve any more. A null read of a local
+// block stays a read failure.
+async function deletedHole (core, seq) {
+  try {
+    return !(await core.has(seq))
+  } catch {
+    return false
+  }
+}
+
+// Media cores whose deletion counters one diary keeps (a diary entry's
+// `media`). Only the latest MAX_MEDIA_CORES are ever bound, so twice that
+// covers every honest diary (about one core per device) with room to spare,
+// while a diary declaring thousands of keys holds at most this many cores x
+// MAX_MEDIA_BLOCKS x 2 counter entries, whatever it writes.
+const MEDIA_TRACK_MAX = 2 * MAX_MEDIA_CORES
+
+// Fresh counters for a core first declared at seq `since`. Sparse (one entry
+// per block actually referenced, never above MAX_MEDIA_BLOCKS), so an honest
+// diary costs only the blocks its posts and tombstones name.
+function mediaState (since) {
+  return { since, last: since, live: new Map(), del: new Map(), dead: 0, ver: 0 }
+}
+
+// Starts counting core K, first declared at seq `seq`, in `counts` (a
+// diary entry, or the fresh counters of a recount). At the cap the core
+// whose latest declaration is oldest is evicted: it falls out of the latest
+// set first. An evicted core is never tracked again in this pass (its
+// earlier ranges are lost), so mediaRead refuses it (fail closed) until a
+// recount (_recountMedia) tracks it again. `pinned` cores (the bound set,
+// at most MAX_MEDIA_CORES of the MEDIA_TRACK_MAX slots) are never evicted.
+function trackMedia (counts, key, seq, pinned = null) {
+  if (counts.media.size >= MEDIA_TRACK_MAX) {
+    let oldest = null
+    for (const [k, state] of counts.media) {
+      if (pinned !== null && pinned.has(k)) continue
+      if (oldest === null || state.last < counts.media.get(oldest).last) oldest = k
+    }
+    counts.media.delete(oldest)
+  }
+  counts.media.set(key, mediaState(seq))
+}
+
+// A `media-core` declaration of K at seq, before `declared` (the keys
+// declared below seq) learns it.
+function countDeclaration (counts, declared, key, seq, pinned = null) {
+  if (!declared.has(key)) trackMedia(counts, key, seq, pinned)
+  else if (counts.media.has(key)) counts.media.get(key).last = seq
+}
+
+// The media a post or profile at seq shows (r its valid copy, or null).
+// A descriptor in a core not declared below seq makes the diary irregular:
+// honest writers declare a core before using it, and the counters would
+// miss it while readers' deletedRanges count every declared core.
+function countShown (counts, declared, seq, r) {
+  const refs = r === null ? [] : r.type === 'post' ? (r.media || []) : (r.avatar ? [r.avatar] : [])
+  const counted = []
+  for (const { core, start, blocks } of refs) {
+    if (!declared.has(core)) counts.mediaIrregular = true
+    const state = counts.media.get(core)
+    if (state === undefined) continue
+    mediaBump(state, start, blocks, 'live', 1)
+    counted.push({ core, start, blocks })
+  }
+  if (counted.length > 0) counts.mediaRefs.set(seq, counted)
+}
+
+// Adds the ranges `media` of one tombstone (undefined: none) to the
+// per-core block sets in `sets`, for the cores it holds only.
+function addTombRanges (sets, media) {
+  if (media === undefined) return
+  for (const { core, start, blocks } of media) {
+    const set = sets.get(core)
+    if (set === undefined) continue
+    for (let b = start; b < Math.min(start + blocks, MAX_MEDIA_BLOCKS); b++) set.add(b)
+  }
+}
+
+// Whether tombstone `record` makes the diary irregular for media: it
+// deletes a tombstone (the counters undo one level only, while readers fold
+// every level) or lists a range in a core not declared below it (never
+// counted). Honest writers do neither. `tombstones` needs only the seqs
+// below the record: a target is always lower than its tombstone.
+function tombstoneIrregular (declared, tombstones, record) {
+  if (tombstones.has(record.seq)) return true
+  if (!Array.isArray(record.media)) return false
+  return record.media.some(({ core }) => !declared.has(core))
+}
+
+// The media side of tombstone `record` at seq whose target block decoded
+// to `block` (null when unreadable): the target's shown media stop
+// counting, a deleted tombstone's ranges are re-read from its own block and
+// uncounted (a failed read keeps them counted, which refuses more, never
+// less), and this tombstone's ranges count (guarded: a scan that retries
+// a tombstone must not count it twice).
+function countTombstone (counts, seq, record, block) {
+  const target = record.seq
+  const refs = counts.mediaRefs.get(target)
+  if (refs !== undefined) {
+    counts.mediaRefs.delete(target)
+    for (const r of refs) mediaBump(counts.media.get(r.core), r.start, r.blocks, 'live', -1)
+  }
+  if (counts.mediaTombs.has(target) && block !== null && block.type === 'delete') {
+    const prev = validRecordCopy(block, target)
+    if (prev !== null) {
+      counts.mediaTombs.delete(target)
+      countRanges(counts, target, prev.media, -1)
+    }
+  }
+  if (!counts.mediaTombs.has(seq) && countRanges(counts, seq, record.media, 1)) counts.mediaTombs.add(seq)
+}
+
+// Per-block counters of one tracked media core (mediaState): `live` how
+// many surviving posts/profiles show a block, `del` how many effective
+// tombstones list it, `dead` how many blocks have del > 0 and no live
+// count, `ver` bumped on every change (mediaRead caches by it). Costs
+// O(blocks), and a record's range is at most MAX_MEDIA_ITEM_BLOCKS.
+function mediaBump (state, start, blocks, field, delta) {
+  if (state === undefined) return
+  const end = Math.min(start + blocks, MAX_MEDIA_BLOCKS)
+  for (let b = Math.max(start, 0); b < end; b++) {
+    const wasDead = state.del.has(b) && !state.live.has(b)
+    const counts = state[field]
+    const n = (counts.get(b) || 0) + delta
+    if (n > 0) counts.set(b, n)
+    else counts.delete(b)
+    const isDead = state.del.has(b) && !state.live.has(b)
+    if (wasDead !== isDead) state.dead += isDead ? 1 : -1
+  }
+  state.ver++
+}
+
+// The deletion state of a diary describes its whole log only once the scan
+// has read every block of the signed length: before that, after every
+// restart, while a new diary syncs or while a block is missing below
+// blocks already stored, a tombstone may still be unread. (The scan skips
+// the holes a tombstone explains and stops at any other one, so an unknown
+// gap keeps this false until it is filled.)
+function scanCaughtUp (entry) {
+  return entry.scanned >= entry.core.length
+}
+
+// Adds (delta 1) or takes back (delta -1) the media ranges of tombstone
+// `seq`. Only cores declared before `seq` count, which is exactly the set
+// counted when the upward scan applied it, so taking back is symmetric.
+// Returns whether any range counted.
+function countRanges (counts, seq, ranges, delta) {
+  if (!Array.isArray(ranges)) return false
+  let any = false
+  for (const { core, start, blocks } of ranges) {
+    const state = counts.media.get(core)
+    if (state === undefined || state.since >= seq) continue
+    mediaBump(state, start, blocks, 'del', delta)
+    any = true
+  }
+  return any
+}
 
 function isPlainObject (x) {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return false
@@ -602,6 +776,12 @@ class Seeder {
   // groupHeaderTimeoutMs how long an admitted group core may wait for its
   // block 0 in the main store (default GATE_TIMEOUT_MS); admitHook and
   // purgeHook also see group keys.
+  // onPush(event) is not a test hook: called synchronously, never awaited,
+  // once per follow, reply, like or repost appended to a served diary past
+  // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
+  // the bytes of deleted diary blocks and media ranges: they are only
+  // hidden, as before byte deletion.
   constructor ({
     dataDir,
     associationKey = null,
@@ -613,6 +793,8 @@ class Seeder {
     admitHook = null,
     regateHook = null,
     storeHook = null,
+    onPush = null,
+    noClear = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -671,6 +853,9 @@ class Seeder {
     this.admitHook = admitHook
     this.regateHook = regateHook
     this.storeHook = storeHook
+    if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
+    this.onPush = onPush
+    this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
     // Two independent caps: maxConnections bounds swarm sockets only and
@@ -767,6 +952,8 @@ class Seeder {
     this._groupHeaders = new Map() // root key -> headerRecord of a root this seeder verified, while a core of its group is kept (persisted)
     this._groupIndex = createGroupIndex({ maxGroups: this.maxGroupCores, maxWritersPerGroup: maxGroupWriters })
     this._groupHandles = new Set()
+    this._preparing = 0 // _prepareDiary calls running (at most PREPARE_CONCURRENCY)
+    this._prepareWaiters = []
     // Engagement index (header comment): its own scan queue (one diary at a
     // time, never the media scan's), and the keys served at start whose
     // first index pass has not finished yet (null until step 4 of start():
@@ -790,6 +977,7 @@ class Seeder {
     this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
     this._topicQueue = Promise.resolve()
     this._topicStartup = null
+    this._pushQueue = Promise.resolve()
     this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
     // The signed moderation snapshot (blocklist.js createBlocklistState),
@@ -799,15 +987,21 @@ class Seeder {
     this._blocklistHandles = new Set()
     // True from a start whose blocklist.json was unreadable or missing with no
     // usable copy to fall back to (a list existed and is lost) until a
-    // verified snapshot is adopted: new admissions are refused meanwhile. In memory only: a restart
-    // before a snapshot arrives reads a plain absent file.
+    // verified snapshot is adopted: new admissions are refused meanwhile.
+    // Decided again at every start: a torn file kept aside by an earlier
+    // start and no verified list hold it again.
     this._blocklistHeld = false
     // Follow notices (notices.js): the follower index is in memory only,
     // rebuilt from block 1 by the diary scan on every serve and never
     // persisted; the open notices channel of every connection.
     // isMember reads the live sets (both created above); a follow of a key
     // admitted later is picked up on that author's next serve or restart.
+    // Post notices (post-notices.js: replies, quotes, @nome mentions) follow
+    // the same lifecycle in their own index, so a mention spammer never
+    // touches the follow index's budget; both are paged on
+    // varanda/notices/2, and _noticeHandles holds the v1 and v2 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
+    this._postNotices = this._createPostNoticeIndex()
     this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
@@ -873,7 +1067,12 @@ class Seeder {
       const snapshot = readSnapshot(dataDir)
       if (snapshot !== null && verifySnapshot(snapshot, association).ok) blocklist = { seq: snapshot.seq, date: snapshot.date }
     } catch {}
-    return { association, publicKey, certificate, admitted, blocklist, running: lockHeld(dataDir) }
+    // Whether a start would hold admissions: no usable list and a torn one kept aside.
+    let blocklistHeld = false
+    try {
+      blocklistHeld = blocklist === null && hasUnreadableBlocklist(dataDir)
+    } catch {}
+    return { association, publicKey, certificate, admitted, blocklist, blocklistHeld, running: lockHeld(dataDir) }
   }
 
   // `seed list`: the admitted logs and their signed sizes, each with the
@@ -1064,8 +1263,9 @@ class Seeder {
         throw new Error('lista de bloqueio ilegível')
       }
       // Decided once the state is loaded: a copy that does not verify leaves
-      // no list either.
-      this._blocklistHeld = unreadable && state.current() === null
+      // no list either, and a torn file kept aside by an earlier start
+      // still says a list existed.
+      this._blocklistHeld = (unreadable || hasUnreadableBlocklist(this.dataDir)) && state.current() === null
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
@@ -1228,8 +1428,13 @@ class Seeder {
       this._indexStartup = new Set(survivors.map(([key]) => key))
       this._topicStartup = new Set(survivors.map(([key]) => key))
       if (provisionalRoot) this._groupRootStartup = new Set(survivors.map(([key]) => key))
+      // Each diary first clears what its stored tombstones delete (and the
+      // ranges they list in its bound media cores), before any download
+      // or peer can bring those bytes back.
       for (const [key, core, cert0] of survivors) this._serve(key, core, { regate: false, cert0 })
+      await Promise.all(survivors.map(([key]) => this._served.has(key) ? this._served.get(key).prepared : null))
       for (const [key, diary, core] of mediaSurvivors) this._serveMedia(key, diary, core, { headerOk: true })
+      await Promise.all(mediaSurvivors.map(([key]) => this._mediaServed.has(key) ? this._mediaServed.get(key).prepared : null))
       for (const [key, binding, core, raw] of groupSurvivors) {
         if (key === binding.group) {
           this._groupIndex.setHeader(key, decodeBlock(raw))
@@ -1296,7 +1501,7 @@ class Seeder {
     let blocks = 0
     let bytes = 0
     for (const entry of this._served.values()) {
-      blocks += entry.core.contiguousLength
+      blocks += entry.present
       bytes += entry.core.byteLength
     }
     let mediaBytes = 0
@@ -1318,6 +1523,7 @@ class Seeder {
       firewalled: this.swarm ? this.swarm.dht.firewalled : null,
       blocked: this._blocklist ? this._blocklist.blocked().size : 0,
       blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0,
+      blocklistHeld: this._blocklistHeld,
       mediaCores: this._media.size,
       mediaBytes,
       groupCores: this._groups.size,
@@ -1419,7 +1625,7 @@ class Seeder {
     // (b) already admitted: idempotent answer.
     const served = this._served.get(key)
     if (this._admitted.has(key) && served) {
-      const length = served.core.contiguousLength
+      const length = served.present
       peer.send({ type: 'admitted', key, length })
       return { type: 'admitted', length, shared: true }
     }
@@ -1547,13 +1753,18 @@ class Seeder {
       if (this._closing) return
       return this._reject(peer, key, after)
     }
-    this._serve(key, core, { regate: true })
+    // The main replica may still be empty here while res.length is the
+    // signed length the quarantine verified: the history up to it was
+    // written before this admission and must never become a push.
+    this._serve(key, core, { regate: true, pushFrom: Math.max(core.length, res.length) })
     // A resumed main-store core already over the quota was dropped inside
     // _serve (rejected sent, purge under way): no join, no admitted (item 6).
     const entry = this._served.get(key)
     if (!entry || entry.dropped) return { type: 'rejected', reason: 'quota' }
+    await entry.prepared
+    if (this._closing || entry.dropped || this._served.get(key) !== entry) return
     this.swarm.join(core.discoveryKey, { server: true, client: true })
-    const length = core.contiguousLength
+    const length = entry.present
     peer.send({ type: 'admitted', key, length })
     this.log({ event: 'admitted', key, length })
     return { type: 'admitted', length, shared: true }
@@ -1586,7 +1797,7 @@ class Seeder {
     return length > this.maxLogBlocks || byteLength > this.maxLogBytes
   }
 
-  _serve (key, core, { regate, cert0 = null }) {
+  _serve (key, core, { regate, cert0 = null, pushFrom = core.length }) {
     // Media scan state (header comment): `scanned` is the next block to read
     // for media-core records (block 0 is the certificate), `decls` the
     // declared cores seen so far (key -> { seq, at }, newest seq; a seq/key
@@ -1596,7 +1807,10 @@ class Seeder {
     // `indexed` is the next block the engagement index reads, `indexPaused`
     // that the index refused a record at that block (cap reached) and the
     // cursor waits there until room is freed. The topic* fields are the
-    // same state for the topic search index, on its own cursor.
+    // same state for the topic search index, on its own cursor. `pushNext`
+    // is the next block the push scanner reads: set once here and only ever
+    // advanced, never by a rescan or an index rebuild, so a block is pushed
+    // at most once per serve and history at serve time never is.
     const entry = {
       core,
       download: null,
@@ -1613,7 +1827,7 @@ class Seeder {
       scanned: 1,
       scanQueued: false,
       scanRetry: null, // pending retry timer of a failed block read
-      scanRetries: 0, // failed reads in a row
+      scanRetries: 0, // failed passes in a row on the same block
       decls: new Map(),
       latest: [],
       refused: new Map(),
@@ -1644,11 +1858,69 @@ class Seeder {
       topicPaused: false,
       topicRetry: null,
       topicReadFailures: 0,
+      // Deletion state, rebuilt by every scan from block 1 (in memory only):
+      // `deleted` every seq a scanned tombstone removed (monotone: the index
+      // cursors skip them), `tombstones` tombstone seq -> target seq and
+      // `effective` its cached fold (what readers hide, for postBlock),
+      // `media` tracked media core -> per-block counters (trackMedia,
+      // mediaBump; at most MEDIA_TRACK_MAX cores),
+      // `mediaRefs` post/profile seq -> the counted media it shows,
+      // `mediaTombs` the tombstone seqs whose ranges are counted,
+      // `mediaIrregular` that the log does something the counters cannot
+      // follow (countShown, tombstoneIrregular: mediaRead then refuses all
+      // of this diary's media until a re-serve), `mediaRecounts` how many
+      // recounts this serve ran and `mediaRecounting` one is running.
+      deleted: new Set(),
+      tombstones: new Map(),
+      effective: null,
+      media: new Map(),
+      mediaRefs: new Map(),
+      mediaTombs: new Set(),
+      mediaIrregular: false,
+      mediaRecounts: 0,
+      mediaRecounting: false,
+      // Byte deletion (in memory only, recomputed from the stored
+      // tombstones at every serve): `gone` the target of every tombstone
+      // read so far, effective or not (a hole there is known, so the scans
+      // and the present length skip it), `excluded` every seq the readers'
+      // fold has deleted in this serve (cleared, and left out of the
+      // download; never shrinks, so a seq a later tombstone gives back is
+      // not fetched again), `arrived` blocks downloaded above the scan
+      // cursor (a tombstone among them is applied before the scan gets
+      // there), `mediaStart` media core -> blocks the stored tombstones
+      // delete (lib/deletion.js deletedRanges, for the cores bound at
+      // serve), `present` the present length (lib/deletion.js; replaces
+      // contiguousLength, which a clear pulls back) and `prepared` the
+      // startup clear, before which nothing is downloaded.
+      gone: new Set(),
+      excluded: new Set(),
+      arrived: new Set(),
+      mediaStart: new Map(),
+      present: 0,
+      prepared: null,
+      clearing: null,
+      clearAgain: false,
+      // Irregular media clear without reading tombstones back (_noteTombstone,
+      // _mediaGone): `tombMedia` tombstone seq -> the ranges it lists,
+      // `tombMax` the highest tombstone seq learned, `tombNew` tombstones
+      // learned since `irrMemo` (per-core blocks for one effective set) that
+      // only add their own ranges, `irrDirty` that the memo must be rebuilt,
+      // and `clearedEffective` the effective set already in `excluded`.
+      tombMedia: new Map(),
+      tombMax: -1,
+      tombNew: [],
+      irrDirty: true,
+      irrMemo: null,
+      clearedEffective: null,
       // Active-diary state (lib/activity.js; in memory only, never persisted
       // or logged): openReplica already awaited core.ready(), so core.length
       // is the stored signed length, and only growth past it counts.
       activityLength: core.length,
-      activeAt: null
+      activeAt: null,
+      pushNext: pushFrom,
+      pushQueued: false,
+      pushRetry: null,
+      pushReadFailures: 0
     }
     // Log quota on growth (S3): length/byteLength advance on the signed
     // upgrade ('append' fires) before the blocks arrive, so an admitted log
@@ -1666,19 +1938,20 @@ class Seeder {
       // rescan never counts.
       else if (this._served.get(key) === entry) {
         this._notices.markPending(key)
+        this._postNotices.markPending(key)
         noteGrowth(entry, core.length, Date.now())
       }
     }
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
     entry.stopFork = watchFork(core, (reason) => this._drop(key, reason))
-    entry.download = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, (length) => this._onGrow(key, entry, length))
     this._served.set(key, entry)
     // Every serve scans from block 1: rebuild this author's follows from
     // scratch, invisible to pages until the scan reaches the signed length.
     this._notices.removeAuthor(key)
     this._notices.markPending(key)
+    this._postNotices.removeAuthor(key)
+    this._postNotices.markPending(key)
     checkQuota()
     if (entry.dropped) return
     // A peer that served block 0 to the quarantine and then withholds it
@@ -1693,25 +1966,152 @@ class Seeder {
       }, this.regateTimeoutMs)
       if (entry.headerTimer.unref) entry.headerTimer.unref()
     }
-    // A replica opened for re-gating may already hold block 0.
-    if (regate && core.contiguousLength >= 1) this._onGrow(key, entry, core.contiguousLength)
+    // _prepareDiary re-gates a replica that already holds block 0.
+    entry.prepared = this._prepareBounded(key, entry, regate).catch(noop)
   }
 
+  // The download starts inside _prepareDiary, after the clear, so waiting
+  // here keeps a diary's deleted bytes from being fetched back.
+  async _prepareBounded (key, entry, regate) {
+    while (this._preparing >= PREPARE_CONCURRENCY) {
+      await new Promise((resolve) => this._prepareWaiters.push(resolve))
+    }
+    this._preparing++
+    try {
+      if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+      await this._prepareDiary(key, entry, regate)
+    } finally {
+      this._preparing--
+      const next = this._prepareWaiters.shift()
+      if (next) next()
+    }
+  }
+
+  // Local reads only (lib/deletion.js presentState walks every stored
+  // block, past holes too): learn the stored tombstones, clear the blocks
+  // their fold deletes, and only then start the download (one range per
+  // gap, so no peer is asked for a deleted block) and the growth watcher.
+  async _prepareDiary (key, entry, regate) {
+    const core = entry.core
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    let state = null
+    try {
+      state = await presentState(core)
+    } catch {}
+    if (stale()) return
+    if (state !== null) {
+      for (const { seq, record } of state.raw) {
+        const r = record !== null && record.type === 'delete' ? validRecordCopy(record, seq) : null
+        if (r === null) continue
+        this._noteTombstone(entry, seq, r)
+        entry.tombstones.set(seq, r.seq)
+        entry.gone.add(r.seq)
+        // Above a hole no tombstone explains, the scan cannot reach it yet.
+        if (seq >= state.present) entry.arrived.add(seq)
+      }
+      entry.effective = null
+      const bound = []
+      for (const [k, binding] of this._media) if (binding !== null && binding.diary === key) bound.push(k)
+      for (const r of deletedRanges(state.raw, bound)) {
+        if (!entry.mediaStart.has(r.core)) entry.mediaStart.set(r.core, new Set())
+        const blocks = entry.mediaStart.get(r.core)
+        for (let b = r.start; b < Math.min(r.start + r.blocks, MAX_MEDIA_BLOCKS); b++) blocks.add(b)
+      }
+      // Only the sets above are kept: the decoded blocks go before the
+      // clear and the present walk, which may wait on the disk a while.
+      state = null
+    }
+    for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
+    if (!this.noClear) {
+      try {
+        await clearDeleted(core, entry.excluded)
+      } catch {}
+    }
+    let present = 0
+    try {
+      present = await presentLength(core, entry.gone)
+    } catch {}
+    if (stale()) return
+    entry.present = Math.max(entry.present, present)
+    entry.download = this._downloader(core, entry.excluded)
+    // Growth is measured on the present length (has() only: no block is
+    // read here, the scan reads each one). A block arriving above the scan
+    // cursor queues a pass, which applies a tombstone among such blocks
+    // even when an unknown hole stops it (_applyArrived).
+    let running = false
+    let again = false
+    let above = false
+    const check = async () => {
+      if (running) {
+        again = true
+        return
+      }
+      running = true
+      try {
+        do {
+          again = false
+          const len = await presentLength(core, entry.gone, entry.present)
+          if (stale()) return
+          const arrivedAbove = above
+          above = false
+          this._onPresent(key, entry, len, arrivedAbove)
+        } while (again)
+      } catch {} finally {
+        running = false
+      }
+    }
+    const onAppend = () => { check() }
+    const onDownload = (index) => {
+      if (index >= entry.scanned) entry.arrived.add(index)
+      if (index > entry.scanned) above = true
+      check()
+    }
+    core.on('append', onAppend)
+    core.on('download', onDownload)
+    entry.stopGrow = () => {
+      core.off('append', onAppend)
+      core.off('download', onDownload)
+    }
+    // A replica opened for re-gating may already hold block 0.
+    if (regate && entry.present >= 1) this._onGrow(key, entry, entry.present)
+    if (entry.present > entry.pushNext) this._pushDiary(key, entry)
+  }
+
+  // The live download of a diary or media core minus `deleted`
+  // (lib/deletion.js downloadExcept: update() clears and re-ranges). With
+  // noClear every block is downloaded and kept, as before byte deletion.
+  _downloader (core, deleted) {
+    if (!this.noClear) return downloadExcept(core, deleted)
+    const range = core.download({ start: 0, end: -1 })
+    return { update: async () => [], destroy: () => range.destroy(), idle: async () => {} }
+  }
+
+  // Growth goes through _onGrow; a block that arrived above the scan
+  // cursor without growth only queues a scan (the block AT the cursor is
+  // the one a running or retrying pass reads).
+  _onPresent (key, entry, length, above) {
+    if (length > entry.present) return this._onGrow(key, entry, length)
+    if (above && entry.gated) this._scanDiary(key, entry)
+  }
+
+  // `length` is a present length: it only ever raises entry.present.
   _onGrow (key, entry, length) {
     if (entry.dropped || this._closing) return
+    if (!(entry.present >= length)) entry.present = length
     if (this._overQuota(entry.core)) return this._drop(key, 'quota')
     if (!entry.gated) {
       // Re-gate on arrival: the main store may have received a different
-      // block 0 than the quarantine did.
-      if (entry.gating) return
+      // block 0 than the quarantine did. Not before block 0 is local.
+      if (entry.gating || !(entry.present >= 1)) return
       entry.gating = true
       this._gate(key, entry)
       return
     }
-    this._broadcastHave(key, length)
+    this._broadcastHave(key, entry.present)
     this._scanDiary(key, entry)
     this._indexDiary(key, entry)
     this._topicDiary(key, entry)
+    this._pushDiary(key, entry)
   }
 
   // Local gate of a served, not yet gated replica. The verdict is computed
@@ -1741,10 +2141,12 @@ class Seeder {
       clearTimeout(entry.headerTimer)
       entry.headerTimer = null
       this._forgetRevoked(key)
-      this._broadcastHave(key, entry.core.contiguousLength)
+      this._broadcastHave(key, entry.present)
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
+      // Growth during the gate returned early from _onGrow.
+      this._pushDiary(key, entry)
     }).catch(() => {
       // Only a throwing test hook gets here: fail closed (never gated).
       entry.gating = false
@@ -1764,6 +2166,8 @@ class Seeder {
     entry.indexRetry = null
     clearTimeout(entry.topicRetry)
     entry.topicRetry = null
+    clearTimeout(entry.pushRetry)
+    entry.pushRetry = null
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
@@ -1788,6 +2192,7 @@ class Seeder {
     entry.dropped = true
     this._served.delete(key)
     this._notices.removeAuthor(key)
+    this._postNotices.removeAuthor(key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -1866,8 +2271,10 @@ class Seeder {
 
   // Queues a scan of a gated diary for media-core records. Scans run one at
   // a time across all diaries (_scanQueue) and at most one is queued per
-  // diary; a scan reads from the diary's cursor to its contiguous length
-  // (checking again before it ends), so growth during a scan is not lost.
+  // diary; a scan walks the local blocks from the diary's cursor up to its
+  // signed length, skipping the holes a tombstone explains and stopping at
+  // any other (checking again before it ends), so growth during a scan is
+  // not lost.
   _scanDiary (key, entry) {
     if (entry.scanQueued || entry.dropped || !entry.gated || this._closing) return
     entry.scanQueued = true
@@ -1878,37 +2285,76 @@ class Seeder {
   async _runScan (key, entry) {
     entry.scanQueued = false
     const core = entry.core
-    while (!entry.dropped && !this._closing && entry.scanned < core.contiguousLength) {
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    while (!entry.dropped && !this._closing && entry.scanned < core.length) {
       const i = entry.scanned
+      // Below the present length a block is local or a known hole, so it
+      // is read right away; above it, only once has() says it is local.
+      let local = i < entry.present
+      if (!local) {
+        try {
+          local = await core.has(i)
+        } catch {}
+      }
       let raw = null
-      try {
-        raw = await core.get(i, { wait: false, raw: true })
-      } catch {}
+      if (local) {
+        try {
+          raw = await core.get(i, { wait: false, raw: true })
+        } catch {}
+      }
       // The read suspended this scan: a drop, close or re-serve meanwhile
       // (all call _notices.removeAuthor) makes this entry stale, and a fold
       // for it would be an orphan (edge budget held for good) or, after a
       // re-serve, a seq high-water mark the new scan's records fall under.
       // Nothing below touches the index for a stale entry.
-      if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+      if (stale()) return
+      if (raw === null && entry.gone.has(i)) {
+        entry.scanned = i + 1
+        entry.scanRetries = 0
+        continue
+      }
+      // A hole no tombstone explains: its arrival queues the scan again.
+      if (!local) break
       if (raw === null) {
-        // Pending until a pass commits; the read is retried a bounded number
-        // of times, as growth alone may never re-queue the scan.
-        this._notices.markPending(key)
-        if (entry.scanRetry === null && entry.scanRetries < SCAN_RETRIES_MAX) {
-          entry.scanRetries++
-          entry.scanRetry = setTimeout(() => {
-            entry.scanRetry = null
-            this._scanDiary(key, entry)
-          }, SCAN_RETRY_MS)
-          entry.scanRetry.unref()
-        } else if (entry.scanRetry === null) {
-          this._groupStartupScanned(key)
-        }
+        // Below the present length a hole is one a local tombstone above it
+        // targets (presentLength), possibly cleared by every peer before
+        // this replica opened: learn that tombstone now, or no pass ever
+        // gets past the hole (_applyArrived only runs after an unknown one).
+        for (let b = i + 1; b < entry.present; b++) entry.arrived.add(b)
+        await this._applyArrived(key, entry)
+        if (stale()) return
+        if (entry.gone.has(i)) continue
+        this._retryScan(key, entry)
         return
       }
-      entry.scanRetries = 0
-      entry.scanned = i + 1
       const block = decodeBlock(raw)
+      if (block !== null && block.type === 'delete') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && tombstoneIrregular(entry.decls, entry.tombstones, r)) entry.mediaIrregular = true
+        if (r !== null && !entry.tombstones.has(i)) {
+          this._noteTombstone(entry, i, r)
+          entry.tombstones.set(i, r.seq)
+          entry.effective = null
+        }
+        if (r !== null) entry.gone.add(r.seq)
+        if (r !== null && !entry.deleted.has(i)) {
+          const done = await this._applyDelete(key, entry, i, r)
+          if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+          if (!done) {
+            this._retryScan(key, entry)
+            return
+          }
+        }
+        // Only now: `scanned` feeds the `complete` flags, which must not
+        // turn true while this tombstone's target is still indexed.
+        entry.scanned = i + 1
+        entry.scanRetries = 0
+        continue
+      }
+      entry.scanned = i + 1
+      // Reset only once the scan moves past a block: a tombstone whose
+      // apply keeps failing reads fine every pass and would never hit the cap.
+      entry.scanRetries = 0
       if (block === null) continue
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
@@ -1932,19 +2378,55 @@ class Seeder {
         }
         continue
       }
+      // Folded here, not in _runIndex: that queue pauses at capacity and
+      // would leave mention targets unknown while the scan commits.
+      if (block.type === 'username') {
+        const r = validRecordCopy(block, i)
+        if (r !== null) this._postNotices.foldUsername(key, i, r)
+        continue
+      }
+      if (block.type === 'post' || block.type === 'profile') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && r.type === 'post') this._postNotices.foldPost(key, i, r)
+        countShown(entry, entry.decls, i, r)
+        continue
+      }
       if (block.type !== 'media-core') continue
       const record = validRecordCopy(block, i)
       if (record === null || record.key === key) continue
+      // Counters only for declared cores, from their first declaration on
+      // (honest writers declare a core before using it), and for at most
+      // MEDIA_TRACK_MAX of them: memory never grows with the number of
+      // declarations or tombstones. A core declared before but no longer
+      // tracked was evicted and stays untracked.
       const prev = entry.decls.get(record.key)
+      countDeclaration(entry, entry.decls, record.key, i)
       if (prev === undefined || i > prev.seq) entry.decls.set(record.key, { seq: i, at: record.at })
     }
-    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-    // The loop stops at contiguousLength, while the signed length advances
+    if (stale()) return
+    // Stopped at an unknown hole: tombstones that arrived above it are
+    // applied now, never after the hole is filled (it may be a deleted
+    // block no peer serves any more). One whose target is the hole lets
+    // the next pass skip it.
+    if (entry.scanned < core.length) {
+      await this._applyArrived(key, entry)
+      if (stale()) return
+      if (entry.gone.has(entry.scanned)) this._scanDiary(key, entry)
+    }
+    for (const index of entry.arrived) {
+      if (index < entry.scanned) entry.arrived.delete(index)
+    }
+    // The loop stops at an unknown hole, while the signed length advances
     // before the blocks arrive: publishing a prefix could hide a later
     // unfollow, so only a fold that reached the signed length is committed
     // (a pending author marks every page `incomplete`).
-    if (core.contiguousLength >= core.length) this._notices.commit(key)
-    else this._notices.markPending(key)
+    if (entry.scanned >= core.length) {
+      this._notices.commit(key)
+      this._postNotices.settle(key)
+    } else {
+      this._notices.markPending(key)
+      this._postNotices.markPending(key)
+    }
     const entries = [...entry.decls].map(([k, { seq, at }]) => ({ seq, record: { type: 'media-core', key: k, at } }))
     entry.latest = latestMediaCores(entries, key, MAX_MEDIA_CORES)
     for (const k of [...entry.refused.keys()]) {
@@ -1954,6 +2436,377 @@ class Seeder {
     entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupFirst)
     this._reconcileGroups(key, entry)
     this._groupStartupScanned(key)
+    if (scanCaughtUp(entry) && !entry.mediaIrregular && entry.mediaRecounts < MEDIA_TRACK_MAX &&
+      entry.latest.some((b) => !entry.media.has(b.key))) {
+      await this._recountMedia(key, entry)
+      if (stale()) return
+    }
+    // Never behind an index pass paused at a cap, and never holding up the
+    // scan queue.
+    this._scheduleClear(key, entry)
+    let present = entry.present
+    try {
+      present = await presentLength(core, entry.gone, entry.present)
+    } catch {}
+    if (!stale() && present > entry.present) this._onGrow(key, entry, present)
+  }
+
+  // Applies the tombstones among the blocks that arrived above the scan
+  // cursor (or were stored above a hole at serve) to the indexes and to
+  // what is cleared. Their media counters wait for the scan: it counts each
+  // tombstone once all the declarations below it are known.
+  async _applyArrived (key, entry) {
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    for (const index of [...entry.arrived].sort((a, b) => a - b)) {
+      entry.arrived.delete(index)
+      if (index < entry.scanned) continue
+      let raw = null
+      try {
+        if (await entry.core.has(index)) raw = await entry.core.get(index, { wait: false, raw: true })
+      } catch {}
+      if (stale()) return
+      const block = raw === null ? null : decodeBlock(raw)
+      const r = block !== null && block.type === 'delete' ? validRecordCopy(block, index) : null
+      if (r === null) continue
+      if (!entry.tombstones.has(index)) {
+        this._noteTombstone(entry, index, r)
+        entry.tombstones.set(index, r.seq)
+        entry.effective = null
+      }
+      entry.gone.add(r.seq)
+      if (!entry.deleted.has(index)) await this._applyDelete(key, entry, index, r, { media: false })
+      if (stale()) return
+    }
+  }
+
+  // One clear at a time per diary; requests made while one runs coalesce
+  // into a single next run (an update re-ranges the whole download, so a
+  // stream of tombstones must not re-range once per scan pass).
+  _scheduleClear (key, entry) {
+    if (entry.clearing) {
+      entry.clearAgain = true
+      return
+    }
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    entry.clearing = (async () => {
+      try {
+        do {
+          entry.clearAgain = false
+          await this._clearDiary(key, entry)
+        } while (entry.clearAgain && !stale())
+      } finally {
+        entry.clearing = null
+      }
+    })().catch(noop)
+  }
+
+  // Clears the diary blocks the readers' fold deletes (never block 0 nor a
+  // tombstone: lib/deletion.js clearDeleted) and takes them out of the
+  // download, then the media blocks of the cores bound to this diary.
+  // A pass that learned no tombstone keeps the same cached effective set,
+  // so the walk over it is skipped (excluded never shrinks). Under the kill
+  // switch nothing is cleared, so the media side does not run at all.
+  async _clearDiary (key, entry) {
+    let changed = false
+    const effective = this._effectiveDeleted(entry)
+    if (entry.clearedEffective !== effective) {
+      for (const seq of effective) {
+        if (seq > 0 && !entry.excluded.has(seq)) {
+          entry.excluded.add(seq)
+          changed = true
+        }
+      }
+      entry.clearedEffective = effective
+    }
+    if (changed && entry.download) {
+      try {
+        await entry.download.update(entry.excluded)
+      } catch {}
+    }
+    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+    if (this.noClear) return
+    await this._clearMedia(key, entry)
+  }
+
+  // Records what the irregular media clear needs from a tombstone just
+  // learned, so _mediaGone never reads tombstones back from disk. A new
+  // highest tombstone whose target is not a tombstone changes no earlier
+  // one's effect and only adds its own ranges to the memo; any other
+  // (learned out of order, or deleting a tombstone) rebuilds it.
+  _noteTombstone (entry, seq, r) {
+    if (Array.isArray(r.media) && r.media.length > 0) entry.tombMedia.set(seq, r.media)
+    if (seq <= entry.tombMax || entry.tombstones.has(r.seq) || entry.tombNew.length >= TOMB_NEW_MAX) {
+      entry.irrDirty = true
+      entry.tombNew = []
+    } else if (!entry.irrDirty) {
+      entry.tombNew.push(seq)
+    }
+    entry.tombMax = Math.max(entry.tombMax, seq)
+  }
+
+  // The media blocks of core K that diary D deletes, or null while that is
+  // not known: for a regular diary the blocks its counters say are listed
+  // by an effective tombstone and shown by no survivor (once its scan
+  // caught up); for an irregular one every block an effective tombstone of
+  // the readers' fold lists, survivors or not (self-only: its media is
+  // refused anyway), from the ranges kept when each tombstone was learned
+  // (_noteTombstone), memoized per effective set and grown incrementally.
+  // The returned sets are shared: callers only read them.
+  async _mediaGone (key, entry, cores) {
+    const out = new Map()
+    if (entry.mediaIrregular) {
+      const deleted = this._effectiveDeleted(entry)
+      let memo = entry.irrMemo
+      if (memo === null || entry.irrDirty) {
+        memo = entry.irrMemo = { effective: deleted, sets: new Map() }
+        entry.irrDirty = false
+        entry.tombNew = []
+      } else if (memo.effective !== deleted) {
+        for (const seq of entry.tombNew) addTombRanges(memo.sets, entry.tombMedia.get(seq))
+        entry.tombNew = []
+        memo.effective = deleted
+      }
+      const missing = new Map()
+      for (const k of cores) if (!memo.sets.has(k)) missing.set(k, new Set())
+      if (missing.size > 0) {
+        for (const [seq, media] of entry.tombMedia) {
+          if (!deleted.has(seq)) addTombRanges(missing, media)
+        }
+        for (const [k, set] of missing) memo.sets.set(k, set)
+      }
+      for (const k of cores) out.set(k, memo.sets.get(k))
+      return out
+    }
+    for (const k of cores) out.set(k, new Set())
+    if (!scanCaughtUp(entry) || entry.mediaRecounting) return null
+    for (const k of cores) {
+      const state = entry.media.get(k)
+      if (state === undefined || state.dead === 0) continue
+      const set = out.get(k)
+      for (const b of state.del.keys()) {
+        if (!state.live.has(b)) set.add(b)
+      }
+    }
+    return out
+  }
+
+  // Never a core bound to another diary: only the served cores whose
+  // binding names this one.
+  async _clearMedia (key, entry) {
+    const cores = []
+    for (const [k, m] of this._mediaServed) {
+      const binding = this._media.get(k)
+      if (!m.dropped && m.diary === key && binding && binding.diary === key) cores.push(k)
+    }
+    if (cores.length === 0) return
+    // The irregular blocks depend only on the effective set (and the core):
+    // a core already cleared for this set has nothing new to exclude.
+    const effective = entry.mediaIrregular ? this._effectiveDeleted(entry) : null
+    if (effective !== null && cores.every((k) => this._mediaServed.get(k).clearedFor === effective)) return
+    const gone = await this._mediaGone(key, entry, cores)
+    if (gone === null) return
+    for (const k of cores) {
+      const m = this._mediaServed.get(k)
+      if (!m || m.dropped || m.diary !== key) continue
+      if (effective !== null) {
+        if (m.clearedFor === effective) continue
+        m.clearedFor = effective
+      }
+      let changed = false
+      for (const b of gone.get(k)) {
+        if (b > 0 && !m.excluded.has(b)) {
+          m.excluded.add(b)
+          changed = true
+        }
+      }
+      if (changed && m.download) {
+        try {
+          await m.download.update(m.excluded)
+        } catch {}
+      }
+    }
+  }
+
+  // A bound core evicted from tracking (more than MEDIA_TRACK_MAX cores over
+  // the diary's life) and declared again by an honest member would stay
+  // refused for good: recount the media counters from block 1 with the
+  // bound set pinned, so every bound core is tracked from its first
+  // declaration. Same rules as the scan, media state only (indexes,
+  // topics and notices are left alone), local reads only. It runs on the
+  // scan queue at the end of a pass, so no scan of this diary moves
+  // `scanned` meanwhile, and mediaRead stays closed until it ends. At most
+  // MEDIA_TRACK_MAX recounts per serve; a failed read keeps the old
+  // counters (the core stays refused).
+  async _recountMedia (key, entry) {
+    entry.mediaRecounts++
+    entry.mediaRecounting = true
+    try {
+      const pinned = new Set(entry.latest.map((b) => b.key))
+      const counts = { media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false }
+      const declared = new Set()
+      const end = entry.scanned
+      const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+      const read = async (i) => {
+        try {
+          return await entry.core.get(i, { wait: false, raw: true })
+        } catch {
+          return null
+        }
+      }
+      for (let i = 1; i < end; i++) {
+        const raw = await read(i)
+        if (stale()) return
+        // A block cleared or never fetched because a tombstone deletes it.
+        if (raw === null && entry.gone.has(i)) continue
+        if (raw === null) return
+        const block = decodeBlock(raw)
+        if (block === null) continue
+        if (block.type === 'delete') {
+          const r = validRecordCopy(block, i)
+          if (r === null) continue
+          if (tombstoneIrregular(declared, entry.tombstones, r)) counts.mediaIrregular = true
+          const targetRaw = await read(r.seq)
+          if (stale()) return
+          const target = targetRaw === null ? null : decodeBlock(targetRaw)
+          if (target !== null && (target.type === 'follow' || target.type === 'media-core')) continue
+          countTombstone(counts, i, r, target)
+        } else if (block.type === 'post' || block.type === 'profile') {
+          countShown(counts, declared, i, validRecordCopy(block, i))
+        } else if (block.type === 'media-core') {
+          const record = validRecordCopy(block, i)
+          if (record === null || record.key === key) continue
+          countDeclaration(counts, declared, record.key, i, pinned)
+          declared.add(record.key)
+        }
+      }
+      entry.media = counts.media
+      entry.mediaRefs = counts.mediaRefs
+      entry.mediaTombs = counts.mediaTombs
+      if (counts.mediaIrregular) entry.mediaIrregular = true
+    } finally {
+      entry.mediaRecounting = false
+    }
+  }
+
+  // Pending until a pass commits; the read is retried a bounded number of
+  // times, as growth alone may never re-queue the scan.
+  _retryScan (key, entry) {
+    this._notices.markPending(key)
+    this._postNotices.markPending(key)
+    if (entry.scanRetry === null && entry.scanRetries < SCAN_RETRIES_MAX) {
+      entry.scanRetries++
+      entry.scanRetry = setTimeout(() => {
+        entry.scanRetry = null
+        this._scanDiary(key, entry)
+      }, SCAN_RETRY_MS)
+      entry.scanRetry.unref()
+    } else if (entry.scanRetry === null) {
+      // Out of retries: the diary's first group scan gave up.
+      this._groupStartupScanned(key)
+    }
+  }
+
+  // A tombstone found by the scan (docs/protocol.md): its target leaves the
+  // engagement, topic, name and post notice indexes, and the index cursors skip it from
+  // now on. The scan walks upwards, so a later tombstone that deletes this
+  // one takes back only its media ranges, never the index removal (self-only
+  // residual: honest writers never tombstone a tombstone; postBlock follows
+  // the readers' fold instead, see _effectiveDeleted). A follow or
+  // media-core target is left alone: writers never emit one, and the
+  // follow fold and media bindings do not apply deletions yet. Returns false
+  // when the scan must retry this tombstone before moving past it. `media`
+  // false (a tombstone above the scan cursor, _applyArrived) leaves the
+  // media counters to the scan, which applies it again on reaching it.
+  async _applyDelete (key, entry, seq, record, { media = true } = {}) {
+    const target = record.seq
+    let raw = null
+    try {
+      raw = await entry.core.get(target, { wait: false, raw: true })
+    } catch {}
+    if (entry.dropped || this._closing || this._served.get(key) !== entry) return true
+    const block = raw === null ? null : decodeBlock(raw)
+    if (block !== null && (block.type === 'follow' || block.type === 'media-core')) return true
+    entry.deleted.add(target)
+    if (media) countTombstone(entry, seq, record, block)
+    this._index.removeRecord(key, target)
+    this._topics.removePost(key, target)
+    this._postNotices.removePost(key, target)
+    // Removing a block a paused cursor never indexed (the refused one, or a
+    // later one) frees nothing, so onFreed never fires: resume this diary's
+    // pass so it skips the deleted seq instead of staying paused.
+    if (entry.indexPaused && target >= entry.indexed) {
+      entry.indexPaused = false
+      this._indexDiary(key, entry)
+    }
+    if (entry.topicPaused && target >= entry.topicIndexed) {
+      entry.topicPaused = false
+      this._topicDiary(key, entry)
+    }
+    // The surviving profile is read BEFORE the name is forgotten: forget()
+    // succeeds only once, so a failed read after it would leave the account
+    // nameless for good while the scan reports complete. A failed read here
+    // leaves the name alone and has the scan retry this tombstone.
+    let copy = null
+    if (block === null || block.type === 'profile') {
+      const { profileSeq } = this._index.hints(key)
+      if (profileSeq !== null && profileSeq !== target && !entry.deleted.has(profileSeq)) {
+        let prev = null
+        try {
+          prev = await entry.core.get(profileSeq, { wait: false, raw: true })
+        } catch {}
+        if (entry.dropped || this._closing || this._served.get(key) !== entry) return true
+        if (prev === null) return false
+        const decoded = decodeBlock(prev)
+        const c = decoded === null ? null : validRecordCopy(decoded, profileSeq)
+        if (c !== null && c.type === 'profile' && !entry.deleted.has(profileSeq)) copy = { seq: profileSeq, record: c }
+      }
+    }
+    if (!this._names.forget(key, target)) return true
+    if (copy !== null) this._names.note(key, copy.seq, copy.record)
+    return true
+  }
+
+  // Whether any block of [start, start + blocks) of core K is listed by an
+  // effective tombstone of diary D and shown by no surviving post or
+  // profile of D: O(blocks), whatever the number of tombstones or refs.
+  // Per block, unlike lib/deletion.js deletedRanges, which keeps a whole
+  // listed range once a survivor overlaps any of it: honest writers only
+  // list ranges no survivor overlaps, so both agree for every honest diary,
+  // and a hand-made range can only hide its own author's media.
+  _mediaDeleted (state, start, blocks) {
+    if (state.dead === 0) return false
+    for (let b = start; b < start + blocks; b++) {
+      if (state.del.has(b) && !state.live.has(b)) return true
+    }
+    return false
+  }
+
+  // The counters mediaRead may trust for core K of diary D, or null (fail
+  // closed): D not served, dropped, irregular for media, recounting or its
+  // scan not caught up yet, or K not tracked (never declared, or evicted at
+  // MEDIA_TRACK_MAX).
+  _mediaState (diaryHex, coreHex) {
+    const entry = this._served.get(diaryHex)
+    if (!entry || entry.dropped || entry.mediaIrregular || entry.mediaRecounting || !scanCaughtUp(entry)) return null
+    return entry.media.get(coreHex) || null
+  }
+
+  // The seqs readers hide (lib/deletion.js): from the highest tombstone
+  // down, one takes effect only if no effective tombstone deleted it. Unlike
+  // `deleted`, a tombstone deleted by a later one gives its target back, so
+  // moderation sees exactly what readers show. Cached until a tombstone is
+  // added. Tombstones are learned out of order (stored ones at serve,
+  // arrivals above the scan cursor), so the seqs are sorted first.
+  _effectiveDeleted (entry) {
+    if (entry.effective === null) {
+      const out = new Set()
+      const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
+      for (let n = seqs.length - 1; n >= 0; n--) {
+        if (!out.has(seqs[n])) out.add(entry.tombstones.get(seqs[n]))
+      }
+      entry.effective = out
+    }
+    return entry.effective
   }
 
   // Diary D's first group scan since start ended (or gave up, or D left):
@@ -2137,6 +2990,8 @@ class Seeder {
     this._serveMedia(key, diary, core, { expected: res.raw })
     const served = this._mediaServed.get(key)
     if (!served || served.dropped) return
+    await served.prepared
+    if (this._closing || served.dropped || this._mediaServed.get(key) !== served) return
     this.swarm.join(core.discoveryKey, { server: true, client: true })
     this.log({ event: 'media-admitted', key, diary, length: core.contiguousLength })
   }
@@ -2158,7 +3013,15 @@ class Seeder {
       dropped: false,
       headerOk,
       gating: false,
-      expected
+      expected,
+      // The blocks a tombstone of D deletes (cleared and left out of the
+      // download; never shrinks) and the clear that runs before the
+      // download starts.
+      excluded: new Set(),
+      prepared: null,
+      // The effective set of D whose irregular media blocks are already in
+      // `excluded` (_clearMedia).
+      clearedFor: null
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
@@ -2167,11 +3030,35 @@ class Seeder {
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
     entry.stopFork = watchFork(core, (reason) => this._dropMedia(key, reason))
-    entry.download = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, () => this._gateMedia(key, entry))
     this._mediaServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
+    entry.prepared = this._prepareMedia(key, entry).catch(noop)
+  }
+
+  // What D's stored tombstones delete (at serve) and, once D's scan caught
+  // up, its counters, cleared before the first download range opens.
+  async _prepareMedia (key, entry) {
+    const core = entry.core
+    const stale = () => entry.dropped || this._closing || this._mediaServed.get(key) !== entry
+    const d = this._served.get(entry.diary)
+    if (d && !d.dropped) {
+      if (d.prepared) await d.prepared
+      if (stale()) return
+      for (const b of d.mediaStart.get(key) || []) entry.excluded.add(b)
+      const gone = await this._mediaGone(entry.diary, d, [key])
+      if (stale()) return
+      if (gone !== null) for (const b of gone.get(key)) entry.excluded.add(b)
+    }
+    entry.excluded.delete(0)
+    if (!this.noClear) {
+      try {
+        await clearDeleted(core, entry.excluded)
+      } catch {}
+    }
+    if (stale()) return
+    entry.download = this._downloader(core, entry.excluded)
+    entry.stopGrow = watchContiguous(core, () => this._gateMedia(key, entry))
     if (!entry.headerOk && core.contiguousLength >= 1) this._gateMedia(key, entry)
   }
 
@@ -3162,11 +4049,12 @@ class Seeder {
 
   // Blocks start..start+blocks-1 of media core K bound to diary D, for the
   // HTTP route: null unless the binding exists, D is admitted and not
-  // blocked, start >= 1, the range is within K's signed length and EVERY
-  // block is local. `bytes` is the exact total (summed from a first local
+  // blocked, D's scan has caught up and tracks K (_mediaState), no block of
+  // the range is deleted, start >= 1, the range is within K's signed length
+  // and EVERY block is local. `bytes` is the exact total (summed from a first local
   // read, since hypercore exposes no per-block sizes), `blocks` yields each
   // block with { wait: false }: nothing here ever waits on the network, and
-  // a block gone meanwhile (K purged or closed mid-stream) makes next()
+  // a block gone meanwhile (K purged, cleared or closed mid-stream) makes next()
   // reject promptly instead of stalling the response.
   async mediaRead (diaryHex, coreHex, start, blocks) {
     try {
@@ -3180,17 +4068,41 @@ class Seeder {
       const core = entry.core
       if (!Number.isSafeInteger(start) || !Number.isSafeInteger(blocks)) return null
       if (start < 1 || blocks < 1 || start + blocks > core.length) return null
+      // A tombstone can be applied during any await below: check again after
+      // each one, so no byte of a range deleted meanwhile leaves (an early
+      // end of the stream makes the route destroy the response).
+      // A diary falling behind (it grew, or was re-served) also counts as
+      // deleted, so a stream stops while its scan catches up. Recomputed
+      // only when K's counters changed, so a long range does not cost
+      // O(blocks) per streamed block.
+      let seen = null
+      let seenVer = -1
+      let seenAnswer = false
+      const deleted = () => {
+        const state = this._mediaState(diaryHex, coreHex)
+        if (state === null) return true
+        if (state === seen && state.ver === seenVer) return seenAnswer
+        seen = state
+        seenVer = state.ver
+        seenAnswer = this._mediaDeleted(state, start, blocks)
+        return seenAnswer
+      }
+      if (deleted()) return null
       const end = start + blocks
       let bytes = 0
       for (let i = start; i < end; i++) {
         if (!(await core.has(i))) return null
         const raw = await core.get(i, { wait: false, raw: true })
-        if (raw === null) return null
+        if (raw === null || deleted()) return null
         bytes += raw.byteLength
       }
       const read = async function * () {
         for (let i = start; i < end; i++) {
+          if (deleted()) return
           const raw = await core.get(i, { wait: false, raw: true })
+          // A block cleared because its range was deleted ends the stream
+          // like any deletion; any other missing block is an error.
+          if (deleted()) return
           if (raw === null) throw new Error('bloco indisponível')
           yield raw
         }
@@ -3207,9 +4119,11 @@ class Seeder {
   // quote; triage must look at what the author actually signed, and this
   // seeder already holds it. Purely local and read-only: nothing here
   // replicates, admits, downloads, decodes, joins the swarm or touches the
-  // engagement index. null unless D is admitted, not blocked, served, gated
-  // and not dropped, its core is on fork 0, 1 <= seq < length and BOTH
-  // blocks are already local ({ wait: false }). Every await may interleave
+  // engagement index. null unless D is admitted, not blocked, served,
+  // gated, not dropped and its scan caught up (a tombstone not yet read may
+  // delete seq), seq is not deleted, its core is on fork 0,
+  // 1 <= seq < length and BOTH blocks are already local ({ wait: false }).
+  // Every await may interleave
   // with a drop, a re-gate, a close or a new blocklist snapshot, so after
   // each one the same conditions (plus an unchanged _moderationGen) are
   // checked again; any change answers null. Trust boundary: these are the
@@ -3269,11 +4183,13 @@ class Seeder {
       const entry = this._served.get(diaryHex)
       const gen = this._moderationGen
       const live = () => !this._closing && this._served.get(diaryHex) === entry &&
-        entry.gated && !entry.dropped && this._admitted.has(diaryHex) &&
+        entry.gated && !entry.dropped && scanCaughtUp(entry) && this._admitted.has(diaryHex) &&
         !this._isBlocked(diaryHex) && this._moderationGen === gen
       if (!entry || !live()) return null
       const core = entry.core
-      if (core.fork !== 0 || seq >= core.length) return null
+      // Besides scanCaughtUp: never answer for a block the scan has not read.
+      if (core.fork !== 0 || seq >= core.length || seq >= entry.scanned) return null
+      if (this._effectiveDeleted(entry).has(seq)) return null
       const read = async (i) => {
         if (!(await core.has(i)) || !live()) return null
         const raw = await core.get(i, { wait: false, raw: true })
@@ -3286,7 +4202,7 @@ class Seeder {
       // Re-check after the last await (a drop or adoption can run between
       // read() resolving and this line) and re-read the length: it only
       // grows on fork 0, and the answer must describe the core as handed out.
-      if (!live() || core.fork !== 0 || seq >= core.length) return null
+      if (!live() || core.fork !== 0 || seq >= core.length || seq >= entry.scanned || this._effectiveDeleted(entry).has(seq)) return null
       return { fork: 0, length: core.length, block0, block }
     } catch {
       return null
@@ -3318,6 +4234,11 @@ class Seeder {
       this._index.clear()
       this._names.clear()
       this._indexDropped.clear()
+      // The scans are not rerun: their tombstones must still hold incoming
+      // likes, reposts, replies and quotes out of the fresh index.
+      for (const [key, entry] of this._served) {
+        for (const seq of entry.deleted || []) this._index.removeRecord(key, seq)
+      }
       // Only gated diaries can start a pass; an ungated one (block 0 not
       // arrived yet) joins when its gate passes, so it must not pin
       // `indexing: true` here.
@@ -3336,14 +4257,15 @@ class Seeder {
     this._indexQueue = this._indexQueue.then(rebuild, rebuild).catch(noop)
   }
 
-  // Reads from the index cursor to the contiguous length: each block is
+  // Reads from the index cursor to the present length (a hole below it is
+  // a block a tombstone deletes, skipped): each block is
   // decoded once, copied and validated (validRecordCopy) and, when it is one
   // of INDEX_TYPES, handed to the index. A refused add (cap reached) leaves
   // the cursor AT that block and pauses the diary: nothing is ever skipped.
   async _runIndex (key, entry) {
     const core = entry.core
     try {
-      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.indexed < core.contiguousLength) {
+      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.indexed < entry.present) {
         const i = entry.indexed
         let raw
         try {
@@ -3353,11 +4275,11 @@ class Seeder {
           return
         }
         if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-        if (raw === null) {
+        if (raw === null && !entry.gone?.has(i) && !(await deletedHole(core, i))) {
           this._retryIndex(key, entry)
           return
         }
-        const block = decodeBlock(raw)
+        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
           // The name index refuses only a new author at its cap: pause like
@@ -3381,7 +4303,7 @@ class Seeder {
       // The first pass over a diary served at start is over once its cursor
       // reached the length, paused at the cap, or failed three retries at
       // the same cursor. A behind cursor still makes `complete` false.
-      if (this._indexStartup !== null && (entry.indexPaused || entry.indexReadFailures >= 4 || entry.indexed >= core.contiguousLength)) {
+      if (this._indexStartup !== null && (entry.indexPaused || entry.indexReadFailures >= 4 || entry.indexed >= entry.present)) {
         this._indexStartup.delete(key)
       }
     }
@@ -3405,6 +4327,23 @@ class Seeder {
   // association (revocation is applied per query by indexSearch).
   _createNameIndex () {
     return createNameIndex({
+      maxAuthors: this.maxServed,
+      verifyUsername: (author, record) => {
+        try {
+          return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      }
+    })
+  }
+
+  // The post notice index: same member predicate as the follow index and the
+  // same @nome verification as the name index (revocation is applied per
+  // page by issuerUsable).
+  _createPostNoticeIndex () {
+    return createPostNoticeIndex({
+      isMember: (k) => this._admitted.has(k) || this._served.has(k),
       maxAuthors: this.maxServed,
       verifyUsername: (author, record) => {
         try {
@@ -3451,14 +4390,15 @@ class Seeder {
 
   // The honesty flags of every answer: `indexing` until the first pass over
   // every diary served at start (or a rebuild) finished; `complete` only
-  // while no served diary's cursor is paused or behind its contiguous length.
+  // while no served diary's cursor is paused or behind its contiguous length,
+  // its scan included (a tombstone not yet scanned may delete a listed post).
   _indexFlags () {
     const indexing = !this._ready || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.size > 0
     let complete = !indexing && !this._closing
     if (complete) {
       for (const entry of this._served.values()) {
         if (!entry.gated || entry.dropped) continue
-        if (entry.indexPaused || entry.indexed < entry.core.contiguousLength) {
+        if (entry.indexPaused || entry.indexed < entry.present || entry.scanned < entry.present) {
           complete = false
           break
         }
@@ -3491,7 +4431,7 @@ class Seeder {
   async _runTopic (key, entry) {
     const core = entry.core
     try {
-      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.topicIndexed < core.contiguousLength) {
+      while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.topicIndexed < entry.present) {
         const i = entry.topicIndexed
         let raw
         try {
@@ -3501,11 +4441,11 @@ class Seeder {
           return
         }
         if (entry.dropped || this._closing || this._served.get(key) !== entry) return
-        if (raw === null) {
+        if (raw === null && !entry.gone?.has(i) && !(await deletedHole(core, i))) {
           this._retryTopic(key, entry)
           return
         }
-        const block = decodeBlock(raw)
+        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && block.type === 'post') {
           const record = validRecordCopy(block, i)
           if (record !== null && !this._topics.add(key, i, record)) {
@@ -3519,7 +4459,7 @@ class Seeder {
     } finally {
       entry.topicQueued = false
       // Same startup accounting as _runIndex, over the search fields.
-      if (this._topicStartup !== null && (entry.topicPaused || entry.topicReadFailures >= 4 || entry.topicIndexed >= core.contiguousLength)) {
+      if (this._topicStartup !== null && (entry.topicPaused || entry.topicReadFailures >= 4 || entry.topicIndexed >= entry.present)) {
         this._topicStartup.delete(key)
       }
     }
@@ -3535,6 +4475,122 @@ class Seeder {
       this._topicDiary(key, entry)
     }, delay)
     entry.topicRetry.unref()
+  }
+
+  // ---- Web Push (onPush) -----------------------------------------------
+
+  // Queues a push pass over a gated diary on the push queue (one diary at a
+  // time, at most one queued per diary). Nothing runs without onPush.
+  _pushDiary (key, entry) {
+    if (!this.onPush) return
+    if (entry.dropped || !entry.gated || this._closing || this._served.get(key) !== entry) return
+    if (entry.pushQueued || entry.pushRetry) return
+    entry.pushQueued = true
+    const run = () => this._runPush(key, entry)
+    this._pushQueue = this._pushQueue.then(run, run).catch(noop)
+  }
+
+  // Reads from the push cursor to the present length (a hole below it is a
+  // deleted block, passed without a push). A failed read of
+  // the diary's own block keeps the cursor there and retries; every block
+  // read is then passed exactly once, emitted or not (at-most-once: a push
+  // is a hint, the in-app notices stay the record).
+  async _runPush (key, entry) {
+    const core = entry.core
+    const live = () => !entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry
+    try {
+      while (live() && entry.pushNext < entry.present) {
+        const i = entry.pushNext
+        let raw
+        try {
+          raw = await core.get(i, { wait: false, raw: true })
+        } catch {
+          raw = null
+        }
+        if (!live()) return
+        if (raw === null && !entry.gone.has(i) && !(await deletedHole(core, i))) {
+          this._retryPush(key, entry)
+          return
+        }
+        entry.pushReadFailures = 0
+        const block = raw === null ? null : decodeBlock(raw)
+        const record = block && validRecordCopy(block, i)
+        const c = record && pushCandidate({
+          author: key,
+          seq: i,
+          record,
+          now: Date.now(),
+          isMember: (k) => this._admitted.has(k) || this._served.has(k),
+          isBlocked: (k) => this._isBlocked(k)
+        })
+        if (c) {
+          const exists = c.kind === 'follow' || await this._pushTargetIsPost(c.recipient, record.type === 'post' ? record.replyTo.seq : record.to.seq)
+          if (!live()) return
+          const name = exists ? await this._pushActorName(key, entry) : null
+          if (!live()) return
+          // The recipient may have been dropped or blocked, or the actor
+          // blocked, while the reads above were pending: decide again on the
+          // current state. The cursor still advances (at-most-once).
+          const r = c.recipient
+          const eligible = (this._admitted.has(r) || this._served.has(r)) && !this._isBlocked(r) && !this._isBlocked(key)
+          if (exists && eligible && this.onPush !== null) {
+            try {
+              this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
+            } catch {}
+          }
+        }
+        entry.pushNext = i + 1
+      }
+    } finally {
+      entry.pushQueued = false
+    }
+  }
+
+  // The engagement index only checks a reference's shape and keeps targets
+  // that do not exist: read the target from the recipient's own replica,
+  // without waiting, and accept only a valid post there.
+  async _pushTargetIsPost (recipient, seq) {
+    const re = this._served.get(recipient)
+    if (!re || re.dropped || !re.gated || seq >= re.present) return false
+    let raw
+    try {
+      raw = await re.core.get(seq, { wait: false, raw: true })
+    } catch {
+      return false
+    }
+    if (raw === null || this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return false
+    const block = decodeBlock(raw)
+    const record = block && validRecordCopy(block, seq)
+    return !!record && record.type === 'post'
+  }
+
+  // The actor's sanitized profile name (never bio or post text), from the
+  // newest profile block the index has seen, or null when it is not held.
+  async _pushActorName (key, entry) {
+    const ps = this._index.hints(key).profileSeq
+    if (!Number.isSafeInteger(ps) || ps < 1 || ps >= entry.present) return null
+    let raw
+    try {
+      raw = await entry.core.get(ps, { wait: false, raw: true })
+    } catch {
+      return null
+    }
+    if (raw === null) return null
+    const block = decodeBlock(raw)
+    const record = block && validRecordCopy(block, ps)
+    return record && record.type === 'profile' ? pushName(record.name) : null
+  }
+
+  // As _retryIndex: one timer per served diary, backoff 2/10/30/60 s.
+  _retryPush (key, entry) {
+    if (entry.pushRetry || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    entry.pushReadFailures = Math.min(entry.pushReadFailures + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.pushReadFailures - 1]
+    entry.pushRetry = setTimeout(() => {
+      entry.pushRetry = null
+      this._pushDiary(key, entry)
+    }, delay)
+    entry.pushRetry.unref()
   }
 
   // As _scheduleIndexResume: resume paused search cursors once, next tick.
@@ -3565,7 +4621,7 @@ class Seeder {
     if (complete) {
       for (const entry of this._served.values()) {
         if (!entry.gated || entry.dropped) continue
-        if (entry.topicPaused || entry.topicIndexed < entry.core.contiguousLength) {
+        if (entry.topicPaused || entry.topicIndexed < entry.present || entry.scanned < entry.present) {
           complete = false
           break
         }
@@ -3585,6 +4641,35 @@ class Seeder {
       const page = this._index.post(authorHex + ':' + seq, cursor, (hex) => this._indexVisible(hex))
       if (page === null) return null
       return { ...page, ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // The likers / reposters page of apps/cli/lib/seed-ws.js: who currently
+  // likes or reposts a post, newest first by each engager's own `at`, with a hint
+  // per listed engager; null for anything unknown (a kind other than likes
+  // or reposts, an author not visible, a post not indexed, a malformed
+  // cursor). As in indexTopic, an engager whose re-gate is pending
+  // (_searchHeld) is left out and the answer says complete false; a held
+  // target author answers null. `total` counts every engager currently on.
+  indexEngagers (kind, authorHex, seq, cursor = null) {
+    try {
+      if (kind !== 'likes' && kind !== 'reposts') return null
+      if (!this._indexVisible(authorHex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      let held = false
+      const visible = (hex) => {
+        if (!this._indexVisible(hex)) return false
+        if (this._searchHeld(hex)) {
+          held = true
+          return false
+        }
+        return true
+      }
+      const page = this._index.engagers(authorHex + ':' + seq, kind, cursor, visible, Date.now())
+      if (page === null) return null
+      const flags = this._indexFlags()
+      return { ref: page.ref, kind: page.kind, items: page.items, next: page.next, total: page.total, authors: page.authors, indexing: flags.indexing, complete: flags.complete && !held }
     } catch {
       return null
     }
@@ -3611,7 +4696,7 @@ class Seeder {
       if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
-      return { length: entry.core.contiguousLength, ...page, ...this._indexFlags() }
+      return { length: entry.present, ...page, ...this._indexFlags() }
     } catch {
       return null
     }
@@ -3661,12 +4746,19 @@ class Seeder {
     return !!e && e.headerOk && !e.dropped
   }
 
+  // The present length (lib/deletion.js): a cleared deleted block is a hole
+  // the scan already went past, so contiguousLength alone would read as a
+  // gap forever. Never below contiguousLength.
+  _scanTop (entry) {
+    return Math.max(entry.present || 0, entry.core.contiguousLength)
+  }
+
   // Whether a diary's join scan reached its signed length. The scan stops
-  // at contiguousLength while the signed length advances before the blocks
+  // at the present length while the signed length advances before the blocks
   // arrive, and a join beyond the local prefix is not seen yet (the notices
   // fold commits only at core.length for the same reason).
   _groupScanBehind (entry) {
-    return !entry.gated || entry.scanQueued || entry.scanned < entry.core.contiguousLength || entry.scanned < entry.core.length
+    return !entry.gated || entry.scanQueued || entry.scanned < this._scanTop(entry) || entry.scanned < entry.core.length
   }
 
   // Whether a diary's scan holds answers about OTHER diaries' groups
@@ -3697,7 +4789,7 @@ class Seeder {
       if (s.since !== null) s.since = now
     }
     const behind = this._groupScanBehind(entry)
-    const contiguous = entry.core.contiguousLength
+    const contiguous = this._scanTop(entry)
     // A replica still waiting for its block 0 (a re-gate) spends the budget
     // too: its block 0 can be withheld, and the scan cannot start without it.
     const stalled = behind && (!entry.gated || (contiguous < entry.core.length && !entry.scanQueued && entry.scanned >= contiguous))
@@ -4299,7 +5391,13 @@ class Seeder {
       return
     }
     this._blocklistHandles.add(handle)
-    socket.once('close', () => this._blocklistHandles.delete(handle))
+    // One close listener releases every channel handle of this connection:
+    // one per channel would pass the emitter's default listener limit.
+    const release = []
+    socket.once('close', () => {
+      for (const fn of release) fn()
+    })
+    release.push(() => this._blocklistHandles.delete(handle))
     // Follow notices: only the followers of the diary key this connection
     // proved it owns, and never for a blocked diary. A target not (yet)
     // served or not gated (admission or quarantine window, a re-gate) and a
@@ -4325,7 +5423,41 @@ class Seeder {
       return
     }
     this._noticeHandles.add(notices)
-    socket.once('close', () => this._noticeHandles.delete(notices))
+    release.push(() => this._noticeHandles.delete(notices))
+    // Post notices merged with follows, under the same rules as v1. A
+    // revoked issuer's names stop matching at once, as in indexSearch.
+    let noticesV2 = null
+    try {
+      noticesV2 = attachNoticesV2(socket, {
+        role: 'seeder',
+        page: ({ target, after, limit }) => {
+          if (this._isBlocked(target)) return { items: [], next: null, incomplete: false }
+          const isBlocked = (k) => this._isBlocked(k)
+          const f = this._notices.rowsFor(target, isBlocked)
+          const opts = this._certOpts()
+          const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+          const result = this._postNotices.pageV2({
+            target,
+            followRows: f.rows,
+            followIncomplete: f.incomplete,
+            isBlocked,
+            issuerUsable: (i) => !revoked.has(i),
+            after,
+            limit,
+            now: Date.now()
+          })
+          const e = this._served.get(target)
+          if (this._closing || !e || !e.gated) result.incomplete = true
+          return result
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._noticeHandles.add(noticesV2)
+    release.push(() => this._noticeHandles.delete(noticesV2))
     // Groups channel: writer pages from the group index, before the hello
     // like the notices channel (groups-net.js).
     let groups = null
@@ -4340,12 +5472,12 @@ class Seeder {
       return
     }
     this._groupHandles.add(groups)
-    socket.once('close', () => this._groupHandles.delete(groups))
+    release.push(() => this._groupHandles.delete(groups))
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
       if (have.length >= MAX_INVENTORY) break
-      have.push({ key, length: entry.gated ? entry.core.contiguousLength : 0 })
+      have.push({ key, length: entry.gated ? entry.present : 0 })
     }
     let peer
     try {
@@ -4425,6 +5557,7 @@ class Seeder {
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
+      this._postNotices = createPostNoticeIndex()
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const entry of this._groupServed.values()) this._stopEntry(entry)

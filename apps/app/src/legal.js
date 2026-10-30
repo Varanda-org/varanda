@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 1
-export const LEGAL_DATE = '27/10/2026'
-export const REVIEW_NOTE = 'Versão 1, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const LEGAL_VERSION = 6
+export const LEGAL_DATE = '29/10/2026'
+export const REVIEW_NOTE = 'Versão 6, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -28,9 +28,11 @@ export const TERMS = {
       heading: 'Sua conta e sua passkey',
       paragraphs: [
         'Na versão web, sua conta vem de uma passkey. Perder a passkey é perder a conta. Outra passkey cria outra conta. A passkey fica no gerenciador de senhas do seu aparelho. Não há arquivo de recuperação nem exportação da chave.',
-        'Na web hospedada, o vínculo com a conta Google dá o certificado de membro e o @nome. Esse vínculo não verifica sua idade. A idade não é verificada nesta versão.',
-        'A verificação de idade que o ECA Digital exige ainda não existe nesta versão. A regra para menores de idade ainda está sendo definida, com revisão jurídica.',
-        'O guardião e a recuperação por e-mail são planejados. O serviço de verificação de idade e o uso de imagem do rosto para essa verificação também são planejados.'
+        'Na web hospedada, o vínculo com a conta Google dá o certificado de membro e o @nome.',
+        'O Varanda é para pessoas com 16 anos ou mais. Esse limite é uma regra adotada pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo.',
+        'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
+        'No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
+        'O guardião e a recuperação por e-mail são planejados.'
       ]
     },
     {
@@ -61,14 +63,14 @@ export const TERMS = {
     {
       heading: 'Fotos e recursos planejados',
       paragraphs: [
-        'A mídia aceita nesta etapa é só imagem: fotos e GIFs, pela web hospedada. Vídeos não são aceitos. A comparação com listas de hashes de mídia ilegal é planejada e ainda não existe. Hoje, denúncias e bloqueio da conta são os meios de moderação dessas imagens.',
-        'Mensagens diretas e notificações push são planejadas. Os avisos atuais aparecem dentro do app aberto, sem push.'
+        'A mídia aceita nesta etapa é só imagem, pela web hospedada: fotos e GIFs nas publicações e a foto do perfil. A foto do perfil é sempre uma imagem parada e quadrada; um GIF escolhido para ela vira imagem parada. Vídeos não são aceitos. A comparação com listas de hashes de mídia ilegal é planejada e ainda não existe. Hoje, denúncias e bloqueio da conta são os meios de moderação dessas imagens. Uma foto de perfil imprópria se denuncia pela conta toda, e essa denúncia sempre é decidida por uma pessoa.',
+        'Na versão web hospedada, você pode ligar em Ajustes os avisos no aparelho (notificações push) de novo seguidor, resposta, curtida e republicação. São opcionais e vêm desligados por padrão. Cada aviso leva o nome de quem agiu e a ação, nunca o texto da publicação. Aceitar estes documentos não liga os avisos: isso depende de uma escolha separada. Mensagens diretas continuam planejadas.'
       ]
     },
     {
       heading: 'Limites da exclusão',
       paragraphs: [
-        'Nesta etapa, o app ainda não permite apagar uma publicação nem excluir a conta por conta própria. O pedido de exclusão assinado descrito no desenho é planejado. Limpar os dados do site só apaga os dados locais; não apaga as cópias que já chegaram a outros aparelhos ou semeadores.',
+        'Você pode apagar uma publicação (resposta e citação incluídas) e uma versão do perfil. Os semeadores e apps oficiais e atualizados deixam de mostrar o item e descartam os bytes dele nas suas cópias, inclusive as imagens que só ele usava. Isso não é um apagamento garantido em qualquer lugar: um aparelho que acabou de seguir você pode guardar o conteúdo por pouco tempo, até receber a exclusão. Apps e semeadores antigos ou modificados não obedecem, e cópias que já chegaram a outros aparelhos, fotos já baixadas, capturas de tela, imagens guardadas em cache e as citações guardadas pelo serviço de conta numa denúncia podem manter o conteúdo. Um diário que já atingiu o limite de blocos não aceita mais nem o registro de exclusão. O app ainda não permite excluir a conta por conta própria, e o pedido de exclusão assinado descrito no desenho é planejado. Limpar os dados do site só apaga os dados locais; não apaga as cópias que já chegaram a outros aparelhos ou semeadores.',
         'Hoje, excluir uma conta é bloquear sua chave pública na lista de moderação. Depois disso, os semeadores e apps atualizados apagam e recusam o diário. Mesmo assim, não é possível garantir a exclusão de cópias em apps modificados ou aparelhos que não obedecem à lista. Bloquear a conta não apaga o diário do aparelho do autor.'
       ]
     },
@@ -96,8 +98,8 @@ export const PRIVACY = {
     {
       heading: 'Diário, perfil e fotos',
       paragraphs: [
-        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário.',
-        'Na Espiadinha, os diários espiados ficam só na memória do navegador. Recarregar descarta essas cópias. No nó, a cópia guardada vale por até 5 minutos.',
+        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário. A foto do perfil é pública, como o nome e a bio. Antes do envio, o app recorta a foto em quadrado, reduz para 512 por 512 pixels e grava de novo, o que remove dados como a localização (GPS) e o modelo da câmera.',
+        'Na Espiadinha, os diários espiados ficam só na memória do navegador. Recarregar descarta essas cópias. No nó, a cópia guardada vale por até 5 minutos. As fotos de perfil de quem você não segue também ficam só na memória do navegador, sem cópia guardada.',
         'Seu nome e seu @nome podem aparecer na busca do semeador. O índice guarda só tokens dobrados, ou seja, partes dos nomes normalizadas para a busca, em memória. O índice some ao reiniciar o semeador. Ainda não há opção de sair dessa busca.'
       ]
     },
@@ -106,7 +108,9 @@ export const PRIVACY = {
       paragraphs: [
         'O serviço de conta, no Brasil, guarda o identificador interno da conta Google (chamado de sub), o e-mail, a chave pública do membro, o @nome atual e os @nomes já usados, as datas e o certificado. Os nomes passados ficam associados ao membro para nunca serem dados a outra pessoa.',
         'Esses dados servem para dar o certificado e o @nome, atender ordens judiciais e bloquear contas. O e-mail nunca entra no diário, no certificado nem no navegador.',
-        'A idade não é verificada. O vínculo com o Google e o certificado atual não afirmam a idade. A verificação de idade que o ECA Digital exige ainda não existe nesta versão, e a regra para menores de idade ainda está sendo definida, com revisão jurídica. O serviço de idade e o uso de imagem do rosto são planejados. O guardião e o e-mail de recuperação também são planejados.'
+        'O Varanda é para pessoas com 16 anos ou mais, um limite adotado pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo. No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
+        'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. A selfie e o documento são tratados pelo parceiro e nunca chegam ao Varanda. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), a forma de verificação e a data, nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
+        'O Varanda pede ao parceiro que apague a sessão de verificação logo depois da decisão, e as configurações de retenção do parceiro ficam no mínimo. A imagem do rosto é um dado sensível; a base legal para esse tratamento ainda será confirmada por parecer jurídico. O vínculo com o Google e o certificado atual não afirmam a idade. O guardião e o e-mail de recuperação são planejados.'
       ]
     },
     {
@@ -138,6 +142,7 @@ export const PRIVACY = {
         'As bases legais descritas aqui são uma proposta, ainda sem parecer jurídico.',
         'Para publicações, perfil, seguidos, fotos e o vínculo Google que dá o certificado e o @nome, a proposta é execução de contrato, Art. 7º, V.',
         'Registro do aceite: a finalidade é registrar qual versão cada conta aceitou. A base legal é uma proposta, ainda sem parecer jurídico.',
+        'Faixa de idade: a finalidade é cumprir a regra de idade mínima. A base legal proposta é obrigação legal (ECA Digital), a confirmar em parecer jurídico.',
         'Denúncias, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
         'Registros de acesso, com IP, data e hora, ficam nos semeadores e serviços, se aplicável. A proposta é obrigação legal caso o Art. 15 do Marco Civil se aplique.'
       ]
@@ -146,23 +151,23 @@ export const PRIVACY = {
       heading: 'Por quanto tempo',
       paragraphs: [
         'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, as decisões e os precedentes de triagem. Denúncias e decisões não são apagadas automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite.',
-        'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Porém, apagar publicações ainda não está disponível no app. A retenção das cópias também depende dos limites da rede P2P.',
+        'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Apagar publicações e versões do perfil já está disponível: as cópias oficiais atualizadas deixam de mostrá-las e descartam os bytes, mas cópias antigas, apps modificados, caches de imagem e as citações guardadas pelo serviço de conta podem guardar o conteúdo. A retenção das cópias também depende dos limites da rede P2P. Tirar a foto do perfil só deixa de mostrá-la; a foto já enviada continua gravada na rede.',
         'As cópias da Espiadinha e o índice de nomes têm os limites de memória descritos acima. Esses limites não apagam as réplicas normais dos diários no semeador. Para registros de acesso, o prazo proposto é de 6 meses, se aplicável.'
       ]
     },
     {
       heading: 'Compartilhamento e cópias fora do Brasil',
       paragraphs: [
-        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação.',
-        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. Avisos por Apple e Google (push) são só planejados e hoje não existem. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
-        'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas e push são planejados e não fazem parte dos fluxos atuais descritos aqui.'
+        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação. A Didit é o serviço parceiro que faz a verificação de idade na web hospedada.',
+        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O tratamento da verificação de idade pela Didit também pode acontecer fora do Brasil. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
+        'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas são planejadas e não fazem parte dos fluxos atuais descritos aqui.'
       ]
     },
     {
       heading: 'Seus direitos e os limites do P2P',
       paragraphs: [
         'O Art. 18 trata de direitos sobre seus dados, como acesso, portabilidade, correção e eliminação. Seu diário já fica no seu aparelho. A exclusão e a portabilidade dos dados do vínculo Google dependem do serviço de conta, não só do diário.',
-        'Você pode mudar o nome e a bio do perfil. Para o @nome, vale o intervalo de 7 dias, e um nome usado nunca vai para outra pessoa. O fluxo de corrigir uma publicação e o pedido assinado para apagá-la são planejados; apagar publicações ainda não está disponível no app.',
+        'Você pode mudar o nome, a bio e a foto do perfil, e tirar a foto quando quiser. Tirar a foto faz o app deixar de mostrá-la, mas a foto já enviada continua gravada na rede, como as fotos das publicações, e quem já tem uma cópia pode mantê-la. Para o @nome, vale o intervalo de 7 dias, e um nome usado nunca vai para outra pessoa. Você também pode apagar uma publicação ou uma versão do perfil: as cópias oficiais atualizadas deixam de mostrá-la e descartam os bytes, mas apps antigos ou modificados, caches de imagem e cópias já obtidas não obedecem. O fluxo de corrigir uma publicação e o pedido assinado para apagá-la são planejados.',
         'O bloqueio da chave faz os semeadores e apps atualizados que obedecem à lista apagarem e recusarem o diário. Não revoga o certificado individual e não apaga o diário do aparelho do autor. Não é possível garantir a eliminação de cópias em apps modificados ou aparelhos que ignoram a lista.',
         'Hoje não há um canal para pedidos sobre seus dados além do que o app já faz. Não existe exclusão de conta por conta própria: a conta é excluída bloqueando a chave pública na lista de moderação, e cópias em apps modificados não podem ser garantidas. O canal privado para exercer seus direitos será publicado com o encarregado. Nunca envie dados pessoais por uma issue pública.'
       ]

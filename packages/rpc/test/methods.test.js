@@ -17,16 +17,17 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.requests',
-    'identity.create', 'identity.show', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
-    'profile.set', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'identity.create', 'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create',
+    'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open',
+    'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.join', 'group.leave',
-    'group.meta', 'group.post', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.quote', 'post.reply',
-    'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
+    'group.meta', 'group.post', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
+    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
@@ -117,6 +118,96 @@ test('terms.sign', (t) => {
   }
 })
 
+test('invite.sign', (t) => {
+  const base = { action: 'issue', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('invite.sign'))
+  ok(t, 'invite.sign', base, base)
+  ok(t, 'invite.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'invite.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'invite.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'email']) {
+    bad(t, 'invite.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['revoke', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('age.sign', (t) => {
+  const base = { action: 'session', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('age.sign'))
+  ok(t, 'age.sign', base, base)
+  ok(t, 'age.sign', { ...base, action: 'result' })
+  ok(t, 'age.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'age.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'age.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'age', 'band']) {
+    bad(t, 'age.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['SESSION', 'issue', '', null, 1]) bad(t, 'age.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'age.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('push.sign', (t) => {
+  const host = 'https://example.com/'
+  const base = {
+    nonce: 'n'.repeat(43),
+    action: 'on',
+    endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/abc',
+    p256dh: 'B'.repeat(87),
+    auth: 'A'.repeat(22)
+  }
+  t.is(isMutating('push.sign'), false)
+  ok(t, 'push.sign', base, base)
+  ok(t, 'push.sign', { ...base, action: 'off' })
+  ok(t, 'push.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'push.sign', { ...base, endpoint: host + 'a'.repeat(2048 - host.length) })
+  ok(t, 'push.sign', { ...base, endpoint: 'https://example.com/push?token=1' })
+  ok(t, 'push.sign', { ...base, p256dh: 'A-_', auth: 'b' })
+  ok(t, 'push.sign', { ...base, p256dh: 'A'.repeat(128), auth: 'B'.repeat(32) })
+  bad(t, 'push.sign', {})
+  for (const k of ['nonce', 'action', 'endpoint', 'p256dh', 'auth']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'push.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association, the hash or the bytes.
+  for (const k of ['member', 'association', 'endpointHash', 'payload', 'bytes', 'key']) {
+    bad(t, 'push.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  bad(t, 'push.sign', { ...base, action: 'add' }, 'action add')
+  bad(t, 'push.sign', { ...base, endpoint: 'http://example.com/push' }, 'http endpoint')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://user:pass@example.com/push' }, 'endpoint with credentials')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://user@example.com/push' }, 'endpoint with a username')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push#frag' }, 'endpoint with a hash')
+  bad(t, 'push.sign', { ...base, endpoint: host + 'a'.repeat(2049 - host.length) }, '2049-char endpoint')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/pu\tsh' }, 'endpoint with a tab')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push\u00e9' }, 'endpoint with a non-ASCII char')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com\\push' }, 'endpoint with a backslash')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/push\ud800' }, 'endpoint with a lone surrogate')
+  bad(t, 'push.sign', { ...base, endpoint: host + '\u00e9'.repeat(2048 - host.length) }, 'non-ASCII endpoint within 2048 code points')
+  ok(t, 'push.sign', { ...base, endpoint: 'https://fcm.googleapis.com/fcm/send/abc:def?x=1&y=2' })
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com:443/push' }, 'endpoint with the default port')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://Example.com/push' }, 'endpoint with an uppercase host')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://example.com/a/../b' }, 'endpoint with dot segments')
+  bad(t, 'push.sign', { ...base, endpoint: 'https://' }, 'endpoint with no host')
+  bad(t, 'push.sign', { ...base, endpoint: 'https:///x' }, 'endpoint with an empty authority')
+  bad(t, 'push.sign', { ...base, p256dh: 'abc=' }, 'p256dh with =')
+})
+
 test('report.sign', (t) => {
   const nonce = 'n'.repeat(43)
   const account = { nonce, target: KEY, reason: 'spam' }
@@ -184,6 +275,40 @@ test('profile.set', (t) => {
   bad(t, 'profile.set', { name: 1 })
   bad(t, 'profile.set', { name: 'a', bio: null })
   bad(t, 'profile.set', { name: 'a', at: 'x' })
+})
+
+test('profile.set avatar', (t) => {
+  const d = { core: KEY, mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: 'cd'.repeat(32), width: 512, height: 512 }
+  const msg = (params) => validateParams('profile.set', params).message
+  ok(t, 'profile.set', { name: 'Ana', avatar: d }, { name: 'Ana', bio: '', avatar: d })
+  ok(t, 'profile.set', { name: 'Ana', avatar: null }, { name: 'Ana', bio: '', avatar: null })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, mime: 'image/jpeg' } })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, blocks: 8, bytes: 262144 } })
+  ok(t, 'profile.set', { name: 'Ana', avatar: { ...d, blocks: 1, bytes: 1 } })
+  // Absent stays absent: the node keeps the newest own avatar.
+  const absent = validateParams('profile.set', { name: 'Ana' })
+  t.absent('avatar' in absent.value)
+  t.alike(Object.keys(absent.value), ['name', 'bio'])
+  const missing = { ...d }
+  delete missing.width
+  for (const avatar of [
+    { ...d, mime: 'image/png' },
+    { ...d, mime: 'image/gif' },
+    { ...d, width: 511, height: 511 },
+    { ...d, width: 513, height: 513 },
+    { ...d, width: 512, height: 511 },
+    { ...d, blocks: 9, bytes: 9 * 32768 },
+    { ...d, blocks: 8, bytes: 262145 },
+    { ...d, extra: 1 },
+    missing,
+    undefined,
+    [d],
+    'x',
+    0,
+    {}
+  ]) {
+    t.is(msg({ name: 'Ana', avatar }), 'parâmetro inválido: avatar', JSON.stringify(avatar))
+  }
 })
 
 test('post.create and post.reply', (t) => {
@@ -297,6 +422,19 @@ test('post.quote requires nonempty text even with media', (t) => {
   // record builder; it only checks the text's type and code-point length.
   for (const text of ['\u0000', '\t', '\r', '\u007f', '\u0085', '\u2028', '\u202e', '\u2066']) {
     t.alike(validateParams('post.quote', { to, text }), { ...validateParams('post.create', { text }), value: { to, text } })
+  }
+})
+
+test('post.delete and profile.delete take one canonical ref and nothing else', (t) => {
+  for (const method of ['post.delete', 'profile.delete']) {
+    t.ok(isMutating(method))
+    ok(t, method, { to: KEY + ':1' }, { to: KEY + ':1' })
+    ok(t, method, { to: KEY + ':' + Number.MAX_SAFE_INTEGER }, { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+    t.is(validateParams(method, {}).message, 'parâmetro obrigatório: to')
+    t.is(validateParams(method, { to: KEY + ':1', on: true }).message, 'parâmetro desconhecido')
+    for (const to of [null, 1, {}, { author: KEY, seq: 1 }, KEY, KEY + ':0', KEY + ':01', KEY + ':-1', KEY + ':1.5', KEY.toUpperCase() + ':1', KEY + ':9007199254740992']) {
+      t.is(validateParams(method, { to }).message, 'parâmetro inválido: to')
+    }
   }
 })
 
@@ -639,6 +777,20 @@ test('notices.list after', (t) => {
   bad(t, 'notices.list', { after: 'x' })
   bad(t, 'notices.list', { after: [] })
   bad(t, 'notices.list', { after, x: 1 })
+})
+
+test('notices.list after with seq', (t) => {
+  const after = { at: '2026-10-24T12:00:00.000Z', key: KEY }
+  ok(t, 'notices.list', { limit: 5, after: { ...after, seq: 1 } }, { limit: 5, after: { ...after, seq: 1 } })
+  ok(t, 'notices.list', { after: { ...after, seq: Number.MAX_SAFE_INTEGER } }, { limit: 30, after: { ...after, seq: Number.MAX_SAFE_INTEGER } })
+  ok(t, 'notices.list', { after }, { limit: 30, after })
+  bad(t, 'notices.list', { after: { ...after, seq: 0 } }, 'seq 0')
+  bad(t, 'notices.list', { after: { ...after, seq: -1 } }, 'seq -1')
+  bad(t, 'notices.list', { after: { ...after, seq: 1.5 } }, 'seq 1.5')
+  bad(t, 'notices.list', { after: { ...after, seq: '1' } }, 'string seq')
+  bad(t, 'notices.list', { after: { ...after, seq: 1, kind: 'x' } }, '4 keys')
+  bad(t, 'notices.list', { after: { ...after, x: 1 } }, '2 keys plus an extra key')
+  bad(t, 'notices.list', { after: { at: after.at, seq: 1 } }, 'seq without key')
 })
 
 test('profile.read', (t) => {

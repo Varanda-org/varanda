@@ -14,6 +14,7 @@
 // `unavailable`. Never throws on malformed input.
 
 import { isAuthorKey, isRef } from './nav.js'
+import { avatarOf } from './media/avatar.js'
 
 // Same value as packages/rpc/lib/limits.js PEEK_SEQS_MAX.
 export const PEEK_SEQS_MAX = 36
@@ -72,7 +73,7 @@ function peekOf (peeked, author) {
 
 function identity (peek) {
   const profile = peek && isObject(peek.profile) && typeof peek.profile.name === 'string'
-    ? { name: peek.profile.name, bio: typeof peek.profile.bio === 'string' ? peek.profile.bio : '' }
+    ? { name: peek.profile.name, bio: typeof peek.profile.bio === 'string' ? peek.profile.bio : '', avatar: avatarOf(peek.profile.avatar) }
     : null
   const username = peek && typeof peek.username === 'string' ? peek.username : null
   return { profile, username }
@@ -108,7 +109,8 @@ function postItem (author, seq, record, peek) {
     quote,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
     name: profile ? profile.name : null,
-    username
+    username,
+    avatar: profile ? profile.avatar : null
   }
 }
 
@@ -117,7 +119,7 @@ function repostItem (author, seq, record, peek) {
   const to = target(record.to)
   if (to === null || to.seq < 1) return null
   const { profile, username } = identity(peek)
-  return { kind: 'repost', author, seq, at: record.at, to, name: profile ? profile.name : null, username }
+  return { kind: 'repost', author, seq, at: record.at, to, name: profile ? profile.name : null, username, avatar: profile ? profile.avatar : null }
 }
 
 function lookupPost (peeked, ref) {

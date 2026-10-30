@@ -381,3 +381,44 @@ test('assoc certify-moderator CLI: file and stdout carry no secret, missing --mo
 
   t.not(run('certify-moderator', '--moderator', publicKey).status, 0)
 })
+
+test('assoc certify* --out writes a new file and refuses an existing file or a symlink', async (t) => {
+  await testnet(t)
+  const dir = tmpDir(t)
+  assoc.initAssociation(dir)
+  const bin = path.join(__dirname, '../bin/varanda.js')
+  const run = (...args) => spawnSync(process.execPath, [bin, 'assoc', ...args, '--data', dir], { encoding: 'utf8' })
+  const out = tmpDir(t)
+
+  for (const [sub, flag, value] of [
+    ['certify', '--member', MEMBER],
+    ['certify-seeder', '--seeder', SEEDER],
+    ['certify-issuer', '--issuer', ISSUER],
+    ['certify-moderator', '--moderator', MODERATOR]
+  ]) {
+    const file = path.join(out, sub + '.json')
+    t.is(run(sub, flag, value, '--out', file).status, 0, sub + ' writes a new file')
+    const written = fs.readFileSync(file, 'utf8')
+
+    const again = run(sub, flag, value, '--out', file)
+    t.is(again.status, 1, sub + ' refuses an existing file')
+    t.ok(again.stderr.includes('o arquivo de saída já existe'), sub + ' says why')
+    t.is(fs.readFileSync(file, 'utf8'), written, sub + ' leaves the file as it was')
+
+    const target = path.join(out, sub + '-target.json')
+    fs.writeFileSync(target, 'keep')
+    const link = path.join(out, sub + '-link.json')
+    fs.symlinkSync(target, link)
+    const linked = run(sub, flag, value, '--out', link)
+    t.is(linked.status, 1, sub + ' refuses a symlink')
+    t.ok(linked.stderr.includes('link simbólico'), sub + ' says it is a symlink')
+    t.is(fs.readFileSync(target, 'utf8'), 'keep', sub + ' never writes through the symlink')
+
+    const nowhere = path.join(out, sub + '-nowhere.json')
+    const dangling = path.join(out, sub + '-dangling.json')
+    fs.symlinkSync(nowhere, dangling)
+    t.is(run(sub, flag, value, '--out', dangling).status, 1, sub + ' refuses a dangling symlink')
+    t.absent(fs.existsSync(nowhere), sub + ' never creates the symlink target')
+  }
+  t.alike(fs.readdirSync(out).filter(name => name.endsWith('.tmp')), [], 'no temp file left')
+})

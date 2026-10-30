@@ -115,16 +115,26 @@ function loadWorker (code, server) {
   const handlers = {}
   const caches = fakeCaches()
   const calls = []
-  const w = { handlers, caches, calls, server }
+  const w = { handlers, caches, calls, server, shown: [], windows: [], opened: [] }
   const fetch = async (request) => {
     calls.push(request.url)
     return w.server(new URL(request.url).pathname, request)
   }
   const self = {
     location: { origin: ORIGIN },
-    addEventListener: (type, fn) => { handlers[type] = fn }
+    addEventListener: (type, fn) => { handlers[type] = fn },
+    registration: {
+      showNotification: async (title, options) => { w.shown.push({ title, options }) }
+    }
   }
-  vm.runInNewContext(code, { self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto })
+  const clients = {
+    matchAll: async (opts) => {
+      w.matchAllOpts = opts
+      return w.windows
+    },
+    openWindow: async (url) => { w.opened.push(url) }
+  }
+  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto })
   return w
 }
 
@@ -428,7 +438,9 @@ test('/index/* is never intercepted', async (t) => {
   const A = 'a'.repeat(64)
   for (const p of ['/index/post/' + A + '/1', '/index/post/' + A + '/1/1700000000000.' + 'b'.repeat(64) + '.2',
     '/index/counts/' + A + ':1,' + 'b'.repeat(64) + ':2', '/index/member/' + A, '/index/member/' + A + '/10', '/index/search/ana-silva', '/index/x',
-    '/index/topic/ceu+azul', '/index/topic/ceu/1700000000000.' + 'b'.repeat(64) + '.2']) {
+    '/index/topic/ceu+azul', '/index/topic/ceu/1700000000000.' + 'b'.repeat(64) + '.2',
+    '/index/likes/' + A + '/1', '/index/likes/' + A + '/1/1700000000000.' + 'b'.repeat(64) + '.2',
+    '/index/reposts/' + A + '/1', '/index/reposts/' + A + '/1/1700000000000.' + 'b'.repeat(64) + '.2']) {
     t.absent((await dispatch(w, ORIGIN + p)).responded, p)
     t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
     t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
@@ -636,4 +648,226 @@ test('correct entries are served offline as fresh 200s with their content-type',
     t.ok(Buffer.from(await res.arrayBuffer()).equals(fs.readFileSync(path.join(dist, p))), p + ' bytes')
   }
   onlyPrecache(t, w, dist, 'every entry kept')
+})
+
+const ACTOR = 'a'.repeat(64)
+const RECIPIENT = 'b'.repeat(64)
+const REF = RECIPIENT + ':7'
+const FALLBACK = 'Você tem um aviso novo na Varanda'
+
+function renderedWorker () {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  return loadWorker(readWorker(dist).code, offline)
+}
+
+const pushData = (payload) => ({ json: () => payload })
+// Objects built inside the vm context have that realm's prototypes.
+const plain = (x) => JSON.parse(JSON.stringify(x))
+
+async function push (w, data) {
+  const waits = []
+  w.handlers.push({ data, waitUntil: (p) => waits.push(p) })
+  await Promise.all(waits)
+  return w.shown.pop()
+}
+
+async function click (w, data) {
+  const waits = []
+  let closed = false
+  w.handlers.notificationclick({
+    notification: { data, close: () => { closed = true } },
+    waitUntil: (p) => waits.push(p)
+  })
+  await Promise.all(waits)
+  return closed
+}
+
+function fakeWindow (url) {
+  const win = { url, focused: 0, messages: [] }
+  win.focus = async () => { win.focused++ }
+  win.postMessage = (m) => { win.messages.push(m) }
+  return win
+}
+
+const valid = (over = {}) => ({ v: 1, kind: 'reply', body: 'Ana respondeu ao seu post', actor: ACTOR, recipient: RECIPIENT, ref: REF, ...over })
+
+test('the rendered worker registers only its five listeners', (t) => {
+  const w = renderedWorker()
+  t.alike(Object.keys(w.handlers).sort(), ['activate', 'fetch', 'install', 'message', 'notificationclick', 'push'])
+})
+
+test('push: a valid payload shows its body, tag and data', async (t) => {
+  const w = renderedWorker()
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.title, 'Varanda')
+  t.is(reply.options.body, 'Ana respondeu ao seu post')
+  t.is(reply.options.icon, '/icon-192.png')
+  t.is(reply.options.tag, 'varanda-reply-' + REF)
+  t.is(reply.options.renotify, false)
+  t.alike(plain(reply.options.data), { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+
+  const follow = await push(w, pushData(valid({ kind: 'follow', body: 'Ana começou a seguir você', ref: null })))
+  t.is(follow.options.body, 'Ana começou a seguir você')
+  t.is(follow.options.tag, 'varanda-follow-' + ACTOR)
+  t.alike(plain(follow.options.data), { kind: 'follow', actor: ACTOR, recipient: RECIPIENT, ref: null })
+
+  const long = await push(w, pushData(valid({ body: '😀'.repeat(120) })))
+  t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
+})
+
+test('push: missing or invalid data shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  const extra = valid()
+  extra.url = 'https://evil.test/'
+  const cases = {
+    'data null': null,
+    'json throws': { json: () => { throw new SyntaxError('bad') } },
+    'not an object': pushData('Ana respondeu'),
+    array: pushData([valid()]),
+    'extra key': pushData({ ...valid(), x: 1 }),
+    'url field': pushData(extra),
+    'missing key': pushData((({ ref, ...rest }) => rest)(valid())),
+    'wrong version': pushData(valid({ v: 2 })),
+    'unknown kind': pushData(valid({ kind: 'mention' })),
+    'uppercase actor': pushData(valid({ actor: 'A'.repeat(64) })),
+    'actor is recipient': pushData(valid({ actor: RECIPIENT })),
+    'follow with ref': pushData(valid({ kind: 'follow' })),
+    'reply without ref': pushData(valid({ ref: null })),
+    'ref author is not the recipient': pushData(valid({ ref: ACTOR + ':7' })),
+    'ref seq 0': pushData(valid({ ref: RECIPIENT + ':0' })),
+    'ref seq too long': pushData(valid({ ref: RECIPIENT + ':1' + '0'.repeat(15) })),
+    'empty body': pushData(valid({ body: '' })),
+    '121 code points': pushData(valid({ body: '😀'.repeat(121) })),
+    'body not a string': pushData(valid({ body: 7 })),
+    'control char': pushData(valid({ body: 'Ana\nrespondeu' })),
+    'C1 control': pushData(valid({ body: 'Ana\u0085respondeu' })),
+    'line separator': pushData(valid({ body: 'Ana\u2028respondeu' })),
+    'bidi override': pushData(valid({ body: 'Ana \u202erespondeu' })),
+    'bidi isolate': pushData(valid({ body: 'Ana \u2067respondeu' })),
+    'left-to-right mark': pushData(valid({ body: 'Ana \u200erespondeu' })),
+    'right-to-left mark': pushData(valid({ body: 'Ana \u200frespondeu' })),
+    'arabic letter mark': pushData(valid({ body: 'Ana \u061crespondeu' })),
+    'lone surrogate': pushData(valid({ body: 'Ana \ud800respondeu' }))
+  }
+  for (const [label, data] of Object.entries(cases)) {
+    const shown = await push(w, data)
+    t.is(shown.title, 'Varanda', label)
+    t.is(shown.options.body, FALLBACK, label)
+    t.is(shown.options.tag, 'varanda-generic', label)
+    t.alike(plain(shown.options.data), {}, label)
+  }
+})
+
+test('push: a failing showNotification never throws', async (t) => {
+  const w = renderedWorker()
+  w.shown = { push: () => { throw new Error('quota') } }
+  const waits = []
+  t.execution(() => w.handlers.push({ data: pushData(valid()), waitUntil: (p) => waits.push(p) }))
+  await t.execution(Promise.all(waits))
+  t.execution(() => w.handlers.push(null))
+})
+
+test('notificationclick: focuses an open same-origin window and posts the target', async (t) => {
+  const w = renderedWorker()
+  const other = fakeWindow('https://other.test/')
+  const mine = fakeWindow(ORIGIN + '/')
+  w.windows = [other, mine]
+  t.ok(await click(w, { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: REF }), 'closed')
+  t.alike(plain(w.matchAllOpts), { type: 'window', includeUncontrolled: true })
+  t.is(other.focused, 0)
+  t.is(mine.focused, 1)
+  t.alike(plain(mine.messages), [{ source: 'varanda-push', kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: REF }])
+  t.alike(w.opened, [])
+
+  // Invalid data still focuses, but posts nothing.
+  t.ok(await click(w, { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR + ':1' }))
+  t.is(mine.focused, 2)
+  t.is(mine.messages.length, 1)
+  t.alike(w.opened, [])
+})
+
+test('notificationclick: a window that refuses focus falls back to a new window', async (t) => {
+  const w = renderedWorker()
+  const mine = fakeWindow(ORIGIN + '/')
+  mine.focus = async () => { throw new Error('InvalidAccessError') }
+  w.windows = [mine]
+  t.ok(await click(w, { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: REF }), 'closed')
+  t.alike(w.opened, ['/?aviso=reply&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + REF])
+  t.is(mine.messages.length, 0)
+})
+
+test('notificationclick: the moderation panel and other bypassed pages are never the app window', async (t) => {
+  const w = renderedWorker()
+  const panel = fakeWindow(ORIGIN + '/account/mod/')
+  const media = fakeWindow(ORIGIN + '/media/x')
+  const app = fakeWindow(ORIGIN + '/?conta=1')
+  w.windows = [panel, media, app]
+  await click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+  t.is(panel.focused, 0)
+  t.is(panel.messages.length, 0)
+  t.is(media.focused, 0)
+  t.is(app.focused, 1)
+  t.is(app.messages.length, 1)
+
+  w.windows = [panel]
+  await click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+  t.is(panel.focused, 0, 'only the panel open: a new app window instead')
+  t.alike(w.opened, ['/?aviso=like&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + REF])
+})
+
+test('notificationclick: no window opens the validated query path', async (t) => {
+  const w = renderedWorker()
+  w.windows = [fakeWindow('https://other.test/')]
+  await click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+  await click(w, { kind: 'follow', actor: ACTOR, recipient: RECIPIENT, ref: null })
+  t.alike(w.opened, [
+    '/?aviso=like&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + REF,
+    '/?aviso=follow&actor=' + ACTOR + '&recipient=' + RECIPIENT
+  ])
+})
+
+test('notificationclick: invalid data opens the root, never a profile link', async (t) => {
+  const w = renderedWorker()
+  const cases = [
+    {},
+    null,
+    undefined,
+    'x',
+    { kind: 'reply', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR + ':1' },
+    { kind: 'like', actor: '/@ana', recipient: RECIPIENT, ref: REF },
+    { kind: 'like', actor: ACTOR, recipient: '/m/' + ACTOR, ref: REF },
+    { kind: 'repost', actor: ACTOR, recipient: RECIPIENT, ref: null }
+  ]
+  for (const data of cases) await click(w, data)
+  t.alike(w.opened, cases.map(() => '/'))
+  for (const u of w.opened) t.absent(/\/m\/|\/@/.test(u), u)
+})
+
+test('notificationclick: a failing clients API never throws', async (t) => {
+  const w = renderedWorker()
+  w.windows = null
+  await t.execution(click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF }))
+})
+
+test('message: the push ping is answered on its port, anything else ignored', (t) => {
+  const w = renderedWorker()
+  const port = () => {
+    const p = { sent: [] }
+    p.postMessage = (m) => { p.sent.push(m) }
+    return p
+  }
+  const ping = port()
+  w.handlers.message({ data: { type: 'varanda-push-ping' }, ports: [ping] })
+  t.alike(plain(ping.sent), [{ source: 'varanda-sw', push: 1 }])
+
+  for (const data of [null, 'varanda-push-ping', { type: 'other' }, { type: 'varanda-push-ping', x: 1 }, ['varanda-push-ping']]) {
+    const p = port()
+    w.handlers.message({ data, ports: [p] })
+    t.alike(p.sent, [], JSON.stringify(data))
+  }
+  t.execution(() => w.handlers.message({ data: { type: 'varanda-push-ping' }, ports: [] }))
+  t.execution(() => w.handlers.message({ data: { type: 'varanda-push-ping' } }))
+  t.execution(() => w.handlers.message({}))
+  t.execution(() => w.handlers.message(null))
 })

@@ -20,7 +20,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv, closeIfOwned, loseLock, startTermsHeal, storeUnavailable } = require('../lib/commands/account')
+const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -837,6 +837,16 @@ test('serve wiring: startTermsHeal heals on its interval and logs only a repair'
   t.is(heals, after, 'stop() clears the interval')
 })
 
+test('serve wiring: the push store heals on the same loop, logged as push', async (t) => {
+  const results = [true, false]
+  let heals = 0
+  const events = []
+  const stop = startHeal({ heal: async () => results[heals++] ?? false }, 'push', (event) => events.push(event), 5)
+  await until(() => heals >= 2)
+  stop()
+  t.alike(events, [{ event: 'push', reason: 'reparado' }])
+})
+
 test('serve wiring: a store that fails at runtime logs store:indisponivel once and stops the service', async (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const calls = []
@@ -1011,7 +1021,7 @@ test('account key, cert add, status and export', async (t) => {
   t.is(exported.code, 0, exported.stderr)
   const lines = exported.stdout.trim().split('\n').map((l) => JSON.parse(l))
   t.is(lines.length, 1)
-  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'sub', 'terms', 'username'])
+  t.alike(Object.keys(lines[0]).sort(), ['email', 'linkedAt', 'member', 'pushDevices', 'sub', 'terms', 'username'])
   t.alike(lines[0].terms, [], 'no terms.json: no acceptance')
   t.is(lines[0].email, EMAIL)
   t.is(lines[0].sub, SUB)
@@ -1190,6 +1200,7 @@ test('account (serve): boots unconfigured, takes the data-dir lock, stops on SIG
   // 'listening' and 'ready' are two writes; they can arrive in separate chunks.
   t.ok(await until(() => svc.stdout().includes(JSON.stringify({ event: 'ready', configured: false })), { name: 'ready' }))
   t.ok(svc.stdout().includes(JSON.stringify({ event: 'triage', reason: 'desligada' })), 'VARANDA_AI unset: triage off')
+  t.ok(svc.stdout().includes(JSON.stringify({ event: 'idade', reason: 'desligada' })), 'Didit unset: age verification off')
   t.ok(lockHeld(dir), 'lock taken')
   const health = await fetch('http://127.0.0.1:' + port + '/account/health')
   t.alike(await health.json(), { status: 'ok' })
@@ -1416,6 +1427,45 @@ test('readEnv: optional capacity variables, canonical integers in range, values 
     } catch (err) {
       t.ok(err instanceof UsageError, name + '=' + value + ': usage error')
       t.is(err.message, name + ' inválido', 'the value is not in the message')
+    }
+  }
+})
+
+test('readEnv: Didit pair on together or off together, values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const KEY = 'chave-sentinela-didit-77'
+  const WORKFLOW = '0a1B2c3D-4e5F-6789-abcd-EF0123456789'
+  t.is(readEnv(env).didit, null, 'unset: off')
+  t.is(readEnv({ ...env, VARANDA_DIDIT_API_KEY: '', VARANDA_DIDIT_WORKFLOW_ID: '' }).didit, null, 'empty: off')
+  t.is(readEnv({ ...env, VARANDA_DIDIT_DAILY_LIMIT: 'abc' }).didit, null, 'the limit is ignored while off')
+  t.alike(readEnv({ ...env, VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW }).didit, { apiKey: KEY, workflowId: WORKFLOW, dailyLimit: 200 })
+  t.is(readEnv({ ...env, VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW, VARANDA_DIDIT_DAILY_LIMIT: '50' }).didit.dailyLimit, 50)
+  t.is(readEnv({ ...env, VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW, VARANDA_DIDIT_DAILY_LIMIT: '' }).didit.dailyLimit, 200, 'empty limit: default')
+
+  const bad = [
+    [{ VARANDA_DIDIT_API_KEY: KEY }, 'VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID vêm juntas'],
+    [{ VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW }, 'VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID vêm juntas'],
+    [{ VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: '' }, 'VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID vêm juntas'],
+    [{ VARANDA_DIDIT_API_KEY: 'chave sentinela', VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW }, 'VARANDA_DIDIT_API_KEY inválido'],
+    [{ VARANDA_DIDIT_API_KEY: KEY + '\n', VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW }, 'VARANDA_DIDIT_API_KEY inválido'],
+    [{ VARANDA_DIDIT_API_KEY: 'k'.repeat(257), VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW }, 'VARANDA_DIDIT_API_KEY inválido'],
+    [{ VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: 'fluxo-sentinela' }, 'VARANDA_DIDIT_WORKFLOW_ID inválido'],
+    [{ VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW + '0' }, 'VARANDA_DIDIT_WORKFLOW_ID inválido']
+  ]
+  for (const limit of ['0', '-1', '1.5', 'abc', '100001']) {
+    bad.push([{ VARANDA_DIDIT_API_KEY: KEY, VARANDA_DIDIT_WORKFLOW_ID: WORKFLOW, VARANDA_DIDIT_DAILY_LIMIT: limit }, 'VARANDA_DIDIT_DAILY_LIMIT inválido'])
+  }
+  for (const [vars, message] of bad) {
+    const label = JSON.stringify(vars)
+    try {
+      readEnv({ ...env, ...vars })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, message, label + ': message')
+      for (const value of Object.values(vars)) {
+        if (value !== '') t.absent(err.message.includes(value), 'the value is not in the message')
+      }
     }
   }
 })

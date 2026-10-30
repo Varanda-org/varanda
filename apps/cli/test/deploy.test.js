@@ -33,6 +33,10 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
+// The six test legs, each its own job (no matrix), gated by check.
+const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member', 'others']
+const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
+const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
 
 test('deploy.yml: actions pinned to the expected commits', (t) => {
   const pins = {
@@ -54,7 +58,13 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   const top = block(/^permissions:/, /^\S/)
   const topLines = top.split('\n').slice(1).filter((l) => l.trim() !== '').map((l) => l.trim())
   t.alike(topLines, ['contents: read'], 'top-level permissions are contents: read only')
-  t.ok(check && deploy, 'both jobs found')
+  t.ok(check && deploy, 'check and deploy found')
+  for (const id of WORKERS) t.ok(workers[id], id + ' job found')
+  const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the six legs, check and deploy')
+  t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
+  t.absent(/<<:/.test(code), 'no YAML merge keys')
+  t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
 
   t.ok(/^ {4}permissions:\s*\{\}\s*$/m.test(deploy), 'deploy job has permissions: {}')
   t.ok(/^ {4}needs:\s*check\s*$/m.test(deploy), 'deploy needs check')
@@ -63,6 +73,21 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {6}name:\s*producao\s*$/m.test(deploy), 'deploy uses the producao environment')
   t.absent(/\buses:/.test(deploy), 'deploy job has no uses: (no third-party action)')
   t.absent(/^ {4}environment:/m.test(check), 'check job has no environment')
+  t.absent(/\buses:/.test(check), 'check job has no uses: (no checkout)')
+  for (const id of WORKERS) {
+    const w = workers[id]
+    t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(w), id + ' runs-on ubuntu-24.04')
+    t.absent(/^ {4}environment:/m.test(w), id + ' has no environment')
+    t.ok(/^ {6}NODE:\s*'24'\s*$/m.test(w), id + ' sets NODE 24')
+    t.ok(/^ {6}VARANDA_TEST_CONCURRENCY:\s*'1'\s*$/m.test(w), id + ' sets VARANDA_TEST_CONCURRENCY 1')
+    t.ok(/^ {4}steps:\s*(&test-steps|\*test-steps)\s*$/m.test(w), id + ' uses the shared step list')
+  }
+  t.is((code.match(/&test-steps\b/g) || []).length, 1, 'one &test-steps anchor')
+  t.ok(/^ {4}steps:\s*&test-steps\s*$/m.test(workers[WORKERS[0]]), 'the first leg defines the anchor')
+  const wsOf = (id) => ((workers[id].match(/^ {6}WORKSPACE:\s*(\S+)\s*$/m) || [])[1])
+  const skip = (workers.others.match(/^ {6}VARANDA_TEST_SKIP_WORKSPACES:\s*(\S+)\s*$/m) || [])[1] || ''
+  t.absent(wsOf('others'), 'others has no WORKSPACE')
+  t.alike(skip.split(',').sort(), [...new Set(WORKERS.filter((id) => id !== 'others').map(wsOf))].sort(), 'others skips exactly the other legs\' workspaces')
 
   const on = block(/^on:/, /^\S/)
   t.ok(/^ {2}push:\s*$/m.test(on) && /branches:\s*\[main\]/.test(on), 'push trigger on main only')
@@ -73,10 +98,17 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {2}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(code), 'concurrency group is per ref (deploy-<ref>)')
 })
 
-test('deploy.yml: both jobs carry the repository, branch and variable guards', (t) => {
-  const guard = /^\s+if:\s*github\.repository == 'Varanda-org\/varanda' && github\.ref == 'refs\/heads\/main' && vars\.VARANDA_DEPLOY == 'true'\s*$/m
-  t.ok(guard.test(check), 'check job is guarded')
+test('deploy.yml: every job carries the repository, branch and variable guards', (t) => {
+  const guard = new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm')
+  for (const id of WORKERS) t.ok(guard.test(workers[id]), id + ' job is guarded')
   t.ok(guard.test(deploy), 'deploy job is guarded')
+  // The gate runs even when a leg failed, was cancelled or was skipped, and
+  // fails closed: a skipped check would read as passing.
+  t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
+  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the six legs')
+  t.ok(/^\s+RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}\s*$/m.test(check), 'check reads every leg result')
+  t.ok(/^\s+\[ "\$#" -eq 6 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly six results')
+  t.ok(/^\s+for r in "\$@"; do \[ "\$r" = success \] \|\| exit 1; done\s*$/m.test(check), 'check requires every result to be success')
 })
 
 test('deploy.yml: secrets and variables are only the expected ones, only in env: or if:', (t) => {
@@ -105,11 +137,27 @@ test('deploy.yml: forbidden constructs are absent', (t) => {
   t.absent(/ForwardAgent/.test(code), 'no agent forwarding')
 })
 
-test('deploy.yml: check job order and ssh hardening', (t) => {
-  const order = ['npm ci --ignore-scripts', 'npm run lint', 'npm test', 'npm run demo']
-  const idx = order.map((cmd) => check.split('\n').findIndex((l) => new RegExp('^\\s+- run:\\s*' + cmd + '\\s*$').test(l)))
-  t.ok(idx.every((i) => i !== -1), 'all four check commands present')
+test('deploy.yml: test step order and ssh hardening', (t) => {
+  const steps = workers[WORKERS[0]].split('\n')
+  const ci = steps.findIndex((l) => /^\s+- run:\s*npm ci --ignore-scripts\s*$/.test(l))
+  const lint = steps.findIndex((l) => /^\s+run:\s*npm run lint\s*$/.test(l))
+  const tst = steps.findIndex((l) => /^\s+- run:.*npm test -w "\$WORKSPACE"/.test(l) && /\bnpm test;/.test(l))
+  const demo = steps.findIndex((l) => /^\s+run:\s*npm run demo\s*$/.test(l))
+  const idx = [ci, lint, tst, demo]
+  t.ok(idx.every((i) => i !== -1), 'npm ci, lint, test and demo steps present in the anchored list')
   t.alike([...idx].sort((a, b) => a - b), idx, 'npm ci, lint, test, demo in that order')
+  const othersOnly = /^\s+- if:\s*env\.SUITE == 'others'\s*$/
+  t.ok(lint > 0 && othersOnly.test(steps[lint - 1]), 'lint runs only in the others leg')
+  t.ok(demo > 0 && othersOnly.test(steps[demo - 1]), 'demo runs only in the others leg')
+  // Includes the body of run: | blocks (lines indented deeper than the key).
+  let runIndent = -1
+  for (const l of lines) {
+    const indent = l.search(/\S/)
+    if (runIndent !== -1 && indent !== -1 && indent <= runIndent) runIndent = -1
+    const isRun = /^\s+(- )?run:/.test(l)
+    if (isRun || runIndent !== -1) t.absent(l.includes('${' + '{'), 'no expression in run: -> ' + l.trim())
+    if (isRun && /run:\s*\|\s*$/.test(l)) runIndent = indent
+  }
 
   t.ok(/\bssh -T\b/.test(deploy), 'ssh -T')
   t.ok(/-o BatchMode=yes/.test(deploy), 'BatchMode=yes')
@@ -194,6 +242,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_ACCOUNT_RATE',
     'VARANDA_ACCOUNT_BURST',
     'VARANDA_ACCOUNT_MAX_PENDING',
+    'VARANDA_INVITES_PER_WEEK',
     '/account/mod/api/me',
     // The optional seeder limits are validated by shape before anything changes.
     ...SEEDER_LIMITS
@@ -350,7 +399,65 @@ test('compose.web.yaml and .env.example: usage-stats variables are optional and 
   t.ok(example.includes('VARANDA_STATS_EMAILS='), '.env.example has an empty VARANDA_STATS_EMAILS= line')
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING']) {
+// Web push is optional: the shared token defaults to empty (push off), so an
+// existing .env still boots. The seeder gets the token and the loopback URL of
+// the account service; the account service only the token; the web service
+// none. The VAPID key lives in push-vapid.json on account-data, never in env.
+test('compose.web.yaml and env examples: web push variables are optional and scoped to seeder and account', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  function service (name) {
+    const start = webLines.findIndex((l) => l === '  ' + name + ':')
+    let end = webLines.length
+    for (let i = start + 1; i < webLines.length; i++) {
+      if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+    }
+    return start === -1 ? [] : webLines.slice(start, end)
+  }
+  const account = service('account')
+  const seeder = service('seeder')
+  const web = service('web')
+  t.ok(account.length > 0 && seeder.length > 0 && web.length > 0, 'account, seeder and web found')
+  const keyCount = (ls, name) => ls.filter((l) => new RegExp('^ {6}' + name + ':').test(l)).length
+  const line = (ls, name) => ls.find((l) => new RegExp('^ {6}' + name + ':').test(l)) || ''
+
+  t.is(keyCount(seeder, 'VARANDA_PUSH_TOKEN'), 1, 'VARANDA_PUSH_TOKEN exactly once under seeder')
+  t.is(keyCount(account, 'VARANDA_PUSH_TOKEN'), 1, 'VARANDA_PUSH_TOKEN exactly once under account')
+  t.is(keyCount(web, 'VARANDA_PUSH_TOKEN'), 0, 'VARANDA_PUSH_TOKEN not on web')
+  t.is(webLines.filter((l) => l.includes('VARANDA_PUSH_TOKEN')).length, 2, 'token mentioned only on seeder and account')
+  t.is(line(seeder, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'seeder token optional (:-)')
+  t.is(line(account, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'account token optional (:-)')
+
+  for (const name of ['VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID']) {
+    t.is(keyCount(account, name), 1, name + ' exactly once under account')
+    t.is(keyCount(seeder, name), 0, name + ' not on seeder')
+    t.is(keyCount(web, name), 0, name + ' not on web')
+    t.is(webLines.filter((l) => l.includes(name)).length, 1, name + ' mentioned only on account')
+    t.is(line(account, name).trim(), name + ': "$' + '{' + name + ':-}"', name + ' optional (:-)')
+  }
+
+  t.is(webLines.filter((l) => l.includes('VARANDA_ACCOUNT_HTTP')).length, 1, 'VARANDA_ACCOUNT_HTTP mentioned exactly once')
+  t.is(keyCount(seeder, 'VARANDA_ACCOUNT_HTTP'), 1, 'VARANDA_ACCOUNT_HTTP under seeder')
+  t.is(line(seeder, 'VARANDA_ACCOUNT_HTTP').trim(), 'VARANDA_ACCOUNT_HTTP: "$' + '{VARANDA_ACCOUNT_HTTP:-http://127.0.0.1:8790}"',
+    'VARANDA_ACCOUNT_HTTP defaults to the account loopback listener')
+  t.ok(account.some((l) => l.trim() === 'VARANDA_ACCOUNT_PORT: "8790"') && account.some((l) => l.trim() === 'VARANDA_ACCOUNT_HOST: 127.0.0.1'),
+    'the account listener is 127.0.0.1:8790')
+  for (const name of ['VARANDA_PUSH_TOKEN', 'VARANDA_ACCOUNT_HTTP']) {
+    t.absent(webLines.some((l) => l.includes('$' + '{' + name + ':?')), name + ' never :?')
+  }
+
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8')
+  t.ok(example.split('\n').includes('VARANDA_PUSH_TOKEN='), '.env.example has an empty VARANDA_PUSH_TOKEN= line')
+  const seederExample = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8')
+  t.ok(seederExample.split('\n').some((l) => /^#VARANDA_PUSH_TOKEN=/.test(l)), 'seeder.env.example documents VARANDA_PUSH_TOKEN')
+  t.ok(seederExample.split('\n').some((l) => /^#VARANDA_ACCOUNT_HTTP=/.test(l)), 'seeder.env.example documents VARANDA_ACCOUNT_HTTP')
+
+  const compose = fs.readFileSync(COMPOSE_WEB, 'utf8')
+  for (const [file, text] of [['compose.web.yaml', compose], ['.env.example', example], ['seeder.env.example', seederExample]]) {
+    t.absent(text.includes('VARANDA_VAPID'), 'no VARANDA_VAPID variable in ' + file)
+  }
+})
+
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -669,7 +776,7 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
     const [name, min, max] = entry.split(':')
     fromSh[name] = [Number(min), Number(max)]
   }
-  t.is(Object.keys(fromJs).length, 5, 'five limits in account.js')
+  t.is(Object.keys(fromJs).length, 6, 'six limits in account.js')
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')

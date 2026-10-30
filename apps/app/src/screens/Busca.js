@@ -31,18 +31,20 @@ import { StyleSheet, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { shouldReloadOnShow } from '../paging'
+import { HELP, SHORT } from '../help'
 import { fetchTopic } from '../indexClient'
 import { planPeeks } from '../thread'
 import { whoOf } from '../who'
 import {
   SEARCH_BUSY, SEARCH_CONTINUE, SEARCH_CONTINUE_BODY, SEARCH_EMPTY_BODY, SEARCH_EMPTY_TITLE, SEARCH_END, SEARCH_ERROR,
-  SEARCH_HINT, SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_MEMORY, SEARCH_OFFLINE_MESSAGE,
+  SEARCH_INCOMPLETE_NOTE, SEARCH_INDEXING_NOTE, SEARCH_OFFLINE_MESSAGE,
   SEARCH_UNAVAILABLE, assembleSearch, isLastSearchPage, mergeRefs, searchNotice
 } from '../topics'
 import { CountsNote, refOf, socialRowProps, useSocial } from './ARua'
 import { peekAll, useFollowSet } from './Conversa'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
+import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 
@@ -66,7 +68,7 @@ function pageNeeds (items) {
   return { local, shown, need, authors: [] }
 }
 
-export default function Busca ({ query, header, ownKey, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
+export default function Busca ({ query, header, ownKey, avatarOf, active, scrollToTop, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onFollowsChanged, onFollowed, onSocialChanged, onToast }) {
   const node = useNode()
   const { request } = node
   const social = useSocial({ ownKey, onToast })
@@ -258,8 +260,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
       {notice === null
         ? (
           <View style={styles.notes}>
-            <Soft>{SEARCH_HINT}</Soft>
-            <Soft>{SEARCH_MEMORY}</Soft>
+            <HelpNote doc={HELP.busca}><Soft>{SHORT.search}</Soft></HelpNote>
             {flags.indexing ? <Soft>{SEARCH_INDEXING_NOTE}</Soft> : null}
             {!flags.complete ? <Soft>{SEARCH_INCOMPLETE_NOTE}</Soft> : null}
             {gone ? <Soft>{gone}</Soft> : null}
@@ -300,9 +301,9 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
   const isOwn = (item) => typeof ownKey === 'string' && item.author === ownKey.toLowerCase()
   const known = (item) => follows === null || follows.has(item.author)
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const renderItem = ({ item }) => {
-    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, now, ownKey, h: handlers })
+    const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, avatarOf, now, ownKey, h: handlers })
     // A like or repost toggled here may also be in the hidden rounds, whose
     // social cache is then stale: tell the Espiadinha.
     const changed = () => { if (typeof onSocialChanged === 'function') onSocialChanged() }
@@ -324,7 +325,7 @@ export default function Busca ({ query, header, ownKey, active, scrollToTop, ref
       data={items}
       keyExtractor={itemKey}
       renderItem={renderItem}
-      extraData={{ now, following, follows, social: social.social }}
+      extraData={{ now, following, follows, social: social.social, avatarOf }}
       ListHeaderComponent={top}
       ListEmptyComponent={empty}
       ListFooterComponent={footer}

@@ -1,30 +1,32 @@
-// Avisos: the people who started following you and whom you do not follow
-// yet, newest first, each with 'Seguir de volta'. Private and quiet: no
-// counts (the tab shows a plain dot, never a number), a row leaves once you
-// follow back, nothing is persisted except the notices already seen, as the
-// node's opaque `seen` tokens (keyed by the identity secret, never a follower
-// key or anything derivable from one; web only, localStorage). Hosted web only: on native and varanda-serve the tab says so
-// and never calls notices.list. The screen stays mounted, so it polls while
-// the page is visible and online (that is how the dot lights up). Names come
-// from the item, never from a key. Rules: docs/app.md.
+// Avisos: who followed you (and whom you do not follow yet), and who replied,
+// quoted or mentioned you, newest first. A follow row opens the person's
+// profile (the Seguir button is there) and leaves on the next read once you
+// follow back (App.js bumps `refresh` on any follow change). A reply, quote or
+// mention has no pill and opens that post. Private and quiet: no counts, a plain dot never
+// a number, and no push. Nothing is persisted except the notices already
+// seen, as the node's opaque `seen` tokens (keyed by the identity secret,
+// never a follower key or anything derivable from one; web only,
+// localStorage). Hosted web only: on native and varanda-serve the tab says
+// so and never calls notices.list. The screen stays mounted, so it polls
+// while the page is visible and online (that is how the dot lights up).
+// Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Platform, StyleSheet, Text, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
 import {
-  EMPTY_TEXT, EMPTY_TITLE, FOLLOW_BACK_LABEL, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
+  ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, SEEN_MAX, SEEN_STORAGE_KEY,
-  hasNew, isLastNoticesPage, isWebOnlyError, markSeenPadded, mergePage, noticeId, noticeLine, noticesNotice,
-  padSeen, parseSeen, readNotices, serializeSeen, shouldPoll, withoutAuthor
+  compareNotices, hasNew, isLastNoticesPage, isWebOnlyError, markSeenPadded, mergePage, noticeId, noticeKind, noticeLine, noticeRef, noticesNotice,
+  padSeen, parseSeen, readNotices, serializeSeen, shouldPoll
 } from '../notices'
 import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
 import { whoOf } from '../who'
 import { Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
-import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
@@ -85,42 +87,67 @@ function writeSeen (ownKey, ids) {
 }
 
 // A poll's first page merged into the list: every current row stays (a poll
-// never drops what was paged in) and the result keeps the node's order, the
-// newest `at` first then the key, so a row that arrives late lands in place.
+// never drops what was paged in) and compareNotices puts a row that arrives
+// late in place.
 function prependNew (currentItems, pageItems) {
   const { items } = mergePage(currentItems, pageItems)
-  return items.slice().sort((a, b) => (Date.parse(b.at) - Date.parse(a.at)) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+  return items.slice().sort(compareNotices)
 }
 
 function pageVisible () {
   return typeof document === 'undefined' || document.visibilityState === 'visible'
 }
 
-function NoticeRow ({ item, now, pending, onFollowBack }) {
+// A follow row opens the person's profile. A reply, quote or mention opens
+// the post.
+function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
   const who = whoOf({ name: item.name, username: item.username })
-  const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
   const time = relativeTime(item.at, now)
-  return (
-    <View style={styles.row}>
-      <Avatar name={who.avatarName} publicKey={item.key} size={44} />
-      <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>{displayText(noticeLine(who))}</Text>
-        {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
-        {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
-      </View>
-      <Pill
-        label={FOLLOW_BACK_LABEL}
-        filled
-        onPress={onFollowBack}
-        pending={pending}
-        accessibilityLabel={FOLLOW_BACK_LABEL + ' ' + title}
-      />
+  const kind = noticeKind(item)
+  const line = displayText(noticeLine(who, kind))
+  const whoBlock = (
+    <View style={styles.who}>
+      <Text style={styles.name} numberOfLines={1}>{line}</Text>
+      {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+      {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
     </View>
+  )
+  if (kind !== 'follow') {
+    const open = typeof onOpenThread === 'function' ? () => onOpenThread({ ref: noticeRef(item) }) : undefined
+    return (
+      <Pressable
+        style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+        accessibilityRole='link'
+        accessibilityLabel={line + ', abrir publicação'}
+        accessibilityHint='abre a conversa'
+        disabled={!open}
+        onPress={open}
+      >
+        <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+        {whoBlock}
+      </Pressable>
+    )
+  }
+  const open = typeof onOpenMember === 'function'
+    ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: item.avatar || null })
+    : undefined
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+      accessibilityRole='link'
+      accessibilityLabel={line + ', ver perfil'}
+      accessibilityHint='abre o perfil'
+      disabled={!open}
+      onPress={open}
+    >
+      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+      {whoBlock}
+    </Pressable>
   )
 }
 
-export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge }) {
+export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onOpenThread, onOpenMember }) {
   const node = useNode()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
@@ -137,12 +164,14 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     moreError: '',
     loadedAt: null,
     incomplete: false,
+    // True until a read says otherwise. activity false is the quiet line, not
+    // an empty list: an answer that omits the field is not that state.
+    activity: true,
     unsupported: false,
     notSupportedByNode: false,
-    locked: false,
-    following: new Set()
+    locked: false
   })
-  const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, incomplete, unsupported, notSupportedByNode, locked, following } = state
+  const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, incomplete, activity, unsupported, notSupportedByNode, locked } = state
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
@@ -242,6 +271,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         next: page.next,
         atEnd: isLastNoticesPage(page),
         incomplete: page.incomplete === true,
+        activity: page.activity !== false,
         notSupportedByNode: false,
         loadedAt: Date.now(),
         loading: false,
@@ -287,6 +317,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         next: page.next,
         atEnd: isLastNoticesPage(page),
         incomplete: stateRef.current.incomplete || page.incomplete === true,
+        activity: stateRef.current.activity !== false && page.activity !== false,
         loadingMore: false
       })
       settle(merged)
@@ -320,6 +351,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         return
       }
       if (!activeRef.current || stateRef.current.loadedAt === null) {
+        if ((page.activity === false) !== (stateRef.current.activity === false)) {
+          commit({ activity: page.activity !== false })
+        }
         settle(page.notices, false)
         return
       }
@@ -333,7 +367,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         return
       }
       const merged = prependNew(stateRef.current.items, page.notices)
-      commit({ items: merged, notSupportedByNode: false, incomplete: stateRef.current.incomplete || page.incomplete === true, loadError: '' })
+      commit({
+        items: merged,
+        notSupportedByNode: false,
+        incomplete: stateRef.current.incomplete || page.incomplete === true,
+        activity: page.activity !== false,
+        loadError: ''
+      })
       settle(merged)
     } catch (err) {
       if (mine !== seqRef.current) return
@@ -413,29 +453,6 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     stateRef.current = { ...stateRef.current, loading: false, loadingMore: false, refreshing: false }
   }, [])
 
-  // 'Seguir de volta': the row leaves once the follow is applied. A failure
-  // (timeout included) is reported and the row stays; never retried alone.
-  const followBack = async (item) => {
-    const author = item.key
-    if (stateRef.current.following.has(author)) return
-    commit({ following: new Set(stateRef.current.following).add(author) })
-    try {
-      await request('follow.add', { key: author })
-      const rest = withoutAuthor(stateRef.current.items, author)
-      commit({ items: rest })
-      settle(rest)
-      const who = whoOf({ name: item.name, username: item.username })
-      if (typeof onToast === 'function') onToast('seguindo ' + displayText(who.title))
-      if (typeof onFollowsChanged === 'function') onFollowsChanged()
-    } catch (err) {
-      if (typeof onToast === 'function') onToast(errorText(err))
-    } finally {
-      const rest = new Set(stateRef.current.following)
-      rest.delete(author)
-      commit({ following: rest })
-    }
-  }
-
   const notice = unsupported
     ? 'web-only'
     : noticesNotice({ hosted, supported: !notSupportedByNode, online: node.online, loadedAt })
@@ -470,8 +487,30 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }
 
   const renderItem = ({ item }) => (
-    <NoticeRow item={item} now={now} pending={following.has(item.key)} onFollowBack={() => followBack(item)} />
+    <NoticeRow
+      item={item}
+      now={now}
+      onOpenMember={onOpenMember}
+      onOpenThread={onOpenThread}
+    />
   )
+
+  // activity false: this seeder still only sends follows. The rows stay; the
+  // line says the rest are not available here. Web-only, unsupported and
+  // offline stay on noticesNotice, and a locked read stays the error it was.
+  const showQuiet = notice === null && activity === false && loadedAt !== null
+  const showLoadError = notice === null && items.length > 0 && loadError
+  let header = null
+  if (showQuiet) {
+    header = (
+      <View>
+        <View style={styles.footer}><Soft>{ACTIVITY_QUIET_TEXT}</Soft></View>
+        {showLoadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : null}
+      </View>
+    )
+  } else if (showLoadError) {
+    header = <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} />
+  }
 
   const shownItems = notice === null ? items : []
   return (
@@ -479,8 +518,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       data={shownItems}
       keyExtractor={noticeId}
       renderItem={renderItem}
-      extraData={{ now, following }}
-      ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : null}
+      extraData={{ now, onOpenMember, onOpenThread }}
+      ListHeaderComponent={header}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}
       contentContainerStyle={{ paddingBottom: bottomPad }}
@@ -508,5 +547,6 @@ const styles = StyleSheet.create({
   who: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
   handle: { ...type.postMeta, color: colors.soft },
+  pressed: { opacity: 0.6 },
   footer: { padding: 16, gap: 8 }
 })

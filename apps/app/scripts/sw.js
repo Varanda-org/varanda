@@ -1,4 +1,4 @@
-/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
+/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, clients, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
 'use strict'
 
 // Service worker TEMPLATE. scripts/finish-web.js renders it into dist/sw.js
@@ -263,4 +263,145 @@ self.addEventListener('fetch', (event) => {
   } else {
     event.respondWith(cacheFirst(request))
   }
+})
+
+// Web Push. The payload's sender is only as trusted as the account service,
+// and a bug there must not put raw peer text, a key or a link on the lock
+// screen: anything that fails the strict shape below shows a fixed sentence
+// instead. A notification is always shown because the subscription is
+// userVisibleOnly. The worker cannot import @varanda/rpc, so the display rule
+// for the body is inlined here.
+const PUSH_KINDS = ['follow', 'reply', 'like', 'repost']
+const PUSH_KEYS = ['v', 'kind', 'body', 'actor', 'recipient', 'ref']
+const PUSH_FALLBACK = 'Você tem um aviso novo na Varanda'
+const HEX64 = /^[0-9a-f]{64}$/
+const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
+
+function isPlainObject (x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x) &&
+    Object.prototype.toString.call(x) === '[object Object]'
+}
+
+// Mirrors isDisplayUnsafe in packages/rpc/lib/text.js (single line).
+function unsafeCodePoint (c) {
+  return c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029 ||
+    (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) ||
+    (c >= 0xd800 && c <= 0xdfff) || c === 0x200e || c === 0x200f || c === 0x061c
+}
+
+function validBody (body) {
+  if (typeof body !== 'string') return false
+  const points = [...body]
+  if (points.length < 1 || points.length > 120) return false
+  return points.every((p) => !unsafeCodePoint(p.codePointAt(0)))
+}
+
+// The fields a click may carry into the app's URL or a postMessage.
+function validTarget (kind, actor, recipient, ref) {
+  if (!PUSH_KINDS.includes(kind)) return false
+  if (typeof actor !== 'string' || !HEX64.test(actor)) return false
+  if (typeof recipient !== 'string' || !HEX64.test(recipient) || actor === recipient) return false
+  if (kind === 'follow') return ref === null
+  if (typeof ref !== 'string') return false
+  const m = REF.exec(ref)
+  return m !== null && m[1] === recipient
+}
+
+function validPush (p) {
+  if (!isPlainObject(p)) return false
+  const keys = Object.keys(p)
+  if (keys.length !== PUSH_KEYS.length || !PUSH_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  return p.v === 1 && validBody(p.body) && validTarget(p.kind, p.actor, p.recipient, p.ref)
+}
+
+function readPush (data) {
+  if (!data) return null
+  try {
+    const p = data.json()
+    return validPush(p) ? p : null
+  } catch {
+    return null
+  }
+}
+
+async function showPush (data) {
+  const p = readPush(data)
+  const options = p
+    ? {
+        body: p.body,
+        icon: '/icon-192.png',
+        tag: 'varanda-' + p.kind + '-' + (p.ref || p.actor),
+        renotify: false,
+        data: { kind: p.kind, actor: p.actor, recipient: p.recipient, ref: p.ref }
+      }
+    : { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
+  try {
+    await self.registration.showNotification('Varanda', options)
+  } catch {}
+}
+
+// Opens the Avisos screen, never a /m/... or /@... path: those are profile
+// invite links with their own flow.
+async function openPush (data) {
+  const d = isPlainObject(data) ? data : {}
+  const ok = validTarget(d.kind, d.actor, d.recipient, d.ref)
+  const path = ok
+    ? '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
+    : '/'
+  try {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
+    // Same origin is not enough: the moderation panel (/account/mod/) and
+    // the other bypassed paths are not the app.
+    const client = list.find((c) => {
+      try {
+        const u = new URL(c.url)
+        const p = u.pathname
+        return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
+          !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) && !p.startsWith(INDEX_PREFIX)
+      } catch {
+        return false
+      }
+    })
+    if (client) {
+      let focused = true
+      try {
+        await client.focus()
+      } catch {
+        // focus() can reject (InvalidAccessError); the click must still open the app.
+        focused = false
+      }
+      if (focused) {
+        if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
+        return
+      }
+    }
+    await clients.openWindow(path)
+  } catch {}
+}
+
+self.addEventListener('push', (event) => {
+  try {
+    event.waitUntil(showPush(event.data))
+  } catch {}
+})
+
+self.addEventListener('notificationclick', (event) => {
+  try {
+    event.notification.close()
+  } catch {}
+  try {
+    event.waitUntil(openPush(event.notification && event.notification.data))
+  } catch {}
+})
+
+// A new release waits for every window of the previous one to close, so an
+// open page can face an older active worker without the push handler: the
+// page pings before offering the toggle.
+self.addEventListener('message', (event) => {
+  try {
+    const d = event.data
+    if (!isPlainObject(d) || Object.keys(d).length !== 1 || d.type !== 'varanda-push-ping') return
+    const port = event.ports && event.ports[0]
+    if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
+  } catch {}
 })

@@ -45,13 +45,15 @@ const { certForKey } = require('@varanda/core/lib/cert')
 const {
   decodeBlock,
   memberCertRecord,
-  profileRecord,
+  profileRecords,
   postRecord,
   mediaCoreRecord,
   followRecord,
   groupJoinRecord,
   likeRecord,
   repostRecord,
+  deleteRecord,
+  validAvatar,
   validateRecord,
   validRecordCopy,
   formatRef,
@@ -63,14 +65,16 @@ const {
   MAX_MEDIA_ITEM_BLOCKS
 } = require('@varanda/core/lib/records')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
-const { latestUsername } = require('@varanda/core/lib/username')
+const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { applyDeletes, deletedSeqs, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const grp = require('@varanda/core/lib/group')
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX } = require('@varanda/rpc')
+const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
 const {
@@ -123,11 +127,96 @@ function keyPairOf (ctx) {
   return ctx.keyPair === undefined ? null : ctx.keyPair
 }
 
+// Borrowed path (reads only): ctx.cores = { diary, replica(key) } are the
+// cores the live sync run holds (./sync.js reader). A second Hypercore on
+// the same files would corrupt them, and closing or purging one would pull
+// it from under the run, so they are read in place and never closed or
+// purged (the run sweeps empty replicas). Whenever this path cannot give
+// exactly the exclusive path's answer (a stored replica the run does not
+// hold, a core closed or failing under the read) it throws NEEDS_EXCLUSIVE
+// and the session reruns the request exclusively.
+function needsExclusive () {
+  const e = new Error('leitura exclusiva necessária')
+  e.code = 'NEEDS_EXCLUSIVE'
+  return e
+}
+
+function isNeedsExclusive (err) {
+  return !!err && err.code === 'NEEDS_EXCLUSIVE'
+}
+
+function borrowedCores (ctx) {
+  return ctx.cores === undefined || ctx.cores === null ? null : ctx.cores
+}
+
+// read(core) on a borrowed core: any failure, or the core closing under
+// the read (a read may then come back short), is NEEDS_EXCLUSIVE.
+async function readBorrowed (core, read) {
+  let value
+  try {
+    value = await read(core)
+  } catch {
+    throw needsExclusive()
+  }
+  if (core.closing) throw needsExclusive()
+  return value
+}
+
+// read(core) on the stored replica of `key` (hex64, lowercase) -> its result,
+// or null when there is no local data (nothing is created). The result
+// carries `entries` (and `borrowed`, the core, on the borrowed path); an
+// empty replica is purged on the exclusive path only.
+async function withReplica (ctx, key, read) {
+  if (!(await store.replicaExists(ctx.storage, key))) return null
+  const cores = borrowedCores(ctx)
+  if (cores !== null) {
+    const core = cores.replica(key)
+    if (core === null) throw needsExclusive()
+    return { ...(await readBorrowed(core, read)), borrowed: core }
+  }
+  const replica = await store.openReplica(ctx.storage, key)
+  let value
+  try {
+    value = await read(replica)
+  } finally {
+    await replica.close()
+  }
+  // An empty core must not linger in the storage.
+  if (value.entries.length === 0) await store.purgeReplica(ctx.storage, key)
+  return value
+}
+
 // Opens the own diary (unlocked when ctx holds the key pair), runs fn and
-// always closes it.
+// always closes it; with ctx.cores, runs fn on the borrowed diary instead.
+// Right before answering, as diary.peek in ./sync.js: the run may have
+// closed or forked a borrowed core since it was read. A closed one ->
+// NEEDS_EXCLUSIVE; a fork seen since is judged as a fork (-> the fork to
+// judge). The exclusive path closes its cores after the read by design.
+function forkNow (read) {
+  if (read.borrowed === undefined) return read.fork
+  if (read.borrowed.closing) throw needsExclusive()
+  return read.fork !== 0 ? read.fork : read.borrowed.fork
+}
+
+function checkOwnDiary (ctx) {
+  const cores = borrowedCores(ctx)
+  if (cores !== null && cores.diary.closing) throw needsExclusive()
+}
+
 async function withIdentity (ctx, fn) {
   const association = await trustRoot(ctx)
   if (!(await store.diaryExists(ctx.storage))) throw new Error('identidade não encontrada')
+  const cores = borrowedCores(ctx)
+  if (cores !== null) {
+    // The run opened the diary without a key pair, so it never ran
+    // openDiary's passkey check: a pair of another key (or any pair on a
+    // legacy store) takes the exclusive path, which refuses it as before.
+    const keyPair = keyPairOf(ctx)
+    if (keyPair !== null && (store.isLegacy(ctx.storage) || !b4a.equals(cores.diary.key, keyPair.publicKey))) {
+      throw needsExclusive()
+    }
+    return readBorrowed(cores.diary, (diary) => fn({ diary, ownHex: hex(diary.key), association }))
+  }
   const diary = await store.openDiary(ctx.storage, keyPairOf(ctx))
   try {
     return await fn({ diary, ownHex: hex(diary.key), association })
@@ -244,10 +333,42 @@ async function publish (ctx, record, check = null) {
   })
 }
 
-async function profileSet (ctx, { name, bio }) {
-  const record = buildRecord(() => profileRecord({ name, bio: bio || '' }))
-  const { seq } = await publish(ctx, record)
-  return { seq }
+function currentAvatar (entries) {
+  return (latestProfile(entries) || {}).avatar || null
+}
+
+// A still image of exactly the declared size: the reader checks only the
+// descriptor, so the bytes are checked here, at write time.
+function stillAvatar (descriptor, bytes) {
+  const s = stillImageSize(bytes, descriptor.mime)
+  return s !== null && s.width === descriptor.width && s.height === descriptor.height
+}
+
+// avatar: undefined keeps the current one, null removes it. A descriptor
+// equal to the current one is kept unverified: it may live in another
+// device's media core (docs/protocol.md). With an avatar the compat pair
+// (plain block, then the same profile with avatar) is one append.
+async function profileSet (ctx, { name, bio, avatar }) {
+  if (avatar !== undefined && avatar !== null) {
+    const current = await withIdentity(ctx, async ({ diary }) => currentAvatar(await store.readAll(diary)))
+    if (!deepEqual(avatar, current)) {
+      if (!validAvatar(avatar)) throw badMedia()
+      await verifyMedia(ctx, [avatar], stillAvatar)
+    }
+  }
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const current = currentAvatar(await store.readAll(diary))
+    const next = avatar === undefined ? current : avatar
+    const records = buildRecord(() => profileRecords({ name, bio: bio || '', avatar: next }))
+    if (records.length === 1) return { seq: await appendOwn(ctx, diary, records[0]) }
+    try {
+      return { seq: await store.appendRecords(diary, records, ctx.limits) }
+    } catch (err) {
+      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+      throw err
+    }
+  })
 }
 
 function hasMedia (media) {
@@ -272,6 +393,163 @@ async function postQuote (ctx, { to, text, media }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   if (hasMedia(media)) await verifyMedia(ctx, media)
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media } : { text, quote: to })))
+}
+
+// ---- delete ----
+
+const NOT_DELETABLE = 'não é possível apagar este registro'
+const DELETE_KINDS = {
+  post: { other: 'profile', wrong: 'o registro não é uma publicação' },
+  profile: { other: 'post', wrong: 'o registro não é um perfil' }
+}
+
+// The compat pair profileRecords writes: a plain profile immediately
+// followed by the same profile with an avatar (never the other order).
+function compatPair (plain, withAvatar) {
+  return plain !== null && withAvatar !== null &&
+    plain.type === 'profile' && withAvatar.type === 'profile' &&
+    plain.avatar === undefined && withAvatar.avatar !== undefined &&
+    plain.name === withAvatar.name && plain.bio === withAvatar.bio && plain.at === withAvatar.at
+}
+
+function recordAt (raw, seq) {
+  return seq >= 1 && seq < raw.length ? validRecordCopy(raw[seq].record, seq) : null
+}
+
+function descriptorsOf (record) {
+  if (record.type === 'post') return Array.isArray(record.media) ? record.media : []
+  return record.avatar !== undefined ? [record.avatar] : []
+}
+
+// The seq of the highest effective tombstone whose target is in targets.
+function existingTombstone (raw, deleted, targets) {
+  let last = null
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'delete' && targets.includes(copy.seq) && (last === null || seq > last)) last = seq
+  }
+  return last
+}
+
+// The tombstone that deleted `seq` and, for a profile, the other half of a
+// compat pair, when the target block itself is already cleared and cannot be
+// read. The pair writer appends both tombstones in one append, in seq order
+// and with one `at`, so only consecutive tombstones of seq n then n + 1
+// carrying the same `at` are taken as one pair; two separate deletions of
+// adjacent versions stay apart (same rule as @varanda/core member.js).
+function clearedTargets (raw, deleted, seq, kind) {
+  const own = existingTombstone(raw, deleted, [seq])
+  if (kind !== 'profile' || own === null) return [seq]
+  const tomb = (i) => {
+    const copy = deleted.has(i) ? null : recordAt(raw, i)
+    return copy !== null && copy.type === 'delete' ? copy : null
+  }
+  const ownCopy = tomb(own)
+  const next = tomb(own + 1)
+  if (next !== null && next.seq === seq + 1 && next.at === ownCopy.at) return [seq, seq + 1]
+  const prev = tomb(own - 1)
+  if (prev !== null && prev.seq === seq - 1 && prev.at === ownCopy.at) return [seq - 1, seq]
+  return [seq]
+}
+
+// Clears what a deletion hides on this device: the targeted diary blocks
+// and the tombstones' media ranges on every stored own media core (this
+// device's and other devices' replicated read-only) whose header names the
+// diary. No media key is needed to clear. Best effort: the tombstone is
+// already appended, and the next sync clears again.
+async function clearAfterDelete (ctx, diary, ownHex, targets, records) {
+  if (ctx.noClear === true) return
+  try {
+    await clearDeleted(diary, targets)
+  } catch {}
+  const byCore = new Map()
+  for (const r of records) {
+    for (const m of Array.isArray(r.media) ? r.media : []) {
+      if (!byCore.has(m.core)) byCore.set(m.core, [])
+      byCore.get(m.core).push({ start: m.start, blocks: m.blocks })
+    }
+  }
+  if (byCore.size === 0) return
+  let stored = []
+  try {
+    stored = await store.readMediaCores(ctx.storage)
+  } catch {}
+  for (const key of stored) {
+    if (!byCore.has(key)) continue
+    let core = null
+    try {
+      core = await store.openMediaCoreReadOnly(ctx.storage, key)
+      if (core === null || core.length < 1 || !(await core.has(0))) continue
+      const header = decodeBlock(await core.get(0, { wait: false }))
+      if (header === null || validateMediaHeader(header) !== null || header.diary !== ownHex) continue
+      await store.clearMediaRanges(core, byCore.get(key))
+    } catch {} finally {
+      if (core !== null) await core.close().catch(() => {})
+    }
+  }
+}
+
+// Tombstones for the caller's own post or profile block `to` -> { seq, ref,
+// changed, deleted } (docs/rpc.md 5.33, 5.34). A compat pair is one version:
+// both tombstones go in one append. A target already deleted writes nothing,
+// even once its block was cleared. Media ranges are only the target's
+// descriptors in a core the diary declared that no surviving own post or
+// profile overlaps; after the append the targets and those ranges are
+// cleared on this device (clearAfterDelete).
+async function recordDelete (ctx, kind, { to }) {
+  const rules = DELETE_KINDS[kind]
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    if (to.seq < raw.length && raw[to.seq].record === null) {
+      const gone = deletedSeqs(raw)
+      if (gone.has(to.seq)) {
+        const targets = clearedTargets(raw, gone, to.seq, kind)
+        const seq = existingTombstone(raw, gone, targets)
+        return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
+      }
+    }
+    const target = recordAt(raw, to.seq)
+    if (target === null) throw new UsageError('referência inválida')
+    if (target.type === rules.other) throw new UsageError(rules.wrong)
+    if (target.type !== kind) throw new UsageError(NOT_DELETABLE)
+    let targets = [to.seq]
+    if (kind === 'profile') {
+      if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
+      else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
+    }
+    const deleted = deletedSeqs(raw)
+    const pending = targets.filter((seq) => !deleted.has(seq))
+    if (pending.length === 0) {
+      const seq = existingTombstone(raw, deleted, targets)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
+    }
+    const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+    const live = liveMediaRefs(raw, targets)
+    // One `at` for the whole append marks the tombstones of a pair as one.
+    const at = nowIso()
+    const records = pending.map((seq) => {
+      const media = descriptorsOf(recordAt(raw, seq))
+        .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
+        .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
+    })
+    const seq = records.length === 1
+      ? await appendOwn(ctx, diary, records[0])
+      : await store.appendRecords(diary, records, ctx.limits)
+    await clearAfterDelete(ctx, diary, ownHex, pending, records)
+    return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
+  })
+}
+
+function postDelete (ctx, params) {
+  return recordDelete(ctx, 'post', params)
+}
+
+function profileDelete (ctx, params) {
+  return recordDelete(ctx, 'profile', params)
 }
 
 // ---- likes / reposts ----
@@ -424,8 +702,9 @@ async function declareMediaCore (ctx, coreHex) {
 
 // Every descriptor must point into an own media core (kv mediaCores) that
 // the own diary declares among its latest `media-core` records, with every
-// block local and the bytes matching; else 'mídia inválida'.
-async function verifyMedia (ctx, media) {
+// block local and the bytes matching; else 'mídia inválida'. inspect, when
+// given, is called with (descriptor, bytes) and a falsy result refuses it.
+async function verifyMedia (ctx, media, inspect = null) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) throw badMedia()
   const own = new Set(await store.readMediaCores(ctx.storage))
   const { ownHex, declared } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
@@ -449,6 +728,7 @@ async function verifyMedia (ctx, media) {
         total += block.byteLength
       }
       if (total !== bytes || (await sha256Hex(chunks)) !== sha256) throw badMedia()
+      if (typeof inspect === 'function' && !inspect(descriptor, b4a.concat(chunks))) throw badMedia()
     } finally {
       await core.close()
     }
@@ -477,6 +757,31 @@ async function usernameAdd (ctx, record) {
 // username record" check of username.add.
 async function ownEntries (ctx) {
   return withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
+}
+
+// What the notices read checks a post against (./notices.js): the usernames
+// the own diary verifiably held (username -> issuer, NOT filtered by the
+// revoked issuers, which the reader applies on every read so a cached
+// context never outlives a revocation) and the seqs of its post blocks.
+// -> { key, present, length, deleted, names, posts }. `cache` (a previous
+// result or null) is returned as is while the own key, the length and the
+// present length (walked with the cached deleted set) are unchanged:
+// readAll reads up to the present length only.
+async function ownNoticeContext (ctx, cache = null) {
+  return withIdentity(ctx, async ({ diary, ownHex, association }) => {
+    if (cache !== null && cache.key === ownHex && cache.length === diary.length &&
+        cache.present === await presentLength(diary, cache.deleted)) return cache
+    const length = diary.length
+    const entries = await store.readAll(diary)
+    const posts = new Set()
+    const deleted = new Set()
+    for (const { seq, record, deleted: gone } of entries) {
+      if (gone === true) deleted.add(seq)
+      const copy = validRecordCopy(record, seq)
+      if (copy !== null && copy.type === 'post') posts.add(seq)
+    }
+    return { key: ownHex, present: entries.length, length, deleted, names: heldUsernames(entries, ownHex, association), posts }
+  })
 }
 
 // ---- follows ----
@@ -725,20 +1030,9 @@ async function followList (ctx) {
 // Reads a replica that has local data, or throws 'sem dados locais para este
 // diário' without creating anything; an empty replica is purged (D).
 async function readReplica (ctx, key) {
-  if (!HEX64.test(key) || !(await store.replicaExists(ctx.storage, key))) {
-    throw new Error('sem dados locais para este diário')
-  }
-  const replica = await store.openReplica(ctx.storage, key)
-  let entries
-  let empty
-  try {
-    entries = await store.readAll(replica)
-    empty = replica.contiguousLength === 0
-  } finally {
-    await replica.close()
-  }
-  if (empty) await store.purgeReplica(ctx.storage, key)
-  return entries
+  const read = HEX64.test(key) ? await withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork })) : null
+  if (read === null) throw new Error('sem dados locais para este diário')
+  return read
 }
 
 async function logRead (ctx, { author = null } = {}) {
@@ -751,8 +1045,14 @@ async function logRead (ctx, { author = null } = {}) {
   const key = String(author).toLowerCase()
   const mod = await moderation(ctx.storage, own.association)
   if (mod.blocked.has(key)) throw new Error('sem dados locais para este diário')
-  const entries = await readReplica(ctx, key)
-  if (mod.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, mod.revokedIssuers)) {
+  const read = await readReplica(ctx, key)
+  const entries = read.entries
+  // A snapshot adopted during the read (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, own.association)
+  // A fork is not refused here (nor on the exclusive path); a closed core is.
+  forkNow(read)
+  if (final.blocked.has(key)) throw new Error('sem dados locais para este diário')
+  if (final.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, final.revokedIssuers)) {
     throw new Error('sem dados locais para este diário')
   }
   return { key: author, entries }
@@ -784,8 +1084,9 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
-  const kept = [own]
-  const skipped = []
+  // One slot per followed key, in follow order: a fixed reason, or what was
+  // read, judged only once every read is done.
+  const slots = []
   const seen = new Set([own.key])
   for (const raw of await store.readFollows(ctx.storage)) {
     if (typeof raw !== 'string' || !HEX64.test(raw)) continue
@@ -794,55 +1095,52 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     seen.add(key)
     // Hidden before any read, whether or not its purge already ran.
     if (mod.blocked.has(key)) {
-      skipped.push({ key, reason: 'blocked' })
+      slots.push({ key, reason: 'blocked' })
       continue
     }
     // Never create a core for a key with no local data (R5.4 a).
-    if (!(await store.replicaExists(ctx.storage, key))) {
-      skipped.push({ key, reason: 'no-cert' })
-      continue
-    }
-    const replica = await store.openReplica(ctx.storage, key)
-    let entries
-    let reason
-    let empty
-    try {
-      entries = await store.readAll(replica)
-      reason = skipReason(replica, entries, key, association, mod)
-      empty = replica.contiguousLength === 0
-    } finally {
-      await replica.close()
-    }
-    // An empty core must not linger in the storage.
-    if (empty) await store.purgeReplica(ctx.storage, key)
-    if (reason === null) kept.push({ key, entries })
+    const read = await withReplica(ctx, key, async (core) => {
+      const entries = await store.readAll(core)
+      return { entries, fork: core.fork, behind: core.length > entries.length }
+    })
+    slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
+  }
+  // A snapshot adopted during the reads (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, association)
+  checkOwnDiary(ctx)
+  const kept = [own]
+  const skipped = []
+  const incomplete = []
+  for (const { key, reason: fixed, read } of slots) {
+    // A key blocked in the first snapshot stays skipped 'blocked' even when
+    // the final one unblocks it (fail-safe, no second read pass).
+    const reason = read === undefined
+      ? (final.blocked.has(key) ? 'blocked' : fixed)
+      : skipReason({ fork: forkNow(read) }, read.entries, key, association, final)
+    if (reason === null && read.behind) incomplete.push(key)
+    if (reason === null) kept.push({ key, entries: read.entries })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers, before })
-  return { items: built.items, skipped, future: built.future }
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
+  return { items: built.items, skipped, future: built.future, incomplete }
 }
 
 // ---- profile.read ----
 
-// The entries of a non-own diary when feedRead would show it, else null:
-// the admission rules of feedRead (blocked, no local data, skipReason), not
-// those of logRead. Never creates a replica; an empty one is purged.
-async function admittedEntries (ctx, key, association, mod) {
+// What a non-own diary's admission needs ({ entries, fork }), or null when
+// feedRead would skip it before any read (blocked, no local data). Never
+// creates a replica; an empty one is purged (exclusive path only).
+async function replicaRead (ctx, key, mod) {
   if (mod.blocked.has(key)) return null
-  if (!(await store.replicaExists(ctx.storage, key))) return null
-  const replica = await store.openReplica(ctx.storage, key)
-  let entries
-  let reason
-  let empty
-  try {
-    entries = await store.readAll(replica)
-    reason = skipReason(replica, entries, key, association, mod)
-    empty = replica.contiguousLength === 0
-  } finally {
-    await replica.close()
-  }
-  if (empty) await store.purgeReplica(ctx.storage, key)
-  return reason === null ? entries : null
+  return withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork }))
+}
+
+// The entries when feedRead would show the diary, else null: the admission
+// rules of feedRead (blocked, no local data, skipReason), not those of
+// logRead.
+function admittedEntries (read, key, association, mod) {
+  if (read === null) return null
+  return skipReason({ fork: forkNow(read) }, read.entries, key, association, mod) === null ? read.entries : null
 }
 
 // Names of the given authors from local data only (docs/rpc.md 5.21) ->
@@ -863,10 +1161,17 @@ async function profileRead (ctx, { authors }) {
     key: ownHex,
     entries: seen.has(ownHex) ? await store.readAll(diary) : null
   }))
+  const reads = new Map()
+  for (const key of keys) {
+    if (key !== own.key && HEX64.test(key)) reads.set(key, await replicaRead(ctx, key, mod))
+  }
+  // A snapshot adopted during the reads (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, association)
+  if (own.entries !== null) checkOwnDiary(ctx)
   const profiles = []
   const missing = []
   for (const key of keys) {
-    const entries = key === own.key ? own.entries : (HEX64.test(key) ? await admittedEntries(ctx, key, association, mod) : null)
+    const entries = key === own.key ? own.entries : (reads.has(key) ? admittedEntries(reads.get(key), key, association, final) : null)
     if (entries === null) {
       missing.push(key)
       continue
@@ -876,7 +1181,8 @@ async function profileRead (ctx, { authors }) {
       author: key,
       name: profile === null ? null : profile.name,
       bio: profile === null ? null : profile.bio,
-      username: latestUsername(entries, key, association, { revokedIssuers: mod.revokedIssuers })
+      avatar: profile === null ? null : profile.avatar,
+      username: latestUsername(entries, key, association, { revokedIssuers: final.revokedIssuers })
     })
   }
   return { profiles, missing }
@@ -1091,7 +1397,7 @@ async function loadGroup (ctx, base, group) {
   for (const d of new Set([ownHex, rootHeader.diary, ...writers.map((w) => w.diary)])) {
     // A blocked own diary binds none of its writers, as in the core node (the
     // feed keeps its own rule for the own diary).
-    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : await admittedEntries(ctx, d, association, mod)
+    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
     diaries.set(d, entries)
     if (entries !== null) joins.set(d, groupJoinHistory(entries, group))
   }
@@ -1644,11 +1950,14 @@ module.exports = {
   postCreate,
   postReply,
   postQuote,
+  postDelete,
+  profileDelete,
   likeSet,
   repostSet,
   engagementRead,
   usernameAdd,
   ownEntries,
+  ownNoticeContext,
   followAdd,
   followRemove,
   followList,
@@ -1681,5 +1990,6 @@ module.exports = {
   groupList,
   groupInfo,
   groupMembers,
-  groupRequests
+  groupRequests,
+  isNeedsExclusive
 }

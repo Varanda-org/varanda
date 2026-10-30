@@ -1,15 +1,17 @@
 // Seguindo: follow.add, follow.remove, follow.list (offset paging, 50 per
 // page). Rows show the avatar and the name (or @nome) the member chose, read
 // from the profiles cache; never a key. The list reloads when another device
-// changes the follows (node.followsVersion). A "Seguindo" pill unfollows. Design:
-// apps/site/artwork/app-design.md.
+// changes the follows (node.followsVersion). A "Seguindo" pill asks for a
+// confirmation before it unfollows. Design: apps/site/artwork/app-design.md.
 //
-// On the hosted web a "Buscar" field above the exact follow field finds
-// people by display name or @nome (useMemberSearch): the seeder's search
-// answer only says where to look, and a row appears only once diary.peek
-// confirms that person (name from the peeked profile, @nome only from the
-// verified username). Each row opens the profile and has Seguir/Seguindo,
-// read from the full follow set (useFollowSet). The own key never has a row.
+// On the hosted web one "Encontrar pessoas" field takes a name, an @nome or a
+// 64-hex code (classifyFollowInput). A name or @nome searches
+// (useMemberSearch): the seeder's search answer only says where to look, and
+// a row appears only once diary.peek confirms that person (name from the
+// peeked profile, @nome only from the verified username). Each row opens the
+// profile and has Seguir/Seguindo, read from the full follow set
+// (useFollowSet). An @nome also gets a "Seguir @nome" pill and a code a
+// "Seguir" pill, with no search. The own key never has a row.
 // Native and loopback keep the exact follow field only and send no search.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -17,10 +19,14 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
+import { pickAvatar } from '../media/avatar'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { UNNAMED, whoOf } from '../who'
+import { SHORT } from '../help'
+import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
 import { Card, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { FollowPill } from '../ui/FollowPill'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -52,7 +58,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={followKey} size={44} />
+        <Avatar name={who.avatarName} publicKey={followKey} size={44} picture={(profile || {}).avatar} persist />
         <View style={styles.who}>
           {who.known
             ? (
@@ -64,17 +70,18 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
             : <View style={styles.skeleton} accessible={false} />}
         </View>
       </Pressable>
-      <Pill
-        label='Seguindo'
-        onPress={() => onRemove(followKey)}
+      <FollowPill
+        following
+        title={who.known ? title : 'esta pessoa'}
         pending={pending}
         disabled={disabled}
-        accessibilityLabel={who.known ? 'deixar de seguir ' + title : 'deixar de seguir'}
+        onFollow={() => {}}
+        onUnfollow={() => onRemove(followKey)}
       />
       <Pressable
         accessibilityRole='button'
         accessibilityLabel={who.known ? 'denunciar ' + title : 'denunciar'}
-        hitSlop={8}
+        hitSlop={13}
         onPress={() => onReport({
           author: followKey,
           name: profile ? profile.name : null,
@@ -83,7 +90,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
           text: null
         })}
       >
-        <Text style={styles.handle}>denunciar</Text>
+        <Icon name='bandeira' size={18} color={colors.soft} />
       </Pressable>
     </View>
   )
@@ -93,7 +100,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
 // verified @nome from the peek (`hit`), never a key, and no 'denunciar'. The
 // avatar and name open the profile; the pill follows ('Seguir') or unfollows
 // ('Seguindo'), disabled while the follow set is unknown (`following` null).
-function SearchRow ({ hit, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+function SearchRow ({ hit, avatar, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
   const profile = { name: hit.name, username: hit.username }
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -108,32 +115,20 @@ function SearchRow ({ hit, following, onOpen, onFollow, onUnfollow, pending, dis
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
+        <Avatar name={who.avatarName} publicKey={hit.author} size={44} picture={avatar} persist={following === true} />
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
         </View>
       </Pressable>
-      {following === true
-        ? (
-          <Pill
-            label='Seguindo'
-            onPress={() => onUnfollow(hit)}
-            pending={pending}
-            disabled={disabled}
-            accessibilityLabel={'deixar de seguir ' + title}
-          />
-          )
-        : (
-          <Pill
-            label='Seguir'
-            filled
-            onPress={() => onFollow(hit)}
-            pending={pending}
-            disabled={disabled || following === null}
-            accessibilityLabel={'seguir ' + title}
-          />
-          )}
+      <FollowPill
+        following={following}
+        title={title}
+        pending={pending}
+        disabled={disabled}
+        onFollow={() => onFollow(hit)}
+        onUnfollow={() => onUnfollow(hit)}
+      />
     </View>
   )
 }
@@ -291,8 +286,8 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
     const key = text.toLowerCase()
     let name = null
     if (!isKey(key)) {
-      if (!text.startsWith('@')) return setLocalError(node.hosted ? 'Digite um @nome ou cole a chave da pessoa.' : 'Cole a chave da pessoa (64 letras e números).')
-      if (!node.hosted) return setLocalError('Nesta versão, siga pela chave da pessoa.')
+      if (!text.startsWith('@')) return setLocalError(node.hosted ? 'Digite um @nome ou cole o código da pessoa.' : 'Cole o código da pessoa (64 letras e números).')
+      if (!node.hosted) return setLocalError('Nesta versão, siga pelo código da pessoa.')
       name = isUsername(text)
       if (name === null) return setLocalError('@nome inválido')
     }
@@ -310,6 +305,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
     })
     if (r.ok) {
       setInput('')
+      search.clear()
       names.resolve(r.value.target)
       // Names the person once the profile is known; never by key.
       const profile = profileOf(r.value.target)
@@ -421,6 +417,9 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
   const changing = add.pending || remove.pending || follow.pending || rereading
 
   // The search block (hosted only): field, state lines, confirmed rows.
+  const cls = classifyFollowInput(input)
+  const searchable = cls.kind === 'name' || cls.kind === 'handle'
+  const handle = cls.kind === 'handle' ? isUsername(cls.handle) : null
   const hits = search.hits.filter((h) => h.author !== own)
   const offline = node.online === false
   const ready = search.phase === 'ready'
@@ -429,19 +428,30 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
     ? (
       <>
         <Field
-          label='Buscar'
-          placeholder='nome ou @nome'
-          value={search.query}
-          onChangeText={setSearchQuery}
+          label='Encontrar pessoas'
+          placeholder='nome, @nome ou código'
+          value={input}
+          onChangeText={(t) => {
+            setInput(t)
+            setLocalError('')
+            const c = classifyFollowInput(t)
+            setSearchQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
+          }}
+          mono
           maxLength={80}
-          editable={!offline}
+          returnKeyType='search'
+          onSubmitEditing={handleSearch}
         />
-        <View style={styles.addRow}>
-          <Pill label='Buscar' onPress={handleSearch} disabled={offline || search.query.trim() === ''} />
-        </View>
-        {offline || search.phase === 'offline' ? <Soft>A busca precisa de internet.</Soft> : null}
-        {search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
-        {search.phase === 'error'
+        {cls.kind === 'key'
+          ? <View style={styles.addRow}><Pill label='Seguir' filled onPress={doAdd} pending={add.pending} disabled={changing} /></View>
+          : null}
+        {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
+        {handle !== null && !hits.some((h) => typeof h.username === 'string' && h.username.toLowerCase() === handle)
+          ? <View style={styles.addRow}><Pill label={'Seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline} /></View>
+          : null}
+        {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
+        {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
+        {searchable && search.phase === 'error'
           ? (
             <>
               <ErrorText>{search.error}</ErrorText>
@@ -457,6 +467,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
                 <SearchRow
                   key={hit.author}
                   hit={hit}
+                  avatar={pickAvatar(names.profileOf(hit.author), hit)}
                   following={follows === null ? null : follows.has(hit.author)}
                   onOpen={onOpenMember}
                   onFollow={doFollowHit}
@@ -488,17 +499,23 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
   const header = (
     <View style={styles.header}>
       {searchBlock}
-      <Field
-        placeholder={node.hosted ? '@nome ou chave' : 'chave da pessoa (64 letras e números)'}
-        value={input}
-        onChangeText={setInput}
-        mono
-        multiline
-        lines={2}
-      />
-      <View style={styles.addRow}>
-        <Pill label='Seguir' filled onPress={doAdd} pending={add.pending} disabled={input.trim() === '' || changing} />
-      </View>
+      {node.hosted === true
+        ? null
+        : (
+          <>
+            <Field
+              placeholder='código da pessoa (64 letras e números)'
+              value={input}
+              onChangeText={setInput}
+              mono
+              multiline
+              lines={2}
+            />
+            <View style={styles.addRow}>
+              <Pill label='Seguir' filled onPress={doAdd} pending={add.pending} disabled={input.trim() === '' || changing} />
+            </View>
+          </>
+          )}
       {legacyApi !== null && !legacyHidden && legacy !== null && legacy.length > 0
         ? (
           <Card>
@@ -541,7 +558,7 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
         <EmptyState
           icon='gente'
           title='Você ainda não segue ninguém'
-          body={node.hosted ? 'Busque alguém pelo nome ou @nome para ver as publicações dessa pessoa na Rua.' : 'Cole a chave de alguém para ver as publicações dessa pessoa na Rua.'}
+          body={node.hosted ? 'Busque alguém pelo nome ou @nome, ou cole o código da pessoa, para ver as publicações dela na Rua.' : 'Cole o código de alguém para ver as publicações dessa pessoa na Rua.'}
         />
         )
       : null
@@ -565,7 +582,9 @@ export default function Seguindo ({ active, ownKey, followsTick, onReport, onFol
           <SectionHeader right={loaded ? <Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft> : null}>
             Seguindo
           </SectionHeader>
-          <View style={styles.note}><Soft>Quem você segue é público e aparece igual em todos os seus aparelhos.</Soft></View>
+          <View style={styles.note}>
+            <Soft>{SHORT.followsPublic}</Soft>
+          </View>
         </>
       }
       ListEmptyComponent={empty}
@@ -589,7 +608,7 @@ const styles = StyleSheet.create({
   legacyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  note: { paddingHorizontal: 16, paddingBottom: 8 },
+  note: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   bleed: { marginHorizontal: -16 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },

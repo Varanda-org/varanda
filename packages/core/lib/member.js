@@ -24,12 +24,15 @@ const {
   likeRecord,
   repostRecord,
   groupJoinRecord,
+  deleteRecord,
   validRecordCopy,
   validateRecord,
   formatRef,
-  latestProfile
+  latestProfile,
+  nowIso
 } = require('./records')
-const { followSet } = require('./media')
+const { followSet, latestMediaCores } = require('./media')
+const { deletedSeqs, applyDeletes, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -43,7 +46,9 @@ const {
   replicaStored,
   purgeReplica,
   readAll,
+  readRaw,
   appendRecord,
+  appendRecords,
   readConfig,
   readFollows,
   writeFollows,
@@ -59,6 +64,8 @@ const { recordBoundRoot } = require('./sync')
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
 const GROUP_FULL = 'limite do grupo atingido'
+const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+const PROFILE_PHOTO_WEB_ONLY = 'perfil com foto: mude o nome e a bio na versão web ou tire a foto'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const USERNAME_RECORD_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
@@ -109,12 +116,51 @@ function trustRoot (ctx) {
   return config.association
 }
 
+// Rollout kill switch: VARANDA_NO_CLEAR=1 keeps the bytes of deleted blocks
+// (only the tombstone is written).
+function clearingOff (ctx) {
+  return ctx.noClear === true || (process.env || {}).VARANDA_NO_CLEAR === '1'
+}
+
+// Data dirs whose own diary was reconciled by this process.
+const reconciled = new Set()
+
+// Clears the own blocks the fold hides but this store still holds: a clear
+// interrupted after its tombstone was appended, or a tombstone that arrived
+// from elsewhere. Once per data dir and process; a failed clear is retried
+// at the next open.
+async function reconcileOwn (ctx, diary) {
+  const dir = path.resolve(ctx.dataDir)
+  if (reconciled.has(dir) || clearingOff(ctx)) return
+  try {
+    const { deleted } = await presentState(diary)
+    if (await clearedAll(diary, deleted)) reconciled.add(dir)
+  } catch {}
+}
+
+// clearDeleted skips a block it cannot read without throwing, so success is
+// read back: true only when every deleted seq is gone, block 0 or a tombstone
+// (both never cleared).
+async function clearedAll (diary, deleted) {
+  try {
+    await clearDeleted(diary, deleted)
+    for (const seq of deleted) {
+      if (seq < 1 || seq >= diary.length || !(await diary.has(seq))) continue
+      if (!(await tombstoneAt(diary, seq))) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Opens the store and the diary, runs fn and always closes the store.
 async function withIdentity (ctx, fn) {
   const association = trustRoot(ctx)
   const store = await openStore(ctx)
   try {
     const diary = await openDiary(store)
+    await reconcileOwn(ctx, diary)
     return await fn({ store, diary, ownHex: hex(diary.key), association })
   } finally {
     await store.close()
@@ -255,9 +301,10 @@ function buildRecord (make) {
   }
 }
 
-async function publish (ctx, record) {
+async function publish (ctx, record, check = null) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (check !== null) await check({ diary, ownHex })
     try {
       const seq = await appendRecord(diary, record)
       return { seq, ref: formatRef({ author: ownHex, seq }) }
@@ -268,9 +315,19 @@ async function publish (ctx, record) {
   })
 }
 
-async function profileSet (ctx, { name, bio }) {
+// Only the browser node writes media cores, so here a photo can only be
+// removed (avatar null). Keeping it requires re-sending its descriptor, which
+// the profile.set caller does not hold: a plain name/bio change would drop
+// the photo, so it is refused instead.
+async function profileSet (ctx, { name, bio, avatar }) {
+  if (avatar !== undefined && avatar !== null) throw new UsageError(MEDIA_WEB_ONLY)
   const record = buildRecord(() => profileRecord({ name, bio: bio || '' }))
-  const { seq } = await publish(ctx, record)
+  const check = avatar === null
+    ? null
+    : async ({ diary }) => {
+      if ((latestProfile(await readAll(diary)) || {}).avatar != null) throw new UsageError(PROFILE_PHOTO_WEB_ONLY)
+    }
+  const { seq } = await publish(ctx, record, check)
   return { seq }
 }
 
@@ -289,6 +346,141 @@ async function postReply (ctx, { to, text }) {
 async function postQuote (ctx, { to, text }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   return publish(ctx, buildRecord(() => postRecord({ text, quote: to })))
+}
+
+// ---- delete ----
+
+const BAD_REF = 'referência inválida'
+const NOT_A_POST = 'o registro não é uma publicação'
+const NOT_A_PROFILE = 'o registro não é um perfil'
+const NOT_DELETABLE = 'não é possível apagar este registro'
+
+// The valid record of block `seq` as written, or null.
+function recordAt (raw, seq) {
+  const entry = raw[seq]
+  if (!(seq >= 1) || entry === undefined || entry.record === null) return null
+  return validRecordCopy(entry.record, seq)
+}
+
+// profileRecords writes a plain block followed by the same version with the
+// avatar; only that order pairs, so two versions saved in the same
+// millisecond never merge.
+function isCompatPair (plain, withAvatar) {
+  return plain !== null && withAvatar !== null &&
+    plain.type === 'profile' && withAvatar.type === 'profile' &&
+    plain.avatar === undefined && withAvatar.avatar !== undefined &&
+    plain.name === withAvatar.name && plain.bio === withAvatar.bio && plain.at === withAvatar.at
+}
+
+// On the unfolded diary, so a half-deleted pair is still recognized as one
+// version.
+function targetedSeqs (raw, seq, copy) {
+  if (copy.type !== 'profile') return [seq]
+  if (copy.avatar === undefined) {
+    if (isCompatPair(copy, recordAt(raw, seq + 1))) return [seq, seq + 1]
+  } else if (isCompatPair(recordAt(raw, seq - 1), copy)) {
+    return [seq - 1, seq]
+  }
+  return [seq]
+}
+
+// The version of a cleared profile block, read from its tombstones: the pair
+// writer appends both tombstones in one append, in seq order and with one
+// `at`, so only consecutive tombstones of seq n then n + 1 carrying the same
+// `at` are taken as one pair. Two separate deletions of adjacent versions
+// stay apart.
+function clearedVersion (raw, deleted, seq) {
+  const t = tombstoneOf(raw, deleted, [seq])
+  if (t === null) return [seq]
+  const tomb = (i) => {
+    const copy = deleted.has(i) ? null : recordAt(raw, i)
+    return copy !== null && copy.type === 'delete' ? copy : null
+  }
+  const own = tomb(t)
+  const next = tomb(t + 1)
+  if (next !== null && next.seq === seq + 1 && next.at === own.at) return [seq, seq + 1]
+  const prev = tomb(t - 1)
+  if (prev !== null && prev.seq === seq - 1 && prev.at === own.at) return [seq - 1, seq]
+  return [seq]
+}
+
+// The highest effective tombstone that targets one of `seqs`, or null.
+function tombstoneOf (raw, deleted, seqs) {
+  for (let i = raw.length - 1; i >= 1; i--) {
+    if (deleted.has(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'delete' && seqs.includes(copy.seq)) return i
+  }
+  return null
+}
+
+// Media ranges a tombstone of `copy` may carry: only in a core this diary
+// declared, and only where no surviving own post or profile overlaps.
+function freedRanges (copy, cores, live) {
+  const descriptors = copy.type === 'post' ? (copy.media || []) : (copy.avatar === undefined ? [] : [copy.avatar])
+  const out = []
+  for (const d of descriptors) {
+    const r = { core: d.core, start: d.start, blocks: d.blocks }
+    if (cores.has(r.core) && !live.some((l) => overlaps(l, r))) out.push(r)
+  }
+  return out
+}
+
+// Deletes one own post (reply and quote included) or profile version ->
+// { seq, ref, changed, deleted } (docs/rpc.md 5.33, 5.34), checking in the
+// same order as the browser writer (@varanda/web-member member-ops.js).
+// The target is judged as written, so a deleted block keeps its kind.
+// Idempotent: a version already deleted writes nothing and reports its
+// existing tombstone; half of a pair already deleted gets only the missing
+// tombstone. `to` is the parsed { author, seq } reference.
+async function recordDelete (ctx, { to, kind }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= diary.length) throw new UsageError(BAD_REF)
+    const raw = await readRaw(diary)
+    const deleted = deletedSeqs(raw)
+    // A cleared target can no longer be judged; its tombstone answers.
+    if (to.seq < raw.length && deleted.has(to.seq) && !(await diary.has(to.seq))) {
+      const seqs = kind === 'profile' ? clearedVersion(raw, deleted, to.seq) : [to.seq]
+      const seq = tombstoneOf(raw, deleted, seqs)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
+    }
+    const copy = recordAt(raw, to.seq)
+    if (copy === null) throw new UsageError(BAD_REF)
+    if (copy.type !== kind) {
+      if (copy.type === 'profile') throw new UsageError(NOT_A_POST)
+      if (copy.type === 'post') throw new UsageError(NOT_A_PROFILE)
+      throw new UsageError(NOT_DELETABLE)
+    }
+    const seqs = targetedSeqs(raw, to.seq, copy)
+    const pending = seqs.filter((seq) => !deleted.has(seq))
+    if (pending.length === 0) {
+      const seq = tombstoneOf(raw, deleted, seqs)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
+    }
+    const cores = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+    const live = liveMediaRefs(raw, seqs)
+    // One `at` for the whole append marks the tombstones of a pair as one.
+    const at = nowIso()
+    const records = pending.map((seq) => {
+      const media = freedRanges(recordAt(raw, seq), cores, live)
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
+    })
+    const seq = await appendRecords(diary, records)
+    // The tombstones are written, so the delete succeeded whatever the clear
+    // does; a clear that is skipped or fails is finished by the next open.
+    const cleared = !clearingOff(ctx) && await clearedAll(diary, new Set(seqs))
+    if (!cleared) reconciled.delete(path.resolve(ctx.dataDir))
+    return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+  })
+}
+
+function postDelete (ctx, { to }) {
+  return recordDelete(ctx, { to, kind: 'post' })
+}
+
+function profileDelete (ctx, { to }) {
+  return recordDelete(ctx, { to, kind: 'profile' })
 }
 
 // ---- likes / reposts ----
@@ -497,6 +689,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
     // The own diary is always shown, even when the association blocked it.
     const kept = [{ key: ownHex, entries: await readAll(diary) }]
     const skippedLogs = []
+    const incomplete = []
     const seen = new Set([ownHex])
     for (const raw of readFollows(ctx.dataDir)) {
       // Entries are hand-editable: skip the own key, bad entries and duplicates.
@@ -522,6 +715,10 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
       // The reason (fork check included) is computed BEFORE an empty core is
       // purged, so an empty forked replica is still reported 'fork'.
       const reason = skipReason(replica, entries, key, association, blocked, revokedIssuers)
+      // Shown diaries with holes are reported so the app can keep syncing
+      // them. readAll ends at the first hole no tombstone covers, so a
+      // cleared deleted block is not one (contiguousLength would count it).
+      if (reason === null && replica.length > entries.length) incomplete.push(key)
       // An empty core must not linger in the main store.
       if (replica.contiguousLength === 0) await purgeReplica(store, key)
       if (reason === null) {
@@ -532,7 +729,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
     }
     const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
-    return { items: built.items, skipped: skippedLogs, future: built.future }
+    return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })
 }
 
@@ -586,6 +783,7 @@ async function profileRead (ctx, { authors }) {
         author: key,
         name: profile === null ? null : profile.name,
         bio: profile === null ? null : profile.bio,
+        avatar: profile === null ? null : profile.avatar,
         username: latestUsername(entries, key, association, { revokedIssuers })
       })
     }
@@ -1302,6 +1500,7 @@ async function groupRequests (ctx, { group, offset = 0, limit = 100 }) {
 }
 
 module.exports = {
+  PROFILE_PHOTO_WEB_ONLY,
   GENESIS_REQUIRED,
   BAD_USERNAME_RECORD,
   BLOCKED_AUTHOR,
@@ -1319,6 +1518,8 @@ module.exports = {
   postCreate,
   postReply,
   postQuote,
+  postDelete,
+  profileDelete,
   likeSet,
   repostSet,
   engagementRead,

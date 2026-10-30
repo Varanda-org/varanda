@@ -5,7 +5,8 @@
 // does not follow (gated on an in-memory core, never stored), a followed
 // one (read from the core the run already holds: no second core on the
 // link), the own diary, a blocked key, an unknown key; the profile and
-// username hints; a peek issued while a feed.read preempts the run; and,
+// username hints; a peek issued during a feed.read served on the run's
+// cores (same run, no preemption); and,
 // without any seeder, the timeout and the concurrency cap.
 const test = require('brittle')
 const fs = require('node:fs')
@@ -233,7 +234,7 @@ test('diary.peek reads admitted diaries through the running sync without storing
   t.is(peeked.entries[2].record.username, 'sofia')
   t.alike(peeked.invalid, [5])
   t.alike(peeked.missing, [9])
-  t.alike(peeked.profile, { name: 'Sofia', bio: 'de passagem' })
+  t.alike(peeked.profile, { name: 'Sofia', bio: 'de passagem', avatar: null })
   t.is(peeked.username, 'sofia')
   t.is(replicates(S.key), 1, 'one in-memory core on the link for S')
 
@@ -283,18 +284,18 @@ test('diary.peek reads admitted diaries through the running sync without storing
   const skipped = (await errorOf(web.request('log.read', { author: S.key })))
   t.is(skipped.message, 'sem dados locais para este diário', 'log.read still has nothing local for S')
 
-  // A peek issued right behind a feed.read (which preempts the run) is
-  // served by the restarted run within the deadline. (The run live here may
-  // already be a restart of the first: the fold of the drained follow
-  // record restarts a continuous run once.)
+  // A peek issued right behind a feed.read is served by the same run: the
+  // read borrows the run's cores instead of preempting it. (The run live
+  // here may already be a restart of the first: the fold of the drained
+  // follow record restarts a continuous run once.)
   const { runId: live } = await web.request('sync.status')
   t.ok(live >= runId)
   const feed = web.request('feed.read', { limit: 5 })
   const during = await web.request('diary.peek', { author: S.key, seqs: [2] })
-  t.alike(during.entries.map((e) => e.seq), [2], 'served after the preemption')
+  t.alike(during.entries.map((e) => e.seq), [2], 'served during the feed read')
   t.ok((await feed).items.some((i) => i.author === F.key), 'the feed read went through too')
-  t.ok(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === live && e.data.reason === 'preempted'), 'the run was preempted')
-  t.alike(await web.request('sync.status'), { state: 'running', runId: live + 1, once: false }, 'and restarted once')
+  t.absent(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === live), 'the run was not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId: live, once: false }, 'the same run served both')
 
   const sent = JSON.stringify(web.events)
   t.absent(sent.includes('127.0.0.1') || sent.includes('ws://'), 'no address in events')

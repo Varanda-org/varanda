@@ -14,13 +14,13 @@ A rede precisa funcionar sem servidor central, nos celulares dos brasileiros, e 
 | --- | --- |
 | Roda nos aparelhos dos brasileiros | Cada celular guarda e repassa as próprias publicações e as de quem a pessoa segue; os semeadores guardam cópias dos diários públicos admitidos, e nenhum servidor tem os demais dados |
 | Funciona com o celular desligado | Semeadores sempre ligados, mantidos por parceiros no Brasil, guardam cópias e ajudam nas conexões |
-| Verificação de idade (ECA Digital) | A faixa etária é confirmada antes de a identidade existir; autodeclaração não basta |
+| Verificação de idade (ECA Digital) | A faixa etária é confirmada antes de a identidade valer na rede; na web hospedada, uma chave local nasce antes só para provar quem é o dono, e o vínculo com a conta e o certificado esperam o resultado da idade; autodeclaração não basta |
 | LGPD | Coleta mínima, dados no Brasil sempre que possível, direitos dos titulares atendidos, encarregado nomeado |
 | Recuperação de login | Perder o celular não pode significar perder a conta |
 | Custo baixo | Nenhuma conta de servidor por usuário; a infraestrutura é doada por parceiros |
 | Remoção de conteúdo | Atender notificações (decisão do STF sobre o Art. 19 do Marco Civil) e ordens judiciais |
 
-**Fora do escopo do MVP:** pagamentos e carteiras (evita as regras do Banco Central para ativos virtuais), publicidade e contas de menores de 18 anos, que entram numa fase seguinte.
+**Fora do escopo do MVP:** pagamentos e carteiras (evita as regras do Banco Central para ativos virtuais), publicidade. Quem tem 16 ou 17 anos entra, por enquanto, com as mesmas regras de quem tem 18 ou mais; o modo restritivo para adolescentes (issue #74) ainda está pendente.
 
 ## Nomes no app
 
@@ -37,9 +37,9 @@ Os pontos em aberto de cada nome estão em Perguntas em aberto.
 
 ### Espiadinha: regra democrática
 
-A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.
+A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.
 
-"Mais recente" é a publicação (publicação, resposta, citação ou republicação ainda valendo; curtidas não aparecem) com maior `seq`, a última escrita. O próprio diário entra (a pessoa vê as próprias publicações); os seguidos não, porque já estão em A Rua. Dentro de cada rodada, vale a data `at` informada pelo autor, com desempate pela chave do diário. A igualdade é por diário certificado, não por pessoa: publicar mais não dá mais lugares na rodada, e cada diário tem no máximo três publicações. A regra está em [packages/core/lib/peek.js](../packages/core/lib/peek.js). A lista exclui os bloqueados e o conjunto efetivo de seguidos, vindo dos registros `follow` do diário mais as operações pendentes; o diário próprio fica. A pesquisa por assunto na Espiadinha ordena só pela data e inclui também os autores seguidos. Não se coleta cidade nem estado.
+"Mais recente" é a publicação (publicação, resposta, citação ou republicação ainda valendo; curtidas não aparecem) com maior `seq`, a última escrita. Os seguidos não entram, porque já estão em A Rua; o próprio diário é buscado como qualquer outro, para que o pedido ao semeador não identifique a pessoa, mas as publicações dele nunca aparecem na própria Espiadinha (já estão em A Rua); nas Espiadinhas das outras pessoas ele aparece como qualquer outro. Dentro de cada rodada, vale a data `at` informada pelo autor, com desempate pela chave do diário. A igualdade é por diário certificado, não por pessoa: publicar mais não dá mais lugares na rodada, e cada diário tem no máximo três publicações. A regra está em [packages/core/lib/peek.js](../packages/core/lib/peek.js). A lista exclui os bloqueados e o conjunto efetivo de seguidos, vindo dos registros `follow` do diário mais as operações pendentes; o diário próprio é buscado, mas não aparece. A pesquisa por assunto na Espiadinha ordena só pela data e inclui também os autores seguidos. Não se coleta cidade nem estado.
 
 O navegador calcula a página a partir do inventário já enviado pelo semeador. Uma conexão curta, anônima no sentido de usar uma chave Noise efêmera e não anunciar a identidade, busca os outros diários; o semeador vê o mesmo IP pedindo o complemento dos seguidos, que já conhece pelo inventário da sincronização, e pode correlacionar as conexões. Ele registra uma linha `peer` por conexão; os logs têm rotação por tamanho em [deploy/seeder/compose.yaml](../deploy/seeder/compose.yaml). A leitura não chama a associação nem o serviço de conta. Nenhuma página de descoberta ou nova cópia de conteúdo é guardada em servidor; continuam existindo as réplicas e os logs normais do semeador. No aparelho, os registros dos diários espiados ficam só na memória do navegador: recarregar descarta; no nó, o retrato vence em 5 minutos, com descarte por temporizador mesmo sem outra leitura. As linhas já exibidas podem permanecer na interface até atualizar ou recarregar. Fotos usam a mesma rota `/media` de A Rua, sob demanda, conferidas por SHA-256, com endereços `blob:` mantidos só em memória; as fotos de quem a pessoa não segue são buscadas com `no-store` (`apps/app/src/media/fetch.js`), então não ficam no cache HTTP; só as próprias e as dos seguidos usam o cache longo.
 
@@ -51,7 +51,7 @@ Limites do piloto: 30 itens na primeira página e 31 nas seguintes, custo linear
 
 Os celulares guardam e trocam as publicações, e parceiros e serviços no Brasil dão apoio. Cada celular guarda só o próprio diário e os de quem a pessoa segue; o semeador guarda a cópia de todo diário que admitiu (os diários públicos dos membros). Fora desses diários públicos, nenhum componente tem todos os dados.
 
-**Índice de engajamento do semeador.** Como o semeador já guarda todo diário admitido, ele monta em memória, a cada início, um índice de respostas, citações, curtidas, republicações e das publicações de cada membro, para que a conversa completa e as contagens apareçam mesmo de quem a pessoa não segue. O índice só diz onde procurar e quantos são; cada publicação, nome ou bio mostrado é lido do diário do autor e conferido pelo nó (na versão web, uma leitura sob demanda na memória, sem guardar nada). Os celulares continuam guardando só os diários seguidos. Contagens e completude são afirmações do semeador; o índice tem limite de memória e avisa quando está incompleto. Detalhes em [protocol.md](protocol.md), seções 5 e 7. O semeador guarda também as palavras de cada publicação pública, só para dizer onde procurar na pesquisa por assunto da Espiadinha; o nó confere as palavras no texto que ele mesmo leu e verificou.
+**Índice de engajamento do semeador.** Como o semeador já guarda todo diário admitido, ele monta em memória, a cada início, um índice de respostas, citações, curtidas, republicações e das publicações de cada membro, para que a conversa completa e as contagens apareçam mesmo de quem a pessoa não segue. O mesmo índice lista quem curtiu e quem republicou: ele só diz onde procurar e quantos são; cada publicação, nome ou bio mostrado é lido do diário do autor e conferido pelo nó (na versão web, uma leitura sob demanda na memória, sem guardar nada). Os celulares continuam guardando só os diários seguidos. Contagens e completude são afirmações do semeador; o índice tem limite de memória e avisa quando está incompleto. Detalhes em [protocol.md](protocol.md), seções 5 e 7. O semeador guarda também as palavras de cada publicação pública, só para dizer onde procurar na pesquisa por assunto da Espiadinha; o nó confere as palavras no texto que ele mesmo leu e verificou.
 
 **Índice de nomes do semeador.** Para achar uma pessoa por nome ou @nome e seguir, o semeador guarda em memória, alimentado pela mesma varredura do índice de engajamento, só os tokens dobrados do nome (sem acentos, em minúsculas) e o @nome já conferido (assinatura e delegação do emissor); nunca o nome original, a bio, o e-mail nem a conta. A busca aceita de 1 a 4 palavras (mínimo de 2 letras), casa começo de palavras, devolve até 20 pessoas e fica atrás da mesma moderação: bloqueados nunca aparecem, e um @nome de emissor revogado deixa de casar na hora. O app confere o nome e o @nome de cada linha no diário da pessoa antes de mostrá-la. O semeador vê o texto dobrado da busca na rota (sem registrar), e a ordem, as omissões e a completude são afirmações dele. Não há opção de sair nesta versão. Detalhes em [protocol.md](protocol.md), seções 5 e 7.
 
@@ -128,7 +128,9 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 **Quem a pessoa segue é público.** A lista de seguidos fica no próprio diário (registros `follow`), para chegar igual a todos os aparelhos da pessoa. Por isso qualquer um que tenha o diário vê quem ela segue; o app diz isso em Seguindo.
 
-**Quem foi seguido é avisado, em particular.** Quem começa a seguir alguém aparece para essa pessoa na aba Avisos do app, com "Seguir de volta". Isso é só dentro do app (versão web hospedada), sem contagem de seguidores e sem lista de seguidores: só quem acabou de seguir e ainda não foi seguido de volta, e a linha some ao seguir de volta. O semeador responde apenas à própria pessoa (ela prova que tem a chave do diário) e o app confere cada seguidor no diário assinado dele. Isso não substitui as notificações abaixo: o aviso cifrado por push (APNs e FCM) continua um desenho futuro, e os Avisos não o usam.
+**Curtidas e republicações são públicas.** Curtidas e republicações são registros públicos do diário (`like` e `repost`). Na versão web hospedada, o app lista, para quem pode ver a publicação, as pessoas cujo registro o nó conferiu.
+
+**Quem foi seguido é avisado, em particular.** Quem começa a seguir alguém aparece para essa pessoa na aba Avisos do app, numa linha que abre o perfil de quem seguiu, onde fica o "Seguir". Isso é só dentro do app (versão web hospedada), sem contagem de seguidores e sem lista de seguidores: só quem acabou de seguir e ainda não foi seguido de volta, e a linha some depois que a pessoa segue de volta. O semeador responde apenas à própria pessoa (ela prova que tem a chave do diário) e o app confere cada seguidor no diário assinado dele. Respostas, citações e menções (`@nome` no texto da publicação) também aparecem em Avisos, com as mesmas regras: só dentro do app, na versão web hospedada, sem contagem e sem lista; o app confere cada uma na publicação assinada e no próprio diário. A lista de Avisos não usa push. Os avisos da versão web hospedada, em Notificações, são um caminho à parte (seguir, resposta, curtida e republicação) e não incluem citação nem menção. O aviso cifrado nativo (APNs e FCM) continua um desenho futuro.
 
 **Ler e sincronizar**
 
@@ -138,9 +140,9 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 **Notificações**
 
-1. O iPhone corta conexões em segundo plano, então avisos precisam passar pela Apple (APNs) e pelo Google (FCM).
-2. Quem responde, menciona ou manda mensagem pede ao serviço de push um aviso cifrado para o destinatário.
-3. O serviço vê só a chave do destinatário e um texto cifrado; o celular decifra antes de mostrar e depois sincroniza por P2P.
+1. Na versão web hospedada, a pessoa liga os avisos em Ajustes ("Avisos no aparelho"). Vêm desligados. São quatro eventos: alguém começou a seguir, respondeu, curtiu ou republicou. Cada aviso é uma frase com o nome e a ação. Citação, menção e o crescimento de um diário seguido não geram push. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+2. O semeador, ao ver um desses registros num diário que serve, manda o candidato em loopback ao serviço de conta. O semeador não vê a inscrição do aparelho.
+3. O serviço de conta monta "nome + ação" e cifra de ponta a ponta (RFC 8291). O serviço de push do navegador vê só o texto cifrado e o endereço do aparelho. O texto cifrado tem sempre o mesmo tamanho, mas o momento da entrega é visível para o serviço de push e pode ser cruzado com os registros públicos. O aparelho decifra e mostra. O aviso nativo pela Apple (APNs) e pelo Google (FCM) continua um desenho futuro.
 
 ## Identidade e recuperação de login
 
@@ -161,27 +163,31 @@ A chave de cada pessoa é dividida em três partes e quaisquer duas assinam: nin
 
 ## Verificação de idade
 
-A idade é confirmada antes de a identidade existir, e a rede guarda só a faixa etária, nunca documento ou foto.
+A idade é confirmada antes de a identidade valer na rede, e a rede guarda só a faixa etária, nunca documento ou foto.
+
+**Idade mínima: 16 anos.** Decisão do dono do produto (2026-10-29), com base no ECA Digital; é uma regra adotada pela Varanda, não um limite fixado pela lei, e está sujeita a parecer jurídico.
+
+**Web hospedada (Didit).** O nó do navegador cria a chave local antes, só para provar quem é o dono nas rotas de idade; o vínculo com a conta Google e o certificado esperam o resultado. A verificação usa o fluxo hospedado da Didit: estimativa por rosto, com o documento como alternativa configurada no fluxo (workflow) da Didit. Uma estimativa por rosto abaixo de 21 anos nunca libera: pede documento. Só o documento pode recusar (menos de 16). O serviço de conta guarda no `age.json` só a faixa (`16-17` ou `18+`), o método (`didit`) e a data. O certificado v2 continua com `ageBand: 'unchecked'`. Todo membro da web hospedada, inclusive quem já tinha vínculo, fica bloqueado até verificar. O sinal da loja e a credencial do gov.br continuam planejados. O app nativo não muda: segue o certificado dado pelo operador.
 
 ```mermaid
 flowchart TD
-  A[Instala o app] --> B[Cria par de chaves no aparelho]
+  A[Instala o app ou abre a web] --> B[Cria par de chaves no aparelho]
   B --> C{Sinal da loja disponível?}
-  C -->|Sim| D[Faixa etária da loja]
-  C -->|Não| E[Estimativa por rosto — imagem apagada na hora]
-  E --> F{Resultado perto do limite ou inconclusivo?}
-  F -->|Sim| G[Documento e selfie — só a faixa é guardada]
+  C -->|Sim, planejado| D[Faixa etária da loja]
+  C -->|Não; web hospedada| E[Estimativa por rosto na Didit: a Varanda não recebe a imagem]
+  E --> F{Abaixo de 21 anos ou inconclusivo?}
+  F -->|Sim| G[Documento na Didit: só a faixa é guardada]
   F -->|Não| D
+  G --> D
   D --> H{Faixa etária}
-  H -->|18+| I[Emite certificado de membro — MVP]
-  H -->|16–17| J[Fase 2 — privacidade restritiva]
-  H -->|até 15| K[Fase 3 — conta vinculada ao responsável]
+  H -->|18+| I[Membro com faixa 18+]
+  H -->|16-17| J[Membro com faixa 16-17]
+  H -->|até 15| K[Bloqueado]
   I --> L[Divide a chave para recuperação]
-  J -.->|fora do MVP| L
-  K -.->|fora do MVP| L
+  J --> L
 ```
 
-No MVP só a saída de 18 anos ou mais existe; as saídas tracejadas (fases 2 e 3) entram depois.
+Na web hospedada, as saídas 18+ e 16-17 existem e viram membro com a faixa guardada no `age.json`; até 15 anos fica bloqueado. O modo restritivo para 16 e 17 anos (issue #74) e a conta vinculada a um responsável ainda não existem.
 
 | Método | Quando entra | O que a rede recebe | Custo |
 | --- | --- | --- | --- |
@@ -217,21 +223,22 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
-| Publicações e perfil | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia. Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |
-| Lista de quem a pessoa segue (registros `follow` no diário) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário | Execução de contrato (Art. 7º, V) | Até a pessoa apagar |
+| Publicações e perfil (inclui a foto do perfil, uma imagem 512x512 sem metadados) | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia. Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |
+| Lista de quem a pessoa segue (registros `follow` no diário), curtidas e republicações (registros `like` e `repost`) e fotos das publicações | Os mesmos lugares do diário: é pública para quem tem o diário. O app guarda a lista de quem curtiu ou republicou só na memória, enquanto a tela está aberta | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; a lista na tela, só enquanto ela está aberta |
 | Mensagens diretas | Só nos aparelhos dos participantes, cifradas de ponta a ponta | Execução de contrato | Até apagarem |
 | Mensagens de grupo público (texto, respostas, ocultações, banimentos, saídas) | Núcleos de escritor nos aparelhos dos membros e nos semeadores no Brasil. O texto é público, como o de uma publicação, e fica em cópias que a associação não controla. Sair e ocultar mantêm as cópias; as regras de retenção estão em "Grupos públicos (Cadeiras de Praia)" abaixo | Execução de contrato (Art. 7º, V) | Sair não encerra a retenção; a remoção segue as regras abaixo, sem recolher cópias de outros aparelhos |
 | Participação em grupo (registros `group-join` no diário e `group-leave` no núcleo do escritor) | A declaração fica no diário e a saída no núcleo do escritor; ambas são públicas para quem tem essas cópias | Execução de contrato (Art. 7º, V) | O índice do semeador fica em memória; os registros seguem a retenção dos respectivos núcleos |
-| Certificado de membro (chave, faixa etária, método, data) | Serviço de idade, no Brasil | Obrigação legal, ECA Digital (Art. 7º, II) | Enquanto a conta existir |
-| Imagem do rosto, só na estimativa de idade | Processada e apagada na hora | Dado sensível: consentimento específico ou obrigação legal (Art. 11), a definir | Nenhuma |
+| Faixa etária do membro | `age.json` do serviço de conta (chave, faixa, método, data), no Brasil | Obrigação legal, ECA Digital (Art. 7º, II), a confirmar em parecer | Enquanto a conta existir |
+| Imagem do rosto e documento, só na verificação de idade | Processada pelo parceiro (Didit); a Varanda nunca a recebe; a sessão é apagada no parceiro logo após a decisão (retenção mínima configurada) | Dado sensível: consentimento específico ou obrigação legal (Art. 11), a definir em parecer | Mínima no parceiro; nenhuma na Varanda |
 | Vínculo com a conta Google (sub do Google, e-mail, chave do membro, @nome atual e os já usados, datas, certificado) | Serviço de conta, no Brasil | Execução de contrato (Art. 7º, V), para dar o certificado e o @nome; e atender pedidos legais e bloqueios | Em aberto (issue #38) |
 | Denúncias de membros (chave de quem denuncia e de quem é denunciado, publicação, motivo, texto de quem denuncia, trecho citado, data, assinatura) e registro de decisões dos moderadores (e-mail do moderador, decisão, data) | Serviço de conta, no Brasil (`moderation.json`) | Moderação e pedido legal (a base legal ainda precisa de parecer) | Em aberto (issue #38); nada é apagado automaticamente |
 | Precedentes humanos da triagem (texto verificado, motivo, decisão, hash e vetor quantizado; no máximo 4000) | Serviço de conta, no Brasil (`exemplars.json`, modo 0600, volume `account-data`) | Moderação (a base legal ainda precisa de parecer) | Em aberto (issue #38); uma linha inválida torna o arquivo indisponível e ele nunca é regravado |
 | Marcas da triagem e leituras verificadas em cache (no máximo 2000) | Serviço de conta, no Brasil (`triage.json`, modo 0600, volume `account-data`) | Dado derivado da moderação (a base legal ainda precisa de parecer) | Se corrompido, renomeado para `triage.json.corrupt-<ms>` e recriado |
 | Contagens agregadas de uso (membros, diários, ativos, conexões, armazenamento, cadastros por semana/mês) | Serviço de conta (usage.json, 0600, volume account-data); ativos só na memória do semeador | Não são dados pessoais: só contagens, sem chave, e-mail ou @nome; a data de cadastro já é pública no certificado (confirmar no parecer) | Até 400 dias, rotativo; ativos zeram ao reiniciar o semeador |
 | Registro de aceite dos Termos de Uso e da Política de Privacidade (versão e data; no serviço de conta também chave do membro, nonce e assinatura) | Aparelho; serviço de conta, no Brasil (`terms.json`, modo 0600, volume `account-data`), só para membros com vínculo Google | Execução de contrato (a confirmar em parecer) | Em aberto (issue #38) |
+| Convites de entrada (`invites.json`: chave de quem criou o convite, identificador aleatório, hash do código só enquanto não usado, data de criação, usado sim ou não; nada de quem recebeu nem de quem usou) | Serviço de conta, no Brasil (`invites.json`, modo 0600, volume `account-data`), só quando `VARANDA_INVITES_PER_WEEK` está definido | Execução de contrato (a confirmar em parecer); finalidade: entrada por convite | A semana atual e os convites ainda dentro dos 7 dias de validade (até 14 dias no total); o resto é apagado na próxima criação de convite |
 | E-mail de recuperação | Guardião, no Brasil | Execução de contrato | Enquanto a conta existir |
-| Token de push | Serviço de push no Brasil; passa por Apple e Google | Execução de contrato | Até a pessoa desligar os avisos |
+| Inscrição de Web Push (endereço do aparelho, `endpoint`, e as chaves `p256dh` e `auth`) | Serviço de conta no Brasil (`push.json`, modo 0600, volume `account-data`). O texto cifrado atravessa o serviço de push do fabricante, que pode estar fora do Brasil | Consentimento (a confirmar no parecer) | Até a pessoa desligar ou o serviço responder 404 ou 410 |
 | Registros de acesso (IP, data, hora) | Semeadores e serviços | Obrigação legal, se o Art. 15 do Marco Civil se aplicar | 6 meses, se aplicável |
 
 **Vínculo com a conta Google (hipóteses de desenho).**
@@ -240,7 +247,8 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 - A retenção está em aberto (issue #38): enquanto a conta existir é só uma proposta. A exclusão e a portabilidade (Art. 18) desses dados dependem do serviço de conta, não do diário; o `account export` é o ponto de partida.
 - O @nome troca no máximo uma vez a cada 7 dias, e um nome já usado por um membro nunca é dado a outro. Um nó antigo ou um seguidor que ainda não sincronizou pode mostrar por um tempo o nome anterior.
 - Com o teto de membros (`VARANDA_MAX_MEMBERS`), um vínculo recusado com "lista de espera" não é guardado: não fica linha pendente, nem `sub`, e-mail ou @nome escolhido, nem certificado ou registro de nome; a linha que a conclusão recusa é apagada. Quem já é membro não muda. Essa regra não altera as conclusões jurídicas desta seção: a base legal, a retenção (issue #38) e os papéis seguem como estão.
-- O certificado v2 não afirma idade (`ageBand: 'unchecked'`): o vínculo com a conta Google não é verificação de idade, e a lacuna do ECA Digital descrita acima continua aberta.
+- Com o convite de entrada (`VARANDA_INVITES_PER_WEEK`), um convite recusado não guarda nada sobre a pessoa convidada e o Google não é chamado: a volta do Google é recusada antes de o código ser trocado, e a linha pendente é apagada. O código do convite não vai para o Google. O `invites.json` guarda a chave de quem convidou, mas nunca dado de quem recebeu o link. O registro de vínculo de quem entrou por convite guarda o hash do convite usado (dado novo no diretório). Quem convidou quem pode ser reconstruído a partir de uma cópia de `invites.json` anterior ao uso e, de forma aproximada, pelas datas. Essa regra também não altera as conclusões jurídicas desta seção: a base legal, a retenção (issue #38) e os papéis seguem como estão.
+- O certificado v2 não afirma idade (`ageBand: 'unchecked'`): o vínculo com a conta Google não é verificação de idade. A faixa verificada fica no serviço de conta (`age.json`), não no certificado.
 - Dois segredos, dois lugares: o segredo da associação (que certifica o emissor) fica na máquina do operador; o segredo do emissor (que assina certificados v2 e registros de @nome) fica só no serviço de conta.
 
 **Denúncias e painel de moderação (hipóteses de desenho).**
@@ -259,14 +267,14 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 **Onde os dados ficam**
 
-- Semeadores, serviço de idade, guardiões e push ficam em datacenters no Brasil.
-- Saem do Brasil: avisos pela Apple e pelo Google, e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024; a política de privacidade informa isso.
+- Semeadores, guardiões e o serviço de conta (onde ficam a inscrição de Web Push, `push.json`, e a faixa etária, `age.json`) ficam em datacenters no Brasil. O serviço de push do navegador e o parceiro de verificação de idade (Didit) podem estar fora.
+- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), a selfie e o documento da verificação de idade, tratados pela Didit, e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
 
 **Antes do lançamento**
 
 - [ ] Nomear o encarregado (Art. 41) e publicar o canal de contato
 - [ ] Fazer o relatório de impacto (RIPD, Art. 38): há dado biométrico, menores e grande escala
-- [ ] Política de privacidade em português simples (versão 1 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
+- [ ] Política de privacidade em português simples (versão 4 no app, sujeita a revisão jurídica: `apps/app/src/legal.js`)
 - [ ] Plano de resposta a incidentes, com aviso à ANPD e aos titulares (Art. 48)
 
 ## Moderação e obrigações legais

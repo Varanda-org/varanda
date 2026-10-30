@@ -21,13 +21,22 @@ const PLAIN = {
   'grave o certificado de membro antes de publicar': 'Sua conta ainda está sendo preparada. Tente de novo em instantes.',
   'a conexão com o nó foi encerrada': 'A conexão foi interrompida. Tente de novo.',
   'sem conexão com o nó': 'A conexão foi interrompida. Tente de novo.',
+  'semeador indisponível': 'Sem conexão agora. Tente de novo em instantes.',
+  'sem conexão com o semeador': 'Sem conexão agora. Tente de novo em instantes.',
+  'Semeador ocupado; tente novamente em instantes.': 'Muitas pessoas conectadas agora. Tente de novo em instantes.',
+  'conexão com o semeador encerrada': 'A conexão foi interrompida. Tente de novo.',
+  'não é possível seguir a própria chave': 'Você não pode seguir a si mesmo.',
   'mídia inválida': 'Não foi possível usar esta foto.',
   'mídia disponível só na versão web': 'Fotos só podem ser publicadas na versão web.',
   'esta conta Google já está vinculada a outra chave': 'Esta conta Google já está em uso por outra conta Varanda.',
   'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
   'o nó do navegador não carregou': 'Não foi possível carregar o app. Recarregue a página.',
   'não foi possível carregar o nó do navegador': 'Não foi possível carregar o app. Recarregue a página.',
-  'nó local indisponível na web': 'Não foi possível carregar o app. Recarregue a página.'
+  'nó local indisponível na web': 'Não foi possível carregar o app. Recarregue a página.',
+  'referência inválida': 'Não encontramos essa publicação.',
+  'não é possível apagar este registro': 'Este registro não pode ser apagado.',
+  'o registro não é uma publicação': 'Este registro não é uma publicação.',
+  'o registro não é um perfil': 'Este registro não é um perfil.'
 }
 
 // The plain words for a message, or the message itself.

@@ -1,3 +1,4 @@
+/* global document */
 // The app shell: before anything else the Termos de Uso and Política de
 // Privacidade gate (src/terms.js: per member, per version; nothing renders
 // behind it and autosync, the outbox and a profile invite wait for it; a
@@ -5,15 +6,17 @@
 // then the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar, the
+// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar (an info button
+// that opens the screen's 'Como funciona' sheet), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
 // both show; its close is remembered for 30 days), the publish button and
 // the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
 // stops a run; its details live in Ajustes → Sincronização. Above the tabs a
-// small screen stack (src/nav.js) opens Conversa (a post and its replies) and
-// Membro (a profile) as full-screen layers; the tabs stay mounted below.
+// small screen stack (src/nav.js) opens Conversa (a post and its replies),
+// Curtidas (who liked or reposted a post) and Membro (a profile) as
+// full-screen layers; the tabs stay mounted below.
 // Back: the browser Back button (src/history.web.js; an in-app back calls
 // history.back() so the history and the stack never drift), Escape on the
 // web, the Android Back button (BackHandler); an open sheet closes first.
@@ -23,6 +26,17 @@
 // consent was given in this page load; after a reload (the Google return) the
 // profile opens for one tap on Seguir, and a visitor already signed in only
 // gets the profile opened.
+// A notification click (hosted web, src/pushClient.web.js) arrives as
+// /?aviso=... at load or as a worker message: held in memory only, it opens
+// Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
+// for the key it names; nothing is written, followed or retried.
+// A splash holds a short minimum while the app loads and, on the web, covers
+// the node's connection; the intro cards (src/intro.js) follow once per device,
+// before the Termos.
+// The age gate (hosted web only, src/age.js) holds every member, linked or
+// not, at 'Confirme sua idade' until the account service answers
+// 'verificado'; it fails closed while the policy or the result is unknown,
+// and nothing about it is stored on the device.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -30,37 +44,52 @@ import { StatusBar } from 'expo-status-bar'
 import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
+import { hostedPage } from './src/configStore'
 import { NamesProvider, useNames } from './src/names'
-import { lookupUsername, parseReturn, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
+import { captureSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
 import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
 import { useTerms } from './src/useTerms'
+import { INTRO_VERSION, introDecision } from './src/intro'
+import { useIntro } from './src/useIntro'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, coverConnecting, holdSplash } from './src/splashGate'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
+import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
+import { InstallCard } from './src/ui/InstallCard'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { watchRelease } from './src/pwa'
+import { captureLaunch, listenLaunch } from './src/pushClient'
+import { nextLaunch } from './src/push-state'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
+import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
+import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa from './src/screens/Conversa'
+import Curtidas from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
+import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
+import Idade from './src/screens/Idade'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -82,10 +111,14 @@ const READY_TOAST = 'Tudo pronto. Siga pessoas para encher a Rua.'
 // A link confirmed in Ajustes re-arms the terms sync at most this many times
 // per member in a page load (Ajustes re-reads the info often).
 const TERMS_REARM_MAX = 5
+// A failed age policy read is tried again after 5 s, 15 s, then every 60 s
+// (and when the connection comes back); the member stays blocked meanwhile.
+const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
+const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
 
-// The steps the setup branch (Identidade) renders; the others belong to the
-// shell (spinner, Perfil, the tabs).
-const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', 'certificado'])
+// The steps the setup branch (Identidade, Idade) renders; the others belong
+// to the shell (spinner, Perfil, the tabs).
+const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado'])
 
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
@@ -94,15 +127,37 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'vinculo', 'identidade', '
 const LINK_RETURN = (() => {
   try {
     const search = globalThis.location?.search
-    return parseReturn(search) !== null || parseReturnWaitlist(search) !== ''
+    return parseReturn(search) !== null || parseReturnWaitlist(search) !== '' || parseReturnInvite(search) !== ''
   } catch { return false }
 })()
+
+// True when this page load is the return from the age verification
+// (?idade=volta). Only skips the intro cards: the result is always asked of
+// the account service after the unlock. The query it carries (idade and the
+// provider's untrusted verificationSessionId and status) is removed here, once;
+// the pathname (read by the captures below), other params and hash are kept.
+const AGE_RETURN = (() => { try { return parseReturnAge(globalThis.location?.search) } catch { return false } })()
+if (AGE_RETURN) {
+  try {
+    const loc = globalThis.location
+    const hist = globalThis.history
+    const params = new URLSearchParams(loc.search)
+    for (const name of ['idade', 'verificationSessionId', 'status']) params.delete(name)
+    const query = params.toString()
+    hist.replaceState(hist.state, '', loc.pathname + (query ? '?' + query : '') + loc.hash)
+  } catch {}
+}
 
 // A profile link (/@ana, /m/<key>) is read and cleaned to '/' here, once,
 // before any render, takeReturnNotice or bindHistory, so neither the history
 // stack nor the account flow ever sees that path; search and hash are kept
 // (?conta= and #token= are read later). No pathname listener: only a page load
 // carries a profile link. Null off the hosted web page.
+// A signup invite (/convite/<code>) is cleaned to '/' first, keeping ?conta=
+// and #token=. It is stored under its own key, so this capture and the profile
+// one below never clear each other. Caddy already serves index.html for
+// extensionless paths, so /convite/ needs no Caddyfile route.
+captureSignupInvite()
 const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.
@@ -113,6 +168,10 @@ const INVITE_RETRIES = 10
 const inviteRetryDelay = (n) => (n === 0 ? 15000 : n === 1 ? 30000 : 60000)
 // Two invite records name the same profile (the @nome or the key).
 const sameTarget = (a, b) => !!a && !!b && a.username === b.username && a.key === b.key
+// A notification click's /?aviso=... query, read and stripped once at load
+// after the profile link (search and hash otherwise kept). Null off the
+// hosted web page.
+const CAPTURED_LAUNCH = captureLaunch()
 
 // True when node.info confirms an identity and a member certificate.
 function setupComplete (info) {
@@ -125,6 +184,16 @@ function Member () {
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   const install = useInstall()
+  const bootAt = useRef(Date.now()).current
+  const connectingAt = useRef(null)
+  const released = useRef(false)
+  const [, bumpSplash] = useState(0)
+  // A timer can fire a few ms before Date.now() reaches the threshold; the
+  // slack makes the re-render see it passed, since nothing re-arms the timer.
+  useEffect(() => {
+    const t = setTimeout(() => bumpSplash((n) => n + 1), SPLASH_MIN_MS + 50)
+    return () => clearTimeout(t)
+  }, [])
   const [updateReady, setUpdateReady] = useState(false)
   const [updateDismissed, setUpdateDismissed] = useState(false)
   useEffect(() => {
@@ -163,6 +232,10 @@ function Member () {
   const followsChanged = useCallback(() => {
     setVersion((v) => v + 1)
     setFollowsSignal((v) => v + 1)
+  }, [])
+  const deletedPost = useCallback(() => {
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
   }, [])
   // Avisos has something unseen: a plain dot on its tab, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
@@ -248,21 +321,32 @@ function Member () {
   // A lock, unlock or reset discards the report sheet (and with it any
   // signature still held in its memory).
   useEffect(() => setReport(null), [generation, locked])
+  // A lock ends this account's session in the tab: nothing it opened or
+  // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
+  // next account.
   useEffect(() => {
     if (!locked) return
     setSetupDone(false)
     setReachedTabs(false)
     setInfo(null)
+    setComposer({ open: false, reply: null, quote: null })
+    setAjustes(null)
   }, [locked])
-  const setupStep = locked || (!setupDone && !confirmed)
   const mode = passkey !== null && node.hosted ? 'hosted' : (node.canConfigure ? 'native' : 'serve')
+  // The age gate follows the origin, not the config source: a configuration
+  // typed by hand on the hosted page (Conectar, "usar outra configuração")
+  // turns node.hosted off but keeps the same passkey and account here.
+  const ageHosted = passkey !== null && (node.hosted || hostedPage)
 
   // --- the Termos de Uso and the Política de Privacidade (src/terms.js) ---
   // The device's record says which member accepted which version; the gate
-  // (before Conexao, Entrar and the tabs) asks whenever it cannot tell that
-  // the member in front of it accepted the current one. The member is the
-  // unlocked passkey's key (browser node) or node.info's identity.
+  // asks when the device has no record of the current version (before
+  // Conexao and Entrar) and, once a member is known, when the record does not
+  // list that member. The member is the unlocked passkey's key (browser node)
+  // or node.info's identity.
   const terms = useTerms(LEGAL_VERSION)
+  const intro = useIntro()
+  const introState = introDecision({ status: intro.status, record: intro.record, version: INTRO_VERSION })
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
     : ((info && info.publicKey) || null)
@@ -276,7 +360,8 @@ function Member () {
       hosted: mode === 'hosted',
       // A failed first status read is known too: nobody (member null), so
       // the gate shows and then Identidade's error and its retry.
-      identityKnown: passkey === null || pkStatus !== null || !!passkey.error
+      identityKnown: passkey === null || pkStatus !== null || !!passkey.error,
+      locked
     })
   // Past the setup a hosted member is never null (unlocked means a known
   // key). On native or varanda-serve a node reached later without an identity
@@ -293,6 +378,124 @@ function Member () {
   }, [decision, member, terms.claim, bindTerms])
   const memberRef = useRef(member)
   memberRef.current = member
+  const recovering = passkey !== null && passkey.recovering === true
+  const onceSync = !!(node.sync.active && node.sync.active.once) || node.sync.starting === true
+
+  // --- the age gate (src/age.js; hosted web only) ---
+  // The policy is read once the node is ready; a failed read (null) keeps
+  // everyone blocked and is tried again with a backoff and when the
+  // connection comes back.
+  const [agePolicy, setAgePolicy] = useState(undefined)
+  const [agePolicyTick, setAgePolicyTick] = useState(0)
+  const agePolicyTries = useRef(0)
+  const agePolicyKnown = agePolicy !== undefined && agePolicy !== null
+  useEffect(() => {
+    if (!ageHosted || !ready || agePolicyKnown) return
+    let cancelled = false
+    let timer = null
+    readAgePolicy().then((p) => {
+      if (cancelled) return
+      setAgePolicy(p)
+      if (p !== null) return
+      timer = setTimeout(() => setAgePolicyTick((n) => n + 1), agePolicyDelay(agePolicyTries.current))
+      agePolicyTries.current += 1
+    })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageHosted, ready, agePolicyKnown, agePolicyTick])
+  const agePolicyOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = agePolicyOnlineRef.current
+    agePolicyOnlineRef.current = node.online
+    if (was !== false || node.online !== true || agePolicyKnown) return
+    setAgePolicyTick((n) => n + 1)
+  }, [node.online, agePolicyKnown])
+
+  // The member's result, asked of the account service (never taken from the
+  // URL or from storage): once per generation and member, and again on
+  // 'Conferir de novo'. Not while the recovery after an unlock or a once sync
+  // runs: age.sign is a member request and would preempt that run.
+  const [ageState, setAgeState] = useState(undefined)
+  const [ageBusy, setAgeBusy] = useState(false)
+  const [ageError, setAgeError] = useState('')
+  const [ageNote, setAgeNote] = useState('')
+  const [ageCheckTick, setAgeCheckTick] = useState(0)
+  // Bumped by every age request and by a lock or generation change: an
+  // answer that arrives under another number is dropped.
+  const ageSeq = useRef(0)
+  const ageRan = useRef(null)
+  useEffect(() => {
+    ageSeq.current += 1
+    ageRan.current = null
+    setAgeState(undefined)
+    setAgeBusy(false)
+    setAgeError('')
+    setAgeNote('')
+  }, [generation, locked])
+  // termsOk: reading the result records the band and closes the partner's
+  // session, which must not happen before the current terms are accepted.
+  // Only once the service said the check is required: an unknown policy keeps
+  // the member blocked (ageGate) and is retried, without calling the age routes.
+  const ageReadNow = ageHosted && ready && termsOk && !locked && member !== null && !recovering && !onceSync &&
+    agePolicyKnown && agePolicy.required === true
+  const ageRequest = (work) => {
+    const seq = ++ageSeq.current
+    const gen = generationRef.current
+    const who = memberRef.current
+    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current
+    setAgeBusy(true)
+    setAgeError('')
+    setAgeNote('')
+    work(stale).catch((err) => {
+      if (!stale()) setAgeError(ageErrorText(err) || errorText(err))
+    }).finally(() => {
+      if (!stale()) setAgeBusy(false)
+    })
+  }
+  useEffect(() => {
+    if (!ageReadNow) return
+    const key = generation + '#' + member + '#' + ageCheckTick
+    if (ageRan.current === key) return
+    ageRan.current = key
+    ageRequest(async (stale) => {
+      const { nonce } = await ageStart({ member })
+      if (stale()) return
+      const { signature } = await node.request('age.sign', { action: 'result', nonce })
+      if (stale()) return
+      const { state } = await ageResult({ member, nonce, signature })
+      if (!stale()) setAgeState(state)
+    })
+  }, [ageReadNow, generation, member, ageCheckTick])
+  const checkAge = () => setAgeCheckTick((n) => n + 1)
+  // A new verification session: the service answers 'verificado' when the
+  // band is already recorded, otherwise the provider's page, opened as a full
+  // page navigation (it comes back with ?idade=volta).
+  const startAge = () => {
+    if (member === null || ageBusy) return
+    ageRequest(async (stale) => {
+      const { nonce } = await ageStart({ member })
+      if (stale()) return
+      const { signature } = await node.request('age.sign', { action: 'session', nonce })
+      if (stale()) return
+      const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
+      if (stale()) return
+      if (r.state === 'verificado') return setAgeState('verificado')
+      if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
+      setAgeNote(AGE_REDIRECT_TEXT)
+      globalThis.location.assign(r.url)
+    })
+  }
+  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageState })
+  const ageClear = !ageBlocking(ageNeeded)
+
+  // The gates: `confirmed` can latch setupDone for a member already linked,
+  // so setupDone alone never opens the tabs, autosync, the outbox, the terms
+  // sync or the profile invite; ageClear is required everywhere too. Not
+  // gated by age (documented, as for the terms): the post-unlock recovery of
+  // the member's own diary, which runs before the age check.
+  const setupStep = locked || (!setupDone && !confirmed) || !ageClear
 
   // The acceptance sent to the account service (hosted, linked members): one
   // start, one signature by the node, one finish, per member and version and
@@ -314,15 +517,15 @@ function Member () {
     Object.hasOwn(terms.record.members, member)
     ? terms.record.members[member]
     : null
-  const syncTermsNow = shouldSyncTerms({
+  const syncTermsNow = ageClear && shouldSyncTerms({
     hosted: mode === 'hosted',
     termsOk,
     ready,
     online: node.online,
     locked,
     setupDone,
-    recovering: passkey !== null && passkey.recovering === true,
-    onceSync: !!(node.sync.active && node.sync.active.once) || node.sync.starting === true,
+    recovering,
+    onceSync,
     member,
     record: terms.record,
     version: LEGAL_VERSION,
@@ -432,12 +635,12 @@ function Member () {
 
   // The sync intent: continuous sync is wanted as soon as the certificate is
   // confirmed (the profile step does not gate it), never while locked or
-  // while the recovery run after an unlock is on. The provider does the rest.
-  const recovering = passkey !== null && passkey.recovering === true
+  // while the recovery run after an unlock is on, never before the age check
+  // clears. The provider does the rest.
   const { setAutoSync } = node
   useEffect(() => {
-    setAutoSync(ready && !locked && setupDone && !recovering && termsOk)
-  }, [ready, locked, setupDone, recovering, termsOk, setAutoSync])
+    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
+  }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
 
   // Back from the Google step with a certificate already held: the tabs show
   // after the unlock, so open Ajustes → Conta once, where the account card offers
@@ -468,13 +671,23 @@ function Member () {
     memberCert: info !== null && info.memberCert === true,
     profileKnown: ownProfile !== undefined || names.unsupported === true,
     hasName: !!(ownProfile && ownProfile.name),
-    skippedName
+    skippedName,
+    // No own key yet (the diary creation after the passkey failed): Identidade
+    // keeps the screen, with its error and retry, since the age check needs the
+    // key. Nothing is released: setupStep still holds while the age gate does,
+    // and the service refuses the link without the check.
+    ageVerified: ageClear || member === null
   })
   // The latched setupDone rule above decides between the setup branch and the
   // shell's steps; the step machine only names the step within each.
   let { step, index, total } = onboarding
-  if (setupStep && !SETUP_STEPS.has(step)) {
-    step = mode === 'hosted' ? 'vinculo' : 'certificado'
+  if (setupStep && mode !== 'hosted' && !ageClear && member !== null && !locked && !recovering) {
+    // A hand-typed configuration on the hosted page: the native steps do not
+    // know the age check, so it takes the screen here.
+    step = 'idade'
+    index = 1
+  } else if (setupStep && !SETUP_STEPS.has(step)) {
+    step = mode === 'hosted' ? (ageClear || member === null ? 'vinculo' : 'idade') : 'certificado'
     index = 1
   } else if (!setupStep && SETUP_STEPS.has(step)) {
     step = 'pronto'
@@ -487,6 +700,24 @@ function Member () {
     index = total
   }
   useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
+
+  // Offered once, right after a signup on this page load. LINK_RETURN alone
+  // also covers an existing member linking Google from Ajustes > Conta, so the
+  // signup signal is 'vinculo' with a node.info that has been read and holds no
+  // certificate: while info is still null the step machine shows 'vinculo' for
+  // that member too. Dismissing also quiets the top-bar note for 30 days. The
+  // Ajustes > Conta sheet the linkReturnRef effect may open on this load can
+  // cover the card for a moment.
+  const signupRef = useRef(false)
+  const certMissing = info !== null && info.memberCert !== true
+  useEffect(() => { if (LINK_RETURN && step === 'vinculo' && certMissing) signupRef.current = true }, [step, certMissing])
+  const [installCardOpen, setInstallCardOpen] = useState(false)
+  useEffect(() => {
+    if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
+      signupRef.current = false
+      setInstallCardOpen(true)
+    }
+  }, [setupStep, step, install.card])
 
   // 'Um instante': the cache retries the own key while it is unknown, and
   // after SLOW_LOOKUP_MS the person may continue without a name.
@@ -524,7 +755,7 @@ function Member () {
   // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
-    enabled: ready && !locked && setupDone && termsOk && !(passkey && passkey.recovering) &&
+    enabled: ready && !locked && setupDone && termsOk && ageClear && !(passkey && passkey.recovering) &&
       node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
@@ -567,6 +798,18 @@ function Member () {
     const binding = bindHistory({
       depthOf: () => nav.depth(stackRef.current),
       onBack: (n) => {
+        if (closeHelp()) {
+          // Help closes first and the screen (and any report draft) stays; the
+          // popstate already stepped the history back, so push the entries again.
+          const h = globalThis.history
+          const d = nav.depth(stackRef.current)
+          if (h && typeof h.pushState === 'function') {
+            for (let k = d - n + 1; k <= d; k++) {
+              try { h.pushState({ varanda: k }, '') } catch {}
+            }
+          }
+          return
+        }
         if (sheetOpenRef.current) {
           // A sheet is open: Back closes it first and the screen stays. The
           // popstate already stepped the history back, so the entries it
@@ -627,6 +870,9 @@ function Member () {
   const openThread = useCallback(({ ref, seed } = {}) => {
     pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
   }, [pushScreen])
+  const openEngagers = useCallback(({ ref, kind } = {}) => {
+    pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
+  }, [pushScreen])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -638,12 +884,42 @@ function Member () {
   }, [pushScreen, clearStack, ownKey])
   // A lock, unlock or reset closes the pushed screens too.
   useEffect(() => clearStack(), [generation, locked, clearStack])
+  // A tap on @nome in a post. The row author's own verified name opens with
+  // no request; any other name goes through the account lookup (current
+  // holder only). No seed: Membro re-verifies and a seed would flash.
+  const mentionSeq = useRef(0)
+  const lockedRef = useRef(locked)
+  lockedRef.current = locked
+  const openMention = useCallback(async (username, ctx) => {
+    const tap = ++mentionSeq.current
+    if (ctx && ctx.username === username) {
+      openMember(ctx.author)
+      return
+    }
+    if (node.online === false) {
+      showToast('Sem conexão para abrir o @nome.')
+      return
+    }
+    const gen = generationRef.current
+    const r = await resolveInvite({ username }, lookupUsername)
+    // A newer tap, a lock or an identity change meanwhile drops this answer.
+    if (tap !== mentionSeq.current || gen !== generationRef.current || lockedRef.current) return
+    if (r.status === 'ready') openMember(r.key)
+    else showToast(r.status === 'not-found' ? NOT_FOUND_TEXT : 'Não foi possível abrir o @nome agora.')
+  }, [openMember, node.online])
+  const mentionHandler = node.hosted === true ? openMention : undefined
 
   // A sheet open over the screens closes first (its Modal handles Back and
   // Escape itself).
   const sheetOpen = composer.open || report !== null || ajustes !== null
   const sheetOpenRef = useRef(sheetOpen)
   sheetOpenRef.current = sheetOpen
+  const helpOpen = useHelpOpen()
+  const helpOpenRef = useRef(helpOpen)
+  helpOpenRef.current = helpOpen
+  // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
+  const stackDepth = nav.depth(stack)
+  useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
@@ -652,13 +928,16 @@ function Member () {
   // (for a newcomer, right after the account link), and that sheet would
   // cover both. The once-sync clauses mirror the outbox gate above: a member
   // request now would preempt the recovery run.
-  const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen &&
+  const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
     // The passkey status was read at least once (or there is no passkey).
-    // Nothing about the invite moves while the terms gate shows.
+    // Nothing about the invite moves while the terms gate shows. The age gate
+    // is not needed here: the card shows on Entrar and the consent is only a
+    // tab-storage record, while the follow waits for atTabs, which needs the
+    // age check passed (setupStep includes it).
     statusKnown: ready && termsOk && (passkey === null || pkStatus !== null),
     locked,
     resumed: !!(pkStatus && pkStatus.resumed === true),
@@ -669,6 +948,44 @@ function Member () {
     acceptedHere
   })
   actionRef.current = action
+
+  // --- a notification click (src/pushClient.web.js) ---
+  // The newest intent (at load or from a click while the passkey screen is
+  // up) waits for the unlock; a later lock and any other key drop it.
+  const launchRef = useRef(CAPTURED_LAUNCH)
+  const [launchSeq, setLaunchSeq] = useState(0)
+  // The screen a click opens reloads even when it is already showing:
+  // Avisos through its refresh prop, the top Conversa by a remount.
+  const [avisosReload, setAvisosReload] = useState(0)
+  const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
+  useEffect(() => listenLaunch((intent) => {
+    launchRef.current = nextLaunch({ held: launchRef.current, intent })
+    setLaunchSeq((n) => n + 1)
+  }), [])
+  const wasUnlocked = useRef(false)
+  useEffect(() => {
+    if (locked && wasUnlocked.current) launchRef.current = null
+    wasUnlocked.current = !locked
+  }, [locked])
+  const launchKey = !locked && pkStatus ? pkStatus.publicKey : null
+  useEffect(() => {
+    const intent = launchRef.current
+    if (intent === null || !atTabs || typeof launchKey !== 'string') return
+    launchRef.current = null
+    if (intent.recipient !== launchKey.toLowerCase()) return
+    if (intent.kind === 'follow') {
+      clearStack()
+      setTab('avisos')
+      setAvisosReload((n) => n + 1)
+    } else {
+      const shownNow = nav.top(stackRef.current)
+      if (shownNow && shownNow.screen === 'conversa' && shownNow.key === intent.ref) {
+        setThreadReload((r) => ({ ref: intent.ref, n: r.n + 1 }))
+      } else {
+        openThread({ ref: intent.ref })
+      }
+    }
+  }, [launchSeq, atTabs, launchKey, clearStack, openThread])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -801,7 +1118,7 @@ function Member () {
   useEffect(() => {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-        if (sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
+        if (helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
         commitStack(nav.pop(stackRef.current))
         return true
       })
@@ -809,7 +1126,7 @@ function Member () {
     }
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
+      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
       goBack()
     }
     globalThis.addEventListener('keydown', onKey)
@@ -822,19 +1139,32 @@ function Member () {
   const sidePad = Math.max(insets.left, insets.right)
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
-  const splash = (
-    <SafeAreaView style={[styles.center, { paddingHorizontal: sidePad }]} edges={sideEdges}>
-      <Text style={styles.brand}>Varanda</Text>
-      <Text style={styles.soft}>conectando…</Text>
-      <StatusBar style='dark' />
-    </SafeAreaView>
-  )
+  const splash = <Splash sidePad={sidePad} edges={sideEdges} />
+  // The intro cards come first, once per device (src/intro.js): presentation
+  // only, so autosync, the outbox and the invite keep waiting for termsOk. A
+  // Google return skips them for that page load without marking them seen.
   // The terms gate, before everything else: Conexao, Entrar (so before
-  // Google), a resumed hosted session and the tabs. Nothing renders behind
-  // it, and autosync, the outbox and the invite wait for termsOk. Not gated
+  // Google) while this device has no record of the current version, and the
+  // tabs. Once it has one, an account that unlocks without its own entry
+  // meets the gate right after the passkey. Nothing renders behind it, and
+  // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  if (decision === 'loading') return splash
+  const gateNext = (introState === 'show' && !LINK_RETURN && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  // The 10 s patience counts only while the splash is what covers the
+  // connect, never while the intro cards or the terms are on screen.
+  const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
+  useEffect(() => {
+    if (!coveringConnect) return
+    if (connectingAt.current === null) connectingAt.current = Date.now()
+    if (!node.canConfigure || released.current) return
+    const remaining = Math.max(0, CONNECT_PATIENCE_MS - (Date.now() - connectingAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [coveringConnect, node.canConfigure])
+  if (decision === 'loading' || introState === 'loading') return splash
+  if (holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })) return splash
+  if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -845,8 +1175,11 @@ function Member () {
   }
 
   if (!ready && !seen) {
-    // loading, connecting, the native Conectar form, or a web error.
-    if (node.phase === 'loading' || (node.phase === 'connecting' && !node.canConfigure)) return splash
+    // The splash covers loading and connecting, also on the hosted page.
+    // A failure or 10 s connecting on a configurable node reveals Conectar;
+    // later retries stay there so its local state survives.
+    if (coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })) return splash
+    released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
@@ -878,7 +1211,23 @@ function Member () {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
     let body
-    if (passkey !== null || info !== null) {
+    if (step === 'idade') {
+      // Unknown and not failed yet counts as busy: an already verified member
+      // sees the spinner, not the start button, while the result is read.
+      body = (
+        <Idade
+          state={ageState}
+          busy={ageBusy || (ageState === undefined && !ageError)}
+          error={ageError}
+          note={ageNote}
+          offline={node.online === false}
+          onStart={startAge}
+          onCheck={checkAge}
+          index={index}
+          total={total}
+        />
+      )
+    } else if (passkey !== null || info !== null) {
       // embedded: the top bar above already carries the step's title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
       const inviteProp = action === 'card'
@@ -901,7 +1250,7 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
         <OfflineNote />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
@@ -927,7 +1276,7 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        <TopBar title={STEP_TITLES[step]} right={<HelpButton doc={HELP.perfil} />} />
         <OfflineNote />
         <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
@@ -935,6 +1284,7 @@ function Member () {
             ownKey={ownKey}
             onSaved={(v) => {
               names.learn(ownKey, v)
+              names.invalidate([ownKey])
               showToast(READY_TOAST)
             }}
             onSkip={() => setSkippedName(true)}
@@ -958,28 +1308,37 @@ function Member () {
       onQuote: startQuote,
       onReport: setReport,
       onOpenThread: openThread,
+      onOpenEngagers: openEngagers,
       onOpenMember: openMember,
+      onOpenMention: mentionHandler,
       onToast: showToast,
-      onFollowsChanged: followsChanged
+      onFollowsChanged: followsChanged,
+      onDeletedPost: deletedPost
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={TAB_TITLES[tab]} />
+          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab]} />} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed
           ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
-          : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
+          : installCardOpen && install.card !== 'none'
+            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+            : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
+              onDeletedPost={deletedPost}
               active={on('rua')}
               refresh={version}
               onReply={startReply}
               onReport={setReport}
+              onToast={showToast}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
@@ -996,7 +1355,9 @@ function Member () {
               onReply={startReply}
               onReport={setReport}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.espiadinha}
@@ -1020,8 +1381,10 @@ function Member () {
           <View style={shown('avisos')}>
             <Avisos
               active={on('avisos')}
-              refresh={version}
+              refresh={version + avisosReload}
               ownKey={ownKey}
+              onOpenThread={openThread}
+              onOpenMember={openMember}
               scrollToTop={scrollSignal.avisos}
               onFollowsChanged={followsChanged}
               onToast={showToast}
@@ -1030,13 +1393,17 @@ function Member () {
           </View>
           <View style={shown('diario')}>
             <Diario
+              onDeletedPost={deletedPost}
               active={on('diario')}
               refresh={version}
               onSettings={setAjustes}
+              onToast={showToast}
               onReply={startReply}
               onPublish={openComposer}
               onOpenThread={openThread}
+              onOpenEngagers={openEngagers}
               onOpenMember={openMember}
+              onOpenMention={mentionHandler}
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
@@ -1047,9 +1414,9 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
-                const Screen = entry.screen === 'conversa' ? Conversa : Membro
+                const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
                 return (
-                  <View key={i + ':' + entry.screen + ':' + entry.key} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                  <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                     <Screen entry={entry} {...screenProps} />
                   </View>
                 )
@@ -1075,7 +1442,8 @@ function Member () {
   const me = {
     publicKey: ownKey,
     name: ownProfile ? (ownProfile.name || null) : null,
-    username: ownProfile ? (ownProfile.username || null) : null
+    username: ownProfile ? (ownProfile.username || null) : null,
+    avatar: ownProfile ? ownProfile.avatar : undefined
   }
   // Light over the Diário band (dark over the offline note above it). The
   // sheets leave the status bar over the (dimmed) screen behind, so they keep
@@ -1087,29 +1455,38 @@ function Member () {
   return (
     <View style={[styles.root, { paddingHorizontal: sidePad }]}>
       {content}
-      <Publicar
-        open={composer.open}
-        reply={composer.reply}
-        quote={composer.quote}
-        me={me}
-        onClose={() => setComposer((c) => ({ ...c, open: false }))}
-        onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
-        onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
-        onPublished={(kind, sentRef) => {
-          // The reply context is dropped only if it is still the one sent; a
-          // sent quote always drops the quote context.
-          setComposer((c) => ({
-            open: false,
-            reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
-            quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
-          }))
-          // Kept in the outbox: nothing new in the diary yet.
-          if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
-          setVersion((v) => v + 1)
-          setPeekVersion((v) => v + 1)
-          showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
-        }}
-      />
+      {/* The terms gate used to unmount these sheets on a hosted lock as a
+          side effect, and a current terms record no longer brings it up. So
+          Publicar is not mounted while locked (its draft and photo go) and
+          Ajustes remounts on every lock and unlock (its cached key goes) but
+          stays reachable at Entrar for the 'Conexão' footer. With the lock
+          effect clearing the composer context, nothing reaches the next
+          account in this tab. */}
+      {!locked && (
+        <Publicar
+          open={composer.open}
+          reply={composer.reply}
+          quote={composer.quote}
+          me={me}
+          onClose={() => setComposer((c) => ({ ...c, open: false }))}
+          onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
+          onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
+          onPublished={(kind, sentRef) => {
+            // The reply context is dropped only if it is still the one sent; a
+            // sent quote always drops the quote context.
+            setComposer((c) => ({
+              open: false,
+              reply: c.reply && c.reply.ref === sentRef ? null : c.reply,
+              quote: kind === 'quote' || (c.quote && c.quote.ref === sentRef) ? null : c.quote
+            }))
+            // Kept in the outbox: nothing new in the diary yet.
+            if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
+            setVersion((v) => v + 1)
+            setPeekVersion((v) => v + 1)
+            showToast(kind === 'reply' ? 'resposta publicada' : 'publicado')
+          }}
+        />
+      )}
       <Denunciar
         open={report !== null}
         target={report}
@@ -1119,7 +1496,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
       <StatusBar style={light ? 'light' : 'dark'} />
     </View>
   )
@@ -1127,6 +1504,12 @@ function Member () {
 
 export default function App () {
   useEffect(() => { loadIcons().catch(() => {}) }, [])
+  // The gate build never mounts Splash, which is what normally removes the overlay.
+  useEffect(() => {
+    if (!GATE_URL || typeof document === 'undefined') return
+    const shell = document.getElementById('varanda-pre-splash')
+    if (shell) shell.remove()
+  }, [])
   if (GATE_URL) {
     const GateScreen = require('./src/gate/GateScreen').default
     return (
@@ -1154,8 +1537,6 @@ const styles = StyleSheet.create({
   hidden: { display: 'none' },
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg },
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  brand: { fontSize: 18, fontWeight: '700', color: colors.accent },
-  soft: { fontSize: 14, color: colors.soft },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
   setupBody: { padding: 16, gap: 12 },

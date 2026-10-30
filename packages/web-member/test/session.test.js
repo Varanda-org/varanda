@@ -7,6 +7,7 @@
 // runs the gate against a fake seeder (sync-gate.test.js's stand-in) to see
 // the record of another device arrive before the duplicate check.
 const test = require('brittle')
+const assert = require('node:assert/strict')
 const net = require('node:net')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -16,13 +17,17 @@ const { WebSocket, WebSocketServer } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createIssuerCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
+const { FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
+const { verifyInvite } = require('@varanda/core/lib/invite')
+const { verifyAge } = require('@varanda/core/lib/age')
+const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -77,17 +82,19 @@ function snapshot (mod, { seq = 1, blocked = [], revokedIssuers = [] }) {
   return createSnapshot({ seq, blocked, revokedIssuers }, mod.keyPair, mod.cert)
 }
 
-// Stores a full local replica of `source` (a Hypercore 10 core) in the node
+// Stores a local replica of `source` (a Hypercore 10 core) in the node
 // storage, as a sync run would, by replicating in memory; the replica core
 // is closed again before the node opens it.
-async function storeReplica (storage, source) {
+async function storeReplica (storage, source, upto = source.length) {
   const key = hex(source.key)
   const replica = new Hypercore(storage.core('replica/' + key), source.key, { valueEncoding: 'binary' })
   await replica.ready()
   const a = source.replicate(true)
   const b = replica.replicate(false)
   a.pipe(b).pipe(a)
-  await replica.download({ start: 0, end: source.length }).done()
+  await replica.download({ start: 0, end: upto }).done()
+  if (replica.length !== source.length) await replica.update()
+  assert.equal(replica.length, source.length)
   a.destroy()
   b.destroy()
   await replica.close()
@@ -256,10 +263,12 @@ test('profile, posts, replies, log and feed of the own diary', async (t) => {
   t.alike(feed.items[1].replyTo, { author: key, seq: 2 })
   t.alike(feed.skipped, [])
   t.is(feed.skippedTruncated, 0)
+  t.alike(feed.incomplete, [])
+  t.is(feed.incompleteTruncated, 0)
 
   // profile.read of the own key (duplicates folded).
   t.alike(await web.request('profile.read', { authors: [key, key] }), {
-    profiles: [{ author: key, name: 'Bia', bio: 'oi', username: null }],
+    profiles: [{ author: key, name: 'Bia', bio: 'oi', avatar: null, username: null }],
     missing: []
   })
 
@@ -296,18 +305,76 @@ test('follows, and reads of diaries with no local data', async (t) => {
 
   const feed = await web.request('feed.read', {})
   t.alike(feed.skipped, [{ key: other, reason: 'no-cert' }])
+  t.alike(feed.incomplete, [])
   const missing = await errorOf(web.request('log.read', { author: other }))
   t.is(missing.code, 'NOT_FOUND')
   t.is(missing.message, 'sem dados locais para este diário')
   t.absent(await storage.hasCore('replica/' + other), 'no core created by a read')
   t.alike(await web.request('profile.read', { authors: [other, key] }), {
-    profiles: [{ author: key, name: null, bio: null, username: null }],
+    profiles: [{ author: key, name: null, bio: null, avatar: null, username: null }],
     missing: [other]
   }, 'no profile record: null name and bio; no local data: missing')
   t.absent(await storage.hasCore('replica/' + other), 'no core created by profile.read')
 
   t.alike(await web.request('follow.remove', { key: other }), { changed: true, followCount: 0 })
   t.alike(await web.request('follow.remove', { key: other }), { changed: false, followCount: 0 })
+})
+
+test('feed.read reports incomplete followed diaries until their full download', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await certified(t)
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+  await source.append(profileRecord({ name: 'Autor', at: '2026-01-01T00:00:00.000Z' }))
+  for (let i = 1; i <= 4; i++) {
+    await source.append(postRecord({ text: 'post ' + i, at: '2026-01-01T00:00:0' + i + '.000Z' }))
+  }
+  const key = await storeReplica(storage, source, 3)
+  await web.request('follow.add', { key })
+
+  const partial = await web.request('feed.read', {})
+  t.alike(partial.incomplete, [key])
+  t.is(partial.incompleteTruncated, 0)
+  t.alike(partial.skipped, [])
+  t.alike(partial.items.map((item) => [item.author, item.seq, item.text]), [[key, 2, 'post 1']])
+
+  await storeReplica(storage, source)
+  const full = await web.request('feed.read', {})
+  t.alike(full.incomplete, [])
+  t.is(full.incompleteTruncated, 0)
+  t.alike(full.items.map((item) => [item.author, item.seq, item.text]), [
+    [key, 2, 'post 1'],
+    [key, 3, 'post 2'],
+    [key, 4, 'post 3'],
+    [key, 5, 'post 4']
+  ])
+})
+
+test('feed.read caps incomplete followed diaries in follow-list order', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await certified(t)
+  const keys = []
+  for (let i = 0; i <= FEED_INCOMPLETE_MAX; i++) {
+    const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+    await source.ready()
+    t.teardown(() => source.close(), { force: true })
+    await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+    await source.append(postRecord({ text: 'post', at: '2026-01-01T00:00:00.000Z' }))
+    const key = await storeReplica(storage, source, 1)
+    keys.push(key)
+    await web.request('follow.add', { key })
+  }
+
+  const follows = await web.request('follow.list')
+  t.alike(follows.follows, keys.sort())
+  const feed = await web.request('feed.read', {})
+  t.is(feed.incomplete.length, FEED_INCOMPLETE_MAX)
+  t.is(feed.incompleteTruncated, 1)
+  t.alike(feed.incomplete, follows.follows.slice(0, FEED_INCOMPLETE_MAX))
+  t.alike(feed.skipped, [])
+  t.alike(feed.items, [])
 })
 
 test('the own diary quota is enforced', async (t) => {
@@ -376,7 +443,7 @@ test('locked: reads work, writes and creation need the key pair', async (t) => {
   t.is(info.memberCert, true)
   t.is((await locked.web.request('log.read', {})).entries[1].record.text, 'com a chave')
   t.alike(await locked.web.request('identity.create'), { publicKey, association: assoc.hex }, 'opening an existing diary needs no key')
-  for (const [method, params] of [['cert.add', { cert: createCert({ member: publicKey }, assoc.kp) }], ['profile.set', { name: 'B' }], ['post.create', { text: 'x' }], ['post.reply', { to: publicKey + ':1', text: 'x' }]]) {
+  for (const [method, params] of [['cert.add', { cert: createCert({ member: publicKey }, assoc.kp) }], ['profile.set', { name: 'B' }], ['post.create', { text: 'x' }], ['post.reply', { to: publicKey + ':1', text: 'x' }], ['post.delete', { to: publicKey + ':1' }], ['profile.delete', { to: publicKey + ':1' }]]) {
     const err = await errorOf(locked.web.request(method, params))
     t.is(err && err.code, 'USAGE', method)
     t.is(err && err.message, LOCKED, method)
@@ -543,6 +610,167 @@ test('terms.sign: the unlocked key signs the terms-acceptance statement, locked 
   t.alike(s.internal, [], 'no internal error')
 })
 
+test('invite.sign: the unlocked key signs the signup-invite request, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'issue', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('invite.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('invite.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: s.key, association: assoc.hex }
+  t.alike(verifyInvite(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyInvite({ ...fields, nonce: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyTerms({ nonce, member: s.key, association: assoc.hex, version: 1 }, r.signature), { ok: false, reason: 'bad-signature' }, 'not a terms acceptance')
+
+  for (const k of ['member', 'association']) {
+    const extra = await errorOf(s.web.request('invite.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('invite.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('invite.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('age.sign: the unlocked key signs the age-verification request without a certificate, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'session', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('age.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  // A fresh identity with no member certificate: the age check comes first.
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.is((await s.web.request('node.info')).memberCert, false, 'no certificate')
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('age.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: key, association: assoc.hex }
+  t.alike(verifyAge(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyAge({ ...fields, action: 'result' }, r.signature), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyAge({ ...fields, nonce: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' }, 'another nonce')
+
+  const result = await s.web.request('age.sign', { ...params, action: 'result' })
+  t.alike(verifyAge({ ...fields, action: 'result' }, result.signature), { ok: true }, 'the result action')
+
+  // Domain separation both ways against the terms acceptance.
+  const terms = { nonce, member: key, association: assoc.hex, version: 1 }
+  t.alike(verifyTerms(terms, r.signature), { ok: false, reason: 'bad-signature' }, 'an age request is not a terms acceptance')
+  const termsSig = await s.web.request('terms.sign', { nonce, version: 1 })
+  t.alike(verifyTerms(terms, termsSig.signature), { ok: true })
+  t.alike(verifyAge(fields, termsSig.signature), { ok: false, reason: 'bad-signature' }, 'a terms acceptance is not an age request')
+
+  for (const k of ['member', 'association']) {
+    const extra = await errorOf(s.web.request('age.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const unknown = await errorOf(s.web.request('age.sign', { ...params, action: 'issue' }))
+  t.is(unknown.code, 'USAGE', 'an unknown action is refused')
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('age.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('age.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('push.sign: the unlocked key signs the push-subscription statement, locked refuses', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const b64url = (buf) => b4a.toString(buf, 'base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const point = b4a.alloc(65, 7)
+  point[0] = 0x04
+  const endpoint = 'https://push.example/send/abc?x=1'
+  const params = { nonce, action: 'on', endpoint, p256dh: b64url(point), auth: b64url(b4a.alloc(16, 9)) }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('push.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('push.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const { endpoint: _, ...rest } = params
+  const fields = { ...rest, member: s.key, association: assoc.hex, endpointHash: endpointHash(endpoint) }
+  t.alike(verifyPush(fields, r.signature), { ok: true }, 'verifies over the hash of the raw endpoint')
+  t.alike(verifyPush({ ...fields, action: 'off' }, r.signature), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyPush({ ...fields, endpointHash: endpointHash(endpoint + '2') }, r.signature), { ok: false, reason: 'bad-signature' }, 'another endpoint')
+
+  const off = await s.web.request('push.sign', { ...params, action: 'off' })
+  t.alike(verifyPush({ ...fields, action: 'off' }, off.signature), { ok: true })
+
+  // Keys the RPC layer accepts but the statement refuses.
+  for (const bad of [{ p256dh: 'abc' }, { auth: 'abc' }]) {
+    const invalid = await errorOf(s.web.request('push.sign', { ...params, ...bad }))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'inscrição de notificação inválida'], Object.keys(bad)[0])
+  }
+  // A non-canonical endpoint never reaches the signer: the RPC refuses it.
+  const shouty = await errorOf(s.web.request('push.sign', { ...params, endpoint: 'HTTPS://push.example/send' }))
+  t.alike([shouty.code, shouty.message], ['USAGE', 'parâmetro inválido: endpoint'])
+  for (const k of ['member', 'association', 'endpointHash']) {
+    const extra = await errorOf(s.web.request('push.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('push.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+})
+
 test('username.add: appends a verified username record once, locked and foreign records refused', async (t) => {
   await testnet(t)
   const assoc = association()
@@ -585,7 +813,7 @@ test('username.add: appends a verified username record once, locked and foreign 
   t.alike(await s.web.request('log.read', {}), after, 'nothing appended')
   t.alike(await s.web.request('username.add', { record: rename }), { changed: false, username: 'ana_2' }, 'the latest record is still accepted')
 
-  const named = { profiles: [{ author: s.key, name: null, bio: null, username: 'ana_2' }], missing: [] }
+  const named = { profiles: [{ author: s.key, name: null, bio: null, avatar: null, username: 'ana_2' }], missing: [] }
   t.alike(await s.web.request('profile.read', { authors: [s.key] }), named, 'the verified username')
 
   await s.node.clearKeyPair()
@@ -609,13 +837,13 @@ test('profile.read: a readable replica is named, a blocked one is missing', asyn
 
   // Not followed: still named when its diary would be shown.
   t.alike(await s.web.request('profile.read', { authors: [A, A] }), {
-    profiles: [{ author: A, name: 'Autor', bio: 'de longe', username: null }],
+    profiles: [{ author: A, name: 'Autor', bio: 'de longe', avatar: null, username: null }],
     missing: []
   })
 
   await writeBlocklist(s.storage, snapshot(moderator(assoc.kp), { blocked: [A] }))
   t.alike(await s.web.request('profile.read', { authors: [A, s.key] }), {
-    profiles: [{ author: s.key, name: null, bio: null, username: null }],
+    profiles: [{ author: s.key, name: null, bio: null, avatar: null, username: null }],
     missing: [A]
   }, 'blocked: missing, before any purge')
   t.ok(await s.storage.hasCore('replica/' + A), 'still stored: the read hides it, the sync purges it')
@@ -940,4 +1168,192 @@ test('connections: one at a time, protocol errors close, a closed session refuse
   const closed = await errorOf(session.handlers['node.info']({}))
   t.is(closed.code, 'LOCKED')
   t.is(closed.message, 'sessão encerrada')
+})
+
+test('follow.list reads the kv area without preempting a continuous run', async (t) => {
+  await testnet(t)
+  const { web } = await certified(t, { syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const K = 'cd'.repeat(32)
+  await web.request('follow.add', { key: K })
+  const { runId } = await web.request('sync.start', {})
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  const from = web.events.length
+  t.alike(await web.request('follow.list', {}), { follows: [K], total: 1 })
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted'), 'the run was not preempted')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same run is live')
+  await web.request('sync.stop')
+})
+
+test('follow.list after a follow.add sent before it lists the new follow', async (t) => {
+  await testnet(t)
+  const { web } = await certified(t)
+  const K = 'ef'.repeat(32)
+  const [added, list] = await Promise.all([
+    web.request('follow.add', { key: K }),
+    web.request('follow.list', {})
+  ])
+  t.is(added.changed, true)
+  t.alike(list, { follows: [K], total: 1 }, 'the list ran after the add (arrival order)')
+})
+
+test('peek.read with the own key cached does not wait behind a gated write', async (t) => {
+  await testnet(t)
+  const { web } = await setup(t, { writeGate: true, writeGateTimeoutMs: 3000, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  await web.request('identity.create') // caches the own key
+  const order = []
+  const write = errorOf(web.request('post.create', { text: 'retida pelo portão' })).then((err) => { order.push('post.create'); return err })
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  const [writeErr, peekErr] = await Promise.all([write, peek])
+  t.is(peekErr && peekErr.message, 'sem conexão com o semeador', 'the peek failed on the dead port')
+  t.is(writeErr && writeErr.message, 'sincronize com o semeador antes de publicar')
+  t.alike(order, ['peek.read', 'post.create'], 'the peek settled while the write held the chain')
+})
+
+test('peek.read during a reset runs after it, never with the old identity', async (t) => {
+  await testnet(t)
+  let sockets = 0
+  const { node, web } = await certified(t, {
+    createSocket: (url) => {
+      sockets++
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+  const before = sockets
+  const order = []
+  const resetting = node.reset().then(() => { order.push('reset') })
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  const [, err] = await Promise.all([resetting, peek])
+  t.alike(order, ['reset', 'peek.read'])
+  t.is(err && err.code, 'NOT_FOUND')
+  t.is(err && err.message, 'identidade não encontrada')
+  t.is(sockets, before, 'no link was opened')
+})
+
+test('peek.read on a fresh session resolves the own key on the chain', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const { web } = await setup(t, { storage, assoc, keyPair })
+  const err = await errorOf(web.request('peek.read', {}))
+  t.is(err && err.code, 'USAGE', 'the lookup found the key and the read reached the dead port')
+  t.is(err && err.message, 'sem conexão com o semeador')
+})
+
+test('regression: a setKeyPair queued right behind a cold peek.read lookup does not fail it with NOT_FOUND', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const port = await deadPort()
+  const session = createBrowserSession({
+    storage,
+    association: assoc.hex,
+    seederUrl: 'ws://127.0.0.1:' + port + '/seeder',
+    createSocket: (url) => {
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+  t.teardown(() => session.close(), { force: true })
+  // Called on the session directly, so the lookup is queued (cold cache)
+  // before setKeyPair queues behind it and clears the key it cached.
+  const peek = errorOf(session.handlers['peek.read']({ limit: 10 }))
+  const unlocking = session.setKeyPair(keyPair)
+  const [err] = await Promise.all([peek, unlocking])
+  t.is(err && err.message, 'sem conexão com o semeador', 'the read reached the dead port')
+  t.is(err && err.code, 'USAGE')
+})
+
+test('regression: setKeyPair ends a peek.read already in flight at once, not behind the chain', async (t) => {
+  await testnet(t)
+  // Accepts TCP and never answers the upgrade: every link hangs.
+  const held = []
+  let connected = 0
+  let onConnection = null
+  const silent = net.createServer((sock) => {
+    held.push(sock)
+    connected++
+    if (onConnection !== null) onConnection()
+  })
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const sock of held) sock.destroy()
+    return new Promise((resolve) => silent.close(() => resolve()))
+  }, { force: true })
+  const connections = (n) => new Promise((resolve) => {
+    onConnection = () => { if (connected >= n) resolve() }
+    onConnection()
+  })
+  const { node, web, keyPair } = await setup(t, {
+    writeGate: true,
+    writeGateTimeoutMs: 3000,
+    seederUrl: 'ws://127.0.0.1:' + silent.address().port + '/seeder'
+  })
+  await web.request('identity.create') // caches the own key
+  const order = []
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  await connections(1) // the peek's own link
+  const write = errorOf(web.request('post.create', { text: 'retida pelo portão' })).then((err) => { order.push('post.create'); return err })
+  await connections(2) // the write gate's run holds the chain
+  const unlocking = node.setKeyPair(keyPair)
+  const [peekErr] = await Promise.all([peek, write, unlocking])
+  t.ok(peekErr, 'the peek of the previous identity was ended')
+  t.alike(order, ['peek.read', 'post.create'], 'ended at the call, not after the gated write')
+})
+
+test('regression: a reset called in the same turn as a cached-key peek.read is not missed', async (t) => {
+  await testnet(t)
+  const held = []
+  let connected = 0
+  let onConnection = null
+  const silent = net.createServer((sock) => {
+    held.push(sock)
+    connected++
+    if (onConnection !== null) onConnection()
+  })
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const sock of held) sock.destroy()
+    return new Promise((resolve) => silent.close(() => resolve()))
+  }, { force: true })
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const session = createBrowserSession({
+    storage,
+    association: assoc.hex,
+    seederUrl: 'ws://127.0.0.1:' + silent.address().port + '/seeder',
+    createSocket: (url) => {
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    },
+    writeGate: true,
+    writeGateTimeoutMs: 3000
+  })
+  t.teardown(() => session.close(), { force: true })
+  await session.setKeyPair(keyPair)
+  await session.handlers['identity.create']({}) // caches the own key
+  const write = errorOf(session.handlers['post.create']({ text: 'retida pelo portão' }))
+  await new Promise((resolve) => {
+    onConnection = () => { if (connected >= 1) resolve() }
+    onConnection()
+  }) // the write gate's run holds the chain
+  // Same turn: the reset is called while the peek's lookup has returned
+  // but its dispatch has not run yet.
+  const peek = errorOf(session.handlers['peek.read']({ limit: 10 }))
+  const resetting = session.reset()
+  const [err] = await Promise.all([peek, resetting, write])
+  t.is(err && err.message, 'identidade não encontrada', 'the peek ran after the reset')
+  t.is(connected, 1, 'no peek link was opened for the old identity')
 })

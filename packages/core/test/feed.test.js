@@ -574,3 +574,147 @@ test('formatFeedItem: repost one-liner and quote marker', async (t) => {
   const q = { kind: 'post', author: KA, name: 'Ana', username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null }
   t.is(formatFeedItem(q), '[' + T2 + '] Ana (aaaaaaaa) #6 cita bbbbbbbb#4\n  olha')
 })
+
+const tombstone = (target, at = AT) => ({ type: 'delete', seq: target, at })
+
+test('a deleted post, reply and quote vanish from the feed', (t) => {
+  const quote = { type: 'post', text: 'olha', at: T2, replyTo: null, quote: { author: KB, seq: 1 } }
+  const entries = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: profile('Ana') },
+    { seq: 2, record: post('plain', T1) },
+    { seq: 3, record: post('resposta', T1, { author: KB, seq: 1 }) },
+    { seq: 4, record: quote },
+    { seq: 5, record: post('fica', T3) },
+    { seq: 6, record: tombstone(2) },
+    { seq: 7, record: tombstone(3) },
+    { seq: 8, record: tombstone(4) }
+  ]
+  const logs = [{ key: KA, entries }]
+  const before = JSON.stringify(logs)
+  const { items, future } = buildFeed({ logs, now: NOW })
+  t.is(JSON.stringify(logs), before, 'inputs unchanged')
+  t.alike(future, [])
+  t.is(items.length, 1)
+  t.alike(items[0], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 5, at: T3, text: 'fica', replyTo: null, quote: null, media: null })
+  // Partial, unordered entries: the tombstone still hides its target.
+  const partial = [
+    { seq: 8, record: tombstone(4) },
+    { seq: 4, record: quote },
+    { seq: 5, record: post('fica', T3) }
+  ]
+  t.alike(buildFeed({ logs: [{ key: KA, entries: partial }], now: NOW }).items.map((i) => i.text), ['fica'])
+})
+
+test('a deleted profile or username falls back to the previous one', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKey.publicKey, 'hex'), date: AT }, associationKey)
+  const username = (name) => createUsernameRecord({ member: KA, username: name, date: AT }, issuerKey, issuerCert)
+  const entries = [
+    { seq: 0, record: { type: 'member-cert', cert: createCert({ member: KA, date: AT }, associationKey) } },
+    { seq: 1, record: profile('Ana') },
+    { seq: 2, record: profile('Ana Maria') },
+    { seq: 3, record: username('ana') },
+    { seq: 4, record: username('ana_maria') },
+    { seq: 5, record: post('oi', AT) },
+    { seq: 6, record: tombstone(2) },
+    { seq: 7, record: tombstone(4) }
+  ]
+  const read = (list) => buildFeed({ logs: [{ key: KA, entries: list }], association, now: NOW }).items[0]
+  const item = read(entries)
+  t.is(item.name, 'Ana', 'the newest surviving profile')
+  t.is(item.username, 'ana', 'the newest surviving username')
+  t.is(item.text, 'oi')
+  const cleared = entries.concat([
+    { seq: 8, record: tombstone(1) },
+    { seq: 9, record: tombstone(3) }
+  ])
+  const gone = read(cleared)
+  t.is(gone.name, null, 'no surviving profile')
+  t.is(gone.username, null, 'no surviving username')
+  t.is(gone.text, 'oi')
+})
+
+test('a repost of a deleted target vanishes only when that log was supplied', (t) => {
+  const KC = 'c'.repeat(64)
+  const quote = { type: 'post', text: 'citação', at: T3, replyTo: null, quote: { author: KA, seq: 1 } }
+  const author = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: post('sumiu', T1) },
+    { seq: 2, record: post('vivo', T2) },
+    { seq: 3, record: repost(KA, 1, true, T3) },
+    { seq: 4, record: tombstone(1) }
+  ]
+  const other = [
+    { seq: 0, record: cert(KB) },
+    { seq: 1, record: repost(KA, 1, true, T2) },
+    { seq: 2, record: repost(KC, 4, true, T3) },
+    { seq: 3, record: post('resposta', T2, { author: KA, seq: 1 }) },
+    { seq: 4, record: quote }
+  ]
+  const { items } = buildFeed({ logs: [{ key: KA, entries: author }, { key: KB, entries: other }], now: NOW })
+  const label = (i) => i.kind === 'repost' ? 'r' : i.text
+  t.alike(items.map(label), ['vivo', 'resposta', 'r', 'citação'])
+  t.alike(items[0], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: T2, text: 'vivo', replyTo: null, quote: null, media: null })
+  t.is(items[1].text, 'resposta')
+  t.alike(items[1].replyTo, { author: KA, seq: 1 })
+  t.alike(items[2], { kind: 'repost', author: KB, name: null, username: null, seq: 2, at: T3, to: { author: KC, seq: 4 }, text: null, replyTo: null, quote: null, media: null })
+  t.is(items[3].text, 'citação')
+  t.alike(items[3].quote, { author: KA, seq: 1 })
+  t.not(items[3].quote, quote.quote)
+  t.ok(items.every((i) => i.text !== 'sumiu' && !(i.kind === 'repost' && i.to.author === KA)))
+  // The post block is absent: the tombstone alone is enough.
+  const partial = [{ seq: 4, record: tombstone(1) }]
+  const onlyRepost = [{ seq: 0, record: cert(KB) }, { seq: 1, record: repost(KA, 1, true, T2) }]
+  t.alike(buildFeed({ logs: [{ key: KA, entries: partial }, { key: KB, entries: onlyRepost }], now: NOW }).items, [])
+  const stayed = buildFeed({ logs: [{ key: KB, entries: onlyRepost }], now: NOW }).items
+  t.is(stayed.length, 1, 'a repost of a log that was not supplied stays')
+  t.alike(stayed[0].to, { author: KA, seq: 1 })
+})
+
+test('a deletion leaves future refs, cursors and likes of what remains', (t) => {
+  const soon = iso(NOW + 23 * HOUR)
+  const far = iso(NOW + 26 * HOUR)
+  const KC = 'c'.repeat(64)
+  const base = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: post('old', T1) },
+    { seq: 2, record: post('mid', T2) },
+    { seq: 3, record: post('soon', soon) },
+    { seq: 4, record: post('far', far) },
+    { seq: 5, record: repost(KC, 4, true, T3) }
+  ]
+  const deleted = base.concat([{ seq: 6, record: tombstone(2) }])
+  const logsOf = (entries) => [{ key: KA, entries }]
+  const plain = buildFeed({ logs: logsOf(base), now: NOW })
+  const folded = buildFeed({ logs: logsOf(deleted), now: NOW })
+  t.alike(folded.future, plain.future, 'deleting a past post does not change future')
+  t.alike(folded.future, [KA + ':4'])
+  t.alike(folded.items.map((i) => i.kind === 'repost' ? 'r' : i.text), ['old', 'r', 'soon'])
+  const before = { at: soon, author: KA, seq: 3 }
+  t.alike(buildFeed({ logs: logsOf(deleted), now: NOW, before }).items.map((i) => i.kind === 'repost' ? 'r' : i.text), ['old', 'r'])
+  t.alike(
+    buildFeed({ logs: logsOf(deleted), now: NOW, before, limit: 1 }).items.map((i) => i.text),
+    buildFeed({ logs: logsOf(base), now: NOW, before, limit: 1 }).items.map((i) => i.text)
+  )
+  t.alike(buildFeed({ logs: logsOf(deleted), now: NOW, before: { at: T2, author: KA, seq: 2 } }).items.map((i) => i.text), ['old'])
+  t.alike(buildFeed({ logs: logsOf(deleted), limit: 1, now: NOW }).items.map((i) => i.text), ['soon'])
+  const withLikes = deleted.concat([
+    { seq: 7, record: like(KB, 1, true, T1) },
+    { seq: 8, record: like(KA, 2, true, T2) },
+    { seq: 9, record: like(KA, 3, false, T3) }
+  ])
+  t.alike(buildFeed({ logs: logsOf(withLikes), now: NOW }), folded, 'likes never become items')
+  const noFar = deleted.concat([{ seq: 10, record: tombstone(4) }])
+  t.alike(buildFeed({ logs: logsOf(noFar), now: NOW }).future, [], 'a deleted future post is not reported')
+  t.alike(buildFeed({ logs: logsOf(noFar), now: NOW }).items.map((i) => i.kind === 'repost' ? 'r' : i.text), ['old', 'r', 'soon'])
+  // A future repost is still reported: the repost record itself was not deleted.
+  const futureRepost = [{ seq: 0, record: cert(KB) }, { seq: 1, record: repost(KA, 1, true, iso(NOW + 30 * HOUR)) }]
+  const partial = [{ seq: 4, record: tombstone(1) }]
+  t.alike(buildFeed({ logs: [{ key: KB, entries: futureRepost }], now: NOW }).future, [KB + ':1'])
+  const hidden = buildFeed({ logs: [{ key: KA, entries: partial }, { key: KB, entries: futureRepost }], now: NOW })
+  t.alike(hidden.items, [])
+  t.alike(hidden.future, [KB + ':1'], 'future reporting is unchanged when only the target was deleted')
+})

@@ -25,13 +25,21 @@
 // the upload or the post then failed, closing the composer leaves those
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
+// @ suggestions (hosted web, online only): while the caret is inside an
+// @token of 2+ characters the member search (../useMemberSearch) lists up to
+// 5 verified members under the compose box; tapping one replaces the token
+// with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
+// text is sent exactly as typed: names are never resolved at send time.
 // Design: apps/site/artwork/app-design.md.
 
 /* global URL, Blob */
 
 import { useEffect, useRef, useState } from 'react'
 import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
-import { MAX_TEXT, displayText } from '@varanda/rpc'
+import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
+import { MENTION_MIN_QUERY, insertMention, suggestionRows } from '../mentions'
+import { useMemberSearch } from '../useMemberSearch'
+import { MentionSuggest } from '../ui/MentionSuggest'
 import { useNode } from '../node'
 import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, isQuoteRecord } from '../outbox'
@@ -156,7 +164,33 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [forcedSel, setForcedSel] = useState(null)
   const selRef = useRef(null)
+  const inputRef = useRef(null)
+  // Re-renders on a caret move so the active @token follows it.
+  const [caret, setCaret] = useState(0)
+  // A range selection has no single caret, so it gets no suggestions: a pick
+  // there would be refused by insertMention.
+  const [collapsed, setCollapsed] = useState(true)
   const [note, setNote] = useState('')
+  // The composer stays mounted with its draft while closed: no searches then.
+  const suggestOn = open === true && node.hosted === true && node.online !== false
+  const search = useMemberSearch({
+    request: node.request,
+    hosted: node.hosted === true,
+    online: node.online !== false,
+    ownKey: me ? me.publicKey : null
+  })
+  // `caret` only forces the re-render; the live position is selRef.
+  const caretAt = selRef.current && caret >= 0 ? Math.min(selRef.current.start, text.length) : text.length
+  const active = suggestOn && collapsed ? activeMention(text, caretAt) : null
+  const mentionQuery = active !== null && active.query.length >= MENTION_MIN_QUERY ? active.query : ''
+  const { setQuery: searchSet, clear: searchClear } = search
+  useEffect(() => {
+    if (mentionQuery !== '') searchSet(mentionQuery)
+    else searchClear()
+  }, [mentionQuery, searchSet, searchClear])
+  const suggestions = mentionQuery !== ''
+    ? suggestionRows(search.hits, mentionQuery, me ? me.publicKey : null)
+    : []
   // Attached items: { id, status: 'encoding' | 'invalid' | 'ready' |
   // 'uploading' | 'failed' | 'done', progress, thumb, encoded, descriptor,
   // error }. liveRef holds the ids still attached (updated synchronously),
@@ -307,6 +341,42 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     setText(next.text)
     selRef.current = next.selection
     setForcedSel(next.selection)
+  }
+
+  const pickMention = (hit) => {
+    // The suggestion was computed for this token: refuse it silently if the
+    // text or the caret moved to another one, or a range got selected, since.
+    const sel = selRef.current || { start: text.length, end: text.length }
+    if (sel.start !== sel.end) return
+    const now = activeMention(text, sel.start)
+    if (active === null || now === null || now.start !== active.start || now.end !== active.end ||
+      now.query !== active.query) return
+    const r = insertMention(text, sel, hit.username)
+    if (!r.changed) {
+      // Selection and token were checked above and rows carry valid names,
+      // so the only refusal left is the length limit.
+      setNote('limite de ' + MAX_TEXT + ' caracteres')
+      return
+    }
+    setNote('')
+    setText(r.text)
+    selRef.current = r.selection
+    setCaret(r.selection.start)
+    setForcedSel(r.selection)
+    setCollapsed(true)
+    searchClear()
+    // Pressing a row moves focus to it (web) and the strip then unmounts, so
+    // typing would go nowhere: give the editor focus back once the new text
+    // and selection are rendered, with the caret after the name.
+    const caretSel = r.selection
+    setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      try {
+        if (typeof input.focus === 'function') input.focus()
+        if (typeof input.setSelectionRange === 'function') input.setSelectionRange(caretSel.start, caretSel.end)
+      } catch {}
+    }, 0)
   }
 
   // Clears only what was sent (an edit made meanwhile stays) and tells the
@@ -489,14 +559,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               )
             : null}
           <View style={styles.compose}>
-            <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} />
+            <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} picture={self.avatar} persist />
             <TextInput
+              ref={inputRef}
               style={styles.input}
               value={text}
               onChangeText={setText}
               selection={forcedSel || undefined}
               onSelectionChange={(event) => {
                 selRef.current = event.nativeEvent.selection
+                setCaret(event.nativeEvent.selection.start)
+                setCollapsed(event.nativeEvent.selection.start === event.nativeEvent.selection.end)
                 if (forcedSel) setForcedSel(null)
               }}
               multiline
@@ -524,6 +597,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               </View>
               )
             : null}
+          <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View style={styles.counterRow}>
             <View style={styles.tools}>
               <Pressable

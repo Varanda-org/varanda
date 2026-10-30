@@ -51,12 +51,31 @@ test('invalid entries are refused', async (t) => {
     { screen: 'membro', key: A + ':1' },
     { screen: 'membro', key: A.toUpperCase() },
     { screen: 'membro', key: 'ab' },
-    { screen: 'membro', key: 42 }
+    { screen: 'membro', key: 42 },
+    { screen: 'curtidas', key: A, params: { kind: 'likes' } },
+    { screen: 'curtidas', key: A + ':0', params: { kind: 'likes' } },
+    { screen: 'curtidas', key: A.toUpperCase() + ':3', params: { kind: 'likes' } },
+    { screen: 'curtidas', key: A + ':3' },
+    { screen: 'curtidas', key: A + ':3', params: {} },
+    { screen: 'curtidas', key: A + ':3', params: { kind: 'like' } },
+    { screen: 'curtidas', key: A + ':3', params: ['likes'] }
   ]
   for (const entry of bad) {
     t.absent(validEntry(entry), JSON.stringify(entry))
     t.is(push(EMPTY, entry), EMPTY)
   }
+})
+
+test('curtidas is keyed by a post ref with a likes or reposts kind', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('curtidas'))
+  const entry = { screen: 'curtidas', key: A + ':3', params: { kind: 'reposts' } }
+  t.ok(validEntry(entry))
+  t.ok(validEntry({ screen: 'curtidas', key: A + ':3', params: { kind: 'likes' } }))
+  const one = push(EMPTY, entry)
+  t.alike(top(one), entry)
+  t.is(push(one, { screen: 'curtidas', key: A + ':3', params: { kind: 'likes' } }), one, 'the other kind on top is a no-op')
+  t.is(push(one, { screen: 'curtidas', key: A + ':4', params: { kind: 'likes' } }).length, 2)
 })
 
 test('MAX_DEPTH drops the oldest entry', async (t) => {

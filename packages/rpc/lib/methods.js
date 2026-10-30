@@ -97,15 +97,19 @@ function isPeekCursor (v) {
     Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
-// notices.list `after` (docs/rpc.md 5.28): exactly { at, key }, the
-// notices-order position of the last item the caller holds.
+// notices.list `after` (docs/rpc.md 5.28): exactly { at, key }, or exactly
+// { at, key, seq } after a reply, quote or mention notice; the notices-order
+// position of the last item the caller holds.
 function isNoticesCursor (v) {
-  if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
+  if (!isPlainObject(v)) return false
+  const count = Object.keys(v).length
   if (!hasOwn(v, 'at') || !hasOwn(v, 'key')) return false
-  return isCanonicalIso(v.at) && isKey(v.key)
+  if (count === 2) return isCanonicalIso(v.at) && isKey(v.key)
+  if (count !== 3 || !hasOwn(v, 'seq')) return false
+  return isCanonicalIso(v.at) && isKey(v.key) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
-// group.read `before` (docs/rpc.md 5.34): exactly { at, writer, seq }, the
+// group.read `before` (docs/rpc.md 5.39): exactly { at, writer, seq }, the
 // group-order position of the oldest item the caller holds.
 function isGroupCursor (v) {
   if (!isPlainObject(v) || Object.keys(v).length !== 3) return false
@@ -144,6 +148,16 @@ function isDescriptor (d) {
     isKey(sha256) &&
     int(1, L.MAX_MEDIA_DIMENSION)(width) &&
     int(1, L.MAX_MEDIA_DIMENSION)(height)
+}
+
+// profile.set `avatar`: same rules as validAvatar in @varanda/core lib/records.js.
+function isAvatar (v) {
+  return isDescriptor(v) &&
+    L.AVATAR_MIMES.includes(v.mime) &&
+    v.width === L.AVATAR_SIDE &&
+    v.height === L.AVATAR_SIDE &&
+    v.blocks <= L.MAX_AVATAR_BLOCKS &&
+    v.bytes <= L.MAX_AVATAR_BYTES
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
@@ -186,6 +200,51 @@ const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 // terms.sign (docs/rpc.md 5.29). Duplicated from @varanda/core lib/terms.js
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
+
+// invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
+// lib/invite.js (ACTIONS), which this package cannot import.
+const INVITE_ACTIONS = ['issue']
+
+const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
+
+// age.sign (docs/rpc.md 5.32). Duplicated from @varanda/core lib/age.js
+// (ACTIONS) because this package has no dependencies.
+const AGE_ACTIONS = ['session', 'result']
+
+const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
+
+// push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
+// lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
+// characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
+// [A-Za-z0-9_-]), which this package cannot import.
+const PUSH_ENDPOINT_MAX = 2048
+const PUSH_P256DH_RE = /^[A-Za-z0-9_-]{1,128}$/
+const PUSH_AUTH_RE = /^[A-Za-z0-9_-]{1,32}$/
+
+const isPushAction = (v) => v === 'on' || v === 'off'
+const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
+const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
+
+// Global URL, not an import: this package stays free of @varanda/core. The
+// signed statement hashes the exact string, so it must be the string fetch
+// would request: the URL parser strips tab, CR and LF and reads a backslash
+// as '/', hence printable ASCII only (counted in UTF-16 units, so a lone
+// surrogate cannot slip through) and no backslash or '#'.
+function isPushEndpoint (v) {
+  if (typeof v !== 'string' || v.length < 1 || v.length > PUSH_ENDPOINT_MAX) return false
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i)
+    if (c < 0x21 || c > 0x7e || c === 0x5c || c === 0x23) return false
+  }
+  try {
+    const url = new URL(v)
+    // Canonical only: fetch would request the parsed href (default port,
+    // case of the host, dot segments), not the string that was signed.
+    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.hash === '' && url.href === v
+  } catch {
+    return false
+  }
+}
 
 function isCert (v) {
   if (!isPlainObject(v)) return false
@@ -272,10 +331,46 @@ const SPECS = {
       version: req(int(1, TERMS_VERSION_MAX))
     }
   },
+  // Signs the signup-invite request with the identity key; the node fills in
+  // member and association itself, so a caller never chooses the bytes.
+  'invite.sign': {
+    fields: {
+      action: req(isInviteAction),
+      nonce: req(isNonce)
+    }
+  },
+  // Signs the age-verification request with the identity key; the node fills
+  // in member and association itself, so a caller never chooses the bytes.
+  'age.sign': {
+    fields: {
+      action: req(isAgeAction),
+      nonce: req(isNonce)
+    }
+  },
+  // Signs the push opt-in statement with the identity key; the node fills
+  // in member, association and the endpoint hash itself, so a caller never
+  // chooses the bytes.
+  'push.sign': {
+    fields: {
+      nonce: req(isNonce),
+      action: req(isPushAction),
+      endpoint: req(isPushEndpoint),
+      p256dh: req(isPushP256dh),
+      auth: req(isPushAuth)
+    }
+  },
   'profile.set': {
-    fields: { name: req(str(1, L.MAX_NAME)), bio: opt(str(0, L.MAX_BIO), '') },
+    // No fallback: an absent avatar keeps the newest own one (docs/rpc.md 5.6).
+    fields: {
+      name: req(str(1, L.MAX_NAME)),
+      bio: opt(str(0, L.MAX_BIO), ''),
+      avatar: opt((v) => v === null || isAvatar(v))
+    },
     mutating: true
   },
+  // Tombstones the caller's own profile version, or the compatibility pair
+  // it belongs to (docs/rpc.md 5.34).
+  'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'post.create': {
     fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
     mutating: true,
@@ -290,6 +385,8 @@ const SPECS = {
     fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList) },
     mutating: true
   },
+  // Tombstones the caller's own publication (docs/rpc.md 5.33).
+  'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },
@@ -334,18 +431,27 @@ const SPECS = {
       after: opt(isPeekCursor)
     }
   },
-  // People who follow the caller and whom the caller does not follow yet.
-  // Success: { notices: [{ key: hex64, seq: integer >= 1, at: ISO,
-  // name: string|null, username: string|null, seen: hex32 }],
-  // next: null | { at, key }, incomplete: boolean, supported: boolean }.
+  // People who follow the caller and whom the caller does not follow yet, plus
+  // the replies, quotes and mentions that name the caller.
+  // Success: { notices: [{ kind: 'follow' | 'reply' | 'quote' | 'mention',
+  // key: hex64, seq: integer >= 1, at: ISO, name: string|null,
+  // username: string|null, seen: hex32, avatar: AvatarDescriptor|null }],
+  // next: null | { at, key } | { at, key, seq }, incomplete: boolean,
+  // supported: boolean, activity: boolean }.
   // No count or total.
-  // name is the follower's profile name; username is their verified username;
-  // seq is the block of their signed follow record; seen is an opaque token,
-  // stable per identity, keyed by the identity secret and unlinkable to the
-  // follower without it (what the app stores as seen); next is the
-  // next-page cursor.
+  // kind is absent on a notice of a node that predates it, and means 'follow'.
+  // name and avatar come from the author's profile and username is their
+  // verified username, for every kind;
+  // seq is the block of their signed follow record; for a non-follow kind,
+  // key:seq is the author's signed POST block that replied to, quoted or
+  // mentioned the caller. seen is an opaque token, stable per identity, keyed
+  // by the identity secret and unlinkable to the follower without it (what the
+  // app stores as seen); one row per block. next is the next-page cursor; it
+  // carries seq whenever the read went over the notices channel v2.
   // incomplete means the seeder's index or the read's budget was not complete;
-  // supported is false when the seeder does not speak the notices channel.
+  // supported is false when the seeder does not speak the notices channel;
+  // activity is false only when the rows came over the follows-only channel
+  // v1 because the seeder does not speak v2; every other result says true.
   // Hosted web only: the core node answers USAGE 'avisos disponíveis só no navegador'
   // (docs/rpc.md 5.28).
   'notices.list': {
@@ -354,7 +460,7 @@ const SPECS = {
       after: opt(isNoticesCursor)
     }
   },
-  // Public groups (docs/rpc.md 5.30 to 5.42). Every method names the group by
+  // Public groups (docs/rpc.md 5.35 to 5.48). Every method names the group by
   // its root key; the node fills in everything else.
   'group.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
   'group.join': { fields: { group: req(isKey) }, mutating: true },

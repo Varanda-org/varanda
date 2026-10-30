@@ -20,7 +20,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord, likeRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -91,7 +91,9 @@ function author (assoc, name, ats) {
 // `coresOf(connectionIndex)` picks the cores of a given connection (a
 // seeder that changes its story between links). `delayOf(core,
 // connectionIndex)` (ms) delays replicating that core on that connection
-// while its have entry goes out at once (a slow diary).
+// while its have entry goes out at once (a slow diary). `uploads` records
+// every block served ({ connection, key, seq }) and `announced` the
+// connections that sent an announce (the sync link; a peek link never does).
 async function fakeSeeder (t, { signer, cores = [], lengthOf = (core) => core.length, ghosts = [], coresOf = () => cores, delayOf = () => 0 }) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
@@ -101,6 +103,8 @@ async function fakeSeeder (t, { signer, cores = [], lengthOf = (core) => core.le
     url: 'ws://127.0.0.1:' + wss.address().port + '/seeder',
     publicKey: hex(keyPair.publicKey),
     connections: 0,
+    uploads: [],
+    announced: new Set(),
     closed: false,
     async close () {
       if (seeder.closed) return
@@ -110,6 +114,15 @@ async function fakeSeeder (t, { signer, cores = [], lengthOf = (core) => core.le
     }
   }
   t.teardown(() => seeder.close(), { force: true })
+  const streams = new Map()
+  const watched = new Set()
+  const watch = (core) => {
+    if (watched.has(core)) return
+    watched.add(core)
+    core.on('upload', (seq, byteLength, from) => {
+      seeder.uploads.push({ connection: streams.get(from && from.stream), key: hex(core.key), seq })
+    })
+  }
   wss.on('connection', (ws) => {
     const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
     noise.on('error', () => {})
@@ -117,6 +130,8 @@ async function fakeSeeder (t, { signer, cores = [], lengthOf = (core) => core.le
       const index = seeder.connections
       const served = coresOf(index)
       seeder.connections++
+      streams.set(noise, index)
+      for (const core of served) watch(core)
       Hypercore.createProtocolStream(noise)
       for (const core of served) {
         const delay = delayOf(core, index)
@@ -133,6 +148,7 @@ async function fakeSeeder (t, { signer, cores = [], lengthOf = (core) => core.le
         have: [...served.map((core) => ({ key: hex(core.key), length: lengthOf(core) })), ...ghosts],
         onmessage: (msg, peer) => {
           if (msg.type !== 'announce') return
+          seeder.announced.add(index)
           peer.send({ type: 'admitted', key: msg.key, length: peer.remoteHave.get(msg.key) || 0 })
         }
       })
@@ -988,6 +1004,7 @@ test('regression: an idle snapshot expires and only an after-less read rebuilds 
   const B = await diary(t, author(assoc, 'B', [now - 2000]))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: seeder.url,
@@ -1032,6 +1049,7 @@ test('regression: a failed refresh keeps the snapshot a continuation still pages
   const B = await diary(t, author(assoc, 'B', [now - 2000]))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A, B] })
   const peeker = createPeeker({
+    ownKey: async () => '00'.repeat(32),
     storage: memoryNodeStorage(),
     association: assoc.hex,
     seederUrl: seeder.url,
@@ -1148,7 +1166,50 @@ test('regression: a get cut by the page deadline is no verdict: the delayed diar
   t.alike(internal, [])
 })
 
-test('the own diary shows in the Espiadinha like any unfollowed diary', async (t) => {
+test('the own diary never shows in the own Espiadinha, but another member sees it', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const keyPair = crypto.keyPair()
+  const other = await diary(t, author(assoc, 'Outro', [now - 4 * HOUR]))
+  const mine = await diary(t, [
+    ...author(assoc, 'Eu', [now - 3 * HOUR]),
+    (key) => postRecord({ text: 'Eu responde', at: iso(now - 2 * HOUR), replyTo: { author: key, seq: 2 } }),
+    () => repostRecord({ to: { author: hex(other.key), seq: 2 }, on: true, at: iso(now - HOUR) })
+  ], keyPair)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine, other] })
+  const { web, internal, key } = await webNode(t, assoc, seeder.url, { keyPair })
+  t.is(key, hex(mine.key), 'the member is the author of `mine`')
+  const page = await web.request('peek.read', {})
+  t.alike(internal, [])
+  t.is(page.diaries, 1)
+  t.absent(page.items.some((i) => i.author === key))
+  t.alike(page.items.map((i) => [i.author, i.text]), [[hex(other.key), 'Outro 1']])
+
+  const viewer = await webNode(t, assoc, seeder.url)
+  const page2 = await viewer.web.request('peek.read', {})
+  t.is(page2.diaries, 2)
+  t.alike(page2.items.filter((i) => i.author === hex(mine.key)).map((i) => [i.kind, i.text, i.round]), [['repost', null, 0], ['post', 'Eu responde', 1], ['post', 'Eu 1', 2]])
+  t.ok(page2.items.some((i) => i.author === hex(other.key) && i.text === 'Outro 1' && i.round === 0))
+  t.alike(viewer.internal, [])
+})
+
+test('only the own diary advertised: an empty Espiadinha', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const mine = await diary(t, author(assoc, 'Eu', [Date.now() - HOUR]), keyPair)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine] })
+  const { web, internal } = await webNode(t, assoc, seeder.url, { keyPair })
+  const page = await web.request('peek.read', {})
+  t.alike(page, { items: [], next: null, diaries: 0, skipped: 0, incomplete: false })
+  t.alike(internal, [])
+})
+
+// The anonymous peek link must request the own diary like any other
+// candidate: a link that skipped it would leave exactly follows + own key
+// unopened, the inventory the member announces on the identified sync link.
+test('regression: the own diary is still requested over the peek link as cover', async (t) => {
   t.timeout(90000)
   const assoc = association()
   const now = Date.now()
@@ -1157,11 +1218,15 @@ test('the own diary shows in the Espiadinha like any unfollowed diary', async (t
   const other = await diary(t, author(assoc, 'Outro', [now - 2 * HOUR]))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [mine, other] })
   const { web, internal, key } = await webNode(t, assoc, seeder.url, { keyPair })
-  t.is(key, hex(mine.key), 'the member is the author of `mine`')
   const page = await web.request('peek.read', {})
   t.alike(internal, [])
-  t.is(page.diaries, 2, 'the own diary is a candidate')
-  t.alike(page.items.map((i) => [i.author, i.text]), [[hex(mine.key), 'Eu 1'], [hex(other.key), 'Outro 1']], 'the own post (newer) first')
+  t.is(page.diaries, 1)
+  t.alike(page.items.map((i) => i.author), [hex(other.key)])
+  // Blocks a sync link (one that announced) served never count.
+  const peekBlocks = (k) => seeder.uploads.filter((u) => u.key === k && u.connection !== undefined && !seeder.announced.has(u.connection))
+  t.ok(peekBlocks(hex(other.key)).some((u) => u.seq === 0), 'another diary is requested over the peek link')
+  t.ok(peekBlocks(key).some((u) => u.seq === 0), 'the own diary block 0 is requested over the peek link')
+  t.ok(peekBlocks(key).length > 1, 'and its tail window too, like any candidate')
 })
 
 // ---- privacy: never the sync link (docs/rpc.md 5.22) ----
@@ -1196,5 +1261,63 @@ test('with a live continuous run, peek.read still opens its own short socket and
   t.alike(web.events.slice(before).filter((e) => e.name === 'sync.stopped'), [], 'no sync.stopped')
   t.alike(await web.request('sync.status', {}), { state: 'running', runId, once: false })
   await web.request('sync.stop', {})
+  t.alike(internal, [])
+})
+
+test('avatar: a retained compat pair reaches every page while an unseen pair preserves the block 2 name', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const avatar = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 512, height: 512 }
+  const pair = profileRecords({ name: 'New name', avatar })
+  const retained = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    ...pair.map((record) => () => record),
+    ...Array.from({ length: 3 }, () => () => postRecord({ text: 'oi' }))
+  ])
+  const outside = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => postRecord({ text: 'old' }),
+    () => profileRecord({ name: 'Block 2', bio: '' }),
+    ...pair.map((record) => () => record),
+    ...Array.from({ length: 15 }, () => () => postRecord({ text: 'oi' }))
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [retained, outside] })
+  const { web, internal } = await webNode(t, assoc, seeder.url)
+  const items = []
+  let after
+  do {
+    const page = await web.request('peek.read', after ? { limit: 2, after } : { limit: 2 })
+    t.is(page.incomplete, false)
+    items.push(...page.items)
+    after = page.next
+  } while (after)
+  t.is(items.length, 6)
+  for (const item of items) {
+    const visible = item.author === hex(retained.key)
+    t.is(item.name, visible ? 'New name' : 'Block 2')
+    t.alike(item.avatar, visible ? avatar : null)
+  }
+  t.alike(internal, [])
+})
+
+test('regression: a head tombstone that times out never lets the profile it deletes show, nor reads as fetched', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const A = await diary(t, [
+    (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
+    () => profileRecord({ name: 'Antigo', bio: '' }),
+    () => deleteRecord({ seq: 1 }),
+    () => postRecord({ text: 'a 1' }),
+    () => postRecord({ text: 'a 2' })
+  ])
+  // The seeder no longer holds the tombstone: its get times out.
+  await A.clear(2)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [A] })
+  const { web, internal } = await webNode(t, assoc, seeder.url, { peek: { fetchTimeoutMs: 1000 } })
+  const page = await web.request('peek.read', { limit: 5 })
+  t.ok(page.items.length >= 1, 'the posts still show')
+  for (const item of page.items) t.is(item.name, null, 'the deleted profile never names the diary')
+  t.is(page.incomplete, true, 'the unread head block leaves the page incomplete')
+  t.absent(seeder.uploads.some((u) => u.seq === 1), 'the block below the unread tombstone is never fetched')
   t.alike(internal, [])
 })

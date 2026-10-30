@@ -85,6 +85,7 @@ Comandos:
   profile set                define nome e bio
   post                       publica um texto (--text)
   reply                      responde a uma publicação (--to <chave>:<seq> --text)
+  delete                     apaga uma publicação ou versão do perfil (--to <chave>:<seq>)
   follow|unfollow|follows    segue ou deixa de seguir uma chave pública
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
@@ -96,6 +97,7 @@ Comandos:
   account                    serviço de vínculo de conta Google (--account-port, --account-host)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
+  account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
@@ -127,6 +129,7 @@ Opções dos comandos:
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -165,7 +168,7 @@ O semeador fica ligado, no tópico da associação, e replica os diários que ad
 
 No `sync`, um par só conta como semeador verificado quando o `hello` traz papel `seeder`, o certificado confere com a chave Noise autenticada da conexão e a associação é a raiz fixada em `config.json`. O resultado `admitted: true` exige esse semeador verificado. Um par que se diz semeador sem esse certificado aparece como `peer seeder <8 hex> não verificado`. O `admitted` desse par não é impresso e não marca o diário como admitido. Um `rejected` para o próprio diário vindo de qualquer par que não seja semeador verificado vira a linha `withdrawn <chave> <8 hex do par> <motivo>` e não decide o sucesso do `sync`.
 
-`sync --once` sai com código 0 quando ao menos um par enviou `hello`, nenhum diário seguido ficou atrás do tamanho que um par anunciou, os pares interessados no próprio diário alcançaram o tamanho dele e, se há semeador verificado e o bloco 0 local é um certificado válido, um semeador verificado enviou `admitted` até esse tamanho. O prazo padrão é 30000 ms (`--timeout-ms`).
+`sync --once` sai com código 0 quando ao menos um par enviou `hello`, nenhum diário seguido ficou atrás do tamanho que um par anunciou, os pares interessados no próprio diário alcançaram o tamanho dele e, se há semeador verificado e o bloco 0 local é um certificado válido, um semeador verificado enviou `admitted` até esse tamanho. O prazo padrão é 30000 ms (`--timeout-ms`, no máximo 2147483647; acima disso o comando sai com erro de uso, código 2).
 
 ### Tópico por associação
 
@@ -196,10 +199,16 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_WS_HOST` | Endereço da entrada WebSocket. O mesmo que `--ws-host`. Padrão `127.0.0.1`. |
 | `VARANDA_WS_ORIGIN` | Origens de navegador aceitas na entrada WebSocket, separadas por vírgula (ex.: `https://app.exemplo.org`). O mesmo que `--ws-origin` (repetível). Ausente, só páginas `http` em loopback. |
 | `VARANDA_MAX_MEMBERS` | Teto de contas vinculadas no serviço `account` (em `deploy/seeder/.env`), de 1 a 4096. Ausente ou vazio, sem teto. Ao chegar ao teto, um vínculo novo recebe "lista de espera" (HTTP 503); quem já é membro não muda. Ver "Vínculo de conta Google e @nome". |
+| `VARANDA_INVITES_PER_WEEK` | Convites por membro e por semana, de 1 a 100 (em `deploy/seeder/.env`; reiniciar o serviço `account` para mudar). Ausente ou vazio, o cadastro segue aberto como hoje, só limitado por `VARANDA_MAX_MEMBERS`. Definido, um vínculo Google novo só termina com um convite válido e cada membro vinculado ganha esse número de convites por semana civil de Brasília. Remover a variável desliga tudo: o `invites.json` fica no disco e é ignorado pelo serviço (o `account status` ainda mostra as contagens). Ver "Convites", em "Vínculo de conta Google e @nome". |
+| `VARANDA_DIDIT_API_KEY` | Chave da API do Didit para a verificação de idade (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar). Segredo. Vazia junto com `VARANDA_DIDIT_WORKFLOW_ID`, a checagem fica desligada. Ver "Verificação de idade (Didit)". |
+| `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
+| `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
 | `VARANDA_ACCOUNT_MAX_PENDING` | Vínculos pendentes ao mesmo tempo no serviço `account`, de 1 a 100000. Padrão 1000. |
+| `VARANDA_PUSH_TOKEN` | Segredo do `POST /push-event` entre o semeador e o serviço de conta: 64 hex minúsculos, o mesmo valor nos dois (`openssl rand -hex 32`). Vazio ou ausente desliga os avisos push (a rota responde 404). Em `deploy/seeder/.env`. O erro de formato não repete o valor (`uso: VARANDA_PUSH_TOKEN inválido`). |
+| `VARANDA_ACCOUNT_HTTP` | Onde o semeador alcança o HTTP do serviço de conta. Padrão `http://127.0.0.1:8790`. Só HTTP em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com porta explícita. Outra forma é `uso: VARANDA_ACCOUNT_HTTP inválido`. |
 | `VARANDA_MAX_EXTERNAL` | Conexões externas (WebSocket) que o `seed` aceita ao mesmo tempo, de 1 a 4096. Padrão 32, independente do limite do enxame. No pior caso cada uma segura até 8 MiB de quadro: a memória fica em ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY`. |
 | `VARANDA_FRAME_MEMORY` | Memória total, em bytes, para quadros grandes em montagem no `seed`, de 8454144 (8 MiB + 64 KiB, o maior quadro válido) a 1073741824 (1 GiB). Padrão 64 MiB. Some à regra de memória: ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY` no pior caso. |
 | `VARANDA_MAX_SOCKETS` | Sockets abertos ao mesmo tempo na porta do `--ws-port` (WebSocket, `/media`, `/index` e conexões mantidas pelo proxy), de 1 a 8192. Padrão: externas + `/media` + `/index` em andamento + 64, ao menos 128. |
@@ -246,7 +255,7 @@ Dois diários (Alice e Bob) e um semeador, na mesma máquina, em diretórios nov
 - `data/seeder` — semeador
 - `data/alice` — diário da Alice
 - `data/bob` — diário do Bob
-- `data/certs` — JSON dos certificados (`--out` / `--cert-file`); não é um diretório de papel
+- `data/certs` — JSON dos certificados (`--out` / `--cert-file`); `--out` só grava arquivo novo (recusa arquivo existente e link simbólico, código 1): apague o antigo antes de emitir de novo; não é um diretório de papel
 
 Rode tudo na raiz do repositório, em bash ou zsh (as linhas com `$(...)` e `${var##padrão}` dependem disso). `data/` está no `.gitignore`. Se esses diretórios já existem de uma tentativa anterior, use outros caminhos ou apague-os antes: `assoc init` recusa uma associação já criada, e `cert add` recusa um bloco 0 diferente do que já está no diário.
 
@@ -418,7 +427,7 @@ Para quem mantém um semeador ligado: comandos de operação, saúde e métricas
 
 ### Comandos de operação
 
-`seed status` mostra a associação, a chave pública do semeador, o estado do certificado, quantos diários estão em `admitted.json` e se algum processo segura o diretório. Não pega o lock, não abre o store e não grava nada: funciona com o semeador ligado ou parado, e sai com 0.
+`seed status` mostra a associação, a chave pública do semeador, o estado do certificado, quantos diários estão em `admitted.json`, se há uma lista de bloqueio ilegível guardada de lado e nenhuma verificada, caso em que a partida segura admissões (linha `admissões: seguradas…`, só quando é o caso; não prevê a primeira partida depois de um arquivo rasgado sem cópia) e se algum processo segura o diretório. Não pega o lock, não abre o store e não grava nada: funciona com o semeador ligado ou parado, e sai com 0.
 
 ```
 associação: <64 hex>
@@ -449,8 +458,8 @@ O tamanho é o assinado, o mesmo que a cota confere. Sem diários: `nenhum diár
 
 `seed --health-port <porta>` (ou `VARANDA_HEALTH_PORT`) abre um endpoint HTTP só de leitura em `127.0.0.1`. Outro endereço só com `--health-host` (ou `VARANDA_HEALTH_HOST`); `0.0.0.0` expõe o endpoint para fora da máquina. Sem a porta, nada escuta. A porta `0` escolhe uma livre, e a primeira linha da saída diz qual: `health http://127.0.0.1:<porta>`. Porta ocupada termina com `erro: porta em uso` (código 1) antes de abrir o diretório.
 
-- `GET /health` devolve `{ "status", "uptimeSeconds", "admitted", "dropping", "activeDay", "activeWeek", "blocks", "bytes", "connections", "peers", "firewalled", "blocked", "blocklistSeq", "mediaCores", "mediaBytes", "indexRecords", "indexSaturated", "topicPosts", "topicSaturated" }`. Código 200 com `status` igual a `ok`; 503 com `starting` (antes de `seed ready`) ou `closing` (encerrando).
-- `GET /metrics` devolve as mesmas contagens no formato de texto do Prometheus: `varanda_seeder_ready`, `varanda_seeder_admitted_diaries`, `varanda_seeder_dropping_diaries`, `varanda_seeder_active_diaries_day`, `varanda_seeder_active_diaries_week`, `varanda_seeder_blocks`, `varanda_seeder_bytes`, `varanda_seeder_connections`, `varanda_seeder_peers`, `varanda_seeder_firewalled`, `varanda_seeder_blocked`, `varanda_seeder_blocklist_seq`, `varanda_seeder_media_cores`, `varanda_seeder_media_bytes`, `varanda_seeder_index_records`, `varanda_seeder_index_saturated`, `varanda_seeder_topic_posts`, `varanda_seeder_topic_saturated` e `varanda_seeder_uptime_seconds`.
+- `GET /health` devolve `{ "status", "uptimeSeconds", "admitted", "dropping", "activeDay", "activeWeek", "blocks", "bytes", "connections", "peers", "firewalled", "blocked", "blocklistSeq", "blocklistHeld", "mediaCores", "mediaBytes", "indexRecords", "indexSaturated", "topicPosts", "topicSaturated" }`. Código 200 com `status` igual a `ok`; 503 com `starting` (antes de `seed ready`) ou `closing` (encerrando).
+- `GET /metrics` devolve as mesmas contagens no formato de texto do Prometheus: `varanda_seeder_ready`, `varanda_seeder_admitted_diaries`, `varanda_seeder_dropping_diaries`, `varanda_seeder_active_diaries_day`, `varanda_seeder_active_diaries_week`, `varanda_seeder_blocks`, `varanda_seeder_bytes`, `varanda_seeder_connections`, `varanda_seeder_peers`, `varanda_seeder_firewalled`, `varanda_seeder_blocked`, `varanda_seeder_blocklist_seq`, `varanda_seeder_blocklist_held`, `varanda_seeder_media_cores`, `varanda_seeder_media_bytes`, `varanda_seeder_index_records`, `varanda_seeder_index_saturated`, `varanda_seeder_topic_posts`, `varanda_seeder_topic_saturated` e `varanda_seeder_uptime_seconds`.
 
 ```sh
 curl -s http://127.0.0.1:8788/health
@@ -552,6 +561,21 @@ O `association.json` nunca sai da máquina do operador, e o segredo do emissor n
 
 Com `VARANDA_MAX_MEMBERS` definido, quando o número de contas vinculadas chega ao teto, um vínculo que criaria um membro novo recebe "lista de espera" (HTTP 503) e o app mostra uma tela calma com essa resposta. Nada sobre a pessoa fica guardado: o serviço não grava a tentativa, nem o @nome escolhido, nem o e-mail, e a linha pendente é apagada se a recusa vier na conclusão do vínculo. Se o teto se completar enquanto a pessoa está no Google, a volta do Google é recusada antes de o código do Google ser trocado, então nenhum dado do Google é coletado para um vínculo recusado. Quem já é membro segue normalmente: renomear, ver o status, denunciar e concluir um segundo vínculo começado antes de o primeiro terminar (vale como atualização de e-mail) continuam funcionando. Uma chave nova para uma conta já vinculada conta como membro novo e também espera. Baixar o teto abaixo do número atual não remove ninguém. O semeador tem o próprio limite de 4096 diários, que continua valendo: mantenha `VARANDA_MAX_MEMBERS` igual ou abaixo dele.
 
+##### Convites
+
+Com `VARANDA_INVITES_PER_WEEK` definido, um vínculo Google que criaria um membro novo só termina com um convite válido. Quem já é membro não precisa de convite: renomear, ver o status, denunciar e atualizar o e-mail continuam como antes. Sem a variável (ausente ou vazia), nada disso existe e o cadastro é o aberto de sempre: `GET /account/invites/policy` ainda responde `{ "required": false }` e as rotas `POST` de convite não existem.
+
+- **O link.** `https://<origem>/convite/<código>`. O código tem 32 bytes aleatórios em base64url, é mostrado uma única vez ao membro que o cria e o serviço guarda só o SHA-256 dele, e só enquanto o convite não foi usado. Cada link vale para uma pessoa só e por 7 dias depois de criado.
+- **Quanto cada membro pode convidar.** Cada membro vinculado ganha N convites por semana civil de Brasília (UTC-3, sem horário de verão), de segunda 00:00 até a segunda seguinte. Um convite criado conta na semana em que foi criado, mesmo sem uso; o que sobra não acumula; não há revogação nem devolução. Todos seguem N, o operador também, e não existe comando de emissão. Baixar N não apaga os links já criados na semana. A semana segue o relógio do servidor.
+- **A primeira pessoa.** Numa rede vazia ninguém pode emitir convite. A primeira pessoa precisa vincular com a variável vazia e só depois o operador a define. Não há exceção.
+- **`varanda assoc certify` fica fora do portão.** Um membro só certificado não é vinculado, logo não emite convite.
+- **O que o serviço guarda.** No `invites.json` (modo 0600, ao lado do `directory.json`): um identificador aleatório de cada convite, a chave de quem o criou, a data de criação, se foi usado e, enquanto não foi usado, o hash do código. Nunca e-mail, nome, `sub` ou chave de quem entrou. O uso único é decidido pelo diretório: o registro do vínculo de quem entrou guarda o hash do convite usado, e um segundo vínculo com o mesmo convite é recusado na hora, sem depender do `invites.json`. Por isso o `invites.json` apaga o hash quando o convite é usado e não guarda quando. Quem convidou quem pode ser reconstruído a partir de uma cópia antiga do `invites.json` (de antes do uso) e, de forma aproximada, pelas datas.
+- **O caminho.** No app, o membro vinculado abre Ajustes › Convidar pessoas, vê quantos convites pode criar por semana e cria o link; depois de criar, vê quantos restam. Quem recebe abre o link, e o app guarda o código só na aba (`sessionStorage`, chave `varanda-signup-invite`) e o envia ao serviço no início do vínculo; o código não vai para o Google. A volta do Google recusa um convite inválido antes de trocar o código do Google, como a lista de espera, e a linha pendente é apagada. Uma recusa na conclusão deixa o convite utilizável. Uma recusa na conclusão por @nome em uso ou conta já vinculada também apaga a linha pendente e libera o convite na hora, para a pessoa recomeçar.
+- **Rotas.** `GET /account/invites/policy` (`{ required, perWeek }`), `POST /account/invites/start` e `POST /account/invites/finish` (o membro assina com `invite.sign`, ver `docs/rpc.md` 5.30; a resposta traz o código uma vez e quantos convites o membro já usou e ainda tem na semana). `GET /account/status` não traz contagens de convite: a chave de um membro é pública. Recusas: `convite-obrigatorio` (403), `convite-invalido` (404), `limite-convites` (429), e `indisponivel` se o `invites.json` não puder ser lido.
+- **`varanda account status`.** Mostra só contagens: `convites: <total> (<usados> usados)`, nunca um código ou uma chave.
+
+Limites conhecidos (detalhes em `docs/verification.md`, seção 37): uma queda ou perda do lock do serviço no meio da criação pode gastar o convite da semana sem entregar o link; um erro passageiro de leitura do `invites.json` deixa os convites indisponíveis até reiniciar o serviço (como o `terms.json`); o `invites.json` e o diretório são arquivos separados, então uma gravação atrasada de um processo que perdeu o lock pode desfazer a contagem da semana, sem afetar o uso único; em navegação privada que recusa o armazenamento da aba, o código fica só na memória da página e não sobrevive à ida ao Google, e a pessoa abre o link de novo se o vínculo não terminar; uma nova tentativa de início sem assinatura nunca apaga um vínculo pendente que já passou pela assinatura ou pelo Google, a menos que venha do mesmo navegador com o cookie desse vínculo ("começar de novo", "usar outra conta Google"); sem o cookie, o código fica reservado até esse pendente vencer (10 minutos) ou terminar.
+
 O diretório de contas fica no volume `account-data` em três arquivos: `directory.json` (o retrato, com `seq`), `directory.journal.<id>` (o diário de mudanças, uma linha por vínculo, troca de e-mail ou troca de @nome; `<id>` é o identificador que o retrato guarda) e `directory.hwm` (a marca d'água: o maior `seq` já confirmado, com o número de vínculos e de @nomes naquele ponto). Cada mudança grava uma linha no diário e a confirma com `fsync`, sem reescrever o diretório inteiro. Ao chegar a 256 linhas, ao passar de 1 MiB e a cada abertura do serviço (mesmo com o diário vazio), o serviço compacta: cria um diário novo (com identificador novo), reescreve o retrato apontando para ele e só então apaga o diário anterior; um diário nunca é truncado nem reescrito. Um corte de energia no meio de uma linha deixa uma linha incompleta, que o serviço ignora e a próxima abertura para escrita descarta; um corte no meio de uma compactação deixa um diário órfão (que nenhum retrato nomeia), que uma abertura para escrita remove depois de 40 segundos sem gravação nele (antes disso ele pode ser de um serviço que ainda não percebeu que perdeu o lock) e depois de conferir de novo que o retrato não o nomeia. Os três arquivos têm modo 0600.
 
 O retrato e o diário andam juntos: o retrato na versão 2 guarda o identificador do seu diário, e a primeira linha do diário traz esse identificador. Se o diário sumir, ficar vazio ou trouxer outro identificador, ou se um diário órfão trouxer uma mudança além do retrato, o serviço (e `account status`, `account export` e `account reports`) recusa o diretório com `diretório de contas inválido`, em vez de esquecer vínculos e entregar de novo um @nome ou uma conta Google. Enquanto roda, o serviço confere antes e depois de cada gravação que o diário é o mesmo arquivo, com o tamanho esperado, e que o `directory.json` é o mesmo arquivo que ele leu ou gravou por último; se alguém mexeu neles, ou se o serviço perdeu o lock e outro serviço assumiu o diretório (toda abertura do novo serviço troca o `directory.json` e apaga o diário antigo, mesmo vazio), o serviço para de gravar e responde "indisponível" até ser reiniciado; uma linha gravada bem na troca não é confirmada a quem pediu. Um diário órfão com uma mudança além do retrato só abre quando o diário nomeado traz a mesma linha (uma queda bem no fim de uma compactação). Uma falha do disco ao confirmar uma linha (`fsync`) tem o mesmo efeito. Nunca gire (rotacione), apague ou esvazie um `directory.journal.*`: ele não é um log. O backup do volume leva os três arquivos juntos, com o serviço parado.
@@ -564,9 +588,56 @@ Os aceites dos Termos de Uso e da Política de Privacidade ficam num arquivo à 
 
 Se houver um `directory.journal.*` antes de voltar (um diário órfão), suba esta versão de novo, espere mais de 40 segundos para que a limpeza de órfãos o remova, pare-a com a parada limpa e confira de novo. O `deploy.sh` desfaz o deploy sozinho recriando o contêiner `account` com um fechamento por SIGTERM, que deixa a versão 1 só se esse fechamento der certo; se o contêiner `account` estava parado ou reiniciando naquele momento, o diretório continua na versão 2 e a imagem anterior o recusa até que os passos manuais acima sejam seguidos.
 
+#### Verificação de idade (Didit, serviço `account`)
+
+Na web hospedada, todo membro, novo ou já vinculado, confirma a idade antes de usar o app. A idade mínima é 16 (decisão do produto com base no ECA Digital, sujeita a parecer jurídico). A pessoa é enviada à página do Didit, por navegação de página inteira como no passo do Google (por isso o CSP do `Caddyfile` não muda), e volta para `https://<domínio>/?idade=volta`. O serviço `account` pergunta a decisão ao Didit por conta própria e nunca confia na URL de volta.
+
+Configuração do operador:
+
+- Crie a aplicação no Didit e um workflow com estimativa de idade por rosto e documento de reserva.
+- Defina o domínio permitido como a origem pública. O callback é `https://<domínio>/?idade=volta`.
+- A chave da API precisa dos privilégios `read:sessions` e `delete:sessions` e não pode ser restrita a um workflow ou a um status: o Didit responde 404 a uma chave restrita, e o serviço trata 404 como sessão já apagada, então uma chave restrita deixaria imagens guardadas sem aviso.
+- Ponha `VARANDA_DIDIT_API_KEY` e `VARANDA_DIDIT_WORKFLOW_ID` no `.env`. O teto diário opcional é `VARANDA_DIDIT_DAILY_LIMIT` (padrão: 200 sessões por dia).
+- Em produção, defina as duas variáveis. Sem elas ninguém é consultado (útil só no desenvolvimento e na demo) e o serviço registra isso na partida. Para desligar, remova as duas.
+
+O que fica guardado: o `age.json` no volume `account-data` (modo `0600`), com a chave do membro, a faixa (`16-17` ou `18+`), o método `didit` e a data. Nada além disso. Faça o backup junto com o resto do `account-data`. A imagem do rosto e o documento nunca chegam ao Varanda.
+
+Retenção no Didit: depois de cada decisão final o serviço pede ao Didit que apague a sessão (`DELETE` com `retain_face_embeddings` falso). Se falhar, tenta de novo algumas vezes, em memória. Como reserva, defina a retenção mínima no console do Didit e recuse ali qualquer uso para treinamento ou reaproveitamento.
+
+Limites: 3 sessões por membro em 24 h e, para quem ainda não tem vínculo, 3 por código de convite em 24 h (com convites ligados). O teto diário conta à parte as chaves novas e os membros já vinculados, então chaves descartáveis não tiram a vez de quem já é membro. Com o cadastro aberto (sem convites), só o teto diário segura chaves descartáveis: acompanhe o registro `idade`/`sessao` e use convites se o teto encher. As sessões pendentes ficam só na memória, então um reinício pede que a pessoa recomece e a sessão aberta não é apagada no Didit (a retenção mínima do console cobre esse caso). Uma estimativa por rosto abaixo de 21 anos pede o documento, e só o documento pode recusar (menos de 16).
+
+Teste de fumaça no sandbox, ANTES de ligar em produção. O serviço falha fechado (todos continuam bloqueados) se o formato das respostas do Didit for diferente do esperado. Com uma chave de sandbox e o id do seu workflow:
+
+```sh
+curl -sS -X POST https://verification.didit.me/v3/session/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY" \
+  -H "content-type: application/json" \
+  -d "{\"workflow_id\": \"$VARANDA_DIDIT_WORKFLOW_ID\", \"callback\": \"https://<domínio>/?idade=volta\"}"
+curl -sS https://verification.didit.me/v3/session/<id>/decision/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY"
+```
+
+Confira que as respostas trazem `session_id`, `url` e um campo `status`.
+
+Diagnóstico: quando o app mostra "A verificação de idade está fora do ar agora", o serviço registra o motivo, só com palavras fixas (nunca a chave, a sessão ou o que o Didit respondeu). Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"idade"'`:
+
+| Registro (`reason`) | O que fazer |
+| --- | --- |
+| `didit-sessao-http-401` ou `didit-sessao-http-403` | Chave recusada: confira `VARANDA_DIDIT_API_KEY` (de produção, não de sandbox), os privilégios e se há crédito na conta do Didit. |
+| `didit-sessao-http-400` com `didit-sessao-campo-callback` | O domínio do callback não está liberado no Didit: ponha a origem pública nos domínios permitidos da aplicação. |
+| `didit-sessao-http-400` ou `-404` com `didit-sessao-campo-workflow_id` | O `VARANDA_DIDIT_WORKFLOW_ID` não existe para essa chave. |
+| `didit-sessao-tempo` ou `didit-sessao-rede` | O servidor não alcançou `verification.didit.me` (rede, DNS, firewall de saída). |
+| `didit-sessao-formato` | O Didit respondeu num formato inesperado: rode o teste de fumaça acima e compare. |
+| `armazenamento-indisponivel` | O `age.json` não pôde ser lido ou gravado no volume `account-data`. |
+| `teto-diario` | O teto `VARANDA_DIDIT_DAILY_LIMIT` encheu; volta no dia seguinte. |
+
+Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
+
+Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
+
 ### Implantação automática pelo GitHub Actions
 
-O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) e, se passarem, entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
+O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) como os mesmos seis jobs em paralelo, no Node 24. O job `check` reúne os seis e só passa se todos passaram. Se `check` passar, o fluxo entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
 
 O script só implanta se esse SHA for a ponta de `origin/main`. Se `main` já avançou, sai com 3 e o fluxo termina verde com um aviso: a execução mais nova de `main` implanta (se nenhuma estiver na fila, use Run workflow). Ele recusa, sem mudar nada, um checkout com alterações locais ou com commits que não estão em `origin/main`, e um `VARANDA_DOMAIN` que não seja um nome em minúsculas sem ponto final. Depois ele:
 
@@ -797,6 +868,33 @@ Numa instalação local, prefira `npm ci --ignore-scripts` (ou defina `ONNXRUNTI
 
 `account status` mostra `Triagem IA: desligada`, `Triagem IA: <n> precedentes` ou `Triagem IA: indisponível (exemplars.json inválido)`. Inclua `exemplars.json` e `triage.json` no backup do volume `account-data`, junto de `moderation.json` (modo `0600`).
 
+##### Avisos push (opcional)
+
+Avisos do sistema na versão web hospedada, para quem ligar em Ajustes ("Avisos no aparelho"). São quatro eventos: alguém começou a seguir, respondeu, curtiu ou republicou. Citação, menção e o crescimento de um diário seguido não entram aqui. A lista de Avisos do app (resposta, citação e menção inclusive) continua sem usar este caminho.
+
+O serviço de conta precisa estar parado na primeira vez. No diretório de dados da conta:
+
+```sh
+node bin/varanda.js account push-key --data <dataDir>
+```
+
+O comando grava `push-vapid.json` (modo `0600`, `{ v: 1, publicKey, privateKey }`) no volume `account-data` e imprime só a chave pública (`chave pública de push: ...`). Recusa com `serviço de conta em execução` se o lock está preso, e com `chave de push já existe` se o arquivo já está lá. Para girar a chave: apague `push-vapid.json` com o serviço parado, rode `account push-key` outra vez e peça que cada pessoa ligue os avisos de novo neste navegador. A chave nova deixa as inscrições antigas órfãs.
+
+No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado; depois de gravar, recrie o semeador e o serviço `account`):
+
+- `VARANDA_PUSH_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta. Gere com `openssl rand -hex 32`. Vazio ou ausente desliga: o semeador não faz o repasse e `POST /push-event` responde 404.
+- `VARANDA_ACCOUNT_HTTP`: onde o semeador alcança o HTTP do serviço de conta. Padrão `http://127.0.0.1:8790`. Só HTTP em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com porta explícita.
+
+O que fica guardado: `push-vapid.json` (o par VAPID) e `push.json` (a inscrição de cada aparelho: `endpoint`, `p256dh`, `auth` e `createdAt`), os dois modo `0600` no volume `account-data`. No máximo 4 aparelhos por membro. `account export` soma `pushDevices` e nunca o endereço. `account status` mostra `avisos push: ligados (N aparelhos)`, `avisos push: desligados` ou `avisos push: indisponível (push.json inválido)`.
+
+Nada de inscrição, chave, nome ou texto do aviso entra no registro. As linhas são só `{ event: 'push', reason }`.
+
+O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível. `isEndpoint` (`packages/core/lib/push-proof.js`) exige `https`, de 1 a 2048 caracteres, ASCII imprimível, sem barra invertida, sem `#` e sem usuário na autoridade. `isPushEndpoint` (`packages/rpc/lib/methods.js`, no `push.sign`) e `endpointParam` (`POST /account/push/finish` e `POST /account/push/check`) exigem o mesmo e ainda `new URL(valor).href === valor`: porta `443` explícita, host em maiúsculas e segmentos `.` ou `..` não entram.
+
+O semeador nunca vê a inscrição. Ele só manda o candidato em loopback (`POST /push-event`, `Authorization: Bearer` com `VARANDA_PUSH_TOKEN`). O Caddy não encaminha essa rota (`apps/cli/test/caddyfile.test.js`). O serviço compara o sha256 do token com `timingSafeEqual`. Sem o token, a rota não existe (404) e o corpo não é lido.
+
+Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
+
 #### Aplicar as decisões do painel
 
 Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.
@@ -870,7 +968,7 @@ npm test
 npm run lint
 ```
 
-`npm test` executa `npm test --workspaces --if-present`. Cada workspace que define script de teste usa `node ../../scripts/run-tests.js`, que roda cada `test/*.test.js` desse workspace em sequência (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000).
+`npm test` executa `npm test --workspaces --if-present` (os workspaces, um depois do outro). Cada workspace que define script de teste usa `node ../../scripts/run-tests.js`, que roda os `test/*.test.js` desse workspace num pool de processos filhos, `VARANDA_TEST_CONCURRENCY` por vez (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000). Sem a variável, o pool é a metade inteira dos núcleos da CPU, no máximo 4 (4 num Mac de 12 núcleos, 2 numa máquina de 4 núcleos), porque vários testes medem tempos abaixo de 100 ms que mudam sob carga; `VARANDA_TEST_CONCURRENCY=1` roda um arquivo por vez, com a saída ao vivo. Com mais de um arquivo por vez, a saída de cada um sai num bloco ao terminar (ordem de término, sem intercalação), e o resumo lista `# falha: <arquivo>` para cada falha antes de `# N arquivo(s) de teste, M falha(s)`. `VARANDA_TEST_SHARD=I/N` roda só os arquivos cuja posição i (base 0, na lista ordenada ou na ordem da linha de comando) satisfaz `i % N == I - 1`; um fragmento sem arquivos sai com falha (`# nenhum arquivo neste fragmento`), e um valor inválido também. Se um teste de tempo falhar, rode-o sozinho (`node <arquivo>`) ou com `VARANDA_TEST_CONCURRENCY=1` antes de culpar a sua mudança.
 
 Um workspace:
 
@@ -889,7 +987,7 @@ npm run dev -w apps/site
 
 Abre em http://127.0.0.1:4173/. Publicação em GitHub Pages: [docs/site.md](docs/site.md).
 
-Em cada pull request e em cada push para `main`, o workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em `ubuntu-24.04` com Node 20 e 24 (matriz): `npm ci`, `npm run lint`, `npm test` e `npm run demo` (a demo deve terminar com `DEMO OK`).
+Em cada pull request e em cada push para `main`, o workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em `ubuntu-24.04`, no Node 20 e no 24. Em cada versão, seis jobs rodam em paralelo: `packages/core` em dois fragmentos, `apps/cli` em dois fragmentos (`VARANDA_TEST_SHARD` 1/2 e 2/2 nos dois), `packages/web-member` e `others`. O job `others` roda o lint, o `npm test` da raiz para os workspaces que restam e a demo, que deve terminar com `DEMO OK`. `packages/core`, `apps/cli` e `packages/web-member` são pulados nesse `npm test`, porque têm job próprio. Um workspace acrescentado depois roda ali automaticamente. Cada job começa com `npm ci --ignore-scripts` e define `VARANDA_TEST_CONCURRENCY=1`. O paralelismo da CI vem dos jobs. Os checks `test (20)` e `test (24)`, um por versão, são os que a regra da `main` exige. Cada um só passa se os seis jobs daquela versão passaram, e falha se algum falhou, foi cancelado ou pulado. Localmente os quatro passos não mudam: `npm ci` (ou `npm install`), `npm run lint`, `npm test` e `npm run demo`.
 
 Um arquivo, a partir da raiz:
 
@@ -920,7 +1018,7 @@ Arquivos JSON de estado são gravados num arquivo temporário e renomeados por c
 - `config.json` — `{ "v": 1, "role": "seeder", "association": "<hex64>" }`, escrito pelo primeiro de `seed key`, `seed cert add` e `seed`.
 - `seeder-key.json` — par Noise do semeador, modo `0600`: `v`, `publicKey` (hex64) e `secretKey`. Criado por `seed key`. O comando não imprime `secretKey`.
 - `seeder-cert.json` — certificado do semeador em JSON indentado, escrito por `seed cert add`.
-- `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita, com a cópia `blocklist.json.prev`. Um arquivo ilegível é guardado como `blocklist.json.ilegivel-<ms>` e a cópia o substitui; um arquivo ausente com cópia também é reposto. Sem cópia (ou com uma cópia que não verifica), o semeador não admite diários novos (`rejected` com `blocklist-pending`; quem ele já serve continua recebendo `admitted`) até receber uma lista verificada; essa trava fica só em memória e some num reinício. Se o arquivo não puder ser movido, a partida falha (`erro: lista de bloqueio ilegível`).
+- `blocklist.json` — como no membro: a lista de bloqueio mais nova aceita, com a cópia `blocklist.json.prev`. Um arquivo ilegível é guardado como `blocklist.json.ilegivel-<ms>` e a cópia o substitui; um arquivo ausente com cópia também é reposto. Sem cópia (ou com uma cópia que não verifica), o semeador não admite diários novos (`rejected` com `blocklist-pending`; quem ele já serve continua recebendo `admitted`) até receber uma lista verificada; a trava vale de novo a cada partida enquanto o `blocklist.json.ilegivel-<ms>` guardado estiver lá e nenhuma lista verificada também (`seed status` e `/health` mostram `blocklistHeld`). Se o arquivo não puder ser movido, a partida falha (`erro: lista de bloqueio ilegível`).
 - `admitted.json` — único arquivo de estado dos diários servidos: `{ "v": 1, "admitted": { "<hex64>": <certificado de membro> }, "media": { "<hex64 do núcleo>": { "diary": "<hex64>", "seq": <n> } } }`. Um arquivo antigo, sem `media`, continua valendo. A chave entra nesse arquivo antes do core abrir em `store/`. Uma chave em descarte permanece no arquivo até a limpeza do core terminar.
 
 ### Associação (`data/assoc`)
@@ -1036,14 +1134,14 @@ Limites desta fase:
 - As sessões do painel acabam quando o serviço `account` reinicia. A lista que o painel mostra como publicada é o espelho verificado da última lista que o operador confirmou com `mod apply`, e o `blocklist.json` do operador é a que vale; "aplicado" é a palavra do operador, e a propagação segue as regras do `varanda/blocklist/1`.
 - Certificados de membro individuais não são revogáveis (bloqueie a chave do diário). A chave do emissor do serviço de conta é revogada com `mod revoke-issuer`; depois disso gere outra (`account key`), certifique (`assoc certify-issuer`), `account cert add`, reinicie o serviço e peça que os membros vinculem de novo, porque os certificados v2 antigos deixam de valer. A reemissão automática fica para uma PR futura.
 - O app pagina para trás por cursor (`before` em `feed.read` e `log.read`: 30 e depois páginas de 31 publicações, páginas de 36 blocos no diário), e os comandos `feed` e `log` da CLI paginam do mesmo jeito com `--limit` e `--before`. Não há paginação para a frente (`since`); dados novos pedem recarregar a página mais nova.
-- A Espiadinha (quarta aba) só existe na versão web hospedada: o app nativo e o `varanda-serve` avisam disso. Cada página abre uma conexão curta com o semeador (uma conexão externa a mais, entre as conexões externas que ele aceita, `VARANDA_MAX_EXTERNAL`, padrão 32; com muitos membros online o semeador responde lotado e a tela mostra "Semeador ocupado; tente novamente em instantes."; medido em laço local, 40 membros conectados com o padrão de 32 dão 32 vagas ocupadas e 8 recusas, e cada leitura segura uma vaga por cerca de 10 a 20 ms. Quadros grandes demais vindos do semeador cortam a ligação), o custo cresce de forma linear com o número de diários do semeador (páginas cortadas em 25 s ou 16 MiB aparecem como incompletas), nada é guardado no aparelho além da memória da página, nomes são o melhor possível, mostra até 3 publicações por diário (respostas, citações e republicações incluídas) e a data é a que o autor escreveu. Regra e detalhes em `docs/rpc.md` (5.22) e `docs/verification.md` seção 17. A pesquisa por assunto da Espiadinha acha só palavras inteiras (sem prefixo, sem acentos nem alfabetos fora de a-z depois de tirar os acentos), em ordem de data e sem pesos, apenas no que o semeador indexou na memória (pode estar incompleto), sem "assuntos do momento"; uma publicação ainda não pode ser apagada, então continua pesquisável até o diário sair do semeador (`docs/protocol.md` seção 5).
-- Os Avisos (a quarta das cinco abas, com o sino, antes do Diário) só existem na versão web hospedada: o app nativo, o `varanda-serve` e a CLI mostram "só na versão web". Quem começou a seguir você aparece com "Seguir de volta", sem contagem, sem lista de seguidores e sem rota HTTP nova; o semeador guarda o índice só em memória (canal `varanda/notices/1`, [docs/protocol.md](docs/protocol.md)) e cada leitura usa uma conexão externa curta a mais, como a Espiadinha. Detalhes em `docs/rpc.md` (5.28) e `docs/verification.md` seção 20.
+- A Espiadinha (quarta aba) só existe na versão web hospedada: o app nativo e o `varanda-serve` avisam disso. Cada página abre uma conexão curta com o semeador (uma conexão externa a mais, entre as conexões externas que ele aceita, `VARANDA_MAX_EXTERNAL`, padrão 32; com muitos membros online o semeador responde lotado (a mensagem do nó, "Semeador ocupado; tente novamente em instantes.", não muda) e a tela mostra "Muitas pessoas conectadas agora. Tente de novo em instantes."; medido em laço local, 40 membros conectados com o padrão de 32 dão 32 vagas ocupadas e 8 recusas, e cada leitura segura uma vaga por cerca de 10 a 20 ms. Quadros grandes demais vindos do semeador cortam a ligação), o custo cresce de forma linear com o número de diários do semeador (páginas cortadas em 25 s ou 16 MiB aparecem como incompletas), nada é guardado no aparelho além da memória da página, nomes são o melhor possível, mostra até 3 publicações por diário (respostas, citações e republicações incluídas) e a data é a que o autor escreveu. Regra e detalhes em `docs/rpc.md` (5.22) e `docs/verification.md` seção 17. A pesquisa por assunto da Espiadinha acha só palavras inteiras (sem prefixo, sem acentos nem alfabetos fora de a-z depois de tirar os acentos), em ordem de data e sem pesos, apenas no que o semeador indexou na memória (pode estar incompleto), sem "assuntos do momento"; uma publicação ainda não pode ser apagada, então continua pesquisável até o diário sair do semeador (`docs/protocol.md` seção 5).
+- Os Avisos (a quarta das cinco abas, com o sino, antes do Diário) só existem na versão web hospedada: o app nativo, o `varanda-serve` e a CLI mostram "só na versão web". Quem começou a seguir você aparece numa linha que abre o perfil da pessoa, onde fica o "Seguir", e quem responde, cita ou menciona (`@nome` no texto) você aparece numa linha que abre a conversa; sem contagem, sem lista de seguidores e sem rota HTTP nova; o semeador guarda os índices só em memória (canais `varanda/notices/1`, só de seguir, e `varanda/notices/2`, com os quatro tipos, [docs/protocol.md](docs/protocol.md)) e cada leitura usa uma conexão externa curta a mais, como a Espiadinha. Detalhes em `docs/rpc.md` (5.28) e `docs/verification.md` seções 20 e 35. O push da versão web hospedada (seguir, resposta, curtida e republicação) é outro caminho e entra nesta fase: "Avisos push" acima e `docs/verification.md` seção 38.
 - O app sincroniza sozinho sempre que está aberto e com rede, também com dados móveis; a preferência por Wi-Fi não existe (issue #48). Toda leitura de membro ainda interrompe e reinicia a rodada contínua (issue #66); o app reduz o efeito com leituras em lote (`profile.read` com até 100 chaves, no máximo um pedido por segundo), uma janela de 5 s antes das buscas de fundo e a pílula "ver novidades" no lugar de recarregar sozinho. A pílula é só uma dica das linhas `downloaded`, nunca uma contagem. Veja [docs/app.md](docs/app.md).
 
 Fora desta fase:
 
 - Verificação de idade real. Hoje o operador de `assoc certify` afirma `--age-band`. Comentário `TODO(phase1): the real age-check vendor decides here; today the operator asserts the age band.` em `packages/core/lib/assoc.js`. O mesmo limite está em `docs/protocol.md` (certificados).
-- Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync). Já existem avisos de "começou a seguir você" (com "Seguir de volta"), mas só dentro do app, na aba Avisos do PWA hospedado: sem contagem de seguidores, sem lista de seguidores e sem notificação do sistema.
+- Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync). Esse caso, um aviso quando um diário seguido cresce, continua fora. Os quatro eventos (seguir, resposta, curtida e republicação) já têm push na versão web hospedada, com adesão em Ajustes. Citação e menção ficam só na aba Avisos, dentro do app, junto com o aviso de seguir. Sem contagem de seguidores e sem lista de seguidores. O app nativo, o `varanda-serve` e a CLI não têm push.
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
 - Denúncias pelo app nativo e pela CLI (a denúncia pela versão web, inclusive do perfil de outro membro, o painel e a lista de bloqueio assinada já existem). Conversas completas e perfis de quem a pessoa não segue só pela versão web hospedada (índice de engajamento do semeador e leitura sob demanda; `docs/protocol.md` seções 5 e 7). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista.
 - Vídeo e a comparação de fotos com listas de hashes de material ilegal (`docs/design.md`, Moderação). Hoje só a versão web hospedada publica fotos e GIFs (até 4 por publicação, 8 MiB cada, 256 MiB por núcleo de fotos, um núcleo por aparelho sem troca); a CLI, o app nativo e o `varanda-serve` só mostram que a publicação tem fotos. Veja `docs/verification.md` seção 16.

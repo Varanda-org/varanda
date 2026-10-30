@@ -70,7 +70,7 @@ test('termsDecision: the full table', async (t) => {
   const { termsDecision } = await load()
   const r = rec({ [X]: { acceptedAt: T1, synced: false } }, 2)
   const claim = { at: T1 }
-  const d = (o) => termsDecision({ record: r, version: 2, member: X, claim: null, hosted: true, identityKnown: true, ...o })
+  const d = (o) => termsDecision({ record: r, version: 2, member: X, claim: null, hosted: true, identityKnown: true, locked: true, ...o })
 
   t.is(d({ identityKnown: false }), 'loading', 'hosted, identity unknown, even with a record')
   t.is(d({ identityKnown: false, record: null }), 'loading')
@@ -81,10 +81,19 @@ test('termsDecision: the full table', async (t) => {
   t.is(d({ version: 3 }), 'updated')
   t.is(d({ version: 3, hosted: false, member: null }), 'updated')
 
-  t.is(d({ member: null }), 'needed', 'hosted, locked at Entrar, no claim')
+  t.is(d({ member: null }), 'accepted', 'hosted, locked at Entrar, a member accepted this version on this device')
+  t.is(d({ member: null, record: rec({}, 2) }), 'accepted', 'hosted, locked, an acceptance given before sign-in was stored (members empty)')
+  t.is(d({ member: null, record: rec({}, 2), claim }), 'accepted', 'hosted, locked, empty record, claim held')
+  t.is(d({ member: null, record: null }), 'needed', 'hosted, locked, nothing stored')
+  t.is(d({ member: null, record: rec({ [X]: { acceptedAt: T1, synced: false } }, 1) }), 'updated', 'hosted, locked, an older version with members still asks')
   t.is(d({ member: null, claim }), 'accepted', 'hosted, member null, claim held')
   t.is(d({ member: null, hosted: false }), 'accepted', 'native, member null, record current')
   t.is(d({ member: null, hosted: undefined }), 'accepted')
+  t.is(d({ member: null, locked: false }), 'needed', 'hosted, unlocked, key not known yet (first ceremony), no claim')
+  t.is(d({ member: null, locked: false, claim }), 'accepted', 'hosted, unlocked, key not known yet, claim held')
+  t.is(d({ member: null, locked: false, record: rec({}, 2) }), 'needed', 'hosted, unlocked, key not known yet, empty record')
+  t.is(d({ member: null, locked: undefined }), 'needed', 'hosted, member null, locked unknown fails closed')
+  t.is(d({ member: null, hosted: false, locked: false }), 'accepted', 'native, member null, unlocked')
 
   t.is(d({}), 'accepted', 'member in record')
   t.is(d({ claim }), 'accepted', 'member in record with a claim')
@@ -291,6 +300,31 @@ test('termsStore.web: round trip under varanda-terms', async (t) => {
   t.is(await loadTermsRecord(), null, 'corrupt JSON')
   map.set('varanda-terms', JSON.stringify({ ...r, extra: 1 }))
   t.is(await loadTermsRecord(), null, 'invalid shape')
+})
+
+test('termsStore.web: a locked reload keeps the acceptance', async (t) => {
+  const { loadTermsRecord, saveTermsRecord } = await loadWeb()
+  const { termsDecision, withMember } = await load()
+  const map = new Map()
+  const storage = { getItem: (k) => map.has(k) ? map.get(k) : undefined, setItem: (k, v) => map.set(k, String(v)) }
+  fakeStorage(t, () => storage)
+  const dec = (record, o) => termsDecision({ record, version: 2, member: null, claim: null, hosted: true, identityKnown: true, locked: true, ...o })
+
+  t.is(dec(await loadTermsRecord()), 'needed', 'nothing stored')
+
+  await saveTermsRecord(rec({ [X]: { acceptedAt: T1, synced: false } }, 2))
+  let loaded = await loadTermsRecord()
+  t.is(dec(loaded), 'accepted', 'locked reload, member accepted')
+  t.is(dec(loaded, { locked: false }), 'needed', 'unlocked before the shell knows the key')
+  t.is(dec(loaded, { member: Y }), 'account', 'another account is asked after its passkey')
+  t.is(dec(loaded, { version: 3 }), 'updated', 'a new version asks again')
+
+  const saved = withMember(null, 2, null, T1)
+  t.alike(saved, rec({}, 2))
+  await saveTermsRecord(saved)
+  loaded = await loadTermsRecord()
+  t.is(dec(loaded), 'accepted', 'locked reload, acceptance given before sign-in')
+  t.is(dec(loaded, { member: Y }), 'account', 'the stored acceptance names no member')
 })
 
 test('termsStore.web: a throwing or missing storage never throws', async (t) => {

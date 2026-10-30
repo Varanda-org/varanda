@@ -92,3 +92,87 @@ test('show reloads only for an initial load, a fresh hint or an expired load', a
   ]
   for (const [input, expected] of cases) t.is(shouldReloadOnShow(Object.freeze(input)), expected)
 })
+
+const KEY_A = 'a'.repeat(64)
+const KEY_B = 'b'.repeat(64)
+const KEY_C = 'c'.repeat(64)
+
+test('feed footer says syncing only while the last page reported incomplete diaries', async (t) => {
+  const { FEED_SYNCING_END, feedStillSyncing, isLastFeedPage } = await load()
+  t.is(FEED_SYNCING_END, 'Ainda sincronizando quem você segue.')
+  t.is(feedStillSyncing({ items: [] }), false, 'an old node without the fields is not syncing')
+  t.is(feedStillSyncing({ incomplete: [], incompleteTruncated: 0 }), false)
+  t.is(feedStillSyncing({ incomplete: [KEY_A] }), true)
+  t.is(feedStillSyncing({ incomplete: [], incompleteTruncated: 1 }), true)
+  t.is(isLastFeedPage({ items: [], incomplete: [KEY_A] }, 2), true, 'a short syncing page still ends the list')
+})
+
+test('sync baseline covers incomplete and no-cert follows, plus every length when truncated', async (t) => {
+  const { syncBaseline } = await load()
+  const lengths = Object.freeze({ [KEY_A]: 3, [KEY_C]: 7 })
+  t.alike(syncBaseline({ incomplete: [KEY_A, KEY_B] }, lengths), { [KEY_A]: 3, [KEY_B]: -1 })
+  t.alike(syncBaseline({ incomplete: [KEY_B] }, undefined), { [KEY_B]: -1 })
+  t.alike(syncBaseline({ items: [] }, lengths), {})
+  t.alike(syncBaseline({ incomplete: [KEY_B], incompleteTruncated: 2 }, lengths), { [KEY_A]: 3, [KEY_B]: -1, [KEY_C]: 7 })
+  t.alike(syncBaseline({
+    incomplete: [],
+    skipped: [{ key: KEY_B, reason: 'no-cert' }, { key: KEY_C, reason: 'blocked' }]
+  }, lengths), { [KEY_B]: -1 }, 'only a no-cert follow joins the baseline')
+})
+
+test('sync advances only on growth past the baseline', async (t) => {
+  const { syncBaseline, syncAdvanced, advancedKeys } = await load()
+  const baseline = Object.freeze({ [KEY_A]: 3, [KEY_B]: -1 })
+  t.is(syncAdvanced(baseline, 0, { [KEY_A]: 3 }), false, 'equal length')
+  t.is(syncAdvanced(baseline, 0, { [KEY_A]: 2 }), false, 'smaller length')
+  t.is(syncAdvanced(baseline, 0, { [KEY_A]: 4 }), true)
+  t.is(syncAdvanced(baseline, 0, { [KEY_B]: 1 }), true, 'first block of an unknown key')
+  t.is(syncAdvanced(baseline, 0, { [KEY_A]: '9' }), false, 'non-number')
+  t.is(syncAdvanced(baseline, 0, undefined), false)
+  t.is(syncAdvanced(baseline, 0, { [KEY_C]: 1 }), false, 'key outside the baseline, not truncated')
+  t.is(syncAdvanced(baseline, 1, { [KEY_C]: 1 }), true, 'key outside the baseline, truncated')
+  t.is(syncAdvanced(baseline, 1, { nothex: 5 }), false, 'non-hex key ignored')
+  t.alike(advancedKeys(baseline, 1, { [KEY_C]: 1, [KEY_B]: 0, [KEY_A]: 3, nothex: 9 }), [KEY_B, KEY_C])
+  t.alike(advancedKeys(baseline, 0, { [KEY_A]: 3 }), [])
+  t.alike(advancedKeys(baseline, 0, undefined), [])
+  const page = { incomplete: [], skipped: [{ key: KEY_B, reason: 'no-cert' }, { key: KEY_C, reason: 'blocked' }] }
+  const fromSkipped = syncBaseline(page, {})
+  t.is(syncAdvanced(fromSkipped, 0, { [KEY_B]: 1 }), true, 'a no-cert follow growing triggers')
+  t.is(syncAdvanced(fromSkipped, 0, { [KEY_C]: 1 }), false, 'a blocked follow does not')
+})
+
+test('a capped skipped or incomplete list opens the trigger to every key', async (t) => {
+  const { syncTruncated, syncBaseline, syncAdvanced } = await load()
+  const KEY_A = 'a'.repeat(64)
+  const KEY_B = 'b'.repeat(64)
+  t.is(syncTruncated({}), 0, 'an old node')
+  t.is(syncTruncated({ incompleteTruncated: 2, skippedTruncated: 3 }), 5)
+  t.is(syncTruncated({ incompleteTruncated: -1, skippedTruncated: 1.5 }), 0)
+  const page = { incomplete: [], skipped: [], skippedTruncated: 1 }
+  const baseline = syncBaseline(page, { [KEY_A]: 4 })
+  t.is(baseline[KEY_A], 4, 'known lengths are recorded')
+  t.is(syncAdvanced(baseline, syncTruncated(page), { [KEY_A]: 4, [KEY_B]: 1 }), true, 'a follow cut from skipped grows')
+  t.is(syncAdvanced(baseline, syncTruncated(page), { [KEY_A]: 4 }), false)
+})
+
+test('only a short newest page replaces the list quietly', async (t) => {
+  const { replacesQuietly } = await load()
+  const row = (seq) => ({ author: 'a'.repeat(64), seq })
+  const full = { items: Array.from({ length: 30 }, (_, i) => row(i + 1)) }
+  t.is(replacesQuietly({ items: [row(1)] }, 30, [row(9)]), true, 'a short page is the whole local feed')
+  t.is(replacesQuietly(full, 30, [row(40)]), false, 'a full page would cut a shown row')
+  t.is(replacesQuietly(full, 30, []), true, 'an empty list loses nothing')
+  t.is(replacesQuietly(full, 30, [row(2), row(30)]), true, 'every shown row is still on the page')
+  t.is(replacesQuietly({}, 30, []), false)
+})
+
+test('empty automatic reads back off with a capped delay', async (t) => {
+  const { FEED_REARM_MS, rearmDelay } = await load()
+  t.is(rearmDelay(0), FEED_REARM_MS)
+  t.is(rearmDelay(1), FEED_REARM_MS * 2)
+  t.is(rearmDelay(4), FEED_REARM_MS * 16)
+  t.is(rearmDelay(10), FEED_REARM_MS * 16, 'delay stays capped')
+  for (const invalid of [-1, 1.5, undefined]) {
+    t.is(rearmDelay(invalid), FEED_REARM_MS, 'invalid streak uses the initial delay')
+  }
+})

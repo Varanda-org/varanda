@@ -8,7 +8,9 @@
 import { Fragment, useState } from 'react'
 import { Pressable, StyleSheet, Text } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
+import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
+import { HelpNote } from '../ui/Help'
 import { Body, Btn, Card, Label, Page, Soft, Title, colors } from '../ui'
 
 const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
@@ -19,8 +21,7 @@ const ACCEPT_LABEL = 'Li e aceito os Termos de Uso e a Política de Privacidade'
 
 const SYNC_TEXT = {
   registrado: 'Também registrado na sua conta da associação.',
-  pendente: 'Ainda não registrado na sua conta da associação; tentaremos de novo.',
-  'so-aparelho': 'Registrado só neste aparelho: esta conta não tem vínculo com uma conta Google. Para registrar também na conta, vincule uma em Conta e @nome.'
+  pendente: 'Ainda não registrado na sua conta da associação; tentaremos de novo.'
 }
 
 function gateText (reason, version) {
@@ -33,9 +34,9 @@ function acceptedText (version, acceptedAt) {
   return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + ' neste aparelho.'
 }
 
-// No line for null or anything outside the three known states.
+// No line for null, for 'so-aparelho' (short text plus a help link) or for an unknown state.
 function syncText (syncState) {
-  if (syncState === 'registrado' || syncState === 'pendente' || syncState === 'so-aparelho') return SYNC_TEXT[syncState]
+  if (syncState === 'registrado' || syncState === 'pendente') return SYNC_TEXT[syncState]
   return ''
 }
 
@@ -77,6 +78,7 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
       {!gate && acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
       {!gate && saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
       {!gate && syncLine ? <Soft>{syncLine}</Soft> : null}
+      {!gate && syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
       <Soft>{REVIEW_NOTE}</Soft>
       <Soft>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
       <LegalDoc doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />

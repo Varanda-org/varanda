@@ -7,12 +7,17 @@
 // a reply, a quote or a repost still in effect (likes are never shown).
 // Within a round, only the author's own `at` orders them, as in A Rua. The same
 // seeder inventory gives every member the same page except for their follows
-// and blocks (the own diary is a candidate too: the person sees their own
-// publications here); anyone can recompute it from hello inventory and diaries.
+// and blocks. The own diary is fetched and paged like any other candidate
+// but its items are removed from its owner's page; it stays visible in
+// everyone else's. Anyone can recompute it from hello inventory and diaries.
 // Known limit: `at` is untrusted presentation data; a date up to 24 hours ahead
-// sorts first in its round, just as in A Rua.
+// sorts first in its round, just as in A Rua. A tombstone below the floor is
+// never seen (the gap between the head and the tail is not fetched), so it
+// cannot hide a post this page fetched. A tombstone in the fetched window
+// hides its target.
 
 const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
+const { applyDeletes } = require('./deletion')
 const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
@@ -28,7 +33,7 @@ const PEEK_PAGE_TIMEOUT_MS = 25000
 const PEEK_CONNECT_TIMEOUT_MS = 15000
 const PEEK_SNAPSHOT_TTL_MS = 300000
 const PEEK_PAGE_MAX_BYTES = 16777216
-const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
+const PEEK_RULE = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
 
 function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
@@ -70,9 +75,10 @@ function peekWindow (length, fetched) {
   return seqs.sort((a, b) => b - a).slice(0, room)
 }
 
-// Only these copied records survive between pages. Invalid records still
-// count as fetched: contiguity must always come from the separate seq set.
-// Hostile entries, getters and iterators cannot escape this reader.
+// Only these copied records survive between pages, tombstones included, so
+// the next page can fold them again. Invalid records still count as fetched:
+// contiguity must always come from the separate seq set. Hostile entries,
+// getters and iterators cannot escape this reader.
 function retainRecords (entries) {
   const kept = []
   try {
@@ -83,7 +89,7 @@ function retainRecords (entries) {
         const copy = validRecordCopy(record, seq)
         if (copy === null) continue
         if (seq === 0 || copy.type === 'profile' || copy.type === 'username' ||
-          copy.type === 'post' || copy.type === 'repost') {
+          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete') {
           kept.push({ seq, record: copy })
         }
       } catch {}
@@ -94,7 +100,7 @@ function retainRecords (entries) {
 
 // Never throws on peer data, including hostile getters and proxies.
 function diaryPeek (input) {
-  const result = { reason: 'not-in-log', name: null, username: null, posts: [], future: 0, scanned: false, capped: false }
+  const result = { reason: 'not-in-log', name: null, avatar: null, username: null, posts: [], future: 0, scanned: false, capped: false }
   try {
     const { key, length, entries, fetched, association, revokedIssuers, now = Date.now() } = input
     if (!Number.isSafeInteger(length) || length < 1) return result
@@ -103,17 +109,23 @@ function diaryPeek (input) {
     // blocks count too, so a missing head block never reads as scanned.
     result.scanned = floor === 0
     result.capped = !result.scanned && fetched.size >= PEEK_MAX_BLOCKS_PER_DIARY
-    const copies = retainRecords(entries)
-    const first = copies.find((entry) => entry.seq === 0)
+    // Before the name and the tail. A tombstone that was not fetched (below
+    // the floor, outside the head) is not in `entries`, so it is never seen.
+    const copies = applyDeletes(retainRecords(entries))
+    const first = copies.find((entry) => entry.seq === 0 && entry.record)
     if (first) {
       const verdict = certForKey(first.record.cert, key, association, { revokedIssuers })
       result.reason = verdict.ok ? null : verdict.reason
     }
-    result.name = (latestProfile(copies) || {}).name || null
+    const profile = latestProfile(copies) || {}
+    result.name = profile.name || null
+    result.avatar = profile.avatar || null
     result.username = latestUsername(copies, key, association, { revokedIssuers })
     const tail = copies.filter(({ seq }) => seq >= floor && seq < length)
     for (const { seq, record: post } of tail) {
-      if (post.type !== 'post') continue
+      // A deleted block is { record: null }. Reading post.type would throw
+      // and the catch would drop every later publication in the tail.
+      if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         result.future++
         continue
@@ -166,31 +178,38 @@ function pageOrder (a, b) {
 
 // `diaries` contains the caller's verified diaryPeek results. Incomplete
 // rounds are provisional: fetch `needs` and rebuild before using any cursor.
-function buildPeekPage ({ diaries, limit, after = null }) {
+// `hidden` (null or a hex64 key) names the viewer's own diary. It is paged
+// exactly as if shown, so every fetch the page triggers (rounds, needs,
+// windows, continuation links) is the same as for a shown diary; only its
+// items are removed from what is returned to its owner. A non-last page can
+// therefore hold up to PEEK_MAX_ROUNDS fewer items than `limit`.
+function buildPeekPage ({ diaries, limit, after = null, hidden = null }) {
   const cursor = after === null ? null : peekCursor(after)
   if (after !== null && cursor === null) throw new TypeError('after inválido')
   if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('limit inválido')
+  const hide = typeof hidden === 'string' ? hidden.toLowerCase() : null
+  if (hidden !== null && !isHex64(hide)) throw new TypeError('hidden inválido')
   const items = []
   const needs = new Set()
   for (let round = cursor === null ? 0 : cursor.round; round < PEEK_MAX_ROUNDS; round++) {
     const slots = []
-    for (const { key, name, username, posts, exhausted } of diaries) {
+    for (const { key, name, avatar = null, username, posts, exhausted } of diaries) {
       const post = posts[round]
       if (!post) {
         if (!exhausted) needs.add(key)
         continue
       }
       const { seq, at } = post
-      // A FeedItem (lib/feed.js), plus round.
+      // A FeedItem (lib/feed.js), plus round and avatar.
       let item
       if (post.kind === 'repost') {
         const to = { author: post.to.author, seq: post.to.seq }
-        item = { kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
+        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
       } else {
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, username, seq, at, text: post.text, replyTo, quote, media, round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, round }
       }
       if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
     }
@@ -201,12 +220,13 @@ function buildPeekPage ({ diaries, limit, after = null }) {
     // round visited so far are accumulated.
     if (items.length === limit) break
   }
-  if (needs.size > 0) return { items, next: null, needs: Array.from(needs).sort(cmp) }
-  if (items.length < limit) return { items, next: null, needs: [] }
-  // A full page always carries a cursor; the call after the last full page
-  // answers { items: [], next: null }.
+  const shown = hide === null ? items : items.filter((item) => item.author !== hide)
+  if (needs.size > 0) return { items: shown, next: null, needs: Array.from(needs).sort(cmp) }
+  if (items.length < limit) return { items: shown, next: null, needs: [] }
+  // A full page always carries a cursor, even one at a hidden item; the call
+  // after the last full page answers { items: [], next: null }.
   const { round, at, author, seq } = items[items.length - 1]
-  return { items, next: { round, at, author, seq }, needs: [] }
+  return { items: shown, next: { round, at, author, seq }, needs: [] }
 }
 
 module.exports = {

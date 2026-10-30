@@ -10,7 +10,7 @@ const { discoveryKey } = require('hypercore-crypto')
 const { testnet, tmpDir } = require('./helpers/net')
 const { verifySeederCert, verifyCert } = require('@varanda/core/lib/cert')
 const { openStore, openDiary, appendRecord } = require('@varanda/core/lib/store')
-const { postRecord } = require('@varanda/core/lib/records')
+const { postRecord, profileRecords } = require('@varanda/core/lib/records')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64 = /^[0-9a-f]{64}$/
@@ -534,4 +534,102 @@ test('follow mirrors into the diary once block 0 exists; feed and log show photo
   t.is(log.code, 0, 'a hostile record does not abort log')
   t.ok(log.stdout.includes('inválido ('), 'invalid entries print a fixed line')
   t.ok(log.stdout.includes('publicação [foto]'), 'later entries are still shown')
+})
+
+test('member command table includes delete', (t) => {
+  const { commands } = require('../lib/commands/member')
+  t.alike(Object.keys(commands), ['id', 'cert', 'profile', 'post', 'reply', 'delete', 'follow', 'unfollow', 'follows', 'log', 'feed'])
+  t.is(commands.delete.summary, 'apaga uma publicação ou versão do perfil (--to <chave>:<seq>)')
+  t.is(typeof commands.delete.run, 'function')
+})
+
+test('delete removes own posts and profile versions and hides their log content', async (t) => {
+  const assocDir = tmpDir(t)
+  const dir = tmpDir(t)
+  const files = tmpDir(t)
+  const association = lastJson(varanda(assocDir, ['assoc', 'init', '--json'])).publicKey
+  const author = lastJson(varanda(dir, ['id', 'create', '--association', association, '--json'])).publicKey
+  const certFile = path.join(files, 'cert.json')
+  t.is(varanda(assocDir, ['assoc', 'certify', '--member', author, '--out', certFile]).code, 0)
+  t.is(varanda(dir, ['cert', 'add', '--cert-file', certFile]).code, 0)
+  const post = lastJson(varanda(dir, ['post', '--text', 'removed post', '--json'])).seq
+  const reply = lastJson(varanda(dir, ['reply', '--to', author + ':' + post, '--text', 'removed reply', '--json'])).seq
+  const profile = lastJson(varanda(dir, ['profile', 'set', '--name', 'removed name', '--bio', 'removed bio', '--json'])).seq
+  const avatar = { core: 'ab'.repeat(32), mime: 'image/webp', start: 1, blocks: 1, bytes: 10, sha256: 'cd'.repeat(32), width: 512, height: 512 }
+  let quote, pair, follow, media, invalid
+  const store = await openStore(dir)
+  try {
+    const diary = await openDiary(store)
+    quote = await appendRecord(diary, postRecord({ text: 'removed quote', quote: { author, seq: post } }))
+    pair = diary.length
+    for (const record of profileRecords({ name: 'removed avatar name', bio: 'removed avatar bio', avatar })) await appendRecord(diary, record)
+    follow = await appendRecord(diary, { type: 'follow', key: 'ef'.repeat(32), on: true, at: new Date().toISOString() })
+    media = await appendRecord(diary, { type: 'media-core', key: avatar.core, at: new Date().toISOString() })
+    invalid = diary.length
+    await diary.append({ type: 'post', text: {} })
+  } finally {
+    await store.close()
+  }
+  const remove = (seq, json = false) => varanda(dir, ['delete', '--to', author + ':' + seq, ...(json ? ['--json'] : [])])
+  const log = () => lastJson(varanda(dir, ['log', '--json']))
+  const before = log().entries.length
+  for (const [args, message] of [
+    [[], 'informe --to <chave>:<seq>'],
+    [['--to', 'invalid'], 'referência inválida'],
+    [['--to', author + ':0'], 'referência inválida'],
+    [['--to', author + ':01'], 'referência inválida'],
+    [['--to', 'ef'.repeat(32) + ':' + profile], 'referência inválida'],
+    [['--to', author + ':999'], 'referência inválida'],
+    [['--to', author + ':' + invalid], 'referência inválida'],
+    [['--to', author + ':' + follow], 'não é possível apagar este registro'],
+    [['--to', author + ':' + media], 'não é possível apagar este registro']
+  ]) {
+    const result = varanda(dir, ['delete', ...args])
+    t.is(result.code, 2)
+    t.is(result.stderr.split('\n')[0], 'uso: ' + message)
+  }
+  t.is(log().entries.length, before, 'invalid requests append nothing')
+
+  let firstTombstone
+  for (const seq of [post, reply, quote, profile, pair + 1]) {
+    const deleted = seq === pair + 1 ? [pair, pair + 1] : [seq]
+    const start = log().entries.length
+    const result = remove(seq)
+    t.is(result.code, 0, result.stderr)
+    t.is(result.stdout, 'apagado #' + seq + '\n')
+    const after = log().entries
+    t.is(after.length, start + deleted.length, 'one tombstone per deleted block')
+    for (const target of deleted) t.alike(after[target], { seq: target, record: null, deleted: true })
+    const repeated = remove(seq)
+    t.is(repeated.code, 0, repeated.stderr)
+    t.is(repeated.stdout, 'já apagado\n')
+    const repeatedJson = remove(seq, true)
+    t.is(repeatedJson.code, 0, repeatedJson.stderr)
+    const last = start + deleted.length - 1
+    t.alike(lastJson(repeatedJson), { seq: last, ref: author + ':' + last, changed: false, deleted })
+    t.is(log().entries.length, after.length, 'repeating writes nothing')
+    if (firstTombstone === undefined) firstTombstone = start
+  }
+  t.alike(lastJson(remove(pair, true)).deleted, [pair, pair + 1], 'either half of a deleted compat pair remains idempotent')
+  const tombstone = remove(firstTombstone)
+  t.is(tombstone.code, 2)
+  t.is(tombstone.stderr, 'uso: não é possível apagar este registro\n')
+
+  const extra = lastJson(varanda(dir, ['post', '--text', 'removed json post', '--json'])).seq
+  const changed = remove(extra, true)
+  t.is(changed.code, 0, changed.stderr)
+  t.alike(lastJson(changed), { seq: extra + 1, ref: author + ':' + (extra + 1), changed: true, deleted: [extra] })
+  for (const args of [['log'], ['log', '--json'], ['log', '--json', '--before', String(firstTombstone)]]) {
+    const result = varanda(dir, args)
+    t.is(result.code, 0, result.stderr)
+    for (const text of ['removed post', 'removed reply', 'removed quote', 'removed name', 'removed bio', 'removed avatar name', 'removed avatar bio', 'removed json post', avatar.sha256]) {
+      t.absent(result.stdout.includes(text), 'deleted content is absent: ' + text)
+    }
+  }
+  const human = varanda(dir, ['log']).stdout.trim().split('\n')
+  t.ok(human.includes('#' + post + ' apagado'))
+  t.ok(human.includes('#' + firstTombstone + ' apagou #' + post))
+  const rows = varanda(dir, ['log', '--json']).stdout.trim().split('\n').map((line) => JSON.parse(line))
+  t.alike(rows[post], { seq: post, record: null, deleted: true }, 'JSON block lines retain the deleted marker')
+  t.alike(rows.slice(0, -1), rows[rows.length - 1].entries, 'JSON block lines and summary agree')
 })

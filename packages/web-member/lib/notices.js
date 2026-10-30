@@ -1,11 +1,13 @@
 'use strict'
 
-// Follow notices in the browser node (docs/rpc.md 5.28, docs/protocol.md
+// Notices in the browser node (docs/rpc.md 5.28, docs/protocol.md
 // 'Notices link'): `notices.list` answers "who started following me and
-// whom I do not follow yet" HERE, in the browser. One short-lived seeder link
-// per read: the node proves on 'varanda/notices/1' that it owns its diary key
-// (@varanda/core lib/notices-net.js, member role), reads the seeder's
-// candidate followers ({ key, seq, at } pages) and keeps only the rows it
+// whom I do not follow yet, and who replied to, quoted or mentioned me" HERE,
+// in the browser. One short-lived seeder link per read: the node proves on
+// 'varanda/notices/2' (or, when the seeder rejects it or leaves it
+// unanswered, 'varanda/notices/1', follows only: activity false) that it owns its diary key (@varanda/core
+// lib/notices-net.js, member role), reads the seeder's candidates
+// ({ key, seq, at, kind } pages, no kind on v1) and keeps only the rows it
 // VERIFIED against author-signed blocks fetched into MEMORY on the same link.
 // The link, the block-0 gate and the budgeted fetch mirror ./peek.js (same
 // names where sensible; peek.js internals are not exported).
@@ -16,9 +18,15 @@
 // the stored revoked issuers, fork 0, quota on the verified length and
 // byteLength, before any other block of that diary is requested) and against
 // the named block `seq`, which must be the author's signed follow of THIS
-// node's key with on: true and the claimed `at`; the head and the signed tail
-// (from the verified length, never a seeder-claimed one) are read too and a
-// later signed unfollow drops the row. The seeder only serves the followers
+// node's key with on: true and the claimed `at`, or the author's signed post
+// with the claimed `at`; the head and the signed tail (from the verified
+// length, never a seeder-claimed one) are read too and, for a follow, a later
+// signed unfollow drops the row. The seeder cannot forge a reply, a quote or
+// a mention: the kind is derived here from the signed post and the own
+// diary (a reply to or a quote of one of its post blocks, else an '@nome' in
+// the text naming one of the usernames the own diary verifiably held, under
+// the current revoked issuers), never taken from the seeder's hint; a post
+// that earns none is dropped. The seeder only serves the notices
 // of the key the channel proved (an Ed25519 signature bound to this link's
 // Noise key), and no core is replicated nor any proof signed before its hello
 // verified (role 'seeder' and seederCertForKey on the Noise key, as
@@ -27,11 +35,14 @@
 // PRIVACY: ephemeral Noise key, empty inventory, no announce. The proof
 // reveals to the seeder only what it already knows: this node's diary key,
 // which the sync link advertises on the same IP. Nothing is stored anywhere.
-// DATA FLOWS: browser memory only: no kv entry, no storage core, no replica.
+// DATA FLOWS: browser memory only: no kv entry, no replica, nothing written;
+// the only storage core opened is the own diary, read (a v2 read only).
 // A small cache keeps the retained evidence of verified rows (block 0,
-// profile and username records, the follow record) for NOTICES_CACHE_TTL_MS,
-// at most NOTICES_CACHE_MAX rows; every hit re-runs the verdict with the
-// current revoked issuers and clock (never a cached name or verdict).
+// profile and username records, the facts block `seq` signed) for
+// NOTICES_CACHE_TTL_MS, at most NOTICES_CACHE_MAX rows; every hit re-runs
+// the verdict and the kind with the current revoked issuers, own context
+// and clock (never a cached name, kind or verdict). A v2 read also reads the
+// own diary once (the session's ownContext, cached on its length).
 // COST: one WebSocket + Noise + hello + proof + at most NOTICES_MAX_SEEDER_PAGES
 // pages, then per unverified row one memory core and at most
 // NOTICES_MAX_BLOCKS_PER_ROW block requests (block 0, `seq`, blocks 1..2 and
@@ -49,7 +60,9 @@ const { attachAdmission } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = require('@varanda/core/lib/peek')
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
-const { attachNotices, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
+const { attachNotices, attachNoticesV2, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
+const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
+const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
 const { moderation } = require('./member-ops')
@@ -101,20 +114,51 @@ function within (promise, ms) {
   return Promise.race([promise, expired]).finally(() => clearTimeout(timer))
 }
 
-// Notices order: newest first by Date.parse, then key ascending (notices.js).
+// Notices order: newest first by Date.parse, then key ascending, then seq
+// descending (one author may have several v2 notices at one instant; a v1
+// page has one row per key, so seq never decides there).
 function compareRows (a, b) {
-  return (Date.parse(b.at) - Date.parse(a.at)) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+  return (Date.parse(b.at) - Date.parse(a.at)) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || (b.seq - a.seq)
 }
 
+// Exactly { at, key } or exactly { at, key, seq } (seq >= 1).
 function isCursor (v) {
   try {
     if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
     const keys = Object.keys(v)
-    return keys.length === 2 && Object.prototype.hasOwnProperty.call(v, 'at') &&
-      Object.prototype.hasOwnProperty.call(v, 'key') && isCanonicalIso(v.at) && isHex64(v.key)
+    const has = (k) => Object.prototype.hasOwnProperty.call(v, k)
+    if (!has('at') || !has('key') || !isCanonicalIso(v.at) || !isHex64(v.key)) return false
+    if (keys.length === 2) return true
+    return keys.length === 3 && has('seq') && Number.isSafeInteger(v.seq) && v.seq >= 1
   } catch {
     return false
   }
+}
+
+// The cursor as the channel in use takes it. v2 maps a 2-key cursor to
+// seq 1, the lowest of its (at, key) group, so the rest of that group is
+// skipped (a 2-key cursor came from a v1 read, where a key had one row);
+// v1 has one row per key and takes no seq.
+function channelCursor (after, v2) {
+  if (after === null) return null
+  if (v2) return { at: after.at, key: after.key, seq: after.seq === undefined ? 1 : after.seq }
+  return { at: after.at, key: after.key }
+}
+
+function cursorOf (row, v2) {
+  return v2 ? { at: row.at, key: row.key, seq: row.seq } : { at: row.at, key: row.key }
+}
+
+// The notice kind a post block earns against the own context, derived here
+// and never taken from the seeder: a reply to or a quote of one of the own
+// diary's posts, else a mention of a name the own diary verifiably held.
+// -> 'reply' | 'quote' | 'mention' | null.
+function postKind (facts, ctx) {
+  const ref = (r) => r !== null && r.author === ctx.own && ctx.posts.has(r.seq)
+  if (ref(facts.replyTo)) return 'reply'
+  if (ref(facts.quote)) return 'quote'
+  if (facts.mentions.some((name) => ctx.names.has(name))) return 'mention'
+  return null
 }
 
 // ownKey: () => Promise<lowercase hex64> (the session's requireOwnKey).
@@ -148,7 +192,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     ...(limits || {})
   }
 
-  // key + ':' + seq -> { cachedAt, target, length, seqs, records, followAt }
+  // key + ':' + seq -> { cachedAt, target, length, seqs, records, at, facts }
+  // (facts: what block `seq` signed, never a kind derived from it).
   const cache = new Map()
   let current = null // the running read: { link, cores, aborted, lost, ... }
   let closed = false
@@ -169,12 +214,12 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // ---- the notices link (mirrors peek.js openLink) ----
 
   // Dials the seeder with an ephemeral Noise key, attaches the muxer, the
-  // admission channel with an EMPTY inventory and the notices channel (on
+  // admission channel with an EMPTY inventory and both notices channels (on
   // the muxer before the hello, so protomux pairs the seeder's open), and
   // resolves once the hello verified exactly as ./sync.js does. The proof is
   // never signed before that: the admission channel opens first, so an
   // honest seeder's hello precedes its challenge. -> the link
-  // { noise, peer, notices, verified }; rejects Error('sem conexão com o semeador'),
+  // { noise, peer, notices, noticesV2, verified }; rejects Error('sem conexão com o semeador'),
   // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
   // text, never the seeder's). The link runs behind a frame guard
   // (./ws-stream.js guardedWsStream): a frame over maxFrame is cut at its
@@ -198,7 +243,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       })
       noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
-      const link = { noise, peer: null, notices: null, verified: false }
+      const link = { noise, peer: null, notices: null, noticesV2: null, verified: false }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -248,7 +293,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
               if (ev && ev.event === 'peer-dropped') warn('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
             }
           })
-          link.notices = attachNotices(noise, {
+          // Both channels: the read uses v2 when the seeder pairs it and
+          // falls back to v1 (follows only) otherwise.
+          const noticesOpts = {
             role: 'member',
             ownKey: own,
             requestTimeoutMs: L.requestTimeoutMs,
@@ -256,7 +303,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
               if (!link.verified) throw new Error(NO_SEEDER)
               return sign(payload, own)
             }
-          })
+          }
+          link.notices = attachNotices(noise, noticesOpts)
+          link.noticesV2 = attachNoticesV2(noise, noticesOpts)
         } catch {
           finish(new Error(NO_SEEDER))
         }
@@ -275,6 +324,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     run.link = null
     if (link !== null) {
       try { if (link.notices !== null) link.notices.close() } catch {}
+      try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
       link.noise.destroy()
     }
   }
@@ -313,12 +363,27 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
 
   // The signed evidence for one seeder item, fetched into a fresh memory
   // core on the read's link: block 0 alone first (the gate, fork and quota
-  // on the verified state), then block `seq` (the follow), then the head and
-  // the signed tail. -> { state: 'ok', evidence } | { state: 'dropped' } |
+  // on the verified state), then block `seq` (a follow of this node, or a
+  // post, at the claimed `at`), then the head and the signed tail. -> { state: 'ok', evidence } | { state: 'dropped' } |
   // { state: 'pending' } (cut: no verdict, the row is left for a later read).
   // A block that did not arrive or is oversized drops the row and marks the
-  // read incomplete. Never throws.
+  // read incomplete. Never throws. Items of one author run one after the
+  // other: two memory cores of one key cannot replicate on one link at once.
   async function fetchEvidence (run, item, ctx) {
+    const prev = run.keyLocks.get(item.key) || Promise.resolve()
+    let release
+    const mine = prev.then(() => new Promise((resolve) => { release = resolve }))
+    run.keyLocks.set(item.key, mine)
+    await prev
+    try {
+      return await fetchOne(run, item, ctx)
+    } finally {
+      release()
+      if (run.keyLocks.get(item.key) === mine) run.keyLocks.delete(item.key)
+    }
+  }
+
+  async function fetchOne (run, item, ctx) {
     const link = run.link
     if (link === null || ctx.cut()) return { state: 'pending' }
     const q = new Hypercore(memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), b4a.from(item.key, 'hex'), { valueEncoding: 'binary' })
@@ -330,8 +395,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       run.incomplete = true
       return DROPPED
     }
-    // -> raw block | PENDING | DROPPED (missing or oversized).
-    const get = async (seq) => {
+    // -> raw block | PENDING | DROPPED (missing or oversized) | ABSENT
+    // (missing, when the caller allows it: a head block).
+    const ABSENT = { state: 'absent' }
+    const get = async (seq, allowAbsent = false) => {
       if (ctx.cut()) return PENDING
       const t = timeout()
       let raw = null
@@ -342,6 +409,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         // Ended by the budget cut, a lost link, an abort or the read
         // deadline (a timeout shorter than the block timeout): no verdict.
         if (cutLink(run, link) || t < L.blockTimeoutMs) return PENDING
+        if (allowAbsent) return ABSENT
         return failed()
       }
       if (!charge(run, raw)) return failed()
@@ -361,8 +429,21 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (gate.reason !== null || q.fork !== 0 || overQuota(q) || item.seq >= length) return DROPPED
       const rawF = await get(item.seq)
       if (!(rawF instanceof Uint8Array)) return rawF
-      const follow = validRecordCopy(decodeBlock(rawF), item.seq)
-      if (follow === null || follow.type !== 'follow' || follow.key !== ctx.own || follow.on !== true || follow.at !== item.at) return DROPPED
+      const signed = validRecordCopy(decodeBlock(rawF), item.seq)
+      if (signed === null || signed.at !== item.at) return DROPPED
+      let facts
+      if (signed.type === 'follow' && signed.key === ctx.own && signed.on === true) {
+        facts = { type: 'follow' }
+      } else if (signed.type === 'post') {
+        facts = {
+          type: 'post',
+          replyTo: signed.replyTo === null ? null : { author: signed.replyTo.author, seq: signed.replyTo.seq },
+          quote: signed.quote === undefined ? null : { author: signed.quote.author, seq: signed.quote.seq },
+          mentions: mentionTokens(signed.text)
+        }
+      } else {
+        return DROPPED
+      }
       seqs.add(item.seq)
       // The head (1..2) and the signed tail, highest first, within the row's
       // block cap (block 0 and `seq` included).
@@ -370,13 +451,33 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       for (let s = length - 1; s >= Math.max(1, length - PEEK_TAIL_BLOCKS); s--) wanted.add(s)
       for (let s = 1; s <= 2 && s < length; s++) wanted.add(s)
       const rest = [...wanted].filter((s) => !seqs.has(s)).sort((a, b) => b - a).slice(0, Math.max(0, L.maxBlocksPerRow - seqs.size))
+      // Read highest first, so a tombstone comes before its target: a block
+      // it deleted is never asked for (seeders clear it) and counts as
+      // fetched, absent. A head block that did not arrive is not known to
+      // be deleted (it may be a live profile or the tombstone of the block
+      // below it): it is never counted as fetched, nothing below it is
+      // read, the row stands without it, the read is incomplete and the
+      // evidence is not cached, so a later read asks again.
+      const gone = new Set()
+      let partial = false
       for (const seq of rest) {
-        const raw = await get(seq)
+        if (gone.has(seq)) {
+          seqs.add(seq)
+          continue
+        }
+        const raw = await get(seq, seq <= 2)
+        if (raw === ABSENT) {
+          run.incomplete = true
+          partial = true
+          break
+        }
         if (!(raw instanceof Uint8Array)) return raw
         seqs.add(seq)
         const record = decodeBlock(raw)
         entries.push({ seq, record })
-        if (seq > item.seq) {
+        const del = validRecordCopy(record, seq)
+        if (del !== null && del.type === 'delete' && del.seq >= 1 && del.seq < length) gone.add(del.seq)
+        if (facts.type === 'follow' && seq > item.seq) {
           const copy = validRecordCopy(record, seq)
           // A later signed unfollow of this node: the seeder's edge is stale.
           if (copy !== null && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
@@ -386,7 +487,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (q.fork !== 0 || overQuota(q)) return DROPPED
       return {
         state: 'ok',
-        evidence: { cachedAt: Date.now(), target: ctx.own, length, seqs, records: retainRecords(entries), followAt: follow.at }
+        partial,
+        evidence: { cachedAt: Date.now(), target: ctx.own, length, seqs, records: retainRecords(entries), at: signed.at, facts }
       }
     } catch {
       return cutLink(run, link) ? PENDING : failed()
@@ -396,21 +498,44 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
   }
 
+  // A follow row: an author already followed is omitted, and an author
+  // listed twice counts once (a seeder's duplicate is dropped). -> whether
+  // the row may stand.
+  function claimFollow (key, ctx) {
+    if (ctx.follows.has(key) || ctx.claimed.has(key)) return false
+    ctx.claimed.add(key)
+    return true
+  }
+
   // -> { state: 'accepted', row } | { state: 'dropped' } | { state: 'pending' }.
+  // The seeder's kind is only a hint: a v1 item has none and means 'follow';
+  // a 'follow' hint is filtered before any block is fetched, and whatever
+  // the hint, the kind of the row is the one the signed block proves.
   async function verifyItem (run, item, ctx) {
-    if (item.key === ctx.own || ctx.mod.blocked.has(item.key) || ctx.follows.has(item.key)) return { state: 'dropped' }
-    // A key listed twice counts once (a seeder's duplicate is dropped).
-    if (ctx.claimed.has(item.key)) return { state: 'dropped' }
-    ctx.claimed.add(item.key)
+    const DROPPED = { state: 'dropped' }
+    if (item.key === ctx.own || ctx.mod.blocked.has(item.key)) return DROPPED
     const ck = item.key + ':' + item.seq
+    if (ctx.claimedSeqs.has(ck)) return DROPPED
+    ctx.claimedSeqs.add(ck)
+    const hintFollow = item.kind === undefined || item.kind === 'follow'
+    if (hintFollow && !claimFollow(item.key, ctx)) return DROPPED
     let evidence = cacheGet(ck, ctx.own)
     if (evidence === null) {
       const r = await fetchEvidence(run, item, ctx)
       if (r.state !== 'ok') return r
       evidence = r.evidence
-      cacheSet(ck, evidence)
+      if (!r.partial) cacheSet(ck, evidence)
     }
-    if (evidence.followAt !== item.at) return { state: 'dropped' }
+    if (evidence.at !== item.at) return DROPPED
+    let kind
+    if (evidence.facts.type === 'follow') {
+      kind = 'follow'
+      if (!hintFollow && !claimFollow(item.key, ctx)) return DROPPED
+    } else {
+      // A follows-only (v1) read lists follows only.
+      kind = ctx.v2 ? postKind(evidence.facts, ctx) : null
+      if (kind === null || Date.parse(evidence.at) - Date.now() > MAX_FUTURE_MS) return DROPPED
+    }
     // The verdict, always fresh: certificate with the CURRENT revoked
     // issuers (block 0 is among the retained records) and the name and
     // username of the retained records (peek.js refresh).
@@ -423,8 +548,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       revokedIssuers: ctx.mod.revokedIssuers,
       now: Date.now()
     })
-    if (v.reason !== null) return { state: 'dropped' }
-    return { state: 'accepted', row: { key: item.key, seq: item.seq, at: item.at, name: v.name, username: v.username } }
+    if (v.reason !== null) return DROPPED
+    return { state: 'accepted', row: { key: item.key, seq: item.seq, at: item.at, kind, name: v.name, avatar: v.avatar, username: v.username } }
   }
 
   // ---- read ----
@@ -435,7 +560,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return t
   }
 
-  async function readWith (run, { limit, after }) {
+  // ownContext: () => Promise<{ names: Map username -> issuer, posts: Set of
+  // seqs }>, the own diary's verified names and post blocks; called only on
+  // a v2 read, so a follows-only read opens no storage core.
+  async function readWith (run, { limit, after }, ownContext) {
     const deadline = Date.now() + L.deadlineMs
     // Preparation: kv reads only, no core is opened.
     const own = await ownKey()
@@ -446,22 +574,35 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
     const mod = await moderation(storage, association)
     checkAborted(run)
-    if (mod.blocked.has(own)) return { notices: [], next: null, incomplete: false, supported: true }
+    // activity is false only on a read that used v1 because the seeder did
+    // not take v2: every other result says nothing about the seeder's
+    // channels and stays neutral (true, no "follows only" banner).
+    if (mod.blocked.has(own)) return { notices: [], next: null, incomplete: false, supported: true, activity: true }
 
     const link = await openLink(run, own)
     checkAborted(run)
-    const handle = link.notices
     const left = () => deadline - Date.now()
-    const supported = await within(handle.supported, Math.min(L.requestTimeoutMs, left()))
+    // v2 first: it carries the follows too. v1 is consulted when the seeder
+    // rejected v2 or left it unanswered, and the channel not used is closed.
+    const supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
     checkAborted(run)
-    if (supported === TIMEOUT) return { notices: [], next: null, incomplete: true, supported: true }
+    const v2 = supportedV2 === true
+    let supported = true
+    if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
+    checkAborted(run)
+    // v2 unanswered and v1 not taken: nothing known yet, the seeder may
+    // answer later.
+    if (supportedV2 === TIMEOUT && supported !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
+    if (supported === TIMEOUT) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
     if (supported !== true) {
       if (!warnedUnsupported) {
         warnedUnsupported = true
         warn(UNSUPPORTED)
       }
-      return { notices: [], next: null, incomplete: false, supported: false }
+      return { notices: [], next: null, incomplete: false, supported: false, activity: true }
     }
+    const handle = v2 ? link.noticesV2 : link.notices
+    try { (v2 ? link.notices : link.noticesV2).close() } catch {}
     let proved
     try {
       proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
@@ -472,15 +613,28 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     checkAborted(run)
     // A proof not sent on a live link within the request timeout: nothing
     // was read, the seeder may answer later.
-    if (proved !== true) return { notices: [], next: null, incomplete: true, supported: true }
+    if (proved !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
+
+    // The names are filtered with the CURRENT revoked issuers on every read
+    // (the own context may be cached across reads).
+    const names = new Set()
+    let posts = new Set()
+    if (v2) {
+      const oc = await ownContext()
+      checkAborted(run)
+      for (const [name, issuer] of oc.names) {
+        if (!mod.revokedIssuers.has(issuer)) names.add(name)
+      }
+      posts = oc.posts
+    }
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.budget >= L.budgetBytes || run.lost || run.aborted || run.link === null
-    const ctx = { own, follows, mod, deadline, cut, claimed: new Set() }
+    const ctx = { own, follows, mod, deadline, cut, v2, names, posts, claimed: new Set(), claimedSeqs: new Set() }
     // Every seeder item in seeder order, with its outcome.
     const seen = []
     let accepted = 0
     let more = false
-    let cursor = after
+    let cursor = channelCursor(after, v2)
     let pages = 0
     while (true) {
       if (pages >= L.maxSeederPages || cut()) {
@@ -548,32 +702,34 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     const last = notices.length > 0 ? notices[notices.length - 1] : null
     let next = null
     if (rows.length > limit) {
-      next = { at: last.at, key: last.key }
+      next = cursorOf(last, v2)
     } else if (more && prefix.length > 0) {
       // Past every row decided, dropped ones included, never before a row
       // returned.
       const edge = prefix[prefix.length - 1].item
-      next = last !== null && compareRows(edge, last) < 0 ? { at: last.at, key: last.key } : { at: edge.at, key: edge.key }
+      next = cursorOf(last !== null && compareRows(edge, last) < 0 ? last : edge, v2)
     }
-    return { notices, next, incomplete: run.incomplete, supported: true }
+    return { notices, next, incomplete: run.incomplete, supported: true, activity: v2 }
   }
 
-  // -> { notices, next, incomplete, supported } (docs/rpc.md 5.28). A
+  // -> { notices, next, incomplete, supported, activity } (docs/rpc.md
+  // 5.28; ownContext as readWith). A
   // concurrent read is refused (UsageError 'avisos já em andamento');
   // abort() and a link lost after the hello reject the running one with
   // Error('sem conexão com o semeador') (the session maps it to USAGE). A
   // page timeout or a budget / deadline cut on a live link is an incomplete
   // success.
-  async function read ({ limit, after } = {}) {
+  async function read ({ limit, after } = {}, ownContext = null) {
     if (closed) throw new Error(NO_SEEDER)
     if (current !== null) throw new UsageError(BUSY)
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > NOTICES_LIMIT_MAX) throw new UsageError('limit inválido')
     const first = after === undefined || after === null
     if (!first && !isCursor(after)) throw new UsageError('after inválido')
-    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, overBudget: false, incomplete: false }
+    const run = { link: null, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, overBudget: false, incomplete: false }
     current = run
     try {
-      return await readWith(run, { limit, after: first ? null : { at: after.at, key: after.key } })
+      const cursor = first ? null : after.seq === undefined ? { at: after.at, key: after.key } : { at: after.at, key: after.key, seq: after.seq }
+      return await readWith(run, { limit, after: cursor }, typeof ownContext === 'function' ? ownContext : async () => ({ names: new Map(), posts: new Set() }))
     } finally {
       closeLink(run)
       for (const q of run.cores) q.close().catch(noop)

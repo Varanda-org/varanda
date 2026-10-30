@@ -272,7 +272,7 @@ test('latestProfile ignores invalid blocks', async (t) => {
     { seq: 4, record: { type: 'profile', name: '', bio: '', at: AT } },
     { seq: 5, record: null }
   ]
-  t.alike(latestProfile(entries), { name: 'Ana Maria', bio: 'dois' })
+  t.alike(latestProfile(entries), { name: 'Ana Maria', bio: 'dois', avatar: null })
   t.is(latestProfile(entries.slice(0, 1)), null)
   t.is(latestProfile([]), null)
   // a profile at seq 0 is invalid (genesis-required)
@@ -336,7 +336,7 @@ test('latestProfile and genesisCert return copies', async (t) => {
   // is the one validated and returned
   let reads = 0
   const shifty = { type: 'profile', get name () { return reads++ === 0 ? 'Ana' : 'x'.repeat(500) }, bio: '', at: AT }
-  t.alike(latestProfile([{ seq: 1, record: shifty }]), { name: 'Ana', bio: '' })
+  t.alike(latestProfile([{ seq: 1, record: shifty }]), { name: 'Ana', bio: '', avatar: null })
 })
 
 test('validRecordCopy skips a revoked proxy or a throwing prototype trap', async (t) => {
@@ -803,7 +803,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -827,4 +827,219 @@ test('group-join records', async (t) => {
   const hostile = { type: 'group-join', group: K1, on: true, at: AT }
   Object.defineProperty(hostile, 'writer', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 1), 'malformed')
+})
+
+const AVATAR = { core: K2, mime: 'image/webp', start: 3, blocks: 2, bytes: 40000, sha256: 'e'.repeat(64), width: 512, height: 512 }
+
+test('avatar constants match @varanda/rpc', async (t) => {
+  await testnet(t)
+  const rpc = require('@varanda/rpc')
+  t.is(records.AVATAR_SIDE, 512)
+  t.is(records.MAX_AVATAR_BLOCKS, 8)
+  t.is(records.MAX_AVATAR_BYTES, 262144)
+  t.is(records.MAX_AVATAR_BYTES, 8 * MEDIA_BLOCK_BYTES)
+  t.alike([...records.AVATAR_MIMES], ['image/jpeg', 'image/webp'])
+  t.ok(Object.isFrozen(records.AVATAR_MIMES))
+  t.alike(records.PROFILE_AVATAR_KEYS, ['type', 'name', 'bio', 'at', 'avatar'])
+  t.is(rpc.AVATAR_SIDE, records.AVATAR_SIDE)
+  t.is(rpc.MAX_AVATAR_BLOCKS, records.MAX_AVATAR_BLOCKS)
+  t.is(rpc.MAX_AVATAR_BYTES, records.MAX_AVATAR_BYTES)
+  t.alike([...rpc.AVATAR_MIMES], [...records.AVATAR_MIMES])
+})
+
+test('validateRecord: profile with an avatar', async (t) => {
+  await testnet(t)
+  const p = (avatar, over) => ({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar, ...over })
+  t.is(validateRecord(p(AVATAR), 1), null)
+  t.is(validateRecord(p({ ...AVATAR, mime: 'image/jpeg' }), 1), null)
+  t.is(validateRecord(p({ ...AVATAR, blocks: 8, bytes: 262144 }), 1), null)
+  t.is(validateRecord(p({ ...AVATAR, blocks: 1, bytes: 1 }), 1), null)
+  t.ok(records.validAvatar(AVATAR))
+  const extra = { ...AVATAR, extra: 1 }
+  const missing = { ...AVATAR }
+  delete missing.sha256
+  for (const avatar of [
+    { ...AVATAR, mime: 'image/png' },
+    { ...AVATAR, mime: 'image/gif' },
+    { ...AVATAR, width: 511, height: 511 },
+    { ...AVATAR, width: 513, height: 513 },
+    { ...AVATAR, width: 512, height: 511 },
+    { ...AVATAR, width: 511, height: 512 },
+    { ...AVATAR, blocks: 9, bytes: 9 * MEDIA_BLOCK_BYTES },
+    { ...AVATAR, blocks: 8, bytes: 262145 },
+    { ...AVATAR, bytes: 1 },
+    extra,
+    missing,
+    null,
+    undefined,
+    [AVATAR],
+    'x',
+    {}
+  ]) {
+    t.is(validateRecord(p(avatar), 1), 'media-invalid', JSON.stringify(avatar))
+    t.absent(records.validAvatar(avatar))
+  }
+  // The other profile rules still apply with an avatar.
+  t.is(validateRecord(p(AVATAR, { name: '' }), 1), 'name-length')
+  t.is(validateRecord(p(AVATAR, { bio: 'x'.repeat(MAX_BIO + 1) }), 1), 'bio-length')
+  t.is(validateRecord(p(AVATAR, { name: 'a\nb' }), 1), 'control-chars')
+  t.is(validateRecord(p(AVATAR, { at: 'x' }), 1), 'date-invalid')
+  t.is(validateRecord(p(AVATAR), 0), 'genesis-required')
+  // Any other key set is malformed.
+  t.is(validateRecord(p(AVATAR, { extra: 1 }), 1), 'malformed')
+  t.is(validateRecord({ type: 'profile', name: 'Ana', at: AT, avatar: AVATAR }, 1), 'malformed')
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', at: AT, media: [AVATAR] }, 1), 'malformed')
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', avatar: AVATAR }, 1), 'malformed')
+})
+
+test('validateRecord: hostile avatars never throw', async (t) => {
+  await testnet(t)
+  const getter = { type: 'profile', name: 'Ana', bio: '', at: AT }
+  Object.defineProperty(getter, 'avatar', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(getter, 1), 'malformed')
+  const inner = { ...AVATAR }
+  Object.defineProperty(inner, 'width', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar: inner }, 1), 'media-invalid')
+  t.absent(records.validAvatar(inner))
+  const proxy = new Proxy({ ...AVATAR }, { get () { throw new Error('boom') }, ownKeys () { throw new Error('boom') } })
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar: proxy }, 1), 'media-invalid')
+  t.absent(records.validAvatar(proxy))
+  const { proxy: revoked, revoke } = Proxy.revocable({ ...AVATAR }, {})
+  revoke()
+  t.absent(records.validAvatar(revoked))
+  t.is(validateRecord({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar: revoked }, 1), 'media-invalid')
+  // A mime that changes between reads: validated once on the copy.
+  let reads = 0
+  const shifty = { ...AVATAR }
+  Object.defineProperty(shifty, 'mime', { enumerable: true, get () { return reads++ === 0 ? 'image/webp' : 'image/png' } })
+  const got = records.validRecordCopy({ type: 'profile', name: 'Ana', bio: '', at: AT, avatar: shifty }, 1)
+  t.ok(got === null || got.avatar.mime === 'image/webp')
+})
+
+test('profileRecord and profileRecords', async (t) => {
+  await testnet(t)
+  t.alike(Object.keys(profileRecord({ name: 'Ana', at: AT, avatar: null })), ['type', 'name', 'bio', 'at'])
+  t.alike(Object.keys(profileRecord({ name: 'Ana', at: AT, avatar: AVATAR })), ['type', 'name', 'bio', 'at', 'avatar'])
+  const src = { ...AVATAR }
+  const one = profileRecord({ name: 'Ana', at: AT, avatar: src })
+  t.not(one.avatar, src)
+  t.alike(one.avatar, AVATAR)
+  await t.exception.all(async () => profileRecord({ name: 'Ana', at: AT, avatar: { ...AVATAR, width: 640 } }), /media-invalid/)
+  t.alike(profileRecord({ name: 'Ana', at: AT, avatar: { ...AVATAR, extra: 1 } }).avatar, AVATAR, 'the builder copies only the descriptor keys')
+
+  const plainOnly = records.profileRecords({ name: 'Ana', bio: 'um', at: AT })
+  t.is(plainOnly.length, 1)
+  t.alike(plainOnly[0], { type: 'profile', name: 'Ana', bio: 'um', at: AT })
+  t.is(records.profileRecords({ name: 'Ana', at: AT, avatar: null }).length, 1)
+
+  const pair = records.profileRecords({ name: 'Ana', bio: 'um', avatar: AVATAR })
+  t.is(pair.length, 2)
+  t.alike(Object.keys(pair[0]), ['type', 'name', 'bio', 'at'])
+  t.alike(Object.keys(pair[1]), ['type', 'name', 'bio', 'at', 'avatar'])
+  t.is(pair[0].name, pair[1].name)
+  t.is(pair[0].bio, pair[1].bio)
+  t.is(pair[0].at, pair[1].at)
+  t.ok(isCanonicalIso(pair[0].at))
+  t.alike(pair[1].avatar, AVATAR)
+  for (const r of pair) t.is(validateRecord(r, 1), null)
+  await t.exception.all(async () => records.profileRecords({ name: 'Ana', avatar: { ...AVATAR, mime: 'image/png' } }), /media-invalid/)
+})
+
+test('latestProfile: avatar from the newest valid profile', async (t) => {
+  await testnet(t)
+  const pair = records.profileRecords({ name: 'Ana', bio: 'um', at: AT, avatar: AVATAR })
+  const entries = [
+    { seq: 0, record: { type: 'member-cert', cert: cert() } },
+    { seq: 1, record: pair[0] },
+    { seq: 2, record: pair[1] }
+  ]
+  const got = latestProfile(entries)
+  t.alike(got, { name: 'Ana', bio: 'um', avatar: AVATAR })
+  t.not(got.avatar, pair[1].avatar)
+  got.avatar.width = 1
+  t.is(pair[1].avatar.width, 512)
+  t.is(latestProfile(entries).avatar.width, 512)
+
+  // An old reader knows only the 4-key form: it skips the 5-key block and
+  // still sees the same name and bio.
+  const oldLatest = (list) => {
+    let best = null
+    for (const { seq, record } of list) {
+      if (seq === 0 || record.type !== 'profile' || Object.keys(record).length !== 4) continue
+      if (best === null || seq > best.seq) best = { seq, name: record.name, bio: record.bio }
+    }
+    return best && { name: best.name, bio: best.bio }
+  }
+  t.alike(oldLatest(entries), { name: got.name, bio: got.bio })
+
+  // A newer plain profile removes the avatar.
+  const removed = [...entries, { seq: 3, record: profileRecord({ name: 'Ana', bio: 'um', at: AT }) }]
+  t.is(latestProfile(removed).avatar, null)
+  // An invalid newer 5-key block is skipped.
+  const bad = [...entries, { seq: 3, record: { ...pair[1], avatar: { ...AVATAR, width: 640, height: 640 } } }]
+  t.alike(latestProfile(bad).avatar, AVATAR)
+})
+
+test('validateRecord: delete records', async (t) => {
+  await testnet(t)
+  const { deleteRecord, DELETE_RANGE_KEYS } = records
+  const del = { type: 'delete', seq: 3, at: AT }
+  const RANGE = { core: K2, start: 1, blocks: 2 }
+  t.is(validateRecord(del, 7), null)
+  t.is(validateRecord(del, 4), null, 'the block right after the target')
+  t.is(validateRecord({ ...del, media: [RANGE] }, 7), null)
+  t.is(validateRecord({ ...del, media: [RANGE, RANGE, RANGE, RANGE] }, 7), null)
+  t.is(validateRecord(del, 0), 'genesis-required')
+  t.is(validateRecord({ ...del, seq: 7 }, 7), 'delete-invalid', 'self target')
+  t.is(validateRecord({ ...del, seq: 8 }, 7), 'delete-invalid', 'forward target')
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateRecord({ ...del, seq }, 7), 'delete-invalid', 'seq ' + String(seq))
+  }
+  t.is(validateRecord({ ...del, seq: 1 }, 1), 'delete-invalid', 'a tombstone at block 1 has no target')
+  t.is(validateRecord(del, undefined), 'delete-invalid', 'no block index')
+  t.is(validateRecord({ ...del, extra: 1 }, 7), 'malformed')
+  t.is(validateRecord({ ...del, author: K1 }, 7), 'malformed', 'no author field')
+  t.is(validateRecord({ ...del, v: 1 }, 7), 'malformed', 'no version field')
+  t.is(validateRecord({ ...del, kind: 'post' }, 7), 'malformed', 'no kind field')
+  const noAt = { ...del }
+  delete noAt.at
+  t.is(validateRecord(noAt, 7), 'malformed')
+  t.is(validateRecord({ ...del, at: '2026-01-01' }, 7), 'date-invalid')
+  t.is(validateRecord({ ...del, at: null }, 7), 'date-invalid')
+  const badMedia = [
+    null, [], {}, [RANGE, RANGE, RANGE, RANGE, RANGE], [null], [{ ...RANGE, extra: 1 }],
+    [{ core: K2, start: 1 }], [{ ...RANGE, core: 'A'.repeat(64) }], [{ ...RANGE, start: 0 }],
+    [{ ...RANGE, start: MAX_MEDIA_BLOCKS }], [{ ...RANGE, blocks: 0 }],
+    [{ ...RANGE, blocks: MAX_MEDIA_ITEM_BLOCKS + 1 }], [{ ...RANGE, start: 1.5 }],
+    [{ ...RANGE, start: MAX_MEDIA_BLOCKS - 1, blocks: 2 }]
+  ]
+  for (const media of badMedia) t.is(validateRecord({ ...del, media }, 7), 'media-invalid', 'media ' + JSON.stringify(media))
+  const sparse = [RANGE, RANGE]
+  sparse.length = 3
+  t.is(validateRecord({ ...del, media: sparse }, 7), 'media-invalid', 'sparse media')
+  t.is(validateRecord({ ...del, media: [{ ...RANGE, start: MAX_MEDIA_BLOCKS - 2, blocks: 2 }] }, 7), null, 'last block of the core')
+
+  t.alike(DELETE_RANGE_KEYS, ['core', 'start', 'blocks'])
+  t.alike(deleteRecord({ seq: 3, at: AT }), del)
+  t.alike(Object.keys(deleteRecord({ seq: 3, at: AT })), ['type', 'seq', 'at'], 'no media key when absent')
+  t.alike(deleteRecord({ seq: 3, at: AT, media: [{ ...RANGE, extra: 1 }] }), { ...del, media: [RANGE] }, 'only the range keys are copied')
+  t.ok(isCanonicalIso(deleteRecord({ seq: 1 }).at))
+  await t.exception.all(async () => deleteRecord({ seq: 0, at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: '3', at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: [] }), /media-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: null }), /media-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: 'x' }), /date-invalid/)
+
+  // Hostile getters and proxies never throw.
+  const hostileSeq = { type: 'delete', at: AT }
+  Object.defineProperty(hostileSeq, 'seq', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostileSeq, 7), 'malformed')
+  const hostileRange = { core: K2, start: 1 }
+  Object.defineProperty(hostileRange, 'blocks', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord({ ...del, media: [hostileRange] }, 7), 'malformed')
+  const trap = new Proxy({ ...del }, { ownKeys () { throw new Error('boom') } })
+  t.is(validateRecord(trap, 7), 'malformed')
+  t.is(records.validRecordCopy(hostileSeq, 7), null)
+  t.alike(records.validRecordCopy(del, 7), del)
 })

@@ -129,7 +129,7 @@ test('seed status: reads the dir without the lock, a store or a write', async (t
 
   const r = varanda(dataDir, ['seed', 'status', '--json'])
   t.is(r.code, 0, r.stderr)
-  t.alike(lastJson(r), { association: assoc.hex, publicKey, certificate: 'ok', admitted: 0, blocklist: null, running: false })
+  t.alike(lastJson(r), { association: assoc.hex, publicKey, certificate: 'ok', admitted: 0, blocklist: null, blocklistHeld: false, running: false })
   t.alike(fs.readdirSync(dataDir).sort(), before, 'nothing created: no store/, no lock')
 
   const human = varanda(dataDir, ['seed', 'status'])
@@ -155,6 +155,25 @@ test('seed status: reads the dir without the lock, a store or a write', async (t
   writeBlocklist(dataDir, createSnapshot({ seq: 4, date }, moderator, foreignCert))
   t.is(lastJson(varanda(dataDir, ['seed', 'status', '--json'])).blocklist, null, 'another association: ignored')
   fs.rmSync(path.join(dataDir, 'blocklist.json'))
+
+  // A torn list kept aside by an earlier start, with no usable list: a start
+  // would hold new admissions.
+  fs.writeFileSync(path.join(dataDir, 'blocklist.json.ilegivel-1'), '{')
+  t.is(lastJson(varanda(dataDir, ['seed', 'status', '--json'])).blocklistHeld, true)
+  t.is(varanda(dataDir, ['seed', 'status']).stdout, [
+    'associação: ' + assoc.hex,
+    'chave do semeador: ' + publicKey,
+    'certificado: válido',
+    'diários admitidos: 0',
+    'lista de bloqueio: nenhuma',
+    'admissões: seguradas até chegar uma lista de bloqueio verificada',
+    'estado: parado'
+  ].join('\n') + '\n')
+  writeBlocklist(dataDir, createSnapshot({ seq: 5, date, blocked: [] }, moderator, modCert))
+  t.is(lastJson(varanda(dataDir, ['seed', 'status', '--json'])).blocklistHeld, false, 'a usable list holds nothing')
+  fs.rmSync(path.join(dataDir, 'blocklist.json'))
+  fs.rmSync(path.join(dataDir, 'blocklist.json.prev'))
+  fs.rmSync(path.join(dataDir, 'blocklist.json.ilegivel-1'))
 
   // Answers while another process holds the data dir (here: this test).
   writeAdmitted(dataDir, { ['a'.repeat(64)]: {}, 'not-a-key': {} })
@@ -296,7 +315,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'mediaCores', 'mediaBytes', 'groupCores', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
@@ -388,7 +407,7 @@ test('seed --health-port on a busy port fails before touching the data dir', asy
 test('health endpoint: 503 while the seeder starts or closes', async (t) => {
   await testnet(t)
   let status = 'starting'
-  const stats = () => ({ status, admitted: 0, dropping: 0, blocks: 0, bytes: 0, connections: 0, swarm: 0, external: 0, maxConnections: 64, maxExternal: 32, peers: 0, firewalled: null, blocked: 0, blocklistSeq: 0, mediaCores: 0, mediaBytes: 0, indexRecords: 0, indexSaturated: false, topicPosts: 0, topicSaturated: false })
+  const stats = () => ({ status, admitted: 0, dropping: 0, blocks: 0, bytes: 0, connections: 0, swarm: 0, external: 0, maxConnections: 64, maxExternal: 32, peers: 0, firewalled: null, blocked: 0, blocklistSeq: 0, blocklistHeld: false, mediaCores: 0, mediaBytes: 0, indexRecords: 0, indexSaturated: false, topicPosts: 0, topicSaturated: false })
   const server = await startHealth({ port: 0, stats })
   t.teardown(() => server.close(), { force: true })
   const base = 'http://127.0.0.1:' + server.port
@@ -406,9 +425,10 @@ test('health endpoint: 503 while the seeder starts or closes', async (t) => {
 })
 
 test('metrics: blocklist and media gauges carry counts only', (t) => {
-  const text = metricsText({ status: 'ok', admitted: 2, dropping: 0, activeDay: 4, activeWeek: 9, blocks: 9, bytes: 100, connections: 3, swarm: 1, external: 2, maxConnections: 64, maxExternal: 32, peers: 1, firewalled: false, blocked: 3, blocklistSeq: 7, mediaCores: 2, mediaBytes: 65536, indexRecords: 12, indexSaturated: true, topicPosts: 3, topicSaturated: false, uptimeSeconds: 5 })
+  const text = metricsText({ status: 'ok', admitted: 2, dropping: 0, activeDay: 4, activeWeek: 9, blocks: 9, bytes: 100, connections: 3, swarm: 1, external: 2, maxConnections: 64, maxExternal: 32, peers: 1, firewalled: false, blocked: 3, blocklistSeq: 7, blocklistHeld: true, mediaCores: 2, mediaBytes: 65536, indexRecords: 12, indexSaturated: true, topicPosts: 3, topicSaturated: false, uptimeSeconds: 5 })
   t.ok(text.includes('# TYPE varanda_seeder_blocked gauge\nvaranda_seeder_blocked 3\n'))
   t.ok(text.includes('# TYPE varanda_seeder_blocklist_seq gauge\nvaranda_seeder_blocklist_seq 7\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_blocklist_held gauge\nvaranda_seeder_blocklist_held 1\n'))
   t.ok(text.includes('# TYPE varanda_seeder_media_cores gauge\nvaranda_seeder_media_cores 2\n'))
   t.ok(text.includes('# TYPE varanda_seeder_media_bytes gauge\nvaranda_seeder_media_bytes 65536\n'))
   t.ok(text.includes('# TYPE varanda_seeder_index_records gauge\nvaranda_seeder_index_records 12\n'))

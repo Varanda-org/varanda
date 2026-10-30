@@ -11,7 +11,8 @@
 //            runs when the verified seeder advertises the key with length >= 1
 //   regate   quarantine gate passed and the replica is open in the storage,
 //            but block 0 has not yet arrived there and passed the LOCAL gate
-//   active   local gate passed; live download, advertised with contiguousLength
+//   active   local gate passed; live download, advertised with its present
+//            length (trackPresent: never contiguousLength)
 //   failing  gate failed, quota or fork: its close + purge is in flight
 //   failed   skipped; excluded from every goal
 //
@@ -31,7 +32,7 @@
 // The own diary is opened read-only here (no key pair: ./node-store.js) and
 // DOWNLOADED from the verified seeder as a replica is, so a device that
 // holds less than the seeder (a fresh device, or one that missed another
-// device's writes) catches up: goal G0 (own contiguousLength >= the length
+// device's writes) catches up: goal G0 (own present length >= the length
 // the seeder advertises). When block 0 arrives on a diary that had none,
 // the member certificate is recomputed from it, the diary is announced and
 // 'own-recovered' is emitted; the recovery in flight counts as an unmet
@@ -68,13 +69,15 @@
 // when the run is ending and the result never lists a dropped diary.
 //
 // Replicas outside the follows: an unfollowed diary keeps its replica
-// (./member-ops.js followRemove, still readable with log.read). The storage
-// cannot list its cores, so every run records the keys it follows in the
-// key-value entry 'replicas' ({ v: 1, keys }, pruned of keys no longer
-// stored); the revocation sweep gates those replicas too, so one certified
-// by a revoked issuer is purged whatever its follow state. A replica
-// unfollowed before this index existed is not known here; ./member-ops.js
-// still hides it from log.read.
+// (./member-ops.js followRemove, still readable with log.read) until the
+// next run. The storage cannot list its cores, so every run records the
+// keys it follows in the key-value entry 'replicas' ({ v: 1, keys }) and
+// purges the stored replica of every indexed key it no longer follows (a
+// replica nobody syncs would keep what its author deletes later); one whose
+// purge failed stays indexed, and the revocation sweep gates it too. A
+// replica unfollowed before this index existed is not known here (a
+// documented residual); ./member-ops.js still hides a blocked or revoked
+// one from log.read.
 //
 // Own media cores (kv 'mediaCores', ./node-store.js): each stored one is
 // opened read-only at run start through store.openMediaCoreReadOnly (lazy
@@ -216,8 +219,10 @@
 //                { key, group, attempts }' when one got no answer.
 //   diaries      the binding diary D of every accepted foreign core is kept
 //                as a replica (replicaName, listed in kv 'groupDiaries',
-//                never in follows): downloaded in full, fork and quota
-//                watched, a goal of once runs up to its join, so local
+//                never in follows): downloaded up to its present length as
+//                a followed replica (trackPresent: a deleted block is never
+//                asked for and is cleared), fork and quota watched, a goal
+//                of once runs up to its join, so local
 //                reads find the join and the name of an unfollowed author.
 //                Not for the own or a followed diary (its follow holds it).
 //                Purged once no STORED core binds it (synced, at rest, or
@@ -243,6 +248,21 @@
 //                follows, G1); once runs also wait for every own group core
 //                to be confirmed pushed. The settled report counts own group
 //                cores with the media (mediaPending).
+//
+// Member reads over the run's cores: the session may hand in a `reader`;
+// once the startup sequence opened the own diary and the stored follows
+// (just before the first connection) the run publishes { diary, replica,
+// hold, release } on it (reader.set), withdrawing it (reader.clear) before
+// teardown closes any core and whenever runSync returns or throws. A second
+// Hypercore instance on the same storage corrupts it, so the reader only
+// ever sees cores this run already holds: replica(key) is the open follow
+// core in whatever state, or null, and never opens one (the run opens
+// replicas itself mid-run, after a quarantine fetch or a sweep). A hold
+// keeps teardown from closing the cores until it is released; none starts
+// once the run is ending. Holds do not fence the run's own mid-run closes
+// (a failed or forked follow, a re-gate, a sweep, cleared deleted blocks):
+// a read that meets a closed core fails and the session reruns it on its
+// exclusive path instead.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -254,6 +274,12 @@ const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/bl
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
 const { validateGroupHeader, validateWriterHeader, groupJoinHistory, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = require('@varanda/core/lib/group')
+const {
+  presentState,
+  presentLength,
+  deletedRanges,
+  clearDeleted
+} = require('@varanda/core/lib/deletion')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
 const store = require('./node-store')
@@ -438,6 +464,8 @@ function ownGroupVerdict (length, pageLength, peerLength) {
 // Listings of a full (group, diary) gated at once as contenders.
 const MAX_CAP_CONTENDERS = 2
 
+const NO_READER = { set: noop, clear: noop }
+
 function key8 (hex) {
   return String(hex).slice(0, 8)
 }
@@ -531,6 +559,332 @@ function socketClosed (socket, maxMs) {
   })
 }
 
+// Hypercore keeps its ranges in an array that every add and remove walks,
+// so a handle never opens more than this many at once. Past the cap the
+// deleted seqs sit inside the live tail range, where a stale peer can
+// still serve one (cleared again on download, but churn), so the cap is
+// high enough that a person who deleted many posts keeps exact gaps: it
+// only bites on crafted diaries with thousands of gaps.
+const MAX_RANGES = 1024
+
+// Whether blocks [start, end) are all local already (a read error: no).
+async function localRange (core, start, end) {
+  try {
+    return await core.has(start, end)
+  } catch {
+    return false
+  }
+}
+
+// @varanda/core lib/deletion.js downloadExcept with linear ranges: a diary
+// downloads in block order, so its prefix (what readAll shows) is readable
+// early. One range per gap between deleted seqs that is not already local,
+// at most MAX_RANGES - 1 of them, then one live range to the end; a deleted
+// seq that still arrives (a request already answered, or one inside the
+// live range past the cap) is cleared. The seqs given at creation were
+// cleared by the caller; an update clears only the seqs new to the set and
+// reopens the ranges only when they change: a set that only grew inside
+// the live range of a capped handle keeps them. Opens and updates run one
+// at a time.
+function linearExcept (core, deleted) {
+  let current = []
+  let currentSet = new Set()
+  let ranges = []
+  let destroyed = false
+  let tailStart = 0
+  let capped = false
+  const tried = new Set()
+  const close = () => {
+    for (const r of ranges) {
+      try { r.destroy() } catch {}
+    }
+    ranges = []
+  }
+  const open = async () => {
+    const gaps = []
+    let start = 0
+    let cap = false
+    for (const seq of current) {
+      if (gaps.length / 2 >= MAX_RANGES - 1) {
+        cap = true
+        break
+      }
+      if (seq > start && !(await localRange(core, start, seq))) gaps.push(start, seq)
+      if (destroyed) return
+      start = seq + 1
+    }
+    if (destroyed) return
+    close()
+    capped = cap
+    tailStart = start
+    for (let g = 0; g < gaps.length; g += 2) ranges.push(core.download({ start: gaps[g], end: gaps[g + 1], linear: true }))
+    ranges.push(core.download({ start, end: -1, linear: true }))
+  }
+  const onDownload = (index) => {
+    if (currentSet.has(index)) clearDeleted(core, [index]).catch(noop)
+  }
+  const set = (next) => {
+    currentSet = new Set([...next].filter((s) => Number.isSafeInteger(s) && s > 0))
+    current = [...currentSet].sort((a, b) => a - b)
+  }
+  set(deleted)
+  for (const seq of current) tried.add(seq)
+  core.on('download', onDownload)
+  let chain = open().catch(noop)
+  const update = async (next) => {
+    if (destroyed) return []
+    const before = currentSet
+    set(next)
+    let shrunk = false
+    for (const seq of before) {
+      if (currentSet.has(seq)) continue
+      shrunk = true
+      tried.delete(seq)
+    }
+    let reopen = shrunk
+    for (const seq of current) {
+      if (reopen) break
+      if (!before.has(seq) && (!capped || seq < tailStart)) reopen = true
+    }
+    if (reopen) await open()
+    const fresh = []
+    for (const seq of current) {
+      if (tried.has(seq)) continue
+      tried.add(seq)
+      fresh.push(seq)
+    }
+    return clearDeleted(core, fresh)
+  }
+  return {
+    update (next) {
+      const run = chain.then(() => update(next))
+      chain = run.catch(noop)
+      return run
+    },
+    destroy () {
+      destroyed = true
+      core.off('download', onDownload)
+      close()
+    }
+  }
+}
+
+// A block whose read failed (it may be a tombstone) is read again after this
+// delay, this many times; after that only on a later step. It stays out of
+// the reported length until it is read.
+const TOMB_RETRY_MS = 250
+const TOMB_RETRY_MAX = 5
+
+// Target seq of the valid tombstone at block seq, null for any other block,
+// undefined for a read error (the checks of tombstoneAt, block read once).
+async function tombstoneTarget (core, seq) {
+  try {
+    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= core.length || !(await core.has(seq))) return null
+    const copy = validRecordCopy(decodeBlock(await core.get(seq, { wait: false, raw: true })), seq)
+    return copy !== null && copy.type === 'delete' ? copy.seq : null
+  } catch {
+    return undefined
+  }
+}
+
+// The deletion fold (deletedSeqs) over tombstones already validated, as
+// seq -> target, so a step never copies the records it already checked.
+function foldTargets (tombs) {
+  const deleted = new Set()
+  for (const seq of [...tombs.keys()].sort((a, b) => b - a)) {
+    if (!deleted.has(seq)) deleted.add(tombs.get(seq))
+  }
+  return deleted
+}
+
+// The present length of a diary core (own or followed) and what deletions
+// hide in it (@varanda/core lib/deletion.js). contiguousLength is never the
+// end: Hypercore 10 does not keep its lowered value across a reopen after a
+// clear, and a cleared block pins it. Every arriving block is checked for a
+// tombstone, whatever the prefix (a tombstone above a hole nobody serves
+// any more is what lets the present length pass it); the blocks the fold
+// deletes are never asked for (linearExcept) and are cleared unless
+// noClear. Events are handled one at a time after the initial scan, and
+// at most one step waits behind the running one: events that arrive
+// meanwhile merge into it, so a burst of blocks costs a few steps, not one
+// fold and one present-length walk per block.
+// -> { ready, present (), deleted (), destroy (), steps () }, steps() being
+// the number of steps run (test-only). onReady(present) once
+// the initial scan is done; onGrow(present) when the present length grows
+// after it; onDeleted(deleted) whenever the deleted set changed (and after
+// the initial scan when it is not empty); onError(err) once when the
+// initial scan fails (the tracker then stops, with present 0).
+function trackPresent (core, { noClear = false, download = true, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
+  const tombs = new Map() // seq -> target of each local valid tombstone
+  const retry = new Map() // index -> failed reads of a block not yet learned
+  let deleted = new Set()
+  let present = 0
+  let range = null
+  let stopped = false
+  let chain = Promise.resolve()
+  let waiting = false
+  let steps = 0
+  let timer = null
+  const arrived = []
+
+  const sameSet = (a, b) => a.size === b.size && [...a].every((s) => b.has(s))
+  const learn = async (index) => {
+    if (tombs.has(index)) return false
+    const target = await tombstoneTarget(core, index)
+    if (target === undefined) {
+      retry.set(index, (retry.get(index) || 0) + 1)
+      return false
+    }
+    retry.delete(index)
+    if (target === null || tombs.has(index)) return false
+    tombs.set(index, target)
+    return true
+  }
+  // A length never covers a block whose read failed: it may be a tombstone.
+  const capped = (len) => {
+    for (const index of retry.keys()) len = Math.min(len, index)
+    return len
+  }
+  // A quiet link still retries the failed reads.
+  const later = () => {
+    if (stopped || timer !== null) return
+    if (![...retry.values()].some((failed) => failed < TOMB_RETRY_MAX)) return
+    timer = setTimeout(() => {
+      timer = null
+      queue()
+    }, TOMB_RETRY_MS)
+  }
+  const apply = async (next) => {
+    let from = present
+    for (const seq of deleted) {
+      if (!next.has(seq)) {
+        from = 0
+        break
+      }
+    }
+    deleted = next
+    if (range !== null) await range.update(next)
+    else if (!noClear) await clearDeleted(core, next)
+    return from
+  }
+  const openRange = () => {
+    if (!download) return
+    if (noClear) {
+      const plain = core.download({ start: 0, end: -1, linear: true })
+      range = { update: async () => [], destroy: () => plain.destroy() }
+    } else {
+      range = linearExcept(core, deleted)
+    }
+  }
+
+  // Learns the blocks that arrived, applies what they delete and walks the
+  // present length from `from`, again while a block below it arrived
+  // during the awaits: a reported length never covers a tombstone that is
+  // stored but not yet applied. -> the length, null once stopped.
+  const settle = async (from) => {
+    for (;;) {
+      let learned = false
+      for (const index of arrived.splice(0)) {
+        if (await learn(index)) learned = true
+      }
+      if (learned) {
+        const next = foldTargets(tombs)
+        if (!sameSet(next, deleted)) from = Math.min(from, await apply(next))
+      }
+      if (stopped) return null
+      const len = await presentLength(core, deleted, from)
+      if (stopped) return null
+      if (!arrived.some((index) => index < len)) return capped(len)
+    }
+  }
+
+  const step = async () => {
+    if (stopped) return
+    steps++
+    for (const index of retry.keys()) {
+      if (!arrived.includes(index)) arrived.push(index)
+    }
+    const before = deleted
+    const len = await settle(present)
+    if (len === null) return
+    if (deleted !== before) onDeleted(deleted)
+    if (len > present) {
+      present = len
+      onGrow(len)
+    } else {
+      present = len
+    }
+  }
+  const queue = () => {
+    if (waiting) return
+    waiting = true
+    // A step that threw still arms the retry of a failed read.
+    chain = chain.then(() => {
+      waiting = false
+      return step()
+    }).catch(noop).then(later)
+  }
+  const onDownload = (index) => {
+    arrived.push(index)
+    queue()
+  }
+  const onAppend = () => { queue() }
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    if (timer !== null) clearTimeout(timer)
+    timer = null
+    core.off('download', onDownload)
+    core.off('append', onAppend)
+    if (range !== null) {
+      try { range.destroy() } catch {}
+      range = null
+    }
+  }
+
+  // Listening first: a block that arrives during the scan is checked again
+  // right after it.
+  core.on('download', onDownload)
+  core.on('append', onAppend)
+  const ready = (async () => {
+    const state = await presentState(core)
+    for (const entry of state.raw) {
+      const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
+      if (copy !== null && copy.type === 'delete') tombs.set(entry.seq, copy.seq)
+    }
+    deleted = state.deleted
+    present = state.present
+    if (stopped) return
+    if (!noClear) await clearDeleted(core, deleted)
+    if (stopped) return
+    openRange()
+    const len = await settle(0)
+    if (len === null) return
+    later()
+    present = len
+    if (deleted.size > 0) onDeleted(deleted)
+    onReady(present)
+  })()
+  // Fail closed: a replica whose initial scan failed reports no length and
+  // takes no more steps, so it is never taken as caught up.
+  chain = ready.catch((err) => {
+    if (stopped) return
+    stop()
+    present = 0
+    try { onError(err) } catch {}
+  })
+
+  return {
+    ready,
+    present: () => present,
+    deleted: () => deleted,
+    steps: () => steps,
+    destroy: stop
+  }
+}
+
+// Growth of a group core, which holds no delete records (diaries, followed
+// or binding, use trackPresent instead).
 function watchContiguous (core, onGrow) {
   let last = core.contiguousLength
   const check = () => {
@@ -568,7 +922,24 @@ function watchFork (core, onFork) {
 // (optional): { set (fn), clear (fn) } that receives this run's diary.peek
 // function (see the header). The limits and timings after `signal` are
 // injectable for tests; their defaults are the protocol constants.
-async function runSync ({
+// The session's reader (see the header) is withdrawn however the run ends,
+// before it published too.
+async function runSync (opts = {}) {
+  const reader = (opts && opts.reader) || NO_READER
+  try {
+    return await syncRun({ ...opts, reader })
+  } finally {
+    clearReader(reader)
+  }
+}
+
+function clearReader (reader) {
+  try {
+    reader.clear()
+  } catch {}
+}
+
+async function syncRun ({
   storage,
   associationKey = null,
   seederUrl,
@@ -578,6 +949,7 @@ async function runSync ({
   log = noop,
   onEvent = noop,
   peeker = null,
+  reader = NO_READER,
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
@@ -593,7 +965,8 @@ async function runSync ({
   groupRequestMs = GROUP_REQUEST_MS,
   groupsChangedMs = GROUPS_CHANGED_MS,
   socketCloseMs = SOCKET_CLOSE_MS,
-  blocklistMinIntervalMs // test-only: blocklist-net.js minIntervalMs
+  blocklistMinIntervalMs, // test-only: blocklist-net.js minIntervalMs
+  noClear = false // keep the bytes of deleted blocks (tombstones still apply)
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   // The trust root is checked before anything is opened.
@@ -626,12 +999,11 @@ async function runSync ({
   let diary = null
   let ownHex = null
   let cert = null
-  let ownRange = null // the own diary's download range (catch-up, G0)
+  let ownTracker = null // the own diary's present-length tracker (catch-up, G0)
   let recovering = false // block 0 arrived on a diary with no cert: reading it
   let recoveryFailed = false
   let lastOwnSynced = -1 // length last reported as own-synced on this link
   let lastOwnBehind = null // 'length/theirs' last reported as own-behind
-  let stopDiaryWatch = null
   let deadlineTimer = null
   let ending = false // finish() started: no new work, waiting for purges
   let ended = false // result built
@@ -670,8 +1042,10 @@ async function runSync ({
   const isBlockedKey = (key) => blocklist.blocked().has(key)
   const gateOpts = () => ({ revokedIssuers: blocklist.revokedIssuers() })
   let unfollowedReplicas = new Set() // index keys not followed in this run
+  const stillFollowed = new Set() // kv follows at run start, over the limit too
   let sweepChain = Promise.resolve() // storage sweeps run one at a time
-  const media = [] // own media cores: { key, core, pushed, stop, uploaded, event }
+  const media = [] // own media cores: { key, core, pushed, stop, uploaded, event, revoked }
+  let mediaRevoke = Promise.resolve() // the last revokeOwnMedia pass
   let mediaTimer = null
   const groupOwn = [] // own group cores: the media shape plus { group, synced }
   const ownGroupKeys = new Set()
@@ -692,6 +1066,26 @@ async function runSync ({
   let changedTimer = null
   const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
+  let holds = 0 // reader holds outstanding
+  let drained = Promise.resolve() // resolves when holds reaches 0
+  let drain = noop
+
+  function hold () {
+    if (ending) return false
+    if (holds++ === 0) drained = new Promise((resolve) => { drain = resolve })
+    return true
+  }
+
+  function release () {
+    if (holds === 0) return
+    if (--holds === 0) drain()
+  }
+
+  function replica (key) {
+    const e = follows.get(key)
+    if (!e || e.core === null || e.core.closing) return null
+    return e.core
+  }
 
   function track (p, onOk, onErr) {
     const wrapped = p.then(onOk, onErr).catch(noop)
@@ -737,7 +1131,7 @@ async function runSync ({
   function inventory () {
     const have = [{ key: ownHex, length: diary.length }]
     for (const e of follows.values()) {
-      if (e.state === 'active') have.push({ key: e.key, length: e.core.contiguousLength })
+      if (e.state === 'active') have.push({ key: e.key, length: entryPresent(e) })
       else if (e.state === 'pending' || e.state === 'regate') have.push({ key: e.key, length: 0 })
     }
     return have
@@ -1030,7 +1424,16 @@ async function runSync ({
       if (!l.peer.inventoryComplete || l.inventoryTimedOut) return null
       return { behind: false, theirs: 0 }
     }
-    return { behind: t > diary.contiguousLength, theirs: t }
+    return { behind: t > ownPresent(), theirs: t }
+  }
+
+  // The own diary's present length (trackPresent), never contiguousLength.
+  function ownPresent () {
+    return ownTracker === null ? 0 : ownTracker.present()
+  }
+
+  function entryPresent (entry) {
+    return entry.tracker ? entry.tracker.present() : 0
   }
 
   // Emits own-synced / own-behind whatever the run mode (evaluate() only
@@ -1039,7 +1442,7 @@ async function runSync ({
     if (ending) return
     const s = ownSyncState()
     if (s === null) return
-    const length = diary.contiguousLength
+    const length = ownPresent()
     if (s.behind) {
       const mark = length + '/' + s.theirs
       if (lastOwnBehind === mark) return
@@ -1059,7 +1462,7 @@ async function runSync ({
   // device): recompute it as at open, announce, and report own-recovered.
   // Tracked, so finish() waits for it; unmetGoals holds the run meanwhile.
   function recoverCert () {
-    if (recovering || recoveryFailed || ending || cert !== null || diary.contiguousLength < 1) return
+    if (recovering || recoveryFailed || ending || cert !== null || ownPresent() < 1) return
     recovering = true
     track(store.readBlock0(diary), (block0) => {
       recovering = false
@@ -1067,7 +1470,7 @@ async function runSync ({
       if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) {
         cert = block0.cert
         announceOwn()
-        emit({ event: 'own-recovered', length: diary.contiguousLength })
+        emit({ event: 'own-recovered', length: ownPresent() })
       } else {
         recoveryFailed = true
         log('sem certificado válido no bloco 0: o diário não será anunciado')
@@ -1108,7 +1511,7 @@ async function runSync ({
       } else if (e.state === 'regate') {
         unmet.push(e.key + ':0/' + (t === undefined ? 0 : t))
       } else {
-        const ours = e.core.contiguousLength
+        const ours = entryPresent(e)
         const want = Math.max(e.core.length, t === undefined ? 0 : t)
         if (ours < want) unmet.push(e.key + ':' + ours + '/' + want)
       }
@@ -1122,10 +1525,10 @@ async function runSync ({
     const own = theirs(ownHex)
     const l = seederLink()
     if (own === undefined) {
-      if (l !== null && l.inventoryTimedOut) unmet.push(ownHex + ':' + diary.contiguousLength + '/?')
+      if (l !== null && l.inventoryTimedOut) unmet.push(ownHex + ':' + ownPresent() + '/?')
       else if (recovering) unmet.push(ownHex + ':recovering')
-    } else if (own > diary.contiguousLength) {
-      unmet.push(ownHex + ':' + diary.contiguousLength + '/' + own)
+    } else if (own > ownPresent()) {
+      unmet.push(ownHex + ':' + ownPresent() + '/' + own)
     } else if (recovering) {
       unmet.push(ownHex + ':recovering')
     }
@@ -1171,7 +1574,7 @@ async function runSync ({
     for (const e of follows.values()) {
       if (e.state === 'failed' || e.state === 'failing') continue
       const t = theirs(e.key)
-      if (e.state === 'active' && !isBlockedKey(e.key)) downloaded[e.key] = e.core.contiguousLength
+      if (e.state === 'active' && !isBlockedKey(e.key)) downloaded[e.key] = entryPresent(e)
       if (t === undefined || t < 1) unadvertised.push(e.key)
     }
     const l = seederLink()
@@ -1334,8 +1737,31 @@ async function runSync ({
     core.on('append', check)
     entry.stopQuota = () => core.off('append', check)
     entry.stopFork = watchFork(core, () => { onFork(entry) })
-    entry.range = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, (length) => { onGrow(entry, length) })
+    // Growth is on the present length: readAll ends there, and a deleted
+    // block is never asked for and is cleared when it arrives anyway.
+    const tracker = trackPresent(core, {
+      noClear,
+      onReady: (present) => {
+        if (entry.core !== core) return
+        if (entry.state === 'regate') {
+          if (present > 0) regate(entry)
+          return
+        }
+        // An inventory sent or answered before the scan finished saw 0.
+        if (entry.state === 'active') onScanned(entry, present)
+      },
+      onGrow: (length) => {
+        if (entry.core === core) onGrow(entry, length)
+      },
+      // Fail closed: nothing is downloaded, but the follow is reported.
+      onError: () => {
+        if (ended || entry.core !== core) return
+        softError('falha ao ler a réplica de ' + key8(entry.key))
+        evaluate()
+      }
+    })
+    entry.tracker = tracker
+    entry.stopGrow = () => tracker.destroy()
     if (checkQuota(entry)) return
     const l = seederLink()
     if (l !== null) core.replicate(l.noise)
@@ -1349,7 +1775,6 @@ async function runSync ({
   function enterRegate (entry, core) {
     entry.state = 'regate'
     watchEntry(entry, core)
-    if (entry.state === 'regate' && core.contiguousLength > 0) regate(entry)
   }
 
   function onGrow (entry, length) {
@@ -1362,6 +1787,15 @@ async function runSync ({
     if (entry.state !== 'active') return
     send({ type: 'have', key: entry.key, length })
     emit({ event: 'downloaded', key: entry.key, length })
+    evaluate()
+  }
+
+  // The initial scan of a stored replica finished: advertise what it holds
+  // and judge completion again, as a growth would.
+  function onScanned (entry, present) {
+    if (ended) return
+    if (checkQuota(entry)) return
+    if (present > 0) send({ type: 'have', key: entry.key, length: present })
     evaluate()
   }
 
@@ -1386,7 +1820,7 @@ async function runSync ({
         return
       }
       entry.state = 'active'
-      const length = core.contiguousLength
+      const length = entryPresent(entry)
       send({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
       evaluate()
@@ -1652,6 +2086,19 @@ async function runSync ({
     return raw
   }
 
+  function deletedOf (core) {
+    if (core === diary && ownTracker !== null) return ownTracker.deleted()
+    for (const e of follows.values()) {
+      if (e.core === core && e.tracker) return e.tracker.deleted()
+    }
+    // A lent binding diary: another member's deleted post is never fetched
+    // and stored again through a peek.
+    for (const gd of groupDiaries.values()) {
+      if (gd.core === core && gd.tracker) return gd.tracker.deleted()
+    }
+    return new Set()
+  }
+
   async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline) {
     const wanted = new Set(seqs)
     if (profileSeq !== null) wanted.add(profileSeq)
@@ -1660,10 +2107,15 @@ async function runSync ({
     // advertises: blocks up to that length are asked for (and verified
     // against the signed tree on arrival); beyond it nothing is asked.
     const limit = Math.max(core.length, theirs(key) || 0)
+    // A seq the local fold of the own diary, of a followed core or of a
+    // binding diary knows deleted is never asked for (its bytes are cleared everywhere): it is
+    // missing at once. On a temporary core a cleared block simply never
+    // arrives and is missing after the timeout.
+    const known = deletedOf(core)
     const blocks = new Map() // seq -> raw bytes, or null when absent
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
-      if (seq < limit) {
+      if (seq < limit && !known.has(seq)) {
         try {
           raw = await core.get(seq, { raw: true, timeout: budget(deadline) })
         } catch {
@@ -1698,7 +2150,7 @@ async function runSync ({
       entries,
       invalid,
       missing,
-      profile: profile !== null && profile.type === 'profile' ? { name: profile.name, bio: profile.bio } : null,
+      profile: profile !== null && profile.type === 'profile' ? { name: profile.name, bio: profile.bio, avatar: profile.avatar === undefined ? null : profile.avatar } : null,
       username: username !== null && username.type === 'username' && verifyUsernameRecord(username, key, association, gateOpts()).ok
         ? username.username
         : null
@@ -1956,16 +2408,34 @@ async function runSync ({
     })
   }
 
-  // Records this run's follows in the 'replicas' index and keeps the
-  // unfollowed keys that still hold a replica. Best effort: a failure only
-  // narrows what the revocation sweep can reach.
+  // Records this run's follows in the 'replicas' index and purges the
+  // stored replica of every indexed key no longer followed: nobody keeps it
+  // in sync any more, so a deletion its author makes later would never be
+  // cleared from it. A key whose purge failed stays indexed (and in the
+  // revocation sweep). Best effort: a failure only narrows what the sweeps
+  // can reach. Under noClear nothing is purged (as the node's
+  // sweepUnfollowed under the kill switch), nor a binding diary of a stored
+  // group core: the key stays indexed.
   async function updateReplicaIndex () {
     try {
       const previous = await readReplicaIndex(storage)
       const next = new Set()
       for (const key of previous) {
         if (key === ownHex || follows.has(key)) continue
-        if (await store.replicaExists(storage, key)) next.add(key)
+        if (!(await store.replicaExists(storage, key))) continue
+        // Over the follow limit is still followed, only not synced now. A
+        // binding diary is open or kept for a stored group core: purging it
+        // would delete storage under that core and lose the join evidence;
+        // an open one's tracker clears what its author deleted.
+        if (stillFollowed.has(key) || noClear || groupDiaries.has(key) || groupDiaryBound(key)) {
+          next.add(key)
+          continue
+        }
+        try {
+          await store.purgeReplica(storage, key)
+        } catch {
+          next.add(key)
+        }
       }
       unfollowedReplicas = new Set(next)
       for (const key of follows.keys()) next.add(key)
@@ -2004,9 +2474,11 @@ async function runSync ({
   }
 
   // A core of ours to push and confirm (see the header). uploaded:
-  // replicator Peer -> the block indexes served to it.
+  // replicator Peer -> the block indexes served to it. revoked: block
+  // indexes a tombstone of the own diary deleted (media only; a group core
+  // keeps it empty, seederHoldsMedia reads it for both).
   function pushEntry (key, core, event) {
-    const m = { key, core, pushed: -1, stop: null, uploaded: new WeakMap(), event }
+    const m = { key, core, pushed: -1, stop: null, uploaded: new WeakMap(), event, revoked: new Set() }
     const onPeer = () => {
       checkMedia()
       pollMedia()
@@ -2037,16 +2509,31 @@ async function runSync ({
   }
 
   // Whether the seeder peer of the verified link holds blocks 0..length-1
-  // of a media core: below its remoteContiguousLength (what it advertised,
-  // Hypercore 10.38.2: per replicator Peer) or served to it on this link
+  // of a media core: below its remoteContiguousLength, in its remote
+  // bitfield (what it advertised, Hypercore 10.38.2: per replicator Peer;
+  // a seeder that cleared a deleted block advertises a contiguous range
+  // pinned at it and the rest as a bitfield) or served to it on this link
   // (the 'upload' event; its range broadcast is skipped for a block we
-  // already have, so the advertised length alone never grows).
+  // already have, so the advertised length alone never grows). A revoked
+  // (deleted) block counts as held: nobody keeps it, so it must not stall
+  // the confirmation of the photos that survive.
   function seederHoldsMedia (m, l, length) {
     for (const peer of m.core.peers) {
       if (peer.stream !== l.noise) continue
       const uploaded = m.uploaded.get(peer)
       for (let i = peer.remoteContiguousLength; i < length; i++) {
-        if (uploaded === undefined || !uploaded.has(i)) return false
+        if (m.revoked.has(i) || peer.remoteBitfield.get(i)) continue
+        if (uploaded === undefined || !uploaded.has(i)) {
+          // A new link only learns the seeder's contiguous range at open:
+          // ask once per segment for its bitfield past it (Hypercore 10.38.2
+          // Peer#_maybeWant, the request path's own call; the seeder
+          // answers with bitfield messages), so blocks held past a cleared
+          // one are confirmed on the next check.
+          if (typeof peer._maybeWant === 'function') {
+            try { peer._maybeWant(i, length - i) } catch {}
+          }
+          return false
+        }
       }
       return true
     }
@@ -2084,6 +2571,27 @@ async function runSync ({
     if (now - l.pushPagedAt < Math.max(mediaPollMs, GROUP_PUSH_PAGE_MS)) return
     l.pushPagedAt = now
     pageGroups(l)
+  }
+
+  // The own diary's effective tombstones name media ranges (in cores the
+  // diary declared, no surviving post or profile overlapping): each range
+  // of an open own media core is revoked (seederHoldsMedia) and, unless
+  // noClear, cleared. Re-run on every change of the deleted set (a deletion
+  // made on another device arrives as a downloaded tombstone); tracked.
+  function revokeOwnMedia () {
+    if (media.length === 0) return
+    mediaRevoke = track((async () => {
+      const state = await presentState(diary)
+      for (const r of deletedRanges(state.raw, media.map((m) => m.key))) {
+        const m = media.find((x) => x.key === r.core)
+        if (m === undefined) continue
+        for (let i = Math.max(1, r.start); i < r.start + r.blocks; i++) m.revoked.add(i)
+        if (!noClear) await store.clearMediaRanges(m.core, [r])
+      }
+      checkMedia()
+    })(), noop, () => {
+      if (!ended) log('aviso: falha ao limpar fotos apagadas')
+    })
   }
 
   function checkMedia () {
@@ -2324,7 +2832,7 @@ async function runSync ({
       known.want = Math.max(known.want, want)
       return
     }
-    const gd = { key: d, core: null, want, attachedTo: null, range: null, stopFork: noop, stopQuota: noop, stopGrow: noop, dropped: false, opening: null }
+    const gd = { key: d, core: null, want, attachedTo: null, tracker: null, stopFork: noop, stopQuota: noop, stopGrow: noop, dropped: false, opening: null }
     groupDiaries.set(d, gd)
     // Opened inside the kv chain: the revocation sweep's look at a stored
     // replica nobody holds (diaryRevoked) never doubles it.
@@ -2357,25 +2865,43 @@ async function runSync ({
     core.on('append', check)
     gd.stopQuota = () => core.off('append', check)
     gd.stopFork = watchFork(core, () => dropGroupDiary(gd))
-    gd.range = core.download({ start: 0, end: -1 })
     // Its block 0 is judged against the current revocations as soon as it
     // is here: a revoked member's cores go even when no snapshot arrives.
     const judge = () => {
-      if (gd.judged || gd.core !== core || core.contiguousLength < 1) return
+      if (gd.judged || gd.core !== core || gd.tracker === null || gd.tracker.present() < 1) return
       gd.judged = true
       track(localGate(core, gd.key, association, gateOpts()), (r) => {
         if (r === 'revoked-issuer' && !ending) dropRevokedDiary(gd.key)
       }, noop)
     }
-    judge()
-    // Joins and names live there: the groups it binds read anew.
-    gd.stopGrow = watchContiguous(core, () => {
-      judge()
-      for (const ge of groupCores.values()) {
-        if (ge.diary === gd.key && ge.state === 'active') markGroupChanged(ge.group)
+    // A post its author deleted is neither fetched again nor kept and served
+    // back, and its hole never pins the goal below the joins after it: the
+    // same present length as a followed replica.
+    const tracker = trackPresent(core, {
+      noClear,
+      onReady: () => {
+        if (gd.core !== core) return
+        judge()
+        evaluate()
+      },
+      // Joins and names live there: the groups it binds read anew.
+      onGrow: () => {
+        if (gd.core !== core) return
+        judge()
+        for (const ge of groupCores.values()) {
+          if (ge.diary === gd.key && ge.state === 'active') markGroupChanged(ge.group)
+        }
+        evaluate()
+      },
+      // Fail closed: no present length, so the goal stays unmet.
+      onError: () => {
+        if (ended || gd.core !== core) return
+        log('aviso: falha ao ler o diário ' + key8(gd.key))
+        evaluate()
       }
-      evaluate()
     })
+    gd.tracker = tracker
+    gd.stopGrow = () => tracker.destroy()
     const l = seederLink()
     if (l !== null) attachGroupDiary(gd, l)
     if (overQuota(core)) dropGroupDiary(gd)
@@ -2408,8 +2934,7 @@ async function runSync ({
     gd.stopGrow()
     gd.stopFork()
     gd.stopQuota()
-    if (gd.range) gd.range.destroy()
-    gd.range = null
+    gd.tracker = null
     const core = gd.core
     gd.core = null
     if (unlist) track(groupKv(() => store.removeGroupDiary(storage, gd.key)), noop, noop)
@@ -3037,6 +3562,16 @@ async function runSync ({
     return gd !== undefined && gd.core ? gd.core : null
   }
 
+  // The present length of a binding diary this run holds open: a deleted
+  // post below a join never hides that join.
+  function bindingPresent (d, core) {
+    if (d === ownHex) return ownPresent()
+    const f = follows.get(d)
+    if (f !== undefined && f.core === core) return entryPresent(f)
+    const gd = groupDiaries.get(d)
+    return gd !== undefined && gd.core === core && gd.tracker ? gd.tracker.present() : 0
+  }
+
   // Per binding diary, the on:true group-joins read so far this run: each
   // gate scans only the blocks that arrived since, never the whole diary
   // again (a long diary must not cost a full decode per gate).
@@ -3048,7 +3583,7 @@ async function runSync ({
       state = { core, length: 0, joins: [] }
       joinCache.set(d, state)
     }
-    const end = core.contiguousLength
+    const end = Math.max(core.contiguousLength, bindingPresent(d, core))
     const fresh = []
     for (let seq = state.length; seq < end; seq++) {
       fresh.push({ seq, record: decodeBlock(await core.get(seq, { wait: false, raw: true })) })
@@ -3270,7 +3805,8 @@ async function runSync ({
         continue
       }
       const want = Math.max(gd.core.length, gd.want)
-      if (gd.core.contiguousLength < want) unmet.push(gd.key + ':' + gd.core.contiguousLength + '/' + want)
+      const ours = gd.tracker ? gd.tracker.present() : 0
+      if (ours < want) unmet.push(gd.key + ':' + ours + '/' + want)
     }
     // A seeder from before groups never opens a peer for an own group core:
     // waiting for its push would hold a once run to the deadline.
@@ -3286,12 +3822,16 @@ async function runSync ({
   // ---- the follow fold (see the header) ----
 
   // Replays the own diary's follow records from the cursor up to its
-  // contiguous length -> the length replayed.
+  // present length -> the length replayed. A block below it that is not
+  // held, or that the fold deleted, has no effect.
   async function replayFollows () {
-    const length = diary.contiguousLength
-    for (let seq = fold.cursor; seq < length; seq++) {
+    const length = ownPresent()
+    const deleted = ownTracker === null ? new Set() : ownTracker.deleted()
+    // The cursor passes a seq only once it was handled: a throw leaves it
+    // there, so the next fold retries it.
+    for (let seq = fold.cursor; seq < length; seq = ++fold.cursor) {
+      if (deleted.has(seq) || !(await diary.has(seq))) continue
       const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
-      fold.cursor = seq + 1
       if (record === null || record.type !== 'follow') continue
       fold.seen = true
       if (record.key === ownHex) continue
@@ -3335,6 +3875,22 @@ async function runSync ({
     ownRefused()
     await openOwnMedia()
     await openGroups()
+    // Deleted blocks and media are cleared, and growth is measured on the
+    // present length, before any connection; whatever the verified seeder
+    // holds beyond us is fetched (only a verified link replicates the
+    // diary, onVerified), deleted blocks never.
+    ownTracker = trackPresent(diary, {
+      noClear,
+      onGrow: (length) => {
+        send({ type: 'have', key: ownHex, length })
+        if (cert === null) recoverCert()
+        checkOwnSync()
+        evaluate()
+      },
+      onDeleted: () => { revokeOwnMedia() }
+    })
+    await ownTracker.ready
+    await mediaRevoke
     // What the own diary already holds is folded before any connection.
     scheduleFold()
 
@@ -3346,6 +3902,7 @@ async function runSync ({
 
     // Follow gate at start (R5.8 a), before any connection.
     let followList = await store.readFollows(storage)
+    for (const k of followList) if (typeof k === 'string') stillFollowed.add(k.toLowerCase())
     if (followList.length > maxFollows) {
       log('aviso: limite de diários seguidos excedido: só os primeiros ' + maxFollows + ' serão sincronizados')
       followList = followList.slice(0, maxFollows)
@@ -3365,6 +3922,7 @@ async function runSync ({
         stopGrow: null,
         stopFork: null,
         stopQuota: null,
+        tracker: null, // trackPresent of the open core
         retryTimer: null,
         fetching: false,
         fetch: null, // the quarantine fetch in flight (peeks wait for it)
@@ -3385,9 +3943,10 @@ async function runSync ({
       if (!(await store.replicaExists(storage, key))) continue
       const core = await store.openReplica(storage, key)
       let reason = null
+      const held0 = core.length > 0 && await core.has(0)
       if (core.fork !== 0) reason = 'fork'
-      else if (core.contiguousLength > 0) reason = await localGate(core, key, association, gateOpts())
-      if (core.contiguousLength > 0 && reason === null) {
+      else if (held0) reason = await localGate(core, key, association, gateOpts())
+      if (held0 && reason === null) {
         activate(entry, core)
         continue
       }
@@ -3421,15 +3980,7 @@ async function runSync ({
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevokedGroups()
 
     if (!ending) {
-      stopDiaryWatch = watchContiguous(diary, (length) => {
-        send({ type: 'have', key: ownHex, length })
-        if (cert === null) recoverCert()
-        checkOwnSync()
-        evaluate()
-      })
-      // Whatever the verified seeder holds beyond us is fetched (only a
-      // verified link replicates the diary, onVerified).
-      ownRange = diary.download({ start: 0, end: -1 })
+      reader.set({ diary, replica, hold, release })
       connect()
     }
 
@@ -3442,11 +3993,7 @@ async function runSync ({
     for (const timer of timers) clearTimeout(timer)
     timers.clear()
     if (signal) signal.removeEventListener('abort', onAbort)
-    if (stopDiaryWatch) stopDiaryWatch()
-    if (ownRange) {
-      try { ownRange.destroy() } catch {}
-      ownRange = null
-    }
+    if (ownTracker !== null) ownTracker.destroy()
     const l = link
     link = null
     if (l !== null) {
@@ -3464,6 +4011,8 @@ async function runSync ({
     discardRegate() // a throw may have skipped finish()
     discardGroupRegate()
     await Promise.allSettled([...inflight])
+    clearReader(reader)
+    await drained
     for (const ge of groupCores.values()) {
       stopGroupEntry(ge)
       if (ge.core) {
@@ -3495,4 +4044,4 @@ async function runSync ({
   }
 }
 
-module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

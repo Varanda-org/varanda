@@ -13,12 +13,13 @@ const { WebSocket, createWebSocketStream } = require('ws')
 const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('./helpers/net')
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
-const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, MAX_GROUPS_PER_DIARY, MAX_GROUP_NAME } = require('@varanda/core/lib/records')
+const { attachAdmission, generateNoiseKeyPair, createSwarm, joinAndFlush, topicFor } = require('@varanda/core/lib/net')
+const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES, MAX_GROUPS_PER_DIARY, MAX_GROUP_NAME } = require('@varanda/core/lib/records')
+const { mediaHeader } = require('@varanda/core/lib/media')
 const { groupHeader: makeGroupHeader } = require('@varanda/core/lib/group')
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -1031,7 +1032,16 @@ function indexSeeder ({ gate = null } = {}) {
       ? { items: [A + ':1'], next: null, authors: { [A]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
       : { items: [], next: null, authors: {}, indexing: false, complete: true }
   }
+  stub.indexEngagers = async (kind, author, seq, cursor) => {
+    stub.calls.push(['indexEngagers', kind, author, seq, cursor])
+    await wait()
+    return author === A ? engagersOf(kind, author + ':' + seq) : null
+  }
   return stub
+}
+
+function engagersOf (kind, ref) {
+  return { ref, kind, items: [B + ':7'], next: null, total: 1, authors: { [B]: { profileSeq: null, usernameSeq: 3 } }, indexing: false, complete: true }
 }
 
 function jsonHeaders (t, got) {
@@ -1051,6 +1061,7 @@ test('startSeedWs /index: limits and regexes are exported with their documented 
   t.is(INDEX_POST_RE.source, '^\\/index\\/post\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
   t.is(INDEX_MEMBER_RE.source, '^\\/index\\/member\\/([0-9a-f]{64})(?:\\/([1-9][0-9]{0,14}))?$')
   t.is(INDEX_SEARCH_RE.source, '^\\/index\\/search\\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$')
+  t.is(INDEX_ENGAGERS_RE.source, '^\\/index\\/(likes|reposts)\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
   t.ok(INDEX_COUNTS_RE.test('/index/counts/' + A + ':1'), 'one ref')
   t.ok(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 31 }, (_, i) => A + ':' + (i + 1)).join(',')), '31 refs')
   t.absent(INDEX_COUNTS_RE.test('/index/counts/' + Array.from({ length: 32 }, (_, i) => A + ':' + (i + 1)).join(',')), '32 refs')
@@ -1381,6 +1392,46 @@ test('startSeedWs /index: the worst-case answer stays within 64 KiB; an oversize
 
   seeder.indexPost = async () => ({ ...worst, replies: Array.from({ length: 1000 }, (_, i) => hex(i) + ':' + seq) })
   const over = await mediaRequest(server.port, '/index/post/' + A + '/1')
+  t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
+  t.is(over.body.toString(), 'não encontrado\n')
+})
+
+// The largest engagers page the contract allows: 20 refs from 20 distinct
+// authors, every seq and hint at 15 digits, a 16-digit cursor and the
+// largest total.
+test('startSeedWs /index/likes|reposts: the worst-case answer stays within 64 KiB; an oversize answer is 404', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const seq = '9'.repeat(15)
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 20; i++) {
+    items.push(hex(i) + ':' + seq)
+    authors[hex(i)] = { profileSeq: Number(seq), usernameSeq: Number(seq) }
+  }
+  const worst = {
+    ref: hex(200) + ':' + seq,
+    kind: 'reposts',
+    items,
+    next: '9'.repeat(16) + '.' + hex(19) + '.' + seq,
+    total: Number.MAX_SAFE_INTEGER,
+    authors,
+    indexing: false,
+    complete: false
+  }
+  t.is(Object.keys(authors).length, 20, '20 distinct author hints')
+  const seeder = indexSeeder()
+  seeder.indexEngagers = async () => worst
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/reposts/' + hex(200) + '/' + seq + '/' + '9'.repeat(16) + '.' + hex(19) + '.' + seq)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.comment('engagers worst case: ' + got.body.byteLength + ' bytes')
+  t.alike(JSON.parse(got.body.toString()), worst)
+
+  seeder.indexEngagers = async () => ({ ...worst, items: Array.from({ length: 1000 }, (_, i) => hex(i) + ':' + seq) })
+  const over = await mediaRequest(server.port, '/index/likes/' + A + '/1')
   t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
   t.is(over.body.toString(), 'não encontrado\n')
 })
@@ -1989,4 +2040,219 @@ test('/index/group and /index/groups with the triage token use the moderation bu
   t.is(viaToken.body, public1.body, 'with the same body')
   t.is((await groupPostRequest(server.port, '/index/groups/' + A)).status, 200)
   t.is((await groupPostRequest(server.port, '/index/group-search/jardim')).status, 503, 'other index routes stay public')
+})
+
+// /index/likes and /index/reposts: who liked or reposted <author>:<seq>, on
+// the same serveIndex discipline; the kind is the literal path segment.
+test('startSeedWs /index/likes|reposts: GET answers JSON with the parsed arguments, HEAD sends the headers only', async (t) => {
+  t.timeout(20000)
+  t.ok(INDEX_ENGAGERS_RE.test('/index/likes/' + A + '/1'), 'likes')
+  t.ok(INDEX_ENGAGERS_RE.test('/index/reposts/' + A + '/1/' + CURSOR), 'reposts with a cursor')
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const likes = await mediaRequest(server.port, '/index/likes/' + A + '/12')
+  t.is(likes.status, 200)
+  jsonHeaders(t, likes)
+  t.is(likes.headers['content-length'], String(likes.body.byteLength))
+  t.alike(JSON.parse(likes.body.toString()), engagersOf('likes', A + ':12'))
+  t.alike(seeder.calls[0], ['indexEngagers', 'likes', A, 12, null], 'no cursor -> null')
+
+  const reposts = await mediaRequest(server.port, '/index/reposts/' + A + '/12')
+  t.is(reposts.status, 200)
+  t.alike(JSON.parse(reposts.body.toString()), engagersOf('reposts', A + ':12'))
+  t.alike(seeder.calls[1], ['indexEngagers', 'reposts', A, 12, null])
+
+  const paged = await mediaRequest(server.port, '/index/likes/' + A + '/12/' + CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[2], ['indexEngagers', 'likes', A, 12, CURSOR], 'the cursor is passed as a string')
+
+  const maxSeq = await mediaRequest(server.port, '/index/reposts/' + A + '/' + '9'.repeat(15))
+  t.is(maxSeq.status, 200)
+  t.is(seeder.calls[3][3], 999999999999999, '15 digits stay an exact safe integer')
+
+  const head = await mediaRequest(server.port, '/index/likes/' + A + '/12', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], likes.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.alike(seeder.calls[4], ['indexEngagers', 'likes', A, 12, null])
+
+  const post = await mediaRequest(server.port, '/index/post/' + A + '/12')
+  t.is(post.status, 200)
+  t.alike(seeder.calls[5], ['indexPost', A, 12, null], '/index/post still reaches indexPost')
+  t.is(seeder.calls.length, 6)
+})
+
+test('startSeedWs /index/likes|reposts: malformed, encoded, uppercase or query paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/likes',
+    '/index/likes/',
+    '/index/likes/' + A,
+    '/index/likes/' + A + '/',
+    '/index/likes/' + A.toUpperCase() + '/1',
+    '/index/Likes/' + A + '/1',
+    '/index/like/' + A + '/1',
+    '/index/repost/' + A + '/1',
+    '/index/likes/' + A + '/0',
+    '/index/likes/' + A + '/01',
+    '/index/likes/' + A + '/' + '1'.repeat(16),
+    '/index/likes/' + A + '/1/',
+    '/index/likes/' + A + '/1?x=1',
+    '/index/likes/' + A + '/1/' + CURSOR + '/',
+    '/index/likes/' + A + '/1/1700000000000.' + B.toUpperCase() + '.7',
+    '/index/likes/' + A + '/1/1700000000000.' + B + '.07',
+    '/index/likes/' + A + '/1/1700000000000.' + B,
+    '/index/likes/' + A + '/1/' + '1'.repeat(17) + '.' + B + '.7',
+    '/index/likes/' + A + '%2F1',
+    '/index/%6Cikes/' + A + '/1',
+    '/index/reposts/' + A + '/%31'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 40) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.absent(got.body.toString().includes('like'), 'the path is not echoed')
+    t.absent(got.body.toString().includes(A.slice(0, 8)), 'no key is echoed')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/likes|reposts: a null answer, a throw and a seeder without indexEngagers are 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const s1 = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => s1.close(), { force: true })
+  for (const url of ['/index/likes/' + B + '/1', '/index/reposts/' + B + '/1']) {
+    const n = await mediaRequest(s1.port, url)
+    t.is(n.status, 404, 'null answer -> 404')
+    t.is(n.body.toString(), 'não encontrado\n')
+  }
+  t.is(seeder.calls.length, 2, 'the seeder was asked')
+
+  const throwing = indexSeeder()
+  throwing.indexEngagers = () => { throw new Error('secret ' + A) }
+  const s2 = await startSeedWs({ port: 0, seeder: throwing })
+  t.teardown(() => s2.close(), { force: true })
+  const th = await mediaRequest(s2.port, '/index/likes/' + A + '/1')
+  t.is(th.status, 404, 'throw -> 404')
+  t.is(th.body.toString(), 'não encontrado\n')
+  t.absent(th.body.toString().includes('secret'), 'nothing of the error is echoed')
+  t.absent(th.body.toString().includes(A.slice(0, 8)), 'no key is echoed')
+
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  for (const url of ['/index/likes/' + A + '/1', '/index/reposts/' + A + '/1']) {
+    const o = await mediaRequest(old.port, url)
+    t.is(o.status, 404, 'a seeder without indexEngagers -> 404')
+    t.is(o.body.toString(), 'não encontrado\n')
+  }
+})
+
+test('startSeedWs /index/likes|reposts: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  for (const url of ['/index/likes/' + A + '/1', '/index/reposts/' + A + '/1']) {
+    const evil = await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })
+    t.is(evil.status, 421, 'foreign Host -> 421')
+    const post = await mediaRequest(server.port, url, { method: 'POST' })
+    t.is(post.status, 405, 'POST -> 405')
+    t.is(post.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/likes|reposts: shares the /index token bucket and in-flight cap', async (t) => {
+  t.timeout(30000)
+  const s1 = await startSeedWs({ port: 0, seeder: indexSeeder(), index: { rate: 0.001, burst: 3 } })
+  t.teardown(() => s1.close(), { force: true })
+  t.is((await mediaRequest(s1.port, '/index/likes/' + A + '/1')).status, 200, 'within the burst')
+  t.is((await mediaRequest(s1.port, '/index/reposts/' + A + '/1')).status, 200, 'within the burst')
+  t.is((await mediaRequest(s1.port, '/index/topic/ceu')).status, 200, 'within the burst')
+  const over = await mediaRequest(s1.port, '/index/likes/' + A + '/1')
+  t.is(over.status, 503, 'the routes spent the shared bucket')
+  t.is(over.body.toString(), 'ocupado\n')
+  t.is(over.headers['retry-after'], '1')
+
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const seeder = indexSeeder({ gate })
+  const s2 = await startSeedWs({ port: 0, seeder, index: { maxInFlight: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  const held = [mediaRequest(s2.port, '/index/likes/' + A + '/1'), mediaRequest(s2.port, '/index/reposts/' + A + '/1')]
+  await until(() => seeder.calls.length === 2, { name: 'duas listas retidas', timeoutMs: 5000 })
+  const busy = await mediaRequest(s2.port, '/index/post/' + A + '/1')
+  t.is(busy.status, 503, 'the routes hold the shared in-flight slots')
+  t.is(busy.headers['retry-after'], '1')
+  t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
+  release()
+  t.alike((await Promise.all(held)).map((r) => r.status), [200, 200])
+})
+
+test('startSeedWs /media with the real Seeder: a deleted range and every overlapping subrange are 404, an adjacent live photo 200', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), associationKey: assoc.hex, log: (e) => events.push(e) })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  // A member whose diary declares media core M: a photo at M[1,2] and an
+  // adjacent one at M[3,1].
+  const store = new Corestore(tmpDir(t, 'varanda-client-'))
+  await store.ready()
+  t.teardown(() => store.close(), { force: true })
+  const diary = store.get({ name: 'diary', valueEncoding: 'json' })
+  await diary.ready()
+  const DK = hex(diary.key)
+  const media = store.get({ name: 'media' })
+  await media.ready()
+  await media.append(b4a.from(JSON.stringify(mediaHeader({ diary: DK }))))
+  for (let i = 0; i < 3; i++) await media.append(b4a.alloc(MEDIA_BLOCK_BYTES, i + 1))
+  const MK = hex(media.key)
+  const photo = (start, blocks) => ({ core: MK, mime: 'image/jpeg', start, blocks, bytes: blocks * MEDIA_BLOCK_BYTES, sha256: 'ab'.repeat(32), width: 100, height: 100 })
+  const at = (i) => new Date(Date.parse('2026-03-01T12:00:00.000Z') + i * 1000).toISOString()
+  await diary.append(memberCertRecord(createCert({ member: DK }, assoc.kp)))
+  await diary.append(mediaCoreRecord({ key: MK, at: at(0) }))
+  await diary.append(postRecord({ text: 'apagada', media: [photo(1, 2)], at: at(1) }))
+  await diary.append(postRecord({ text: 'vizinha', media: [photo(3, 1)], at: at(2) }))
+
+  const swarm = createSwarm(localSwarmOptions(bootstrap))
+  t.teardown(() => swarm.destroy(), { force: true })
+  const peers = []
+  swarm.on('connection', (socket) => {
+    socket.on('error', () => {})
+    store.replicate(socket)
+    peers.push(attachAdmission(socket, { role: 'member', have: [{ key: DK, length: diary.length }], onmessage: () => {} }))
+  })
+  await joinAndFlush(swarm, [topicFor(assoc.hex)])
+  const peer = await until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador' })
+  peer.send({ type: 'announce', key: DK, cert: createCert({ member: DK }, assoc.kp) })
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === MK), { name: 'mídia admitida', timeoutMs: 30000 })
+  const url = (start, blocks) => '/media/' + DK + '/' + MK + '/' + start + '/' + blocks
+  await until(async () => (await mediaRequest(server.port, url(1, 3))).status === 200, { name: 'mídia servida', timeoutMs: 30000 })
+
+  await diary.append(deleteRecord({ seq: 2, at: at(3), media: [{ core: MK, start: 1, blocks: 2 }] }))
+  const core = await until(() => seeder._mediaServed.get(MK)?.core, { name: 'núcleo de mídia' })
+  await until(async () => !(await core.has(1)) && !(await core.has(2)), { name: 'mídia apagada', timeoutMs: 30000 })
+  for (const [start, blocks] of [[1, 2], [1, 1], [2, 1], [2, 2], [1, 3]]) {
+    t.is((await mediaRequest(server.port, url(start, blocks))).status, 404, 'GET ' + start + '/' + blocks + ' is 404')
+    t.is((await mediaRequest(server.port, url(start, blocks), { method: 'HEAD' })).status, 404, 'HEAD ' + start + '/' + blocks + ' is 404')
+  }
+  const live = await mediaRequest(server.port, url(3, 1))
+  t.is(live.status, 200, 'the adjacent live photo is served')
+  t.alike(live.body, b4a.alloc(MEDIA_BLOCK_BYTES, 3))
+  t.is((await mediaRequest(server.port, url(3, 1), { method: 'HEAD' })).status, 200)
 })

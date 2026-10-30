@@ -6,23 +6,23 @@ const item = (key, seq, at = 1) => Object.freeze({ key, seq, at, name: 'Ana', us
 
 test('the fixed texts are the approved Portuguese', async (t) => {
   const {
-    FOLLOW_BACK_LABEL,
     EMPTY_TITLE,
     EMPTY_TEXT,
     NOTICES_WEB_ONLY_MESSAGE,
     NOTICES_OFFLINE_MESSAGE,
     NOTICES_UNSUPPORTED_MESSAGE,
+    ACTIVITY_QUIET_TEXT,
     NOTICES_INCOMPLETE_TEXT,
     SEEN_STORAGE_KEY,
     NOTICES_POLL_MS,
     SEEN_MAX
   } = await load()
-  t.is(FOLLOW_BACK_LABEL, 'Seguir de volta')
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
-  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, aparece aqui.')
+  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.')
   t.is(NOTICES_WEB_ONLY_MESSAGE, 'Nesta versão, os Avisos só funcionam na versão web no site da associação.')
-  t.is(NOTICES_OFFLINE_MESSAGE, 'Os Avisos precisam de conexão com o semeador.')
-  t.is(NOTICES_UNSUPPORTED_MESSAGE, 'O semeador desta associação ainda não envia avisos.')
+  t.is(NOTICES_OFFLINE_MESSAGE, 'Confira sua internet.')
+  t.is(NOTICES_UNSUPPORTED_MESSAGE, 'Os Avisos ainda não estão disponíveis nesta associação.')
+  t.is(ACTIVITY_QUIET_TEXT, 'O semeador desta associação ainda só envia avisos de quem seguiu você.')
   t.is(NOTICES_INCOMPLETE_TEXT, 'Alguns avisos ainda podem chegar.')
   t.is(SEEN_STORAGE_KEY, 'varanda-notices-seen')
   t.is(NOTICES_POLL_MS, 300000)
@@ -55,6 +55,77 @@ test('notice lines name the person or say someone, and never carry a key', async
     t.is(line.includes(key), false, line)
     t.is(line.includes(key.slice(0, 6)), false, line)
   }
+})
+
+test('notice lines follow the kind, and the default kind is a follow', async (t) => {
+  const { noticeLine } = await load()
+  const key = 'ab'.repeat(32)
+  const who = Object.freeze({ title: 'Bia', subtitle: '@bia', key, seq: 12 })
+  t.is(noticeLine(who, 'mention'), 'Bia mencionou você')
+  t.is(noticeLine(who, 'reply'), 'Bia respondeu à sua publicação')
+  t.is(noticeLine(who, 'quote'), 'Bia citou sua publicação')
+  t.is(noticeLine(who, 'follow'), 'Bia começou a seguir você')
+  t.is(noticeLine({ title: 'Bia' }), 'Bia começou a seguir você')
+  t.is(noticeLine({ title: 'sem nome' }, 'reply'), 'Alguém respondeu à sua publicação')
+  t.is(noticeLine({ title: 'sem nome' }, 'quote'), 'Alguém citou sua publicação')
+  t.is(noticeLine({ title: 'sem nome' }, 'mention'), 'Alguém mencionou você')
+  t.is(noticeLine({ title: '' }, 'quote'), 'Alguém citou sua publicação')
+  t.is(noticeLine({ title: 'Bia' }, 'like'), 'Bia começou a seguir você', 'an unknown kind reads as a follow')
+  for (const kind of ['follow', 'reply', 'quote', 'mention']) {
+    const line = noticeLine(who, kind)
+    t.is(line.includes(key), false, line)
+    t.is(line.includes('@bia'), false, line)
+  }
+})
+
+test('noticeKind is the row kind, and a row from an older node reads as a follow', async (t) => {
+  const { noticeKind } = await load()
+  t.is(noticeKind({ kind: 'follow' }), 'follow')
+  t.is(noticeKind({ kind: 'reply' }), 'reply')
+  t.is(noticeKind({ kind: 'quote' }), 'quote')
+  t.is(noticeKind({ kind: 'mention' }), 'mention')
+  t.is(noticeKind({}), 'follow')
+  t.is(noticeKind({ kind: undefined }), 'follow')
+  t.is(noticeKind({ kind: 'like' }), 'follow')
+  t.is(noticeKind({ kind: 'FOLLOW' }), 'follow')
+  t.is(noticeKind(null), 'follow')
+})
+
+test('noticeRef is the post ref for a reply, quote or mention, and null for a follow', async (t) => {
+  const { noticeRef } = await load()
+  const key = 'ab'.repeat(32)
+  t.is(noticeRef({ key, seq: 5, kind: 'reply' }), key + ':5')
+  t.is(noticeRef({ key, seq: 12, kind: 'quote' }), key + ':12')
+  t.is(noticeRef({ key, seq: 3, kind: 'mention' }), key + ':3')
+  t.is(noticeRef({ key, seq: 5, kind: 'follow' }), null)
+  t.is(noticeRef({ key, seq: 5 }), null, 'a row with no kind is a follow')
+  t.is(noticeRef({ key, seq: 5, kind: 'like' }), null)
+})
+
+test('compareNotices orders by time descending, then key ascending, then seq descending', async (t) => {
+  const { compareNotices } = await load()
+  const at = '2026-06-01T00:00:00.000Z'
+  const earlier = '2026-05-01T00:00:00.000Z'
+  const row = (when, key, seq) => ({ at: when, key, seq })
+  const items = [
+    row(at, 'b', 1),
+    row(at, 'a', 2),
+    row(at, 'a', 9),
+    row(earlier, 'a', 50)
+  ]
+  t.alike(items.slice().sort(compareNotices), [
+    row(at, 'a', 9),
+    row(at, 'a', 2),
+    row(at, 'b', 1),
+    row(earlier, 'a', 50)
+  ])
+  t.is(compareNotices(row(at, 'a', 2), row(at, 'a', 2)), 0)
+  // String order puts -000001 before -000002; time order is the reverse.
+  // Same key and seq, so only the instant can decide.
+  const older = row('-000002-01-01T00:00:00.000Z', 'a', 1)
+  const newer = row('-000001-01-01T00:00:00.000Z', 'a', 1)
+  t.ok(compareNotices(newer, older) < 0)
+  t.ok(compareNotices(older, newer) > 0)
 })
 
 test('notice ids use the signed sequence, so the same moment can be two follows', async (t) => {
@@ -363,7 +434,7 @@ test('readNotices reads past a gap: an empty page with a cursor is followed by t
     { notices: [behind], next: null, incomplete: false, supported: true }
   ])
   const r = await readNotices(request, { limit: 30 })
-  t.alike(r, { notices: [behind], next: null, incomplete: true, supported: true })
+  t.alike(r, { notices: [behind], next: null, incomplete: true, supported: true, activity: true })
   t.alike(calls, [
     { method: 'notices.list', params: { limit: 30 } },
     { method: 'notices.list', params: { limit: 30, after: cursor(1) } }
@@ -381,7 +452,7 @@ test('readNotices continues from `after`, merges short pages and stops once limi
     { notices: [c], next: cursor(3), incomplete: false, supported: true }
   ])
   const r = await readNotices(request, { limit: 3, after: cursor(0) })
-  t.alike(r, { notices: [a, b, c], next: cursor(3), incomplete: false, supported: true })
+  t.alike(r, { notices: [a, b, c], next: cursor(3), incomplete: false, supported: true, activity: true })
   t.alike(calls.map((call) => call.params.after), [cursor(0), cursor(1), cursor(2)])
 })
 
@@ -390,7 +461,7 @@ test('readNotices stops on a full page, keeping its cursor', async (t) => {
   const full = [item('a', 1), item('b', 1)]
   const { request, calls } = fakeRequest([{ notices: full, next: cursor(1), incomplete: false, supported: true }])
   const r = await readNotices(request, { limit: 2 })
-  t.alike(r, { notices: full, next: cursor(1), incomplete: false, supported: true })
+  t.alike(r, { notices: full, next: cursor(1), incomplete: false, supported: true, activity: true })
   t.is(calls.length, 1)
 })
 
@@ -404,7 +475,7 @@ test('readNotices is bounded: at most NOTICES_AUTO_PAGES continuations, then the
   const { request, calls } = fakeRequest(gaps())
   const r = await readNotices(request, { limit: 30 })
   t.is(calls.length, 1 + NOTICES_AUTO_PAGES)
-  t.alike(r, { notices: [], next: cursor(1 + NOTICES_AUTO_PAGES), incomplete: false, supported: true })
+  t.alike(r, { notices: [], next: cursor(1 + NOTICES_AUTO_PAGES), incomplete: false, supported: true, activity: true })
   const two = fakeRequest(gaps())
   const r2 = await readNotices(two.request, { limit: 30, maxContinuations: 1 })
   t.is(two.calls.length, 2)
@@ -419,7 +490,7 @@ test('readNotices never spins on a cursor that does not move', async (t) => {
   ])
   const r = await readNotices(request, { limit: 30 })
   t.is(calls.length, 2)
-  t.alike(r, { notices: [], next: null, incomplete: false, supported: true }, 'a stuck cursor ends the list')
+  t.alike(r, { notices: [], next: null, incomplete: false, supported: true, activity: true }, 'a stuck cursor ends the list')
   const same = fakeRequest([{ notices: [item('a', 1)], next: cursor(0), incomplete: false, supported: true }])
   const r2 = await readNotices(same.request, { limit: 30, after: cursor(0) })
   t.is(same.calls.length, 1)
@@ -437,7 +508,63 @@ test('readNotices returns an unsupported page as is and stops when no longer liv
   ])
   const r = await readNotices(gone.request, { limit: 30, live: () => false })
   t.is(gone.calls.length, 1, 'no page is read for a read that is no longer the latest')
-  t.alike(r, { notices: [], next: cursor(1), incomplete: false, supported: true })
+  t.alike(r, { notices: [], next: cursor(1), incomplete: false, supported: true, activity: true })
+})
+
+test('readNotices is not stuck when only the cursor seq advances', async (t) => {
+  const { readNotices } = await load()
+  const at = '2026-01-01T00:00:00.000Z'
+  const key = 'kk'
+  const start = { at, key, seq: 1 }
+  const moved = { at, key, seq: 4 }
+  const a = item('a', 1)
+  const b = item('b', 1)
+  const { request, calls } = fakeRequest([
+    { notices: [a], next: moved, incomplete: false, supported: true },
+    { notices: [b], next: null, incomplete: false, supported: true }
+  ])
+  const r = await readNotices(request, { limit: 30, after: start })
+  t.is(calls.length, 2, 'a cursor that moves only in seq is a new page')
+  t.alike(calls[1].params.after, moved)
+  t.alike(r, { notices: [a, b], next: null, incomplete: false, supported: true, activity: true })
+  const stuck = fakeRequest([
+    { notices: [], next: { at, key, seq: 1 }, incomplete: false, supported: true }
+  ])
+  const r2 = await readNotices(stuck.request, { limit: 30, after: { at, key, seq: 1 } })
+  t.is(stuck.calls.length, 1)
+  t.is(r2.next, null)
+  t.is(r2.activity, true)
+})
+
+test('readNotices carries activity false when any page says so, else true', async (t) => {
+  const { readNotices } = await load()
+  const one = fakeRequest([
+    { notices: [item('a', 1)], next: null, incomplete: false, supported: true, activity: false }
+  ])
+  const r = await readNotices(one.request, { limit: 30 })
+  t.is(r.activity, false)
+  t.alike(r.notices, [item('a', 1)])
+
+  const across = fakeRequest([
+    { notices: [item('a', 1)], next: cursor(1), incomplete: false, supported: true, activity: true },
+    { notices: [item('b', 1)], next: null, incomplete: false, supported: true, activity: false }
+  ])
+  const r2 = await readNotices(across.request, { limit: 30 })
+  t.is(r2.activity, false)
+  t.is(r2.notices.length, 2, 'a quiet page is still merged')
+
+  const full = fakeRequest([
+    { notices: [item('a', 1), item('b', 1)], next: cursor(1), incomplete: false, supported: true, activity: false }
+  ])
+  const rFull = await readNotices(full.request, { limit: 2 })
+  t.is(full.calls.length, 1)
+  t.is(rFull.activity, false)
+
+  const omitted = fakeRequest([
+    { notices: [], next: cursor(1), incomplete: false, supported: true },
+    { notices: [item('c', 1)], next: null, incomplete: false, supported: true }
+  ])
+  t.is((await readNotices(omitted.request, { limit: 30 })).activity, true, 'a page that omits activity counts as true')
 })
 
 test('withoutAuthor drops every notice of one key and keeps the rest in order', async (t) => {
@@ -447,6 +574,21 @@ test('withoutAuthor drops every notice of one key and keeps the rest in order', 
   t.alike(withoutAuthor(items, 'z'), [...items])
   t.alike(withoutAuthor([], 'a'), [])
   t.is(items.length, 4, 'the input is not changed')
+})
+
+test('withoutAuthor keeps a reply, quote or mention of the key it drops follows for', async (t) => {
+  const { withoutAuthor } = await load()
+  const K = 'ab'.repeat(32)
+  const follow = Object.freeze({ key: K, seq: 1, kind: 'follow' })
+  const reply = Object.freeze({ key: K, seq: 5, kind: 'reply' })
+  const quote = Object.freeze({ key: K, seq: 6, kind: 'quote' })
+  const mention = Object.freeze({ key: K, seq: 7, kind: 'mention' })
+  const otherFollow = Object.freeze({ key: 'b', seq: 1, kind: 'follow' })
+  const otherReply = Object.freeze({ key: 'b', seq: 2, kind: 'reply' })
+  const bare = Object.freeze({ key: K, seq: 8 })
+  const items = Object.freeze([follow, reply, otherFollow, quote, mention, otherReply, bare])
+  t.alike(withoutAuthor(items, K), [reply, otherFollow, quote, mention, otherReply])
+  t.is(items.length, 7, 'the input is not changed')
 })
 
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {

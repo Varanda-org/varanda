@@ -344,6 +344,46 @@ test('a torn blocklist.json is replaced by the copy kept by the last save: the l
   t.alike(JSON.parse(fs.readFileSync(file, 'utf8')), { v: 1, snapshot: snap }, 'blocklist.json is back')
 })
 
+test('the hold survives a restart while the torn file is kept aside, and ends with a verified list for good', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const file = path.join(dataDir, 'blocklist.json')
+  const mod = makeModerator(assoc)
+  const snap = snapshot(mod, 4, { blocked: ['c'.repeat(64)] })
+  writeBlocklist(dataDir, snap)
+  const whole = fs.readFileSync(file, 'utf8')
+  fs.writeFileSync(file, whole.slice(0, whole.length >> 1))
+  fs.rmSync(file + '.prev')
+  const key = 'd'.repeat(64)
+  const cert = createCert({ member: key }, assoc.kp)
+  const heldAnswer = async (seeder) => {
+    const sent = []
+    await seeder.admit(key, cert, { peerKey: null, socket: { destroy () {} }, send: (m) => sent.push(m) })
+    return sent
+  }
+
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.is(first.seeder.stats().blocklistHeld, true, 'held after the torn start')
+  await first.seeder.close()
+
+  // The torn file is out of the way now: a plain absent file, but kept aside.
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.is(second.events.filter((e) => e.reason === 'blocklist-unreadable').length, 0, 'no second warning')
+  t.is(second.seeder.stats().blocklistHeld, true, 'still held after the restart')
+  t.alike(await heldAnswer(second.seeder), [{ type: 'rejected', key, reason: 'blocklist-pending' }])
+
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot: snap } })
+  await until(() => second.seeder.stats().blocklistSeq === 4, { name: 'seq 4 de volta' })
+  t.is(second.seeder.stats().blocklistHeld, false, 'released by the verified list')
+  await second.seeder.close()
+
+  const third = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.is(third.seeder.stats().blocklistSeq, 4, 'the list is read back')
+  t.is(third.seeder.stats().blocklistHeld, false, 'a kept-aside file with a usable list holds nothing')
+})
+
 test('a missing blocklist.json is read from the copy: the list is enforced from the start', async (t) => {
   t.timeout(60000)
   const { bootstrap } = await testnet(t)

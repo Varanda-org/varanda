@@ -19,6 +19,7 @@ const {
 const { memberCertRecord, profileRecord, postRecord, MAX_LOG_BLOCKS } = require('../lib/records')
 const c = require('compact-encoding')
 const Hypercore = require('hypercore')
+const { randomBytes } = require('hypercore-crypto')
 const { createCert, createSeederCert, certForKey, generateAssociationKeyPair } = require('../lib/cert')
 const {
   createSwarm,
@@ -58,8 +59,8 @@ async function makeMember (t, kp, { certKp = kp, posts = 2, trustKp = kp } = {})
 // A raw node: a Corestore and a loopback swarm (optionally with a fixed Noise
 // key pair) that attaches an admission channel with the given role/cert/have
 // on every connection. onpeer(peer) runs after attach.
-async function rawNode (t, bootstrap, { keyPair, role = 'member', cert = null, have = () => [], onmessage = () => {}, onpeer = () => {} } = {}) {
-  const store = new Corestore(tmpDir(t, 'varanda-raw-'))
+async function rawNode (t, bootstrap, { keyPair, role = 'member', cert = null, have = () => [], onmessage = () => {}, onpeer = () => {}, primaryKey = null } = {}) {
+  const store = new Corestore(tmpDir(t, 'varanda-raw-'), primaryKey ? { primaryKey, unsafe: true } : undefined)
   await store.ready()
   const swarm = createSwarm({ ...localSwarmOptions(bootstrap), keyPair })
   t.teardown(() => swarm.destroy(), { force: true })
@@ -84,7 +85,9 @@ async function rawNode (t, bootstrap, { keyPair, role = 'member', cert = null, h
 // Fake seeder built in-test (lib/seeder.js is not used here): verifies the
 // announce against kp, fetches block 0, downloads live, replies admitted and
 // advertises growth with have.
-async function fakeSeeder (t, bootstrap, kp) {
+// opts.have(heldCores) lists what to advertise to a peer that connects later.
+async function fakeSeeder (t, bootstrap, kp, { have } = {}) {
+  const held = []
   const noise = generateNoiseKeyPair()
   const cert = createSeederCert({ seeder: hex(noise.publicKey) }, kp)
   const association = hex(kp.publicKey)
@@ -93,6 +96,7 @@ async function fakeSeeder (t, bootstrap, kp) {
     keyPair: noise,
     role: 'seeder',
     cert,
+    have: have ? () => have(held) : undefined,
     onmessage: (msg, peer) => {
       if (msg.type !== 'announce') return
       announces.push(msg)
@@ -107,6 +111,7 @@ async function fakeSeeder (t, bootstrap, kp) {
     }
     const core = node.store.get({ key: b4a.from(msg.key, 'hex') })
     await core.ready()
+    held.push(core)
     const range = core.download({ start: 0, end: -1 })
     t.teardown(() => range.destroy(), { force: true })
     await core.get(0, { timeout: 10000 })
@@ -178,10 +183,11 @@ test('the deadline and an abort interrupt a stalled network startup', async (t) 
   const stalled = () => new Promise(() => {}) // a join that never settles
   let swarmSeen = null
 
-  // --once: the deadline resolves the run with the timeout result.
+  // --once: the deadline resolves the run with the timeout result. The
+  // deadline leaves room for the startup sweeps, so it hits during the join.
   const a = await makeMember(t, kp, { posts: 0 })
   const started = Date.now()
-  const r = await runSync({ ...localSwarmOptions(bootstrap), dataDir: a.dir, once: true, timeoutMs: 20, joinHook: (swarm) => { swarmSeen = swarm; return stalled() } })
+  const r = await runSync({ ...localSwarmOptions(bootstrap), dataDir: a.dir, once: true, timeoutMs: 500, joinHook: (swarm) => { swarmSeen = swarm; return stalled() } })
   const ms = Date.now() - started
   t.ok(ms < 5000, 'resolved while the join was still stalled (' + ms + ' ms)')
   t.is(r.ok, false)
@@ -274,6 +280,58 @@ test('fake seeder: admission, untrusted genesis, raw untrusted announce', async 
   await joinAndFlush(raw.swarm, [topicFor(hex(kp.publicKey))])
   await until(() => replies.length > 0, { timeoutMs: 20000, name: 'rejected reply' })
   t.alike(replies[0], { type: 'rejected', key: fakeKey, reason: 'untrusted-association' })
+})
+
+test('a follower downloads a followed diary in block order', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const seeder = await fakeSeeder(t, bootstrap, kp, {
+    have: (cores) => cores.map((c) => ({ key: hex(c.key), length: c.contiguousLength }))
+  })
+  const a = await makeMember(t, kp, { posts: 300 })
+  const ra = await runSync({ ...localSwarmOptions(bootstrap), dataDir: a.dir, once: true, timeoutMs: 60000 })
+  t.ok(ra.ok, JSON.stringify(ra.errors))
+  const seederCore = seeder.store.get({ key: b4a.from(a.key, 'hex') })
+  await seederCore.ready()
+  t.ok(seederCore.contiguousLength >= a.length, 'seeder holds the full diary')
+
+  const uploads = []
+  seederCore.on('upload', (index) => uploads.push(index))
+  const b = await makeMember(t, kp, { posts: 0 })
+  writeFollows(b.dir, [a.key])
+
+  // Without linear the first requested block is a random offset. The values
+  // stay varied (HyperDHT draws stream ids from Math.random and retries on a
+  // collision) but within 0.4..0.6, so that offset lands far from block 0.
+  const random = Math.random
+  let seed = 1
+  Math.random = () => {
+    seed = (seed * 16807) % 2147483647
+    return 0.4 + 0.2 * (seed / 2147483647)
+  }
+  t.teardown(() => { Math.random = random }, { force: true })
+  let rb
+  try {
+    rb = await runSync({ ...localSwarmOptions(bootstrap), dataDir: b.dir, once: true, timeoutMs: 60000 })
+  } finally {
+    Math.random = random
+  }
+  t.ok(rb.ok, JSON.stringify(rb.errors))
+
+  t.ok(uploads.length > 0, 'the follower fetched from the seeder')
+  const distinct = [...new Set(uploads)]
+  // Requests inside the in-flight window may be served out of order.
+  t.ok(Math.max(...distinct.slice(0, 32)) < 64, 'the first blocks served are from the start')
+
+  const store = await openStore(b.dir)
+  try {
+    const replica = await openReplica(store, a.key)
+    t.is(replica.contiguousLength, a.length, 'every block is stored')
+    t.is((await readAll(replica)).length, a.length)
+  } finally {
+    await store.close()
+  }
 })
 
 test('config errors', async (t) => {
@@ -501,6 +559,66 @@ test('fork on a followed log: skipped, purged and withdrawn', async (t) => {
 
   await diary.truncate(1, { fork: 1 })
   await diary.append(postRecord({ text: 'reescrito' }))
+  await until(() => ev.events.some((e) => e.event === 'skipped' && e.key === key && e.reason === 'fork'), { timeoutMs: 30000, name: 'skipped fork' })
+  await until(() => got.some((m) => m.key === key && m.reason === 'fork'), { timeoutMs: 30000, name: 'author sees withdrawal' })
+
+  controller.abort()
+  const rb = await pb
+  t.is(rb.ok, true)
+  t.alike(rb.skipped, [{ key, reason: 'fork' }])
+  t.absent(key in rb.downloaded)
+
+  const store = await openStore(b.dir)
+  try {
+    const replica = await openReplica(store, key)
+    t.is(replica.contiguousLength, 0, 'purged')
+  } finally {
+    await store.close()
+  }
+})
+
+test('equivocation on a followed log: two writable copies of the key, skipped, purged and withdrawn', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const got = []
+  // Same primary key and name: the same core key, writable in both stores.
+  const primaryKey = randomBytes(32)
+  const author = await rawNode(t, bootstrap, {
+    primaryKey,
+    have: () => [{ key: hex(diary.key), length: diary.length }],
+    onmessage: (msg) => { if (msg.type === 'rejected') got.push(msg) }
+  })
+  const diary = author.store.get({ name: 'diary', valueEncoding: 'json' })
+  await diary.ready()
+  const key = hex(diary.key)
+  await diary.append(memberCertRecord(createCert({ member: key }, kp)))
+  await diary.append(postRecord({ text: 'um' }))
+  await diary.append(postRecord({ text: 'dois' }))
+  await joinAndFlush(author.swarm, [topicFor(hex(kp.publicKey)), diary.discoveryKey])
+
+  const b = await makeMember(t, kp, { posts: 0 })
+  writeFollows(b.dir, [key])
+  const ev = collector()
+  const controller = new AbortController()
+  const pb = runSync({ ...localSwarmOptions(bootstrap), dataDir: b.dir, signal: controller.signal, onEvent: ev.onEvent })
+  t.teardown(() => controller.abort(), { force: true })
+  await until(() => ev.events.some((e) => e.event === 'downloaded' && e.key === key && e.length === 3), { timeoutMs: 30000, name: 'downloaded 3' })
+
+  // The second copy was never truncated: it just holds another, longer history.
+  const twinNode = await rawNode(t, bootstrap, {
+    primaryKey,
+    have: () => [{ key: hex(twin.key), length: twin.length }]
+  })
+  const twin = twinNode.store.get({ name: 'diary', valueEncoding: 'json' })
+  await twin.ready()
+  t.is(hex(twin.key), key, 'the second copy holds the same key')
+  await twin.append(memberCertRecord(createCert({ member: key }, kp)))
+  await twin.append(postRecord({ text: 'um, de outro jeito' }))
+  await twin.append(postRecord({ text: 'dois, de outro jeito' }))
+  await twin.append(postRecord({ text: 'tres, de outro jeito' }))
+  await joinAndFlush(twinNode.swarm, [topicFor(hex(kp.publicKey)), twin.discoveryKey])
+
   await until(() => ev.events.some((e) => e.event === 'skipped' && e.key === key && e.reason === 'fork'), { timeoutMs: 30000, name: 'skipped fork' })
   await until(() => got.some((m) => m.key === key && m.reason === 'fork'), { timeoutMs: 30000, name: 'author sees withdrawal' })
 

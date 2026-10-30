@@ -10,7 +10,7 @@ const os = require('node:os')
 const path = require('node:path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { MAX_LIST, RpcError } = require('@varanda/rpc')
+const { MAX_LIST, RpcError, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure, scanWire } = require('./helpers/net')
 const { createSession, toRpcError, checkConfig, redactLogLine } = require('../lib/session')
@@ -18,7 +18,7 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
-const { postRecord, profileRecord, validateRecord } = require('../lib/records')
+const { postRecord, profileRecord, profileRecords, validateRecord, memberCertRecord } = require('../lib/records')
 const store = require('../lib/store')
 
 // A bootstrap that is never dialled: these tests start no sync.
@@ -172,13 +172,81 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.alike(feed.items.map((i) => i.text), ['olá varanda', 'eu mesma'])
   t.is(feed.items[0].name, 'Ana')
   t.alike(feed.items[1].replyTo, { author: pk, seq: 2 })
-  t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated], [[], 0, [], 0])
+  t.alike([feed.skipped, feed.skippedTruncated, feed.future, feed.futureTruncated, feed.incomplete, feed.incompleteTruncated], [[], 0, [], 0, [], 0])
 
   // profile.read folds duplicates; the own diary has no username record.
   t.alike(await m.call('profile.read', { authors: [pk, pk] }), {
-    profiles: [{ author: pk, name: 'Ana', bio: 'oi', username: null }],
+    profiles: [{ author: pk, name: 'Ana', bio: 'oi', avatar: null, username: null }],
     missing: []
   })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('post.delete clears the block; node.info and log.read keep working', async (t) => {
+  const m = await member(t, { cert: true })
+  const post = await m.call('post.create', { text: 'apagar' })
+  await m.call('post.create', { text: 'fica' })
+  const d = await m.call('post.delete', { to: post.ref })
+  t.alike(d, { seq: 3, ref: m.publicKey + ':3', changed: true, deleted: [post.seq] })
+  t.alike(await m.call('post.delete', { to: post.ref }), { ...d, changed: false })
+  t.alike((await m.call('node.info')).memberCert, true)
+  const log = await m.call('log.read')
+  t.alike(log.entries.map((e) => e.seq), [0, 2, 3])
+  t.alike(log.invalid, [{ seq: post.seq, reason: 'deleted' }])
+  await m.session.close()
+  const s = await store.openStore(m.dataDir)
+  try {
+    const diary = await store.openDiary(s)
+    t.absent(await diary.has(post.seq), 'the deleted block is cleared')
+    t.ok(await diary.has(0))
+    t.is(diary.fork, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('feed.read caps the incomplete list at FEED_INCOMPLETE_MAX', async (t) => {
+  const m = await member(t, { cert: true })
+  const total = FEED_INCOMPLETE_MAX + 1
+  const keys = []
+  // Each follow has its certificate and one post replicated in-process, plus
+  // one more block that stays unfetched: a diary with a hole at the end.
+  for (let i = 0; i < total; i++) {
+    const src = await store.openStore(tmpDir(t))
+    const dst = await store.openStore(m.dataDir)
+    try {
+      const core = src.get({ name: 'diary', valueEncoding: 'json' })
+      await core.ready()
+      const key = b4a.toString(core.key, 'hex')
+      await core.append(memberCertRecord(issueCertificate(m.assoc.dir, { member: key })))
+      await core.append(postRecord({ text: 'parcial ' + i, at: '2020-01-01T00:00:00.000Z' }))
+      await core.append(postRecord({ text: 'faltando ' + i, at: '2020-01-02T00:00:00.000Z' }))
+      const s1 = src.replicate(true)
+      const s2 = dst.replicate(false)
+      s1.pipe(s2).pipe(s1)
+      const replica = dst.get({ key: core.key, valueEncoding: 'json' })
+      await replica.ready()
+      await replica.get(0)
+      await replica.get(1)
+      await replica.update()
+      t.is(replica.length, 3)
+      t.is(replica.contiguousLength, 2)
+      s1.destroy()
+      s2.destroy()
+      keys.push(key)
+    } finally {
+      await dst.close()
+      await src.close()
+    }
+  }
+  // Also follow a key with no local data: it stays no-cert and is not listed.
+  const absent = randomKey()
+  fs.writeFileSync(path.join(m.dataDir, 'follows.json'), JSON.stringify({ v: 1, follows: [absent, ...keys] }))
+  const feed = await m.call('feed.read')
+  t.alike(feed.skipped, [{ key: absent, reason: 'no-cert' }])
+  t.is(feed.incomplete.length, FEED_INCOMPLETE_MAX)
+  t.is(feed.incompleteTruncated, 1)
+  t.alike(feed.incomplete, keys.slice(0, FEED_INCOMPLETE_MAX), 'follow-list order')
   t.alike(m.session.internal, [], 'no internal error')
 })
 
@@ -186,7 +254,7 @@ test('profile.read: an author with no local data is missing and gets no core', a
   const m = await member(t, { cert: true })
   const unknown = randomKey()
   t.alike(await m.call('profile.read', { authors: [unknown, m.publicKey, unknown] }), {
-    profiles: [{ author: m.publicKey, name: null, bio: null, username: null }],
+    profiles: [{ author: m.publicKey, name: null, bio: null, avatar: null, username: null }],
     missing: [unknown]
   }, 'no profile record: name and bio null; duplicates fold')
   const s = await store.openStore(m.dataDir)
@@ -292,6 +360,42 @@ test('terms.sign is refused by the node session (USAGE, not INTERNAL)', async (t
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('invite.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { action: 'issue', nonce: 'n'.repeat(43) }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('invite.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('invite.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('push.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { nonce: 'n'.repeat(43), action: 'on', endpoint: 'https://push.example/send/abc', p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('push.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('push.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('age.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { action: 'session', nonce: 'n'.repeat(43) }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('age.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('age.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('peek.read is refused by the node session (USAGE), nothing opened or written', async (t) => {
   const NO = { code: 'USAGE', message: 'Espiadinha disponível só no navegador' }
   const fresh = await member(t)
@@ -316,6 +420,8 @@ test('notices.list is refused by the node session (USAGE), nothing opened or wri
   const before = await m.call('log.read')
   t.alike(await failure(m.call('notices.list', {})), NO, 'after an identity')
   t.alike(await failure(m.call('notices.list', { limit: 5 })), NO, 'with a limit')
+  const at = '2026-10-24T12:00:00.000Z'
+  t.alike(await failure(m.call('notices.list', { limit: 5, after: { at, key: 'ab'.repeat(32), seq: 1 } })), NO, 'with a 3-key cursor')
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
@@ -407,6 +513,38 @@ test('log.read marks invalid blocks with a reason, never their content', async (
   t.alike(newest, { key: m.publicKey, entries: [], invalid: [{ seq: 3, reason: log.invalid[1].reason }, { seq: 4, reason: 'malformed' }], entriesTruncated: 3 })
 })
 
+test('profile.set: a photo is refused, and a profile with one is not overwritten', async (t) => {
+  const m = await member(t, { cert: true })
+  const pk = m.publicKey
+  const avatar = { core: randomKey(), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 30000, sha256: 'e'.repeat(64), width: 512, height: 512 }
+  const length = async () => (await m.call('log.read')).entries.length
+  t.alike(await failure(m.call('profile.set', { name: 'Ana', avatar })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+  t.is(await length(), 1, 'nothing appended')
+
+  const s = await store.openStore(m.dataDir)
+  try {
+    const diary = await store.openDiary(s)
+    for (const r of profileRecords({ name: 'Ana', bio: 'oi', avatar })) await store.appendRecord(diary, r)
+  } finally {
+    await s.close()
+  }
+  t.alike(await m.call('profile.read', { authors: [pk] }), {
+    profiles: [{ author: pk, name: 'Ana', bio: 'oi', avatar, username: null }],
+    missing: []
+  })
+  const refused = { code: 'USAGE', message: 'perfil com foto: mude o nome e a bio na versão web ou tire a foto' }
+  t.alike(await failure(m.call('profile.set', { name: 'Bia' })), refused)
+  t.alike(await failure(m.call('profile.set', { name: 'Bia', bio: 'tchau' })), refused)
+  t.is(await length(), 3, 'nothing appended')
+
+  t.alike(await m.call('profile.set', { name: 'Bia', avatar: null }), { seq: 3, ref: pk + ':3' })
+  const log = await m.call('log.read')
+  t.is(log.entries.length, 4)
+  t.alike(Object.keys(log.entries[3].record).sort(), ['at', 'bio', 'name', 'type'], 'a 4-key profile')
+  t.alike((await m.call('profile.read', { authors: [pk] })).profiles[0].avatar, null)
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
 test('feed.read caps future and reports the cut', async (t) => {
   t.timeout(60000)
   const m = await member(t, { cert: true })
@@ -450,7 +588,10 @@ test('toRpcError: the error table, row by row', (t) => {
     'limite de diários seguidos atingido',
     'limite do diário atingido',
     'diretório não é de um membro',
-    'associação diferente da configurada'
+    'associação diferente da configurada',
+    'o registro não é uma publicação',
+    'o registro não é um perfil',
+    'não é possível apagar este registro'
   ]
   for (const message of usage) t.alike(map(plain(message)), { code: 'USAGE', message }, message)
   t.alike(map(plain('registro inválido: genesis-required', 'INVALID_RECORD')), { code: 'USAGE', message: 'registro inválido: genesis-required' })

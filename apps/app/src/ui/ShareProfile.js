@@ -6,7 +6,18 @@ import { Mono, Row, Soft } from './index'
 import { Pill } from './Pill'
 import { colors, fonts } from './theme'
 
-export function ShareProfile ({ url }) {
+const PROFILE_LABELS = Object.freeze({
+  field: 'link do perfil',
+  copy: 'copiar link',
+  copyLabel: 'copiar link do perfil',
+  share: 'compartilhar',
+  shareLabel: 'compartilhar perfil'
+})
+
+// labels: other wording for another kind of link (missing keys keep the
+// profile's). showUrl: draw any link, not only a /@ profile URL.
+export function ShareProfile ({ url, labels, showUrl = false }) {
+  const text = labels ? { ...PROFILE_LABELS, ...labels } : PROFILE_LABELS
   const [note, setNote] = useState('')
   const [manual, setManual] = useState(false)
   // One action at a time: a second tap while the clipboard or the share
@@ -30,7 +41,7 @@ export function ShareProfile ({ url }) {
   if (typeof url !== 'string') return null
 
   const nav = globalThis.navigator
-  const shown = visibleUrl(url)
+  const shown = showUrl ? url : visibleUrl(url)
   const copyOrSelect = async () => {
     if (await copyText(nav, url)) {
       setManual(false)
@@ -58,9 +69,9 @@ export function ShareProfile ({ url }) {
     <>
       {shown !== null ? <Mono>{displayText(url)}</Mono> : null}
       <Row>
-        <Pill label='copiar link' accessibilityLabel='copiar link do perfil' onPress={copy} />
+        <Pill label={text.copy} accessibilityLabel={text.copyLabel} onPress={copy} />
         {canShare(nav)
-          ? <Pill label='compartilhar' accessibilityLabel='compartilhar perfil' onPress={share} />
+          ? <Pill label={text.share} accessibilityLabel={text.shareLabel} onPress={share} />
           : null}
       </Row>
       {manual
@@ -75,7 +86,7 @@ export function ShareProfile ({ url }) {
             autoCapitalize='none'
             autoCorrect={false}
             spellCheck={false}
-            accessibilityLabel='link do perfil'
+            accessibilityLabel={text.field}
           />
           )
         : null}

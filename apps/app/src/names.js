@@ -1,21 +1,26 @@
-// Per-session profiles cache: author key -> { name, username, bio } (or null:
-// the node has no showable diary for that key), read with profile.read
-// (docs/rpc.md 5.21). Feed items seed name and username (a non-authoritative
-// seed: it never marks the bio as loaded, so a resolve() still asks the node).
+// Per-session profiles cache: author key -> { name, username, bio, avatar }
+// (or null: the node has no showable diary for that key), read with
+// profile.read (docs/rpc.md 5.21). Feed items seed name and username (a
+// non-authoritative seed: it never marks the bio as loaded, so a resolve()
+// still asks the node); a seed changes the avatar only when it carries an
+// 'avatar' key. avatar is undefined while unknown, null when there is none.
+// The entry rules live in ./namesCache.js.
 // Everything stored is raw peer data and the SCREENS render it through
 // displayText, as plain text.
 //
-// profile.read is a member read, so it preempts a running sync (docs/rpc.md
-// 6.1) and the node restarts a continuous run after it: lookups are batched
-// (100 ms debounce, at most PROFILE_LIMIT_MAX keys per request, one request in
-// flight, at least 1 s between automatic batches) so bursts from several
-// screens coalesce. The own key and the keys a screen asks for (resolve,
-// resolveMany: what is on screen) go first. BACKGROUND batches (freshness
-// re-fetches and failure retries) wait until the current continuous run has
-// lasted 5 s or entered its idle gap (while no failure backoff is pending),
-// so every restart gets time to reach the seeder (#66). Lookups
-// never run while a ONCE run is active (it would end for good), while a
-// sync.start is in flight or while the provider reconciles an uncertain start.
+// profile.read is a member read. The native node's read preempts a running
+// sync (docs/rpc.md 6.1) and that node restarts a continuous run after it.
+// The browser node serves the read from the live run's cores. Lookups stay
+// batched (100 ms debounce, at most PROFILE_LIMIT_MAX keys per request, one
+// request in flight, at least 1 s between automatic batches) so bursts from
+// several screens coalesce: fewer requests, and fewer native preemptions.
+// The own key and the keys a screen asks for (resolve, resolveMany: what is
+// on screen) go first. BACKGROUND batches (freshness re-fetches and failure
+// retries) wait until the current continuous run has lasted 5 s or entered
+// its idle gap (while no failure backoff is pending), so a native restart
+// gets time to reach the seeder (#66). Lookups never run while a ONCE run
+// is active (a native read would end it for good), while a sync.start is in
+// flight or while the provider reconciles an uncertain start.
 // A failure (connection lost, timeout, no identity) keeps the keys for a retry
 // when the node is ready again, when a once run ends, or on a resolve() 5 s
 // later; an older node without profile.read ('método desconhecido') answers
@@ -26,6 +31,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode } from './node'
 import { namesQuiet } from './autoSyncPolicy'
+import { applySeed, authoritative, viewOf } from './namesCache'
 
 const DEBOUNCE_MS = 100
 const MIN_GAP_MS = 1000
@@ -40,16 +46,6 @@ export function useNames () {
   return useContext(NamesContext)
 }
 
-const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
-
-// A seed or learned value: { name?, username?, bio? }, or a bare name (the
-// older learn(key, name) form).
-function fieldsOf (value) {
-  if (value === null || value === undefined) return {}
-  if (typeof value === 'string') return { name: value }
-  return typeof value === 'object' ? value : {}
-}
-
 export function NamesProvider ({ children }) {
   const node = useNode()
   const { phase, sync, request, epoch, signals } = node
@@ -59,7 +55,7 @@ export function NamesProvider ({ children }) {
     ? node.passkey.status.publicKey.toLowerCase()
     : null
 
-  // lowercase key -> null | { name, username, bio, loaded }
+  // lowercase key -> null | { name, username, bio, avatar, loaded }
   const [cache, setCache] = useState(() => new Map())
   const cacheRef = useRef(cache)
   const [unsupported, setUnsupported] = useState(false)
@@ -98,24 +94,15 @@ export function NamesProvider ({ children }) {
     setCache(next)
   }, [])
 
-  // Merges seeds: a null never overwrites a known string, and a seed never
-  // marks the entry as loaded (nor touches a known bio).
+  // Merges seeds (namesCache.applySeed).
   const apply = useCallback((entries) => {
     const next = new Map(cacheRef.current)
     let changed = false
     for (const [rawKey, value] of entries) {
       if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
       const key = rawKey.toLowerCase()
-      const f = fieldsOf(value)
-      const known = next.get(key) || null
-      const merged = {
-        name: str(f.name) ?? (known ? known.name : null),
-        username: str(f.username) ?? (known ? known.username : null),
-        bio: str(f.bio) ?? (known ? known.bio : null),
-        loaded: known ? known.loaded : false
-      }
-      if (known && merged.name === known.name && merged.username === known.username && merged.bio === known.bio) continue
-      if (!known && merged.name === null && merged.username === null && merged.bio === null) continue
+      const merged = applySeed(next.get(key) || null, value)
+      if (merged === null) continue
       next.set(key, merged)
       changed = true
     }
@@ -171,7 +158,7 @@ export function NamesProvider ({ children }) {
         if (!p || typeof p.author !== 'string') continue
         const key = p.author.toLowerCase()
         // Authoritative: a null removes what a seed said (username included).
-        next.set(key, { name: str(p.name), username: str(p.username), bio: str(p.bio), loaded: true })
+        next.set(key, authoritative(p))
         retryRef.current.delete(key)
       }
       for (const rawKey of (res && res.missing) || []) {
@@ -287,7 +274,7 @@ export function NamesProvider ({ children }) {
     for (const key of list) {
       const known = next.get(key)
       if (known === undefined) continue
-      next.set(key, known === null ? { name: null, username: null, bio: null, loaded: false } : { ...known, loaded: false })
+      next.set(key, known === null ? { name: null, username: null, bio: null, avatar: undefined, loaded: false } : { ...known, loaded: false })
       changed = true
     }
     if (changed) commit(next)
@@ -359,7 +346,7 @@ export function NamesProvider ({ children }) {
     const entry = cache.get(key.toLowerCase())
     if (entry === undefined) return unsupported ? null : undefined
     if (entry === null) return null
-    return { name: entry.name, username: entry.username, bio: entry.bio }
+    return viewOf(entry)
   }, [cache, unsupported])
 
   // Compat: string | null (looked up, no name) | undefined (unknown).

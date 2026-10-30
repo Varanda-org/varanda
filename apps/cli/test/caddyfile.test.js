@@ -56,6 +56,15 @@ test('Caddyfile: the triage route is not exposed', (t) => {
   t.absent(lines.some((l) => /^\s*handle\s+\/moderation/.test(l)), 'no handle for any /moderation route')
 })
 
+// The push relay route on the account service is loopback-only (the seeder
+// calls it directly on 127.0.0.1), and the VAPID key file never leaves the
+// account volume: Caddy exposes neither.
+test('Caddyfile: the push relay route is not exposed', (t) => {
+  t.absent(lines.some((l) => /^\s*handle\s+\S*push-event/.test(l)), 'no handle for push-event')
+  t.is(count('push-event'), 0, 'push-event never mentioned outside comments')
+  t.is(count('push-vapid'), 0, 'push-vapid never mentioned outside comments')
+})
+
 test('Caddyfile: cache headers', (t) => {
   // No long-lived cache anywhere: the deploy replaces www in place while
   // Caddy serves, so a torn file must never be pinned by the browser.

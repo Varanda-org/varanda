@@ -25,6 +25,11 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Profile avatar, same values as records.js.
+const AVATAR_SIDE = 512
+const MAX_AVATAR_BLOCKS = 8
+const MAX_AVATAR_BYTES = 262144
+const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
 
 const LOG_LIMIT_DEFAULT = 20
 // Page maxima: the largest pages whose worst case (every post with
@@ -33,6 +38,11 @@ const LOG_LIMIT_DEFAULT = 20
 const LOG_LIMIT_MAX = 36
 const FEED_LIMIT_DEFAULT = 30
 const FEED_LIMIT_MAX = 31
+// The 31-item worst case of feed.read leaves about 1.3 KB under MAX_MESSAGE
+// (docs/rpc.md section 2), so this list cannot use MAX_LIST (100 hex64 keys
+// are about 6.7 KB and the dispatcher would answer USAGE 'resposta grande
+// demais', lib/server.js:58).
+const FEED_INCOMPLETE_MAX = 16
 // A PeekItem is a FeedItem (with up to MAX_MEDIA_PER_POST maximal media
 // descriptors, hence FEED_LIMIT_MAX) plus `round` (<= 100000);
 // the envelope adds a cursor and three counts, so the same maximum fits
@@ -150,10 +160,15 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  AVATAR_SIDE,
+  MAX_AVATAR_BLOCKS,
+  MAX_AVATAR_BYTES,
+  AVATAR_MIMES,
   LOG_LIMIT_DEFAULT,
   LOG_LIMIT_MAX,
   FEED_LIMIT_DEFAULT,
   FEED_LIMIT_MAX,
+  FEED_INCOMPLETE_MAX,
   PEEK_LIMIT_DEFAULT,
   PEEK_LIMIT_MAX,
   NOTICES_LIMIT_DEFAULT,

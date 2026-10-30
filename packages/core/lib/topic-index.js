@@ -222,13 +222,17 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
   const authorTermCap = option(perAuthorTermsMax, DEFAULT_PER_AUTHOR_TERMS_MAX)
   // author -> Map<seq, entry>
   const posts = new Map()
-  // author -> { postings, created }: the slots its entries hold and the
-  // terms its accepted posts introduced (header comment, Fairness). Gone
-  // with removeDiary.
+  // Removed seqs stay until removeDiary: a slower cursor must not restore them.
+  const deleted = new Map()
+  // author -> { postings, created }: posting slots it holds and terms its
+  // posts introduced. created stays until those terms' lists disappear, so
+  // it can outlive the author's posts. removeDiary drops the whole entry.
   const usage = new Map()
-  // canonical key -> { key, list }: `key` is the flat copy (flatKey) used
-  // as this Map's key, in entry.tokens and in `dirty`; `list` holds the
-  // entries in stored order (see compareStored), unless dirty
+  // canonical key -> { key, list, author }: `key` is the flat copy (flatKey)
+  // used as this Map's key, in entry.tokens and in `dirty`; `list` holds the
+  // entries in stored order (see compareStored), unless dirty. `author` is
+  // the diary that created the term, or null once that diary has left while
+  // the term remains (its charge was dropped with the diary).
   const terms = new Map()
   // canonical keys whose list may be out of order since the last query
   // touching it
@@ -246,10 +250,22 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
     try { if (typeof onFreed === 'function') onFreed() } catch {}
   }
 
+  // The creation charge lives on the diary that introduced the term. It is
+  // refunded only when the posting list disappears, including when a later
+  // post (this diary's or another's) was the last reference.
+  function refundCreator (creator) {
+    if (creator === null) return
+    const row = usage.get(creator)
+    if (row === undefined || row.created === 0) return
+    row.created--
+    if (row.created === 0 && row.postings === 0 && !posts.has(creator)) usage.delete(creator)
+  }
+
   function add (author, seq, record) {
     try {
       if (typeof author !== 'string' || !HEX64.test(author)) return false
       if (!Number.isSafeInteger(seq) || seq < 1) return false
+      if (deleted.get(author)?.has(seq)) return true
       if (seq > MAX_SEQ) {
         // A capacity-like refusal (the seeder pauses this cursor): reported
         // through stats().saturated like any other.
@@ -286,7 +302,7 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
         let rec = terms.get(tok)
         if (rec === undefined) {
           const key = flatKey(tok)
-          rec = { key, list: [] }
+          rec = { key, list: [], author }
           terms.set(key, rec)
         }
         recs.push(rec)
@@ -313,26 +329,92 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
     }
   }
 
+  function removePost (author, seq) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author) || !Number.isSafeInteger(seq) || seq < 1) return false
+      if (!deleted.has(author)) deleted.set(author, new Set())
+      deleted.get(author).add(seq)
+      const own = posts.get(author)
+      const entry = own?.get(seq)
+      if (entry === undefined) return false
+      const use = usage.get(author)
+      for (const tok of entry.tokens) {
+        const rec = terms.get(tok)
+        // From the end: lists keep the newest entries last, and authors
+        // usually delete recent posts, so a shared list is not walked whole.
+        rec.list.splice(rec.list.lastIndexOf(entry), 1)
+        if (rec.list.length === 0) {
+          // A term another post still references stays charged to its
+          // creator. Refunding it here would let add/remove grow the term
+          // table past the per-author share.
+          const creator = rec.author
+          terms.delete(tok)
+          dirty.delete(tok)
+          refundCreator(creator)
+        }
+      }
+      use.postings -= entry.tokens.length
+      if (own.size === authorCap) fullAuthors--
+      own.delete(seq)
+      if (own.size === 0) {
+        posts.delete(author)
+        // No posts left. Posting slots are gone, but a term this diary
+        // created may still be in use: that charge has to outlive the posts.
+        if (use.created === 0) usage.delete(author)
+        else use.postings = 0
+      }
+      postCount--
+      postings -= entry.tokens.length
+      refused = false
+      freed()
+      return true
+    } catch {
+      return false
+    }
+  }
+
   function removeDiary (author) {
     try {
+      const forgotten = deleted.delete(author)
       const own = posts.get(author)
-      if (own === undefined) return false
+      if (own === undefined) {
+        // Every post was already removed, but a creation charge may remain.
+        // Leaving the diary drops that charge, same as the path below.
+        if (!usage.has(author)) return forgotten
+        for (const rec of terms.values()) if (rec.author === author) rec.author = null
+        usage.delete(author)
+        refused = false
+        freed()
+        return true
+      }
       const used = new Set()
       let slots = 0
       for (const entry of own.values()) {
         slots += entry.tokens.length
         for (const tok of entry.tokens) used.add(tok)
       }
+      const created = usage.get(author)?.created ?? 0
+      let cleared = 0
       for (const tok of used) {
         const rec = terms.get(tok)
         if (rec === undefined) continue
+        if (rec.author === author) cleared++
         const kept = rec.list.filter((e) => e.author !== author)
         if (kept.length === 0) {
+          if (rec.author !== null && rec.author !== author) refundCreator(rec.author)
           terms.delete(tok)
           dirty.delete(tok)
         } else {
           rec.list = kept
+          // The diary's charge is dropped with its usage below. A surviving
+          // term must not be refunded again to a later usage entry.
+          if (rec.author === author) rec.author = null
         }
+      }
+      // Terms this diary created whose referencing posts removePost already
+      // dropped are not in `used`; only then is the full scan needed.
+      if (cleared < created) {
+        for (const rec of terms.values()) if (rec.author === author) rec.author = null
       }
       if (own.size >= authorCap) fullAuthors--
       posts.delete(author)
@@ -413,6 +495,7 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
 
   function clear () {
     posts.clear()
+    deleted.clear()
     usage.clear()
     terms.clear()
     dirty.clear()
@@ -422,7 +505,7 @@ function createTopicIndex ({ maxPosts, perAuthorMax, maxTerms, maxPostings, perA
     refused = false
   }
 
-  return { add, removeDiary, search, stats, clear }
+  return { add, removePost, removeDiary, search, stats, clear }
 }
 
 module.exports = {

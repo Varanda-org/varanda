@@ -19,12 +19,16 @@ import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, fromRead, mergeCounts } from '../engagement'
 import { replyNameOf, whoOf } from '../who'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { avatarOf, pickAvatar } from '../media/avatar'
+import { canDelete } from '../deletion'
+import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
+import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { revokeDeletedMedia } from '../media/cache'
 import { colors, type } from '../ui/theme'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
@@ -95,7 +99,10 @@ export async function peekAll (request, plan, peeked, alive = () => true) {
     let busyTries = 0
     for (;;) {
       try {
-        mergePeek(peeked, await request('diary.peek', params))
+        const peek = await request('diary.peek', params)
+        // A delete meanwhile invalidates this load: merging would bring the entry back.
+        if (!alive()) return peeked
+        mergePeek(peeked, peek)
         break
       } catch (err) {
         if (isSeederDown(err) && !seederRetried) {
@@ -199,6 +206,58 @@ export function useFollowSet (request) {
   return { follows, load, mark }
 }
 
+// Deleting an own post: ask({ ref, seq }) opens the confirmation (DeletePrompt),
+// confirm sends post.delete once. After an uncertain failure `recheck` (a read
+// of the diary) runs before the action is offered again; nothing is resent.
+export function useDelete ({ request, onToast, onDeleted, recheck }) {
+  const action = useAction()
+  const [target, setTarget] = useState(null)
+  const [rechecking, setRechecking] = useState(false)
+  const notify = (text) => { if (typeof onToast === 'function') onToast(text) }
+  const ask = (t) => {
+    action.clearError()
+    setTarget(t)
+  }
+  const cancel = () => {
+    if (action.pending) return
+    action.clearError()
+    setTarget(null)
+  }
+  const confirm = async () => {
+    if (target === null) return
+    const r = await action.run(() => request('post.delete', { to: target.ref }))
+    if (r.ok) {
+      setTarget(null)
+      notify('publicação apagada')
+      await onDeleted(target)
+    } else if (r.uncertain) {
+      setTarget(null)
+      setRechecking(true)
+      notify(UNCERTAIN)
+      try {
+        await recheck()
+      } catch {} finally {
+        setRechecking(false)
+      }
+    }
+  }
+  return { target, pending: action.pending, error: action.error, offered: !rechecking, ask, cancel, confirm }
+}
+
+export function DeletePrompt ({ del }) {
+  return (
+    <Sheet open={del.target !== null} onClose={() => del.cancel()} title='Apagar publicação'>
+      <View style={styles.prompt}>
+        <Soft>Apagar esta publicação? Ela some do seu diário e dos feeds de quem te segue.</Soft>
+        <ErrorText>{del.error}</ErrorText>
+        <Row>
+          <Btn label='Apagar' danger onPress={() => del.confirm()} pending={del.pending} />
+        </Row>
+      </View>
+    </Sheet>
+  )
+}
+
 // The own like/repost state and the index counts on screen, with optimistic
 // toggles: the change shows at once, like.set / repost.set is sent, and a
 // failure reverts it and shows the error. A read never overrides a field
@@ -297,20 +356,21 @@ export function useEngagement ({ request, onToast }) {
   return { state, counts, pending, reset, readOwn, readCounts, setCount, toggle }
 }
 
-// The identity shown for an author: the peeked (verified) fields first,
-// then the profiles cache. Raw strings: PostRow escapes them.
+// Names prefer the verified peek; avatars prefer the authoritative cache.
+// Raw strings: PostRow escapes them.
 export function identityOf (names, author, item) {
   const p = names.profileOf(author)
   return {
     name: (item && item.name) || (p ? p.name : null) || null,
-    username: (item && item.username) || (p ? p.username : null) || null
+    username: (item && item.username) || (p ? p.username : null) || null,
+    avatar: pickAvatar(p, item)
   }
 }
 
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onReply, onQuote, onReport } = handlers
+  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -320,9 +380,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     const q = peeked ? postAt(peeked, qref) : null
     if (q) {
       const qwho = identityOf(names, q.author, q)
-      quote = { author: q.author, name: qwho.name, username: qwho.username, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }) }
+      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }), onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
     } else {
-      quote = { author: item.quote.author, name: null, username: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
+      quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
     }
   }
   const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
@@ -331,6 +391,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     author: item.author,
     name: who.name,
     username: who.username,
+    avatar: who.avatar,
     at: item.at,
     text: item.text,
     replyToName: parentRef ? replyNameOf(names.profileOf(item.replyTo.author)) : null,
@@ -345,13 +406,19 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     pending: eng && eng.pending.has(ref) ? eng.pending.get(ref) : null,
     onOpen: hasSeq ? () => onOpenThread({ ref, seed: item }) : undefined,
     onOpenAuthor: () => onOpenMember(item.author, who),
+    onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: item.author, username: who.username }) : undefined,
     onOpenParent: parentRef ? () => onOpenThread({ ref: parentRef }) : undefined,
     onOpenReposter: undefined,
     onReply: hasSeq && typeof onReply === 'function' ? () => onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
     onQuote: hasSeq && typeof onQuote === 'function' ? () => onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
+    onOpenLikes: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+    onOpenReposts: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
     onLike: eng && hasSeq ? () => eng.toggle('like', ref) : undefined,
     onRepost: eng && hasSeq ? () => eng.toggle('repost', ref) : undefined,
     onReport: reportable ? () => onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
+    onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
+      ? () => onDelete({ ref, seq: item.seq })
+      : undefined,
     ...extra
   }
 }
@@ -371,7 +438,8 @@ export function seedItem (seed, ref) {
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
     name: typeof seed.name === 'string' ? seed.name : null,
-    username: typeof seed.username === 'string' ? seed.username : null
+    username: typeof seed.username === 'string' ? seed.username : null,
+    avatar: avatarOf(seed.avatar)
   }
 }
 
@@ -401,7 +469,7 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onToast }) {
+export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -458,7 +526,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       if (!alive()) return
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
-      resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).map((i) => i.author))])
+      resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       setCount(focal, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
       commit({
         phase: 'ready',
@@ -508,6 +576,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
       if (!alive()) return
       learnPeeked(learnMany, peeked)
+      resolveMany([...new Set(page.replies.flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       const seen = new Set(viewRef.current.replies.map((r) => refOf(r.author, r.seq)))
       const fresh = page.replies.filter((r) => !seen.has(refOf(r.author, r.seq)))
       commit({
@@ -521,7 +590,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     } catch (err) {
       if (alive()) commit({ loadingMore: false, moreError: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
-  }, [focal, request, commit, readOwn, readCounts, learnMany, ownKey])
+  }, [focal, request, commit, readOwn, readCounts, learnMany, resolveMany, ownKey])
 
   useEffect(() => {
     if (full) load(false)
@@ -529,7 +598,37 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     return () => { genRef.current += 1 }
   }, [full, load, loadFollows])
 
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const del = useDelete({
+    request,
+    onToast,
+    recheck: () => load(true),
+    onDeleted: async (t) => {
+      // Drops the result of a load started before the delete: it would bring the row back.
+      genRef.current += 1
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+      // Cached photos of the deleted post go too, wherever they were shown.
+      revokeDeletedMedia(request, [t.seq])
+      if (t.ref === focal) {
+        onBack()
+        return
+      }
+      // A quote of the deleted post must not keep showing its text.
+      const [author, seqText] = t.ref.split(':')
+      const known = peekedRef.current.get(author)
+      if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
+      const cur = viewRef.current
+      const wasReply = cur.replies.some((r) => refOf(r.author, r.seq) === t.ref)
+      commit({
+        replies: cur.replies.filter((r) => refOf(r.author, r.seq) !== t.ref),
+        parent: cur.parent && refOf(cur.parent.author, cur.parent.seq) === t.ref ? null : cur.parent,
+        meta: wasReply && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
+        // The loads invalidated above never clear their own flags.
+        loadingMore: false,
+        refreshing: false
+      })
+    }
+  })
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
@@ -539,6 +638,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
     return (
       <View style={styles.flex}>
         {top}
+        <DeletePrompt del={del} />
         <OfflineNote />
         <View style={styles.flex}>
           {seed ? <PostRow {...props(seed)} /> : null}
@@ -594,6 +694,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   return (
     <View style={styles.flex}>
       {top}
+      <DeletePrompt del={del} />
       <OfflineNote />
       <View style={styles.flex}>
         <RefreshableList
@@ -631,6 +732,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
+  prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   parent: { opacity: 0.72 },
   focal: { borderLeftWidth: 3, borderLeftColor: colors.accent },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },

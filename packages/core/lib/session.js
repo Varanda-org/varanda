@@ -22,7 +22,7 @@
 
 const fs = require('#fs')
 const path = require('#path')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, storeExists } = require('./store')
@@ -62,6 +62,9 @@ const USAGE_MESSAGES = new Set([
   'associação diferente da configurada',
   'registro de nome inválido',
   'registro de nome antigo',
+  'o registro não é uma publicação',
+  'o registro não é um perfil',
+  'não é possível apagar este registro',
   MEDIA_WEB_ONLY,
   PEEK_WEB_ONLY
 ])
@@ -457,7 +460,9 @@ function createSession ({
     return withStore((c) => member.withIdentity(c, async ({ diary, ownHex, association: assoc }) => {
       ownKey = ownHex
       let ok = false
-      if (diary.contiguousLength > 0) {
+      // has(0), not contiguousLength: the own diary may hold cleared deleted
+      // blocks, and block 0 is never cleared.
+      if (diary.length > 0 && await diary.has(0)) {
         const block0 = decodeBlock(await diary.get(0, { wait: false, raw: true }))
         const cert = genesisCert([{ seq: 0, record: block0 }])
         ok = cert !== null && certForKey(cert, ownHex, assoc).ok
@@ -533,6 +538,21 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the signup-invite request (docs/rpc.md 5.30).
+    'invite.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // And for the push-subscription statement (docs/rpc.md 5.31).
+    'push.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // And for the age-verification request (docs/rpc.md 5.32).
+    'age.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // Espiadinha reads diaries this node does not store through the browser
     // node's seeder WebSocket link (packages/web-member/lib/peek.js).
     // Nothing is opened.
@@ -548,9 +568,11 @@ function createSession ({
       throw new UsageError('avisos disponíveis só no navegador')
     }),
 
-    'profile.set': serial(async ({ name, bio }) => {
+    // A photo lives in a media core only the browser node writes.
+    'profile.set': serial(async ({ name, bio, avatar }) => {
+      if (avatar !== undefined && avatar !== null) throw new UsageError(MEDIA_WEB_ONLY)
       const own = await requireOwnKey()
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio }))
+      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
       return { seq, ref: own + ':' + seq }
     }),
 
@@ -602,6 +624,20 @@ function createSession ({
       return withStore((c) => member.repostSet(c, { to: ref, on }))
     }),
 
+    // The core node writes the tombstone only: it neither clears media bytes
+    // nor writes media.
+    'post.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.postDelete(c, { to: ref }))
+    }),
+
+    'profile.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.profileDelete(c, { to: ref }))
+    }),
+
     // Which refs the own diary likes / reposts (docs/rpc.md), local data only.
     'engagement.read': serial(async ({ refs }) => {
       const r = await withStore((c) => member.engagementRead(c, { refs }))
@@ -639,9 +675,9 @@ function createSession ({
       const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
-      for (const { seq, record } of window) {
+      for (const { seq, record, deleted } of window) {
         if (record === null) {
-          invalid.push({ seq, reason: 'malformed' })
+          invalid.push({ seq, reason: deleted === true ? 'deleted' : 'malformed' })
           continue
         }
         const copy = validRecordCopy(record, seq)
@@ -658,12 +694,15 @@ function createSession ({
       const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
+      const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
       return {
         items: r.items,
         skipped: skipped.list,
         skippedTruncated: skipped.truncated,
         future: future.list,
-        futureTruncated: future.truncated
+        futureTruncated: future.truncated,
+        incomplete: incomplete.list,
+        incompleteTruncated: incomplete.truncated
       }
     }),
 

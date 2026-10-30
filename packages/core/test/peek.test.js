@@ -6,6 +6,7 @@ const crypto = require('hypercore-crypto')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } = require('../lib/cert')
+const { profileRecords } = require('../lib/records')
 const { MAX_FUTURE_MS } = require('../lib/feed')
 const {
   PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS,
@@ -58,7 +59,7 @@ function refs (items) {
 test('peek constants and the public rule', (t) => {
   t.alike([PEEK_HEAD_BLOCKS, PEEK_TAIL_BLOCKS, PEEK_MAX_BLOCKS_PER_DIARY, PEEK_MAX_ROUNDS], [3, 8, 64, 3])
   t.alike([PEEK_PARALLEL, PEEK_FETCH_TIMEOUT_MS, PEEK_PAGE_TIMEOUT_MS, PEEK_CONNECT_TIMEOUT_MS, PEEK_SNAPSHOT_TTL_MS, PEEK_PAGE_MAX_BYTES], [16, 10000, 25000, 15000, 300000, 16777216])
-  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
+  t.is(PEEK_RULE, 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.')
 })
 
 test('peekCandidates filters inventory, lowercases keys and sorts without mutation', (t) => {
@@ -116,6 +117,7 @@ test('diaryPeek validates block zero and revoked issuers, with best effort names
   const valid = diaryPeek(f)
   t.is(valid.reason, null)
   t.is(valid.name, 'Ana')
+  t.is(valid.avatar, null)
   t.is(valid.username, 'ana')
   t.ok(valid.scanned)
   t.absent(valid.capped)
@@ -208,8 +210,9 @@ test('a cap is not a full scan: an old post can remain undiscovered', (t) => {
   t.alike(peekWindow(all.length, fetched), [])
 })
 
-test('retainRecords keeps copied certificate, profiles, usernames, posts and reposts only', (t) => {
+test('retainRecords keeps copied certificate, profiles, usernames, posts, reposts and tombstones only', (t) => {
   const f = fixture()
+  const tomb = { type: 'delete', seq: 9, at: AT }
   const entries = [...f.entries,
     { seq: 3, record: { ...post('foto'), media: MEDIA } },
     { seq: 4, record: post('reply', AT, { author: B, seq: 1 }) },
@@ -219,17 +222,22 @@ test('retainRecords keeps copied certificate, profiles, usernames, posts and rep
     { seq: 8, record: null },
     { seq: 9, record: post('plain') },
     { seq: 10, record: { type: 'like', to: { author: B, seq: 1 }, on: true, at: AT } },
-    { seq: 11, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
+    { seq: 11, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } },
+    { seq: 12, record: tomb },
+    { seq: 13, record: { type: 'delete', seq: 0, at: AT } }
   ]
   const before = JSON.stringify(entries)
   const kept = retainRecords(entries)
-  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 4, 9, 11])
+  t.alike(kept.map(({ seq }) => seq), [0, 1, 2, 3, 4, 9, 11, 12])
   t.not(kept, entries)
   t.not(kept[0].record.cert, entries[0].record.cert)
   t.not(kept[3].record.media[0], MEDIA[0])
   t.alike(kept[3].record.media, MEDIA)
-  const input = { ...f, length: 12, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
+  t.not(kept[7].record, tomb)
+  t.alike(kept[7].record, tomb)
+  const input = { ...f, length: 14, entries, fetched: new Set(entries.map(({ seq }) => seq)) }
   t.alike(diaryPeek({ ...input, entries: kept }), diaryPeek(input))
+  t.alike(diaryPeek(input).posts.map((p) => p.seq), [11, 4, 3], 'the tombstone hides seq 9')
   t.is(JSON.stringify(entries), before, 'inputs unchanged')
 })
 
@@ -241,8 +249,9 @@ test('buildPeekPage: one slot per diary per round, numerical date then author or
   t.alike(page.needs, [])
   t.is(page.next, null)
   t.is(JSON.stringify(diaries), before)
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
   t.is(page.items[0].kind, 'post')
+  t.is(page.items[0].avatar, null)
   t.is(page.items[0].replyTo, null)
   t.is(page.items[0].quote, null)
   t.is(page.items[0].media, null)
@@ -320,6 +329,135 @@ test('needs completes a touched round before finalizing even a full page', (t) =
   t.alike(final.items.map((i) => i.round), [0, 1, 2])
   t.is(final.next, null)
   t.alike(buildPeekPage({ diaries: [], limit: 35 }), { items: [], next: null, needs: [] })
+})
+
+test('buildPeekPage: the hidden diary never becomes an item on any round, in any case', (t) => {
+  // B is the newest in every round, so its items sit at the head of each round.
+  const diaries = [diary(A, 3), diary(B, 3, 5000), diary(C, 3)]
+  const plain = buildPeekPage({ diaries, limit: 35 })
+  t.is(plain.items.filter((i) => i.author === B).length, 3)
+  for (const hidden of [B, B.toUpperCase()]) {
+    const all = buildPeekPage({ diaries, limit: 35, hidden })
+    t.alike(refs(all.items), refs(plain.items.filter((i) => i.author !== B)), 'rounds 0, 1 and 2 without B: ' + hidden.slice(0, 2))
+    t.alike(all.next, plain.next)
+    t.alike(all.needs, plain.needs)
+    // The hidden diary still takes its slots: a full page keeps the cursor
+    // of the unhidden page and shows fewer than `limit` items.
+    const first = buildPeekPage({ diaries, limit: 4, hidden })
+    const firstPlain = buildPeekPage({ diaries, limit: 4 })
+    t.alike(refs(first.items), refs(firstPlain.items.filter((i) => i.author !== B)))
+    t.is(first.items.length, 2)
+    t.alike(first.next, firstPlain.next)
+    const rest = buildPeekPage({ diaries, limit: 35, after: first.next, hidden })
+    t.alike(refs(rest.items), refs(plain.items.slice(4).filter((i) => i.author !== B)))
+    t.is(rest.next, null)
+  }
+  t.alike(buildPeekPage({ diaries: [diary(B, 3)], limit: 35, hidden: B }), { items: [], next: null, needs: [] })
+})
+
+test('buildPeekPage: the hidden diary lands in needs like a shown one', (t) => {
+  const a = diary(A, 3)
+  const pending = (key) => ({ ...diary(key, 0), exhausted: false })
+  const plain = buildPeekPage({ diaries: [a, pending(B), pending(C)], limit: 35 })
+  const hidden = buildPeekPage({ diaries: [a, pending(B), pending(C)], limit: 35, hidden: B })
+  t.alike(plain.needs, [B, C])
+  t.alike(hidden.needs, [B, C], 'requested exactly like an unhidden diary')
+  t.is(hidden.next, null)
+  // With one post fetched, round 1 is still pending for the hidden diary.
+  const one = { ...diary(B, 1, 5000), exhausted: false }
+  const later = buildPeekPage({ diaries: [a, one], limit: 35, hidden: B })
+  t.alike(later.needs, [B])
+  t.ok(later.items.every((i) => i.author !== B))
+  t.alike(buildPeekPage({ diaries: [a, one], limit: 35 }).needs, [B])
+})
+
+test('buildPeekPage refuses an invalid hidden key and keeps null as no-op', (t) => {
+  for (const hidden of ['zz'.repeat(32), 'aa', 42]) {
+    t.exception.all(() => buildPeekPage({ diaries: [], limit: 1, hidden }), { name: 'TypeError', message: 'hidden inválido' })
+  }
+  const diaries = [diary(A, 3), diary(B, 3, 5000)]
+  t.alike(buildPeekPage({ diaries, limit: 35, hidden: null }), buildPeekPage({ diaries, limit: 35 }))
+})
+
+function prng (seed) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let x = Math.imul(a ^ (a >>> 15), 1 | a)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function randomDiaries (rand) {
+  const count = 2 + Math.floor(rand() * 19)
+  const diaries = []
+  for (let d = 0; d < count; d++) {
+    const key = d.toString(16).padStart(2, '0').repeat(32)
+    const fetched = Math.floor(rand() * 4)
+    const posts = []
+    for (let i = 0; i < fetched; i++) {
+      const seq = 10 - i
+      // Few distinct dates, so ties broken by author are common.
+      const at = new Date(NOW - Math.floor(rand() * 6) * 1000).toISOString()
+      if (rand() < 0.3) {
+        posts.push({ kind: 'repost', seq, at, to: { author: A, seq: 1 } })
+      } else {
+        posts.push({ kind: 'post', seq, at, text: key.slice(0, 2) + ' ' + i, replyTo: null, quote: null, media: null })
+      }
+    }
+    diaries.push({ key, name: key.slice(0, 2), username: null, posts, exhausted: rand() < 0.5 })
+  }
+  return diaries
+}
+
+test('buildPeekPage: hiding a diary changes nothing but the returned items', (t) => {
+  const rand = prng(20261028)
+  const limits = [1, 2, 3, 4, 30, 31]
+  const mismatches = []
+  let checked = 0
+  let withCursor = 0
+  let withNeeds = 0
+  for (let n = 0; n < 200; n++) {
+    const diaries = randomDiaries(rand)
+    const limit = limits[Math.floor(rand() * limits.length)]
+    let after = null
+    if (rand() < 0.5) {
+      const settled = diaries.map((d) => ({ ...d, exhausted: true }))
+      after = buildPeekPage({ diaries: settled, limit: limits[Math.floor(rand() * 4)] }).next
+    }
+    if (after !== null) withCursor++
+    const args = { diaries, limit, after }
+    const plain = buildPeekPage(args)
+    if (plain.needs.length > 0) withNeeds++
+    for (const { key } of diaries) {
+      for (const hidden of [key, key.toUpperCase()]) {
+        const page = buildPeekPage({ ...args, hidden })
+        checked++
+        const expected = { items: plain.items.filter((i) => i.author !== key), next: plain.next, needs: plain.needs }
+        if (JSON.stringify(page) !== JSON.stringify(expected)) mismatches.push({ n, limit, hidden: key.slice(0, 2), page, expected })
+      }
+    }
+  }
+  t.is(mismatches.length, 0, 'every hidden page equals the unhidden one minus its items')
+  if (mismatches.length > 0) t.comment(JSON.stringify(mismatches[0]))
+  t.ok(checked > 1000, 'checked ' + checked + ' hidden pages')
+  t.ok(withCursor > 20 && withNeeds > 20, 'cases with a cursor and with needs')
+})
+
+test('buildPeekPage: a hidden item filling round 0 does not open round 1', (t) => {
+  // Round 0 has exactly `limit` items, one of them hidden. B is not exhausted
+  // and has one fetched post: round 1 would add it to needs.
+  const x = diary(C, 3, 5000)
+  const b = { ...diary(B, 1), exhausted: false }
+  const plain = buildPeekPage({ diaries: [x, b], limit: 2 })
+  t.alike(plain.needs, [])
+  t.ok(plain.next !== null)
+  const hidden = buildPeekPage({ diaries: [x, b], limit: 2, hidden: C })
+  t.alike(hidden.needs, [], 'no needs from a round the unhidden page never visits')
+  t.alike(hidden.next, plain.next)
+  t.alike(refs(hidden.items), refs(plain.items.filter((i) => i.author !== C)))
+  t.is(hidden.items.length, 1)
 })
 
 test('needs accumulates every round the page touches', (t) => {
@@ -433,7 +571,7 @@ test('quotes and reposts in effect are publications; likes and undone reposts ar
   t.not(result.posts[1].quote, quote, 'a copy')
   const page = buildPeekPage({ diaries: [{ key: A, name: result.name, username: result.username, posts: result.posts, exhausted: true }], limit: 35 })
   t.alike(page.items.map((i) => [i.kind, i.seq, i.round]), [['repost', 5, 0], ['post', 3, 1]])
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
   t.alike(page.items[0].to, quote)
   t.is(page.items[0].text, null)
   t.alike(page.items[1].quote, quote)
@@ -520,5 +658,177 @@ test('peek loads without the node-only network or storage stack', (t) => {
   t.ok(cached.length > 0)
   for (const frag of ['/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/', '/udx/', '/rocksdb/', '/corestore/']) {
     t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+  }
+})
+
+test('avatar: diaryPeek uses the newest retained profile and page items copy its descriptor', (t) => {
+  const f = fixture()
+  const avatar = { ...MEDIA[0], mime: 'image/jpeg', width: 512, height: 512 }
+  const newer = { ...avatar, start: 2 }
+  const records = [
+    ...profileRecords({ name: 'Older', avatar, at: AT }),
+    ...profileRecords({ name: 'Newest', avatar: newer, at: new Date(NOW - 1000).toISOString() }),
+    post(),
+    { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT }
+  ]
+  const entries = [...f.entries, ...records.map((record, i) => ({ seq: i + 3, record }))]
+  const input = { ...f, length: entries.length, entries: entries.slice().reverse(), fetched: new Set(entries.map(({ seq }) => seq)) }
+  const result = diaryPeek(input)
+  t.is(result.name, 'Newest', 'seq wins over profile at')
+  t.alike(result.avatar, newer)
+  t.not(result.avatar, records[3].avatar)
+  const page = buildPeekPage({ diaries: [{ key: A, ...result, exhausted: true }], limit: 35 })
+  t.alike(page.items.map(({ kind }) => kind), ['repost', 'post'])
+  for (const item of page.items) {
+    t.alike(item.avatar, newer)
+    t.not(item.avatar, result.avatar)
+  }
+  t.execution(() => { page.items[0].avatar.start = 99 })
+  t.is(page.items[1].avatar?.start, 2, 'items do not share descriptors')
+  t.is(result.avatar?.start, 2)
+  t.is(records[3].avatar.start, 2)
+  entries.push({ seq: entries.length, record: profile('Removed') })
+  const removed = diaryPeek({ ...input, entries, length: entries.length, fetched: new Set(entries.map(({ seq }) => seq)) })
+  t.is(removed.avatar, null, 'a newer plain profile removes the avatar')
+  t.ok(buildPeekPage({ diaries: [{ key: A, ...removed, exhausted: true }], limit: 35 }).items.every(({ avatar }) => avatar === null))
+  t.is(diaryPeek({ ...f, entries: [f.entries[0]] }).avatar, null, 'no profile')
+  t.is(diaryPeek(null).avatar, null, 'invalid input')
+})
+
+function tombstone (block, target) {
+  return { seq: block, record: { type: 'delete', seq: target, at: AT } }
+}
+
+test('a deleted tail post vanishes and a deletion at either end still folds the rest', (t) => {
+  const f = fixture()
+  const target = { author: B, seq: 1 }
+  const repost = { type: 'repost', to: target, on: true, at: AT }
+  const run = (entries) => {
+    const fetched = new Set(entries.map((e) => e.seq))
+    const length = Math.max(...entries.map((e) => e.seq)) + 1
+    return diaryPeek({ ...f, length, entries, fetched })
+  }
+  // Lowest seq first: the deleted post is the first record the tail reads.
+  const lowFirst = [
+    { seq: 3, record: post('gone') },
+    ...f.entries,
+    tombstone(4, 3),
+    { seq: 5, record: post('keep') },
+    { seq: 6, record: repost },
+    { seq: 7, record: post('also') }
+  ]
+  const low = run(lowFirst)
+  t.alike(low.posts.map((p) => [p.kind, p.seq]), [['post', 7], ['repost', 6], ['post', 5]])
+  t.alike(low.posts[1].to, target)
+  t.absent(low.posts.some((p) => p.seq === 3))
+  // Highest seq first: the deleted post is the first entry of the tail.
+  const highFirst = [
+    { seq: 6, record: post('gone') },
+    tombstone(7, 6),
+    { seq: 5, record: repost },
+    { seq: 4, record: post('keep') },
+    { seq: 3, record: post('also') },
+    ...[...f.entries].reverse()
+  ]
+  const high = run(highFirst)
+  t.alike(high.posts.map((p) => [p.kind, p.seq]), [['repost', 5], ['post', 4], ['post', 3]])
+  t.alike(high.posts[0].to, target)
+  t.absent(high.posts.some((p) => p.seq === 6))
+})
+
+test('a deleted newest profile falls back to the previous name', (t) => {
+  const f = fixture()
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: profile('Nova') },
+    { seq: 4, record: post('oi') },
+    tombstone(5, 3)
+  ]
+  const fetched = new Set(entries.map((e) => e.seq))
+  const result = diaryPeek({ ...f, length: 6, entries, fetched })
+  t.is(result.name, 'Ana')
+  t.is(result.username, 'ana')
+  t.alike(result.posts.map((p) => p.text), ['oi'])
+  const none = [...entries, tombstone(6, 1)]
+  const cleared = diaryPeek({ ...f, length: 7, entries: none, fetched: new Set(none.map((e) => e.seq)) })
+  t.is(cleared.name, null, 'no surviving profile')
+  t.is(cleared.username, 'ana', 'a username is not a profile')
+  t.alike(cleared.posts.map((p) => p.seq), [4])
+})
+
+test('a tombstone is retained across pages', (t) => {
+  const f = fixture()
+  const entries = [
+    ...f.entries,
+    { seq: 3, record: post('some') },
+    { seq: 4, record: post('fica') },
+    tombstone(5, 3),
+    { seq: 6, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
+  ]
+  const fetched = new Set(entries.map((e) => e.seq))
+  const input = { ...f, length: 7, entries, fetched }
+  const result = diaryPeek(input)
+  t.alike(result.posts.map((p) => [p.kind, p.seq]), [['repost', 6], ['post', 4]])
+  const kept = retainRecords(entries)
+  t.ok(kept.some((e) => e.seq === 5 && e.record.type === 'delete'))
+  t.alike(diaryPeek({ ...input, entries: kept }), result)
+  // The next page only has what the previous page retained, plus a new post.
+  const more = { seq: 7, record: post('nova') }
+  const page2 = retainRecords([...kept, more])
+  const again = diaryPeek({ ...f, length: 8, entries: page2, fetched: new Set([...fetched, 7]) })
+  t.alike(again.posts.map((p) => [p.kind, p.seq]), [['post', 7], ['repost', 6], ['post', 4]])
+  t.absent(again.posts.some((p) => p.seq === 3 || p.text === 'some'))
+  t.alike(diaryPeek({ ...f, length: 8, entries: retainRecords(page2), fetched: new Set([...fetched, 7]) }), again)
+})
+
+test('a tombstone below the floor is never seen', (t) => {
+  const f = fixture()
+  // Length 20: head 0..2 and tail 12..19. Seq 5 sits in the unfetched gap.
+  // A tombstone can only name an earlier block, so this one names the head.
+  const gap = tombstone(5, 2)
+  const entries = [
+    f.entries[0],
+    { seq: 1, record: profile('Old') },
+    { seq: 2, record: profile('Head') },
+    gap,
+    { seq: 13, record: post('tail post') },
+    { seq: 19, record: post('newest') }
+  ]
+  const fetched = new Set([0, 1, 2, 12, 13, 14, 15, 16, 17, 18, 19])
+  const seen = entries.filter((e) => fetched.has(e.seq))
+  const result = diaryPeek({ ...f, length: 20, entries: seen, fetched })
+  t.is(result.name, 'Head', 'the gap tombstone was not fetched')
+  t.alike(result.posts.map((p) => p.seq), [19, 13])
+  const fetchedGap = diaryPeek({ ...f, length: 20, entries: [...seen, gap], fetched })
+  t.is(fetchedGap.name, 'Old', 'the same tombstone counts once it is in the entries')
+  t.alike(fetchedGap.posts.map((p) => p.seq), [19, 13])
+  const hidden = diaryPeek({ ...f, length: 20, entries: [...seen, tombstone(18, 13)], fetched })
+  t.alike(hidden.posts.map((p) => [p.kind, p.seq]), [['post', 19]], 'a tail tombstone hides the tail post')
+  t.is(hidden.name, 'Head')
+})
+
+test('avatar: profiles outside the head and tail preserve the older retained value and block 2 name', (t) => {
+  const f = fixture()
+  const avatar = { ...MEDIA[0], mime: 'image/jpeg', width: 512, height: 512 }
+  for (const older of [null, avatar]) {
+    const head = profileRecords({ name: 'Retained', avatar: older, at: AT })
+    const entries = [
+      f.entries[0],
+      { seq: 1, record: older === null ? post() : head[0] },
+      { seq: 2, record: head[head.length - 1] },
+      ...profileRecords({ name: 'Outside', avatar: { ...avatar, start: 2 }, at: AT }).map((record, i) => ({ seq: i + 3, record })),
+      ...Array.from({ length: 15 }, (_, i) => ({ seq: i + 5, record: post() }))
+    ]
+    const fetched = new Set(peekWindow(entries.length, new Set()))
+    t.absent(fetched.has(3) || fetched.has(4), 'the compat pair is outside the window')
+    const result = diaryPeek({ ...f, length: entries.length, entries: entries.filter(({ seq }) => fetched.has(seq)), fetched })
+    t.is(result.name, 'Retained')
+    t.alike(result.avatar, older)
+    const page = buildPeekPage({ diaries: [{ key: A, ...result, exhausted: true }], limit: 35 })
+    t.is(page.items.length, 3)
+    for (const item of page.items) {
+      t.is(item.name, 'Retained')
+      t.alike(item.avatar, older)
+    }
   }
 })

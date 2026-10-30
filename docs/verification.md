@@ -1226,7 +1226,7 @@ None of these was performed for this change.
 
 ### Summary
 
-- The fourth tab ("Espiadinha", provisional label; second in the tab bar, after A Rua) shows what the diaries the person does NOT follow are publishing, by one public rule (`PEEK_RULE`, `packages/core/lib/peek.js`): "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos." Definition: round r (0, 1, 2; `PEEK_MAX_ROUNDS` = 3) holds the (r+1)-th highest-`seq` top-level post of every candidate diary ("most recent" = last written in the diary, not the newest `at`); replies are excluded [superseded 2026-10-27: sections 18 and 19 include replies, quotes, reposts and the own diary; the rule text now ends the first clause with "o seu incluído"]; page order is (`round` asc, `at` desc, `author` asc); posts carry their `media`, shown through the existing `/media` route as in A Rua.
+- The fourth tab ("Espiadinha", provisional label; second in the tab bar, after A Rua) shows what the diaries the person does NOT follow are publishing, by one public rule (`PEEK_RULE`, `packages/core/lib/peek.js`): "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos." Definition: round r (0, 1, 2; `PEEK_MAX_ROUNDS` = 3) holds the (r+1)-th highest-`seq` top-level post of every candidate diary ("most recent" = last written in the diary, not the newest `at`); replies are excluded [superseded 2026-10-27: sections 18 and 19 include replies, quotes, reposts and the own diary; the rule text now ends the first clause with "o seu incluído"; superseded again 2026-10-28: section 34 takes the own diary back out of its owner's Espiadinha and the rule text loses "o seu incluído"]; page order is (`round` asc, `at` desc, `author` asc); posts carry their `media`, shown through the existing `/media` route as in A Rua.
 - Files: `packages/core/lib/peek.js` (the pure rule: candidates, window, per-diary result, page), `packages/web-member/lib/peek.js` (transport and memory, in the browser node), `packages/web-member/lib/session.js` (the `peek.read` handler) and `lib/storage.js` (64 KiB memory pages), `packages/rpc` (`peek.read`, `PEEK_LIMIT_DEFAULT` 30, `PEEK_LIMIT_MAX` 31; `docs/rpc.md` 5.22 and 13), `packages/core/lib/session.js` (the node session answers that it is web only), `apps/app/src/screens/Espiadinha.js` and `apps/app/src/peek.js` (screen and pure helpers), `apps/app/App.js`, `ui/TabBar.js`, `ui/Icon.js`, `ui/PostRow.js`.
 - Trust model: nothing is gained by the seeder compared with A Rua. It can withhold (an inventory entry, a block, a shorter length, an older signed state it kept); it cannot forge (Hypercore verifies every block against the author key), cannot choose which post is shown (the client reads the signed tail: the window comes from the length Hypercore verified with block 0, never from the length advertised in the hello), cannot bypass the block-0 gate (checked locally with the stored revoked-issuer set, block 0 alone, before any other block of that diary) and cannot unblock anyone (the stored signed blocklist is re-applied on every read). Later windows are accepted only if their core has the same verified length and the same `treeHash` as the first window.
 - Data flows and retention: browser memory only. The node keeps one snapshot for at most 5 minutes (`PEEK_SNAPSHOT_TTL_MS`, retained records capped at 32 MiB); the UI keeps the page until the list is refreshed. Nothing is written to storage, the account service learns nothing, and the only server-side trace is one `peer` log line per link at the seeder (ephemeral Noise key; the seeder log is size-rotated).
@@ -1259,7 +1259,7 @@ New test files: `packages/core/test/peek.test.js`, `packages/web-member/test/pee
 - Constants (`packages/core/lib/peek.js`, `packages/rpc/lib/limits.js`): `PEEK_HEAD_BLOCKS` 3, `PEEK_TAIL_BLOCKS` 8, `PEEK_MAX_BLOCKS_PER_DIARY` 64, `PEEK_MAX_ROUNDS` 3, `PEEK_PARALLEL` 16, `PEEK_FETCH_TIMEOUT_MS` 10000, `PEEK_PAGE_TIMEOUT_MS` 25000, `PEEK_CONNECT_TIMEOUT_MS` 15000, `PEEK_SNAPSHOT_TTL_MS` 300000, `PEEK_PAGE_MAX_BYTES` 16777216 (16 MiB), page 30 / 31.
 - Cost per page (`docs/rpc.md` 5.22 and 13): one WebSocket, Noise and hello (1 round trip each at the start), the inventory at about 85 bytes per entry (4096 entries about 340 KB), then per candidate one channel and at most 11 block requests in two phases (block 0, then the window), 16 diaries in parallel. Documented estimate: about 3-5 s for 300 diaries at 50 ms RTT (an estimate, not measured on the pilot). Memory in the browser: raw buffers released after every window, between pages only retained records (at most 32 MiB per snapshot) and 64 KiB memory pages per open core. At the seeder: one extra short-lived external socket and reads of blocks it already holds; no new state.
 - Theoretical maximum: 4096 diaries x 11 blocks x 16 KiB = 738,197,504 bytes (704 MiB), against the 16 MiB page budget; with a random order the budget (or the 25 s deadline) cuts the page and marks it incomplete rather than fetching it all.
-- Known limits [superseded 2026-10-27: replies appear since section 18; the own diary is included since section 19]: replies do not appear; names come only from the first blocks and the fetched tail ("sem nome" otherwise); `at` is author-supplied (up to 24 h ahead is accepted); rows already shown are removed only on the next load; no city or state; up to 3 posts per diary; native app and `varanda-serve` answer that the Espiadinha is web only.
+- Known limits [superseded 2026-10-27: replies appear since section 18; the own diary is included since section 19; superseded again 2026-10-28: section 34 takes the own diary back out of its owner's Espiadinha and the rule text loses "o seu incluído"]: replies do not appear; names come only from the first blocks and the fetched tail ("sem nome" otherwise); `at` is author-supplied (up to 24 h ahead is accepted); rows already shown are removed only on the next load; no city or state; up to 3 posts per diary; native app and `varanda-serve` answer that the Espiadinha is web only.
 
 ### Security audit
 
@@ -1408,7 +1408,7 @@ None of these was performed for this change.
 
 ### Summary
 
-- At the owner's request ("quando posto na rua não sobe na espiadinha"), the own diary is now an Espiadinha candidate like any unfollowed diary: a post made in A Rua shows up in the person's own Espiadinha. Followed diaries stay out (they are already in A Rua).
+- [superseded 2026-10-28: section 34 excludes the own diary from its owner's Espiadinha again] At the owner's request ("quando posto na rua não sobe na espiadinha"), the own diary is now an Espiadinha candidate like any unfollowed diary: a post made in A Rua shows up in the person's own Espiadinha. Followed diaries stay out (they are already in A Rua).
 - `packages/core/lib/peek.js`: `peekCandidates` no longer excludes the own key (the `ownKey` parameter is gone). `packages/web-member/lib/peek.js`: `createPeeker` no longer takes `ownKey`; `peek.read` still checks the identity on the serial chain first (`packages/web-member/lib/session.js`).
 - App: own rows in the Espiadinha offer no 'seguir' (following oneself is refused) and, as before, no 'denunciar'.
 - The own diary is read like any other candidate: from the seeder, over the short-lived peek link, into memory cores (never the node storage), so it shows once the seeder holds the post (the browser's write gate pushes it before `post.create` answers).
@@ -1427,7 +1427,7 @@ CI result on the final tree, Node 24.22.1 (run from the worktree root, in this o
 
 ### Human verification
 
-- [ ] Hosted web: publish in A Rua, open the Espiadinha: the post is there, without 'seguir' (not performed yet).
+- [ ] Hosted web: publish in A Rua, open the Espiadinha: the post is there, without 'seguir' (not performed yet). (superseded by section 34: the own diary no longer shows in its owner's Espiadinha)
 
 ## 20. Follow-back notices: the Avisos tab (PR feat/follow-back-notices, 2026-10-26)
 
@@ -1550,14 +1550,14 @@ None of these was performed for this change. Use two or three hosted accounts ag
 ### Summary
 
 - Report: reposts of diaries the person does not follow did not show in the Espiadinha. T1 wrote a regression test (`packages/web-member/test/peek-repost.test.js`, 8 tests / 65 asserts, all pass) that follows an unfollowed repost through every layer: record, engagement state, `retainRecords` / `diaryPeek`, the window walk past likes, `buildPeekPage` with a cursor, the session (`peek.read`, `repost.set`, `diary.peek`) and the app (`mergePage`, `peekKey`). It was green from the start, so the cause of the report is UNPROVEN in code: every layer is clean. The most likely cause is a window running an old release (`apps/app/scripts/sw.js` waits until every window closes), which the release banner below addresses.
-- `PEEK_RULE` (`packages/core/lib/peek.js`) now reads exactly: "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos."
+- [superseded 2026-10-28: section 34 excludes the own diary from its owner's Espiadinha again] `PEEK_RULE` (`packages/core/lib/peek.js`) now reads exactly: "A Espiadinha mostra a publicação mais recente de cada diário que você não segue, o seu incluído, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos."
 - Expiration: `packages/web-member/lib/peek.js` refuses a continuation (`after`) on a missing or expired snapshot with USAGE 'A lista expirou; atualize para continuar.' before any link is opened; an `after`-less read keeps the previous snapshot until the new one exists, so a failed refresh does not strand the list. Docs: `docs/rpc.md` 5.22.
 - Index budget (`apps/app/src/indexClient.js`): shared pacer (at most 2 in flight, at most 18 starts per rolling 10 s, under Caddy's 20 per 10 s zone); a 429 with Retry-After sets a shared cooldown honoured in full (cap 10 min); up to 3 retries within 45 s of waiting per call, then 'rate-limited' with the remaining `retryAfterMs`; member cache (complete pages only, 5 min, 256 entries, in-flight dedupe); `resetIndexClient()` and `invalidateMember(author)` (used by Membro's pull-to-refresh).
 - App (`screens/ARua.js`, `engagement.js`, `ui/PostRow.js`): the second pass resolves the quote and the `replyTo` of resolved originals (a reposted reply names its parent); 'seguir' on the 'Nome republicou' line (Espiadinha only); follows changed elsewhere reset `useSocial`'s follow cache; a failed member lookup retries the nameless originals once (after `retryAfterMs`, else 10 s); a failed counts call shows the 'incompletos' note.
 - App (`App.js`, `screens/Espiadinha.js`, `src/peek.js`, `screens/Membro.js`): the Espiadinha reloads only on publishes (`peekVersion`), not on follows; 'seguir' removes the author's rows without reload or scroll loss and a late page cannot bring them back; follows made elsewhere drop rows without reload (all `follow.list` pages); no 'seguir' on own rows or before the own key is known; round labels on all three rounds; the texts include the own diary; the skipped note lists the real causes; empty states offer 'publicar' / 'atualizar'; reply marks of own or followed parents show their names; an expired list keeps its rows and asks for a pull.
 - Core tests (`packages/core/test/peek.test.js`): 4 repost cases (head/tail window, undo in the tail with `on` below the floor, `MAX_FUTURE_MS`, two reposters).
 - Release banner (`apps/app/src/release.js`, `pwa.web.js`, `ui/UpdateNote.js`, `App.js`): 'Nova versão disponível.' with 'atualizar' (reload) when the release the server serves now (the `VERSION` in `/sw.js`, which the worker never intercepts) differs from the open page's `varanda-release` marker, so the notice disappears once the reload lands on the new release even while the old worker still controls the page; checked on focus/visibility (at least 60 s apart), every 30 min and when a new worker starts installing; a failed check leaves the state unchanged; native shows nothing.
-- Docs: strangers' photos are fetched `no-store` (`apps/app/src/media/fetch.js`; own and followed keep the long cache); `ownKey` is gone from `peekCandidates` and `createPeeker`; the own diary is part of the rule.
+- [superseded 2026-10-28: section 34 excludes the own diary from its owner's Espiadinha again] Docs: strangers' photos are fetched `no-store` (`apps/app/src/media/fetch.js`; own and followed keep the long cache); `ownKey` is gone from `peekCandidates` and `createPeeker`; the own diary is part of the rule.
 
 ### Automated (CI)
 
@@ -1576,7 +1576,7 @@ If the reposts are still missing on the hosted web:
 Shipped behaviours:
 
 - [ ] 'seguir' on a row keeps the scroll position, removes that author's rows and the rows do not come back (not performed yet).
-- [ ] Own rows have no 'seguir', and there is none before the own key is known (not performed yet).
+- [ ] Own rows have no 'seguir', and there is none before the own key is known (not performed yet). (superseded by section 34: own rows no longer exist)
 - [ ] Round 1 is labelled '1ª publicação de cada diário', like rounds 2 and 3 (not performed yet).
 - [ ] The skipped note lists the real causes (not performed yet).
 - [ ] A reposted reply names its parent ('respondendo a Nome') (not performed yet).
@@ -1832,7 +1832,7 @@ Nenhuma destas conferências foi feita ao escrever esta seção.
 
 ### O que mudou
 
-- Antes de Entrar (web hospedada) ou Conectar (nativo), o app mostra os Termos de Uso e a Política de Privacidade (versão 1, `apps/app/src/legal.js`) e só segue depois do aceite. O aceite é por aparelho e por membro: pergunta de novo a cada conta nova e a cada versão nova. Na web hospedada, o portão aparece antes de Entrar sempre que a conta está bloqueada e ainda não houve aceite nesta carga da página (um toque por Entrar depois de Sair ou de a sessão expirar), porque o aparelho não sabe quem vai entrar; uma sessão retomada de um membro que já está no registro do aparelho passa direto. No nativo e no `varanda-serve`, passa enquanto não existe identidade e pergunta quando aparece uma identidade que não está no registro. A decisão é a função pura `termsDecision` (`apps/app/src/terms.js`, com `hosted` e `identityKnown`); o aceite dado na página fica preso à próxima identidade que desbloqueia nessa carga (limite de navegador compartilhado).
+- Antes de Entrar (web hospedada) ou Conectar (nativo), o app mostra os Termos de Uso e a Política de Privacidade (versão vigente, `LEGAL_VERSION` em `apps/app/src/legal.js`) e só segue depois do aceite. O aceite é por aparelho e por membro: pergunta de novo a cada conta nova e a cada versão nova. Na web hospedada, enquanto a conta está bloqueada, o aparelho não sabe quem vai entrar, então o portão aparece antes de Entrar só enquanto não há registro da versão atual no aparelho; com esse registro, recarregar, Sair ou a sessão expirar não pedem de novo antes de Entrar. Quem desbloqueia é conferido no registro: uma conta sem registro próprio é perguntada logo depois da passkey, antes de qualquer pedido ao serviço de conta (numa primeira passkey o shell ainda não conhece a chave, então o registro só dispensa o portão enquanto a conta está bloqueada); uma sessão retomada de um membro que já está no registro do aparelho passa direto. No nativo e no `varanda-serve`, passa enquanto não existe identidade e pergunta quando aparece uma identidade que não está no registro. A decisão é a função pura `termsDecision` (`apps/app/src/terms.js`, com `hosted`, `identityKnown` e `locked`); o aceite dado na página fica preso à próxima identidade que desbloqueia nessa carga (limite de navegador compartilhado). (Regra revista em 2026-10-29: antes, o portão voltava em toda carga bloqueada.)
 - Declaração assinada `varanda-terms-v1` (`packages/core/lib/terms.js`): `'varanda-terms-v1'`, nonce, membro, associação e versão, unidos por LF, sem LF final e sem data. A data é a do serviço de conta. Assinada pela chave do diário do membro; nenhuma outra assinatura do protocolo usa o prefixo.
 - RPC `terms.sign` `{ nonce, version }` -> `{ signature }` (`docs/rpc.md` 5.29): só no nó do navegador; os nós nativo, `varanda-serve` e CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/server.js`): `POST /account/terms/start` `{ member, version }` -> `{ nonce }` e `POST /account/terms/finish` `{ member, nonce, signature }` -> `{ version, acceptedAt }`. Recusas: `pedido-invalido`, `nao-vinculado`, `expirado`, `assinatura-invalida`, `indisponivel` e `limite`. Só membro com vínculo Google aceita no servidor; o nonce vale 10 minutos, uma vez, no máximo 1000 pendentes.
@@ -1864,13 +1864,18 @@ Cobertura no repositório:
 
 Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 
-- [ ] Na web hospedada, sem sessão: o portão aparece antes de Entrar, com os dois documentos abrindo no lugar; "Li e aceito os Termos de Uso e a Política de Privacidade" libera Entrar; sem tocar nele não se entra.
-- [ ] Sair e Entrar de novo: pergunta de novo (um toque); recarregar com a sessão retomada de um membro já aceito não pergunta.
-- [ ] Entrar com uma conta nova no mesmo aparelho: pergunta de novo.
+- [ ] Na web hospedada, sem sessão e sem registro da versão atual neste aparelho (primeira visita): o portão aparece antes de Entrar, com os dois documentos abrindo no lugar; "Li e aceito os Termos de Uso e a Política de Privacidade" libera Entrar; sem tocar nele não se entra.
+- [ ] Sair e Entrar de novo com a mesma conta: não pergunta, nem antes nem depois de Entrar; recarregar com a sessão retomada de um membro já aceito não pergunta.
+- [ ] Escrever um rascunho em Publicar, fechar sem publicar e tocar em Sair; entrar na mesma aba com outra conta que já aceitou neste aparelho: o compositor abre vazio e Ajustes mostra o perfil da conta nova.
+- [ ] Entrar com uma conta nova no mesmo aparelho: não pergunta antes de Entrar; o portão aparece logo depois da passkey.
+- [ ] Aceitar o portão e recarregar antes de Entrar: não pergunta antes de Entrar; a conta que entrar é perguntada uma vez logo depois da passkey.
+- [ ] Nesse mesmo caso, com uma passkey nova (primeira entrada): o portão aparece logo depois da passkey, sem "Continuar com o Google" e sem pedido a `/account/status` antes do aceite (aba Rede); depois do aceite, a configuração segue sem erro e sem pedir a passkey de novo.
+- [ ] Recomeçar com o único membro do aparelho e recarregar: não pergunta antes de Entrar; a nova conta é perguntada logo depois da passkey.
+- [ ] Um valor de `varanda-terms` editado à mão que não passa na validação: o portão aparece antes de Entrar.
 - [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
 - [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
 - [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
-- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para 2 num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (7, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
 - [ ] Recomeçar tira o membro do registro; Sair não.
 - [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
 
@@ -1887,6 +1892,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - O portão pertence ao app oficial: um cliente modificado ou outro cliente do protocolo não passa por ele, e o aceite no servidor é um registro, não uma barreira.
 - Na web hospedada, antes de o nó conectar o modo ainda não é "hospedado": quem tem o registro do aparelho em dia pode ver a tela de erro de conexão antes do portão. Nada sai dessa tela; o portão aparece assim que o nó conecta.
 - Num navegador compartilhado, o aceite dado antes de Entrar vale para a próxima conta que entrar naquela carga da página.
+- Com o registro da versão atual no aparelho, outra conta só vê o portão depois da passkey, não antes do Google; o aceite dado antes de Entrar na mesma carga continua valendo para a primeira conta que entrar (item acima).
 
 ## 30. Android gate on the emulator (issue #150, 2026-10-28)
 
@@ -1921,9 +1927,809 @@ Not verified: a real Android device, arm64-v8a, a release build, Doze and the re
 
 Method notes: with the data partition too small the emulator refuses to start, so keep several GB free. `adb reverse` carries TCP only. Do not stop Metro with `kill $(lsof -ti tcp:8081)`: `lsof` also lists the emulator process, which has a connection to that port, and in this run the kill stopped the emulator too. Use `lsof -ti tcp:8081 -sTCP:LISTEN`.
 
-## 31. Grupos públicos (PR feat/groups-public, 2026-10-28)
+## 31. Quem curtiu e quem republicou (seeder engagers lists, 2026-10-28)
 
-Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.30 a 5.43. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
+### Summary
+
+- Shipped: the seeder's engager pages `GET|HEAD /index/likes/...` and `/index/reposts/...` in `apps/cli/lib/seed-ws.js`, backed by `packages/core/lib/engagement-index.js` and `packages/core/lib/seeder.js` (`indexEngagers`, newest first, paged by cursor, 20 per page); `fetchEngagers` in `apps/app/src/indexClient.js`; the pure helpers in `apps/app/src/engagers.js`; the 'Curtidas' screen (`apps/app/src/screens/Curtidas.js`) with its route in `apps/app/src/nav.js` and `apps/app/App.js`; the entry points in `apps/app/src/ui/PostRow.js` and the screens that render it (A Rua, Conversa, Diario, Espiadinha, Membro, Busca); `docs/protocol.md`, `docs/rpc.md`, `docs/design.md`, `docs/app.md`, `apps/site/artwork/app-design.md`, `CHANGELOG.md`. The service worker (`apps/app/scripts/sw.js`) and Caddy already pass every `/index/` path: only `sw.test.js` gains the new URLs and the Caddyfile gains comment lines.
+- Hosted web only. Native and `varanda-serve` show no number control.
+- Entry point: the like and repost numbers on post rows. Each number sits next to its icon as a compact, separate touch target (each icon and number pair is about as wide as the old combined button, about 47 pt, so the bar still fits 320 pt). The toggle and the number have non-overlapping hit areas: the icon toggles, the number opens the list on the matching tab. On a repost row the list is the original post's.
+- Trust model: the index says where to look; each row is the engager's own signed like or repost record, verified by `diary.peek` on the node. A seeder can omit or reorder people but cannot invent one.
+- No new RPC method. The counts on rows are unchanged.
+
+### Automated (CI)
+
+CI result on the final tree, from the worktree root, in this order: `npm ci --ignore-scripts`, `npm run lint`, `npm test`, `npm run demo`. `npm ci` was not rerun in this pass (dependencies were already installed). Lint, test and demo were run on Node 24.22.1 and on Node 20.20.2.
+
+- `npm run lint`: clean on both versions (`standard` printed no output).
+- `npm test` (all workspaces), the same on Node 20.20.2 and on Node 24.22.1, 0 failures: core 38, rpc 8, web-member 31, app 38, cli (`varanda`) 43, site 2 test files (`# N arquivo(s) de teste, 0 falha(s)` for each).
+- `npm run demo`: `DEMO OK` on both versions.
+- New or changed test files, all passing: `apps/cli/test/seeder-index.test.js` (engager pages, 'lazy targets', 20k likers), `apps/cli/test/seed-ws.test.js` (the `/index/likes|reposts` routes and the size cap: 57/57 on Node 20), `apps/app/test/indexClient.test.js` (`fetchEngagers`), `apps/app/test/engagers.test.js` (new, the pure helpers), `apps/app/test/nav.test.js` (the new route) and `apps/app/test/sw.test.js` (additions).
+- 'lazy targets' (`seeder-index.test.js`), Node 20.20.2 log: `50k distinct like targets: 25.06 MiB retained (526 bytes/target including records)`, against the unchanged 35 MiB bound. Before this change the same test retained 22.0 to 22.5 MiB; the extra 3 MiB or so is the per-like and per-repost edge object. The Node 24 run measured 25.08 to 25.54 MiB.
+- 20k engagers on one target (`seeder-index.test.js`, 'engager pages: 20,000 likers on one target have bounded visibility work'): first page 0.054 ms on Node 20 (0.049 ms on Node 24), with at most 201 visibility calls. These are comments in the test log on a development machine, not asserted timings.
+- `seed-ws.test.js` worst case: `engagers worst case: 4516 bytes` against the 65536 cap (a full page of 20 rows with maximum-length fields); an oversize answer is 404.
+- No browser pass in CI: there is no component harness, so the Curtidas screen and the entry points are covered only by the pure helper tests and the human checklist below.
+
+### Residual risks
+
+- Order, omissions, `total`, and whether a listed `on` record is still the engager's latest operation on the post are seeder claims. A lying seeder can hide a person, reorder the list, list an older authentic like that was later taken back, or report a wrong total; it cannot invent a like.
+- An `at` up to 24 h ahead is accepted, so an engager with a future-dated record is listed first; a record dated further ahead is hidden until the clock catches up.
+- The count on the row can exceed the verified list (records dated more than 24 h ahead, engagers held by a pending re-gate, records that do not verify); the list then says 'Algumas pessoas não aparecem nesta lista agora.' or 'N pessoas indisponíveis', never a key, and never 'Ninguém curtiu ainda'.
+- A like or unlike while the list is being paged needs a refresh to show up; a person blocked while the list is open stays until refresh.
+- Each page costs one serial `diary.peek` per engager, up to 20 per page.
+- The page cursor never carries an engager hidden from the list (it resumes from the last person listed), so a run of 200 or more hidden engagers right after the cursor ends the list there; the answer then has `complete: false` and the screen says people may be missing.
+- Privacy: the seeder learns which list was opened (which post, likes or reposts), but never the client address (Caddy strips it); Caddy keeps the address only in memory for the rate-limit window.
+- Privacy, Caddy error log: the error log is on for every route, so a failed proxy (seeder restarting, a deadline) can record the request URI of `/index/likes` and `/index/reposts` together with the client address. The same deferred item as the topic search (section 25).
+- Memory: the engagement index keeps one edge object per like and per repost in seeder memory (see the 'lazy targets' figure above); the pilot seeder was not measured.
+- No follow pill on the rows: opening Membro is the way to follow someone from the list.
+
+### Human verification
+
+None of these was performed for this change. Use the hosted web app at 320 px and on desktop, against a seeder with the change.
+
+- [ ] Hosted web at 320 px: the post bar fits, and tapping the like and repost numbers never toggles the like or repost, and tapping the icons never opens the list.
+- [ ] Hosted web on desktop: the same, with the mouse.
+- [ ] Two accounts like and repost the same post; the post shows both counts.
+- [ ] From A Rua, from a repost row (the list is the original's) and from Conversa, the number opens the matching tab and the icon still toggles.
+- [ ] Rows show verified names (not the raw key).
+- [ ] A row opens Membro, and back returns to the same list.
+- [ ] Unlike, then refresh: the person is gone from 'Curtidas'.
+- [ ] A blocked engager disappears after a refresh.
+- [ ] A record that does not verify shows '1 pessoa indisponível' and no key.
+- [ ] More than 20 likers page with 'mostrar mais', without gaps or duplicates.
+- [ ] Native app and `varanda-serve` show no number control.
+- [ ] Keyboard (tab order, enter on the number) and screen-reader labels on the numbers and on the list.
+
+## 32. Foto do perfil (PR feat/profile-avatar, 2026-10-28)
+
+### O que mudou
+
+- Web hospedada: Editar perfil escolhe uma imagem, enquadra em círculo e recodifica no navegador (`apps/app/src/media/avatar.js`, `crop.js`, `avatarEncode.web.js`, `ui/AvatarEditor.js`) para um still 512x512 em WebP ou JPEG de no máximo 262144 bytes, sem metadados. O nó confere o resultado (`packages/core/lib/still-image.js`). Nada sobe antes de Salvar (`profileSave.js`).
+- Perfil: chave opcional `avatar` e o par de compatibilidade (`docs/protocol.md`); `profile.set` aceita `avatar`; `avatar` em `profile.read`, `diary.peek`, `peek.read` e `notices.list` (`docs/rpc.md`).
+- Termos de Uso e Política de Privacidade versão 2, com novo aceite.
+- O avatar usa a foto, quando há, no mesmo círculo (cover) por cima das iniciais; sem foto, iniciais; nunca caracteres da chave. O cache de nomes (`namesCache.js`) guarda o `avatar` junto do nome.
+- O nó do núcleo recusa mudar nome ou bio enquanto existe foto (`USAGE` 'perfil com foto: mude o nome e a bio na versão web ou tire a foto').
+
+### Testes automatizados
+
+Novos: `apps/app/test/mediaAvatar.test.js`, `apps/app/test/mediaCrop.test.js`, `apps/app/test/namesCache.test.js`, `packages/core/test/still-image.test.js`.
+
+Alterados: `apps/app/test/legal.test.js`, `search.test.js`, `thread.test.js`, `topics.test.js`; `packages/core/test/helpers/net.js` (o `scanWire` aceita as strings de mime de mídia), `member.test.js`, `peek.test.js`, `records.test.js`, `session-sync.test.js`, `session.test.js`, `terms.test.js`; `packages/rpc/test/methods.test.js`, `sizes.test.js`; `packages/web-member/test/diary-peek.test.js`, `e2e-media.test.js`, `media-ops.test.js`, `notices-e2e.test.js`, `notices.test.js`, `peek-repost.test.js`, `peek.test.js`, `session-e2e.test.js`, `session-media.test.js`, `session.test.js`.
+
+### Verificação humana
+
+Na web hospedada, a cada item:
+
+- [ ] Um JPEG com EXIF e GPS, um PNG, um WebP e um GIF animado: cada um vira um still 512x512 em WebP ou JPEG de no máximo 262144 bytes, sem metadados (`exiftool` nos bytes baixados de `/media`).
+- [ ] Enquadrar arrastando, com os botões, pelo teclado e com leitor de tela (VoiceOver, NVDA).
+- [ ] Confirmar o enquadramento não sobe nada até Salvar.
+- [ ] Remover a foto volta às iniciais.
+- [ ] Num segundo aparelho, editar o nome mantém a foto.
+- [ ] Um build antigo mostra o mesmo nome e a mesma bio.
+- [ ] No nativo, aparecem as iniciais e dá para remover a foto.
+- [ ] O portão da versão 2 dos termos aparece de novo.
+- [ ] O avatar de uma conta bloqueada deixa de carregar.
+- [ ] Caddy, mídia: 120 pedidos por 10 s com uma página cheia de avatares.
+- [ ] Moderação: o painel só sinaliza fotos (`panel/app.js:62,99`); quem modera julga uma denúncia de foto abrindo `/m/<chave>` no app hospedado.
+- [ ] (a) A saída real do codificador no Chrome, no Safari e no Firefox passa na conferência de still e de dimensões do nó: um Salvar com enquadramento novo funciona em cada navegador.
+- [ ] (b) Entrar com foto no cadastro grava o perfil simples antes da declaração do núcleo de mídia, então a linha da Espiadinha de um desconhecido e o aviso de seguidor mantêm o nome depois de mais de 10 escritas.
+- [ ] (c) Um enquadramento cujos bytes codificados falham na conferência local mostra 'não foi possível preparar a foto' e não sobe nada.
+
+### Limites
+
+- A foto é permanente: o registro fica no diário como os demais.
+- Só os 4 núcleos de mídia mais novos valem.
+- Não há comparação com listas de hash.
+- No nativo, só iniciais.
+- Uma aba com pacote antigo não mostra o nome de quem tem foto na busca, nas páginas de membro e nas conversas até recarregar.
+- Quem escreve com versão antiga (aba velha, CLI antiga) e salva o perfil remove a foto.
+- Espiadinha e Avisos mostram o avatar só dentro da janela de espiada.
+- O nó do núcleo recusa mudar nome ou bio enquanto existe foto.
+- Ao publicar, suba o semeador e o pacote web juntos.
+
+## 33. Textos mais curtos e folhas de ajuda (issue #198, 2026-10-28)
+
+### O que mudou
+
+- As explicações saíram das telas e foram para uma folha de ajuda aberta pelo botão de informações (ⓘ). O conteúdo fica em `apps/app/src/help.js` (um texto por aba e por passo da configuração) e a folha em `apps/app/src/ui/Help.js`. Os avisos que antes ocupavam a tela viraram uma linha curta com "Saiba mais", que abre a folha do tema.
+- Têm ⓘ: A Rua, Espiadinha, Seguindo, Avisos, Diário e os primeiros passos da configuração. Ganharam só "Saiba mais": passkey, vínculo com o Google, instalação, denúncia, diários que não aparecem, contas bloqueadas, pesquisa e registro do aceite.
+- As telas principais e a tela Conectar da web hospedada não mostram mais semeador, nó, chave, certificado nem índice. A tela Conectar mostra uma frase simples e um botão "Tentar de novo" (`apps/app/src/connectText.js`: `CONNECT_FAILED_TEXT`, `OTHER_TAB_TEXT`, `RETRY_LABEL`), e os termos técnicos da falha ficam em "Detalhes técnicos", recolhido.
+- O aviso do vínculo com o Google ficou em uma frase visível, antes de "Continuar com o Google".
+- Textos de offline: Espiadinha e Avisos mostram "Sem conexão" com "Confira sua internet." (`PEEK_OFFLINE_MESSAGE`, `NOTICES_OFFLINE_MESSAGE`); a pesquisa mostra "A pesquisa precisa de conexão." (`SEARCH_OFFLINE_MESSAGE`).
+- "Semeador ocupado" da tela passa a ser "Muitas pessoas conectadas agora. Tente de novo em instantes." (mapeamento em `apps/app/src/ui/index.js`).
+- Ajustes › Avançado continua técnico. Os Termos, a Política de Privacidade e a regra da Espiadinha não mudaram; `apps/app/src/legal.js` não foi alterado, então nenhum aceite novo é pedido.
+
+### Testes automatizados
+
+Cobertura no repositório:
+
+- `apps/app/test/help.test.js`: os textos da folha de ajuda por aba e por passo, e os temas de "Saiba mais".
+- `apps/app/test/connectText.test.js`: as frases da tela Conectar, o botão de tentar de novo e a separação entre a frase e os detalhes técnicos.
+- Atualizados para os textos novos: `apps/app/test/peek.test.js`, `apps/app/test/topics.test.js`, `apps/app/test/notices.test.js`, `apps/app/test/report.test.js` e `apps/app/test/onboarding.test.js`.
+
+Resultados (2026-10-28, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (39, 8, 31, 45, 43 e 2 arquivos de teste, já com a main de #201); `npm run demo` termina com "DEMO OK". Node 20 não foi rodado localmente; fica para a CI.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados e não realizada ainda; marcar só o que for de fato executado, com a saída.
+
+- [ ] Cada aba (A Rua, Espiadinha, Seguindo, Avisos, Diário) e cada passo da configuração tem o ⓘ, com papel de botão e rótulo (não realizada ainda).
+- [ ] Fechar, o toque no fundo, Escape e o botão Voltar do Android fecham a folha (não realizada ainda).
+- [ ] "Saiba mais" em Entrar, Escolha seu @nome, Conta e @nome, Instalar, Denunciar, no aviso de Espiadinha pulada, no aviso de A Rua bloqueada e na pesquisa abre a folha certa (não realizada ainda).
+- [ ] No iOS, a folha de ajuda aberta sobre Ajustes ou sobre Denunciar aparece e volta para a tela, e o rascunho continua lá (não realizada ainda).
+- [ ] Na web, o Voltar com a folha de ajuda aberta sobre Denunciar fecha só a folha e mantém o rascunho da denúncia (não realizada ainda).
+- [ ] A frase do vínculo com o Google aparece visível antes de "Continuar com o Google" (não realizada ainda).
+- [ ] Na web hospedada, com uma segunda aba aberta, aparece a frase de outra aba, e "Tentar de novo" recupera a conexão (não realizada ainda).
+- [ ] Na web hospedada com uma configuração manual salva antes, a página abre na visão simples (não realizada ainda).
+- [ ] Com o boot offline, aparece a frase genérica de conexão, sem termos técnicos (não realizada ainda).
+- [ ] Enquanto conecta, nenhum campo manual aparece (não realizada ainda).
+- [ ] "Detalhes técnicos" começa recolhido e, ao abrir, é anunciado como expandido (não realizada ainda).
+- [ ] Espiadinha e Avisos offline mostram "Sem conexão" e "Confira sua internet."; a pesquisa offline mostra "A pesquisa precisa de conexão." (não realizada ainda).
+- [ ] Com os slots externos do semeador ocupados, a Espiadinha e os Avisos mostram "Muitas pessoas conectadas agora. Tente de novo em instantes." Este item substitui o texto antigo da verificação "Seeder full" da §24 (não realizada ainda).
+- [ ] Ajustes › Avançado › Conexão continua igual, com os termos técnicos (não realizada ainda).
+- [ ] Em Identidade técnica, o texto ainda diz chave e certificado (não realizada ainda).
+- [ ] Membro que já aceitou a versão 1 dos Termos não é perguntado de novo, porque `legal.js` não mudou (não realizada ainda).
+
+### Limites
+
+- A tela Conectar nativa (ConexaoNo), o `varanda-serve` e Ajustes › Avançado mantêm as palavras técnicas (semeador, chave, certificado).
+- A folha de ajuda ocupa a altura toda porque o componente `Sheet` não tem variante curta.
+- O mock do site (`apps/site/public/index.html`) não foi atualizado nesta mudança.
+
+## 34. Own publications out of the own Espiadinha (2026-10-28)
+
+### Summary
+
+- User report: the person's own reply showed in A Rua and also in their own Espiadinha. Decision, quoted from the owner: "eu nao vejo os meus mas outros veem os meus posts ou interracoes". So the person never sees their own publications, replies, quotes and reposts in their own Espiadinha (they are already in A Rua), while a person who does not follow them still sees that diary in their own Espiadinha, including a stranger's repost of one of their posts. This reverts section 19.
+- The rule text returns to the pre-section-19 sentence, without "o seu incluído" (`PEEK_RULE`, `packages/core/lib/peek.js`). The own diary stays a candidate and is fetched over the anonymous link like any other, so the link keeps requesting the complement of the follows and the blocklist; `buildPeekPage({ hidden })` pages it exactly as if shown (same rounds, `needs`, windows and cursor) and removes its items only from the page returned to its owner, so a non-last page may hold up to 3 fewer items than `limit`. It is counted in neither `diaries` nor `skipped` nor the failed/capped `incomplete` warning. `peekCandidates` is back to `{ inventory, follows, blocked }`; `createPeeker` requires the `ownKey` getter and the session passes a cache-only getter.
+- The "carregar mais" delay is out of scope. Topic search, A Rua, `feed.read` and `diary.peek` are unchanged.
+- Files: `packages/core/lib/peek.js` and `packages/core/test/peek.test.js`; `packages/web-member/lib/peek.js`, `packages/web-member/lib/session.js` and the tests `peek.test.js`, `peek-repost.test.js`, `frame-guard-client.test.js` and `peek-capacity.test.js`; `apps/app/src/peek.js`, `apps/app/src/screens/Espiadinha.js` and `apps/app/test/peek.test.js`; docs `docs/rpc.md`, `docs/protocol.md`, `docs/design.md`, `docs/app.md` and `apps/site/artwork/app-design.md`.
+
+### Automated (CI)
+
+CI result on the final tree (rebased on main 60282a6), Node v24.22.1 (run from the worktree root). Node 20 (the other version in `.github/workflows/ci.yml`) was NOT run locally.
+
+- `npm ci --ignore-scripts`: ok.
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 168 test files, 0 failures (core 39, rpc 8, web-member 31, app 45, cli 43, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/core/test/peek.test.js`: 32 tests, 923 asserts, all pass.
+- `node packages/web-member/test/peek.test.js`: 34 tests, about 335 asserts, all pass (the assert count of these network tests moves by a few between runs because of polling waits).
+- `node packages/web-member/test/peek-repost.test.js`: 9 tests, 69 asserts, all pass.
+- `node packages/web-member/test/frame-guard-client.test.js`: 8 tests, 34 asserts, all pass.
+- `node packages/web-member/test/peek-capacity.test.js`: 1 test, 43 asserts, passes.
+- `node apps/app/test/peek.test.js`: 14 tests, 76 asserts, all pass.
+- Regression proofs: in `packages/core/test/peek.test.js`, "hiding a diary changes nothing but the returned items" generates 200 page configurations and checks, for every diary key in both cases, that `buildPeekPage({ hidden })` returns the same `needs` and `next` as without `hidden` and the same items minus that diary's; dropping the hidden diary before the page is cut instead makes it fail (620 mismatching pages, 29/32 tests). In `packages/web-member/test/peek.test.js`, "regression: the own diary is still requested over the peek link as cover" fails on the first version of this change, which left the own diary out of the candidates (33/34), and passes now; the two tests on the author's and another member's pages pass on both.
+- Reviews: one grok pass on the core change (its only finding, the web-member caller, was fixed in the next task as planned), then codex and grok passes on the web-member and app changes and on the docs, with no defects.
+
+### Security audit
+
+- Auditors: Claude (opus, with the audit brief), Claude built-in security review, GPT (gpt-6-astra) and Grok (grok-4.7).
+- No open findings.
+- Design note: the own diary is fetched and paged exactly as if shown, so the requests on the peek link do not depend on who is reading (see `docs/protocol.md` section 6).
+
+### Human verification (none performed yet)
+
+- [ ] Hosted web, seeder log at debug: opening the Espiadinha requests the own diary's core like any other diary.
+- [ ] Hosted web: a reply by the signed-in person appears in A Rua and not in their Espiadinha rounds, also after 'atualizar'.
+- [ ] A second passkey that does not follow them sees that reply and their repost in its Espiadinha.
+- [ ] A stranger's repost of the person's post still shows to the person.
+- [ ] A lone member sees 'Ninguém para espiar ainda'.
+
+## 35. Menções e avisos de resposta, citação e menção (2026-10-28)
+
+### Summary
+
+- Shipped: `@nome` mentions in the text of a post, and notices in the Avisos tab when someone replies to, quotes or mentions the member, next to the follow notices of section 20. The row opens the conversation of that post. In-app only, hosted web only, never a count, no push.
+- Contract: `@varanda/rpc` exports `findMentions`, `mentionTokens`, `mentionSegments`, `activeMention` and `MENTION_MAX` (`packages/rpc/lib/mentions.js`, `docs/rpc.md` section 12); `notices.list` (`docs/rpc.md` 5.28) gains `kind` on each notice, `activity` on the result and a three-key cursor `{ at, key, seq }`, with no new param; the channel `'varanda/notices/2'` (`docs/protocol.md`, "Notices channel v2"); the browser read (`docs/protocol.md`, "Notices link"). No record change (a post gains no key, protocol section 2) and no new RPC method. `NOTICE_KINDS` lives in `@varanda/core` (`packages/core/lib/notices-v2.js`), not in `@varanda/rpc`.
+- Files: `packages/rpc/lib/mentions.js`, `packages/rpc/index.js`, `packages/rpc/lib/methods.js`; `packages/core/lib/notices-v2.js` (the v2 messages and proof), `packages/core/lib/notices-net.js` (`attachNoticesV2`, slot `_varandaNoticesV2`), `packages/core/lib/post-notices.js` (the post index), `packages/core/lib/username.js` (`heldUsernames`, `MAX_HELD_USERNAMES`), `packages/core/lib/seeder.js` (fold in `_runScan`, v2 page in `_attachPeer`); `packages/web-member/lib/notices.js`, `member-ops.js` (`ownNoticeContext`) and `session.js`; `apps/app/src/mentions.js`, `apps/app/src/notices.js`, `apps/app/src/ui/MentionText.js`, `apps/app/src/ui/MentionSuggest.js`, `apps/app/src/ui/PostRow.js`, `apps/app/src/ui/QuoteCard.js`, `apps/app/src/screens/Avisos.js`, `Publicar.js`, `Conversa.js`, `Membro.js`, `ARua.js`, `Diario.js`, `Espiadinha.js`, `Busca.js` and `apps/app/App.js` (`openMention`).
+- Trust model: the seeder is not trusted for facts or for kinds. A v2 item is `{ key, seq, at, kind }` and `kind` is a hint only. The browser re-reads the named signed block from the author's diary (block 0 gate, then the block `seq` with the claimed `at`) and derives the kind itself from the signed post and its own diary: a reply to or a quote of one of the member's own post blocks, else an `@nome` in the signed text naming a username the own diary verifiably held (current revoked issuers applied on every read). A post that earns none is dropped. A seeder can withhold a notice, never forge one or change its kind. A v1 proof cannot open v2 pages (different proof prefix).
+- Mentions fail closed: invisible characters are looked past, and the visible neighbour must be one of an allowlist of separators, otherwise the token is not a mention (a missed link, never a wrong notice).
+- Data flows: the post index is in memory only, separate from the follow index, rebuilt from block 1 on every serve and at start. Nothing new is stored on the device; the seen tokens are unchanged. The `@` suggestions in Publicar send the typed fragment (2 or more characters, 400 ms debounce) to the seeder's account search (`/index/search/<segment>`), as the Buscar field already does, so the association's seeder can see which names a member starts to mention, even in a draft that is never published.
+
+### Limits
+
+- Constants: `MENTION_MAX` 8 names per post; `MAX_POST_NOTICES_PER_PAIR` 32; `MAX_POST_NOTICES_PER_AUTHOR` 1024; `POST_NOTICES_MAX_EDGES` 262144; `MAX_UNRESOLVED_TOKENS_PER_AUTHOR` 64 (distinct unresolved targets); `MAX_HELD_USERNAMES` 64 (the newest username records of an author, per seeder and per reader); future rule 24 h (`MAX_FUTURE_MS`); page 30 / 64; `MAX_NOTICES_MESSAGE` 16384. Authors are bounded by the seeder's `maxServed`. @ suggestions: 5 rows, queries of 2 or more characters.
+- What evicts and what marks incomplete: the per-pair and per-author caps evict the author's own lowest-seq post whole and do NOT mark pages incomplete. The global edge cap refuses the new row and marks pages incomplete (never evicting another author). Unresolved targets beyond 64 per author are skipped silently. An author refused at `maxAuthors`, or a refusal the bounded set cannot record, keeps pages incomplete (sticky until `removeAuthor` or a restart).
+- Worst case of one `notices.list` page (64 notices, with the widest avatar): 61751 bytes against `MAX_MESSAGE` 262144 (`node packages/rpc/test/sizes.test.js`).
+- Capacity: a read is still one extra external socket (two channels on it), like a peek; a busy seeder can refuse it.
+- Known limit: a self-mention folded before the author's own username record settles can still evict that author's older rows inside the author's own budget; it never touches another author's rows, and the row is dropped once the name is verified.
+- Known limit: a mention next to an unlisted character (a letter, mark or digit of any script, or another `@`) is not linked and does not notify (fail closed).
+- Known limit: a seeder from before v2 serves follow rows only; the tab says so (`activity: false`). Native, `varanda-serve` and the CLI show the web-only text.
+- Human checks are not done yet (below).
+
+### Automated tests
+
+New test files, one per area:
+
+- `packages/rpc/test/mentions.test.js`: the grammar, the boundaries (separator allowlist, skipped invisible characters), `MENTION_MAX`, `mentionSegments`, `activeMention`.
+- `packages/core/test/notices-v2.test.js`: v2 messages, proof prefix, cursors, items, hostile input.
+- `packages/core/test/username.test.js`: `heldUsernames` and `MAX_HELD_USERNAMES`.
+- `packages/core/test/post-notices.test.js`: the post index (priority, caps, unresolved targets, name window, self-mentions, whole-post eviction, sticky incomplete, 24 h rule).
+- `packages/web-member/test/post-notices.test.js`: the browser read of reply, quote and mention notices over v2 (kind derived from the signed block, v1 fallback with `activity: false`, cursors).
+- `packages/web-member/test/post-notices-e2e.test.js`: seeder and browser node end to end on the loopback DHT.
+- `apps/cli/test/seeder-post-notices.test.js`: the seeder's fold and the v2 pages.
+- `apps/app/test/mentions.test.js`: `insertMention` and `suggestionRows`.
+
+Extended: `packages/core/test/notices.test.js`, `packages/core/test/session.test.js`, `packages/rpc/test/methods.test.js`, `packages/rpc/test/sizes.test.js`, `packages/web-member/test/notices.test.js`, `apps/app/test/notices.test.js`, `apps/cli/test/seeder-index.test.js`, `apps/cli/test/seeder-topic.test.js`.
+
+No browser pass in CI: there is no component harness, so the screens (Avisos rows, the suggestion strip, the tappable `@nome`) are covered only by the pure helper tests and the checklist below. The final CI result (lint, tests, demo) is the orchestrator's and is not repeated here.
+
+### Human verification
+
+None of these was performed for this change. Use two hosted accounts, A and B, in two browsers against a seeder with the change.
+
+- [ ] Publicar, hosted web, online: typing `@` and 2 letters shows the suggestion strip with up to 5 verified members; tapping one writes `@nome ` at the caret without a double space. Offline, on native and with the sheet closed there is no strip.
+- [ ] A publishes a post that says `@b`. In A Rua, in Conversa and in a quote card, `@b` is a link; tapping it (and Enter or Space from the keyboard) opens B's profile and does NOT open the thread. A tap on the rest of the text still opens the thread.
+- [ ] Tapping a name that nobody holds shows the not-found message; offline it says "Sem conexão para abrir o @nome."
+- [ ] B (page visible, or after opening the app) sees the dot on Avisos with no number; the row says "<A> mencionou você"; tapping it opens the conversation.
+- [ ] A replies to a post of B: the row says "<A> respondeu à sua publicação". A quotes it: "<A> citou sua publicação". A post that replies and mentions B shows one row, as a reply.
+- [ ] B follows A back from the follow row: the follow row leaves, the reply, quote and mention rows of A stay.
+- [ ] B renames to another @nome; a later post of A that mentions the OLD name still notifies B.
+- [ ] A mentions A's own name: no notice for A. A text like `x@b` or `@b1é` is not linked and notifies nobody.
+- [ ] The operator blocks A: A's rows are gone on B's next load.
+- [ ] Nowhere in the app is there a count of mentions, replies or followers.
+- [ ] Native app and `varanda-serve`: the Avisos tab shows the web-only text, mentions are plain text, no `notices.list` call.
+- [ ] A seeder with only `varanda/notices/1`: the follow rows show and the quiet line "O semeador desta associação ainda só envia avisos de quem seguiu você." appears.
+- [ ] The seeder log shows no new route, no key and no text of a post.
+
+## 36. A Rua com diários seguidos ainda incompletos (2026-10-28)
+
+### Summary
+
+- User report (screenshot): A Rua ended with "Isso é tudo por enquanto." right after a post from "ontem", while older posts of people they follow were missing. Owner's decisions: download followed diaries in order; `feed.read` reports the followed diaries that are still incomplete; A Rua shows a syncing footer instead of the end and loads more when the sync advances. Starvation (reads preempting the sync run, `discardRegate`, the run-start purge) is out of scope.
+- Cause: followed replicas (and the browser node's own-diary recovery range) were downloaded with `core.download({ start: 0, end: -1 })`, which starts at a random offset, while `readAll` reads only `0..contiguousLength-1`. Stored blocks after the first gap were invisible and a short page looked like the end of the feed. Reproduced before the change with a scratch script (not in the repo): a 400-block followed diary, sync stopped mid-download, held 240 blocks of which 7 were contiguous, and `feed.read` showed 4 posts; with `linear: true` every stored block was contiguous and every stored post showed.
+- Ordered downloads: `linear: true` in `packages/web-member/lib/sync.js` (follow range and own-diary recovery range) and `packages/core/lib/sync.js` (follow range). Seeder ranges are unchanged.
+- `feed.read` (docs/rpc.md 5.13): new `incomplete` and `incompleteTruncated`, capped at `FEED_INCOMPLETE_MAX` = 16 (the 31-item worst case is 261,964 bytes, 180 under `MAX_MESSAGE`). Listed: shown followed diaries whose replica has `length > contiguousLength`, in follow order; a follow with no local replica stays `no-cert` in `skipped` and is not listed. Same rule on the core and browser nodes; the CLI `feed` is unchanged.
+- A Rua (`apps/app/src/screens/ARua.js`, `apps/app/src/paging.js`): the footer says "Ainda sincronizando quem você segue." instead of "Isso é tudo por enquanto." while the last page reported incomplete diaries; `atEnd`, 'mostrar mais' and the end-reached load are unchanged; an empty older page keeps the cursor. When the downloaded length of a listed diary, or of a follow skipped as `no-cert`, grows past the lengths seen before the last read, one timer (`FEED_REARM_MS` = 2 s) runs exactly one `feed.read`: a quiet re-read of the newest page when only it is loaded (no pull spinner, no 'ver novidades' acknowledgement, no other request; if the new page would cut rows already shown, the list stays and leaves its end so 'mostrar mais' pages on), otherwise an older page. Empty automatic older reads back off (2 s doubling to 32 s). No automatic read follows a failed read; the footer retry repeats the read that failed. A capped `skipped` or `incomplete` list makes growth of any key count.
+
+### Automated (CI)
+
+CI result on the final tree (rebased on main 17ec1d8, after the mentions PR), Node v24.22.1 (run from the worktree root). Node 20 (the other version in `.github/workflows/ci.yml`) was NOT run locally.
+
+- `npm ci --ignore-scripts`: ok.
+- `npm run lint`: clean (`standard`), exit 0.
+- `npm test` (all workspaces): 177 test files, 0 failures (core 42, rpc 10, web-member 33, app 46, cli 44, site 2).
+- `npm run demo`: DEMO OK.
+- `node packages/rpc/test/sizes.test.js`: 13 tests, 78 asserts, all pass (the `feed.read` worst case is unchanged by the mentions PR).
+- `node packages/core/test/sync.test.js`: 42 tests, 239 asserts, all pass.
+- `node packages/core/test/member.test.js`: 11 tests, 132 asserts, all pass.
+- `node packages/core/test/session.test.js`: 29 tests, 350 asserts, all pass.
+- `node packages/web-member/test/sync-gate.test.js`: 5 tests, 53 asserts, all pass.
+- `node packages/web-member/test/session.test.js`: 26 tests, 327 asserts, all pass.
+- `node apps/app/test/paging.test.js`: 10 tests, 89 asserts, all pass.
+- New tests: core `sync.test.js` "a follower downloads a followed diary in block order" (the in-test fake seeder gains an optional `have`, so a peer that connects later learns about a diary it already holds); web-member `sync-gate.test.js` "a followed diary downloads in block order so its prefix is readable"; core `member.test.js` "feedRead reports a shown diary with holes as incomplete"; core `session.test.js` "feed.read caps the incomplete list at FEED_INCOMPLETE_MAX"; web-member `session.test.js` "feed.read reports incomplete followed diaries until their full download" and "feed.read caps incomplete followed diaries in follow-list order"; app `paging.test.js` "feed footer says syncing only while the last page reported incomplete diaries", "sync baseline covers incomplete and no-cert follows, plus every length when truncated", "sync advances only on growth past the baseline", "a capped skipped or incomplete list opens the trigger to every key", "only a short newest page replaces the list quietly" and "empty automatic reads back off with a capped delay". `sizes.test.js` adds the two fields to the `feed.read` worst case.
+- The ordering tests replace `Math.random` during the follower's run with a seeded generator in 0.4..0.6 (HyperDHT draws stream ids from `Math.random` and retries on a collision, so a constant could loop), which puts a random-order range far from block 0. In-flight requests complete out of order (0, 1, 2, 4, 8, ... was observed), so they check that the first 32 distinct uploaded blocks are below 64 (and include 0 to 3 on the browser node) and that the follower stored every block.
+- Regression proofs: without `linear: true` on the follow range both ordering tests fail (core 41/42, web-member 4/5). Without the `incomplete` push the new `feed.read` tests fail (core member 10/11, core session 28/29, web-member session 24/26). The new paging tests fail without the paging helpers, without counting `skippedTruncated`, and without the shown-rows rule for quiet replacement.
+- Reviews: every task by a vendor other than its author (GPT, Grok or Claude). A Rua took three review-fix rounds: the first "settle" rule could hide a diary's later posts and became the backoff; the automatic newest-page read behaved like a pull-to-refresh and became the quiet read with its footer retry; capped `skipped` lists, a full page that would cut shown rows, and an empty list were then handled.
+
+### Security audit
+
+- Auditors: Claude (opus, with the audit brief), Claude built-in security review, GPT (gpt-6-astra) and Grok (grok-4.7).
+- One low finding (automatic reads kept repeating while a full newest page left the list unchanged), fixed by leaving the end in that case. No open findings.
+
+### Human verification (none performed yet)
+
+Check the hosted web (browser node) and the native app (core node) separately.
+
+- [ ] A partially synced follow: after a short page the footer reads "Ainda sincronizando quem você segue.".
+- [ ] The list fills without pull-to-refresh as the follow downloads; on native no pull spinner appears.
+- [ ] A fully synced follow: the footer reads "Isso é tudo por enquanto." as before.
+- [ ] 'mostrar mais' still pages 30 then 31 items.
+- [ ] Follow a diary with hundreds of posts, keep A Rua open at the end of the list, and confirm the download finishes (every automatic read preempts the sync run).
+
+### Limits
+
+- Every automatic read preempts the sync run, which restarts; `FEED_REARM_MS` (2 s) is a starting value to tune after the check above.
+- A download usually costs one extra read at its end, because the stopped run reports growth the read already saw.
+- A follow with no local replica is not reported, so a follow nobody serves keeps the old footer; an author who signs a length nobody serves keeps the syncing footer.
+- Arrivals that sort inside the range already shown come through 'ver novidades' or pull-to-refresh; once the download ends the footer can say "Isso é tudo por enquanto." while such arrivals wait behind the pill.
+- An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
+- A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
+- `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
+
+## 37. Convites para entrar na rede (2026-10-29)
+
+### O que mudou
+
+- Com `VARANDA_INVITES_PER_WEEK` definido (1 a 100), um vínculo Google que criaria um membro novo só termina com um convite válido. Ausente ou vazio, o cadastro segue aberto como hoje, limitado só por `VARANDA_MAX_MEMBERS`. Remover a variável desliga tudo e o `invites.json` fica no disco, ignorado. Mudar o valor exige reiniciar o serviço `account`.
+- O link é `https://<origem>/convite/<código>`. O código tem 32 bytes em base64url, aparece uma única vez e fica guardado só como SHA-256, e só enquanto o convite não foi usado. Vale para uma pessoa só e por 7 dias depois de criado.
+- Cada membro vinculado ganha N convites por semana civil de Brasília (UTC-3, sem horário de verão), com renovação na segunda 00:00. Um convite criado conta na semana em que foi criado, mesmo sem uso. O que sobra não acumula, não há revogação nem devolução, e baixar N não apaga links já criados na semana. Todos seguem N, o operador também, e não existe comando de emissão. A primeira pessoa de uma rede vazia precisa vincular com a variável vazia, sem exceção. `varanda assoc certify` fica fora do portão: um membro só certificado não é vinculado, logo não emite convite.
+- Uso único estrito: o serviço de conta grava o hash do convite (SHA-256 do código) no vínculo de quem entrou, no diretório (`directory.json` e seu diário, o armazenamento de um só escritor), e esse registro recusa um segundo uso de forma atômica. O `invites.json` apaga o hash quando o convite é usado e guarda só o identificador aleatório, a chave de quem criou, a data de criação e se foi usado. Uma conclusão recusada deixa o convite utilizável. Uma recusa na conclusão por @nome em uso ou conta já vinculada também apaga a linha pendente e libera o convite na hora, para a pessoa recomeçar.
+- O serviço nunca guarda e-mail, nome, `sub` ou chave de quem entrou, e não registra quem usou qual convite. A volta do Google recusa um convite inválido antes de trocar o código do Google, como a lista de espera.
+- Rotas: `GET /account/invites/policy` (`{ required, perWeek }`), `POST /account/invites/start`, `POST /account/invites/finish` (assinatura `invite.sign`, `docs/rpc.md` 5.30, a resposta traz `used`, `remaining` e `resetsAt`). `GET /account/status` não traz contagens de convite. Sem a variável, a política responde `{ "required": false }` e as rotas `POST` de convite respondem 404. Recusas: `convite-obrigatorio` (403), `convite-invalido` (404), `limite-convites` (429) e `indisponivel`. `varanda account status` imprime só `convites: <total> (<usados> usados)`.
+- App (web hospedada): `/convite/<código>` guarda o código na aba (`sessionStorage`, chave `varanda-signup-invite`), limpa o endereço e mostra o botão do Google; sem código, a tela calma pede o link de convite. Ajustes › Convidar pessoas aparece só na web hospedada, só com o portão ligado e só para membro vinculado: quantos convites pode criar por semana (da política), depois de criar quantos restam (da resposta assinada), criar, copiar ou compartilhar, link mostrado uma vez e renovação na segunda em Brasília. O código não é enviado ao Google.
+- LGPD: `docs/design.md` ganhou a linha do `invites.json`, a nota de que o vínculo de quem entrou por convite guarda o hash do convite (dado novo no diretório) e a nota de que quem convidou quem pode ser reconstruído a partir de uma cópia do `invites.json` anterior ao uso e, de forma aproximada, pelas datas.
+
+### Testes automatizados
+
+Nenhum foi rodado por quem escreveu esta seção; o resultado de lint, testes e demo é o da CI. Por arquivo:
+
+- `apps/cli/test/invites-store.test.js`: o armazenamento de `invites.json` (semana de Brasília, limite por membro, validade de 7 dias, poda, arquivo inválido, modo 0600).
+- `packages/core/test/invite.test.js`: a mensagem e a assinatura de `invite.sign`.
+- `apps/cli/test/account-invites.test.js`: as rotas de política, início e conclusão, as recusas, o portão do vínculo e a regressão de que `GET /account/status` nunca traz contagens de convite, com `invites.json` íntegro ou corrompido.
+- `apps/cli/test/account-invites-cli.test.js`: a leitura da variável (`readEnv`), a perda do lock e `varanda account status`. O reinício com e sem a variável é coberto no próprio processo por `account-e2e.test.js`.
+- `apps/cli/test/account-store.test.js` (estendido): o hash do convite no vínculo e a recusa atômica de um segundo uso.
+- `apps/cli/test/deploy.test.js` (estendido): a variável no `.env.example`, no compose e no `deploy.sh`.
+- `packages/rpc/test/methods.test.js` (estendido): o método `invite.sign`.
+- `packages/core/test/session.test.js` e `packages/web-member/test/session.test.js` (estendidos): `invite.sign` nas duas sessões.
+- `apps/app/test/account.test.js` (estendido): política, início e conclusão.
+- `apps/app/test/signupInvite.test.js`: o caminho `/convite`, a guarda na aba, o prazo, a limpeza do endereço e os textos da contagem e do número semanal.
+- `apps/app/test/help.test.js` (estendido): a folha de ajuda dos convites.
+- `apps/cli/test/account-e2e.test.js` (estendido): o fluxo completo com convite.
+
+Sem teste de navegador na CI: as telas (Convidar pessoas, a tela calma) só têm os testes de funções puras e a lista abaixo.
+
+### Verificação humana
+
+Nada abaixo foi feito ainda. Use uma instalação hospedada com o serviço `account` e o Google configurados.
+
+- [ ] Sem `VARANDA_INVITES_PER_WEEK`, um vínculo novo termina normalmente (cadastro aberto) e Ajustes não mostra Convidar pessoas.
+- [ ] Com `VARANDA_INVITES_PER_WEEK=1`, uma pessoa sem link que tenta vincular vê a tela calma, e o `docker logs` do serviço mostra só tokens, nunca um código, um e-mail ou uma chave.
+- [ ] Um membro vinculado abre Ajustes › Convidar pessoas, vê "Você pode criar até 1 convite por semana.", cria o link, copia e compartilha. O link aparece uma vez; depois de criado, aparece "Seus convites desta semana acabaram." e o botão fica desativado.
+- [ ] Abrir `/convite/<código>` troca o endereço para `/` e o botão do Google aparece. O vínculo termina e a pessoa passa a ser membro.
+- [ ] O mesmo código não vincula uma segunda chave (recusa calma), e uma recusa na conclusão deixa o convite utilizável.
+- [ ] Na fronteira da segunda-feira, 03:00Z, a contagem renova e os convites sem uso da semana anterior não acumulam.
+- [ ] `varanda account status` mostra `convites: <total> (<usados> usados)` e nenhum código.
+- [ ] Remover a variável e reiniciar volta ao cadastro aberto, e o `invites.json` continua no disco.
+
+### Limites
+
+- Uma queda ou perda do lock do serviço bem no meio da criação de um convite pode gastar aquele convite da semana sem entregar o link (o código só existe na resposta).
+- Um erro passageiro de leitura do `invites.json` deixa os convites indisponíveis até reiniciar o serviço (mesmo comportamento do `terms.json`).
+- O `invites.json` e o diretório são arquivos separados: uma gravação atrasada de um processo que perdeu o lock pode desfazer a contagem da semana (resíduo do gravador atrasado, como em `terms-store.js`). O uso único não depende disso, porque o diretório registra o convite usado no vínculo.
+- Em navegação privada que recusa o armazenamento da aba, o código fica só na memória da página e não sobrevive à ida ao Google: se o vínculo não terminar, é preciso abrir o link de novo.
+- Uma nova tentativa de início sem assinatura nunca apaga um vínculo pendente que já passou pela assinatura ou pelo Google, a menos que venha do mesmo navegador com o cookie desse vínculo ("começar de novo", "usar outra conta Google"); sem o cookie, o código fica reservado até esse pendente vencer (10 minutos) ou terminar. Uma recusa do convite no início não apaga o código guardado na aba: o formulário continua e a pessoa tenta de novo sem recarregar.
+- `varanda assoc certify` fica fora do portão.
+- Fechar Ajustes enquanto a criação do convite já foi enviada ao serviço pode gastar o convite sem mostrar o link.
+- Quem convidou quem pode ser reconstruído a partir de uma cópia de `invites.json` anterior ao uso e, de forma aproximada, pelas datas. O diretório guarda o hash do convite usado no vínculo de quem entrou (dado novo).
+- Não há revogação: um link enviado à pessoa errada admite um membro até vencer (7 dias). Uma resposta de criação perdida gasta a vaga e a única cópia do código.
+- O número de convites por semana é público (GET /account/invites/policy); quantos cada membro já criou só aparece para o próprio membro, na resposta assinada de criação.
+- Numa instalação com o serviço de conta, o botão de vincular em Conta e @nome espera a leitura da política, que pode levar até 8 segundos (o limite de tempo das chamadas ao serviço). Se a leitura falhar ou passar desse tempo, o formulário de hoje é liberado e o serviço recusa sozinho quem precisar de convite.
+- O teto é de 100000 linhas no `invites.json`. A semana segue o relógio do servidor.
+- Se um operador ligar depois um log de acesso do Caddy, os códigos ficariam nos caminhos `/convite/<código>`; este deploy não tem log de acesso.
+
+## 38. Avisos push na web hospedada (feat/web-push, 2026-10-29)
+
+A especificação pedia a seção 35. A seção 35 já documenta menções e avisos de resposta, citação e menção (2026-10-28), a 36, A Rua com diários seguidos ainda incompletos, e a 37, Convites para entrar na rede. Esta verificação fica na 38. As seções 1 a 37 não mudam.
+
+O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/1` e `varanda/notices/2`) continua dentro do app e inclui citação e menção. O push da web hospedada cobre só seguir, resposta, curtida e republicação.
+
+### O que mudou
+
+- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, quatro avisos: começou a seguir, respondeu ao seu post, curtiu seu post, republicou seu post. Cada um é uma frase com o nome e a ação. Citação, menção e o crescimento de um diário seguido não geram push. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+- O semeador escolhe o candidato (`packages/core/lib/push-events.js`) e o manda em loopback (`POST /push-event`, `apps/cli/lib/push-relay.js`). O cursor `pushNext` começa no comprimento assinado já guardado (na primeira admissão, o maior entre esse comprimento e o que a quarentena verificou). Reinício, reconstrução de índice e histórico já servido não repetem aviso. O semeador nunca vê a inscrição.
+- O serviço de conta (`apps/cli/lib/account/push-routes.js`) oferece `GET /account/push/key`, `POST /account/push/start`, `POST /account/push/finish` e `POST /account/push/check`. A declaração é `varanda-push-v1`, só por HTTPS até o serviço de conta. O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível (`isEndpoint` em `packages/core/lib/push-proof.js`, `isPushEndpoint` em `packages/rpc/lib/methods.js`, `endpointParam` na conclusão). A frase é cifrada de ponta a ponta (RFC 8291). O fabricante vê o texto cifrado e o endereço.
+- Operação: `account push-key` com o serviço parado (grava `push-vapid.json`, modo 0600, imprime só a chave pública), `VARANDA_PUSH_TOKEN` e `VARANDA_ACCOUNT_HTTP` em `deploy/seeder/.env`. Token vazio desliga. Termos versão 3 (`TERMS_VERSION`). Ligar os avisos pede o aceite dessa versão.
+- A página mede o worker com `{ type: 'varanda-push-ping' }`. O worker atual responde `{ source: 'varanda-sw', push: 1 }`. Com um worker antigo, ligar fica bloqueado, com `PUSH_RELOAD`, até fechar todas as janelas; desligar continua permitido. No iOS, o estado é lido quando a folha abre, para o toque chegar em `pushManager.subscribe()` sem outro `await` antes.
+
+### Testes automatizados
+
+Arquivos novos:
+
+- `packages/core/test/push-events.test.js`: candidato (seguir, resposta, curtida, republicação), nunca a si mesmo, só membro, lista de bloqueio, idade de 6 h, nome e forma do evento.
+- `packages/core/test/push-proof.test.js`: declaração `varanda-push-v1`, hash do endpoint e URL `https` em ASCII imprimível.
+- `apps/cli/test/seeder-push.test.js`: cursor `pushNext`, silêncio do histórico, primeira admissão, reinício e os quatro eventos.
+- `apps/cli/test/push-relay.test.js`: `POST /push-event` em loopback, token, fila e perda sem repetir.
+- `apps/cli/test/account-push.test.js`: as quatro rotas da conta, o relé, 404 sem token, cifra e 404/410.
+- `apps/cli/test/web-push.test.js`: cifra RFC 8291 e a lista de endereços permitidos.
+- `apps/cli/test/push-store.test.js`: `push.json`, modo 0600, teto de 4 aparelhos.
+- `apps/cli/test/push-text.test.js`: as quatro frases, "Alguém" e `PUSH_BODY_MAX` 120.
+- `apps/app/test/push-state.test.js`: rótulos, estado do interruptor, `PUSH_RELOAD` e o aviso aberto pelo toque.
+- `apps/cli/test/push-e2e.test.js`: de um registro no diário servido, pelo relé do semeador, a um único `POST` cifrado num serviço de push falso, e todos os caminhos que devem ficar em silêncio.
+
+Arquivos estendidos:
+
+- `packages/core/test/terms.test.js`: `TERMS_VERSION` 3.
+- `packages/rpc/test/methods.test.js`: `push.sign` e o endpoint canônico (`href` igual à string, sem porta 443 explícita, sem host em maiúsculas, sem segmentos `.` ou `..`).
+- `packages/core/test/session.test.js`: o nó recusa `push.sign` com USAGE.
+- `packages/core/test/browser-safe.test.js`: `push-proof.js` entra no pacote do navegador.
+- `packages/web-member/test/session.test.js`: `push.sign` com a chave aberta.
+- `apps/cli/test/cli.test.js`: `VARANDA_PUSH_TOKEN` e `VARANDA_ACCOUNT_HTTP`.
+- `apps/cli/test/caddyfile.test.js`: `push-event` e `push-vapid` não aparecem fora de comentário.
+- `apps/cli/test/deploy.test.js`: as duas variáveis no semeador e na conta, não no serviço web.
+- `apps/cli/test/account.test.js`: o reparo de `push.json` registrado como `push`, e `pushDevices` no `account export`.
+- `apps/app/test/account.test.js`: `GET /account/push/key`, `POST /account/push/start`, `POST /account/push/finish` e `POST /account/push/check`.
+- `apps/app/test/sw.test.js`: o aviso, o toque, o ping `varanda-push-ping` e a resposta `{ source: 'varanda-sw', push: 1 }`.
+- `apps/app/test/legal.test.js`: `LEGAL_VERSION` 3.
+
+O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui. Nenhum teste de navegador cobre a linha de Ajustes nem o fluxo de abrir o aviso a partir da notificação (veja Limites).
+
+### Verificação manual
+
+Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados e não realizada ainda. Marcar só o que for de fato executado, com a saída. Use duas contas hospedadas, A e B, em dois navegadores, com o semeador e o serviço de conta desta mudança, a chave VAPID gerada e `VARANDA_PUSH_TOKEN` definido.
+
+- [ ] No navegador de mesa, em Ajustes, "Avisos no aparelho" aparece desligado. Ligar pede permissão e passa a "Ligados" (não realizada ainda).
+- [ ] No PWA instalado no Android, o mesmo controle liga e o sistema mostra o aviso (não realizada ainda).
+- [ ] No iPhone ou iPad com iOS 16.4 ou mais novo, com o Varanda na Tela de Início: o primeiro `await` do toque em ligar é `pushManager.subscribe()` (o estado já foi lido ao abrir a folha). A inscrição completa e o aviso do sistema chega (não realizada ainda).
+- [ ] Fora da Tela de Início, no iPhone ou iPad, a linha do interruptor não aparece e o texto diz que os avisos só funcionam na Tela de Início (não realizada ainda).
+- [ ] Com a conta B, um evento de cada tipo para A: seguir, responder, curtir e republicar. A recebe uma frase de cada, com o nome de B e a ação, sem o texto da publicação e sem citação (não realizada ainda).
+- [ ] Tocar no aviso de seguir abre a aba Avisos. Tocar no de resposta, curtida ou republicação abre a Conversa daquela publicação (não realizada ainda).
+- [ ] Desligar em Ajustes para os avisos neste navegador. Um evento novo de B não chega neste aparelho (não realizada ainda).
+- [ ] "Sair" desliga os avisos deste navegador. Entrar de novo não os religa sozinho (não realizada ainda).
+- [ ] Reiniciar o semeador não repete o histórico: os eventos que já estavam no diário não geram aviso de novo (não realizada ainda).
+- [ ] Sem `push-vapid.json` (serviço sem chave), a linha "Avisos no aparelho" não aparece (não realizada ainda).
+- [ ] Uma citação e uma menção de B aparecem na lista de Avisos e não geram aviso do sistema (não realizada ainda).
+
+### Limites
+
+- Um evento se perde, e não é repetido, enquanto o serviço de conta está fora ou a fila do repasse está cheia (`maxPending` 256 no semeador, `MAX_QUEUE` 512 no serviço). O cursor do semeador já andou.
+- Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
+- Teto de 60 avisos por hora por destinatário (`keyedWindow(60, 3600 * 1000)`, motivo `teto`). Pausa de 600 s para o mesmo autor, destinatário, tipo e `ref` (curtida, republicação e seguir repetidos; `keyedWindow(1, 600 * 1000)`, motivo `descartado`); cada resposta é um aviso próprio, porque a chave leva também o `seq` da resposta.
+- No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
+- Não há tratamento de `pushsubscriptionchange`. Não há citação nem menção no push. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
+- Em `apps/cli/lib/account/push-store.js`, `byDate` compara `createdAt` como texto. Um ISO de ano expandido (`toISOString` fora de 0000 a 9999, no formato `+275760-...`) ordena antes de um ano de quatro dígitos, e o teto pode tratar essa linha como a mais antiga. Uma transferência de `endpoint` para um membro que já tem 4 aparelhos não é recusada: `put` aceita (o comentário de "transferência que não acrescenta membro" vale para `MAX_MEMBERS`) e `cap` descarta a linha mais antiga desse membro.
+- Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros, do service worker e do roteiro acima.
+- Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
+- Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
+- Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
+- A limpeza de Sair e Recomeçar não espera uma troca do interruptor em andamento, e o interruptor continua tocável durante ela: ligar os avisos de novo no meio de Sair pode deixar a nova inscrição ativa.
+- Todo aviso é preenchido até 1024 bytes antes de cifrar (`PUSH_PAD_TO`, preenchimento do RFC 8188), então o tamanho não mostra o tipo nem o nome. Mas a entrega é imediata: o serviço de push do navegador vê o momento de cada aviso e pode cruzá-lo com os registros públicos dos diários. Não há atraso artificial, por escolha: um atraso deixaria todo aviso mais lento.
+- Os caminhos de `apps/app/src/screens/Identidade.js` que trocam a identidade guardada ("apagar e recomeçar" quando a identidade não confere, "criar mesmo assim") não chamam `disablePush`. Num aparelho compartilhado, a inscrição do navegador pode continuar recebendo os avisos da identidade anterior até ser desligada ou até o serviço de push descartá-la (não confirmado de ponta a ponta).
+
+## 39. Abertura do app: splash e cartões (feat/app-startup, 2026-10-29)
+
+As seções 1 a 38 não mudam. Esta seção documenta a primeira parte da abertura do app (PR A): a marca animada e os três cartões de apresentação antes dos Termos.
+
+### O que mudou
+
+- Splash animado (`apps/app/src/ui/Splash.js`): a cadeira (`assets/cadeira.png`) aparece com efeito de fade e escala, junto com a palavra "Varanda" e "conectando…", sobre o fundo `#fbf8f3`, o mesmo das telas de abertura nativas e da página web. Respeita "reduzir movimento". Substitui o splash só com texto que aparecia enquanto o registro dos Termos carregava e enquanto o nó conectava.
+- Cartões de apresentação (`apps/app/src/screens/Introducao.js`, lógica em `apps/app/src/intro.js`): três cartões, mostrados uma vez por aparelho, antes do portão dos Termos. Botões Pular, Voltar, Próximo e Começar. Na web, deslizar, os botões e as setas do teclado; na tela nativa, deslizar e os botões. Cada cartão é anunciado para leitor de tela.
+- Registro do aparelho: `varanda-intro` no `localStorage` (web, `introStore.web.js`) ou `varanda-intro.json` na pasta de documentos do app (nativo, `introStore.native.js`). Guarda só `{ v, seenVersion, at }`. É apresentação: não é aceite dos Termos nem de nada.
+- Não há telemetria e não há dependência nova. As telas de abertura nativas (`ios/` e `android/`) não mudam.
+
+### Testes automatizados
+
+- `node apps/app/test/intro.test.js`: validação do registro (formato, versão, data), a decisão de mostrar ou não (carregando tem prioridade, versão nova mostra de novo), o registro novo, os três cartões congelados e a ida e volta do armazenamento web (o nativo copia `termsStore.native.js` e fica na verificação manual).
+
+Esses testes cobrem os módulos puros e o armazenamento. Não cobrem a animação, a tela nem a ordem de carga no app: essa parte está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Primeira carga em aparelho novo: aparecem o splash, depois os três cartões, depois os Termos (não realizada ainda).
+2. [ ] Recarregar depois de Começar: os cartões não aparecem de novo (não realizada ainda).
+3. [ ] Pular no primeiro ou no segundo cartão (o último só tem Começar): vai direto para os Termos e não aparece de novo na recarga (não realizada ainda).
+4. [ ] Armazenamento recusado (navegador em modo privado): os cartões voltam a cada carga, e Pular continua funcionando (não realizada ainda).
+5. [ ] "Reduzir movimento" ligado no sistema: o splash não anima e os cartões trocam sem movimento (não realizada ainda).
+6. [ ] Web em celular estreito e em desktop largo: sem rolagem horizontal, botões acessíveis, cartões legíveis (não realizada ainda).
+7. [ ] iOS (app nativo): splash, cartões e Termos na ordem certa, e o arquivo `varanda-intro.json` aparece depois de Começar (não realizada ainda).
+8. [ ] Android (app nativo): o mesmo roteiro do iOS (não realizada ainda).
+9. [ ] Volta do Google (`?conta=` na URL): os cartões não aparecem, e o registro não é marcado como visto (não realizada ainda).
+10. [ ] Aparelho novo abrindo `/convite/<código>`: os cartões aparecem antes, e depois de Começar o convite continua na tela de entrada (não realizada ainda).
+11. [ ] Aparelho novo abrindo `/@nome`: os cartões aparecem antes, e depois de Começar o perfil continua aberto (não realizada ainda).
+12. [ ] Leitor de tela (VoiceOver ou TalkBack, ou leitor do navegador): cada cartão é anunciado ao trocar (não realizada ainda).
+
+### Limites
+
+- O registro vale por aparelho, não por conta. Quem usa outra conta no mesmo aparelho não vê os cartões de novo.
+- Sem armazenamento (modo privado ou dados bloqueados), os cartões voltam a cada carga. Pular continua funcionando na mesma carga.
+- Quem abre `/@nome` ou `/convite/<código>` pela primeira vez no aparelho vê os cartões antes do destino. O link é mantido enquanto os cartões estão na tela, e a checagem 10 e 11 confirma que ele não se perde.
+- A volta do Google (`?conta=`) pula os cartões nessa carga e não os marca como vistos, então eles podem aparecer na próxima abertura normal.
+- Os cartões são de apresentação. Não dizem nada sobre os Termos, e o texto deles não substitui o aceite.
+
+## 40. Verificação de idade na web hospedada (feat/hosted-age-verification, 2026-10-29)
+
+As seções 1 a 39 não mudam. Esta seção documenta o PR B: a verificação de idade com a Didit para quem usa a web hospedada. Idade mínima 16.
+
+### O que mudou
+
+- Declaração assinada `varanda-age-v1` (`packages/core/lib/age.js`) e método RPC `age.sign` (`docs/rpc.md` §5.32), só no nó do navegador.
+- Cliente da Didit (`apps/cli/lib/account/didit.js`): cria a sessão, lê a decisão e apaga a sessão. A decisão por rosto vale pela MENOR estimativa aprovada; abaixo de 21 anos pede o documento, e só o documento recusa (menos de 16).
+- Sidecar `age.json` (`apps/cli/lib/account/age-store.js`, modo 0600, volume `account-data`): por chave do membro, só a faixa (`16-17` ou `18+`), o método `didit` e a data.
+- Rotas (`apps/cli/lib/account/age-routes.js`): `GET /account/age/policy` e `POST /account/age/start|session|result`. Pedidos simultâneos de sessão dividem uma só sessão paga. Sem `age.json` disponível, nenhuma sessão é criada. A sessão que expira (24 h) ou é substituída é apagada na Didit. Limites de sessões pagas: 3 por membro em 24 h e, para chaves ainda sem vínculo, 3 por código de convite em 24 h (`limite-idade`, 429); teto diário `VARANDA_DIDIT_DAILY_LIMIT` (padrão 200), contado à parte para chaves novas e para membros já vinculados, que respondem `indisponivel` (503) quando cheio. Chaves sem vínculo e sem convite, com convites ligados, recebem `convite-obrigatorio`.
+- Portões no `server.js`: `idade-pendente` (403) em `/account/authorize`, `/account/finish`, `/account/rename/finish` e `/account/invites/finish` enquanto a verificação estiver ligada, sempre depois de conferir a assinatura (as rotas `start` sem assinatura não revelam se uma chave já verificou).
+- App: tela "Confirme sua idade" (`apps/app/src/screens/Idade.js`, lógica em `apps/app/src/age.js`) para toda pessoa da web hospedada, inclusive quem já tinha conta; antes do vínculo Google. A volta é `/?idade=volta`; `verificationSessionId` e `status` na URL são ignorados. Falha vira "verificação necessária".
+- Termos e Política versão 4 (novo aceite para todos).
+- Variáveis: `VARANDA_DIDIT_API_KEY`, `VARANDA_DIDIT_WORKFLOW_ID` (as duas definidas ligam; as duas vazias desligam; uma só é erro de uso) e `VARANDA_DIDIT_DAILY_LIMIT`. A chave precisa de `read:sessions` e `delete:sessions` e não pode ser restrita (README, "Verificação de idade").
+
+### Testes automatizados
+
+- `node packages/core/test/age.test.js`
+- `node apps/cli/test/didit.test.js`
+- `node apps/cli/test/age-store.test.js`
+- `node apps/cli/test/account-age.test.js`
+- `node apps/cli/test/account-age-e2e.test.js`
+- `node apps/app/test/age.test.js`
+- `node apps/app/test/onboarding.test.js`
+- `node apps/app/test/account.test.js`
+
+Todos usam servidores falsos em `127.0.0.1`, sem rede externa. Não cobrem a Didit real, a tela no navegador nem o modelo de idade do parceiro: isso está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Recurso desligado (sem as duas variáveis): nada muda, o passo não aparece e o serviço registra isso na partida (não realizada ainda).
+2. [ ] Teste de fumaça no sandbox da Didit, com os dois `curl` do README, antes de ligar em produção (não realizada ainda).
+3. [ ] Membro novo de ponta a ponta: Entrar, "Confirme sua idade", Didit, volta, @nome, Google, certificado (não realizada ainda).
+4. [ ] Membro já vinculado: fica bloqueado em "Confirme sua idade" e é liberado depois de passar (não realizada ainda).
+5. [ ] Menor de 16 pelo documento: recusado, sem acesso (não realizada ainda).
+6. [ ] Rosto inconclusivo, depois documento: o fluxo segue para o documento e termina bem (não realizada ainda).
+7. [ ] Revisão pendente, depois aprovada: o estado "pendente" some quando a Didit aprova (não realizada ainda).
+8. [ ] Reiniciar o serviço `account` com a sessão pendente: a pessoa recomeça e o app não trava (não realizada ainda).
+9. [ ] Teto diário atingido: aparece "serviço indisponível" (503) para chaves novas, um membro já vinculado ainda consegue a sessão, e no dia seguinte tudo volta a funcionar (não realizada ainda).
+10. [ ] Volta forjada, com `?idade=volta&status=Approved` sem ter passado: continua bloqueado (não realizada ainda).
+11. [ ] Abrir o app hospedado sem rede: fica bloqueado até conseguir consultar o serviço de conta (não realizada ainda).
+12. [ ] Console da Didit: retenção mínima definida e exclusão da sessão confirmada depois da decisão (não realizada ainda).
+13. [ ] Parecer jurídico sobre os textos da versão 4 dos Termos e da Política e sobre a idade mínima de 16 (não realizada ainda).
+
+### Limites
+
+- As sessões pendentes ficam só na memória: reiniciar pede para começar de novo.
+- A faixa não entra no certificado (v2 continua `unchecked`). A camada P2P ainda admite um certificado existente (`docs/protocol.md`), então um cliente antigo ou modificado não é bloqueado pela rede, só pelo app e pelo serviço de conta.
+- Não há o modo restritivo de 16 e 17 anos (#74).
+- O resultado depende do modelo do parceiro.
+- A exclusão na Didit é pedida logo após a decisão, com novas tentativas só em memória.
+- Sem as variáveis, ninguém é verificado (só para desenvolvimento e demo).
+- Aberto offline, o app hospedado fica bloqueado até conseguir consultar o serviço de conta.
+- Uma faixa fica guardada para uma chave que fez a verificação e não concluiu o vínculo.
+- A verificação prova a idade de quem terminou a página da Didit, não de quem tem a passkey: o endereço da sessão pode ser repassado, e um adulto pode fazer a selfie no lugar de um menor (no mesmo aparelho ou em outro). Prender a sessão ao aparelho não fecha isso; é uma questão de produto e de parecer (#39, #82).
+- Um membro que já tinha certificado é bloqueado pelo app e pelo serviço de conta, mas um cliente modificado ainda publica e sincroniza, porque os semeadores não conferem a faixa (#68).
+
+## 41. Apagar publicações e versões do perfil (PR feat/delete-posts, 2026-10-29)
+
+### O que mudou
+
+- Registro novo `delete` (lápide) no próprio diário: `{ type: 'delete', seq, at }`, com `media: [{ core, start, blocks }]` opcional, `1 <= seq <` o seq da própria lápide (`docs/protocol.md`). O efeito é determinístico e genérico: as entradas são lidas do seq mais alto para o mais baixo, uma lápide válida vale se ela mesma ainda não foi apagada, e o bloco apagado não conta em nenhuma dobra (`packages/core/lib/deletion.js`, `applyDeletes`).
+- Os escritores (`packages/core/lib/member.js`, `packages/web-member/lib/member-ops.js`) só apagam publicação própria (inclusive resposta e citação) ou versão do perfil; recusam o bloco 0, lápides e qualquer outro tipo. O par de compatibilidade do perfil sai como uma versão só, em um append atômico (duas lápides). A faixa de mídia vai na lápide só quando nenhuma publicação ou perfil sobrevivente a usa.
+- RPC `post.delete` e `profile.delete` (`docs/rpc.md`); `log.read` mostra o bloco apagado como `invalid: { seq, reason: 'deleted' }`.
+- Semeador: o alvo sai dos índices de engajamento, tema e nome; curtidas, republicações, respostas e citações de um alvo apagado não contam; `postBlock` responde null e `mediaRead` recusa a faixa listada na lápide, então `/media` e `/moderation-post` dão o 404 genérico.
+- CLI: `varanda delete --to <chave>:<seq>`; `log` mostra `#<seq> apagado`.
+- App: ação de lixeira nas publicações próprias em Diário, A Rua e Conversa, com confirmação em folha (`DeletePrompt`); Perfil lista as versões com "Apagar versão".
+
+### Testes automatizados
+
+Cobertura no repositório, por ponto:
+
+- Dobra, validação e efeito determinístico (inclusive a lápide de lápide): `packages/core/test/deletion.test.js`, `records.test.js`, `records-clone.test.js`.
+- Escritor do nó do núcleo, recusas, par de compatibilidade, faixas de mídia, `log.read` paginado: `packages/core/test/delete-session.test.js`, `member.test.js`, `session.test.js`, `store.test.js`.
+- Escritor do nó do navegador: `packages/web-member/test/delete.test.js`, `session.test.js`.
+- Semeador (índices, `postBlock`, `mediaRead`, reconstrução, cursor pausado): `packages/core/test/seeder-delete.test.js`, `engagement-index-delete.test.js`, `topic-index.test.js`, `name-index.test.js`; `apps/cli/test/seeder-index.test.js`, `ai-post-route.test.js`.
+- Feed e Espiadinha: `packages/core/test/feed.test.js`, `peek.test.js`.
+- CLI `delete` e `log`: `apps/cli/test/commands.test.js`, `cli.test.js`.
+- App (quem pode apagar, linhas escondidas, versões do perfil): `apps/app/test/deletion.test.js`, `outbox.test.js`.
+- Ponta a ponta, novo: `packages/core/test/delete-e2e.test.js` (sessões do nó na DHT local): quem segue sincroniza pelo semeador e deixa de ver a publicação, a resposta e a citação apagadas (`feed.read`, `log.read` com `deleted`); a lápide de outro diário com o seq do autor só esconde o bloco do próprio diário dela; o escritor recusa outro autor e recusa apagar uma lápide; uma lápide de lápide gravada à mão faz a publicação voltar no nó do autor e no de quem segue; um diário truncado continua aparecendo como `fork` para quem segue; o worklet do app usa o mesmo despachante da sessão, sem handler próprio.
+- Ponta a ponta, novo: `packages/web-member/test/e2e-delete.test.js` (nó do navegador e semeador real pelo WebSocket): depois de apagar uma publicação com foto, `/index/counts` e `/index/member` a omitem, `/media` e `/moderation-post` dão 404, `postBlock` é null e a Espiadinha de outro nó não a mostra mais.
+
+Resultados (2026-10-29, macOS): `node packages/core/test/delete-e2e.test.js` com 3 testes e 44 asserções, todos passam, no Node 24.22.1 e no 20.20.2; `node packages/web-member/test/e2e-delete.test.js` com 1 teste e 20 asserções, passa no Node 24.22.1 e no 20.20.2. Na árvore final, já sobre a main 184b7d2: `npm ci --ignore-scripts` ok; `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (50, 10, 35, 51, 54 e 2 arquivos de teste) no Node 20.20.2 e no 24.22.1; `npm run demo` termina com "DEMO OK" nas duas versões.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Diário: a lixeira aparece só nas publicações próprias; tocar abre a folha "Apagar publicação"; Cancelar, o toque no fundo, Escape e o Voltar do Android fecham sem gravar nada (não realizada ainda).
+- [ ] Diário: confirmar apaga, a publicação some da lista e o diário mostra uma lápide a mais em Ajustes › Avançado (não realizada ainda).
+- [ ] A Rua e Conversa: a mesma ação numa publicação, numa resposta e numa citação próprias; a republicação de um post de outra pessoa nunca oferece a lixeira (não realizada ainda).
+- [ ] Falha incerta (semeador derrubado durante o pedido): aparece a mensagem de incerteza, o app relê o diário antes de oferecer o botão de novo e nunca reenvia o pedido sozinho (não realizada ainda).
+- [ ] Perfil: com três versões, "Apagar versão" na mais nova faz valer a anterior (nome e bio); confirmar e cancelar se comportam como no Diário (não realizada ainda).
+- [ ] Perfil: uma versão com foto (par de compatibilidade) aparece como uma versão só e some inteira com um toque; a foto deixa de carregar em `/media` (não realizada ainda).
+- [ ] Perfil: apagar a última versão deixa a conta sem nome nem bio; quem segue vê as iniciais (não realizada ainda).
+- [ ] CLI: `varanda delete --to <chave>:<seq>` imprime `apagado #<seq>`; repetir imprime `já apagado` sem gravar; outro autor, o bloco 0, uma curtida e uma lápide são recusados com a mensagem em pt-BR (não realizada ainda).
+- [ ] CLI: `varanda log` mostra `#<seq> apagado` no lugar do texto, e `--json` traz `record: null, deleted: true` (não realizada ainda).
+- [ ] Semeador de produção: depois da sincronização, `/index/counts/<ref>` e `/index/member/<chave>` não trazem a publicação, `/media/...` da foto dá 404 e `/moderation-post/<chave>/<seq>` com o token dá 404 (não realizada ainda).
+- [ ] Um segundo aparelho que segue o autor deixa de ver a publicação em A Rua depois de sincronizar, e uma pessoa que não segue deixa de vê-la na Espiadinha (não realizada ainda).
+- [ ] O aceite dos Termos versão 5 aparece de novo para quem aceitou a versão 4 (não realizada ainda).
+
+### Limites
+
+- Apagar não remove os bytes: quem já tem cópia do diário, ou da foto, continua com ela; a lápide só diz aos clientes e ao semeador que o bloco não vale mais.
+- Uma lápide que aponta para outra lápide desfaz a primeira. O escritor nunca grava isso; só o próprio autor, escrevendo à mão, consegue, e o efeito vale só para o diário dele.
+- O semeador não aplica nesta etapa lápides que apontam para `follow` ou para a declaração de núcleo de mídia (os escritores nunca as gravam).
+
+## 42. Descarte dos bytes apagados (PR feat/delete-posts-purge, 2026-10-29)
+
+### O que mudou
+
+- Os bytes de um bloco apagado são descartados (`core.clear`) no aparelho do autor, em quem segue, no semeador e no nó do navegador. Só se descarta o que a dobra dos leitores esconde (`deletedSeqs` / `applyDeletes` em `packages/core/lib/deletion.js`); o bloco 0 e as lápides nunca são descartados. As faixas de mídia da lápide saem do núcleo de mídia, menos o cabeçalho e o que uma publicação sobrevivente ainda mostra.
+- O comprimento presente (primeiro buraco que não é bloco apagado) substitui o `contiguousLength` como valor em `hello`, `have` e `admitted`; o formato das mensagens não muda. Um buraco apagado não segura o comprimento, e o bloco descartado nunca é baixado de novo de um par desatualizado.
+- Na partida, o semeador e o nó descartam o que as lápides guardadas apagam antes de servir ou baixar qualquer coisa. Uma réplica que deixou de ser seguida é removida.
+- Chave de emergência: `VARANDA_NO_CLEAR=1` (ou `noClear`) guarda os bytes como antes; a lápide continua escondendo o item.
+
+### Testes automatizados
+
+- Descarte no motor e no armazenamento: `packages/core/test/clear.test.js`, `packages/web-member/test/node-storage.test.js`.
+- Escritor e sincronização do nó do núcleo (par desatualizado, chave de emergência, réplica não seguida, seguidor novo): `packages/core/test/sync-delete.test.js`, `delete-session.test.js`, `store.test.js`, `sync.test.js`.
+- Semeador (descarte, partida, `mediaRead`, lápide de lápide): `packages/core/test/seeder-delete.test.js`; `apps/cli/test/seeder-index.test.js`, `seed-ws.test.js`.
+- Nó do navegador (escritor, reabertura, sincronização sem reabastecer o buraco): `packages/web-member/test/delete-purge.test.js`, `delete.test.js`.
+- Ponta a ponta, novo: `packages/core/test/delete-purge-e2e.test.js` (sessões do nó, semeador real e um par cru desatualizado na DHT local). Depois de `post.delete` e das sincronizações, o bloco some do semeador e de quem segue (`has` falso; uma réplica crua nova pede o bloco e não recebe nada, e como controle recebe o mesmo bloco do par desatualizado). Reiniciados o semeador e a sessão de quem segue, cada um sozinho continua servindo os blocos seguintes e a lápide e não serve o bloco apagado. O par desatualizado volta com o bloco, o autor escreve de novo, e nem o semeador nem quem segue buscam o bloco de volta. Um seguidor novo, com o autor fora da rede, sincroniza pelo semeador e pelo par desatualizado e fica sem o bloco depois da varredura. Uma lápide forjada (no diário de outro membro, apontando para o seq do autor e inválida lá) não apaga nem descarta nada. Um diário de teste truncado continua sendo `fork` no semeador (`rejected` com `fork`) e em quem segue. Com `VARANDA_NO_CLEAR=1` o semeador e quem segue guardam os bytes e o item continua escondido (`postBlock` null, `feed.read` sem ele).
+- Ponta a ponta, novo: `packages/web-member/test/e2e-delete-purge.test.js` (nó do navegador sobre o IndexedDB de teste e semeador real pelo WebSocket). Apagada uma publicação com foto de três blocos, o semeador descarta o bloco do post e os três blocos da foto e guarda o cabeçalho e a outra foto; `mediaRead` recusa a faixa, um bloco dentro dela e faixas que a cruzam; GET e HEAD `/media` dão 404 para essas faixas e 200 para a foto que fica; a Espiadinha de outro nó não mostra o post. Depois de recarregar o nó (armazenamento fechado e reaberto, sincronização de novo), o buraco continua no navegador e no semeador.
+- A lápide de lápide com bytes já descartados não traz nada de volta: o post fica ausente no autor e em quem segue, e os blocos seguintes continuam visíveis (`packages/core/test/delete-e2e.test.js`, primeiro teste; `seeder-delete.test.js`, "a post a later tombstone gives back stays absent once cleared").
+
+Resultados (2026-10-29, macOS, rodados um a um): `node packages/core/test/delete-purge-e2e.test.js` com 3 testes e 76 asserções, todos passam, no Node 24.22.1 e no 20.20.2; `node packages/web-member/test/e2e-delete-purge.test.js` com 1 teste e 34 asserções, passa no Node 24.22.1 e no 20.20.2. Com `VARANDA_NO_CLEAR=1` no ambiente, o teste do navegador falha (o semeador não descarta), como esperado. A sequência completa da CI (`npm ci --ignore-scripts`, lint, test, demo) ainda não foi registrada aqui para esta PR.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Ordem de implantação: semeadores primeiro, depois o pacote web, depois o app, por último a CLI. Leitores anteriores a esta PR veem o diário cortado no primeiro buraco; conferir que cada etapa só entra depois da anterior estar no ar (não realizada ainda).
+- [ ] Semeador de produção: apagar uma publicação com foto no app; depois da sincronização, `/media/...` da foto dá 404 em GET e em HEAD, e o diretório de dados do semeador, depois de um reinício, continua sem servir o bloco (não realizada ainda).
+- [ ] Reinício do semeador com `VARANDA_NO_CLEAR=1` e depois sem: com a chave, os bytes ficam e o item continua escondido; sem a chave, o reinício descarta os bytes antes de servir (não realizada ainda).
+- [ ] Um aparelho com o app desatualizado (anterior a esta PR) que já tinha a publicação volta a se conectar: o semeador e os aparelhos atualizados não buscam o bloco de volta, e o app desatualizado mostra o diário do autor só até o primeiro buraco, sem erro (não realizada ainda).
+- [ ] Depois de atualizar esse app, ele descarta o bloco apagado na primeira sincronização e mostra as publicações seguintes do autor (não realizada ainda).
+- [ ] Navegador: apagar uma publicação com foto na web hospedada, recarregar a página; a foto não volta, as publicações seguintes aparecem e a Espiadinha de outra pessoa não mostra o post (não realizada ainda).
+- [ ] Um segundo aparelho que segue o autor, depois de sincronizar e reiniciar o app, continua sem a publicação e sem a foto, inclusive com um par antigo ainda online (não realizada ainda).
+- [ ] CLI: `varanda log` de um diário com bloco descartado mostra `#<seq> apagado` e lê os blocos seguintes (não realizada ainda).
+
+### Limites
+
+- Quem já obteve uma cópia (par desatualizado, réplica de navegador fora do registro, captura de tela, cache imutável de `/media`) continua com ela; o descarte vale para as cópias oficiais atualizadas.
+- Uma réplica nova ainda pode baixar o bloco de um par desatualizado antes de varrer a lápide; ela o descarta na varredura.
+- Uma lápide de lápide desfaz a primeira na dobra, mas não traz de volta bytes já descartados: o seq aparece sem registro (`malformed`) e os blocos seguintes continuam visíveis.
+- No Hypercore 10 do navegador o `contiguousLength` não é durável depois de `clear`; o nó usa o comprimento presente calculado com `has(i)`, e um par do navegador pode anunciar um intervalo contíguo que cruza um buraco descartado: o pedido desse bloco só expira.
+
+## 43. Ajustes de UX: Espiadinha sem rótulos de rodada, ajuda só pelo botão de informação, compartilhar perfil, campo único em Seguindo, aviso abre o perfil, confirmação ao deixar de seguir, cartão de instalação (2026-10-30)
+
+As seções 1 a 42 não mudam. Esta seção documenta uma rodada de sete ajustes de interface no app. Nenhum método do RPC, formato de registro ou rota mudou.
+
+### O que mudou
+
+- Espiadinha sem rótulos de rodada: as rodadas continuam (até três publicações por diário), mas a lista não mostra mais os títulos "Nª publicação de cada diário" (`apps/app/src/peek.js`, `apps/app/src/screens/Espiadinha.js`).
+- Ajuda só pelo botão de informação: o link "Saiba mais" deixou de existir; as linhas curtas terminam com um pequeno botão de informação que abre a mesma folha (`apps/app/src/ui/Help.js`, `apps/app/src/help.js` e as telas A Rua, Espiadinha, Seguindo, Avisos, Diário, Identidade, Ajustes, Denunciar, Termos e Busca).
+- Compartilhar perfil: no Diário, "Editar perfil" e "Compartilhar" ficam lado a lado embaixo dos dados do perfil (fora da faixa do topo); "Compartilhar" abre a folha "Compartilhar perfil" com o link, "copiar link" e "compartilhar" (`apps/app/src/screens/Diario.js`).
+- Campo único em Seguindo: "Encontrar pessoas" ("nome, @nome ou código") no lugar do campo "Buscar", da pílula "Buscar" e do campo de código; a classificação da entrada vive em `apps/app/src/followInput.js` (`apps/app/src/screens/Seguindo.js`).
+- Aviso abre o perfil: a linha "começou a seguir você" é um link para o perfil, sem a pílula "Seguir de volta"; o "Seguir" fica no perfil (`apps/app/src/screens/Avisos.js`, `apps/app/src/notices.js`).
+- Confirmação ao deixar de seguir: "Seguindo" abre a folha "Deixar de seguir <nome>?", e só o botão vermelho "Deixar de seguir" envia `follow.remove` (`apps/app/src/ui/FollowPill.js`, `apps/app/src/follow.js`; usado em Seguindo, na busca e em Membro).
+- Cartão de instalação: "Instale o Varanda" aparece uma vez depois do cadastro novo (`apps/app/src/ui/InstallCard.js`, `apps/app/src/install-offer.js`, `apps/app/src/install.web.js`, `apps/app/src/install.native.js`, `apps/app/App.js`).
+
+**Substitui.** As instruções de verificação humana que mandam procurar o link "Saiba mais" (seções 20, 22, 23, 26 e 33) passam a valer para o botão de informação ao fim da mesma linha. A pílula "Seguir de volta" da seção 20 deixa de existir: a linha abre o perfil. A pílula "Buscar" e o campo separado "@nome ou código" da seção 22 (e do acompanhamento da seção 26) viram o campo único "Encontrar pessoas". Os títulos de rodada da Espiadinha (seção 23) não aparecem mais. O "Seguindo" que deixava de seguir com um toque agora pede confirmação. A seção 39 (abertura do app antes do cadastro: splash e cartões de apresentação) continua valendo sem mudança; o cartão de instalação desta seção vem depois do cadastro e é outra coisa.
+
+### Testes automatizados
+
+- `node apps/app/test/peek.test.js`: os testes dos títulos de rodada foram removidos.
+- `node apps/app/test/notices.test.js`: o teste do rótulo "Seguir de volta" foi removido.
+- `node apps/app/test/follow.test.js` (novo): texto e rótulo da confirmação de deixar de seguir.
+- `node apps/app/test/followInput.test.js` (novo): classificação da entrada (nome, @nome, código, código incompleto).
+- `node apps/app/test/install-offer.test.js`: testes novos de `installCard`, de `getCard` e das exportações do módulo nativo.
+- `node apps/app/test/help.test.js`: não mudou.
+
+### Verificação humana (ainda não realizada)
+
+- [ ] A Espiadinha não mostra títulos entre as rodadas.
+- [ ] Cada ponto que tinha "Saiba mais" abre a folha certa pelo botão de informação ao fim da linha.
+- [ ] Diário, "Compartilhar": a folha "Compartilhar perfil" abre com e sem @nome, com a área de transferência recusada (o link fica selecionado) e a engrenagem continua tocável.
+- [ ] Seguindo, campo único: nome, @nome (com e sem resultado que bata, e sem internet), código completo, código incompleto e Enter.
+- [ ] Avisos: o aviso de quem seguiu abre o perfil, e "Seguir" ali tira o aviso na próxima leitura.
+- [ ] A confirmação "Deixar de seguir <nome>?" aparece na lista, na busca e em Membro, e "Cancelar" não envia nada.
+- [ ] O cartão "Instale o Varanda" aparece depois do cadastro no Chrome do Android, no Chrome do computador e no Safari do iPhone; nunca numa recarga, nem para conta existente, nem para conta que volta num aparelho novo.
+- [ ] "Agora não" também silencia a nota "Instalar o Varanda".
+
+### Limites
+
+- O cartão aparece só na carga de página que volta do Google depois do passo "vinculo", e vale também a chave de 30 dias; não há cartão no app nativo. Quem já é membro e vincula o Google em Ajustes › Conta e @nome não o recebe. "Instalar" abre o diálogo do navegador e fecha o cartão.
+- Na web, Escape ou Voltar com a folha de confirmação aberta em Membro também fecha a tela, e nada é enviado.
+
+## 44. Abertura do app: splash animado e espera mínima (feat/animated-splash, 2026-10-30)
+
+As seções 1 a 43 não mudam. Esta seção documenta o splash animado: a cadeira, as letras e "conectando…" cobrem o carregamento e a conexão com o semeador, e a tela Conectar deixa de piscar na web hospedada.
+
+### O que mudou
+
+- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s nas fases de carregamento e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o splash passa a cobrir a fase `connecting` (o tempo nos cartões e nos Termos não conta); depois disso, num nó configurável, a tela Conectar aparece. A busca da configuração (`loading`) não entra nessa conta: ela tem o próprio limite de 8 s. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
+- Coreografia (`apps/app/src/ui/Splash.js`): a cadeira sobe e assenta, as letras de "Varanda" entram uma a uma, e "conectando…" aparece e pulsa. Os números ficam em `apps/app/src/ui/splashMotion.js` (`ENTRANCE_MS = 1180`, `PULSE_MS = 1200`, entre outros). Com "reduzir movimento", tudo vai ao estado final de imediato.
+- Sobreposição na web (`apps/app/public/index.html`): um elemento fixo `#varanda-pre-splash`, desenhado só com CSS e um SVG inline (sem script), antes de o bundle do app carregar. O app o remove quando o splash sai. Uma regra CSS o esconde sozinho depois de 20 s, caso o app nunca monte. Sem JavaScript, ele fica oculto e aparece a frase do `<noscript>`.
+- Por que: na web hospedada `canConfigure` é verdadeiro, então a regra antiga do `App.js` mostrava Conectar enquanto o nó ainda conectava. Agora o splash cobre essa espera.
+
+### Testes automatizados
+
+- `apps/app/test/splashGate.test.js`: o piso de 1,5 s segura as fases de carregamento e, com `gateNext`, qualquer fase antes dos cartões ou dos Termos, a paciência de 10 s conta a partir de `connecting`, tempo que não é número finito conta como zero, depois que Conectar apareceu (`released`) o splash não volta, e os guardas da função pura e da integração no app.
+- `apps/app/test/splashMotion.test.js`: as constantes, a coreografia completa, o "reduzir movimento" que assenta de imediato, e que o módulo continua puro.
+- `apps/app/test/pwa.test.js`, "index.html paints the brand before the bundle runs": a marca e o estilo da sobreposição vêm no HTML antes do bundle do app.
+
+Esses testes cobrem o portão, os números e o HTML. Não cobrem a animação em aparelho real nem a ordem de pintura no navegador: essa parte está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Web hospedada a frio: a cadeira e as letras aparecem antes do app, e nunca a chave nem o endereço do semeador (não realizada ainda).
+2. [ ] PWA instalada com cache quente: a animação termina e não aparece duas vezes (não realizada ainda).
+3. [ ] Rede lenta (3G no DevTools): a marca continua durante a busca da configuração (até 8 s) e depois até a conexão responder ou até 10 s, e só então aparece Conectar (não realizada ainda).
+4. [ ] Falha de descoberta: Conectar aparece na hora (não realizada ainda).
+5. [ ] Falha de conexão: Conectar aparece na hora, com "Detalhes técnicos" (não realizada ainda).
+6. [ ] Conexão presa por 10 s: Conectar aparece (não realizada ainda).
+7. [ ] "Tentar de novo": Conectar continua na tela durante a nova tentativa (não realizada ainda).
+8. [ ] Com o app bloqueado (bundle que não monta), a sobreposição some sozinha em 20 s (não realizada ainda).
+9. [ ] "Reduzir movimento" na web, no iOS e no Android: nada se move (não realizada ainda).
+10. [ ] Leitor de tela anuncia "Varanda, conectando" uma vez (não realizada ainda).
+11. [ ] Passagem da tela de abertura nativa para o splash no iOS e no Android, sem salto nem tela em branco (não realizada ainda).
+12. [ ] Ordem dos cartões e dos Termos da seção 39 inalterada (não realizada ainda).
+13. [ ] JavaScript desligado mostra "Ative o JavaScript para usar o Varanda." (não realizada ainda).
+14. [ ] No nativo com configuração salva, o splash cobre a conexão por até 10 s no lugar do formulário com "conectando…" (não realizada ainda).
+15. [ ] Primeira abertura lenta: com o nó ainda conectando, passar mais de 10 s nos cartões e nos Termos; depois deles volta o splash (com a entrada de novo), e Conectar só aparece se a conexão não responder em mais 10 s (não realizada ainda).
+
+### Limites
+
+- A sobreposição da web não conhece a fase real da conexão. Ela sai quando o app a remove, ou some sozinha em 20 s; se o app montar depois disso, o splash do app toca a entrada e passa a ser o anunciado para leitor de tela.
+- 1,5 s e 10 s são fixos, sem configuração.
+- No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
+- Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
+- No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
+- Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
+
+## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
+
+### O que mudou
+
+- Veio de um relato com print: num iPhone, depois de criar a passkey, o cartão mostrava três avisos seguidos, culpava só o navegador ("Use o Chrome ou o Edge, ou o Safari 18") e não tinha botão; só recarregar a página saía dele.
+- O cartão separa dois casos (`apps/app/src/screens/Identidade.js`, textos em `apps/app/src/passkeyTrouble.js`):
+  - o navegador diz antes de qualquer cerimônia que não consegue (sem WebAuthn, ou `getClientCapabilities` com `extension:prf` falso): "Este navegador não funciona com o Varanda. Use o Chrome, o Edge ou o Safari 18 ou mais novo.", sem botão, como antes;
+  - uma cerimônia devolveu NO_PRF (a passkey foi criada ou escolhida, mas o gerenciador de senhas não entrega o PRF): "Não deu para entrar com essa passkey.", passos numerados e o botão "tentar de novo", que volta ao cartão Entrar.
+- Passkey criada nesta página (Criar ou concluir): apagar a passkey "Varanda xxxxxx", tentar de novo e criar outra salvando nas Senhas da Apple ou no Gerenciador de Senhas do Google, ou abrir no Safari ou no Chrome.
+- O passo de apagar nomeia só passkeys criadas nesta página que falharam, todas, uma vez cada. Ele sobrevive ao "tentar de novo" e a uma falha seguinte em Entrar; depois de uma falha em Entrar o passo seguinte é escolher outra passkey, nunca criar outra.
+- Passkey escolhida em Entrar e não criada aqui: pode ser a passkey da conta, então nunca é nomeada para apagar (antes era). Os passos sugerem tentar de novo (escolhendo outra passkey quando o navegador não guarda nenhuma; com uma guardada, Entrar só oferece aquela e o passo é só "tentar de novo") ou abrir em outro navegador.
+- Criação em dois passos (o PRF só chega no "concluir"): se o "concluir" falha sem PRF, o cartão sai do estado "concluir", porque o nó descarta a criação pendente e "tentar de novo" levaria a um "concluir" que só falharia. Uma falha de "Criar passkey" (outra passkey) não mexe na criação pendente. Se a falha vem de uma passkey escolhida em Entrar, a criação pendente pode continuar viva (outra passkey) ou ter sido descartada (a mesma), e a tela não sabe qual: o cartão mantém "concluir" e mostra também "Criar passkey" (achados das revisões do codex e do grok).
+- Com convite, o passo de abrir em outro navegador sai, porque o convite já diz isso com o link.
+- O texto do convite perdeu o travessão: "@nome convidou você. Entre para seguir." (`apps/app/src/profileLink.js`).
+- A cerimônia, o nó e o que fica guardado não mudaram. O nó já deixava a passkey que falhou fora da próxima criação (`packages/web-member/web/node.js`, `noteUnusable`).
+
+### Testes automatizados
+
+- Novo: `apps/app/test/passkeyTrouble.test.js` (rótulo da passkey, uma ou várias passkeys nomeadas sem repetir, ids inválidos ignorados, numeração, passo omitido com convite, passkey escolhida nunca nomeada para apagar nem recriada, sem travessão e sem o id inteiro).
+- Atualizado: `apps/app/test/profileLink.test.js` (texto do convite).
+
+Resultados (2026-10-30, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em 219 arquivos de teste (já sobre a main com #234 e #235); `npm run demo` termina com "DEMO OK". `apps/app/test/passkeyTrouble.test.js`: 5 testes, 60 asserções. Numa rodada anterior, com auditorias rodando testes ao mesmo tempo, `packages/web-member/test/e2e-delete-purge.test.js` falhou uma vez ("every photo block is cleared on the seeder": `[false, true, true]` em vez de `[false, false, false]`); sozinho, passou duas vezes (34/34), e a rodada completa seguinte passou. Esse pacote não foi alterado. Não rodado no Node 20.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] iPhone com um gerenciador de senhas de terceiros ligado: criar a passkey salvando nele mostra "Não deu para entrar com essa passkey.", os passos e "tentar de novo" (não realizada ainda).
+- [ ] Na mesma página, "tentar de novo" e criar salvando nas Senhas da Apple entra; o cartão não volta (não realizada ainda).
+- [ ] Duas falhas seguidas nomeiam as duas passkeys no passo 1 (não realizada ainda).
+- [ ] Criação em dois passos que falha no "concluir": "tentar de novo" mostra "Criar passkey", não "concluir" (não realizada ainda).
+- [ ] Criação em dois passos pendente e outra passkey sem PRF escolhida em Entrar: "tentar de novo" mostra "concluir" e "Criar passkey", e "concluir" ainda entra (não realizada ainda).
+- [ ] Escolher em Entrar uma passkey sem PRF que não foi criada nesta página mostra os passos sem "Apague" (não realizada ainda).
+- [ ] Criar falha, "tentar de novo", Entrar com a mesma passkey falha: o passo "Apague" continua nomeando-a (não realizada ainda).
+- [ ] Navegador embutido (Instagram) com link de convite continua mostrando o caso do navegador, o convite e copiar/compartilhar (não realizada ainda).
+
+### Limites que sobram
+
+- A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
+- Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
+- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
+
+## 46. Leituras sem parar a sincronização na web (PR perf/faster-content-loading, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), cada leitura de membro parava a sincronização em curso: o socket fechava, todos os núcleos fechavam, e a rodada recomeçava e reconectava. A Rua disparava uma rajada de leituras, e a sincronização caía de novo e de novo. Num armazenamento novo do navegador, a lista de seguidos (montada a partir do próprio diário quando ele fica em dia) só aparecia depois que as leituras paravam. Parecia que A Rua, a Espiadinha e Seguindo só carregavam depois do Diário.
+- `feed.read`, `log.read`, `profile.read`, `engagement.read` e a leitura do próprio diário em `notices.list` passam a ser servidas pelos núcleos que a rodada já tem abertos (`packages/web-member/lib/session.js`, `withCores`; `lib/sync.js`, o leitor). Elas não param mais a sincronização: nenhum `sync.stopped` com `'preempted'`, o mesmo `runId`. Sem rodada, abrem o armazenamento como antes. Uma leitura que a rodada não consegue servir (uma réplica guardada que a rodada não tem, ou um núcleo que a rodada fechou no meio da leitura) volta ao caminho exclusivo antigo e interrompe a rodada uma vez. A moderação (chaves bloqueadas, emissores revogados) é relida logo antes de responder.
+- `follow.list` lê só a lista guardada e nunca para a sincronização. A resposta continua em ordem, depois de um `follow.add`.
+- A Espiadinha (`peek.read`) e `notices.list` deixam de esperar atrás da fila de pedidos quando a chave própria já é conhecida, a menos que uma troca de identidade esteja pendente.
+- Escritas (publicar, curtir, seguir, perfil, apagar) continuam parando e recomeçando a sincronização como antes. O app nativo e o `varanda-serve` (`packages/core`) não mudam: as leituras deles ainda interrompem a rodada por causa do lock do diretório de dados (`docs/protocol.md` seção 9).
+
+### Testes automatizados
+
+- `packages/web-member/test/read-while-sync.test.js`: as leituras mantêm o `runId`, zero `'preempted'`, o mesmo feed que sem uma rodada, bloqueados e emissores revogados continuam escondidos, `follow.list` espera em ordem enquanto `peek.read` começa, o fechamento espera uma leitura em andamento, e uma réplica guardada de quem não se segue cai no caminho exclusivo uma vez.
+- `packages/web-member/test/sync-reader.test.js`: a rodada publica os núcleos dela, um empréstimo atrasa o desmonte, e uma falha cedo limpa o leitor.
+- `packages/web-member/test/member.test.js`: leituras emprestadas iguais às leituras exclusivas, nada aberto, fechado ou descartado, casos `NEEDS_EXCLUSIVE`, e bloco, bifurcação e fechamento adotados no meio da leitura.
+- `packages/web-member/test/session.test.js`: `follow.list` não interrompe a rodada, `peek.read` com a chave em cache pula a fila, e uma troca de identidade pendente entra na fila.
+- `packages/web-member/test/lease.test.js` e `packages/web-member/test/diary-peek.test.js`, reescritos: as leituras deixam de interromper a rodada; `diary.peek` durante um `feed.read` na mesma rodada.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Na web hospedada, com as ferramentas de desenvolvedor do navegador e o registro de RPC e de eventos. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Armazenamento com seguidos: desbloquear. No primeiro minuto, nenhum `'preempted'` causado por uma leitura. Paradas `'idle'` do lease, e paradas e recomeços depois de escritas, são esperados (não realizada ainda).
+- [ ] Abrir Seguindo enquanto A Rua carrega: a lista responde sem parar a sincronização. Ela pode ainda esperar uma leitura que já estava na fila (não realizada ainda).
+- [ ] Abrir a Espiadinha com um `feed.read` pendente: o socket próprio dela abre antes de esse `feed.read` responder (não realizada ainda).
+- [ ] Um diário bloqueado e um emissor revogado continuam escondidos em A Rua, nos nomes e na Espiadinha (não realizada ainda).
+- [ ] Armazenamento novo do navegador: ficar em A Rua. As publicações de quem se segue aparecem quando a lista de seguidos chega (`follows-changed`), sem visitar o Diário (não realizada ainda).
+- [ ] Anotar os números antes e depois desta PR: a quantidade de `'preempted'` no primeiro minuto e o tempo até a primeira linha de A Rua (não realizada ainda).
+
+### Limites
+
+- A primeira leitura depois que uma rodada começa espera a rodada abrir as réplicas seguidas, uma a uma.
+- O app nativo e o `varanda-serve` ainda interrompem a rodada em cada leitura.
+- Um desbloqueio adotado durante uma leitura só aparece na leitura seguinte (falha segura).
+- O portão de idade da web hospedada continua com 3 idas e voltas a cada carga da página (de propósito).
+
+## 47. Grupos públicos (PR feat/groups-public, 2026-10-28)
+
+Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.35 a 5.48. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
 
 ### Como verificar
 
@@ -2006,6 +2812,11 @@ Resultado nesta rodada: os arquivos de teste de grupos listados acima passam; a 
 - Limitação aceita pela decisão do produto: um navegador que divide a chave de escritor de um grupo com outra instância do mesmo perfil (outra aba, ou um aparelho restaurado de um armazenamento mais antigo) confia no comprimento que seu único semeador informa. Um semeador malicioso que esconde blocos desse escritor que ele tem pode fazer o aparelho gravar num comprimento defasado e bifurcar o próprio escritor ou a própria raiz. Nenhuma prova distingue um semeador que esconde blocos de um que nunca os recebeu, e o navegador não tem outro par. Um semeador honesto que só está atrasado é coberto por `group-behind`.
 - Núcleo (décima terceira rodada): o caminho real da divergência de bloco 0 em escritores de grupo não tem asserção de ponta a ponta da linha agregada `bloco 0 divergente em escritores de grupo: <n> (<chaves>)` (só um teste com gancho).
 - Núcleo (diário de vínculo): entre a saída de um escritor parado por cota da tabela de admissão e a leitura que o registra como guardado, o diário de vínculo dele pode ser liberado e purgado se nenhum outro escritor o nomear naquele instante; o diário volta a ser buscado quando um escritor dele passa de novo pelo portão. Sem perda dos blocos do escritor.
+- Navegador: as leituras de grupo (`group.read`, `group.list`, `group.info`, `group.members`, `group.requests`) ainda pausam a sincronização em andamento em vez de ler junto com ela.
+- Quando a pessoa autora apaga um bloco `group-join`, a varredura do semeador o ignora, mas o estado de entrada dobrado antes da exclusão permanece.
+- Núcleo: nenhum teste falha sem a mudança da varredura de entradas para uma entrada depois de um buraco limpo (só o refino do teto por diário a usa).
+- Núcleo: a execução única que ficava esperando um escritor cujo bloco `group-join` a pessoa autora apagou depois do portão não foi reproduzida em teste (a retirada `withdrawn` tem teste; a espera exata foi conferida lendo o código), e a regra que impede a limpeza da partida de apagar um núcleo de grupo que o próprio nó grava não tem teste que falhe sem ela. Um portão que já esperava o bloco `group-join` quando chega a exclusão dele só termina no próprio prazo (`timeout`, sem contar contra o diário).
+- Navegador: nenhum teste cobre um bloco apagado que o semeador ainda guarda ser recusado enquanto está em oferta.
 - Verificações humanas, em aparelho real, ainda devidas: ver um grupo criado na CLI aparecer no navegador e o inverso, num semeador de verdade.
 
 ### Verificações novas do ciclo de segurança (a fazer; a pessoa que modera ou opera confere)

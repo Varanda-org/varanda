@@ -7,12 +7,15 @@ const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
 const http = require('node:http')
+const net = require('node:net')
 const crypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
 const { testnet, tmpDir, bootstrapFlags, until } = require('./helpers/net')
 const { connect, openSession } = require('./helpers/ws-client')
-const { initAssociation } = require('@varanda/core/lib/assoc')
-const { MAX_REQUEST } = require('@varanda/rpc')
+const { initAssociation, issueCertificate } = require('@varanda/core/lib/assoc')
+const { openStore, openDiary } = require('@varanda/core/lib/store')
+const WebSocket = require('ws')
+const { MAX_REQUEST, createClient } = require('@varanda/rpc')
 
 const SERVE = path.join(__dirname, '..', 'bin', 'varanda-serve.js')
 const CLI = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -241,6 +244,108 @@ test('scripted client: errors and the sync events of the contract', async (t) =>
   noLeak(t, s)
 })
 
+// The labels (never the values) of the sentinels found in any of the texts.
+function leaked (texts, sentinels) {
+  return Object.keys(sentinels).filter((label) => texts.some((text) => text.includes(sentinels[label])))
+}
+
+// The member's secret material as bytes, from its own closed store: the seed
+// half of the diary's secret key (the other half is the public key) and the
+// store's primary key.
+// Each secret as it could slip out of a handler: hex, base64 (unpadded, so
+// padded matches too), base64url, and the byte list a Buffer takes in JSON
+// ({"type":"Buffer","data":[...]}).
+function secretForms (secrets) {
+  const out = {}
+  for (const [label, bytes] of Object.entries(secrets)) {
+    out[label + ' (hex)'] = bytes.toString('hex')
+    out[label + ' (base64)'] = bytes.toString('base64').replace(/=+$/, '')
+    // The same text as base64 when the key has no '+' or '/'.
+    if (bytes.toString('base64url') !== out[label + ' (base64)']) out[label + ' (base64url)'] = bytes.toString('base64url')
+    out[label + ' (byte list)'] = JSON.stringify([...bytes])
+  }
+  return out
+}
+
+async function secretsOf (dataDir) {
+  const store = await openStore(dataDir)
+  try {
+    const diary = await openDiary(store)
+    return {
+      'diary secret key': Buffer.from(diary.keyPair.secretKey).subarray(0, 32),
+      'store primary key': Buffer.from(store.primaryKey)
+    }
+  } finally {
+    await store.close()
+  }
+}
+
+test('WebSocket frames and HTTP bodies carry no path, secret key, token or bootstrap address', async (t) => {
+  const m = await member(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const bad = connect(s, ORIGIN)
+  await bad.opened
+  t.is((await bad.call('session.open', { token: 'x'.repeat(64) })).error.code, 'UNAUTHORIZED')
+  await bad.closed
+  t.is((await request(s, { path: '/nada' })).status, 404)
+
+  const { c } = await openSession(s, ORIGIN)
+  const ok = async (method, params) => {
+    const r = await c.call(method, params)
+    t.is(r.ok, true, method)
+    return r.result
+  }
+  const refused = async (method, params, code) => t.is((await c.call(method, params)).error.code, code, method + ' -> ' + code)
+
+  await refused('identity.show', {}, 'NOT_FOUND')
+  const { publicKey } = await ok('identity.create')
+  await ok('identity.show')
+  await ok('cert.add', { cert: issueCertificate(m.assocDir, { member: publicKey }) })
+  await ok('node.info')
+  await ok('profile.set', { name: 'Ana', bio: 'bio' })
+  const post = await ok('post.create', { text: 'olá' })
+  await ok('post.reply', { to: post.ref, text: 'de novo' })
+  await refused('post.create', { text: '' }, 'USAGE')
+  await refused('node.info', { extra: 1 }, 'USAGE')
+  await refused('nao.existe', {}, 'USAGE')
+  await ok('follow.add', { key: 'ab'.repeat(32) })
+  await ok('follow.list')
+  await ok('follow.remove', { key: 'ab'.repeat(32) })
+  await ok('log.read')
+  await refused('log.read', { author: 'ab'.repeat(32) }, 'NOT_FOUND')
+  await ok('feed.read')
+  await ok('profile.read', { authors: [publicKey] })
+  await ok('sync.status')
+  const { runId } = await ok('sync.start', { once: true, timeoutMs: 1000 })
+  await c.event('sync.stopped', (data) => data.runId === runId)
+  await ok('sync.status')
+  t.ok(c.events('sync.started').length > 0 && c.events('sync.event').length > 0, 'sync events crossed the socket')
+  c.ws.close()
+  s.child.kill('SIGTERM')
+  await s.exit
+
+  const secrets = await secretsOf(m.dataDir)
+  const sentinels = {
+    'data dir': m.dataDir,
+    'association dir': m.assocDir,
+    token: s.token,
+    ...Object.fromEntries(m.bootstrap.map((address, i) => ['bootstrap ' + (i + 1), address])),
+    ...secretForms(secrets)
+  }
+  t.ok(s.seen.length > 20, 'a broad script (' + s.seen.length + ' texts)')
+  t.alike(leaked(s.seen, sentinels), [], 'no sentinel in any frame or body')
+
+  // Control: the scan names every sentinel it is given when one leaks.
+  for (const label of Object.keys(sentinels)) {
+    t.alike(leaked(['{"v":1,"id":1,"ok":true,"result":{"x":"' + sentinels[label] + '"}}'], sentinels), [label], 'control: ' + label)
+  }
+
+  // Control: a Buffer left in a result takes its JSON form, {"type":"Buffer","data":[...]}.
+  for (const [label, bytes] of Object.entries(secrets)) {
+    t.alike(leaked([JSON.stringify({ v: 1, id: 1, ok: true, result: { key: bytes } })], sentinels), [label + ' (byte list)'], 'control: ' + label + ' as a Buffer')
+  }
+})
+
 test('reconnection: closing the socket stops the run and keeps the identity', async (t) => {
   const m = await member(t)
   const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
@@ -441,5 +546,149 @@ test('EADDRINUSE and SIGTERM releases the data dir', async (t) => {
 
   const show = spawnSync(process.execPath, [CLI, 'id', 'show', '--data', m.dataDir], { env: baseEnv, encoding: 'utf8', timeout: 30000 })
   t.is(show.status, 0, 'the data dir is free for the CLI: ' + show.stderr)
+  noLeak(t, s)
+})
+
+// A member data dir with an identity and its certificate as block 0, which
+// post.create needs.
+async function certifiedMember (t) {
+  const m = await member(t)
+  const run = (args) => {
+    const r = spawnSync(process.execPath, [CLI, ...args, '--json'], { env: baseEnv, encoding: 'utf8', timeout: 30000 })
+    if (r.status !== 0) throw new Error('varanda ' + args.join(' ') + ': ' + r.stderr)
+    return JSON.parse(r.stdout)
+  }
+  const { publicKey } = run(['id', 'create', '--data', m.dataDir, '--association', m.association])
+  const certFile = path.join(tmpDir(t), 'cert.json')
+  run(['assoc', 'certify', '--data', m.assocDir, '--member', publicKey, '--out', certFile])
+  run(['cert', 'add', '--data', m.dataDir, '--cert-file', certFile])
+  return m
+}
+
+// A TCP relay in front of varanda-serve for one connection: hold() keeps what
+// the server says from reaching the client, release() delivers it, cut() drops
+// the connection. The request always reaches the server.
+async function relay (t, server) {
+  let down = null
+  let up = null
+  let held = false
+  const chunks = []
+  const state = { port: null, heldBytes: 0 }
+  const tcp = net.createServer((socket) => {
+    down = socket
+    up = net.connect(server.port, '127.0.0.1')
+    for (const s of [down, up]) s.on('error', () => {})
+    down.on('data', (d) => up.write(d))
+    up.on('data', (d) => {
+      server.seen.push(d.toString())
+      if (!held) return down.write(d)
+      chunks.push(d)
+      state.heldBytes += d.length
+    })
+    down.on('close', () => up.destroy())
+    up.on('close', () => down.destroy())
+  })
+  await new Promise((resolve) => tcp.listen(0, '127.0.0.1', resolve))
+  state.port = tcp.address().port
+  t.teardown(() => {
+    down?.destroy()
+    up?.destroy()
+    tcp.close()
+  }, { order: 0, force: true })
+  state.hold = () => { held = true }
+  state.release = () => {
+    held = false
+    for (const d of chunks.splice(0)) down.write(d)
+  }
+  state.cut = () => {
+    down.destroy()
+    up.destroy()
+  }
+  return state
+}
+
+// The real rpc client over a WebSocket to the relay, with every request it sent.
+async function rpcThrough (server, rel, timeoutMs) {
+  const ws = new WebSocket('ws://127.0.0.1:' + rel.port + '/rpc', { origin: ORIGIN, headers: { host: '127.0.0.1:' + server.port } })
+  const sent = []
+  const ignored = []
+  const c = createClient({ send (message, text) { sent.push(message); ws.send(text) }, timeoutMs })
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString())
+    if (!c.receive(msg)) ignored.push(msg)
+  })
+  ws.on('close', () => c.close())
+  ws.on('error', () => {})
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  await c.request('session.open', { token: server.token })
+  return { c, ws, sent, ignored }
+}
+
+const ONCE = 'só uma vez'
+const onceBlocks = (result) => result.entries.filter((e) => e.record.type === 'post' && e.record.text === ONCE)
+const sentCount = (sent, method) => sent.filter((m) => m.method === method).length
+
+test('uncertain mutation: response held past the timeout -> TIMEOUT uncertain, never resent, one block', async (t) => {
+  const m = await certifiedMember(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const rel = await relay(t, s)
+  const { c, ws, sent, ignored } = await rpcThrough(s, rel, 1000)
+
+  rel.hold()
+  const [write, read] = await Promise.all([
+    c.request('post.create', { text: ONCE }).catch((e) => e),
+    c.request('log.read').catch((e) => e)
+  ])
+  t.is(write.code, 'TIMEOUT')
+  t.is(write.uncertain, true, 'the mutation may have happened')
+  t.is(read.code, 'TIMEOUT')
+  t.is(read.uncertain, false, 'a read is certain')
+  t.is(c.pending, 0)
+
+  rel.release()
+  await until(() => ignored.length === 2, { name: 'late responses ignored' })
+  t.is(sentCount(sent, 'post.create'), 1, 'not resent')
+  t.is(sentCount(sent, 'log.read'), 1, 'not resent')
+  const seen = await until(async () => {
+    const log = await c.request('log.read')
+    return onceBlocks(log).length > 0 && log
+  }, { name: 'the post in the diary' })
+  t.is(onceBlocks(seen).length, 1, 'one block')
+  t.is(sentCount(sent, 'post.create'), 1, 'still not resent')
+  ws.close()
+  noLeak(t, s)
+})
+
+test('uncertain mutation: connection lost after the server answered -> CLOSED uncertain, never resent, one block', async (t) => {
+  const m = await certifiedMember(t)
+  const s = await serve(t, [...memberArgs(m), '--origin', ORIGIN])
+  const rel = await relay(t, s)
+  const { c, sent } = await rpcThrough(s, rel, 15000)
+
+  rel.hold()
+  const write = c.request('post.create', { text: ONCE }).catch((e) => e)
+  await until(() => rel.heldBytes > 0, { name: 'post.create answered by the server' })
+  const heldBefore = rel.heldBytes
+  const read = c.request('log.read').catch((e) => e)
+  await until(() => rel.heldBytes > heldBefore, { name: 'log.read answered by the server' })
+  rel.cut()
+
+  const w = await write
+  const r = await read
+  t.is(w.code, 'CLOSED')
+  t.is(w.uncertain, true, 'the mutation may have happened')
+  t.is(r.code, 'CLOSED')
+  t.is(r.uncertain, false, 'a read is certain')
+  t.is(c.pending, 0)
+  t.is(sentCount(sent, 'post.create'), 1, 'not resent')
+
+  const fresh = await openSession(s, ORIGIN)
+  const log = await fresh.c.call('log.read')
+  t.is(log.ok, true)
+  t.is(onceBlocks(log.result).length, 1, 'one block')
+  fresh.c.ws.close()
   noLeak(t, s)
 })

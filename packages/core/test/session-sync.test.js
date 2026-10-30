@@ -17,7 +17,8 @@ const { testnet, localSwarmOptions, until, newSession, connect, failure, scanWir
 const { initAssociation, issueCertificate, issueSeederCertificate, issueIssuerCertificate, issueModeratorCertificate } = require('../lib/assoc')
 const { createUsernameRecord } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writeBlocklist } = require('../lib/store')
+const { writeBlocklist, openStore, openDiary, appendRecord } = require('../lib/store')
+const { profileRecords } = require('../lib/records')
 const { Seeder } = require('../lib/seeder')
 
 function association (t) {
@@ -382,6 +383,15 @@ test('profile.read over synced replicas: names, usernames, blocked and unknown k
   const c = await member(t, bootstrap, assoc)
   await c.call('profile.set', { name: 'Cris' })
   await c.call('post.create', { text: 'olá de C' })
+  // A photo pair as the browser node writes it.
+  const avatar = { core: 'ab'.repeat(32), mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: 'e'.repeat(64), width: 512, height: 512 }
+  const s = await openStore(c.dataDir)
+  try {
+    const diary = await openDiary(s)
+    for (const r of profileRecords({ name: 'Cris', avatar })) await appendRecord(diary, r)
+  } finally {
+    await s.close()
+  }
   await syncOnce(t, c)
 
   const b = await member(t, bootstrap, assoc)
@@ -391,8 +401,8 @@ test('profile.read over synced replicas: names, usernames, blocked and unknown k
   const unknown = 'f'.repeat(64)
   t.alike(await b.call('profile.read', { authors: [a.publicKey, unknown, c.publicKey, a.publicKey] }), {
     profiles: [
-      { author: a.publicKey, name: 'Ana', bio: 'oi', username: null },
-      { author: c.publicKey, name: 'Cris', bio: '', username: null }
+      { author: a.publicKey, name: 'Ana', bio: 'oi', avatar: null, username: null },
+      { author: c.publicKey, name: 'Cris', bio: '', avatar, username: null }
     ],
     missing: [unknown]
   })
@@ -406,7 +416,7 @@ test('profile.read over synced replicas: names, usernames, blocked and unknown k
   await syncOnce(t, a)
   await syncOnce(t, b)
   t.alike(await b.call('profile.read', { authors: [a.publicKey] }), {
-    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', username: 'ana_1' }],
+    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', avatar: null, username: 'ana_1' }],
     missing: []
   })
 
@@ -415,7 +425,7 @@ test('profile.read over synced replicas: names, usernames, blocked and unknown k
   const modCert = issueModeratorCertificate(assoc.dir, { moderator: b4a.toString(modKp.publicKey, 'hex') })
   writeBlocklist(b.dataDir, createSnapshot({ seq: 1, blocked: [c.publicKey] }, modKp, modCert))
   t.alike(await b.call('profile.read', { authors: [c.publicKey, a.publicKey] }), {
-    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', username: 'ana_1' }],
+    profiles: [{ author: a.publicKey, name: 'Ana', bio: 'oi', avatar: null, username: 'ana_1' }],
     missing: [c.publicKey]
   })
   t.alike((await b.call('feed.read')).skipped, [{ key: c.publicKey, reason: 'blocked' }], 'the same rule as feed.read')

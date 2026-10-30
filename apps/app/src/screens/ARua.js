@@ -32,14 +32,19 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { cursorMoved, cursorOf, feedKey, isLastFeedPage, mergeOlder, resetWith, shouldReloadOnShow } from '../paging'
+import { pickAvatar } from '../media/avatar'
+import { FEED_SYNCING_END, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, rearmDelay, replacesQuietly, resetWith, shouldReloadOnShow, syncAdvanced, syncBaseline, syncTruncated } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
-import { isBusy, isDiaryGone, isSeederDown } from './Conversa'
+import { DeletePrompt, isBusy, isDiaryGone, isSeederDown, useDelete } from './Conversa'
+import { canDelete } from '../deletion'
+import { revokeDeletedMedia } from '../media/cache'
+import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -131,10 +136,21 @@ export function useSocial ({ ownKey, onToast }) {
   const epochRef = useRef(0)
   // The refs asked for since the last refresh, to re-resolve after a drop.
   const seenRef = useRef({ need: new Set(), local: new Map() })
+  const deletedRef = useRef(new Set())
   const change = useCallback((update) => {
-    socialRef.current = { ...socialRef.current, ...update(socialRef.current) }
+    const patch = update(socialRef.current)
+    // Queued pages and pending original reads must not restore deleted content.
+    if (patch.originals) {
+      for (const ref of deletedRef.current) patch.originals.set(ref, null)
+    }
+    socialRef.current = { ...socialRef.current, ...patch }
     setSocial(socialRef.current)
   }, [])
+  const deleteOriginal = useCallback((ref) => {
+    deletedRef.current.add(ref)
+    seenRef.current.local.delete(ref)
+    change((prev) => ({ originals: new Map(prev.originals) }))
+  }, [change])
   // Keys known to be own or followed: rebuilt on every refresh from the
   // page's authors and follow.list.
   const knownRef = useRef(new Set())
@@ -386,14 +402,18 @@ export function useSocial ({ ownKey, onToast }) {
     // Reply parents: only those of strangers are read (verified, with the
     // name and @nome); own and followed parent authors come from profile.read.
     // Only on the hosted web with a network: without the index hints the
-    // peek carries no name, and the core node's log.read fallback would
-    // preempt the sync for a mark that still reads 'sem nome'.
+    // peek carries no name. The native node's log.read fallback preempts the
+    // sync for a mark that still reads 'sem nome'. The browser node serves
+    // member reads from the live run's cores, so batching them still saves
+    // requests and native preemptions.
     const asked = hosted && online ? parents.filter((r) => typeof r === 'string') : []
     if (asked.some((r) => !isKnown(authorOfRef(r)))) await loadFollows()
     const needed = need.filter((r) => typeof r === 'string')
     const strangers = asked.filter((r) => !isKnown(authorOfRef(r)))
     for (const r of needed.concat(strangers)) seenRef.current.need.add(r)
-    for (const [ref, item] of local) seenRef.current.local.set(ref, item)
+    for (const [ref, item] of local) {
+      if (!deletedRef.current.has(ref)) seenRef.current.local.set(ref, item)
+    }
     change((prev) => {
       // A refresh starts from an empty cache: every original (and each
       // unavailable one) passes diary.peek again, which refuses authors the
@@ -403,7 +423,9 @@ export function useSocial ({ ownKey, onToast }) {
       return { originals, ...(reset ? { flags: { indexing: false, complete: true } } : {}) }
     })
     const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
-    // engagement.read first: like every member read it preempts a sync.
+    // engagement.read first: a native read preempts the sync; the browser
+    // node serves it from the live run's cores. Batching the chunks still
+    // saves requests and native preemptions.
     for (const chunk of chunks(refs, ENGAGEMENT_LIMIT_MAX)) {
       const started = ++clockRef.current
       try {
@@ -544,13 +566,14 @@ export function useSocial ({ ownKey, onToast }) {
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast }
+  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onReply, onQuote, onReport } (each
-// optional). A repost passes the ORIGINAL as `post` and `repostedBy`.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, now, ownKey, h, persist }) {
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } (each
+// optional; onOpenMention(username, { author, username }) gets the row author's verified
+// name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
   const prof = profileOf(post.author) || null
   const name = post.name || (prof ? prof.name : null) || null
   const username = post.username || (prof ? prof.username : null) || null
@@ -563,6 +586,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       author: post.quote.author,
       name: (q && q.name) || (qp ? qp.name : null) || null,
       username: (q && q.username) || (qp ? qp.username : null) || null,
+      avatar: pickAvatar(avatarOf(post.quote.author), q || null),
       at: q ? q.at : null,
       text: q ? q.text : null,
       media: q ? q.media : null,
@@ -572,7 +596,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       hasQuote: !!(q && q.quote),
       onOpen: q === undefined && social.transient(quoteRef)
         ? () => social.retry(quoteRef)
-        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined
+        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined,
+      onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.quote.author, username: quote.username }) : undefined
     }
   }
   const s = social.social
@@ -593,6 +618,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     author: post.author,
     name,
     username,
+    avatar: pickAvatar(avatarOf(post.author), post),
     at: post.at,
     text: post.text,
     media: post.media || null,
@@ -609,15 +635,22 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     pending: s.pending.get(ref) || null,
     onOpen: typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref, seed: post }) : undefined,
     onOpenAuthor: typeof h.onOpenMember === 'function' ? () => h.onOpenMember(post.author, { name, username }) : undefined,
+    onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.author, username }) : undefined,
     onOpenParent: parentRef !== null && typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: parentRef }) : undefined,
     onOpenReposter: repostedBy && typeof h.onOpenMember === 'function' && repostedBy.author !== own
       ? () => h.onOpenMember(repostedBy.author, { name: repostedBy.name, username: repostedBy.username })
       : undefined,
     onReply: typeof h.onReply === 'function' ? () => h.onReply({ ref, name, username, text: post.text }) : undefined,
     onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
+    onOpenLikes: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+    onOpenReposts: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
     onLike: () => social.toggle('like', ref),
     onRepost: () => social.toggle('repost', ref),
     // Until the own key is known, no post can safely offer a report action.
+    // Only the own post itself, never the original of a repost by someone else.
+    onDelete: typeof h.onDelete === 'function' && canDelete(post, own) && repostedBy === null
+      ? () => h.onDelete({ ref, seq: post.seq })
+      : undefined,
     onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
       ? () => h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text })
       : undefined
@@ -688,6 +721,20 @@ export function SocialToast ({ text }) {
   )
 }
 
+// Never after a failed read: only a manual action clears the error.
+function canAutoReload (feed, lengths, active) {
+  return active && feed.loadedAt !== null && feed.atEnd && !feed.loading && !feed.loadingMore && !feed.refreshing &&
+    !feed.loadError && !feed.moreError &&
+    (Object.keys(feed.syncBase).length > 0 || feed.syncTruncated > 0) &&
+    syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)
+}
+
+const pageIncomplete = (page) => ({
+  incomplete: Array.isArray(page.incomplete) ? page.incomplete : [],
+  incompleteTruncated: Number.isSafeInteger(page.incompleteTruncated) ? page.incompleteTruncated : 0,
+  syncTruncated: syncTruncated(page)
+})
+
 // The refs a feed page needs: counts and own state for every row's target,
 // originals for reposts, quoted posts, reply parents; feed posts are already
 // at hand.
@@ -722,7 +769,7 @@ function pageNeeds (pageItems) {
   return { local, shown, need, parents: [...parents], authors }
 }
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onQuote, onToast }) {
+export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -738,14 +785,24 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     refreshing: false,
     loadError: '',
     moreError: '',
+    retryKind: 'older',
     loadedAt: null,
-    meta: { skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0 }
+    meta: { skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0 },
+    incomplete: [],
+    incompleteTruncated: 0,
+    syncTruncated: 0,
+    syncBase: {},
+    emptyStreak: 0,
+    deep: false
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
   const listRef = useRef(null)
   const signalsRef = useRef(node.signals)
   signalsRef.current = node.signals
+  const activeRef = useRef(active)
+  activeRef.current = active
+  const rearmRef = useRef(null)
   // Only the latest read may commit; the ref also blocks duplicate end reaches
   // before React renders. Rows and their loading flags always change together.
   const seqRef = useRef(0)
@@ -758,11 +815,56 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const { learnMany, resolveMany } = names
   const learnPage = useCallback((items) => {
     learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+    resolveMany(items.map((i) => i.author))
     resolveMany(items.filter((i) => i.replyTo).map((i) => i.replyTo.author))
   }, [learnMany, resolveMany])
 
   const ownSeenRef = useRef(null)
-  const loadNewest = useCallback(async () => {
+  const loadNewest = useCallback(async ({ quiet = false } = {}) => {
+    if (quiet) {
+      const current = feedRef.current
+      if (!activeRef.current || current.loading || current.refreshing || current.loadingMore) return
+      const mine = ++seqRef.current
+      const seen = signalsRef.current
+      const base = seen && seen.lengths ? seen.lengths : {}
+      commit({ loadingMore: true, moreError: '' })
+      try {
+        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
+        if (mine !== seqRef.current) return
+        const { skipped, skippedTruncated, future, futureTruncated } = page
+        // A full page would cut rows off the end of the list being read: the
+        // list stays and the unacknowledged 'ver novidades' pill shows the
+        // rest. The list is no longer the whole local feed, so it leaves its
+        // end: 'mostrar mais' pages on, and automatic reads stop. Each one
+        // preempts the sync on the native node. The browser node serves them
+        // from the live run's cores, so this batching still saves requests
+        // and native preemptions.
+        if (!replacesQuietly(page, FEED_LIMIT_DEFAULT, feedRef.current.items)) {
+          commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), atEnd: false, loadingMore: false })
+          return
+        }
+        commit({
+          items: resetWith(page.items),
+          cursor: cursorOf(page.items),
+          atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
+          meta: { skipped, skippedTruncated, future, futureTruncated },
+          ...pageIncomplete(page),
+          syncBase: syncBaseline(page, base),
+          emptyStreak: 0,
+          deep: false,
+          loadingMore: false
+        })
+        learnPage(page.items)
+        // No ack and no reset. On the native node any other request would
+        // preempt the sync again. The browser node serves reads from the
+        // live run's cores, so keeping this path small still saves requests
+        // and native preemptions.
+        ingest(pageNeeds(page.items))
+      } catch (err) {
+        if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'newest' })
+      }
+      return
+    }
     const mine = ++seqRef.current
     const seen = signalsRef.current
     ownSeenRef.current = seen && typeof seen.ownLength === 'number' ? seen.ownLength : null
@@ -773,6 +875,8 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       loadError: '',
       moreError: ''
     })
+    // Taken before the read so growth during it stays visible to the next pass.
+    const base = seen && seen.lengths ? seen.lengths : {}
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
@@ -783,6 +887,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
         loadedAt: Date.now(),
         meta: { skipped, skippedTruncated, future, futureTruncated },
+        ...pageIncomplete(page),
+        syncBase: syncBaseline(page, base),
+        emptyStreak: 0,
+        deep: false,
         loading: false,
         refreshing: false
       })
@@ -795,26 +903,34 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     }
   }, [request, ackFresh, commit, learnPage, ingest])
 
-  const loadOlder = useCallback(async () => {
+  const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
-    if (!active || current.loading || current.refreshing || current.loadingMore || current.atEnd || current.cursor === null) return
+    if (!active || current.loading || current.refreshing || current.loadingMore || (current.atEnd && !fromSync) || current.cursor === null) return
     const mine = ++seqRef.current
     const before = current.cursor
+    const seen = signalsRef.current
+    const base = seen && seen.lengths ? seen.lengths : {}
     commit({ loadingMore: true, moreError: '' })
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before })
       if (mine !== seqRef.current) return
       const cursor = cursorOf(page.items)
+      const prev = feedRef.current
       commit({
-        items: mergeOlder(feedRef.current.items, page.items).items,
-        cursor,
+        items: mergeOlder(prev.items, page.items).items,
+        // An empty page keeps the cursor so a later sync pass can ask again.
+        cursor: cursor === null ? before : cursor,
         atEnd: isLastFeedPage(page, FEED_LIMIT_MAX) || !cursorMoved(before, cursor),
+        ...pageIncomplete(page),
+        syncBase: syncBaseline(page, base),
+        emptyStreak: page.items.length > 0 ? 0 : fromSync ? prev.emptyStreak + 1 : prev.emptyStreak,
+        deep: prev.deep || page.items.length > 0,
         loadingMore: false
       })
       learnPage(page.items)
       ingest(pageNeeds(page.items))
     } catch (err) {
-      if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err) })
+      if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'older' })
     }
   }, [active, request, commit, learnPage, ingest])
 
@@ -842,7 +958,42 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadNewest()
   }, [active, refresh, scrollToTop, fresh, loadNewest])
 
+  // On the native node every feed.read preempts the sync run and the
+  // continuous run restarts after it (docs/rpc.md section 6.1). The browser
+  // node serves the read from the live run's cores. The first growth past
+  // the baseline starts one timer (longer after empty older reads): later
+  // growth neither resets it nor adds another, and this effect has no
+  // cleanup, which would debounce it on every lengths change. That batching
+  // saves requests and native preemptions. With only the newest page
+  // loaded, re-reading it shows arrivals that sort inside the shown range;
+  // a before read would rarely return them.
+  const lengths = node.signals ? node.signals.lengths : undefined
+  const loadersRef = useRef(null)
+  loadersRef.current = { loadNewest, loadOlder }
+  useEffect(() => {
+    if (rearmRef.current !== null || !canAutoReload(feedRef.current, lengths, active)) return
+    rearmRef.current = setTimeout(() => {
+      rearmRef.current = null
+      const current = feedRef.current
+      const now = signalsRef.current ? signalsRef.current.lengths : undefined
+      if (!canAutoReload(current, now, activeRef.current)) return
+      if (current.deep) loadersRef.current.loadOlder({ fromSync: true })
+      else loadersRef.current.loadNewest({ quiet: true })
+    }, rearmDelay(feedRef.current.deep ? feedRef.current.emptyStreak : 0))
+  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak])
+
+  useEffect(() => {
+    if (!active && rearmRef.current !== null) {
+      clearTimeout(rearmRef.current)
+      rearmRef.current = null
+    }
+  }, [active])
+
   useEffect(() => () => {
+    if (rearmRef.current !== null) {
+      clearTimeout(rearmRef.current)
+      rearmRef.current = null
+    }
     seqRef.current += 1
     // Effect replay may show the mounted screen again after cancelling a read.
     previous.current.active = false
@@ -857,20 +1008,25 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // Only the association's blocklist gets a sentence (plain words); other
   // skipped or future-dated entries are not shown to people.
   const blocked = meta.skipped.filter((s) => MODERATION_REASONS.includes(s.reason)).length
+  // A failed manual read never commits atEnd, so an older error with atEnd
+  // true came from an automatic read and its retry must bypass the end guard.
+  const stillSyncing = feedStillSyncing(feed)
   const footer = (
     <View>
       <ListFooter
         loading={loadingMore}
         atEnd={loadedAt !== null && atEnd && items.length > 0}
-        endText='Isso é tudo por enquanto.'
+        endText={stillSyncing ? FEED_SYNCING_END : 'Isso é tudo por enquanto.'}
         error={moreError}
-        onRetry={loadOlder}
+        onRetry={() => feedRef.current.retryKind === 'newest' ? loadNewest({ quiet: true }) : loadOlder({ fromSync: feedRef.current.atEnd })}
         pending={loadingMore || refreshing}
       />
       {blocked > 0
         ? (
           <View style={styles.footer}>
-            <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
+            <HelpNote doc={HELP.bloqueio}>
+              <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
+            </HelpNote>
           </View>
           )
         : null}
@@ -900,10 +1056,24 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     )
   }
 
+  const del = useDelete({
+    request,
+    onToast,
+    recheck: loadNewest,
+    onDeleted: async (t) => {
+      social.deleteOriginal(t.ref)
+      const cur = feedRef.current
+      commit({ items: cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+      // Cached photos of the deleted post go too, wherever they were shown.
+      await revokeDeletedMedia(request, [t.seq])
+    }
+  })
   // Reply names re-render when the cache changes; relative dates on each tick.
-  // Originals, counts and the own state re-render the rows too.
-  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social }), [names.profileOf, now, social.social])
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  // Originals, counts, the own state and whether deleting is offered re-render
+  // the rows too.
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   const renderItem = ({ item }) => {
@@ -929,6 +1099,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
 
   return (
     <View style={styles.flex}>
+      <DeletePrompt del={del} />
       <RefreshableList
         listRef={listRef}
         data={items}

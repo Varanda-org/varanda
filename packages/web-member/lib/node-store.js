@@ -49,6 +49,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
+const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
@@ -202,6 +203,62 @@ function forgetLegacy (storage) {
   legacySeen.delete(storage)
 }
 
+// One Hypercore per stored core per storage. Hypercore 10 keeps the oplog
+// offset, tree and bitfield per instance, and a clear or flush writes that
+// instance's view: a second instance on the same files (one opened before
+// an append) overwrites the other's oplog entries and header and drops the
+// blocks appended through it. So every open of a core that is already open
+// is a session of it (one oplog, tree and bitfield), and a core is only
+// opened again once its last session closed its files. A session never
+// inherits a secret key from another one: openDiary and openMediaCore set
+// the pair on their own session.
+const sharedCores = new WeakMap() // storage -> Map(name -> slot)
+
+async function openShared (storage, name, valueEncoding, create) {
+  let byName = sharedCores.get(storage)
+  if (byName === undefined) sharedCores.set(storage, (byName = new Map()))
+  let slot = byName.get(name)
+  if (slot === undefined) byName.set(name, (slot = { lock: Promise.resolve(), sessions: null, closed: null }))
+  const prev = slot.lock
+  let release
+  slot.lock = new Promise((resolve) => { release = resolve })
+  try {
+    await prev
+    const live = slot.sessions === null ? undefined : slot.sessions.find((s) => !s.closing)
+    if (live !== undefined) {
+      const s = live.session({ valueEncoding })
+      watchShared(slot, s)
+      await s.ready()
+      s.setKeyPair({ publicKey: s.key })
+      return { core: s, fresh: false }
+    }
+    if (slot.closed !== null) await slot.closed
+    const core = await create()
+    let done
+    slot.sessions = core.sessions
+    slot.closed = new Promise((resolve) => { done = resolve })
+    slot.done = done
+    watchShared(slot, core)
+    return { core, fresh: true }
+  } finally {
+    release()
+  }
+}
+
+// The last session of a core emits 'close' with true once its files closed.
+function watchShared (slot, core) {
+  const done = slot.done
+  core.on('close', (last) => {
+    if (last && slot.done === done && typeof done === 'function') done()
+  })
+}
+
+// The queues below are per shared core: every session of one core shares
+// them (core.core is Hypercore 10's per-files state, set once ready).
+function queueKey (core) {
+  return core.core || core
+}
+
 // Opens the own diary. With a key pair: creates it when missing (public key
 // only in the storage) and sets the pair on the open core, in memory, so it
 // can append; a stored diary of another key, or a legacy store, is refused
@@ -214,14 +271,19 @@ async function openDiary (storage, keyPair = null) {
   if (!exists && keyPair === null) throw new Error('identidade não encontrada')
   const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
   if (!exists) options.keyPair = { publicKey: keyPair.publicKey }
-  const core = new Hypercore(storage.core(DIARY), options)
-  await core.ready()
-  try {
-    if (await scrubLegacySecret(core)) legacySeen.add(storage)
-  } catch (err) {
-    await core.close().catch(() => {})
-    throw err
-  }
+  // The legacy scrub writes the oplog file directly: only on a first open,
+  // never beside a live core.
+  const { core } = await openShared(storage, DIARY, 'json', async () => {
+    const core = new Hypercore(storage.core(DIARY), options)
+    await core.ready()
+    try {
+      if (await scrubLegacySecret(core)) legacySeen.add(storage)
+    } catch (err) {
+      await core.close().catch(() => {})
+      throw err
+    }
+    return core
+  })
   if (keyPair !== null) {
     if (isLegacy(storage) || !b4a.equals(core.key, keyPair.publicKey)) {
       await core.close()
@@ -274,24 +336,38 @@ function purgeReplica (storage, hex) {
 }
 
 // As @varanda/core readAll: a decode failure is { seq, record: null }; a
-// closed core is an error, never an empty log.
+// closed core is an error, never an empty log. A block an effective
+// tombstone deleted is { seq, record: null, deleted: true }
+// (@varanda/core lib/deletion.js), held or cleared, at its own index. The
+// result ends at the present length: contiguousLength is never the end,
+// Hypercore 10 does not keep its lowered value across a reopen after a
+// clear.
 async function readAll (core) {
+  assertOpen(core)
+  const { entries, present } = await presentState(core)
+  return entries.slice(0, present)
+}
+
+// Every block as decoded up to the same end, tombstones not applied (the
+// delete writers check the targeted block itself); a cleared block is
+// { seq, record: null }.
+async function readRaw (core) {
+  assertOpen(core)
+  const { raw, present } = await presentState(core)
+  return raw.slice(0, present)
+}
+
+function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
     err.code = 'SESSION_CLOSED'
     throw err
   }
-  const entries = []
-  for (let i = 0; i < core.contiguousLength; i++) {
-    const block = await core.get(i, { wait: false, raw: true })
-    entries.push({ seq: i, record: decodeBlock(block) })
-  }
-  return entries
 }
 
 // Block 0 as the Hypercore 11 side decodes it, or null.
 async function readBlock0 (core) {
-  if (core.contiguousLength < 1) return null
+  if (core.length < 1 || !(await core.has(0))) return null
   return decodeBlock(await core.get(0, { wait: false, raw: true }))
 }
 
@@ -323,10 +399,10 @@ function appendGroupRecord (core, record, { root = false, limits } = {}) {
 }
 
 function enqueueAppend (core, record, validate, limits, full) {
-  const prev = appendQueues.get(core) || Promise.resolve()
+  const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
   const run = () => appendNow(core, record, validate, { ...DEFAULT_LIMITS, ...limits }, full)
   const next = prev.then(run, run)
-  appendQueues.set(core, next.catch(() => {}))
+  appendQueues.set(queueKey(core), next.catch(() => {}))
   return next
 }
 
@@ -351,6 +427,43 @@ async function appendNow (core, record, validate, limits, full) {
     throw new Error(full)
   }
   await core.append(plain)
+  return core.length - 1
+}
+
+// One atomic append of 1..8 records (the profile compat pair): each is
+// validated at its own seq, and either all are appended or none.
+function appendRecords (core, records, limits) {
+  const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
+  const run = () => appendManyNow(core, records, { ...DEFAULT_LIMITS, ...limits })
+  const next = prev.then(run, run)
+  appendQueues.set(queueKey(core), next.catch(() => {}))
+  return next
+}
+
+async function appendManyNow (core, records, limits) {
+  await core.ready()
+  if (core[UNLOCKED] !== true) throw new UsageError(LOCKED)
+  if (!Array.isArray(records) || records.length < 1 || records.length > 8) throw invalidRecord('malformed')
+  const plains = []
+  let bytes = 0
+  for (let i = 0; i < records.length; i++) {
+    let plain = null
+    try {
+      plain = decodeBlock(b4a.from(JSON.stringify(records[i])))
+    } catch {}
+    if (plain === null) throw invalidRecord('malformed')
+    const reason = validateRecord(plain, core.length + i)
+    if (reason) throw invalidRecord(reason)
+    const blockBytes = b4a.byteLength(JSON.stringify(plain))
+    bytes += blockBytes
+    if (blockBytes > limits.maxBlockBytes ||
+        core.length + i >= limits.maxLogBlocks ||
+        core.byteLength + bytes > limits.maxLogBytes) {
+      throw new Error('limite do diário atingido')
+    }
+    plains.push(plain)
+  }
+  await core.append(plains)
   return core.length - 1
 }
 
@@ -416,8 +529,11 @@ async function openMediaCore (storage, keyPair) {
   const name = mediaName(b4a.toString(keyPair.publicKey, 'hex'))
   const options = { ...DIARY_OPTIONS, valueEncoding: 'binary' }
   if (!(await storage.hasCore(name))) options.keyPair = { publicKey: keyPair.publicKey }
-  const core = new Hypercore(storage.core(name, MEDIA_STORAGE), options)
-  await core.ready()
+  const { core } = await openShared(storage, name, 'binary', async () => {
+    const core = new Hypercore(storage.core(name, MEDIA_STORAGE), options)
+    await core.ready()
+    return core
+  })
   if (!b4a.equals(core.key, keyPair.publicKey)) {
     await core.close()
     throw new Error('núcleo de mídia de outra chave')
@@ -435,8 +551,11 @@ async function openMediaCoreReadOnly (storage, hex) {
   if (typeof hex !== 'string' || !HEX64.test(hex)) return null
   const name = mediaName(hex)
   if (!(await storage.hasCore(name))) return null
-  const core = new Hypercore(storage.core(name, MEDIA_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
-  await core.ready()
+  const { core } = await openShared(storage, name, 'binary', async () => {
+    const core = new Hypercore(storage.core(name, MEDIA_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+    await core.ready()
+    return core
+  })
   return core
 }
 
@@ -444,9 +563,9 @@ async function openMediaCoreReadOnly (storage, hex) {
 const mediaQueues = new WeakMap()
 
 function queued (core, run) {
-  const prev = mediaQueues.get(core) || Promise.resolve()
+  const prev = mediaQueues.get(queueKey(core)) || Promise.resolve()
   const next = prev.then(run, run)
-  mediaQueues.set(core, next.catch(() => {}))
+  mediaQueues.set(queueKey(core), next.catch(() => {}))
   return next
 }
 
@@ -483,6 +602,20 @@ function appendMediaBlocks (core, blocks) {
     const first = core.length
     await core.append(blocks)
     return first
+  })
+}
+
+// Clears a deleted item's blocks ({ start, blocks } ranges) of a media core,
+// never block 0 (the header naming the diary). Every session of the core
+// (openShared), unlocked or read-only, clears through the core's one write
+// queue, so a clear never interleaves with an append. No signing key is
+// needed to clear.
+function clearMediaRanges (core, ranges) {
+  const safe = (Array.isArray(ranges) ? ranges : []).filter((r) =>
+    r !== null && typeof r === 'object' && Number.isSafeInteger(r.start) && r.start >= 1)
+  return queued(core, async () => {
+    await core.ready()
+    await clearRanges(core, safe)
   })
 }
 
@@ -961,12 +1094,15 @@ module.exports = {
   diaryExists,
   diaryStatus,
   forgetLegacy,
+  isLegacy,
   openReplica,
   replicaExists,
   purgeReplica,
   readAll,
+  readRaw,
   readBlock0,
   appendRecord,
+  appendRecords,
   readConfig,
   writeConfig,
   readFollows,
@@ -977,6 +1113,7 @@ module.exports = {
   openMediaCoreReadOnly,
   writeMediaHeader,
   appendMediaBlocks,
+  clearMediaRanges,
   readMediaDevice,
   writeMediaDevice,
   readMediaCores,

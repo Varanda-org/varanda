@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const { formatFeedItem } = require('@varanda/core/lib/feed')
 const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
+const { readRaw } = require('@varanda/core/lib/store')
 const { validateParams } = require('@varanda/rpc')
 const { validRecordCopy, validateRecord } = require('@varanda/core/lib/records')
 
@@ -95,6 +96,24 @@ async function replyRun (flags) {
   print(flags, result, 'publicado #' + result.seq)
 }
 
+async function deleteRun (flags) {
+  if (!flags.to) throw usage('informe --to <chave>:<seq>')
+  const ctx = ctxOf(flags)
+  // The original type is needed to route an already deleted profile too.
+  const record = await member.withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (flags.to.author !== ownHex) return null
+    const entries = await readRaw(diary)
+    const entry = entries.find((entry) => entry.seq === flags.to.seq)
+    return entry ? validRecordCopy(entry.record, entry.seq) : null
+  })
+  // A cleared target has no type left: the profile path answers it from its
+  // tombstones and still recognises a compatibility pair, while a cleared
+  // post (a single tombstone) gets the same answer as from the post path.
+  const remove = !record || record.type === 'profile' ? member.profileDelete : member.postDelete
+  const result = await remove(ctx, { to: flags.to })
+  print(flags, result, result.changed ? 'apagado #' + flags.to.seq : 'já apagado')
+}
+
 // ---- follows ----
 
 async function followRun (flags, follow) {
@@ -131,7 +150,8 @@ function withMediaTag (text, media) {
 // One short human line for a log entry. Only a validated copy of the record
 // is formatted; an invalid one prints a fixed line (raw peer fields are never
 // converted to strings). Peer-derived strings are escaped.
-function logLine ({ seq, record }) {
+function logLine ({ seq, record, deleted }) {
+  if (deleted === true) return '#' + seq + ' apagado'
   const r = validRecordCopy(record, seq)
   if (r === null) {
     let reason
@@ -146,6 +166,7 @@ function logLine ({ seq, record }) {
   else if (r.type === 'repost') body = (r.on ? 'republicou ' : 'desfez republicação ') + short(r.to.author) + '#' + r.to.seq
   else if (r.type === 'post') body = 'publicação ' + safe(withMediaTag(r.text, r.media)).replace(/\n/g, ' ') + (r.quote ? ' cita ' + short(r.quote.author) + '#' + r.quote.seq : '')
   else if (r.type === 'profile') body = 'perfil ' + safe(r.name)
+  else if (r.type === 'delete') body = 'apagou #' + r.seq
   else if (r.type === 'member-cert') body = 'certificado'
   else body = safe(r.type)
   return '#' + seq + ' ' + body
@@ -166,7 +187,7 @@ async function logRun (flags) {
   const entries = flags.limit ? older.slice(-flags.limit) : older
   const next = entries.length < older.length ? entries[0].seq : null
   if (flags.json) {
-    for (const entry of entries) process.stdout.write(jsonLine({ seq: entry.seq, record: entry.record }) + '\n')
+    for (const entry of entries) process.stdout.write(jsonLine(entry) + '\n')
     process.stdout.write(jsonLine({ key, entries, next }) + '\n')
   } else {
     for (const entry of entries) process.stdout.write(logLine(entry) + '\n')
@@ -225,6 +246,7 @@ module.exports = {
     profile: { summary: 'define nome e bio', run: profileRun },
     post: { summary: 'publica um texto (--text)', run: postRun },
     reply: { summary: 'responde a uma publicação (--to <chave>:<seq> --text)', run: replyRun },
+    delete: { summary: 'apaga uma publicação ou versão do perfil (--to <chave>:<seq>)', run: deleteRun },
     follow: { summary: 'segue uma chave pública', run: (flags) => followRun(flags, true) },
     unfollow: { summary: 'deixa de seguir uma chave pública', run: (flags) => followRun(flags, false) },
     follows: { summary: 'lista as chaves seguidas', run: followsRun },

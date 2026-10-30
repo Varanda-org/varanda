@@ -738,8 +738,9 @@ test('fabricated low-seq writers of a full diary never stop its held writers', a
   for (let i = 0; i < 3; i++) forged.push({ key: hex(crypto.randomBytes(32)), diary: dkey, length: 1, seq: 1 })
   const m = await groupMember(t, kp, group)
   // The diary is held already: eight gates of one diary read it through the
-  // main store, never through concurrent quarantine reads.
-  await copyInto(fake.store, m, [d])
+  // main store, never through concurrent quarantine reads. A stored writer
+  // naming it is what keeps it at start (an unnamed diary is purged).
+  await copyInto(fake.store, m, [d, writers[0]])
   setTimeout(async () => {
     for (const w of writers) await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
   }, 3000)

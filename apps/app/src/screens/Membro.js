@@ -1,9 +1,9 @@
 // Membro: a member's profile, pushed above the tabs (App.js screen stack,
 // entry { screen: 'membro', key: authorHex, params: { seed } } where the seed
-// is { name, username } from the row tapped). The header (avatar, name,
+// is { name, username, avatar } from the row tapped). The header (avatar, name,
 // @nome, bio) comes from profile.read when the node holds the diary, else
 // (hosted web) from a diary.peek of the seeder index's profile/username seq
-// hints. Seguir/Seguindo uses follow.list / follow.add / follow.remove;
+// hints. Seguindo asks for confirmation before follow.remove;
 // 'denunciar a conta' opens the report sheet without a post (hosted web). On
 // the hosted web the member's posts and reposts are paged from the index
 // (/index/member, newest first) and every one is fetched and verified with
@@ -16,11 +16,13 @@ import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { avatarOf } from '../media/avatar'
 import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -68,7 +70,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onReply, onQuote, onReport, onOpenThread, onOpenMember, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -84,6 +86,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
     name: seed ? str(seed.name) : null,
     username: seed ? str(seed.username) : null,
     bio: null,
+    avatar: seed ? avatarOf(seed.avatar) : null,
     verified: false
   }))
   const headerRef = useRef(header)
@@ -110,9 +113,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
       const r = await request('profile.read', { authors: [author] })
       const p = (r && Array.isArray(r.profiles) ? r.profiles : []).find((x) => x && typeof x.author === 'string' && x.author.toLowerCase() === author)
       if (!p) return false
-      const h = { name: str(p.name), username: str(p.username), bio: str(p.bio), verified: true }
+      const h = { name: str(p.name), username: str(p.username), bio: str(p.bio), avatar: avatarOf(p.avatar), verified: true }
       commitHeader(h)
-      learnMany([[author, { name: h.name, username: h.username, bio: h.bio }]])
+      learnMany([[author, { name: h.name, username: h.username, bio: h.bio, avatar: h.avatar }]])
       return true
     } catch {
       return false
@@ -125,8 +128,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
     const name = peek.profile && typeof peek.profile.name === 'string' ? str(peek.profile.name) : null
     const bio = peek.profile && typeof peek.profile.bio === 'string' ? str(peek.profile.bio) : null
     const username = str(peek.username)
-    if (name === null && username === null && bio === null) return
-    commitHeader({ name, username, bio, verified: true })
+    const avatar = avatarOf(peek.profile && peek.profile.avatar)
+    if (name === null && username === null && bio === null && avatar === null) return
+    commitHeader({ name, username, bio, avatar, verified: true })
   }, [commitHeader])
 
   // One page of the member's index (`before` exclusive), peeked and
@@ -179,7 +183,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
     const peeked = peekedRef.current
     const shown = items.map((i) => shownPost(i, peeked)).filter(Boolean)
     const refs = shown.map((p) => refOf(p.author, p.seq))
-    resolveMany([...new Set(shown.map((p) => p.author).concat(shown.filter((p) => p.replyTo).map((p) => p.replyTo.author)))])
+    resolveMany([...new Set(shown.map((p) => p.author).concat(shown.filter((p) => p.replyTo).map((p) => p.replyTo.author), shown.filter((p) => p.quote).map((p) => p.quote.author)))])
     readOwn(refs, alive).then(() => readCounts(refs, alive))
   }, [readOwn, readCounts, resolveMany])
 
@@ -283,20 +287,20 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
 
   const head = (
     <View style={styles.head}>
-      <Avatar name={who.avatarName} publicKey={author} size={88} />
+      <Avatar name={who.avatarName} publicKey={author} size={88} picture={header.avatar} persist={own || isFollowed} />
       <Text style={styles.name} accessibilityRole='header'>{displayText(who.title)}</Text>
       {who.subtitle ? <Text style={styles.handle}>{displayText(who.subtitle)}</Text> : null}
       {header.bio ? <Text style={styles.bio}>{displayText(header.bio, { multiline: true })}</Text> : null}
       <View style={styles.actions}>
         {!own
           ? (
-            <Pill
-              label={isFollowed ? 'Seguindo' : 'Seguir'}
-              filled={!isFollowed}
+            <FollowPill
+              following={follows === null ? null : isFollowed}
+              title={displayText(who.title)}
               pending={following}
-              disabled={follows === null}
-              accessibilityLabel={isFollowed ? 'deixar de seguir ' + displayText(who.title) : 'seguir ' + displayText(who.title)}
-              onPress={toggleFollow}
+              disabled={false}
+              onFollow={toggleFollow}
+              onUnfollow={toggleFollow}
             />
             )
           : null}
@@ -345,7 +349,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => load(false)} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
-  const handlers = { onOpenThread, onOpenMember, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
     const peeked = peekedRef.current

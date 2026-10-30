@@ -4,6 +4,7 @@ const { Seeder } = require('@varanda/core/lib/seeder')
 const { UsageError } = require('../cli')
 const { startHealth, DEFAULT_HOST } = require('../health')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
+const { createPushRelay } = require('../push-relay')
 
 const USAGE = 'node bin/varanda.js seed [key|cert add|list|drop <chave>|status]'
 
@@ -36,6 +37,7 @@ function eventLine (event) {
     case 'media-admitted': return 'media admitted ' + safe(event.key) + ' ' + safe(event.diary) + ' ' + safe(event.length)
     case 'media-rejected': return 'media rejected ' + safe(event.key) + ' ' + safe(event.diary) + ' ' + safe(event.reason)
     case 'blocklist': return 'blocklist ' + safe(event.seq)
+    case 'push': return 'push ' + safe(event.reason)
     default: return safe(event.event)
   }
 }
@@ -92,6 +94,10 @@ async function runSeeder (flags) {
   // Web limits from the environment; unset ones keep the seeder's defaults.
   if (flags.maxExternal != null) options.maxExternal = flags.maxExternal
   if (flags.frameMemory != null) options.maxFrameMemory = flags.frameMemory
+  // Without VARANDA_PUSH_TOKEN no relay exists and the seeder skips push work.
+  const relay = flags.pushToken == null ? null : createPushRelay({ baseUrl: flags.accountHttp, token: flags.pushToken })
+  if (relay !== null) options.onPush = (ev) => relay.send(ev)
+  log({ event: 'push', reason: relay === null ? 'desligado' : 'ligado' })
   const seeder = new Seeder(options)
   // Handlers go in BEFORE start(): a signal during startup (DHT join) must not
   // take Node's default terminate path; the seeder is closed once start settles.
@@ -118,6 +124,7 @@ async function runSeeder (flags) {
   } catch (err) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
+    if (relay) relay.close()
     if (health) await health.close()
     if (ws) await ws.close()
     throw err
@@ -128,6 +135,7 @@ async function runSeeder (flags) {
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
+    if (relay) relay.close()
     await seeder.close()
     if (health) await health.close()
     if (ws) await ws.close()
@@ -148,6 +156,7 @@ function statusLines (status) {
     certificateLine(status.certificate),
     'diários admitidos: ' + status.admitted,
     'lista de bloqueio: ' + (status.blocklist === null ? 'nenhuma' : 'seq ' + status.blocklist.seq + ' de ' + safe(status.blocklist.date)),
+    ...(status.blocklistHeld ? ['admissões: seguradas até chegar uma lista de bloqueio verificada'] : []),
     'estado: ' + (status.running ? 'em execução' : 'parado')
   ].join('\n')
 }

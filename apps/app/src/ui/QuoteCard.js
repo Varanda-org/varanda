@@ -7,6 +7,10 @@
 // line 'cita outra publicação', never a second card). `missing` shows 'Publicação indisponível'; a quote with
 // neither text nor photos and not missing is still loading. The whole card
 // opens the quoted post (`quote.onOpen`); the photos keep their own taps.
+// `quote.onOpenMention(username)`, when a function and the text has an @nome,
+// makes the mentions tappable (./MentionText); the card is then not one
+// accessible group, so the links stay reachable, and a mention tap never
+// calls `quote.onOpen`.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -14,6 +18,7 @@ import { relativeTime } from '../format'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
+import { hasMention, MentionText } from './MentionText'
 import { colors, type } from './theme'
 
 export function QuoteCard ({ quote, now }) {
@@ -27,10 +32,40 @@ export function QuoteCard ({ quote, now }) {
   const title = displayText(who.title)
   const time = typeof q.at === 'string' ? (relativeTime(q.at, now) ?? displayText(q.at)) : null
   const meta = [who.subtitle ? displayText(who.subtitle) : null, time].filter(Boolean).join(' · ')
+  const openMention = typeof q.onOpenMention === 'function' ? q.onOpenMention : undefined
+  const label = missing ? 'Publicação indisponível' : 'publicação citada de ' + title
+  if (!missing && openMention && hasText && hasMention(q.text)) {
+    return (
+      <View style={styles.card}>
+        <Pressable
+          accessibilityRole={open ? 'link' : 'text'}
+          accessibilityLabel={label}
+          disabled={!open}
+          onPress={open}
+          style={({ pressed }) => [styles.head, pressed && open && styles.pressed]}
+        >
+          {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /> : null}
+          <Text style={styles.name} numberOfLines={1}>{title}</Text>
+          {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
+        </Pressable>
+        <MentionText text={q.text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
+        {hasMedia || q.hasQuote === true
+          ? (
+            <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
+              {hasMedia
+                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} persist={q.persist === true} /></View>
+                : null}
+              {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}
+            </Pressable>
+            )
+          : null}
+      </View>
+    )
+  }
   return (
     <Pressable
       accessibilityRole={open ? 'link' : 'text'}
-      accessibilityLabel={missing ? 'Publicação indisponível' : 'publicação citada de ' + title}
+      accessibilityLabel={label}
       disabled={!open}
       onPress={open}
       style={({ pressed }) => [styles.card, pressed && open && styles.pressed]}
@@ -40,7 +75,7 @@ export function QuoteCard ({ quote, now }) {
         : (
           <>
             <View style={styles.head}>
-              {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} /> : null}
+              {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /> : null}
               <Text style={styles.name} numberOfLines={1}>{title}</Text>
               {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
             </View>

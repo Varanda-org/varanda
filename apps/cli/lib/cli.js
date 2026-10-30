@@ -14,6 +14,7 @@ Comandos:
   profile set                define nome e bio
   post                       publica um texto (--text)
   reply                      responde a uma publicação (--to <chave>:<seq> --text)
+  delete                     apaga uma publicação ou versão do perfil (--to <chave>:<seq>)
   follow|unfollow|follows    segue ou deixa de seguir uma chave pública
   log                        mostra os blocos locais de um diário
   feed                       feed com as publicações dos diários seguidos
@@ -25,6 +26,7 @@ Comandos:
   account                    serviço de vínculo de conta Google (--account-port, --account-host)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
+  account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
@@ -55,7 +57,8 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo`
+  --join --undo
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--undo', '--help', '-h'])
 const stringFlags = new Set([
@@ -72,12 +75,16 @@ function key (value, message = 'chave inválida') {
   return value.toLowerCase()
 }
 
-function integer (value, name) {
+// setTimeout runs a delay above this at 1 ms, so --timeout-ms stops here.
+const MAX_TIMEOUT_MS = 2147483647
+
+function integer (value, name, max = Infinity) {
   if (value == null) return null
   const number = Number(value)
   if (!/^[0-9]+$/.test(value) || !Number.isInteger(number) || number < 1) {
     throw new UsageError(name + ' inválido')
   }
+  if (number > max) throw new UsageError(name + ' acima do máximo de ' + max)
   return number
 }
 
@@ -209,6 +216,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const triageToken = env.VARANDA_TRIAGE_TOKEN === undefined || env.VARANDA_TRIAGE_TOKEN === '' ? null : env.VARANDA_TRIAGE_TOKEN
   if (triageToken !== null && !/^[0-9a-f]{64}$/.test(triageToken)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
 
+  const pushToken = env.VARANDA_PUSH_TOKEN === undefined || env.VARANDA_PUSH_TOKEN === '' ? null : env.VARANDA_PUSH_TOKEN
+  if (pushToken !== null && !/^[0-9a-f]{64}$/.test(pushToken)) throw new UsageError('VARANDA_PUSH_TOKEN inválido')
+
+  const accountHttp = env.VARANDA_ACCOUNT_HTTP === undefined || env.VARANDA_ACCOUNT_HTTP === '' ? 'http://127.0.0.1:8790' : env.VARANDA_ACCOUNT_HTTP
+  const accountHttpMatch = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/.exec(accountHttp)
+  if (!accountHttpMatch || Number(accountHttpMatch[2]) < 1 || Number(accountHttpMatch[2]) > 65535) throw new UsageError('VARANDA_ACCOUNT_HTTP inválido')
+
   return {
     command: positionals.shift() ?? null,
     positionals,
@@ -222,7 +236,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
-    timeoutMs: integer(get('timeout-ms'), 'timeout-ms'),
+    timeoutMs: integer(get('timeout-ms'), 'timeout-ms', MAX_TIMEOUT_MS),
     member: key(get('member')),
     seeder: key(get('seeder')),
     issuer: key(get('issuer')),
@@ -234,6 +248,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     wsHost,
     wsOrigins: wsOrigins.length ? wsOrigins : null,
     triageToken,
+    pushToken,
+    accountHttp: accountHttp.replace(/\/$/, ''),
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
     // The seeder's web limits, environment only (README, "Variáveis de ambiente").
