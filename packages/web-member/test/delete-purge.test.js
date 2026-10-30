@@ -18,7 +18,7 @@ const { EventEmitter } = require('node:events')
 const { WebSocketServer, WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { MEDIA_BLOCK_BYTES, profileRecords, followRecord, postRecord } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, profileRecords, followRecord, postRecord, memberCertRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { presentLength, clearDeleted } = require('@varanda/core/lib/deletion')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { runSync, trackPresent, linearExcept, MAX_RANGES } = require('../lib/sync')
@@ -646,6 +646,92 @@ test('under noClear the followed diary still downloads in block order', async (t
   t.is(ranges.length, 1, 'one range is open')
   t.is(ranges[0] && ranges[0].linear, true, 'it is linear')
 })
+
+test('newest first: only head ranges open until the window is stored, none asks for a deleted seq', async (t) => {
+  t.timeout(30000)
+  const assocKp = generateAssociationKeyPair()
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assocKp)))
+  for (let i = 1; i < 298; i++) await source.append(postRecord({ text: 'p' + i }))
+  await source.append(deleteRecord({ seq: 280 }))
+  await source.append(postRecord({ text: 'última' }))
+  // The replica knows the signed length (300), blocks 0..2 and the
+  // tombstone at 298.
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 0, end: 3 }).done()
+  await replica.download({ start: 298, end: 299 }).done()
+  a.destroy()
+  b.destroy()
+  t.is(replica.length, 300, 'fixture: the signed length is known')
+
+  const ranges = []
+  const arrived = new Set()
+  replica.on('download', (index) => arrived.add(index))
+  const download = replica.download.bind(replica)
+  replica.download = (opts) => {
+    const r = download(opts)
+    const seen = { ...opts, closed: false, window: range(268, 300).every((i) => i === 280 || i === 298 || arrived.has(i)) }
+    ranges.push(seen)
+    const destroy = r.destroy.bind(r)
+    r.destroy = () => {
+      seen.closed = true
+      return destroy()
+    }
+    return r
+  }
+  const tracker = trackPresent(replica, { newest: 32, stallMs: 60000 })
+  t.teardown(() => tracker.destroy(), { force: true })
+  await tracker.ready
+  t.alike(ranges.map((r) => [r.start, r.end, r.linear, r.closed]), [[0, 3, true, false], [268, 280, true, false], [281, 300, true, false]], 'blocks 0..2 and the newest 32 without the deleted seq')
+
+  const c = source.replicate(true)
+  const d = replica.replicate(false)
+  c.pipe(d).pipe(c)
+  t.teardown(() => { c.destroy(); d.destroy() }, { force: true })
+  t.ok(await until(() => tracker.present() === 300), 'the whole diary arrived')
+  const body = ranges.findIndex((r) => r.end === -1)
+  t.ok(body > 2, 'a body range opened after the head')
+  t.ok(ranges[body].window, 'only once the window was stored')
+  t.ok(ranges.slice(0, 3).every((r) => r.closed), 'the head ranges were closed first')
+  t.absent(ranges.some((r) => r.start <= 280 && (r.end === -1 || r.end > 280)), 'no range covers the deleted seq')
+  t.absent(await replica.has(280), 'the deleted block never arrived')
+})
+
+test('newest first: a diary within the window opens the body at once, as the own diary does', async (t) => {
+  const core = rangeCore(30)
+  core.local.add(0)
+  const ranges = []
+  core.download = (opts) => {
+    ranges.push(opts)
+    return { destroy () {} }
+  }
+  const small = trackPresent(core, { newest: 32 })
+  t.teardown(() => small.destroy())
+  await small.ready
+  t.alike(ranges, [{ start: 0, end: -1, linear: true }], 'one linear range from block 0')
+  const big = rangeCore(3000)
+  big.local.add(0)
+  const own = []
+  big.download = (opts) => {
+    own.push(opts)
+    return { destroy () {} }
+  }
+  const diary = trackPresent(big, {})
+  t.teardown(() => diary.destroy())
+  await diary.ready
+  t.alike(own, [{ start: 0, end: -1, linear: true }], 'newest 0: the body from block 0')
+})
+
+function range (start, end) {
+  return Array.from({ length: end - start }, (_, i) => start + i)
+}
 
 test('a tombstone whose first read fails is learned on a retry, and no length covers it before', async (t) => {
   t.timeout(60000)

@@ -1094,9 +1094,11 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
       continue
     }
     // Never create a core for a key with no local data (R5.4 a).
+    // The prefix plus the newest run (store.readVisible): a diary that
+    // downloads newest-first shows its latest posts before its history.
     const read = await withReplica(ctx, key, async (core) => {
-      const entries = await store.readAll(core)
-      return { entries, fork: core.fork, behind: core.length > entries.length }
+      const { entries, present } = await store.readVisible(core)
+      return { entries, fork: core.fork, behind: core.length > present }
     })
     slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
   }
@@ -1124,10 +1126,12 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
 
 // What a non-own diary's admission needs ({ entries, fork }), or null when
 // feedRead would skip it before any read (blocked, no local data). Never
-// creates a replica; an empty one is purged (exclusive path only).
+// creates a replica; an empty one is purged (exclusive path only). The
+// entries are feedRead's (store.readVisible), so a name never reads older
+// here than in the feed.
 async function replicaRead (ctx, key, mod) {
   if (mod.blocked.has(key)) return null
-  return withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork }))
+  return withReplica(ctx, key, async (core) => ({ entries: (await store.readVisible(core)).entries, fork: core.fork }))
 }
 
 // The entries when feedRead would show the diary, else null: the admission

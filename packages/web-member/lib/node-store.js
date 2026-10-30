@@ -338,6 +338,43 @@ async function readAll (core) {
   return entries.slice(0, present)
 }
 
+// What a followed diary can show while it downloads newest-first (./sync.js
+// trackPresent): the readAll prefix plus the unbroken run of blocks that
+// ends at core.length, a hole in that run passed only when the effective
+// deletion fold of the stored blocks deletes it. -> { entries, present, tail }
+// with entries = the prefix, then the blocks of [tail, core.length);
+// tail === core.length when there is no such run (or none is needed). The
+// run needs block 0 (moderation reads it) and is never read past
+// MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
+// that can delete a block of the run lies inside the run: stored, and
+// applied to the whole result by the same fold.
+async function readVisible (core) {
+  assertOpen(core)
+  const length = core.length
+  const { raw, entries, deleted, present } = await presentState(core)
+  const prefix = entries.slice(0, present)
+  if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
+    return { entries: prefix, present, tail: length }
+  }
+  let tail = length
+  while (tail > present) {
+    const seq = tail - 1
+    // Judged on the snapshot alone: a block that arrived after presentState
+    // (a tombstone, say) is not in `raw`, so asking the live core would bridge
+    // a gap with a deletion this read never applied. A stored block that does
+    // not decode stops the run too, which only shows less.
+    // A hole is passed only when the effective fold deletes it: a tombstone
+    // that a later one cancelled names a block that may itself be a live
+    // tombstone of a post below, which this read would then show.
+    if (raw[seq].record === null && !deleted.has(seq)) break
+    tail = seq
+  }
+  // Only a block that arrived after presentState can close the gap: the
+  // next read shows it.
+  if (tail <= present) return { entries: prefix, present, tail: length }
+  return { entries: prefix.concat(entries.slice(tail, length)), present, tail }
+}
+
 // Every block as decoded up to the same end, tombstones not applied (the
 // delete writers check the targeted block itself); a cleared block is
 // { seq, record: null }.
@@ -770,6 +807,7 @@ module.exports = {
   replicaExists,
   purgeReplica,
   readAll,
+  readVisible,
   readRaw,
   readBlock0,
   appendRecord,
