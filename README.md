@@ -621,7 +621,7 @@ Antes do lançamento é preciso existir um canal privado de contato para contest
 
 ### Implantação automática pelo GitHub Actions
 
-O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) e, se passarem, entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
+O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) como os mesmos seis jobs em paralelo, no Node 24. O job `check` reúne os seis e só passa se todos passaram. Se `check` passar, o fluxo entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
 
 O script só implanta se esse SHA for a ponta de `origin/main`. Se `main` já avançou, sai com 3 e o fluxo termina verde com um aviso: a execução mais nova de `main` implanta (se nenhuma estiver na fila, use Run workflow). Ele recusa, sem mudar nada, um checkout com alterações locais ou com commits que não estão em `origin/main`, e um `VARANDA_DOMAIN` que não seja um nome em minúsculas sem ponto final. Depois ele:
 
@@ -952,7 +952,7 @@ npm test
 npm run lint
 ```
 
-`npm test` executa `npm test --workspaces --if-present`. Cada workspace que define script de teste usa `node ../../scripts/run-tests.js`, que roda cada `test/*.test.js` desse workspace em sequência (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000).
+`npm test` executa `npm test --workspaces --if-present` (os workspaces, um depois do outro). Cada workspace que define script de teste usa `node ../../scripts/run-tests.js`, que roda os `test/*.test.js` desse workspace num pool de processos filhos, `VARANDA_TEST_CONCURRENCY` por vez (com prazo por arquivo: `VARANDA_TEST_TIMEOUT_MS`, padrão 180000). Sem a variável, o pool é a metade inteira dos núcleos da CPU, no máximo 4 (4 num Mac de 12 núcleos, 2 numa máquina de 4 núcleos), porque vários testes medem tempos abaixo de 100 ms que mudam sob carga; `VARANDA_TEST_CONCURRENCY=1` roda um arquivo por vez, com a saída ao vivo. Com mais de um arquivo por vez, a saída de cada um sai num bloco ao terminar (ordem de término, sem intercalação), e o resumo lista `# falha: <arquivo>` para cada falha antes de `# N arquivo(s) de teste, M falha(s)`. `VARANDA_TEST_SHARD=I/N` roda só os arquivos cuja posição i (base 0, na lista ordenada ou na ordem da linha de comando) satisfaz `i % N == I - 1`; um fragmento sem arquivos sai com falha (`# nenhum arquivo neste fragmento`), e um valor inválido também. Se um teste de tempo falhar, rode-o sozinho (`node <arquivo>`) ou com `VARANDA_TEST_CONCURRENCY=1` antes de culpar a sua mudança.
 
 Um workspace:
 
@@ -971,7 +971,7 @@ npm run dev -w apps/site
 
 Abre em http://127.0.0.1:4173/. Publicação em GitHub Pages: [docs/site.md](docs/site.md).
 
-Em cada pull request e em cada push para `main`, o workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em `ubuntu-24.04` com Node 20 e 24 (matriz): `npm ci`, `npm run lint`, `npm test` e `npm run demo` (a demo deve terminar com `DEMO OK`).
+Em cada pull request e em cada push para `main`, o workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em `ubuntu-24.04`, no Node 20 e no 24. Em cada versão, seis jobs rodam em paralelo: `packages/core` em dois fragmentos, `apps/cli` em dois fragmentos (`VARANDA_TEST_SHARD` 1/2 e 2/2 nos dois), `packages/web-member` e `others`. O job `others` roda o lint, o `npm test` da raiz para os workspaces que restam e a demo, que deve terminar com `DEMO OK`. `packages/core`, `apps/cli` e `packages/web-member` são pulados nesse `npm test`, porque têm job próprio. Um workspace acrescentado depois roda ali automaticamente. Cada job começa com `npm ci --ignore-scripts` e define `VARANDA_TEST_CONCURRENCY=1`. O paralelismo da CI vem dos jobs. Os checks `test (20)` e `test (24)`, um por versão, são os que a regra da `main` exige. Cada um só passa se os seis jobs daquela versão passaram, e falha se algum falhou, foi cancelado ou pulado. Localmente os quatro passos não mudam: `npm ci` (ou `npm install`), `npm run lint`, `npm test` e `npm run demo`.
 
 Um arquivo, a partir da raiz:
 
