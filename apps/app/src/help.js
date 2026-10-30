@@ -145,6 +145,16 @@ export const HELP = Object.freeze({
       'Esta conta não tem vínculo com uma conta Google, então o aceite fica registrado só neste aparelho.',
       'Para registrar também na conta, vincule uma conta Google em Ajustes → Conta e @nome.'
     ])
+  }),
+  carteira: Object.freeze({
+    title: 'Sobre a conta de pagamentos',
+    paragraphs: Object.freeze([
+      'A conta de pagamentos é opcional: a Varanda continua funcionando igual sem ela. Nas próximas versões, ela vai servir para receber e enviar dinheiro por Pix.',
+      'Para abrir a conta, a lei pede uma verificação de identidade, feita pela Hodle, empresa parceira, com seus dados, a foto de um documento e uma selfie. Só pessoas com 18 anos ou mais podem abrir.',
+      'Seus dados e fotos vão para a Hodle. A Varanda guarda só os identificadores da conta e da carteira e o estado da verificação, nunca sua senha de 6 dígitos, seu CPF, suas fotos nem seu endereço.',
+      'A conta criada na Hodle não pode ser apagada depois.',
+      'O dinheiro fica em BRLA, uma moeda digital que vale 1 real, numa carteira em seu nome. A Varanda não é banco e o saldo não rende juros. Quando enviar dinheiro estiver disponível, a Varanda poderá cobrar uma taxa própria, sempre mostrada antes de você confirmar.'
+    ])
   })
 })
 
