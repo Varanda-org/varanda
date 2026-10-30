@@ -89,25 +89,34 @@ test('createSession: x-api-key header, JSON body, callback and vendor_data passe
 test('createSession: refused inputs never reach the network', async (t) => {
   const fake = await fakeFor(t)
   const d = client(fake)
-  t.alike(await d.createSession({ vendorData: '', callback: CALLBACK }), { ok: false })
-  t.alike(await d.createSession({ vendorData: VENDOR, callback: 'http://varanda.test/' }), { ok: false })
-  t.alike(await d.createSession({ vendorData: VENDOR, callback: CALLBACK, language: 'pt;x' }), { ok: false })
-  t.alike(await d.createSession(), { ok: false })
+  const refused = { ok: false, reason: 'entrada' }
+  t.alike(await d.createSession({ vendorData: '', callback: CALLBACK }), refused)
+  t.alike(await d.createSession({ vendorData: VENDOR, callback: 'http://varanda.test/' }), refused)
+  t.alike(await d.createSession({ vendorData: VENDOR, callback: CALLBACK, language: 'pt;x' }), refused)
+  t.alike(await d.createSession(), refused)
   t.is(fake.seen.length, 0)
 })
 
-async function createRefused (t, handlers, extra) {
+// A refusal carries only a coarse reason and, for a 4xx, field names.
+async function createRefused (t, handlers, extra, reason, fields = []) {
   const fake = await fakeFor(t)
   fake.script(handlers)
   const result = await create(client(fake, extra))
-  t.alike(result, { ok: false })
+  t.alike(result, { ok: false, reason, fields }, reason)
   noLeak(t, result)
 }
 
 test('createSession: 4xx and 5xx refused', async (t) => {
-  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 400, { detail: 'bad', session_token: SESSION_TOKEN }) })
-  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 403, { detail: 'forbidden' }) })
-  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 500, { detail: 'boom' }) })
+  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 400, { detail: 'bad', session_token: SESSION_TOKEN }) }, undefined, 'http-400', ['detail', 'session_token'])
+  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 403, { detail: 'forbidden' }) }, undefined, 'http-403', ['detail'])
+  await createRefused(t, { create: (req, res, ctx) => ctx.json(res, 500, { detail: 'boom' }) }, undefined, 'http-500')
+  // The field names say what the provider refused; the values never leave.
+  await createRefused(t, {
+    create: (req, res, ctx) => ctx.json(res, 400, { callback: ['domain not allowed: ' + API_KEY], workflow_id: ['?'], 'Weird Key!': 1, ['x'.repeat(50)]: 1 })
+  }, undefined, 'http-400', ['callback', 'workflow_id'])
+  await createRefused(t, {
+    create (req, res) { res.writeHead(401, { 'Content-Type': 'text/html' }).end('<html>' + API_KEY + '</html>') }
+  }, undefined, 'http-401')
 })
 
 test('createSession: non-JSON refused', async (t) => {
@@ -115,12 +124,12 @@ test('createSession: non-JSON refused', async (t) => {
     create (req, res) {
       res.writeHead(201, { 'Content-Type': 'text/html' }).end('<html>' + SESSION_TOKEN + '</html>')
     }
-  })
+  }, undefined, 'formato')
   await createRefused(t, {
     create (req, res) {
       res.writeHead(201, { 'Content-Type': 'application/json' }).end('{not json')
     }
-  })
+  }, undefined, 'formato')
 })
 
 test('createSession: a redirect is never followed', async (t) => {
@@ -130,12 +139,20 @@ test('createSession: a redirect is never followed', async (t) => {
     res.writeHead(302, { Location: fake.base + '/elsewhere' }).end()
   })
   const result = await create(client(fake))
-  t.alike(result, { ok: false })
+  t.alike(result, { ok: false, reason: 'rede', fields: [] })
   t.is(fake.seen.length, 1, 'only the original request was made')
 })
 
 test('createSession: timeout refused', async (t) => {
-  await createRefused(t, () => {}, { timeoutMs: 100 })
+  await createRefused(t, () => {}, { timeoutMs: 100 }, 'tempo')
+  // Headers arrive, then the body stalls past the deadline: a timeout, not a
+  // format problem.
+  await createRefused(t, {
+    create (req, res) {
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.write('{"session_id":')
+    }
+  }, { timeoutMs: 100 }, 'tempo')
 })
 
 test('createSession: oversize body refused', async (t) => {
@@ -143,13 +160,13 @@ test('createSession: oversize body refused', async (t) => {
     create (req, res, ctx) {
       ctx.json(res, 201, { session_id: 'sess-1', url: 'https://a.test/', pad: 'x'.repeat(70000) })
     }
-  })
+  }, undefined, 'formato')
   await createRefused(t, {
     create (req, res) {
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ session_id: 'sess-1', url: 'https://a.test/', pad: 'x'.repeat(70000) }))
     }
-  })
+  }, undefined, 'formato')
 })
 
 test('createSession: hostile session id or url refused, session_token dropped', async (t) => {
@@ -169,7 +186,7 @@ test('createSession: hostile session id or url refused, session_token dropped', 
   for (const body of answers) {
     await createRefused(t, {
       create: (req, res, ctx) => ctx.json(res, 201, Array.isArray(body) ? body : { ...body, session_token: SESSION_TOKEN })
-    })
+    }, undefined, 'formato')
   }
 })
 
@@ -191,18 +208,18 @@ test('decision: GET with the key, maps the outcome, encodes the id', async (t) =
   t.is(req.headers['x-api-key'], API_KEY)
 })
 
-test('decision: failures collapse to { ok: false }', async (t) => {
+test('decision: failures collapse to { ok: false } with a coarse reason', async (t) => {
   const fake = await fakeFor(t)
   const d = client(fake)
-  t.alike(await d.decision('nao-existe'), { ok: false }, '404')
-  t.alike(await d.decision('../etc'), { ok: false }, 'bad id never sent')
-  t.alike(await d.decision(''), { ok: false })
+  t.alike(await d.decision('nao-existe'), { ok: false, reason: 'http-404', fields: ['detail'] }, '404')
+  t.alike(await d.decision('../etc'), { ok: false, reason: 'entrada' }, 'bad id never sent')
+  t.alike(await d.decision(''), { ok: false, reason: 'entrada' })
   fake.script({ decision: (req, res, ctx) => ctx.json(res, 500, { date_of_birth: DOB }) })
   const r = await d.decision('sess-1')
-  t.alike(r, { ok: false })
+  t.alike(r, { ok: false, reason: 'http-500', fields: [] })
   noLeak(t, r)
   fake.script({ decision: (req, res) => res.writeHead(200, { 'Content-Type': 'text/plain' }).end(DOB) })
-  t.alike(await d.decision('sess-1'), { ok: false })
+  t.alike(await d.decision('sess-1'), { ok: false, reason: 'formato', fields: [] })
   t.absent(fake.seen.some((s) => s.path.includes('..')))
 })
 

@@ -44,3 +44,15 @@ export const AGE_TEXTS = Object.freeze({
   expirado: 'A verificação venceu. Comece de novo.',
   nenhum: ''
 })
+
+// The service answered that it cannot verify now (its own 503): nothing was
+// started, so the message says to try later instead of "incerto".
+export const AGE_UNAVAILABLE_TEXT = 'A verificação de idade está fora do ar agora. Tente de novo mais tarde.'
+
+// -> the text for an age request error: a definite "unavailable" gets the
+// age wording, anything else (including an uncertain outcome) is left to the
+// caller.
+export function ageErrorText (err) {
+  if (err && err.code === 'indisponivel' && err.uncertain !== true) return AGE_UNAVAILABLE_TEXT
+  return null
+}

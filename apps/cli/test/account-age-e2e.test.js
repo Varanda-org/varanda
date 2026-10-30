@@ -548,7 +548,7 @@ test('age e2e 7: one paid session per hour for repeated calls, and none re-creat
   h.fake.script({ create () {} })
   const timedOut = await l.age('session')
   t.is(timedOut.status, 503)
-  t.alike(timedOut.body, { error: 'indisponivel' })
+  t.alike(timedOut.body, { error: 'resultado-incerto' }, 'Didit may have created it: unknown, not refused')
   t.is(h.creates().length, 2, 'one attempt for the timed-out call')
   await sleep(1000)
   t.is(h.creates().length, 2, 'nothing re-created on its own')

@@ -82,7 +82,7 @@ async function waitFor (fn, ms = 3000) {
 // `age: false` leaves didit and ages null. `inviting` opens an invites
 // sidecar; `maxMembers` caps the directory. `c.guardOk = false` makes every
 // age.json write fail.
-async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit } = {}) {
+async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -92,7 +92,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
   await linkDirect(store, iss, linked, 'ana', SUB)
   const fake = await startFakeDidit()
   t.teardown(() => fake.close(), { force: true })
-  const didit = age ? createDidit({ apiKey: API_KEY, workflowId: WORKFLOW, endpoints: { base: fake.base }, fetch: loopbackFetch(fake.base) }) : null
+  const didit = age ? createDidit({ apiKey: API_KEY, workflowId: WORKFLOW, endpoints: { base: fake.base }, fetch: loopbackFetch(fake.base), ...(diditTimeoutMs ? { timeoutMs: diditTimeoutMs } : {}) }) : null
   const ages = age ? openAgeStore(dir, { now: c.now, guard: () => c.guardOk }) : null
   const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 5, isUsed: (id) => store.inviteUsed(id) }) : null
   const google = googleStub()
@@ -322,6 +322,63 @@ test('age: concurrent session requests for one member share one paid session', a
   t.is(ra.body.url, rb.body.url, 'both get the same url')
   t.is(s.creates().length, 1, 'one create at Didit')
   t.is(s.deletes().length, 0, 'the returned session is never deleted')
+})
+
+test('age: a refused session logs why (status and field names, never values), and the store or ceiling too', async (t) => {
+  const s = await setup(t)
+  s.fake.script({ create: (req, res, ctx) => ctx.json(res, 400, { callback: ['domain not allowed https://varanda.test'], detail: API_KEY }) })
+  const r = await s.step(member(), 'session')
+  t.is(r.status, 503, r.text)
+  t.alike(r.body, { error: 'indisponivel' })
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'didit-sessao-http-400' })), 'status in the log')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'didit-sessao-campo-callback' })), 'field name in the log')
+  t.absent(s.logs.join('\n').includes('domain not allowed'), 'no provider value in the log')
+  t.absent(s.logs.join('\n').includes(API_KEY), 'no key in the log')
+
+  s.fake.script({ create: (req, res, ctx) => ctx.json(res, 403, { detail: 'invalid key' }) })
+  t.is((await s.step(member(), 'session')).status, 503)
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'didit-sessao-http-403' })))
+
+  // A provider that never answers may have created the session anyway: the
+  // outcome is unknown, so the token is not the plain refusal.
+  const slow = await setup(t, { diditTimeoutMs: 100 })
+  slow.fake.script({ create: () => {} })
+  const timedOut = await slow.step(member(), 'session')
+  t.is(timedOut.status, 503)
+  t.alike(timedOut.body, { error: 'resultado-incerto' })
+  t.ok(slow.logs.includes(JSON.stringify({ event: 'idade', reason: 'didit-sessao-tempo' })))
+
+  // A 5xx or an unreadable success may also hide a created session.
+  for (const create of [
+    (req, res, ctx) => ctx.json(res, 502, { detail: 'bad gateway' }),
+    (req, res) => res.writeHead(201, { 'Content-Type': 'application/json' }).end('{not json')
+  ]) {
+    s.fake.script({ create })
+    const r = await s.step(member(), 'session')
+    t.is(r.status, 503)
+    t.alike(r.body, { error: 'resultado-incerto' })
+  }
+
+  // Two requests sharing one creation that times out both hear "unknown".
+  const pair = await setup(t, { diditTimeoutMs: 100 })
+  pair.fake.script({ create: () => {} })
+  const m = member()
+  const a = await pair.start(m)
+  const b = await pair.start(m)
+  const body = (nonce) => ({ member: m.hex, nonce, signature: pair.signFor(m, 'session', nonce) })
+  const both = await Promise.all([pair.post('/account/age/session', body(a.body.nonce)), pair.post('/account/age/session', body(b.body.nonce))])
+  for (const res of both) t.alike(res.body, { error: 'resultado-incerto' })
+
+  const full = await setup(t, { dailyLimit: 1 })
+  t.is((await full.step(member(), 'session')).status, 200)
+  t.is((await full.step(member(), 'session')).status, 503)
+  t.ok(full.logs.includes(JSON.stringify({ event: 'idade', reason: 'teto-diario' })))
+
+  const down = await setup(t)
+  down.ages.available = () => false
+  t.is((await down.step(member(), 'session')).status, 503)
+  t.ok(down.logs.includes(JSON.stringify({ event: 'idade', reason: 'armazenamento-indisponivel' })))
+  noPersonalData(t, s)
 })
 
 test('age: an unavailable age store never sends anyone to Didit', async (t) => {
@@ -654,14 +711,15 @@ test('age gates on: authorize, finish, rename and invites refuse an unverified k
   noPersonalData(t, s)
 })
 
-test('age: a failed age.json write answers 503 and the member stays unverified', async (t) => {
+test('age: a failed age.json write answers 503 resultado-incerto and the member stays unverified', async (t) => {
   const s = await setup(t)
   const m = member()
   await opened(s, m, DOC(19))
   s.c.guardOk = false
   const r = await s.step(m, 'result')
   t.is(r.status, 503)
-  t.alike(r.body, { error: 'indisponivel' })
+  t.alike(r.body, { error: 'resultado-incerto' }, 'the write may have landed: not a plain refusal')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'gravacao-falhou' })))
   t.absent(s.ages.verified(m.hex), 'not verified')
   t.is(s.deletes().length, 0, 'the session is kept for a retry')
 
