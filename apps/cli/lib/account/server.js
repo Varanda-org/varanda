@@ -14,6 +14,7 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { LINK_HEADER, REDEEM_HEADER, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, header } = require('./app-return')
+const { createWalletRoutes } = require('./wallet-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -124,7 +125,22 @@ const ERROR_STATUS = Object.freeze({
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
-  'resultado-incerto': 503
+  'resultado-incerto': 503,
+  // The optional payments account (./wallet-routes.js).
+  'carteira-pendente': 403,
+  'kyc-pendente': 409,
+  'kyc-recusado': 403,
+  'documentos-pendentes': 409,
+  'pin-invalido': 400,
+  'pin-bloqueado': 429,
+  'limite-carteira': 429,
+  'valor-invalido': 400,
+  'destino-invalido': 400,
+  'saldo-insuficiente': 409,
+  'carteira-incerta': 503,
+  'taxa-mudou': 409,
+  'idade-minima': 403,
+  'rede-divergente': 409
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -573,7 +589,13 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
-// paid Didit sessions opened per day across all members.
+// paid Didit sessions opened per day across all members. `hodle` (a
+// createHodle of ./hodle.js) and `wallets` (an openWalletStore of
+// ./wallet-store.js) turn on the optional payments account when both are
+// set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
+// `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
+// names the chain. Either null keeps the wallet policy at
+// { available: false }.
 function createAccountServer ({
   association,
   origin,
@@ -595,6 +617,11 @@ function createAccountServer ({
   didit = null,
   ages = null,
   ageDailyLimit = 200,
+  hodle = null,
+  wallets = null,
+  walletMode = 'cadastro',
+  walletDailyLimit = 100,
+  walletNetwork,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -665,6 +692,23 @@ function createAccountServer ({
     now,
     dailyLimit: ageDailyLimit,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Always mounted, so /account/wallet/policy answers even when the feature is off.
+  const walletRoutes = createWalletRoutes({
+    hodle,
+    wallets,
+    ages,
+    terms,
+    mode: walletMode,
+    association,
+    origin,
+    store,
+    log,
+    now,
+    dailyLimit: walletDailyLimit,
+    network: walletNetwork,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1336,6 +1380,7 @@ function createAccountServer ({
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
@@ -1404,7 +1449,7 @@ function createAccountServer ({
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
   // appStats: counts of app rows and of those holding a Google answer.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {
