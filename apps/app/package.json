@@ -24,6 +24,9 @@
     "@expo/vector-icons": "15.1.1",
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
+    "@varanda/web-member": "0.1.0",
+    "bare-crypto": "1.15.4",
+    "bare-ws": "3.2.0",
     "expo": "55.0.31",
     "expo-build-properties": "55.0.18",
     "expo-crypto": "55.0.19",
@@ -37,7 +40,6 @@
     "react-native-web": "0.21.3"
   },
   "devDependencies": {
-    "@varanda/web-member": "0.1.0",
     "bare-link": "4.0.1",
     "bare-pack": "2.2.4",
     "brittle": "4.5.0"
