@@ -2830,18 +2830,18 @@ O app nativo (nó web dentro do worklet) roda a cerimônia da passkey no própri
 
 Nenhuma verificação foi feita ainda: a compilação nativa (Kotlin e Swift) só acontece no build do EAS, e os passos abaixo pedem aparelhos de verdade. Marcar só o que for de fato executado, com a saída.
 
-Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instalação para o pacote do app (`delegate_permission/common.get_login_creds`); iOS 18 ou mais novo com `com.apple.developer.associated-domains` contendo `webcredentials:<domínio>` (precisa do Apple Developer Program) e o `apple-app-site-association` no domínio. Sem isso, o iOS responde `UNSUPPORTED` e o app mostra o aviso do aparelho.
+Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instalação para o pacote do app (`delegate_permission/common.get_login_creds`); iOS 18 ou mais novo com `com.apple.developer.associated-domains` contendo `webcredentials:<domínio>` (precisa do Apple Developer Program) e o `apple-app-site-association` no domínio. Sem isso, o iOS responde `UNSUPPORTED` e o app mostra o aviso do aparelho. Uma passkey sem PRF não trava o app: lança o mesmo `NO_PRF` da web e o cartão "Não deu para entrar com essa passkey" aparece, com "tentar de novo".
 
 - [ ] Mesma chave do diário que a web, ANTES de publicar qualquer coisa: entrar na web com a passkey e anotar a chave pública (Ajustes, Identidade técnica); no app, entrar com a mesma passkey (o gerenciador de senhas oferece a passkey criada na web) e conferir que a chave pública é a mesma. Se for diferente, não publicar nada e relatar (não realizada ainda).
 - [ ] Criar passkey pelo app numa instalação de teste: o app entra, e a mesma passkey abre a mesma conta na web (não realizada ainda).
 - [ ] Retomada a frio: depois de entrar, encerrar o app à força e abrir de novo; ele abre já desbloqueado, sem pedir a passkey (não realizada ainda).
 - [ ] Sair pede de novo: Ajustes, Sair; encerrar e abrir o app; ele pede a passkey (não retoma a sessão) (não realizada ainda).
-- [ ] Aparelho ou gerenciador sem PRF: o app mostra o aviso de que o aparelho ainda não consegue abrir a conta, nada é derivado e nenhuma chave aparece em Identidade técnica (não realizada ainda).
+- [ ] Aparelho ou gerenciador sem PRF: o app mostra o cartão "Não deu para entrar com essa passkey", com os passos e "tentar de novo"; nada é derivado, nenhuma chave aparece em Identidade técnica e tocar "tentar de novo" abre a cerimônia outra vez (não realizada ainda).
 - [ ] Os logs do app (`adb logcat`, console do Xcode) durante entrar, retomar e Sair não mostram a saída da PRF nem o `prfHex` (não realizada ainda).
 
 ### Limites que sobram
 
 - A saída da PRF passa pela ponte JS como texto hexadecimal (uma string não pode ser zerada); os bytes locais são zerados depois do `identity.install`.
-- Depois de um `NO_PRF` o status passa a `prf: 'no'` até o app reabrir, e o cartão Entrar mostra o aviso do aparelho sem `tentar de novo`.
+- Criar a passkey pelo app ainda envia `excludeCredentials: []`: a web guarda em memória os ids das passkeys inutilizáveis e os exclui, o app não, então uma passkey rejeitada pode ser oferecida de novo.
 - O item no chaveiro dá a identidade a quem tiver o aparelho desbloqueado (ou código rodando dentro do app) até Sair ou 30 dias sem uso. Não vai para backups nem para o iCloud Keychain.
 - No iOS, se a plataforma não aplicar à entrada da PRF o mesmo prefixo "WebAuthn PRF" que o navegador aplica, a chave sai diferente da web: o primeiro passo da verificação humana existe para pegar isso antes de publicar.

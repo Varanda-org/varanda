@@ -997,7 +997,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // A passkey was created or chosen but its password manager gives no
       // PRF. The node keeps a created one out of the next creation, so
       // another try can save the new one elsewhere.
-      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true })
+      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true, native: NATIVE })
       entrar = (
         <Card>
           <Notice>{UNUSABLE_TITLE}</Notice>
