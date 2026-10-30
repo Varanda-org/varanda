@@ -19,6 +19,7 @@ const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
+const { openWalletStore } = require('../lib/account/wallet-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
 const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
@@ -823,6 +824,26 @@ test('data-dir lock: a lost lock marks the store unavailable before the service 
   }
 })
 
+test('data-dir lock: a lost lock fails the wallet store before the service stops', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  fs.mkdirSync(dir, { recursive: true })
+  const wallets = openWalletStore(dir)
+  const calls = []
+  const walletsFail = wallets.fail
+  wallets.fail = () => { calls.push('wallets'); walletsFail() }
+  loseLock(null, (event) => calls.push(event.event), () => calls.push('stop'), null, null, null, null, wallets)
+  t.alike(calls, ['wallets', 'lock', 'stop'], 'wallets.fail() runs before the log and the stop')
+  t.is(wallets.available(), false)
+  try {
+    await wallets.intendSubaccount({ member: member().hex, network: 'polygon' })
+    t.fail('intendSubaccount resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'a wallet write still draining is refused')
+  }
+  t.is(await wallets.heal(), false, 'nor does heal() write')
+  t.absent(fs.existsSync(path.join(dir, 'wallet.json')), 'nothing reached the disk')
+})
+
 test('serve wiring: startTermsHeal heals on its interval and logs only a repair', async (t) => {
   const results = [false, true, false]
   let heals = 0
@@ -1201,6 +1222,8 @@ test('account (serve): boots unconfigured, takes the data-dir lock, stops on SIG
   t.ok(await until(() => svc.stdout().includes(JSON.stringify({ event: 'ready', configured: false })), { name: 'ready' }))
   t.ok(svc.stdout().includes(JSON.stringify({ event: 'triage', reason: 'desligada' })), 'VARANDA_AI unset: triage off')
   t.ok(svc.stdout().includes(JSON.stringify({ event: 'idade', reason: 'desligada' })), 'Didit unset: age verification off')
+  t.is(svc.stdout().split(JSON.stringify({ event: 'carteira', reason: 'desligada' })).length - 1, 1, 'Hodle unset: payments account off, logged once')
+  t.absent(fs.existsSync(path.join(dir, 'wallet.json')), 'no wallet.json while off')
   t.ok(lockHeld(dir), 'lock taken')
   const health = await fetch('http://127.0.0.1:' + port + '/account/health')
   t.alike(await health.json(), { status: 'ok' })
@@ -1468,6 +1491,119 @@ test('readEnv: Didit pair on together or off together, values never in the error
       }
     }
   }
+})
+
+test('readEnv: Hodle on with its key, other variables ignored while off, values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const KEY = 'hodle_test_chave-sentinela-hodle-77'
+  t.is(readEnv(env).hodle, null, 'unset: off')
+  t.is(readEnv({ ...env, VARANDA_HODLE_API_KEY: '' }).hodle, null, 'empty: off')
+  t.is(readEnv({ ...env, VARANDA_HODLE_NETWORK: 'x', VARANDA_HODLE_MODE: 'pix', VARANDA_HODLE_DAILY_LIMIT: 'abc' }).hodle, null, 'the rest is ignored while off')
+  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY }).hodle, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100 })
+  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: 'hodle_live_' + 'k'.repeat(40), VARANDA_HODLE_NETWORK: 'base', VARANDA_HODLE_MODE: 'carteira', VARANDA_HODLE_DAILY_LIMIT: '50' }).hodle,
+    { apiKey: 'hodle_live_' + 'k'.repeat(40), network: 'base', mode: 'carteira', dailyLimit: 50 })
+  const empties = readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: '', VARANDA_HODLE_MODE: '', VARANDA_HODLE_DAILY_LIMIT: '' }).hodle
+  t.alike(empties, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100 }, 'empty values: defaults')
+
+  const bad = [
+    [{ VARANDA_HODLE_API_KEY: 'chave-sentinela-hodle' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: 'hodle_prod_sentinela-123' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: 'hodle_test_' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: 'hodle_test_curta' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: 'hodle_test_chave sentinela' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY + '\n' }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: 'hodle_test_' + 'k'.repeat(250) }, 'VARANDA_HODLE_API_KEY inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: 'ethereum-sentinela' }, 'VARANDA_HODLE_NETWORK inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: 'Polygon' }, 'VARANDA_HODLE_NETWORK inválido'],
+    // pix and completo come with the later releases; until then a typo or an
+    // early value must stop the service, never run a mode the code lacks.
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'pix' }, 'VARANDA_HODLE_MODE inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'completo' }, 'VARANDA_HODLE_MODE inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'modo-sentinela' }, 'VARANDA_HODLE_MODE inválido']
+  ]
+  for (const limit of ['0', '-1', '1.5', 'abc', '100001', '007']) {
+    bad.push([{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_DAILY_LIMIT: limit }, 'VARANDA_HODLE_DAILY_LIMIT inválido'])
+  }
+  for (const [vars, message] of bad) {
+    const label = message + ' ' + Object.keys(vars).join(',')
+    try {
+      readEnv({ ...env, ...vars })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, message, label + ': message')
+      for (const value of Object.values(vars)) {
+        if (value !== '') t.absent(err.message.includes(value), 'the value is not in the message')
+      }
+    }
+  }
+})
+
+test('account (serve): Hodle wiring by mode, the key never printed, an unreadable wallet.json logged', async (t) => {
+  t.timeout(60000)
+  const KEY = 'hodle_test_chave-sentinela-hodle-serve'
+  const base = {
+    VARANDA_ASSOCIATION: issuer().association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET,
+    VARANDA_HODLE_API_KEY: KEY
+  }
+  const startAction = (port, action) => fetch('http://127.0.0.1:' + port + '/account/wallet/start', {
+    method: 'POST',
+    headers: { origin: ORIGIN, 'content-type': 'application/json' },
+    body: JSON.stringify({ member: member().hex, action })
+  })
+  const run = async (env, check) => {
+    const dir = path.join(tmpDir(t), 'account')
+    if (check.before) check.before(dir)
+    const svc = await serveCli(t, dir, env)
+    const port = await until(() => listeningPort(svc.stdout()), { name: 'listening' })
+    await until(() => svc.stdout().includes(JSON.stringify({ event: 'ready', configured: false })), { name: 'ready' })
+    await check(port, svc)
+    t.is(await svc.stop(), 0, svc.stderr())
+    t.absent(svc.stdout().includes(KEY) || svc.stderr().includes(KEY), 'the key is never printed')
+    t.absent(svc.stdout().includes('chave-sentinela'), 'nor any part of it')
+  }
+
+  // Default mode cadastro (C11): subaccount and KYC only, no wallet create.
+  await run(base, async (port, svc) => {
+    t.ok(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'ligada' })), 'on')
+    t.absent(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'indisponivel' })))
+    const policy = await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')
+    t.alike(await policy.json(), { available: true, network: 'polygon', mode: 'cadastro' })
+    const create = await startAction(port, 'wallet-create')
+    t.is(create.status, 404, 'cadastro: wallet-create does not exist')
+    const optin = await startAction(port, 'optin')
+    t.is(optin.status, 200, 'cadastro: opt-in starts')
+  })
+
+  // carteira adds wallet-create; the network reaches the routes.
+  await run({ ...base, VARANDA_HODLE_MODE: 'carteira', VARANDA_HODLE_NETWORK: 'base' }, async (port) => {
+    const policy = await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')
+    t.alike(await policy.json(), { available: true, network: 'base', mode: 'carteira' })
+    const create = await startAction(port, 'wallet-create')
+    t.is(create.status, 200, 'carteira: wallet-create starts')
+  })
+
+  // An unreadable wallet.json keeps the service up, logged by token only.
+  const corrupt = async (port, svc) => {
+    t.ok(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'indisponivel' })), 'logged at open')
+    const optin = await startAction(port, 'optin')
+    t.not(optin.status, 200, 'the routes fail closed')
+  }
+  corrupt.before = (dir) => {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'wallet.json'), 'não é json', { mode: 0o600 })
+  }
+  await run(base, corrupt)
+
+  // A bad mode stops the service before anything opens, without the values.
+  const dir = path.join(tmpDir(t), 'account')
+  const r = varanda(dir, ['account'], { ...base, VARANDA_HODLE_MODE: 'pix' })
+  t.is(r.code, 2)
+  t.ok(r.stderr.includes('VARANDA_HODLE_MODE inválido'), r.stderr)
+  t.absent(r.stderr.includes(KEY) || r.stdout.includes(KEY), 'the key is not printed')
 })
 
 test('account (serve): an invalid capacity variable exits 2 without printing it', (t) => {
