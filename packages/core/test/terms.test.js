@@ -136,6 +136,18 @@ test('account-link and report signatures by the member key are not terms accepta
   t.ok(b4a.toString(termsBytes).startsWith('varanda-terms-v1\n'))
 })
 
+test('only the prefix separates a terms signature from the same content under another domain', (t) => {
+  const text = b4a.toString(termsPayload(FIELDS), 'utf8')
+  const rest = text.slice(PREFIX.length)
+  const sign = (body) => b4a.toString(crypto.sign(b4a.from(body, 'utf8'), MEMBER_KP.secretKey), 'hex')
+  t.alike(verifyTerms(FIELDS, sign(PREFIX + rest)), { ok: true }, 'control: the same bytes with the terms prefix')
+  for (const other of [accountLink.PREFIX, report.PREFIX]) {
+    t.not(other, PREFIX)
+    t.alike(verifyTerms(FIELDS, sign(other + rest)), { ok: false, reason: 'bad-signature' }, 'prefix ' + other)
+  }
+  t.alike(verifyTerms(FIELDS, sign(rest.slice(1))), { ok: false, reason: 'bad-signature' }, 'no prefix at all')
+})
+
 test('shape: payload throws TypeError, verify answers malformed and never throws', (t) => {
   const bad = [
     null,
