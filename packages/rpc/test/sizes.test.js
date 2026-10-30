@@ -30,7 +30,9 @@ const {
   PROFILE_LIMIT_MAX,
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
-  FOLLOW_LIMIT_MAX
+  FOLLOW_LIMIT_MAX,
+  GROUP_LIMIT_MAX,
+  GROUP_MEMBERS_LIMIT_MAX
 } = require('..')
 
 const HEX = 'f'.repeat(64)
@@ -255,6 +257,24 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   const s = size({ follows: Array(FOLLOW_LIMIT_MAX).fill(HEX), total: SEQ })
   t.comment('follow.list worst case at ' + FOLLOW_LIMIT_MAX + ' keys: ' + s + ' bytes')
   t.ok(s * 4 < MAX_MESSAGE)
+})
+
+function groupReadResult (n, ch) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true }
+}
+
+test('group.read: GROUP_LIMIT_MAX fits', (t) => {
+  t.is(GROUP_LIMIT_MAX, 31)
+  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + size(groupReadResult(GROUP_LIMIT_MAX, '\ud800')) + ' bytes')
+})
+
+test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
+  const member = { member: HEX, name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), admin: true, banned: true, joinedAt: AT }
+  const s = size({ members: Array(GROUP_MEMBERS_LIMIT_MAX).fill(member), total: SEQ })
+  t.comment('group.members worst case at ' + GROUP_MEMBERS_LIMIT_MAX + ' members: ' + s + ' bytes')
+  t.ok(s <= MAX_MESSAGE)
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {

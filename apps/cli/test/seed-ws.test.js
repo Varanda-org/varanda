@@ -14,11 +14,12 @@ const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('.
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair, createSwarm, joinAndFlush, topicFor } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES, MAX_GROUPS_PER_DIARY, MAX_GROUP_NAME } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
+const { groupHeader: makeGroupHeader } = require('@varanda/core/lib/group')
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -1753,6 +1754,292 @@ test('startSeedWs /index/search and /index/topic: the same word reaches only its
   t.is((await mediaRequest(server.port, '/index/topic/ceu')).status, 200)
   t.is((await mediaRequest(server.port, '/index/search/ceu')).status, 200)
   t.alike(seeder.calls, [['indexTopic', 'ceu', null], ['indexSearch', 'ceu']])
+})
+
+// /index/group, /index/groups, /index/group-search: the seeder's group
+// answers shaped into the wire bodies. The stub answers in the shapes the
+// real Seeder returns (the end-to-end test below pins them).
+const G = 'd'.repeat(64)
+const W = 'e'.repeat(64)
+const groupHeader = { kind: 'group', visibility: 'public', join: 'open', diary: A, name: 'Jardim' }
+
+function groupSeeder () {
+  const stub = indexSeeder()
+  stub.indexGroup = async (group, after) => {
+    stub.calls.push(['indexGroup', group, after])
+    if (group !== G) return null
+    return { header: groupHeader, rootServed: true, writers: [{ key: W, diary: A, length: 3, seq: 1, left: false }], next: null, indexing: false, complete: true }
+  }
+  stub.indexGroups = async (diary) => {
+    stub.calls.push(['indexGroups', diary])
+    return diary === A ? { groups: [{ group: G, writer: W, seq: 1, left: false }], indexing: false, complete: true } : null
+  }
+  stub.indexGroupSearch = async (segment) => {
+    stub.calls.push(['indexGroupSearch', segment])
+    return segment === 'jardim' ? { groups: [{ group: G, name: 'Jardim', members: 2 }], more: false, indexing: false, complete: true } : null
+  }
+  return stub
+}
+
+test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers only; unknown or blocked is 404', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const g = await mediaRequest(server.port, '/index/group/' + G)
+  t.is(g.status, 200)
+  jsonHeaders(t, g)
+  t.alike(JSON.parse(g.body.toString()), {
+    kind: 'group',
+    visibility: 'public',
+    join: 'open',
+    name: 'Jardim',
+    creator: A,
+    rootServed: true,
+    writers: [{ key: W, diary: A, length: 3, seq: 1, left: false }],
+    next: null,
+    indexing: false,
+    complete: true
+  })
+  t.alike(seeder.calls[0], ['indexGroup', G, null])
+  t.is((await mediaRequest(server.port, '/index/group/' + G + '/' + W)).status, 200)
+  t.alike(seeder.calls[1], ['indexGroup', G, W], 'the cursor reaches the seeder')
+
+  const gs = await mediaRequest(server.port, '/index/groups/' + A)
+  t.is(gs.status, 200)
+  t.alike(JSON.parse(gs.body.toString()), { groups: [{ group: G, writer: W, seq: 1, left: false }], indexing: false, complete: true })
+
+  const found = await mediaRequest(server.port, '/index/group-search/jardim')
+  t.is(found.status, 200)
+  t.alike(JSON.parse(found.body.toString()), { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true })
+
+  const head = await mediaRequest(server.port, '/index/group/' + G, { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], g.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+
+  for (const url of ['/index/group/' + 'f'.repeat(64), '/index/groups/' + 'f'.repeat(64), '/index/group-search/zzz']) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url + ' unknown -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+})
+
+test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 421 and method 405 policy', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  t.ok(INDEX_GROUP_RE.test('/index/group/' + G + '/' + W))
+  t.ok(INDEX_GROUPS_RE.test('/index/groups/' + A))
+  t.ok(INDEX_GROUP_SEARCH_RE.test('/index/group-search/a-b'))
+  const bad = [
+    '/index/group', '/index/group/', '/index/group/' + 'a'.repeat(63), '/index/group/' + 'A'.repeat(64),
+    '/index/group/' + G + '/', '/index/group/' + G + '/abc', '/index/group/' + G + '/' + W + '/' + W,
+    '/index/group/' + G + '?x=1', '/index/groups', '/index/groups/' + A + '/x', '/index/groups/' + 'a'.repeat(65),
+    '/index/group-search', '/index/group-search/', '/index/group-search/Ana', '/index/group-search/a-b-c-d-e',
+    '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url + ' -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  const url = '/index/group/' + G
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+// The real Seeder's group answers through the routes, so the stub above and
+// the Seeder cannot drift apart: the index is fed as the seeder feeds it
+// (a validated root header, writer bindings) and the served state is set
+// to what an admitted diary and gated group cores leave behind.
+test('startSeedWs /index/group*: the real Seeder\'s answers carry the public name and one row per group', async (t) => {
+  t.timeout(20000)
+  const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
+  seeder._ready = true
+  const B = 'b'.repeat(64)
+  const P = 'a'.repeat(64)
+  const core = { contiguousLength: 2, length: 2 }
+  for (const diary of [A, B]) {
+    seeder._admitted.set(diary, {})
+    seeder._served.set(diary, { core, gated: true, dropped: false, scanQueued: false, scanned: 2, groupLive: new Map() })
+  }
+  const writers = [G, P, W, 'f'.repeat(64)]
+  for (const key of writers) seeder._groupServed.set(key, { core, headerOk: true, dropped: false })
+  seeder._groupIndex.setHeader(G, makeGroupHeader({ diary: A, name: 'Jardim Botânico' }))
+  seeder._groupIndex.setHeader(P, makeGroupHeader({ diary: A, visibility: 'private', join: 'approval', name: null, box: 'e'.repeat(64) }))
+  seeder._groupIndex.addWriter(G, G, A, 1)
+  seeder._groupIndex.addWriter(P, P, A, 2)
+  // B joined G from two devices.
+  seeder._groupIndex.addWriter(G, W, B, 1)
+  seeder._groupIndex.addWriter(G, 'f'.repeat(64), B, 2)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const g = JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString())
+  t.is(g.name, 'Jardim Botânico', 'the public root\'s display name')
+  t.is(g.creator, A)
+  t.is(g.writers.length, 3)
+  const p = JSON.parse((await mediaRequest(server.port, '/index/group/' + P)).body.toString())
+  t.is(p.visibility, 'private')
+  t.is(p.name, null, 'a private root has no name')
+  const found = JSON.parse((await mediaRequest(server.port, '/index/group-search/jardim')).body.toString())
+  t.alike(found.groups, [{ group: G, name: 'Jardim Botânico', writerCount: 2 }])
+  const gs = JSON.parse((await mediaRequest(server.port, '/index/groups/' + B)).body.toString())
+  t.alike(gs.groups, [{ group: G, writer: 'f'.repeat(64), seq: 2, left: false }], 'one row per group, the newest join')
+})
+
+test('startSeedWs /index/group*: a throw or a seeder without the methods is 404; worst-case bodies stay within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const max = Number.MAX_SAFE_INTEGER
+  const seeder = groupSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  // A lone surrogate is the costliest JSON character (6 bytes, \udXXX).
+  const name = '\ud800'.repeat(MAX_GROUP_NAME)
+  const writers = Array.from({ length: 64 }, (_, i) => ({ key: hex(i), diary: hex(100 + i), length: max, seq: max, left: true }))
+  seeder.indexGroup = async () => ({ header: { ...groupHeader, name }, writers, next: hex(63), indexing: true, complete: false })
+  const g = await mediaRequest(server.port, '/index/group/' + G + '/' + W)
+  t.is(g.status, 200)
+  t.ok(g.body.byteLength <= INDEX_MAX_BODY, 'group worst case is ' + g.body.byteLength + ' bytes')
+  t.ok(g.body.byteLength > 8192, 'a real page')
+
+  const groups = Array.from({ length: MAX_GROUPS_PER_DIARY }, (_, i) => ({ group: hex(i), writer: hex(1000 + i), seq: max, left: true }))
+  seeder.indexGroups = async () => ({ groups, indexing: true, complete: false })
+  const gs = await mediaRequest(server.port, '/index/groups/' + A)
+  t.is(gs.status, 200)
+  t.ok(gs.body.byteLength <= INDEX_MAX_BODY, 'groups worst case is ' + gs.body.byteLength + ' bytes')
+
+  const hits = Array.from({ length: 20 }, (_, i) => ({ group: hex(i), name, members: max }))
+  seeder.indexGroupSearch = async () => ({ groups: hits, more: true, indexing: true, complete: false })
+  const gsr = await mediaRequest(server.port, '/index/group-search/jardim')
+  t.is(gsr.status, 200)
+  t.ok(gsr.body.byteLength <= INDEX_MAX_BODY, 'search worst case is ' + gsr.body.byteLength + ' bytes')
+
+  seeder.indexGroups = async () => ({ groups: Array.from({ length: 3000 }, (_, i) => ({ group: hex(i), writer: hex(i), seq: max, left: true })), indexing: true, complete: false })
+  const over = await mediaRequest(server.port, '/index/groups/' + A)
+  t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
+
+  seeder.indexGroup = async () => { throw new Error('secret') }
+  const thrown = await mediaRequest(server.port, '/index/group/' + G)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('secret'))
+
+  const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
+  t.teardown(() => old.close(), { force: true })
+  t.is((await mediaRequest(old.port, '/index/group/' + G)).status, 404, 'a seeder without the methods -> 404')
+})
+
+// GET /moderation-group-post/<W>/<seq>: the account service's read of the
+// reported group message (Seeder#groupPostBlock behind it), gated like
+// /moderation-post by the triage token.
+const GP_TOKEN = 'd4'.repeat(32)
+const GP_W = 'e'.repeat(64)
+const GP_G = '1'.repeat(64)
+const GP_D = '2'.repeat(64)
+
+function groupPostRequest (port, url, { token = GP_TOKEN, method = 'GET' } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = { Host: '127.0.0.1:' + port }
+    if (token !== null) headers.Authorization = 'Bearer ' + token
+    const req = http.request({ host: '127.0.0.1', port, method, path: url, headers, agent: false }, (res) => {
+      const chunks = []
+      res.on('data', (d) => chunks.push(d))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b4a.toString(b4a.concat(chunks)) }))
+      res.on('error', reject)
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function groupPostSeeder () {
+  const stub = stubSeeder()
+  stub.calls = []
+  stub.groupPostBlock = async (writer, seq) => {
+    stub.calls.push([writer, seq])
+    if (writer !== GP_W) return null
+    if (seq === 2) return { group: GP_G, diary: GP_D, seq, texto: 'olá <b>grupo</b>', resposta: { writer: GP_W, seq: 1 } }
+    if (seq === 3) return { group: GP_G, diary: GP_D, seq, texto: 'sem resposta', resposta: null }
+    if (seq === 4) return { group: GP_G, diary: 'zz', seq, texto: 'forma errada', resposta: null }
+    return null
+  }
+  return stub
+}
+
+test('GROUP_POST_RE: canonical keys and sequence numbers only', (t) => {
+  t.ok(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/1'))
+  t.ok(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/' + '9'.repeat(15)))
+  t.absent(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/0'))
+  t.absent(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/01'))
+  t.absent(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/' + '9'.repeat(16)))
+  t.absent(GROUP_POST_RE.test('/moderation-group-post/' + 'E'.repeat(64) + '/1'))
+  t.absent(GROUP_POST_RE.test('/moderation-group-post/' + GP_W + '/1?x=1'))
+})
+
+test('GET /moderation-group-post: the validated group-post with the token, the generic 404 otherwise', async (t) => {
+  t.timeout(20000)
+  const seeder = groupPostSeeder()
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN })
+  t.teardown(() => server.close(), { force: true })
+  const url = (w, seq) => '/moderation-group-post/' + w + '/' + seq
+
+  const ok = await groupPostRequest(server.port, url(GP_W, 2))
+  t.is(ok.status, 200)
+  t.is(ok.headers['cache-control'], 'no-store')
+  t.alike(JSON.parse(ok.body), { group: GP_G, diary: GP_D, seq: 2, texto: 'olá <b>grupo</b>', resposta: { writer: GP_W, seq: 1 } })
+  t.alike(JSON.parse((await groupPostRequest(server.port, url(GP_W, 3))).body).resposta, null)
+
+  const notFound = async (res, name) => {
+    t.is(res.status, 404, name)
+    t.is(res.body, 'não encontrado\n', name + ': generic body')
+    t.absent(res.body.includes(GP_W), name + ': nothing echoed')
+  }
+  await notFound(await groupPostRequest(server.port, url('f'.repeat(64), 2)), 'unknown writer')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 5)), 'not a group-post')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 4)), 'a malformed answer')
+  const before = seeder.calls.length
+  await notFound(await groupPostRequest(server.port, url(GP_W, 2), { token: null }), 'missing token')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 2), { token: 'ab'.repeat(32) }), 'wrong token')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 2), { token: 'x' }), 'short token')
+  t.is(seeder.calls.length, before, 'the seeder is never asked without the token')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 2) + '?a=1'), 'a query string')
+  const head = await groupPostRequest(server.port, url(GP_W, 2), { method: 'HEAD' })
+  t.is(head.status, 405)
+  t.is(head.headers.allow, 'GET')
+
+  // No triage token configured: the route does not exist at all.
+  const plain = await startSeedWs({ port: 0, seeder: groupPostSeeder() })
+  t.teardown(() => plain.close(), { force: true })
+  await notFound(await groupPostRequest(plain.port, url(GP_W, 2)), 'no triageToken')
+})
+
+test('/index/group and /index/groups with the triage token use the moderation budget; a wrong token is public', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN, index: { rate: 0.001, burst: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  const public1 = await groupPostRequest(server.port, '/index/group/' + G, { token: null })
+  t.is(public1.status, 200, 'the one public token')
+  t.is((await groupPostRequest(server.port, '/index/group/' + G, { token: null })).status, 503, 'the public bucket is empty')
+  t.is((await groupPostRequest(server.port, '/index/groups/' + A, { token: 'ab'.repeat(32) })).status, 503, 'a wrong token is a public request')
+  const viaToken = await groupPostRequest(server.port, '/index/group/' + G)
+  t.is(viaToken.status, 200, 'the token still answers')
+  t.is(viaToken.body, public1.body, 'with the same body')
+  t.is((await groupPostRequest(server.port, '/index/groups/' + A)).status, 200)
+  t.is((await groupPostRequest(server.port, '/index/group-search/jardim')).status, 503, 'other index routes stay public')
 })
 
 // /index/likes and /index/reposts: who liked or reposted <author>:<seq>, on

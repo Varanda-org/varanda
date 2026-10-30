@@ -108,6 +108,15 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
+  group create               cria um grupo público (--name, --join open|approval)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group post <chave>         publica no grupo (--text)
+  group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
+  group list                 grupos dos quais você participa
+  group info|members|requests <chave>  dados do grupo, membros e pedidos de entrada
+  group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
+  group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
+  group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -119,6 +128,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --join --undo
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -193,6 +203,10 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_DIDIT_API_KEY` | Chave da API do Didit para a verificação de idade (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar). Segredo. Vazia junto com `VARANDA_DIDIT_WORKFLOW_ID`, a checagem fica desligada. Ver "Verificação de idade (Didit)". |
 | `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
 | `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
+| `VARANDA_HODLE_API_KEY` | Chave da API do Hodle para a conta de pagamentos (em `deploy/seeder/.env`; só o serviço `account` a recebe). Segredo. O prefixo `hodle_live_` ou `hodle_test_` escolhe produção ou sandbox. Vazia, o recurso fica desligado e `GET /account/wallet/policy` responde `{ available:false }`. Ver "Conta de pagamentos (Hodle)". |
+| `VARANDA_HODLE_NETWORK` | Rede da carteira: `polygon` (padrão) ou `base`. Fica fixa por membro desde a primeira carteira. Opcional. |
+| `VARANDA_HODLE_MODE` | Quais rotas existem: `cadastro` (padrão: só subconta e verificação) ou `carteira` (acrescenta criar a carteira com o PIN do membro). `pix` e `completo` virão em versões futuras. Atualizar a imagem nunca liga movimento de dinheiro sozinho. Só defina `carteira` depois que o Hodle confirmar por escrito que os PINs escolhidos por cada membro funcionam. Opcional. |
+| `VARANDA_HODLE_DAILY_LIMIT` | Teto por dia de subcontas novas, envios de verificação e operações de saída somados (padrão: 100; de 1 a 100000). Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
@@ -374,6 +388,12 @@ node bin/varanda.js sync --data data/bob --once --timeout-ms 30000 --bootstrap "
 
 Para encerrar: Ctrl-C no semeador (código 0) e Ctrl-C na DHT local.
 
+### 7. Grupos públicos
+
+`group create --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Grupos privados ainda não existem: `--join private` é recusado. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
+
+`group read <chave>` imprime uma linha por mensagem, das mais novas para as mais antigas: `<at> <nome|@usuário|8 hex>: <texto>`, ou `(mensagem oculta)`. Com `--limit <n>` (até 31) e se há mais antigas, a última linha é `mais antigas: --before <at>,<escritor>,<seq>`. Com `--json`, a última linha é o resultado. Um pedido que altera estado nunca é reenviado: se o resultado for incerto, o erro avisa.
+
 ## Demo automática
 
 ```sh
@@ -505,17 +525,24 @@ docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml u
 
 `VARANDA_ASSOCIATION` é a chave pública da associação (64 dígitos hexadecimais, a mesma em que o semeador confia: `seed status` a mostra), e precisa estar em `deploy/seeder/.env` antes do `up`: o compose recusa subir sem ela. O Caddy a serve em `https://<domínio>/varanda.json` (`{"v":1,"association":"..."}`, sem endereço: a página usa `wss://<domínio>/seeder`), e é daí que o app se configura sozinho.
 
-Depois abra `https://<domínio>/` (confira também `curl https://<domínio>/varanda.json`). Os membros não preenchem mais a tela Conectar: a página só mostra "Entrar". Cada pessoa cria uma passkey (de preferência no Gerenciador de Senhas do Google) e, depois da cerimônia do emissor (seção seguinte), vincula a conta Google na etapa Identidade e recebe o certificado de membro sozinha, sem colar nada; antes dessa cerimônia o vínculo responde "serviço indisponível". No app nativo, na CLI e no `varanda-serve` o certificado ainda vem da associação (`assoc certify --member <chave>`) e é colado (ou gravado com `cert add`). A cada atualização do código, sem a implantação automática da próxima seção: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
+Depois abra `https://<domínio>/` (confira também `curl https://<domínio>/varanda.json`). Os membros não preenchem mais a tela Conectar: a página só mostra "Entrar". Cada pessoa cria uma passkey (de preferência no Gerenciador de Senhas do Google) e, depois da cerimônia do emissor (seção seguinte), vincula a conta Google na etapa Identidade e recebe o certificado de membro sozinha, sem colar nada; antes dessa cerimônia o vínculo responde "serviço indisponível". No app com configuração manual (tela Conectar, Avançado), na CLI e no `varanda-serve` o certificado ainda vem da associação (`assoc certify --member <chave>`) e é colado (ou gravado com `cert add`). A cada atualização do código, sem a implantação automática da próxima seção: `git pull`, `bash deploy/seeder/build-web.sh` e o mesmo `up -d --build`.
 
 Depois de uma visita com rede que guarde o app no aparelho, o PWA também abre sem rede, instalado (pela sugestão do próprio app ou pelo menu do navegador) ou numa aba. Entrar funciona se o autenticador da passkey funcionar sem rede; A Rua, Seguindo e Diário mostram o que já está no aparelho. Publicações e respostas ficam na fila de saída, no Diário, e saem uma a uma quando a conexão volta, com a página aberta, a identidade desbloqueada e nenhuma sincronização em andamento. Só sai sozinho o que foi escrito com a página aberta; o que ficou de uma visita anterior espera a pessoa tocar em "enviar" no Diário, para que uma publicação plantada no aparelho enquanto a identidade estava bloqueada não saia com a chave do membro. A data é a de quando a publicação entra no diário, não a de quando foi escrita; envios incertos pedem uma decisão da pessoa. Apagar os dados do site perde a fila ainda não enviada. Detalhes e limites em [docs/app.md](docs/app.md).
 
 A exportação gera `sw.js` com os arquivos desta versão conferidos por SHA-256 e a marca `varanda-release` no `index.html`. O worker só é registrado na página hospedada em HTTPS com o nó no navegador, nunca em `localhost` nem com `varanda-serve`; ele não guarda respostas durante o uso e confere de novo o SHA-256 de cada arquivo guardado a cada leitura, antes de entregá-lo. Navegações e `varanda-node.js` buscam a rede primeiro e usam a cópia guardada desta versão se a rede falhar ou responder 404/5xx; arquivos com hash usam primeiro essa cópia. HTML no endereço de um script ou de outro recurso é recusado. No Caddy, todos os arquivos de `/srv/web` usam `Cache-Control: no-cache`, revalidado por ETag, para que uma cópia incompleta durante a implantação se corrija na carga seguinte. Um caminho com extensão que não existe recebe 404, e todo 404 recebe `no-store`; só caminhos sem extensão recebem `index.html`. `/varanda.json` continua com `no-store`.
 
+Para o app instalado (iOS e Android) entrar com a mesma passkey do site, o domínio publica `/.well-known/assetlinks.json` e `/.well-known/apple-app-site-association`, gerados por `deploy/seeder/well-known.sh` a partir de duas variáveis opcionais de `deploy/seeder/.env`:
+
+- `VARANDA_ANDROID_CERT_SHA256`: a impressão digital SHA-256 do certificado de assinatura da versão de lançamento do app Android, em 64 hexadecimais maiúsculos separados por dois-pontos. Vem de `eas credentials -p android` (o certificado de assinatura do build de lançamento), nunca da chave de depuração.
+- `VARANDA_IOS_APP_ID`: o identificador do app no iOS, no formato `TEAMID.app.varanda` (o Team ID da conta Apple Developer mais o identificador do pacote).
+
+O `assetlinks.json` declara `get_login_creds` (a passkey) e `handle_all_urls`: o Auth Tab do Chrome só entrega ao app a volta `https://<domínio>/account/app/conta` do vínculo da conta depois de conferir essa declaração; sem ela, o vínculo pelo app não termina e a pessoa liga a conta pelo site. O app não declara nenhum link https do site como seu, então nenhum outro link do domínio passa a abrir no app. Vazio desliga a entrada nativa naquela plataforma (a implantação avisa e segue); um valor fora da forma recusa a implantação. `deploy/seeder/well-known.sh` é lido por `deploy.sh` e `build-web.sh` como root: ele precisa ser de root e sem escrita para grupo ou outros, como o `deploy.sh`. Depois de mudar o `deploy/seeder/Caddyfile`, rode `caddy validate --config deploy/seeder/Caddyfile --adapter caddyfile` antes de subir. O fluxo do app com a conta Google está em "Vínculo pelo app nativo", mais abaixo.
+
 Limites desta fase: a chave do membro é derivada da passkey (extensão PRF) e nunca é gravada: ela só existe na memória da página enquanto a identidade está desbloqueada, perder a passkey perde a identidade e um navegador sem PRF não entra (ver `docs/verification.md` seção 10); a passkey vale para o endereço exato da página; a página continua tão confiável quanto o código que o servidor entrega. Com rede, uma nova carga busca código fresco e instala a nova versão do worker; ela assume depois que todas as janelas do app são fechadas, sem forçar a troca numa janela aberta. Sem rede, o aparelho roda a última versão que recebeu e guardou por inteiro. A entrada WebSocket ainda não tem os limites para a internet aberta previstos no PR de endurecimento. Use com um grupo pequeno de pessoas de confiança. O Caddy não grava registro de acesso; os erros que ele registra podem incluir o endereço do cliente (mesma rotação do semeador).
 
 #### Vínculo de conta Google e @nome (serviço `account`)
 
-O `compose.web.yaml` também sobe o serviço `account`, que liga a passkey de um membro a uma conta Google e dá a ele um @nome e um certificado de membro automático. O Caddy repassa `/account/*` a ele. Dois valores novos em `deploy/seeder/.env` (veja `.env.example`):
+O `compose.web.yaml` também sobe o serviço `account`, que liga a passkey de um membro a uma conta Google e dá a ele um @nome e um certificado de membro automático. O app instalado usa o mesmo serviço (veja "Vínculo pelo app nativo"). O Caddy repassa `/account/*` a ele. Dois valores novos em `deploy/seeder/.env` (veja `.env.example`):
 
 - `VARANDA_GOOGLE_CLIENT_ID` e `VARANDA_GOOGLE_CLIENT_SECRET`: um cliente OAuth do Google Cloud. No console (APIs e serviços, Credenciais), crie um "ID do cliente OAuth" do tipo "Aplicativo da Web"; em "URIs de redirecionamento autorizados" ponha `https://<domínio>/account/callback`; na tela de consentimento use os escopos `openid` e `email`. Copie o ID e o segredo para o `.env`. O segredo nunca vai para o repositório nem para registros.
 
@@ -572,6 +599,17 @@ Os aceites dos Termos de Uso e da Política de Privacidade ficam num arquivo à 
 
 Se houver um `directory.journal.*` antes de voltar (um diário órfão), suba esta versão de novo, espere mais de 40 segundos para que a limpeza de órfãos o remova, pare-a com a parada limpa e confira de novo. O `deploy.sh` desfaz o deploy sozinho recriando o contêiner `account` com um fechamento por SIGTERM, que deixa a versão 1 só se esse fechamento der certo; se o contêiner `account` estava parado ou reiniciando naquele momento, o diretório continua na versão 2 e a imagem anterior o recusa até que os passos manuais acima sejam seguidos.
 
+##### Vínculo pelo app nativo
+
+O app nativo faz o mesmo vínculo, mas o passo do Google roda no navegador do sistema, que não divide cookies com o app. Por isso o app segue o padrão de apps nativos do OAuth (RFC 8252) no lugar do cookie `__Host-varanda-link`, sem nada novo para configurar no Google (o retorno continua sendo `https://<domínio>/account/callback`):
+
+- **Cabeçalho.** Os pedidos do app trazem `x-varanda-client: app`. Um `POST` sem cabeçalho `Origin` só é aceito com esse cabeçalho e com corpo JSON (uma página de outro site não envia nenhum dos dois sem uma consulta prévia de CORS, que o serviço nunca responde). Um `Origin` presente continua tendo de ser exatamente a origem pública; `null` é recusado.
+- **Segredo V.** O app sorteia 32 bytes (V) e os guarda só na memória. No início envia apenas `appProof`, o SHA-256 de V em base64url (43 caracteres), e não recebe cookie. Autorizar, ler o pendente e concluir trazem V no cabeçalho `x-varanda-link`; o serviço guarda só o `appProof` e compara em tempo constante. Recomeçar um vínculo com convite já assinado ou já no Google vale, como o cookie na web, para quem apresenta V. Um recomeço com V abandona a linha anterior: a página do Google aberta para ela não conclui mais e volta para `https://<domínio>/account/app/conta?conta=erro`.
+- **Código de resgate R.** A volta do Google de um vínculo do app é reconhecida só pelo `state` de uso único e termina em `https://<domínio>/account/app/conta?conta=ok&codigo=<R>`, com R aleatório de uso único; o serviço guarda só o hash de R. As recusas voltam para `https://<domínio>/account/app/conta?conta=<erro|cancelado|lista-de-espera|convite-invalido>`, sem código. R chega ao app só pela sessão de autenticação que o próprio app abriu (Auth Tab no Android, `ASWebAuthenticationSession` no iOS), que captura essa volta. Não há outro caminho: o app ignora qualquer código que chegue por link (`varanda://conta?...`), e a página `https://<domínio>/account/app/conta`, se um navegador a carregar, é estática, sem script e sem link, e nunca repete a consulta. Num aparelho sem navegador com Auth Tab (ou em que a conferência falhe), o app pede para ligar a conta Google pelo site, entrando com a mesma passkey: é a mesma conta. Ler o pendente exige V e R (`x-varanda-redeem`); concluir exige os dois e gasta R, mesmo se a conclusão for recusada (aí o app recomeça). R vale por 3 minutos depois da volta do Google, e o app esquece V quando a sessão falha: um R que um navegador tenha guardado no histórico não serve para nada. A conta Google só é associada à linha pendente quando R é apresentado.
+- **Idade.** Com o cabeçalho do app, a sessão do Didit volta para `https://<domínio>/account/age/app-return`, que ignora qualquer parâmetro e redireciona para `varanda://idade?volta=1`; o app pergunta o resultado com a assinatura, como a web. O domínio permitido no Didit continua o mesmo. Uma sessão aberta pela web só é reaproveitada pela web, e a do app só pelo app: quem usa os dois na mesma hora abre duas sessões pagas.
+
+Por que dois segredos: quem compartilha o link do Google com outra pessoa tem V, mas nunca vê R, porque a volta com R chega ao aparelho de quem entrou no Google. Outro app no mesmo aparelho pode registrar o esquema `varanda://`, mas R não passa mais por ele; e, mesmo com R, nada se conclui sem V, que nunca sai da memória do app. Os registros nunca trazem V, `appProof`, R, `state`, `sub` nem e-mail. Verificação manual em `docs/verification.md`, seção 50.
+
 #### Verificação de idade (Didit, serviço `account`)
 
 Na web hospedada, todo membro, novo ou já vinculado, confirma a idade antes de usar o app. A idade mínima é 16 (decisão do produto com base no ECA Digital, sujeita a parecer jurídico). A pessoa é enviada à página do Didit, por navegação de página inteira como no passo do Google (por isso o CSP do `Caddyfile` não muda), e volta para `https://<domínio>/?idade=volta`. O serviço `account` pergunta a decisão ao Didit por conta própria e nunca confia na URL de volta.
@@ -618,6 +656,39 @@ Diagnóstico: quando o app mostra "A verificação de idade está fora do ar ago
 Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
 
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
+
+#### Conta de pagamentos (Hodle, serviço `account`)
+
+É uma conta opcional de Pix e reais digitais (BRLA) dentro do Varanda, feita com o Hodle. Sem `VARANDA_HODLE_API_KEY` nada muda: o recurso não existe e a política responde `{ available:false }`. Ligá-lo não é necessário para usar a rede.
+
+Pré-requisitos no Hodle, antes de ligar:
+
+- Conta com subcontas, verificação de identidade (KYC) e carteiras habilitadas.
+- Peça ao suporte para habilitar operações de terceiros e saques por API.
+- Confirme por escrito que cada membro pode ter o próprio PIN de carteira. A página de chaves de carteira do Hodle diz que carteiras de subcontas usam o PIN da plataforma, a menos que a subconta tenha usuário próprio. Até essa confirmação, não use produção com `carteira`.
+
+Modos (`VARANDA_HODLE_MODE`), em ordem: `cadastro` (padrão: subconta e verificação) < `carteira` (acrescenta criar a carteira com o PIN do membro) < `pix` < `completo`. Nesta versão só `cadastro` e `carteira` existem; `pix` e `completo` virão depois. Em `cadastro`, criar a carteira responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". Defina `carteira` só depois da confirmação do Hodle acima (no sandbox, a primeira carteira protegida pode fixar o PIN enviado).
+
+O que fica guardado: o `wallet.json` no volume `account-data`, com o vínculo do membro à subconta, o estado da verificação e a carteira. O que nunca fica: o PIN, o CPF, as imagens de documento e o endereço postal.
+
+CSP: o `Caddyfile` agora libera `https://uploads.hodle.com.br` em `connect-src`. As imagens de documento vão do navegador direto ao Hodle por URLs de uso único e nunca passam pelo Varanda. O `img-src` não muda (o código Pix aparece como texto).
+
+Diagnóstico: o serviço registra `{ event: 'carteira', reason }` só com palavras fixas, nunca a chave, o PIN ou o que o Hodle respondeu. Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"carteira"'`.
+
+| Registro (`reason`) | O que fazer |
+| --- | --- |
+| `teto-diario` | O teto `VARANDA_HODLE_DAILY_LIMIT` encheu; volta no dia seguinte. |
+| `armazenamento-indisponivel` | O `wallet.json` não pôde ser lido ou gravado no volume `account-data`. Se aparecer logo depois de uma chamada aceita pela Hodle, a pessoa recebe "resultado incerto" e nada é refeito sozinho. |
+| `ligada` / `desligada` / `indisponivel` | Estado da conta de pagamentos na partida do serviço (`indisponivel`: o `wallet.json` existe mas não pôde ser aberto). |
+| `carteira-incerta` | A criação da subconta ou da carteira perdeu a resposta e não foi confirmada por leitura. A pessoa fica parada até uma leitura confirmar ou o operador resolver; o serviço nunca cria de novo sozinho. |
+| `conflito` | A Hodle devolveu uma subconta ou carteira que já está guardada para outra pessoa. Nada foi gravado; confira na Hodle. |
+| `kyc-incerto` | Um envio de KYC perdeu a resposta e a consulta só achou uma tentativa anterior recusada ou expirada. A pessoa fica em "verificação em andamento" até uma leitura achar a tentativa nova ou o operador conferir na Hodle. |
+| `rede-divergente` | `VARANDA_HODLE_NETWORK` mudou depois que a pessoa abriu a conta e antes da carteira. A carteira não é criada; volte a variável para a rede da conta. |
+| `pin-plataforma` | A Hodle recusou a criação da carteira com o PIN da pessoa (403). Sinal de que a conta da chave usa o PIN da plataforma: mantenha `VARANDA_HODLE_MODE` em `cadastro` e fale com o suporte da Hodle. |
+
+Os motivos de falha da chamada ao Hodle seguem o padrão `hodle-<passo>-<causa>`, com `<passo>` em `subconta`, `documento`, `kyc`, `carteira`, `chaves` ou `leitura` e `<causa>` como `http-401`, `tempo`, `rede`, `formato`, `entrada` (pedido recusado antes de sair) ou `falha` (erro inesperado); confira o código em `apps/cli/lib/account/hodle.js` e `apps/cli/lib/account/wallet-routes.js`.
+
+Sandbox: os fluxos de dinheiro de subconta não estão disponíveis nele, então o teste de fumaça dessas operações só vale com a conta principal.
 
 ### Implantação automática pelo GitHub Actions
 
@@ -832,8 +903,8 @@ A triagem lê a publicação denunciada no semeador e compara com decisões huma
 No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado: depois de gravar estas linhas, recrie `account` e o `seeder`, como no passo 3):
 
 - `VARANDA_AI`: vazio ou ausente desliga (padrão). `sombra` só registra o que a IA faria e mostra a sugestão no painel. `1` deixa a IA decidir. Outro valor é erro de uso antes de abrir a porta. Sem o modelo o serviço sobe sem triagem (`sem-modelo`) e a checagem de saúde continua verde.
-- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele a rota de leitura não existe no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando.
-- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`.
+- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele as rotas de leitura (`/moderation-post/` e `/moderation-group-post/`) não existem no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando. Um token malformado é erro de partida mesmo com a IA desligada. Para bloquear uma denúncia de grupo (conta ou grupo) o serviço de conta lê a mensagem em `/moderation-group-post/` e confere grupo e diário; sem o token os dois bloqueios de uma denúncia de grupo são recusados, mesmo com a IA desligada, e o painel mostra o texto conferido ("Texto conferido no semeador:"). Defina o mesmo token nos dois serviços para moderar grupos. Com o token configurado, o serviço de conta também o envia nas leituras `/index/group` e `/index/groups` do semeador, que as cobra do orçamento de moderação e não do balde público do índice (a resposta é a mesma; token ausente ou errado cai no balde público).
+- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`. É lido e validado mesmo com a triagem desligada: o painel só decide `Bloquear grupo` depois de confirmar o grupo, o escritor e a existência da mensagem (o comprimento do escritor passa da posição; senão `sem-mensagem`) na rota pública `/index/group/<chave>` desse endereço (no máximo 8 páginas, 5 s, sem nova tentativa). Numa denúncia de grupo, tanto `Bloquear conta` quanto `Bloquear grupo` exigem essa confirmação; qualquer falha, inclusive um semeador fora do ar ou não configurado, recusa a decisão (`grupo-nao-confirmado`). Sem um semeador alcançável, uma denúncia de grupo só pode ser descartada (`Descartar` sempre funciona). O mesmo vale para toda denúncia sem grupo, com ou sem conta vinculada no alvo: `Bloquear` exige que o semeador confirme um diário servido (`GET /index/groups/<chave>` responde 200; senão `alvo-nao-confirmado`). Sem um semeador alcançável, nenhuma conta pode ser bloqueada pelo painel: todas as denúncias só podem ser descartadas.
 - `VARANDA_AI_MODEL_DIR`: diretório dos pesos, só fora do Compose. Padrão `<dataDir>/ai-model`. No Compose ele é fixo em `/data/ai-model`, dentro do volume `account-data`: não o defina no `.env`.
 
 Baixe os pesos uma vez. O script confere o sha256 dos cinco arquivos e recusa um diretório dentro do repositório. No Compose, grave direto no volume do serviço de conta, com a própria imagem:

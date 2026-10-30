@@ -9,7 +9,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites'
+    'instalar', 'denuncia', 'termosAparelho', 'convites', 'carteira'
   ].sort())
 })
 
@@ -97,6 +97,16 @@ test('installation help keeps browser instructions and local storage limits', as
   ]) {
     t.ok(text.includes(fact), fact)
   }
+})
+
+test('espiadinha and avisos hold for the site and the app tied to the installation', async (t) => {
+  const { HELP } = await load()
+  for (const key of ['espiadinha', 'avisos']) {
+    const text = HELP[key].paragraphs.join(' ')
+    t.ok(text.includes('app ligado à instalação da associação'), key)
+    t.absent(text.includes('só funciona'), key + ' is no longer web only')
+  }
+  t.ok(HELP.seguindo.paragraphs[0].includes('app ligado à instalação'))
 })
 
 test('help and short texts avoid jargon and em dashes', async (t) => {

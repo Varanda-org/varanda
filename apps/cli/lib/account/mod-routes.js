@@ -174,6 +174,13 @@ function createModRoutes ({
   // A createUsageStats instance (./usage-stats.js) exposing async view(), or
   // null when the stats tab is off.
   usage = null,
+  // A createGroupCheck instance (./group-check.js) or null. Either block of
+  // a group report is refused unless it confirms, through the seeder's
+  // public group index, that the report's `group` is a served group root
+  // and its `writer` belongs to the reported diary: both keys come from the
+  // reporter, so blocking unchecked would let a reporter aim an
+  // association-wide block at any key, a diary included.
+  groupCheck = null,
   panelDir = path.join(__dirname, 'panel'),
   log = () => {},
   now = Date.now,
@@ -185,6 +192,7 @@ function createModRoutes ({
   // Anything without a view() is treated as off, so a miswired caller shows
   // no tab instead of a tab that always fails.
   if (usage === null || usage === undefined || typeof usage.view !== 'function') usage = null
+  if (groupCheck === null || groupCheck === undefined || typeof groupCheck.check !== 'function') groupCheck = null
   // The subset rule enforced here too (not only where the env is parsed): a
   // stats e-mail that is not a moderator can never hold a session anyway,
   // and keeping it out makes that explicit.
@@ -244,8 +252,12 @@ function createModRoutes ({
   // person reporting them) and none on api/challenge (stateless). The
   // per-reporter cap that matters lives in the store (moderation-store.js
   // MAX_PER_REPORTER_DAY), reached only with the reporter's signature.
+  //   - group: the panel's api/reports/<id>/grupo lookups, keyed on the
+  //     session too but in a window of their own, so a queue full of group
+  //     reports cannot spend the budget decide and the lists need.
   const limits = {
     session: keyedWindow(60, 60 * 1000, now),
+    group: keyedWindow(30, 60 * 1000, now),
     operatorSigned: fixedWindow(30, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -413,10 +425,20 @@ function createModRoutes ({
     // The own key is never a target; checked before the signature and the store.
     if (target === member) throw refuse('pedido-invalido')
     const seq = body.seq === undefined || body.seq === null ? null : body.seq
+    // A group message (report v2): writer and group come together, only with
+    // a seq.
+    const writer = body.writer === undefined || body.writer === null ? null : hex64(body.writer)
+    const group = body.group === undefined || body.group === null ? null : hex64(body.group)
+    if ((writer === null) !== (group === null) || (writer !== null && seq === null)) throw refuse('pedido-invalido')
+    // A group root is not a diary, and a writer core is not one either. The
+    // writer MAY be the group key: the creator posts through the root core.
+    if (writer !== null && (group === target || writer === target)) throw refuse('pedido-invalido')
     const text = body.text === undefined ? '' : body.text
     const quote = body.quote === undefined ? '' : body.quote
     const { reason, signature } = body
-    const fields = { nonce, member, association, target, seq, reason, text, quote }
+    const fields = writer === null
+      ? { nonce, member, association, target, seq, reason, text, quote }
+      : { nonce, member, association, target, seq, writer, group, reason, text, quote }
     if (!verifyReport(fields, signature).ok) throw refuse('assinatura-invalida')
     // Spent only now that the member's signature over it verified (no await
     // between the check above and this line, so two concurrent copies of one
@@ -424,11 +446,13 @@ function createModRoutes ({
     // the app asks for a fresh nonce, and the store answers a retry of a
     // landed report as a duplicate.
     spend(spentReportNonces, nonce, expiresAt)
-    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, reason, text, quote, signature, nonce }))
+    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, writer, group, reason, text, quote, signature, nonce }))
     log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
     send(res, 200, { id: added.id, duplicate })
-    // A duplicate is a report the triage already has.
-    if (!duplicate) afterAnswer(() => triage.onReport(added))
+    // A duplicate is a report the triage already has. A group message never
+    // reaches the triage: it reads the diary at `seq`, which is not the
+    // reported block, so only a human decides it.
+    if (!duplicate && writer === null) afterAnswer(() => triage.onReport(added))
   }
 
   // --- moderator sign-in ---------------------------------------------------
@@ -531,9 +555,42 @@ function createModRoutes ({
   }
 
   // A case the moderator may not see or decide: about their own diary
-  // (retaliation, self-unblock) or filed from it (accuser and judge at once).
+  // (retaliation, self-unblock) or filed from it (accuser and judge at
+  // once). moderation.list's `exclude` applies the same rule. The group key
+  // is the reporter's choice, so it does not hide a case: anyone could
+  // otherwise file reports naming a moderator's diary as the group that
+  // this moderator can never discard. Only 'Bloquear grupo' aimed at the
+  // moderator's own diary is refused, in decide.
   function ownCase (r, own) {
     return r.target === own || r.reporter === own
+  }
+
+  // -> { ok: true, root, name, creator, texto } | { ok: false, code }. Never throws.
+  async function confirmGroup (r) {
+    if (r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
+    if (groupCheck === null) return { ok: false, code: 'config' }
+    try {
+      const v = await groupCheck.check({ group: r.group, writer: r.writer, diary: r.target, seq: r.seq })
+      return v !== null && typeof v === 'object' && v.ok === true ? v : { ok: false, code: v && typeof v.code === 'string' ? v.code : 'recusado' }
+    } catch {
+      return { ok: false, code: 'recusado' }
+    }
+  }
+
+  // A report without a group names only a key, which could be a group root:
+  // 'Bloquear' would then drop the whole group everywhere. A linked account
+  // proves nothing here (a creator can link the root key itself as an
+  // account), so every such block waits for the seeder to confirm a served
+  // diary. -> { ok: true, needed } | { ok: false, code }. Never throws.
+  async function confirmTarget (r) {
+    if (r.group !== null) return { ok: true, needed: false }
+    if (groupCheck === null || typeof groupCheck.checkDiary !== 'function') return { ok: false, code: 'config' }
+    try {
+      const v = await groupCheck.checkDiary({ diary: r.target })
+      return v !== null && typeof v === 'object' && v.ok === true ? { ok: true, needed: true } : { ok: false, code: v && typeof v.code === 'string' ? v.code : 'recusado' }
+    } catch {
+      return { ok: false, code: 'recusado' }
+    }
   }
 
   // { seq, at } of the last acked snapshot, or null before the first.
@@ -550,6 +607,8 @@ function createModRoutes ({
       kind: r.kind,
       target: r.target,
       seq: r.seq,
+      writer: r.writer,
+      group: r.group,
       quote: r.quote,
       reason: r.reason,
       text: r.text,
@@ -567,8 +626,21 @@ function createModRoutes ({
     }
   }
 
-  function projectChange (c, cache) {
+  // The keys a 'bloquear' decision blocked as a group root, over every
+  // stored row (not one listing window), so an old group block keeps its
+  // label.
+  function groupKeys () {
+    return moderation.groupKeys()
+  }
+
+  function projectChange (c, cache, groups = null) {
     if (c === null || c === undefined) return null
+    const isGroup = groups !== null
+      ? groups.has(c.member)
+      : c.reportIds.some((id) => {
+        const r = moderation.get(id)
+        return r !== null && r.blocked === 'grupo' && r.group === c.member
+      })
     return {
       id: c.id,
       op: c.op,
@@ -577,7 +649,8 @@ function createModRoutes ({
       at: c.at,
       reportIds: [...c.reportIds],
       claimedAt: c.claimedAt ?? null,
-      byAi: c.by === AI_ACTOR
+      byAi: c.by === AI_ACTOR,
+      kind: isGroup ? 'grupo' : 'conta'
     }
   }
 
@@ -644,9 +717,42 @@ function createModRoutes ({
 
   async function decide (req, res, session, id, body) {
     const row = store(() => moderation.get(id))
-    if (row === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const own = ownMember(session)
+    if (row === null || ownCase(row, own)) throw refuse('nao-encontrado')
     const note = body.note === undefined ? '' : body.note
-    const result = await storeAsync(() => moderation.decide(id, { decision: body.decision, by: session.email, note }))
+    const block = body.block === undefined ? 'diario' : body.block
+    // Blocking one's own diary as a "group" would also hide it from them in
+    // api/blocked.
+    if (body.decision === 'bloquear' && block === 'grupo' && row.group === own) throw refuse('nao-encontrado')
+    // A report without a group is refused by the store ('pedido-invalido').
+    // A group report gets no AI triage and no verified read: its quote is
+    // the reporter's word only. Either block (the root, or the diary named
+    // as author) therefore waits for the seeder to confirm that the writer
+    // belongs to that diary, so an invented quote cannot aim a block at a
+    // diary that never wrote it. Fails closed; 'descartar' never asks.
+    if (body.decision === 'bloquear' && row.group !== null) {
+      const v = await confirmGroup(row)
+      if (!v.ok) {
+        log({ event: 'grupo', reason: v.code })
+        throw refuse('grupo-nao-confirmado')
+      }
+      // The writer row alone confirms the reported diary, never that the
+      // reported `group` is a group root: without the root header's kind a
+      // reporter could have 'Bloquear grupo' drop any key association-wide.
+      if (block === 'grupo' && v.root !== true) {
+        log({ event: 'grupo', reason: 'sem-raiz' })
+        throw refuse('grupo-nao-confirmado')
+      }
+    }
+    // ('grupo' on a report without a group is the store's refusal.)
+    if (body.decision === 'bloquear' && row.group === null && block === 'diario') {
+      const v = await confirmTarget(row)
+      if (!v.ok) {
+        log({ event: 'alvo', reason: v.code })
+        throw refuse('alvo-nao-confirmado')
+      }
+    }
+    const result = await storeAsync(() => moderation.decide(id, { decision: body.decision, by: session.email, note, block }))
     log({ event: 'decided', reason: result.report.status })
     const cache = new Map()
     send(res, 200, { report: projectReport(result.report, cache), change: projectChange(result.change, cache) })
@@ -661,11 +767,39 @@ function createModRoutes ({
     const own = ownMember(session)
     const list = store(() => moderation.blocked()).filter(({ member }) => member !== own)
     const { changes } = store(() => moderation.pending())
+    const groups = store(groupKeys)
     send(res, 200, {
       published: store(publishedInfo),
-      blocked: list.map(({ member, reportIds }) => ({ member, username: usernameOf(member, cache), reportIds: [...reportIds] })),
-      pending: changes.filter((c) => c.member !== own).map((c) => projectChange(c, cache))
+      blocked: list.map(({ member, reportIds, kind }) => ({ member, username: usernameOf(member, cache), reportIds: [...reportIds], kind })),
+      pending: changes.filter((c) => c.member !== own).map((c) => projectChange(c, cache, groups))
     })
+  }
+
+  // The panel asks before offering either block: { confirmed: true, root,
+  // name, creator } (`root` false: no root header, so only the diary can be
+  // blocked; the root header as the seeder holds it, peer text the panel
+  // renders as text) or { confirmed: false, reason }. A hint for the button
+  // only: decide checks again.
+  async function groupInfo (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || row.writer === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const v = await confirmGroup(row)
+    if (!v.ok) log({ event: 'grupo', reason: v.code })
+    // `texto`: the reported message as the seeder decoded it (peer text,
+    // rendered by the panel as text only).
+    send(res, 200, v.ok ? { confirmed: true, root: v.root === true, name: v.name ?? null, creator: v.creator ?? null, texto: typeof v.texto === 'string' ? v.texto : null } : { confirmed: false, reason: v.code })
+  }
+
+  // The panel asks before offering 'Bloquear' on a report without a group
+  // whose target has no linked account: { confirmed: true } or {
+  // confirmed: false, reason }. A hint for the button only: decide checks
+  // again.
+  async function targetInfo (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || row.group !== null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const v = await confirmTarget(row)
+    if (!v.ok) log({ event: 'alvo', reason: v.code })
+    send(res, 200, v.ok ? { confirmed: true } : { confirmed: false, reason: v.code })
   }
 
   async function unblock (req, res, session, body) {
@@ -774,10 +908,10 @@ function createModRoutes ({
     return readJsonBody(req, max)
   }
 
-  async function withSession (req, fn) {
+  async function withSession (req, fn, limit = limits.session) {
     const session = sessionOf(req)
     if (session === null) throw unauthorized()
-    if (!limits.session(session.id)) throw over()
+    if (!limit(session.id)) throw over()
     needModeration()
     return fn(session)
   }
@@ -824,6 +958,16 @@ function createModRoutes ({
       const id = decideMatch[1]
       const body = await postBody(req, undefined)
       return withSession(req, (s) => decide(req, res, s, id, body))
+    }
+    const groupMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/grupo$/.exec(p)
+    if (get && groupMatch && ID_RE.test(groupMatch[1])) {
+      const id = groupMatch[1]
+      return withSession(req, (s) => groupInfo(req, res, s, id), limits.group)
+    }
+    const targetMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/alvo$/.exec(p)
+    if (get && targetMatch && ID_RE.test(targetMatch[1])) {
+      const id = targetMatch[1]
+      return withSession(req, (s) => targetInfo(req, res, s, id), limits.group)
     }
     const cancelMatch = /^\/account\/mod\/api\/pending\/([^/]+)\/cancel$/.exec(p)
     if (post && cancelMatch && ID_RE.test(cancelMatch[1])) {

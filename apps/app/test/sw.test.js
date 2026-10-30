@@ -393,6 +393,10 @@ test('bypassed requests are never intercepted', async (t) => {
   for (const url of [ORIGIN + '/varanda.json', ORIGIN + '/sw.js', ORIGIN + '/seeder', ORIGIN + '/seeder/x', 'https://other.test' + BUNDLE]) {
     t.absent((await dispatch(w, url)).responded, url)
   }
+  for (const url of [ORIGIN + '/.well-known/assetlinks.json', ORIGIN + '/.well-known/apple-app-site-association']) {
+    t.absent((await dispatch(w, url, { mode: 'navigate' })).responded, url)
+    t.absent((await dispatch(w, url)).responded, url)
+  }
   t.absent((await dispatch(w, ORIGIN + BUNDLE, { method: 'POST' })).responded, 'POST')
 })
 

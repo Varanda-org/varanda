@@ -12,6 +12,11 @@
 // local-first: kv 'follows' changes at once, kv 'followsPending' holds the
 // changes not yet appended as `follow` records, and writeFoldedFollows
 // folds the own diary's records back into kv 'follows'.
+// 'group/<hex>' is a group core (@varanda/core lib/group.js), own or foreign,
+// JSON blocks, LAZY 'data': this device's own roots and writers are created
+// with the public key only and unlocked in memory exactly as media cores
+// (kv 'groupWriters' names them with their derivation nonce); foreign roots
+// and writers are opened by key and listed in kv 'groupReplicas'.
 // The own diary uses ./diary-options.js (compat mode: core.key is the signing
 // public key, the key a member certificate names) and valueEncoding 'json'
 // (stores exactly the JSON.stringify bytes, ./member.js); replicas are
@@ -43,6 +48,7 @@ const {
   MAX_MEDIA_BYTES
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
+const { validateGroupRecord, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -56,6 +62,10 @@ const MEDIA_PREFIX = 'media/'
 const MEDIA_FULL = 'espaço de fotos deste aparelho esgotado'
 const MEDIA_INVALID = 'mídia inválida'
 const MAX_MEDIA_CORE_ENTRIES = 8 // kv mediaCores keeps the newest 8
+const GROUP_PREFIX = 'group/'
+const GROUP_FULL = 'limite do grupo atingido'
+const GROUPS_FULL = 'limite de grupos atingido'
+const MAX_GROUP_REPLICAS = MAX_GROUPS_PER_DIARY * MAX_GROUP_WRITERS
 
 // The flag an open core carries when the session key pair was set on it:
 // appendNow trusts this and never `core.writable` (a legacy store is
@@ -378,8 +388,19 @@ const DEFAULT_LIMITS = Object.freeze({
 const appendQueues = new WeakMap()
 
 function appendRecord (core, record, limits) {
+  return enqueueAppend(core, record, validateRecord, limits, 'limite do diário atingido')
+}
+
+// The same queue and limits for a group core: block 0 is its header, the
+// root (`root: true`) alone may hold root-only records.
+function appendGroupRecord (core, record, { root = false, limits } = {}) {
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true })
+  return enqueueAppend(core, record, validate, limits, GROUP_FULL)
+}
+
+function enqueueAppend (core, record, validate, limits, full) {
   const prev = appendQueues.get(queueKey(core)) || Promise.resolve()
-  const run = () => appendNow(core, record, { ...DEFAULT_LIMITS, ...limits })
+  const run = () => appendNow(core, record, validate, { ...DEFAULT_LIMITS, ...limits }, full)
   const next = prev.then(run, run)
   appendQueues.set(queueKey(core), next.catch(() => {}))
   return next
@@ -387,8 +408,9 @@ function appendRecord (core, record, limits) {
 
 // The storage limits of the own diary (protocol S3), exactly as
 // @varanda/core appendNow: a seeder rejects and purges a diary over them.
-// Only a core unlocked by openDiary(storage, keyPair) may append.
-async function appendNow (core, record, limits) {
+// Only a core unlocked by openDiary(storage, keyPair) (or openGroupWriter)
+// may append.
+async function appendNow (core, record, validate, limits, full) {
   await core.ready()
   if (core[UNLOCKED] !== true) throw new UsageError(LOCKED)
   let plain = null
@@ -396,13 +418,13 @@ async function appendNow (core, record, limits) {
     plain = decodeBlock(b4a.from(JSON.stringify(record)))
   } catch {}
   if (plain === null) throw invalidRecord('malformed')
-  const reason = validateRecord(plain, core.length)
+  const reason = validate(plain, core.length)
   if (reason) throw invalidRecord(reason)
   const blockBytes = b4a.byteLength(JSON.stringify(plain))
   if (blockBytes > limits.maxBlockBytes ||
       core.length >= limits.maxLogBlocks ||
       core.byteLength + blockBytes > limits.maxLogBytes) {
-    throw new Error('limite do diário atingido')
+    throw new Error(full)
   }
   await core.append(plain)
   return core.length - 1
@@ -650,6 +672,309 @@ async function deleteMediaCores (storage) {
   await storage.writeJson('mediaDevice', null)
 }
 
+// ---- group cores ----
+
+function groupName (hex) {
+  return GROUP_PREFIX + hex.toLowerCase()
+}
+
+const GROUP_STORAGE = Object.freeze({ lazy: ['data'] })
+
+// kv groupCores = { v: 1, keys }: every group core key this storage may
+// hold, written BEFORE the core is created (write-ahead) and dropped after
+// its purge, so a reset finds every group core, also one no other list
+// names (a re-gate core left by a closed tab, a key sliced off a full
+// list): the next person on the device must not inherit any of them. The
+// storage cannot list its cores, hence the list.
+const groupCoreLocks = new WeakMap()
+
+function withGroupCoreLock (storage, fn) {
+  const prev = groupCoreLocks.get(storage) || Promise.resolve()
+  const p = prev.then(fn)
+  groupCoreLocks.set(storage, p.catch(() => {}))
+  return p
+}
+
+async function readGroupCoreKeys (storage) {
+  const data = await readKv(storage, 'groupCores')
+  if (!isVersioned(data) || !Array.isArray(data.keys)) return []
+  return [...new Set(data.keys.filter((k) => isHex64(k)).map((k) => k.toLowerCase()))]
+}
+
+function registerGroupCore (storage, hex) {
+  const key = hex.toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const keys = await readGroupCoreKeys(storage)
+    if (keys.includes(key)) return
+    keys.push(key)
+    await storage.writeJson('groupCores', { v: 1, keys })
+  })
+}
+
+function unregisterGroupCore (storage, hex) {
+  const key = String(hex).toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const keys = await readGroupCoreKeys(storage)
+    if (!keys.includes(key)) return
+    await storage.writeJson('groupCores', { v: 1, keys: keys.filter((k) => k !== key) })
+  })
+}
+
+// Opens (creating when missing) one of this device's group cores (a root or
+// a writer) for `keyPair`, derived by the session from the passkey and the
+// core's nonce: the openMediaCore pattern, so the storage only ever receives
+// the public key and the secret lives on the open core, in memory.
+async function openGroupWriter (storage, keyPair) {
+  if (keyPair === null || typeof keyPair !== 'object' ||
+      !(keyPair.publicKey instanceof Uint8Array) || keyPair.publicKey.byteLength !== 32) {
+    throw new TypeError('par de chaves inválido')
+  }
+  const unlock = keyPair.secretKey !== undefined && keyPair.secretKey !== null
+  if (unlock) checkKeyPair(keyPair)
+  const name = groupName(b4a.toString(keyPair.publicKey, 'hex'))
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  if (!(await storage.hasCore(name))) {
+    options.keyPair = { publicKey: keyPair.publicKey }
+    await registerGroupCore(storage, b4a.toString(keyPair.publicKey, 'hex'))
+  }
+  const core = new Hypercore(storage.core(name, GROUP_STORAGE), options)
+  await core.ready()
+  if (!b4a.equals(core.key, keyPair.publicKey)) {
+    await core.close()
+    throw new Error('núcleo de grupo de outra chave')
+  }
+  if (unlock) {
+    core.setKeyPair({ publicKey: keyPair.publicKey, secretKey: keyPair.secretKey })
+    core[UNLOCKED] = true
+  }
+  return core
+}
+
+// A group core by key, read-only (a foreign root or writer, or an own core
+// read without its secret); created empty when missing, for replication.
+async function openGroupReplica (storage, hex) {
+  if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('chave inválida')
+  if (!(await groupCoreExists(storage, hex))) await registerGroupCore(storage, hex)
+  const core = new Hypercore(storage.core(groupName(hex), GROUP_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+  await core.ready()
+  return core
+}
+
+function groupCoreExists (storage, hex) {
+  return storage.hasCore(groupName(hex))
+}
+
+// A stored group core, read-only; null when none is stored. Never creates.
+async function openGroupCoreReadOnly (storage, hex) {
+  if (typeof hex !== 'string' || !HEX64.test(hex)) return null
+  if (!(await groupCoreExists(storage, hex))) return null
+  return openGroupReplica(storage, hex)
+}
+
+async function purgeGroupCore (storage, hex) {
+  await storage.deleteCore(groupName(hex))
+  await unregisterGroupCore(storage, hex)
+  await removeBoundRoot(storage, hex)
+}
+
+// kv boundRoots = { v: 1, keys: [rootHex...] }: the group roots whose gate
+// proved the creator's own signed join of the root here, newest last, at
+// most MAX_GROUP_REPLICAS. A restart before the join block was stored
+// still knows the root goes with a blocked or revoked creator. Removed with
+// the core. An unreadable entry reads as not bound.
+async function readBoundRoots (storage) {
+  const data = await readKv(storage, 'boundRoots')
+  if (!isVersioned(data) || !Array.isArray(data.keys)) return []
+  return [...new Set(data.keys.filter((k) => isHex64(k)).map((k) => k.toLowerCase()))]
+}
+
+function addBoundRoot (storage, hex) {
+  if (typeof hex !== 'string' || !HEX64.test(hex)) throw new TypeError('chave inválida')
+  const key = hex.toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const keys = await readBoundRoots(storage)
+    if (keys.includes(key)) return
+    keys.push(key)
+    await storage.writeJson('boundRoots', { v: 1, keys: keys.slice(-MAX_GROUP_REPLICAS) })
+  })
+}
+
+function removeBoundRoot (storage, hex) {
+  const key = String(hex).toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const keys = await readBoundRoots(storage)
+    if (!keys.includes(key)) return
+    await storage.writeJson('boundRoots', { v: 1, keys: keys.filter((k) => k !== key) })
+  })
+}
+
+function validWriterEntry (e) {
+  return e !== null && typeof e === 'object' && isHex64(e.group) && isHex64(e.key) && isHex64(e.nonce) &&
+    (e.rootNonce === undefined || e.rootNonce === null || isHex64(e.rootNonce))
+}
+
+// The root's nonce of a group this device created: kept apart from the
+// current writer's, because a creator who leaves and rejoins writes through a
+// new writer but still needs the root for the root-only records. An entry
+// from before the field existed whose writer is the root names it already.
+function rootNonceOf (e) {
+  if (typeof e.rootNonce === 'string') return e.rootNonce.toLowerCase()
+  return e.key.toLowerCase() === e.group.toLowerCase() ? e.nonce.toLowerCase() : null
+}
+
+// kv groupWriters = { v: 1, entries: [{ group, key, nonce, rootNonce }] }: per
+// group the core this device writes (key === group for a group it created
+// and has not left), the nonce its key pair is derived with, and the root's
+// nonce when this device created the group (else null); one entry per
+// group, at most MAX_GROUPS_PER_DIARY, oldest first.
+async function readGroupWriters (storage) {
+  const data = await readKv(storage, 'groupWriters')
+  if (!isVersioned(data) || !Array.isArray(data.entries)) return []
+  const seen = new Set()
+  const out = []
+  for (const e of data.entries) {
+    if (!validWriterEntry(e)) continue
+    const group = e.group.toLowerCase()
+    if (seen.has(group)) continue
+    seen.add(group)
+    out.push({ group, key: e.key.toLowerCase(), nonce: e.nonce.toLowerCase(), rootNonce: rootNonceOf(e) })
+  }
+  return out.slice(0, MAX_GROUPS_PER_DIARY)
+}
+
+// Sets the entry of entry.group (replacing that group's previous one, which
+// moves to the end, and never dropping its root nonce); a new group beyond
+// the cap is refused.
+async function putGroupWriter (storage, entry) {
+  if (!validWriterEntry(entry)) throw new TypeError('entrada de grupo inválida')
+  const current = await readGroupWriters(storage)
+  const group = entry.group.toLowerCase()
+  const prev = current.find((e) => e.group === group)
+  let rootNonce = rootNonceOf(entry)
+  if (rootNonce === null && prev !== undefined) rootNonce = prev.rootNonce
+  const plain = { group, key: entry.key.toLowerCase(), nonce: entry.nonce.toLowerCase(), rootNonce }
+  const entries = current.filter((e) => e.group !== group)
+  if (entries.length >= MAX_GROUPS_PER_DIARY) throw new UsageError(GROUPS_FULL)
+  entries.push(plain)
+  await storage.writeJson('groupWriters', { v: 1, entries })
+  return entries
+}
+
+async function removeGroupWriter (storage, group) {
+  const entries = (await readGroupWriters(storage)).filter((e) => e.group !== String(group).toLowerCase())
+  await storage.writeJson('groupWriters', { v: 1, entries })
+  return entries
+}
+
+// kv groupReplicas = { v: 1, keys: [hex64...] }: the foreign group cores
+// (roots and writers) and this device's former writers, oldest first, at
+// most MAX_GROUP_REPLICAS (the newest kept).
+async function readGroupReplicas (storage) {
+  const data = await readKv(storage, 'groupReplicas')
+  if (!isVersioned(data) || !Array.isArray(data.keys)) return []
+  return [...new Set(data.keys.filter((k) => isHex64(k)).map((k) => k.toLowerCase()))].slice(-MAX_GROUP_REPLICAS)
+}
+
+async function addGroupReplica (storage, hex) {
+  if (typeof hex !== 'string' || !HEX64.test(hex)) throw new TypeError('chave inválida')
+  const key = hex.toLowerCase()
+  const keys = await readGroupReplicas(storage)
+  if (keys.includes(key)) return keys
+  keys.push(key)
+  const kept = keys.slice(-MAX_GROUP_REPLICAS)
+  await storage.writeJson('groupReplicas', { v: 1, keys: kept })
+  return kept
+}
+
+async function removeGroupReplica (storage, hex) {
+  const key = String(hex).toLowerCase()
+  const keys = (await readGroupReplicas(storage)).filter((k) => k !== key)
+  await storage.writeJson('groupReplicas', { v: 1, keys })
+  return keys
+}
+
+// The binding diaries of accepted foreign group writers, stored as replicas
+// (replicaName) for the join evidence and the names of their authors and
+// never listed in kv follows: kv 'groupDiaries' { v: 1, keys }, at most
+// MAX_GROUP_REPLICAS (the newest kept).
+async function readGroupDiaries (storage) {
+  const data = await readKv(storage, 'groupDiaries')
+  if (!isVersioned(data) || !Array.isArray(data.keys)) return []
+  return [...new Set(data.keys.filter((k) => isHex64(k)).map((k) => k.toLowerCase()))].slice(-MAX_GROUP_REPLICAS)
+}
+
+async function addGroupDiary (storage, hex) {
+  if (typeof hex !== 'string' || !HEX64.test(hex)) throw new TypeError('chave inválida')
+  const key = hex.toLowerCase()
+  const keys = await readGroupDiaries(storage)
+  if (keys.includes(key)) return keys
+  keys.push(key)
+  const kept = keys.slice(-MAX_GROUP_REPLICAS)
+  await storage.writeJson('groupDiaries', { v: 1, keys: kept })
+  return kept
+}
+
+async function removeGroupDiary (storage, hex) {
+  const key = String(hex).toLowerCase()
+  const keys = (await readGroupDiaries(storage)).filter((k) => k !== key)
+  await storage.writeJson('groupDiaries', { v: 1, keys })
+  return keys
+}
+
+// kv groupCerts = { v: 1, entries: [[diaryHex, block0Hex]...] }: the block 0
+// (the certificate) of each binding diary whose group core this device
+// accepted, newest last, at most MAX_GROUP_REPLICAS. A restart re-judges the
+// binding against a newer revocation even when the diary itself is not
+// stored, so a revoked member's cores cannot outlive the revocation.
+async function readGroupCerts (storage) {
+  const data = await readKv(storage, 'groupCerts')
+  const out = new Map()
+  if (!isVersioned(data) || !Array.isArray(data.entries)) return out
+  for (const e of data.entries) {
+    if (!Array.isArray(e) || !isHex64(e[0]) || typeof e[1] !== 'string' || !/^([0-9a-f]{2})+$/.test(e[1])) continue
+    out.set(e[0].toLowerCase(), b4a.from(e[1], 'hex'))
+  }
+  return out
+}
+
+function putGroupCert (storage, diaryHex, raw0) {
+  if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex) || !(raw0 instanceof Uint8Array)) throw new TypeError('certificado inválido')
+  const key = diaryHex.toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const map = await readGroupCerts(storage)
+    map.delete(key)
+    map.set(key, raw0)
+    const entries = [...map].slice(-MAX_GROUP_REPLICAS).map(([d, r]) => [d, b4a.toString(r, 'hex')])
+    await storage.writeJson('groupCerts', { v: 1, entries })
+  })
+}
+
+// Every group core and binding replica this device holds, and the three
+// group kv lists (reset; the cores must be closed first): the next person on
+// a shared device must neither read nor push the previous person's groups.
+// A binding diary that kv follows still lists keeps its replica (the
+// follows survive a reset).
+async function deleteGroupData (storage) {
+  const cores = new Set()
+  for (const e of await readGroupWriters(storage)) {
+    cores.add(e.key)
+    if (e.rootNonce !== null) cores.add(e.group)
+  }
+  for (const key of await readGroupReplicas(storage)) cores.add(key)
+  for (const key of await readGroupCoreKeys(storage)) cores.add(key)
+  for (const key of cores) await storage.deleteCore(groupName(key))
+  const followed = new Set((await readFollows(storage)).map((k) => String(k).toLowerCase()))
+  for (const d of await readGroupDiaries(storage)) {
+    if (!followed.has(d) && await replicaExists(storage, d)) await purgeReplica(storage, d)
+  }
+  await storage.writeJson('groupWriters', null)
+  await storage.writeJson('groupReplicas', null)
+  await storage.writeJson('groupDiaries', null)
+  await withGroupCoreLock(storage, () => storage.writeJson('groupCores', null))
+  await withGroupCoreLock(storage, () => storage.writeJson('groupCerts', null))
+  await withGroupCoreLock(storage, () => storage.writeJson('boundRoots', null))
+}
+
 // ---- follows, local-first ----
 
 // One chain per storage for every read-modify-write of kv follows and
@@ -759,6 +1084,10 @@ module.exports = {
   MEDIA_PREFIX,
   MEDIA_FULL,
   MEDIA_INVALID,
+  GROUP_PREFIX,
+  GROUP_FULL,
+  GROUPS_FULL,
+  MAX_GROUP_REPLICAS,
   replicaName,
   mediaName,
   openDiary,
@@ -790,6 +1119,28 @@ module.exports = {
   readMediaCores,
   addMediaCore,
   deleteMediaCores,
+  groupName,
+  openGroupWriter,
+  openGroupReplica,
+  openGroupCoreReadOnly,
+  groupCoreExists,
+  purgeGroupCore,
+  appendGroupRecord,
+  readGroupWriters,
+  putGroupWriter,
+  removeGroupWriter,
+  readGroupReplicas,
+  addGroupReplica,
+  removeGroupReplica,
+  readGroupDiaries,
+  addGroupDiary,
+  removeGroupDiary,
+  deleteGroupData,
+  readGroupCoreKeys,
+  readGroupCerts,
+  putGroupCert,
+  readBoundRoots,
+  addBoundRoot,
   withFollowsLock,
   readFollowsPending,
   writeFollowsPending,

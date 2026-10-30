@@ -254,6 +254,7 @@
 				"${PODS_CONFIGURATION_BUILD_DIR}/ExpoFileSystem/ExpoFileSystem_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/React-Core/React-Core_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/React-cxxreact/React-cxxreact_privacy.bundle",
+				"${PODS_CONFIGURATION_BUILD_DIR}/SDWebImage/SDWebImage.bundle",
 			);
 			name = "[CP] Copy Pods Resources";
 			outputPaths = (
@@ -262,6 +263,7 @@
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoFileSystem_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/React-Core_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/React-cxxreact_privacy.bundle",
+				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SDWebImage.bundle",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -280,6 +282,8 @@
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/hermes-engine/Pre-built/hermesvm.framework/hermesvm",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/BareKit.framework/BareKit",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-abort.2.0.13.framework/bare-abort.2.0.13",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-crypto.1.15.4.framework/bare-crypto.1.15.4",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-dns.2.3.0.framework/bare-dns.2.3.0",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-fs.4.8.4.framework/bare-fs.4.8.4",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-hrtime.2.1.2.framework/bare-hrtime.2.1.2",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-inspect.3.1.10.framework/bare-inspect.3.1.10",
@@ -289,13 +293,17 @@
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-posix.1.0.1.framework/bare-posix.1.0.1",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-signals.5.0.0.framework/bare-signals.5.0.0",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-stdio.1.0.3.framework/bare-stdio.1.0.3",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-tcp.2.6.1.framework/bare-tcp.2.6.1",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-tls.3.1.12.framework/bare-tls.3.1.12",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-tty.5.2.1.framework/bare-tty.5.2.1",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-type.1.4.0.framework/bare-type.1.4.0",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/bare-url.2.5.5.framework/bare-url.2.5.5",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/crc-native.1.1.8.framework/crc-native.1.1.8",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/fs-native-extensions.1.5.1.framework/fs-native-extensions.1.5.1",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/quickbit-native.2.4.9.framework/quickbit-native.2.4.9",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/rocksdb-native.3.19.1.framework/rocksdb-native.3.19.1",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/simdle-native.1.3.9.framework/simdle-native.1.3.9",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/sodium-native.4.3.3.framework/sodium-native.4.3.3",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/sodium-native.5.2.0.framework/sodium-native.5.2.0",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/react-native-bare-kit/udx-native.1.21.3.framework/udx-native.1.21.3",
 			);
@@ -306,6 +314,8 @@
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/hermesvm.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/BareKit.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-abort.2.0.13.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-crypto.1.15.4.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-dns.2.3.0.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-fs.4.8.4.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-hrtime.2.1.2.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-inspect.3.1.10.framework",
@@ -315,13 +325,17 @@
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-posix.1.0.1.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-signals.5.0.0.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-stdio.1.0.3.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-tcp.2.6.1.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-tls.3.1.12.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-tty.5.2.1.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-type.1.4.0.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/bare-url.2.5.5.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/crc-native.1.1.8.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/fs-native-extensions.1.5.1.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/quickbit-native.2.4.9.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/rocksdb-native.3.19.1.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/simdle-native.1.3.9.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/sodium-native.4.3.3.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/sodium-native.5.2.0.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/udx-native.1.21.3.framework",
 			);
@@ -388,7 +402,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -419,7 +433,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",

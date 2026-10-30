@@ -12,7 +12,8 @@
   "scripts": {
     "lint": "standard",
     "test": "npm test --workspaces --if-present",
-    "demo": "npm run demo -w apps/cli --"
+    "demo": "npm run demo -w apps/cli --",
+    "eas-build-post-install": "npm run eas-build-post-install -w apps/app"
   },
   "devDependencies": {
     "brittle": "4.5.0",

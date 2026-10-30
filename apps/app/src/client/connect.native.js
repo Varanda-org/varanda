@@ -1,6 +1,9 @@
-// Native: connectNode wraps the in-app Bare node (./native).
+// Native: connectNode wraps the in-app Bare node (./native). A hosted config
+// starts the web kind and adds the handle of ./webnode (identity, media,
+// follows); any other config is the core kind, as before.
 
 import { startNode, terminateNode, currentClient } from './native'
+import { webNodeHandle } from './webnode'
 
 const WATCH_MS = 1000
 
@@ -24,16 +27,21 @@ export async function connectNode (config, { onEvent, onClose } = {}) {
     if (typeof onClose === 'function') onClose({ code: 'closed' })
   }
   timer = setInterval(check, WATCH_MS)
-  return {
+  const request = (method, params = {}) => client.request(method, params).catch((err) => {
+    if (err && err.code === 'CLOSED') check()
+    throw err
+  })
+  const conn = {
     kind: 'native',
-    request: (method, params = {}) => client.request(method, params).catch((err) => {
-      if (err && err.code === 'CLOSED') check()
-      throw err
-    }),
+    request,
     close: async () => {
       deliberate = true
       clearInterval(timer)
       await terminateNode()
     }
   }
+  if (config !== null && typeof config === 'object' && config.kind === 'hosted') {
+    return { ...conn, ...webNodeHandle(request) }
+  }
+  return conn
 }

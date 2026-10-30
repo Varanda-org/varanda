@@ -264,8 +264,9 @@ function createIdentity (node, storage, sessionStore, idb) {
       media = await passkey.mediaKeyPairFromPrf(prf, nonce)
       if (gen !== generation) throw cancelled()
       const publicKey = b4a.toString(kp.publicKey, 'hex')
-      // setKeyPair copies both pairs synchronously: the local copies are zeroed below.
-      const setting = node.setKeyPair(kp, { media })
+      // setKeyPair copies both pairs and the PRF (group writer keys derive
+      // from it) synchronously: the local copies are zeroed below.
+      const setting = node.setKeyPair(kp, { media, prf })
       zeroPair(kp)
       zeroPair(media)
       installed = true

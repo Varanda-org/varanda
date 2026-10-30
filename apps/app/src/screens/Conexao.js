@@ -1,8 +1,9 @@
 /* global location */
 
 // "Conectar" (before the node runs) and the "Conexão" tab.
-// Native: association, bootstrap or public DHT, optional DHT host; a change
-// stops the node and starts it again. Web with the node in the browser: the
+// Native: the installation address first (its /varanda.json starts the web
+// kind); under "Avançado", association, bootstrap or public DHT, optional DHT
+// host (the core kind); a change stops the node and starts it again. Web with the node in the browser: the
 // association and the seeder's WebSocket address; a change closes the node
 // and opens it again. Web with varanda-serve: no onboarding (the
 // configuration is varanda-serve's), only the connection state and a
@@ -15,14 +16,28 @@ import { useEffect, useState } from 'react'
 import { Platform, Pressable, Switch, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
-import { canConfigure, hostedPage } from '../configStore'
+import * as configStore from '../configStore'
+import { installationOrigin } from '../installation'
 import { connectProblem, DETAILS_LABEL, RETRY_LABEL } from '../connectText'
 import { useNode } from '../node'
 import { colors, type } from '../ui/theme'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
 
+const { canConfigure, hostedPage } = configStore
+// Native only (configStore.native.js).
+const saveInstallation = typeof configStore.saveInstallation === 'function' ? configStore.saveInstallation : null
+
 // Fixed for the app's lifetime (src/client/mode.js on the web).
 const BROWSER_NODE = Platform.OS === 'web' && canConfigure
+// Native: the installation address comes first; the manual core form is
+// under "Avançado".
+const NATIVE_INSTALLATION = Platform.OS !== 'web' && saveInstallation !== null
+
+const BAD_INSTALLATION = 'endereço da instalação inválido: use https:// seguido do nome, em minúsculas e sem caminho'
+
+function initialAddress () {
+  return installationOrigin() || process.env.EXPO_PUBLIC_VARANDA_INSTALLATION || ''
+}
 
 export default function Conexao (props) {
   return BROWSER_NODE ? <ConexaoNavegador {...props} /> : <ConexaoNo {...props} />
@@ -235,8 +250,16 @@ function ConexaoNo ({ active = true, embedded = false }) {
   const apply = useAction()
   const [infoError, setInfoError] = useState('')
   const ready = node.phase === 'ready'
+  const coreConfig = node.config !== null && typeof node.config === 'object' && node.config.kind !== 'hosted'
+  // A core configuration in use (saved or tried) opens the manual form.
+  const [advanced, setAdvanced] = useState(() => coreConfig)
+  const [address, setAddress] = useState(initialAddress)
+  const [addressError, setAddressError] = useState('')
 
   useEffect(() => { setForm(formOf(node.config)) }, [node.config])
+  useEffect(() => { if (coreConfig) setAdvanced(true) }, [coreConfig])
+  // The saved installation is read while the app starts (src/node.js).
+  useEffect(() => { setAddress((a) => (a === '' ? initialAddress() : a)) }, [node.phase])
 
   useEffect(() => {
     if (!active || !ready) return
@@ -277,6 +300,69 @@ function ConexaoNo ({ active = true, embedded = false }) {
   }
 
   const busy = node.phase === 'connecting' || node.phase === 'loading' || apply.pending
+
+  // The installation's own /varanda.json then starts the web kind
+  // (src/node.js); a saved core configuration is dropped, since it would win.
+  const submitInstallation = async () => {
+    const value = address.trim()
+    if (value === '') return setAddressError('informe o endereço da instalação, por exemplo https://varanda.exemplo')
+    setAddressError('')
+    // The same address over a working connection to it: nothing to change,
+    // and closing it would only lose the connection (offline, no way back).
+    if (ready && node.hosted && value.replace(/\/$/, '') === installationOrigin()) return
+    await apply.run(async () => {
+      if (!(await saveInstallation(value))) return setAddressError(BAD_INSTALLATION)
+      await node.forgetConfig()
+    })
+  }
+
+  if (NATIVE_INSTALLATION && !advanced) {
+    const configError = node.phase === 'config-error'
+    return (
+      <Page>
+        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {!ready ? <Soft>Informe o endereço da instalação do Varanda. O app usa a mesma passkey e o mesmo diário do site.</Soft> : null}
+        {busy ? <Notice>conectando…</Notice> : null}
+        <ErrorText>{node.error || apply.error || infoError}</ErrorText>
+        <Card>
+          {ready
+            ? (
+              <View style={{ gap: 4 }}>
+                <Label>estado</Label>
+                <Body>o nó roda neste aparelho e sincroniza com a instalação</Body>
+              </View>
+              )
+            : null}
+          <Field
+            label='Endereço da instalação'
+            value={address}
+            onChangeText={(v) => { setAddress(v); setAddressError('') }}
+            mono
+            placeholder='https://varanda.exemplo'
+            returnKeyType='go'
+            onSubmitEditing={submitInstallation}
+          />
+          <ErrorText>{addressError}</ErrorText>
+          <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submitInstallation} pending={busy} />
+          {configError ? <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={busy} secondary /> : null}
+          {node.hosted && node.config
+            ? (
+              <View style={{ gap: 4 }}>
+                <Label>detectados nesta instalação</Label>
+                <Mono>{displayText(node.config.association)}</Mono>
+                <Mono>{displayText(node.config.seederUrl)}</Mono>
+              </View>
+              )
+            : null}
+          {node.hostedSource === 'remembered'
+            ? <Soft>sem resposta da instalação: usando a configuração guardada da última vez</Soft>
+            : null}
+          <Btn label='Avançado' onPress={() => setAdvanced(true)} disabled={busy} secondary />
+        </Card>
+      </Page>
+    )
+  }
+
   return (
     <Page>
       {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
@@ -310,6 +396,9 @@ function ConexaoNo ({ active = true, embedded = false }) {
         <Field label='endereço local da DHT (opcional)' value={form.dhtHost} onChangeText={set('dhtHost')} mono />
         <ErrorText>{localError}</ErrorText>
         <Btn label={ready ? 'aplicar e reiniciar o nó' : 'conectar'} onPress={submit} pending={busy} />
+        {NATIVE_INSTALLATION
+          ? <Btn label='usar o endereço da instalação' onPress={() => setAdvanced(false)} disabled={busy} secondary />
+          : null}
       </Card>
     </Page>
   )

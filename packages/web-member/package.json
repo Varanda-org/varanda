@@ -12,6 +12,16 @@
     ".": "./index.js",
     "./lib/*": "./lib/*.js"
   },
+  "imports": {
+    "#fs": {
+      "bare": "./lib/bare/fs.js",
+      "default": "./lib/node/fs.js"
+    },
+    "#path": {
+      "bare": "./lib/bare/path.js",
+      "default": "./lib/node/path.js"
+    }
+  },
   "scripts": {
     "test": "node ../../scripts/run-tests.js"
   },
@@ -21,9 +31,13 @@
     "@noble/curves": "2.4.0",
     "@varanda/core": "0.1.0",
     "b4a": "1.9.0",
+    "bare-fs": "4.8.4",
+    "bare-path": "3.1.2",
     "compact-encoding": "3.5.2",
+    "fs-native-extensions": "1.5.1",
     "hypercore": "10.38.2",
     "hypercore-crypto": "3.7.0",
+    "random-access-file": "4.1.2",
     "random-access-memory": "6.2.1",
     "random-access-storage": "3.0.2",
     "sodium-javascript": "0.8.0",
