@@ -13,7 +13,8 @@
 import { File } from 'expo-file-system'
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator'
 import { AVATAR_SIDE } from './avatar.js'
-import { MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, MEDIA_MIMES, fitWithin } from './plan.js'
+import { MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, fitWithin } from './plan.js'
+import { acceptedSource, canHaveAlpha } from './source.js'
 
 const QUALITIES = [0.85, 0.70, 0.55]
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
@@ -38,9 +39,7 @@ function validRect (rect, width, height) {
 
 export async function openImage (asset) {
   if (!asset || typeof asset.uri !== 'string') throw fail('formato não aceito')
-  if (typeof asset.mimeType === 'string' && asset.mimeType !== '' && !MEDIA_MIMES.includes(asset.mimeType.toLowerCase())) {
-    throw fail('formato não aceito')
-  }
+  if (!acceptedSource(asset.mimeType)) throw fail('formato não aceito')
   const w = asset.width
   const h = asset.height
   if (!(Number.isInteger(w) && Number.isInteger(h) && w >= 1 && h >= 1)) throw fail('não foi possível abrir a foto')
@@ -55,9 +54,12 @@ export async function openImage (asset) {
   if (size > MAX_SOURCE_BYTES) throw fail('arquivo grande demais')
 
   const fit = fitWithin(w, h, MAX_IMAGE_SIDE)
+  // A source that can be transparent is frozen as PNG, so the transparency
+  // survives until encode (a JPEG freeze would turn it black).
+  const alpha = canHaveAlpha(asset.mimeType)
   let frozen
   try {
-    frozen = await manipulateAsync(asset.uri, [{ resize: { width: fit.width, height: fit.height } }], { compress: 0.9, format: SaveFormat.JPEG })
+    frozen = await manipulateAsync(asset.uri, [{ resize: { width: fit.width, height: fit.height } }], { compress: 0.9, format: alpha ? SaveFormat.PNG : SaveFormat.JPEG })
   } catch {
     throw fail('não foi possível preparar a foto')
   }
@@ -72,20 +74,28 @@ export async function openImage (asset) {
       { crop: { originX: rect.sx, originY: rect.sy, width: rect.size, height: rect.size } },
       { resize: { width: AVATAR_SIDE, height: AVATAR_SIDE } }
     ]
-    for (const quality of QUALITIES) {
-      let out
-      try {
-        out = await manipulateAsync(uri, actions, { compress: quality, format: SaveFormat.JPEG })
-      } catch {
-        throw fail('não foi possível preparar a foto')
-      }
-      try {
-        const bytes = await new File(out.uri).bytes()
-        if (bytes.byteLength <= maxBytes) {
-          return { bytes, mime: 'image/jpeg', width: AVATAR_SIDE, height: AVATAR_SIDE }
+    // Avatars are JPEG or WebP only. A source with alpha tries WebP (which
+    // keeps it) first; JPEG is the fallback when no WebP fits the cap
+    // (residual: transparent pixels then turn black).
+    const formats = alpha
+      ? [[SaveFormat.WEBP, 'image/webp'], [SaveFormat.JPEG, 'image/jpeg']]
+      : [[SaveFormat.JPEG, 'image/jpeg']]
+    for (const [format, mime] of formats) {
+      for (const quality of QUALITIES) {
+        let out
+        try {
+          out = await manipulateAsync(uri, actions, { compress: quality, format })
+        } catch {
+          throw fail('não foi possível preparar a foto')
         }
-      } finally {
-        discard(out.uri)
+        try {
+          const bytes = await new File(out.uri).bytes()
+          if (bytes.byteLength <= maxBytes) {
+            return { bytes, mime, width: AVATAR_SIDE, height: AVATAR_SIDE }
+          }
+        } finally {
+          discard(out.uri)
+        }
       }
     }
     throw fail('foto grande demais')

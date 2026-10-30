@@ -46,7 +46,7 @@
 		<true/>
 	</dict>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>O Varanda abre sua fototeca só para você escolher fotos. Elas são refeitas sem dados de localização e só são publicadas quando você toca em Publicar ou Salvar.</string>
+	<string>O Varanda abre sua fototeca só para você escolher fotos. As fotos são refeitas sem dados de localização e os GIFs são enviados como estão. Nada é publicado até você tocar em Publicar ou Salvar.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

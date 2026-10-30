@@ -14,6 +14,7 @@
 import { File } from 'expo-file-system'
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator'
 import { gifSize } from './gif.js'
+import { acceptedSource, canHaveAlpha, gifOverCap } from './source.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, checkFile, fitWithin } from './plan.js'
 
 const QUALITY = 0.85
@@ -43,25 +44,40 @@ async function encodePhoto (asset) {
   if (w > MAX_MEDIA_DIMENSION || h > MAX_MEDIA_DIMENSION) throw fail('foto grande demais')
   const fit = fitWithin(w, h, MAX_IMAGE_SIDE)
   const actions = fit.width === w && fit.height === h ? [] : [{ resize: { width: fit.width, height: fit.height } }]
+  // PNG and WebP can be transparent and the manipulator cannot fill a white
+  // background here, so they are saved as PNG to keep the alpha. Only when
+  // that PNG breaks the byte limit does JPEG take over (residual: transparent
+  // pixels of a very large image turn black).
+  if (canHaveAlpha(asset.mimeType)) {
+    const png = await save(asset.uri, actions, SaveFormat.PNG, 'image/png')
+    if (png.ok) return png.value
+  }
+  const jpeg = await save(asset.uri, actions, SaveFormat.JPEG, 'image/jpeg')
+  if (!jpeg.ok) throw fail(jpeg.problem)
+  return jpeg.value
+}
+
+// -> { ok: true, value } or { ok: false, problem } when checkFile refuses.
+async function save (uri, actions, format, mime) {
   let result
   try {
-    result = await manipulateAsync(asset.uri, actions, { compress: QUALITY, format: SaveFormat.JPEG })
+    result = await manipulateAsync(uri, actions, { compress: QUALITY, format })
   } catch {
     throw fail('não foi possível preparar a foto')
   }
   const out = new File(result.uri)
   try {
     const bytes = await out.bytes()
-    const problem = checkFile({ mime: 'image/jpeg', bytes: bytes.byteLength, width: result.width, height: result.height })
-    if (problem) throw fail(problem)
-    return { bytes, mime: 'image/jpeg', width: result.width, height: result.height }
+    const problem = checkFile({ mime, bytes: bytes.byteLength, width: result.width, height: result.height })
+    if (problem) return { ok: false, problem }
+    return { ok: true, value: { bytes, mime, width: result.width, height: result.height } }
   } finally {
     discard(out)
   }
 }
 
 export async function encodeFile (asset) {
-  if (!asset || typeof asset.uri !== 'string') throw fail('formato não aceito')
+  if (!asset || typeof asset.uri !== 'string' || !acceptedSource(asset.mimeType)) throw fail('formato não aceito')
   let file
   let size
   try {
@@ -74,6 +90,7 @@ export async function encodeFile (asset) {
   if (size > MAX_SOURCE_BYTES) throw fail('arquivo grande demais')
   const mime = typeof asset.mimeType === 'string' ? asset.mimeType.toLowerCase() : ''
   // A GIF is told by its signature too: a picker may report a wrong type.
+  if (mime === 'image/gif' && gifOverCap(size, MAX_GIF_BYTES)) throw fail('arquivo grande demais')
   if (mime === 'image/gif' || size <= MAX_GIF_BYTES) {
     let bytes
     try {
