@@ -10,6 +10,7 @@ const { joinAndFlush, topicFor } = require('../lib/net')
 const { groupJoinRecord, postRecord } = require('../lib/records')
 const { groupHeader, writerHeader, groupPost } = require('../lib/group')
 const { createSnapshot } = require('../lib/blocklist')
+const clock = require('../lib/clock')
 const {
   hex,
   makeAssociation,
@@ -195,20 +196,26 @@ test('a diary releasing one block per interval shorter than the stall bound stop
   const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, groupScanStallMs: stallMs })
   const K = 'a'.repeat(64)
   const entry = { gated: true, scanQueued: false, scanned: 1, core: { contiguousLength: 1, length: 1000 } }
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-  const from = Date.now()
+  // The seeder's monotonic clock, stepped by hand: with real timers the four
+  // intervals before the bound could sum just under it on a loaded runner,
+  // the budget then ran out on the next interval's first call, and that call
+  // (a new block, so not stalled) still counted.
+  const realNow = clock.now
+  let now = realNow()
+  clock.now = () => now
+  t.teardown(() => { clock.now = realNow })
+  const step = stallMs / 4
   t.is(seeder._groupScanCounts(K, entry), true, 'caught up inside the gap: counts')
   let early = true
   let late = null
-  while (Date.now() - from < stallMs * 3) {
-    await wait(stallMs / 4)
+  for (let elapsed = step; elapsed <= stallMs * 3; elapsed += step) {
+    now += step
     entry.core.contiguousLength++
     const a = seeder._groupScanCounts(K, entry)
     entry.scanned = entry.core.contiguousLength
     const b = seeder._groupScanCounts(K, entry)
-    const elapsed = Date.now() - from
-    if (elapsed < stallMs - 50 && (!a || !b)) early = false
-    if (elapsed > stallMs + 50 && late === null) late = a || b
+    if (elapsed < stallMs && (!a || !b)) early = false
+    if (elapsed > stallMs && late === null) late = a || b
   }
   t.ok(early, 'counts before the bound')
   t.is(late, false, 'a trickle inside the gap does not re-arm the clock')
