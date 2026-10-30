@@ -42,6 +42,8 @@ const noop = () => {}
 
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
+// How long downloads in a group are gathered into one groups.changed.
+const GROUPS_CHANGED_MS = 50
 
 // ---- error mapping (A6) ----
 
@@ -52,6 +54,10 @@ const USAGE_MESSAGES = new Set([
   'não é possível seguir a própria chave',
   'limite de diários seguidos atingido',
   'limite do diário atingido',
+  'sem permissão no grupo',
+  'limite de grupos atingido',
+  'nada a alterar',
+  'limite do grupo atingido',
   'diretório não é de um membro',
   'associação diferente da configurada',
   'registro de nome inválido',
@@ -69,7 +75,8 @@ const USAGE_PATTERNS = [
 ]
 const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
-  'sem dados locais para este diário'
+  'sem dados locais para este diário',
+  'grupo não encontrado'
 ])
 
 function messageOf (err) {
@@ -93,6 +100,7 @@ function codeOf (err) {
 //   RpcError raised by the session itself       -> unchanged
 //   code LOCKED or LOCK_INVALID                 -> LOCKED 'diretório de dados em uso'
 //   UsageError (code USAGE)                     -> USAGE, its message (else 'pedido inválido')
+//   code NOT_FOUND with a NOT_FOUND_MESSAGES one -> NOT_FOUND, that message ('grupo não encontrado')
 //   a user-caused member message (USAGE_*)      -> USAGE, that message
 //   'identidade não encontrada', 'sem dados ...'-> NOT_FOUND, that message
 //   anything else (STORE_INVALID included)      -> INTERNAL 'erro interno', onInternalError(err)
@@ -104,6 +112,7 @@ function toRpcError (err, onInternalError = noop) {
   if (code === 'USAGE' && err instanceof UsageError) {
     return rpcError('USAGE', isSafeMessage(message) ? message : 'pedido inválido')
   }
+  if (code === 'NOT_FOUND' && NOT_FOUND_MESSAGES.has(message)) return rpcError('NOT_FOUND', message)
   // Member errors are plain Errors (no code); appendRecord's carry INVALID_RECORD.
   if (message !== null && (code === null || code === 'INVALID_RECORD')) {
     if (USAGE_MESSAGES.has(message) || USAGE_PATTERNS.some((re) => re.test(message))) return rpcError('USAGE', message)
@@ -301,6 +310,19 @@ function createSession ({
     const { signal, abort } = createAbort()
     const r = { runId, once, abort, reason: null, done: null }
     run = r
+    // A burst of downloads in one group (a writer catching up block by
+    // block) becomes one groups.changed per group.
+    const grown = new Set()
+    let grownTimer = null
+    const flushGrown = () => {
+      grownTimer = null
+      for (const group of grown) send('groups.changed', { group }, epoch)
+      grown.clear()
+    }
+    const groupGrew = (group) => {
+      grown.add(group)
+      if (grownTimer === null) grownTimer = setTimeout(flushGrown, GROUPS_CHANGED_MS)
+    }
     send('sync.started', { runId, once }, epoch)
     r.done = (async () => {
       let result = null
@@ -319,6 +341,7 @@ function createSession ({
             warning(safe(clean), epoch)
           },
           onEvent: (ev) => {
+            if (ev && ev.event === 'group-downloaded' && typeof ev.group === 'string') groupGrew(ev.group)
             if (ev && ev.event === 'skipped') {
               warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
               return
@@ -331,6 +354,10 @@ function createSession ({
         })
       } catch (err) {
         error = err
+      }
+      if (grownTimer !== null) {
+        clearTimeout(grownTimer)
+        flushGrown()
       }
       if (run === r) run = null
       if (error !== null) {
@@ -689,6 +716,70 @@ function createSession ({
     'profile.read': serial(async ({ authors }) => {
       const r = await withStore((c) => member.profileRead(c, { authors }))
       return { profiles: r.profiles, missing: r.missing }
+    }),
+
+    'group.create': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupCreate(c, params))
+      send('groups.changed', { group: r.group }, epoch)
+      return r
+    }),
+
+    'group.join': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupJoin(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.leave': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupLeave(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.post': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupPost(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+
+    'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
+
+    'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
+
+    'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),
+
+    'group.requests': serial((params) => withStore((c) => member.groupRequests(c, params))),
+
+    'group.admit': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupAdmit(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.ban': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupBan(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.admin': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupAdmin(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.hide': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupHide(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'group.meta': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupMeta(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
     }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {

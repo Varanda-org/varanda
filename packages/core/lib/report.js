@@ -10,6 +10,11 @@
 // an account link (varanda-account-link-v1), a moderation request or a
 // Hypercore block signature, and vice versa.
 //
+// A report of a group message (fields carry `writer` and `group`) signs the
+// 'varanda-report-v2' statement instead, which also binds the group root key
+// and the writer core that holds the message at `seq`. The two prefixes keep a
+// v1 signature from ever verifying as a v2 statement and back.
+//
 // What the signature proves: that the reporter attested this text and this
 // quote to the association's account service. It does NOT prove that the
 // reported diary contains the quote; the moderator checks that separately.
@@ -22,6 +27,7 @@ const { isUnsafe } = require('./safe')
 const { MAX_TEXT, MAX_LOG_BLOCKS } = require('./records')
 
 const PREFIX = 'varanda-report-v1'
+const PREFIX_V2 = 'varanda-report-v2'
 const REASONS = Object.freeze(['spam', 'assedio', 'ilegal', 'outro'])
 const REASON_LABELS = Object.freeze({ spam: 'spam', assedio: 'assédio', ilegal: 'conteúdo ilegal', outro: 'outro' })
 // Code points (Array.from length), as packages/rpc text.js charLength.
@@ -97,20 +103,37 @@ function checkFields (fields) {
   if (!validText(text, TEXT_MAX, false)) return 'text'
   if (!validText(quote, QUOTE_MAX, true)) return 'quote'
   if (seq === null && quote !== '') return 'quote'
+  const { writer, group } = fields
+  if (writer === undefined || writer === null) {
+    if (group !== undefined && group !== null) return 'group'
+    return null
+  }
+  if (typeof writer !== 'string' || !HEX64.test(writer)) return 'writer'
+  if (seq === null) return 'seq'
+  if (typeof group !== 'string' || !HEX64.test(group)) return 'group'
   return null
+}
+
+function isGroupReport (fields) {
+  return isPlainObject(fields) && fields.writer !== undefined && fields.writer !== null
 }
 
 // { nonce, member, association, target, seq, reason, text, quote } -> the
 // UTF-8 bytes of PREFIX, nonce, member, association, target, seq, reason,
 // digest(text), digest(quote) joined by LF (no trailing LF). `seq` is the
 // canonical decimal for a post report and '' for an account report (null).
-// Throws TypeError on a bad shape.
+// With `writer` (and `group`), the bytes of PREFIX_V2, nonce, member,
+// association, target, group, writer, seq, reason, digest(text),
+// digest(quote) instead. Throws TypeError on a bad shape.
 function reportPayload (fields) {
   const reason = checkFields(fields)
   if (reason !== null) throw new TypeError('invalid report ' + reason)
   const { nonce, member, association, target, seq, text, quote } = fields
   const seqField = seq === null ? '' : String(seq)
-  return b4a.from([PREFIX, nonce, member, association, target, seqField, fields.reason, digest(text), digest(quote)].join('\n'), 'utf8')
+  const lines = isGroupReport(fields)
+    ? [PREFIX_V2, nonce, member, association, target, fields.group, fields.writer, seqField, fields.reason, digest(text), digest(quote)]
+    : [PREFIX, nonce, member, association, target, seqField, fields.reason, digest(text), digest(quote)]
+  return b4a.from(lines.join('\n'), 'utf8')
 }
 
 // -> lowercase hex128 Ed25519 signature by keyPair.secretKey.
@@ -138,6 +161,7 @@ function verifyReport (fields, signatureHex) {
 
 module.exports = {
   PREFIX,
+  PREFIX_V2,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -146,6 +170,7 @@ module.exports = {
   NONCE_RE,
   isCleanText,
   digest,
+  isGroupReport,
   reportPayload,
   signReport,
   verifyReport

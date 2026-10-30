@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -17,13 +17,16 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.delete',
-    'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start',
-    'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
+    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.meta', 'group.post', 'group.read', 'group.requests',
+    'identity.create', 'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create',
+    'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open',
+    'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
+    'cert.add', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.join', 'group.leave',
+    'group.meta', 'group.post', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
@@ -541,6 +544,165 @@ test('follow.*', (t) => {
     bad(t, m, { key: KEY + '0' })
     bad(t, m, { key: KEY, author: KEY })
   }
+})
+
+test('report.sign: writer and group (a group post)', (t) => {
+  const nonce = 'n'.repeat(43)
+  const WRITER = 'cd'.repeat(32)
+  const base = { nonce, target: KEY, seq: 3, reason: 'spam' }
+  const full = { ...base, writer: WRITER, group: KEY }
+  ok(t, 'report.sign', full, { ...full, text: '', quote: '' })
+  ok(t, 'report.sign', { ...full, quote: 'citado' })
+  for (const [label, p] of [['writer only', { ...base, writer: WRITER }], ['group only', { ...base, group: KEY }]]) {
+    bad(t, 'report.sign', p, label)
+  }
+  const noSeq = { nonce, target: KEY, reason: 'spam', writer: WRITER, group: KEY }
+  bad(t, 'report.sign', noSeq, 'writer without seq')
+  t.is(validateParams('report.sign', { ...base, writer: WRITER }).message, 'writer só com seq e group')
+  t.is(validateParams('report.sign', { ...base, group: KEY }).message, 'group só com writer')
+  for (const writer of [WRITER.toUpperCase(), WRITER.slice(1), 1, null]) bad(t, 'report.sign', { ...full, writer }, 'writer ' + writer)
+  for (const group of [KEY.toUpperCase(), KEY.slice(1), 1, null]) bad(t, 'report.sign', { ...full, group }, 'group ' + group)
+})
+
+test('group.create', (t) => {
+  t.ok(isMutating('group.create'))
+  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open' })
+  ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval' })
+  ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open' })
+  bad(t, 'group.create', {})
+  bad(t, 'group.create', { name: 'Clube' })
+  bad(t, 'group.create', { join: 'open' })
+  bad(t, 'group.create', { name: '', join: 'open' })
+  bad(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open' })
+  for (const join of ['closed', 'Open', '', null, true]) bad(t, 'group.create', { name: 'Clube', join }, 'join ' + join)
+  bad(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'public' })
+})
+
+test('group.join and group.leave', (t) => {
+  for (const m of ['group.join', 'group.leave']) {
+    t.ok(isMutating(m))
+    ok(t, m, { group: KEY }, { group: KEY })
+    bad(t, m, {})
+    bad(t, m, { group: KEY.toUpperCase() })
+    bad(t, m, { group: KEY.slice(1) })
+    bad(t, m, { group: 1 })
+    bad(t, m, { group: KEY, extra: 1 })
+  }
+})
+
+test('group.post', (t) => {
+  t.ok(isMutating('group.post'))
+  const reply = { writer: KEY, seq: 4 }
+  ok(t, 'group.post', { group: KEY, text: 'oi' }, { group: KEY, text: 'oi' })
+  ok(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply }, { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply })
+  bad(t, 'group.post', { group: KEY, text: '' })
+  bad(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT + 1) })
+  bad(t, 'group.post', { text: 'oi' })
+  bad(t, 'group.post', { group: KEY })
+  for (const replyTo of [{ writer: KEY }, { seq: 1 }, { writer: KEY, seq: 0 }, { writer: KEY, seq: 1.5 }, { writer: 'x', seq: 1 }, { writer: KEY, seq: 1, extra: 1 }, KEY + ':1', null, []]) {
+    bad(t, 'group.post', { group: KEY, text: 'oi', replyTo }, 'replyTo ' + JSON.stringify(replyTo))
+  }
+  // The node computes `seen` from its own fold; a caller cannot pass it.
+  bad(t, 'group.post', { group: KEY, text: 'oi', seen: [] })
+})
+
+test('group.read', (t) => {
+  t.absent(isMutating('group.read'))
+  t.is(GROUP_LIMIT_DEFAULT, 30)
+  t.is(GROUP_LIMIT_MAX, 31)
+  const AT = '2026-10-28T12:00:00.000Z'
+  const cur = { at: AT, writer: KEY, seq: 9 }
+  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: 30 })
+  ok(t, 'group.read', { group: KEY, limit: 1 })
+  ok(t, 'group.read', { group: KEY, limit: 31, before: cur }, { group: KEY, limit: 31, before: cur })
+  bad(t, 'group.read', {})
+  bad(t, 'group.read', { group: KEY, limit: 0 })
+  bad(t, 'group.read', { group: KEY, limit: 32 })
+  bad(t, 'group.read', { group: KEY, limit: 1.5 })
+  for (const before of [{ at: AT, writer: KEY }, { at: AT, seq: 1 }, { writer: KEY, seq: 1 }, { at: '2026-10-28', writer: KEY, seq: 1 },
+    { at: AT, writer: KEY, seq: 0 }, { at: AT, writer: 'x', seq: 1 }, { at: AT, writer: KEY, seq: 1, extra: 1 }, 5, null, []]) {
+    bad(t, 'group.read', { group: KEY, before }, 'before ' + JSON.stringify(before))
+  }
+})
+
+test('group.list', (t) => {
+  t.absent(isMutating('group.list'))
+  ok(t, 'group.list', {}, { offset: 0, limit: 30 })
+  ok(t, 'group.list', { offset: 40, limit: 31 }, { offset: 40, limit: 31 })
+  bad(t, 'group.list', { offset: -1 })
+  bad(t, 'group.list', { offset: 1.5 })
+  bad(t, 'group.list', { limit: 0 })
+  bad(t, 'group.list', { limit: 32 })
+  bad(t, 'group.list', { group: KEY })
+})
+
+test('group.info', (t) => {
+  t.absent(isMutating('group.info'))
+  ok(t, 'group.info', { group: KEY }, { group: KEY })
+  bad(t, 'group.info', {})
+  bad(t, 'group.info', { group: 'x' })
+  bad(t, 'group.info', { group: KEY, limit: 1 })
+})
+
+test('group.members and group.requests', (t) => {
+  for (const m of ['group.members', 'group.requests']) {
+    t.absent(isMutating(m))
+    ok(t, m, { group: KEY }, { group: KEY, offset: 0, limit: GROUP_MEMBERS_LIMIT_MAX })
+    ok(t, m, { group: KEY, offset: 200, limit: 100 }, { group: KEY, offset: 200, limit: 100 })
+    ok(t, m, { group: KEY, limit: 1 })
+    bad(t, m, {})
+    bad(t, m, { group: KEY, limit: 0 })
+    bad(t, m, { group: KEY, limit: 101 })
+  }
+  bad(t, 'group.members', { group: KEY, offset: -1 })
+  bad(t, 'group.members', { group: KEY, offset: 1.5 })
+})
+
+test('group.admit, group.ban and group.admin', (t) => {
+  const OTHER = 'cd'.repeat(32)
+  for (const m of ['group.admit', 'group.ban', 'group.admin']) {
+    t.ok(isMutating(m))
+    ok(t, m, { group: KEY, member: OTHER, on: true }, { group: KEY, member: OTHER, on: true })
+    ok(t, m, { group: KEY, member: OTHER, on: false })
+    for (const k of ['group', 'member', 'on']) {
+      const p = { group: KEY, member: OTHER, on: true }
+      delete p[k]
+      bad(t, m, p, 'missing ' + k)
+    }
+    bad(t, m, { group: KEY, member: OTHER, on: 1 })
+    bad(t, m, { group: KEY, member: OTHER, on: 'true' })
+    bad(t, m, { group: KEY, member: 'x', on: true })
+    bad(t, m, { group: KEY, member: OTHER.toUpperCase(), on: true })
+    bad(t, m, { group: KEY, member: OTHER, on: true, extra: 1 })
+  }
+})
+
+test('group.hide', (t) => {
+  t.ok(isMutating('group.hide'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.hide', { group: KEY, target, on: true }, { group: KEY, target, on: true })
+  ok(t, 'group.hide', { group: KEY, target, on: false })
+  bad(t, 'group.hide', { group: KEY, target })
+  bad(t, 'group.hide', { group: KEY, on: true })
+  bad(t, 'group.hide', { group: KEY, target: KEY, on: true })
+  bad(t, 'group.hide', { group: KEY, target: { writer: KEY, seq: 0 }, on: true })
+  bad(t, 'group.hide', { group: KEY, target: { writer: KEY }, on: true })
+  bad(t, 'group.hide', { group: KEY, target, on: 'yes' })
+})
+
+test('group.meta', (t) => {
+  t.ok(isMutating('group.meta'))
+  ok(t, 'group.meta', { group: KEY, name: 'Novo' }, { group: KEY, name: 'Novo' })
+  ok(t, 'group.meta', { group: KEY, join: 'approval' }, { group: KEY, join: 'approval' })
+  ok(t, 'group.meta', { group: KEY, name: 'Novo', join: 'open' })
+  ok(t, 'group.meta', { group: KEY, name: 'x'.repeat(MAX_GROUP_NAME) })
+  bad(t, 'group.meta', {})
+  bad(t, 'group.meta', { group: KEY }, 'nothing to change')
+  bad(t, 'group.meta', { group: KEY, name: '' })
+  bad(t, 'group.meta', { group: KEY, name: 'x'.repeat(MAX_GROUP_NAME + 1) })
+  bad(t, 'group.meta', { group: KEY, join: 'closed' })
+  bad(t, 'group.meta', { group: KEY, name: null })
+  bad(t, 'group.meta', { group: KEY, name: 'a', visibility: 'private' })
 })
 
 test('follow.list', (t) => {

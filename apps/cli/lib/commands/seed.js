@@ -161,13 +161,14 @@ function statusLines (status) {
   ].join('\n')
 }
 
-// One line per diary, its media cores indented under it.
+// One line per diary, its media and group cores indented under it.
 function listLines ({ admitted }) {
   if (admitted.length === 0) return 'nenhum diário admitido'
   const lines = []
   for (const e of admitted) {
     lines.push(e.key + ' ' + e.length + ' blocos ' + e.byteLength + ' bytes')
     for (const m of e.media || []) lines.push('  mídia ' + m.key + ' ' + m.length + ' blocos ' + m.byteLength + ' bytes')
+    for (const g of e.groups || []) lines.push('  grupo ' + safe(g.key) + ' (grupo ' + safe(g.group).slice(0, 8) + ') ' + safe(g.length) + ' blocos ' + safe(g.byteLength) + ' bytes')
   }
   return lines.join('\n')
 }
@@ -219,6 +220,7 @@ async function run (flags) {
 }
 
 module.exports = {
+  listLines,
   commands: {
     seed: { summary: 'semeador sempre ligado', run }
   }

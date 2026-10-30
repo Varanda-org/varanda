@@ -389,3 +389,52 @@ test('media key pair: per (PRF, nonce), unrelated to the identity, zeroed buffer
   }
   t.is(await codeOf(() => mediaKeyPairFromPrf(prf)), 'TypeError', 'a nonce is required')
 })
+
+// Golden vector of the group derivation: PRF = 00 01 .. 1f, nonce = ff fe .. e0.
+const GOLDEN_GROUP_NONCE = new Uint8Array(32).map((_, i) => 255 - i)
+const GOLDEN_GROUP_SEED = '66916b6b5dcdc95da41b166c966d0f55369867604aacb16ec464f16e018ca18d'
+const GOLDEN_GROUP_PUBLIC_KEY = '9ceb6df34264298a1e1ca4a67f8064ea6fd3a1e62f20f6f4c559e4c8f898b887'
+
+test('group key pair: golden vector, per (PRF, nonce), unrelated to identity and media, zeroed buffers', async (t) => {
+  const { GROUP_HKDF_SALT, GROUP_HKDF_INFO, groupKeyPairFromPrf, mediaKeyPairFromPrf } = passkey
+  t.is(b4a.toString(GROUP_HKDF_SALT), 'varanda/member-group/hkdf/v1')
+  t.is(b4a.toString(GROUP_HKDF_INFO), 'varanda/member-group/ed25519/v1')
+  const seed = crypto.hkdfSync('sha256', GOLDEN_PRF, GROUP_HKDF_SALT, b4a.concat([GROUP_HKDF_INFO, GOLDEN_GROUP_NONCE]), 32)
+  t.is(hex(seed), GOLDEN_GROUP_SEED, 'seed matches node:crypto hkdfSync')
+  const kp = await groupKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)
+  t.is(hex(kp.publicKey), GOLDEN_GROUP_PUBLIC_KEY, 'public key')
+  t.is(hex(hypercoreCrypto.keyPair(b4a.from(GOLDEN_GROUP_SEED, 'hex')).publicKey), GOLDEN_GROUP_PUBLIC_KEY, 'seed -> public key')
+  t.is(kp.secretKey.byteLength, 64)
+  t.ok(GOLDEN_PRF.every((x, i) => x === i), 'caller PRF untouched')
+  t.ok(GOLDEN_GROUP_NONCE.every((x, i) => x === 255 - i), 'caller nonce untouched')
+
+  const again = await groupKeyPairFromPrf(new Uint8Array(GOLDEN_PRF), new Uint8Array(GOLDEN_GROUP_NONCE))
+  t.is(hex(again.secretKey), hex(kp.secretKey), 'deterministic')
+  t.not(again.secretKey.buffer, kp.secretKey.buffer, 'fresh buffers')
+  const other = await groupKeyPairFromPrf(GOLDEN_PRF, new Uint8Array(32).fill(1))
+  t.not(hex(other.publicKey), GOLDEN_GROUP_PUBLIC_KEY, 'another nonce, another key')
+  t.not(hex((await mediaKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)).publicKey), GOLDEN_GROUP_PUBLIC_KEY, 'not the media key')
+  t.not(hex((await keyPairFromPrf(GOLDEN_PRF)).publicKey), GOLDEN_GROUP_PUBLIC_KEY, 'not the identity key')
+
+  const original = hypercoreCrypto.keyPair
+  let seenSeed = null
+  let made = null
+  hypercoreCrypto.keyPair = (s) => {
+    seenSeed = s
+    made = original(s)
+    return made
+  }
+  try {
+    await groupKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)
+    t.ok(seenSeed.every((x) => x === 0), 'seed zeroed')
+    t.ok(made.secretKey.every((x) => x === 0), 'internal secret key zeroed')
+  } finally {
+    hypercoreCrypto.keyPair = original
+  }
+
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), null, 'x'.repeat(32), new Uint8Array(32).buffer]) {
+    t.is(await codeOf(() => groupKeyPairFromPrf(bad, GOLDEN_GROUP_NONCE)), 'TypeError', 'bad PRF refused')
+    t.is(await codeOf(() => groupKeyPairFromPrf(GOLDEN_PRF, bad)), 'TypeError', 'bad nonce refused')
+  }
+  t.is(await codeOf(() => groupKeyPairFromPrf(GOLDEN_PRF)), 'TypeError', 'a nonce is required')
+})

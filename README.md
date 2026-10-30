@@ -108,6 +108,15 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
+  group create               cria um grupo público (--name, --join open|approval)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group post <chave>         publica no grupo (--text)
+  group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
+  group list                 grupos dos quais você participa
+  group info|members|requests <chave>  dados do grupo, membros e pedidos de entrada
+  group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
+  group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
+  group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -119,6 +128,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --join --undo
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -378,6 +388,12 @@ node bin/varanda.js sync --data data/bob --once --timeout-ms 30000 --bootstrap "
 
 Para encerrar: Ctrl-C no semeador (código 0) e Ctrl-C na DHT local.
 
+### 7. Grupos públicos
+
+`group create --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Grupos privados ainda não existem: `--join private` é recusado. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
+
+`group read <chave>` imprime uma linha por mensagem, das mais novas para as mais antigas: `<at> <nome|@usuário|8 hex>: <texto>`, ou `(mensagem oculta)`. Com `--limit <n>` (até 31) e se há mais antigas, a última linha é `mais antigas: --before <at>,<escritor>,<seq>`. Com `--json`, a última linha é o resultado. Um pedido que altera estado nunca é reenviado: se o resultado for incerto, o erro avisa.
+
 ## Demo automática
 
 ```sh
@@ -585,7 +601,7 @@ O app nativo faz o mesmo vínculo, mas o passo do Google roda no navegador do si
 - **Código de resgate R.** A volta do Google de um vínculo do app é reconhecida só pelo `state` de uso único e termina em `varanda://conta?conta=ok&codigo=<R>`, com R aleatório de uso único; o serviço guarda só o hash de R. As recusas voltam para `varanda://conta?conta=<erro|cancelado|lista-de-espera|convite-invalido>`, sem código. Ler o pendente exige V e R (`x-varanda-redeem`); concluir exige os dois e gasta R, mesmo se a conclusão for recusada (aí o app recomeça). A conta Google só é associada à linha pendente quando R é apresentado.
 - **Idade.** Com o cabeçalho do app, a sessão do Didit volta para `https://<domínio>/account/age/app-return`, que ignora qualquer parâmetro e redireciona para `varanda://idade?volta=1`; o app pergunta o resultado com a assinatura, como a web. O domínio permitido no Didit continua o mesmo. Uma sessão aberta pela web só é reaproveitada pela web, e a do app só pelo app: quem usa os dois na mesma hora abre duas sessões pagas.
 
-Por que dois segredos: quem compartilha o link do Google com outra pessoa tem V, mas nunca vê R, porque a volta com R chega ao aparelho de quem entrou no Google. Limite conhecido: outro app no mesmo aparelho pode registrar o esquema `varanda://` e receber R, mas não conclui o vínculo sem V, que nunca sai da memória do app. Os registros nunca trazem V, `appProof`, R, `state`, `sub` nem e-mail. Verificação manual em `docs/verification.md`, seção 49.
+Por que dois segredos: quem compartilha o link do Google com outra pessoa tem V, mas nunca vê R, porque a volta com R chega ao aparelho de quem entrou no Google. Limite conhecido: outro app no mesmo aparelho pode registrar o esquema `varanda://` e receber R, mas não conclui o vínculo sem V, que nunca sai da memória do app. Os registros nunca trazem V, `appProof`, R, `state`, `sub` nem e-mail. Verificação manual em `docs/verification.md`, seção 50.
 
 #### Verificação de idade (Didit, serviço `account`)
 
@@ -880,8 +896,8 @@ A triagem lê a publicação denunciada no semeador e compara com decisões huma
 No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado: depois de gravar estas linhas, recrie `account` e o `seeder`, como no passo 3):
 
 - `VARANDA_AI`: vazio ou ausente desliga (padrão). `sombra` só registra o que a IA faria e mostra a sugestão no painel. `1` deixa a IA decidir. Outro valor é erro de uso antes de abrir a porta. Sem o modelo o serviço sobe sem triagem (`sem-modelo`) e a checagem de saúde continua verde.
-- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele a rota de leitura não existe no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando.
-- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`.
+- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele as rotas de leitura (`/moderation-post/` e `/moderation-group-post/`) não existem no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando. Um token malformado é erro de partida mesmo com a IA desligada. Para bloquear uma denúncia de grupo (conta ou grupo) o serviço de conta lê a mensagem em `/moderation-group-post/` e confere grupo e diário; sem o token os dois bloqueios de uma denúncia de grupo são recusados, mesmo com a IA desligada, e o painel mostra o texto conferido ("Texto conferido no semeador:"). Defina o mesmo token nos dois serviços para moderar grupos. Com o token configurado, o serviço de conta também o envia nas leituras `/index/group` e `/index/groups` do semeador, que as cobra do orçamento de moderação e não do balde público do índice (a resposta é a mesma; token ausente ou errado cai no balde público).
+- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`. É lido e validado mesmo com a triagem desligada: o painel só decide `Bloquear grupo` depois de confirmar o grupo, o escritor e a existência da mensagem (o comprimento do escritor passa da posição; senão `sem-mensagem`) na rota pública `/index/group/<chave>` desse endereço (no máximo 8 páginas, 5 s, sem nova tentativa). Numa denúncia de grupo, tanto `Bloquear conta` quanto `Bloquear grupo` exigem essa confirmação; qualquer falha, inclusive um semeador fora do ar ou não configurado, recusa a decisão (`grupo-nao-confirmado`). Sem um semeador alcançável, uma denúncia de grupo só pode ser descartada (`Descartar` sempre funciona). O mesmo vale para toda denúncia sem grupo, com ou sem conta vinculada no alvo: `Bloquear` exige que o semeador confirme um diário servido (`GET /index/groups/<chave>` responde 200; senão `alvo-nao-confirmado`). Sem um semeador alcançável, nenhuma conta pode ser bloqueada pelo painel: todas as denúncias só podem ser descartadas.
 - `VARANDA_AI_MODEL_DIR`: diretório dos pesos, só fora do Compose. Padrão `<dataDir>/ai-model`. No Compose ele é fixo em `/data/ai-model`, dentro do volume `account-data`: não o defina no `.env`.
 
 Baixe os pesos uma vez. O script confere o sha256 dos cinco arquivos e recusa um diretório dentro do repositório. No Compose, grave direto no volume do serviço de conta, com a própria imagem:
