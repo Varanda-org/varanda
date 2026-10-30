@@ -22,6 +22,7 @@
   "dependencies": {
     "@expo/metro-runtime": "55.0.12",
     "@expo/vector-icons": "15.1.1",
+    "@noble/hashes": "2.4.0",
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
     "@varanda/web-member": "0.1.0",

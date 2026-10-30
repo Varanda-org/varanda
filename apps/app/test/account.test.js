@@ -532,6 +532,8 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(calls[0].init.credentials, 'omit', 'a GET never carries cookies either')
   t.is(calls.length, 3)
   t.is(a.buildRequest('GET', '/account/pending?member=' + M).init.credentials, 'omit')
+  for (const c of calls) t.absent('cache' in c.init, 'no cache option in the app')
+  t.absent('cache' in a.buildRequest('GET', '/account/pending?member=' + M).init)
   for (const c of calls.slice(1)) {
     t.is(c.init.method, 'POST')
     t.ok(c.url.startsWith('https://example.test/account/'), c.url)
@@ -545,5 +547,6 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(off.url, 'https://example.test/account/start', 'the URL follows the installation alone')
   t.is(off.init.credentials, 'same-origin')
   t.absent('x-varanda-client' in off.init.headers)
+  t.is(off.init.cache, 'no-store', 'the web keeps no-store')
   t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
 })

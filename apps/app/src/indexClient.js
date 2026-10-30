@@ -1,5 +1,6 @@
 /* global fetch, AbortController, TextDecoder */
 
+import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
 
 // Client for the seeder index (hosted web only; same origin, served by the
@@ -446,14 +447,18 @@ async function attempt (url, deps, clock) {
   const work = (async () => {
     let res
     try {
-      res = await get(url, {
+      const init = {
         method: 'GET',
         credentials: 'omit',
         redirect: 'error',
         cache: 'no-store',
         headers: { Accept: 'application/json' },
         signal: ctrl ? ctrl.signal : undefined
-      })
+      }
+      // React Native's fetch (whatwg-fetch) appends '_=<timestamp>' for
+      // 'no-store', and the seeder's /index routes answer 404 to any query.
+      if (isAppClient()) delete init.cache
+      res = await get(url, init)
     } catch {
       throw new Failure('network')
     }

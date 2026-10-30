@@ -135,6 +135,9 @@ export function buildRequest (method, path, body) {
   // method), and the service tells its writes apart by this header.
   if (isAppClient()) {
     init.credentials = 'omit'
+    // React Native's fetch (whatwg-fetch) appends '_=<timestamp>' to the URL
+    // for 'no-store'; one rule for every app request (see media/fetch.js).
+    delete init.cache
     if (method === 'POST') init.headers['x-varanda-client'] = 'app'
   }
   return { url: resolveUrl(path), init }

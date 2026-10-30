@@ -93,7 +93,9 @@ function buildPost (path, body) {
     init: {
       method: 'POST',
       credentials: app ? 'omit' : 'same-origin',
-      cache: 'no-store',
+      // React Native's fetch (whatwg-fetch) appends '_=<timestamp>' to the
+      // URL for 'no-store'; one rule for every app request (media/fetch.js).
+      ...(app ? {} : { cache: 'no-store' }),
       headers,
       body: JSON.stringify(body)
     }

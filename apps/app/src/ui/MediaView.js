@@ -1,33 +1,42 @@
-// One photo of a post. Only the hosted web app (hostedPage) fetches it: the
-// bytes come from the same origin's /media route and are shown only after
-// ../media/fetch.js verified their length and SHA-256 against the
-// descriptor, as an Image with a blob: URL (never anything else). Natively,
-// with varanda-serve or on a page that is not hosted, a neutral 'foto' tile
-// is shown and nothing is fetched. While loading: a soft placeholder (the
+// One photo of a post. Only a hosted node (node.hosted: the hosted web app or
+// the native app on an installation) fetches it: the bytes come from the
+// installation's /media route and are shown only after ../media/fetch.js
+// verified their length and SHA-256 against the descriptor, as an Image with
+// a blob: URL on the web or a cache file:// URI natively (../media/display,
+// never anything else). With varanda-serve or a manual configuration, a
+// neutral 'foto' tile is shown and nothing is fetched. While loading: a soft placeholder (the
 // parent gives the tile its aspect ratio). On failure: 'foto indisponível';
 // a tap retries. A 404 or a network error (blocks reach the seeder a moment
 // after the post) is first retried automatically after 2, 5 and 15 s while
 // the tile is mounted (retryDelay); a length or SHA-256 mismatch never is.
 // URLs live in a shared LRU (../media/cache.js). persist (default true) is
 // false for authors the device does not follow: their photos are fetched with
-// cache: 'no-store' so nothing of them is kept on the device.
+// cache: 'no-store' on the web so nothing of them is kept on the device
+// (natively no cache option: see fetchMedia).
 
 import { useEffect, useRef, useState } from 'react'
-import { Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
-import { hostedPage } from '../configStore'
+import { fetch as expoFetch } from 'expo/fetch'
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useNode } from '../node'
 import { loadMediaUrl, validDescriptor } from '../media/fetch'
 import { createMediaCache, mediaKey, retryDelay } from '../media/cache'
+import { revokeUrl, urlFromBytes } from '../media/display'
+import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
 import { colors } from './theme'
 
-const canFetch = Platform.OS === 'web' && hostedPage === true
+// The native app streams media through expo/fetch so the byte cap stops the
+// download (see fetchMedia); the web keeps the global fetch.
+const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
 
-const cache = createMediaCache({ max: 64, concurrency: 4 })
+const cache = createMediaCache({ max: 64, concurrency: 4, revoke: revokeUrl })
 
-const isBlobUrl = (url) => typeof url === 'string' && url.startsWith('blob:')
+const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
 function useMedia (author, descriptor, persist) {
+  const node = useNode()
+  const canFetch = node !== null && node.hosted === true
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
   const [attempt, setAttempt] = useState(0)
@@ -49,7 +58,7 @@ function useMedia (author, descriptor, persist) {
     }
     setResult({ key, url: null, error: false })
     const fresh = attempt > 0
-    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh, persist })).then(
+    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh, persist, urlFromBytes, fetch: mediaFetch() })).then(
       (url) => { if (alive) setResult({ key, url, error: false }) },
       (err) => {
         if (!alive) return
@@ -69,13 +78,13 @@ function useMedia (author, descriptor, persist) {
       if (timer !== null) clearTimeout(timer)
     }
     // The descriptor is identified by its key (deps omit the object itself).
-  }, [author, key, attempt, persist])
+  }, [canFetch, author, key, attempt, persist])
   const retry = () => setAttempt((n) => n + 1)
   if (!canFetch) return { state: 'off', url: null, retry }
   if (!key) return { state: 'error', url: null, retry }
   if (result.key !== key) return { state: 'loading', url: null, retry }
   if (result.error) return { state: 'error', url: null, retry }
-  if (isBlobUrl(result.url)) return { state: 'ok', url: result.url, retry }
+  if (isShownUrl(result.url)) return { state: 'ok', url: result.url, retry }
   return { state: 'loading', url: null, retry }
 }
 
