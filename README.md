@@ -603,6 +603,20 @@ curl -sS https://verification.didit.me/v3/session/<id>/decision/ \
 
 Confira que as respostas trazem `session_id`, `url` e um campo `status`.
 
+Diagnóstico: quando o app mostra "A verificação de idade está fora do ar agora", o serviço registra o motivo, só com palavras fixas (nunca a chave, a sessão ou o que o Didit respondeu). Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"idade"'`:
+
+| Registro (`reason`) | O que fazer |
+| --- | --- |
+| `didit-sessao-http-401` ou `didit-sessao-http-403` | Chave recusada: confira `VARANDA_DIDIT_API_KEY` (de produção, não de sandbox), os privilégios e se há crédito na conta do Didit. |
+| `didit-sessao-http-400` com `didit-sessao-campo-callback` | O domínio do callback não está liberado no Didit: ponha a origem pública nos domínios permitidos da aplicação. |
+| `didit-sessao-http-400` ou `-404` com `didit-sessao-campo-workflow_id` | O `VARANDA_DIDIT_WORKFLOW_ID` não existe para essa chave. |
+| `didit-sessao-tempo` ou `didit-sessao-rede` | O servidor não alcançou `verification.didit.me` (rede, DNS, firewall de saída). |
+| `didit-sessao-formato` | O Didit respondeu num formato inesperado: rode o teste de fumaça acima e compare. |
+| `armazenamento-indisponivel` | O `age.json` não pôde ser lido ou gravado no volume `account-data`. |
+| `teto-diario` | O teto `VARANDA_DIDIT_DAILY_LIMIT` encheu; volta no dia seguinte. |
+
+Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
+
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
 
 ### Implantação automática pelo GitHub Actions

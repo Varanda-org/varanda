@@ -37,6 +37,13 @@ const MAX_SESSIONS = 10000
 const DAY_MS = 24 * 3600 * 1000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
+const LOG_TOKEN_RE = /^[a-z0-9_-]{1,48}$/
+// Only a 4xx from the provider (it refused the request) or our own input check
+// proves no session was created; after a timeout, a dropped connection, a 5xx
+// or an unreadable success the provider may have created (and billed) one.
+function createFailureToken (reason) {
+  return reason === 'entrada' || /^http-4\d\d$/.test(String(reason)) ? 'indisponivel' : 'resultado-incerto'
+}
 const CLEANUP_DELAYS_MS = Object.freeze([30 * 1000, 120 * 1000, 600 * 1000])
 
 // A fixed window whose room can be checked without spending it: a request is
@@ -100,7 +107,7 @@ function createAgeRoutes ({
   const nonces = new Map()
   // member -> { sessionId, url, createdAt }, the oldest evicted for room.
   const sessions = new Map()
-  // member -> Promise<url | null> of a session creation in flight.
+  // member -> Promise<{ url } | { error } | {}> of a session creation in flight.
   const creating = new Map()
   // Abandoned sessions reach the provider's deletion even with no traffic.
   if (on) setInterval(sweep, 3600 * 1000).unref()
@@ -124,7 +131,22 @@ function createAgeRoutes ({
     if (!on) throw refuse('indisponivel')
     let ok = false
     try { ok = ages.available() === true } catch {}
-    if (!ok) throw refuse('indisponivel')
+    if (!ok) {
+      log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      throw refuse('indisponivel')
+    }
+  }
+
+  // Every 503 says why in the log, so the operator can tell a refused key or
+  // callback from a full ceiling: the provider's coarse reason, then each
+  // field name it complained about. Tokens only, never a value.
+  function logProvider (where, r) {
+    const reason = r && typeof r.reason === 'string' && LOG_TOKEN_RE.test(r.reason) ? r.reason : 'falha'
+    log({ event: 'idade', reason: where + '-' + reason })
+    const fields = r && Array.isArray(r.fields) ? r.fields : []
+    for (const field of fields) {
+      if (typeof field === 'string' && LOG_TOKEN_RE.test(field)) log({ event: 'idade', reason: where + '-campo-' + field })
+    }
   }
 
   function memberParam (value) {
@@ -219,11 +241,13 @@ function createAgeRoutes ({
     // session would replace (and delete) the one whose URL was just returned.
     const inflight = creating.get(member)
     if (inflight !== undefined) {
-      const url = await inflight
-      if (url !== null) return send(res, 200, { url })
+      // { url } or { error } of the shared creation, the same answer as the
+      // request that made it (an uncertain outcome stays uncertain here too).
+      const shared = await inflight
+      if (shared.url) return send(res, 200, { url: shared.url })
       // The creation was dropped because the member got approved meanwhile.
       if (verified(member)) return send(res, 200, { state: 'verificado' })
-      throw refuse('indisponivel')
+      throw refuse(shared.error || 'indisponivel')
     }
     // Eligibility before biometrics: a key the link would refuse never pays
     // for, nor shows anything to, the provider.
@@ -239,7 +263,10 @@ function createAgeRoutes ({
     // burn the member's own attempts; it is charged last, once the narrower
     // windows let the request through.
     const daily = linked ? limits.dailyLinked : limits.dailyNew
-    if (!daily.has()) throw refuse('indisponivel')
+    if (!daily.has()) {
+      log({ event: 'idade', reason: 'teto-diario' })
+      throw refuse('indisponivel')
+    }
     if (!limits.session(member)) throw refuse('limite-idade')
     if (!linked && inviting && !limits.invite(inviteId(body.invite))) throw refuse('limite-idade')
     daily.take()
@@ -255,19 +282,24 @@ function createAgeRoutes ({
         language: 'pt'
       })
     } catch {
-      r = { ok: false }
+      r = { ok: false, reason: 'falha' }
     } finally {
       creating.delete(member)
     }
     // A result call may have approved the member while this creation waited:
     // the new session is then useless and goes straight to deletion.
     if (r.ok && verified(member)) {
-      settle(null)
+      settle({})
       cleanup(r.sessionId)
       return send(res, 200, { state: 'verificado' })
     }
-    settle(r.ok ? r.url : null)
-    if (!r.ok) throw refuse('indisponivel')
+    if (!r.ok) {
+      logProvider('didit-sessao', r)
+      const error = createFailureToken(r.reason)
+      settle({ error })
+      throw refuse(error)
+    }
+    settle({ url: r.url })
     sweep()
     const replaced = sessions.get(member)
     if (replaced !== undefined) {
@@ -304,19 +336,25 @@ function createAgeRoutes ({
       return send(res, 200, { state: 'nenhum' })
     }
     const r = await didit.decision(open.sessionId)
-    if (!r.ok) throw refuse('indisponivel')
+    if (!r.ok) {
+      logProvider('didit-decisao', r)
+      throw refuse('indisponivel')
+    }
     const state = r.outcome.state
     if (state === 'verificado') {
       try {
         await ages.record({ member, band: r.outcome.band, method: 'didit', checkedAt: new Date(now()).toISOString() })
       } catch {
-        // The session stays open, so a retry reads the decision again.
-        throw refuse('indisponivel')
+        // The session stays open, so a retry reads the decision again. The
+        // write may still have landed, so the outcome is unknown.
+        log({ event: 'idade', reason: 'gravacao-falhou' })
+        throw refuse('resultado-incerto')
       }
       finalize(member, open)
     } else if (state === 'recusado' || state === 'inconclusivo' || state === 'expirado') {
       finalize(member, open)
     } else if (state !== 'pendente') {
+      log({ event: 'idade', reason: 'estado-desconhecido' })
       throw refuse('indisponivel')
     }
     log({ event: 'idade', reason: state })

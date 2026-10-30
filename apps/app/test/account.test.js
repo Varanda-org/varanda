@@ -449,6 +449,36 @@ test('ageSession: invite only when well formed; no answer is uncertain, refusals
   }
 })
 
+test('age calls: the service\'s own 503 token is a definite refusal; a 5xx without one stays uncertain', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const call of [a.ageSession, a.ageResult]) {
+    stub(t, json(503, { error: 'indisponivel' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.absent(e.uncertain, 'nothing was created: not uncertain')
+    }
+    stub(t, json(502, null, 'text/html'))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.uncertain, true, 'a proxy page is still unknown')
+    }
+    stub(t, json(500, { error: 'algo-que-nao-existe' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.uncertain, true, 'an unknown token is still unknown')
+    }
+    stub(t, json(503, { error: 'resultado-incerto' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.uncertain, true, 'the service says it may have been applied')
+    }
+  }
+  // Other uncertain calls keep treating every 5xx as unknown.
+  stub(t, json(503, { error: 'indisponivel' }))
+  try { await a.pushFinish({ member: M, nonce: 'n', action: 'on', signature: 'ff', endpoint: 'https://push.test/x', p256dh: 'a', auth: 'b' }); t.fail() } catch (e) {
+    t.is(e.uncertain, true)
+  }
+})
+
 test('ageResult: known states only', async (t) => {
   const a = await load()
   const args = { member: M, nonce: 'n1', signature: 'ff' }

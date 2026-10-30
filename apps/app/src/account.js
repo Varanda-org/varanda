@@ -134,7 +134,7 @@ export function buildRequest (method, path, body) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false } = {}) {
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false } = {}) {
   const { url, init } = buildRequest(method, path, body)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
@@ -159,7 +159,11 @@ async function call (method, path, body, { allow404 = false, uncertain = false }
   }
   if (allow404 && res.status === 404) return null
   const code = data && typeof data.error === 'string' ? data.error : ''
-  throw fail(code, data && data.nextChangeAt, res.status >= 500)
+  // `definite`: the route answers a 5xx with an error token only before it
+  // changed anything, so that answer is a refusal, not an unknown outcome. A
+  // 5xx without a known token (a proxy page, a crash) stays uncertain.
+  const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code))
+  throw fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
 }
 
 export const accountStatus = (member) =>
@@ -288,12 +292,13 @@ function isVerificationUrl (v) {
 }
 
 // Creates a provider session on the service, so an unknown outcome is
-// uncertain. The invite goes in only when well formed: the service checks it
-// before sending anyone to the provider.
+// uncertain; the service's own 503 'indisponivel' is not unknown (it answers
+// it only before creating anything). The invite goes in only when well
+// formed: the service checks it before sending anyone to the provider.
 export const ageSession = async ({ member, nonce, signature, invite }) => {
   const body = { member, nonce, signature }
   if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
-  const data = await call('POST', '/account/age/session', body, { uncertain: true })
+  const data = await call('POST', '/account/age/session', body, { uncertain: true, definite: true })
   if (isVerificationUrl(data.url)) return { url: data.url }
   if (data.state === 'verificado') return { state: 'verificado' }
   const err = toError('indisponivel')
@@ -301,9 +306,10 @@ export const ageSession = async ({ member, nonce, signature, invite }) => {
   throw err
 }
 // The service may record the band and close the provider session before it
-// answers, so an unknown outcome is uncertain too.
+// answers, so an unknown outcome is uncertain too; its own error tokens come
+// only before the band is recorded.
 export const ageResult = async ({ member, nonce, signature }) => {
-  const data = await call('POST', '/account/age/result', { member, nonce, signature }, { uncertain: true })
+  const data = await call('POST', '/account/age/result', { member, nonce, signature }, { uncertain: true, definite: true })
   if (typeof data.state === 'string' && AGE_STATES.includes(data.state)) return { state: data.state }
   const err = toError('indisponivel')
   err.uncertain = true
