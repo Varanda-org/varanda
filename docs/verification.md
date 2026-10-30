@@ -3169,3 +3169,76 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 
 - Capacidade: cada aba visível segura uma vaga externa o tempo todo. Dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo mais folga para os links curtos da Espiadinha e dos Avisos; `apps/cli/scripts/load-ws.js` mede conexões seguradas.
 - Não há teste automatizado no navegador nem medição em semeador real.
+
+## 55. Partida mais rápida da sincronização na web (PR perf/faster-sync-startup, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), numa visita de volta, toda leitura de membro espera a rodada abrir o próprio diário e as réplicas seguidas (seção 46). Essa partida era sequencial: para cada seguido, uma checagem de existência, a abertura da réplica (leituras inteiras do IndexedDB), o teste de bifurcação, `has(0)` e a verificação do bloco 0 (ed25519 em JavaScript puro), um de cada vez. E o próprio diário era decodificado duas vezes: na varredura do comprimento presente e de novo na leitura dos registros `follow`, cujo cursor recomeçava em 1 a cada rodada.
+- `lib/sync.js`, réplicas seguidas: a partida tem três passos. Primeiro, na ordem da lista, valida, descarta repetidas e marca as bloqueadas, como antes. Depois abre e verifica até 8 réplicas ao mesmo tempo (`MAX_PARALLEL_OPENS`), cada resultado no seu lugar, sem tocar em estado compartilhado, e nenhuma abertura começa depois que a rodada está terminando. Por último, em série e na ordem da lista, aplica o mesmo de antes: estado do seguido, eventos `skipped`, ativação, limpeza das rejeitadas e parada numa limpeza que falhou. Num término, numa limpeza que falhou ou num erro, todo núcleo aberto e ainda não usado é fechado antes de seguir. Cada chave abre uma vez só; nada mais abre réplicas antes da primeira conexão.
+- `lib/sync.js`, registros `follow`: `trackPresent` ganha `onScan(state)`, chamado com o resultado da varredura inicial. O rastreador do próprio diário usa essa varredura para semear a leitura dos registros `follow` abaixo do comprimento presente (mesmas regras: `decodeBlock` e `validRecordCopy`, seq a partir de 1, a última operação por chave vale, a chave própria é ignorada, os apagados ficam de fora, com o conjunto de apagados do momento da leitura) e começa o cursor ali. A lista gravada e o `follows-changed` são os mesmos de antes para o mesmo diário.
+- `lib/member-ops.js`, leituras emprestadas: com os núcleos da rodada, a réplica que a rodada já tem é lida direto, sem perguntar ao armazenamento se ela existe. Só uma chave que a rodada não tem consulta o armazenamento (sem dados: nada, como antes; guardada mas fora da rodada: caminho exclusivo, como antes). As respostas não mudam.
+- A varredura de chaves bloqueadas continua consultando o armazenamento diretamente (`docs/protocol.md`, normativo). Nenhum documento normativo muda.
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: 12 seguidos (2 com certificado de outra associação) com aberturas atrasadas para inverter a ordem de chegada: pico de aberturas simultâneas acima de 1 e no máximo 8, cada chave aberta uma vez, `skipped` e o inventário enviado ao semeador na ordem da lista, aberturas iguais a fechamentos. Uma rodada interrompida durante as aberturas termina com aberturas iguais a fechamentos e sem abrir as demais. Sem a mudança, o pico fica em 1 e o teste falha.
+- `packages/web-member/test/sync-media.test.js`: cada bloco do próprio diário depois do certificado é lido uma vez na partida (antes, duas), com a mesma lista e o mesmo `follows-changed`.
+- `packages/web-member/test/read-while-sync.test.js`: `feed.read` e `profile.read` emprestados não consultam `hasCore('replica/' + chave)` para a réplica que a rodada tem (antes, 1 vez por leitura). O teste do caminho exclusivo continua cobrindo `NEEDS_EXCLUSIVE`.
+- `packages/web-member/test/delete-purge.test.js`: o teste de um registro `follow` cuja leitura falha uma vez dependia de a partida ler o registro pela leitura dos seguidos, o que não acontece mais. Agora o registro chega depois da partida: a cópia do semeador (gravável, como outro aparelho) recebe o registro depois do primeiro `own-synced`, a primeira leitura dele falha, e um bloco seguinte dispara a leitura que o aplica.
+- `packages/web-member/scripts/startup-bench.js` (fora da CI): mede, no Node, o tempo entre `runSync` e a publicação do leitor, com as checagens de existência, as aberturas de réplica (e o pico simultâneo) e as leituras de blocos do próprio diário. Os tempos no Node não valem para o navegador; as contagens é que comparam. Resultado nesta máquina:
+
+| Cenário | Antes | Depois |
+|---|---|---|
+| 50 seguidos x 20 blocos, diário 200, memória, 5 rodadas | mediana 22.2 ms; pico 1; 398 leituras | mediana 16.1 ms; pico 8; 199 leituras |
+| 50 seguidos x 20 blocos, diário 200, fake-indexeddb, 5 rodadas | mediana 78 ms; pico 1; 398 leituras | mediana 71.1 ms; pico 8; 199 leituras |
+| 200 seguidos x 10 blocos, diário 400, fake-indexeddb, 3 rodadas | mediana 466.1 ms; pico 1; 798 leituras | mediana 387.5 ms; pico 8; 399 leituras |
+
+Em todos os cenários, as checagens de existência e as aberturas ficam iguais ao número de seguidos.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Web hospedada, visita de volta com muitos seguidos: medir o tempo entre desbloquear e a primeira linha de A Rua, antes e depois desta PR (não realizada ainda).
+- [ ] Na mesma visita, as ferramentas de desenvolvedor mostram as aberturas das réplicas sobrepostas e nenhum `'preempted'` causado por uma leitura (não realizada ainda).
+- [ ] Um diário seguido bloqueado e um com certificado inválido continuam aparecendo como ignorados, na mesma ordem (não realizada ainda).
+- [ ] Seguir alguém em outro aparelho: a lista de seguidos deste navegador atualiza depois que o diário próprio fica em dia, como antes (não realizada ainda).
+
+### Limites
+
+- No navegador o ganho depende de quanto o IndexedDB e a verificação ed25519 se sobrepõem; o bench no Node com fake-indexeddb não mede isso.
+- Até 8 réplicas abertas ao mesmo tempo na partida aumentam o pico de memória dessa fase.
+- A varredura de bloqueados e a de emissores revogados continuam em série, depois das aberturas.
+
+## 56. Diários seguidos baixam o mais novo primeiro (PR perf/newest-first-sync, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), um diário seguido baixava em uma só faixa linear, do bloco 0 ao fim, e A Rua só mostrava o que estava no prefixo contínuo. Com histórico longo, os posts novos eram os últimos a aparecer.
+- `lib/sync.js` `trackPresent`: com `newest` maior que 0 (diários seguidos, `NEWEST_BLOCKS` = 32), o download tem duas fases estritas, nunca as duas ao mesmo tempo (o Hypercore 10.38.2 sorteia entre as faixas abertas de um núcleo). A cabeça pede os blocos 0 a 2 (só eles enquanto falta o bloco 0), espera o comprimento assinado quando o semeador anunciou mais do que o núcleo conhece (nada é pedido além do comprimento assinado) e então pede os 32 blocos mais novos, sem os apagados. O corpo é o download linear de antes, a partir do bloco 0. O corpo começa quando a janela já encosta no prefixo (diário pequeno: igual a antes), quando a janela inteira está guardada ou apagada, ou quando a janela não trouxe bloco nenhum por `HEAD_STALL_MS` (3 s). `runSync` aceita `newestBlocks` e `headStallMs` (testes). O próprio diário continua do mais velho para o mais novo.
+- `lib/node-store.js` `readVisible`: o prefixo de `readAll` mais a sequência contínua de blocos que termina no comprimento assinado (um buraco nela só passa se uma tombstone guardada o aponta), só com o bloco 0 guardado e dentro de `MAX_LOG_BLOCKS`. Uma tombstone vem sempre depois do alvo, então toda tombstone que pode apagar um bloco da sequência está nela.
+- `lib/member-ops.js`: `feed.read` e `profile.read` (admissão e nome) leem com `readVisible`; `log.read` continua só com o prefixo. `incomplete` mantém o valor (comprimento presente abaixo do assinado), com nova definição em `docs/rpc.md` 5.13.
+- Tudo o que é anunciado ou medido (hello, `have`, `downloaded`, metas, `settled`) continua no comprimento presente. Documentos normativos: `docs/rpc.md` 5.12, 5.13 e 5.21; `docs/protocol.md` §2 e §6 "Browser node download order".
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: com 300 blocos, o semeador envia o bloco 0 primeiro, depois {1, 2} e [268, 300), depois o resto (sem a mudança, falha: o envio é linear). Um semeador sem o meio do diário: A Rua mostra o prefixo e os 32 mais novos, com `incomplete`, e o histórico quando o semeador o recebe (sem a troca de leitura, falha). Visita de volta: os envios começam em [268, 300) e nenhum `have` passa de blocos não guardados (sem a mudança, falha). Semeador que retém os blocos mais novos (`headStallMs: 200`): o histórico baixa assim mesmo. O próprio diário continua em ordem de blocos.
+- `packages/web-member/test/member.test.js`: réplica com [0, 3) e os blocos mais novos: o feed mostra prefixo e sequência nova, nada do meio, nos caminhos exclusivo e emprestado; uma sequência que não chega ao comprimento assinado mostra só o prefixo; uma tombstone na sequência esconde o alvo no prefixo e na sequência, guardado ou limpo; bloqueado e emissor revogado continuam escondidos do feed e do perfil; `profile.read` usa o perfil mais novo da sequência e um perfil só no meio lê `null`; a paginação com `before` passa pela sequência e depois pelo prefixo, sem repetir; `log.read` termina no comprimento presente. Sem a troca em `member-ops.js`, cinco desses falham.
+- `packages/web-member/test/delete-purge.test.js`: com `download()` registrado, só as faixas da cabeça abrem ([0, 3), [268, 280), [281, 300), o 280 apagado fica de fora), a faixa do corpo só abre com a janela guardada e as da cabeça fechadas, e o bloco apagado nunca chega (sem a mudança, falha). Diário dentro da janela, e `newest` 0, abrem o corpo de uma vez.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Navegador novo, seguindo contas com histórico longo: A Rua mostra os posts mais novos de cada conta em poucos segundos, enquanto o histórico completa (não realizada ainda).
+- [ ] Visita de volta depois de as contas postarem bastante: os posts novos aparecem antes do histórico que faltava (não realizada ainda).
+- [ ] Semeador sem o meio de um diário: A Rua mostra o começo e os mais novos, e o resto quando o semeador o tiver (não realizada ainda).
+- [ ] Um nome pode aparecer como "sem nome" por um instante, até chegar o bloco do perfil (não realizada ainda).
+
+### Limites
+
+- A Rua atualiza quando o comprimento presente cresce: os posts mais novos aparecem cerca de uma ida e volta depois do bloco 2, ou ao puxar para atualizar se o semeador não tem o meio do diário.
+- Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
+- Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
+- Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.

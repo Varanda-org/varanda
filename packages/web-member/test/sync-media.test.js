@@ -205,6 +205,45 @@ test('the own follow records fold into kv follows once; nothing new folds nothin
   t.alike(await store.readFollows(m.storage), [k1, k2].sort())
 })
 
+test('the startup scan of the own diary feeds the fold: each block is read once', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const m = await member()
+  const k1 = randomKey()
+  const k2 = randomKey()
+  await appendOwn(m, [
+    followRecord({ key: k1, on: true }),
+    postRecord({ text: 'entre os seguidos' }),
+    followRecord({ key: k2, on: true }),
+    followRecord({ key: k1, on: false })
+  ])
+  await store.writeFollowsMigrated(m.storage)
+
+  const openDiary = store.openDiary
+  t.teardown(() => { store.openDiary = openDiary }, { force: true })
+  const reads = new Map()
+  let length = 0
+  store.openDiary = async (...args) => {
+    const core = await openDiary(...args)
+    length = core.length
+    const get = core.get.bind(core)
+    core.get = (index, opts) => {
+      reads.set(index, (reads.get(index) || 0) + 1)
+      return get(index, opts)
+    }
+    return core
+  }
+  const events = []
+  await sync(m.storage, NO_SEEDER, events, { once: true, timeoutMs: 1000 })
+  store.openDiary = openDiary
+  t.is(length, 5, 'fixture: block 0 and four records')
+  const seqs = []
+  for (let seq = 1; seq < length; seq++) seqs.push(reads.get(seq) || 0)
+  t.alike(seqs, [1, 1, 1, 1], 'every block after the certificate is read once')
+  t.alike(await store.readFollows(m.storage), [k2], 'the fold result is unchanged')
+  t.alike(named(events, 'follows-changed'), [{ event: 'follows-changed', count: 1, length: 5 }])
+})
+
 test('pending local follow changes win over the folded records and stay pending', async (t) => {
   t.timeout(60000)
   await testnet(t)

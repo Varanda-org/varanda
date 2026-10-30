@@ -13,6 +13,12 @@
 //            but block 0 has not yet arrived there and passed the LOCAL gate
 //   active   local gate passed; live download, advertised with its present
 //            length (trackPresent: never contiguousLength)
+//
+// Followed diaries (active and regate) download newest-first: block 0..2,
+// then the newest NEWEST_BLOCKS blocks, then the history from block 0
+// (trackPresent `newest`, docs/protocol.md section 6 "Browser node download
+// order"); the own diary stays oldest-first. Every advertised or measured
+// length is still the present length.
 //   failing  gate failed, quota or fork: its close + purge is in flight
 //   failed   skipped; excluded from every goal
 //
@@ -129,8 +135,9 @@
 //
 // Follow fold: the own diary's valid `follow` records (decodeBlock +
 // validRecordCopy, seq >= 1, the last op per key wins, the own key ignored)
-// are replayed incrementally (a cursor from seq 1) at run start, before any
-// connection, and whenever the own diary is caught up (each own-synced, see
+// are replayed incrementally at run start, before any connection (seeded
+// from the own tracker's initial scan, so the blocks below its present
+// length are decoded once, then a cursor from there), and whenever the own diary is caught up (each own-synced, see
 // checkOwnSync), never per downloaded chunk while own-behind: the session
 // restarts the continuous run once per distinct follows-changed length, so
 // a fresh device's catch-up folds once at its end, and another device's
@@ -289,6 +296,8 @@ const GATE_MIN_TIMEOUT_MS = 250
 const GATE_RETRY_MS = 15000
 // Quarantine fetches in flight at once (a browser tab, not a server).
 const MAX_PARALLEL_GATES = 8
+// Stored follows opened (and gated locally) at once at run start.
+const MAX_PARALLEL_OPENS = 8
 // One deadline for the WebSocket, the Noise handshake and the seeder's hello.
 const CONNECT_TIMEOUT_MS = 15000
 const RETRY_MIN_MS = 1000
@@ -675,6 +684,15 @@ function linearExcept (core, deleted) {
 const TOMB_RETRY_MS = 250
 const TOMB_RETRY_MAX = 5
 
+// Newest-first download of a followed diary (trackPresent `newest`): the
+// window is one A Rua page (FEED_LIMIT_MAX is 31), the head also asks for
+// blocks 0..HEAD_LOW-1 (block 0 and where the first profile usually is,
+// the Espiadinha's window), and a window that brings no block for
+// HEAD_STALL_MS gives way to the history.
+const NEWEST_BLOCKS = 32
+const HEAD_LOW = 3
+const HEAD_STALL_MS = 3000
+
 // Target seq of the valid tombstone at block seq, null for any other block,
 // undefined for a read error (the checks of tombstoneAt, block read once).
 async function tombstoneTarget (core, seq) {
@@ -709,12 +727,29 @@ function foldTargets (tombs) {
 // meanwhile merge into it, so a burst of blocks costs a few steps, not one
 // fold and one present-length walk per block.
 // -> { ready, present (), deleted (), destroy (), steps () }, steps() being
-// the number of steps run (test-only). onReady(present) once
+// the number of steps run (test-only). onScan(state) with the initial
+// presentState result, before anything else uses it; onReady(present) once
 // the initial scan is done; onGrow(present) when the present length grows
 // after it; onDeleted(deleted) whenever the deleted set changed (and after
 // the initial scan when it is not empty); onError(err) once when the
 // initial scan fails (the tracker then stops, with present 0).
-function trackPresent (core, { noClear = false, download = true, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
+//
+// newest > 0 (followed diaries in the browser) downloads in two strict
+// phases, never both at once: Hypercore 10.38.2 picks among a core's open
+// ranges at random, so a newest range open next to the history range would
+// get about half of the requests. The HEAD asks for block 0..HEAD_LOW-1
+// (only those while block 0 is missing), waits for the signed length when
+// expect(length) announced more than the core knows (nothing is requested
+// past the signed length), then asks for the newest `newest` blocks below
+// it, split around deleted seqs. The BODY is the linear download above,
+// from block 0. The body runs when the newest window already reaches the
+// prefix (a small diary: newest 0 behaves exactly so), once the window is
+// all stored or deleted, or when it brought no block for stallMs (the
+// seeder may lack it); a target that grows past that and leaves the
+// history more than `newest` blocks behind runs the head again. The
+// reported length stays the present length on both phases.
+// -> also expect(length), the length a seeder advertised (a hint only).
+function trackPresent (core, { noClear = false, download = true, newest = 0, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
@@ -726,6 +761,13 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
   let steps = 0
   let timer = null
   const arrived = []
+  let scheduling = false // the initial scan is done: schedule() decides
+  let phase = null // 'head' | 'body'
+  let heads = []
+  let headKey = ''
+  let hint = 0
+  let bodyAt = -1 // the target the body was chosen for (window done or stalled)
+  let stall = null
 
   const sameSet = (a, b) => a.size === b.size && [...a].every((s) => b.has(s))
   const learn = async (index) => {
@@ -767,7 +809,7 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     else if (!noClear) await clearDeleted(core, next)
     return from
   }
-  const openRange = () => {
+  const openBody = () => {
     if (!download) return
     if (noClear) {
       const plain = core.download({ start: 0, end: -1, linear: true })
@@ -798,6 +840,91 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     }
   }
 
+  const closeHeads = () => {
+    for (const r of heads) {
+      try { r.destroy() } catch {}
+    }
+    heads = []
+    headKey = ''
+  }
+  const clearStall = () => {
+    if (stall !== null) clearTimeout(stall)
+    stall = null
+  }
+  const armStall = () => {
+    clearStall()
+    if (stopped) return
+    stall = setTimeout(() => {
+      stall = null
+      if (stopped || phase !== 'head') return
+      bodyAt = Math.max(core.length, hint)
+      queue()
+    }, stallMs)
+  }
+  const wantHead = (target) => newest > 0 && target > bodyAt && target - newest > Math.max(present, HEAD_LOW)
+  // [start, end) without the deleted seqs, as [start, end) pairs.
+  const around = (start, end) => {
+    const out = []
+    let from = start
+    for (let i = start; i < end; i++) {
+      if (!deleted.has(i)) continue
+      if (i > from) out.push([from, i])
+      from = i + 1
+    }
+    if (end > from) out.push([from, end])
+    return out
+  }
+  const closeBody = () => {
+    if (range === null) return
+    try { range.destroy() } catch {}
+    range = null
+    // A body update cut short by the close may have left deleted blocks.
+    if (!noClear) clearDeleted(core, deleted).catch(noop)
+  }
+  const toBody = () => {
+    if (phase === 'head') {
+      closeHeads()
+      clearStall()
+    }
+    phase = 'body'
+    if (range === null) openBody()
+  }
+  const schedule = async () => {
+    if (!download || stopped || !scheduling) return
+    const len = core.length
+    const target = Math.max(len, hint)
+    if (!wantHead(target)) return toBody()
+    const segs = []
+    let done = false
+    if (!(await localRange(core, 0, 1))) {
+      segs.push(...around(0, HEAD_LOW))
+    } else {
+      segs.push(...around(0, Math.min(HEAD_LOW, len)))
+      if (len >= target) {
+        const ws = Math.max(HEAD_LOW, len - newest)
+        const window = around(ws, len)
+        done = true
+        for (const [a, b] of window) {
+          if (!(await localRange(core, a, b))) done = false
+        }
+        segs.push(...window)
+      }
+    }
+    if (stopped) return
+    if (done) {
+      bodyAt = target
+      return toBody()
+    }
+    closeBody()
+    const key = segs.map(([a, b]) => a + '-' + b).join(',')
+    if (phase === 'head' && key === headKey) return
+    closeHeads()
+    phase = 'head'
+    headKey = key
+    for (const [a, b] of segs) heads.push(core.download({ start: a, end: b, linear: true }))
+    armStall()
+  }
+
   const step = async () => {
     if (stopped) return
     steps++
@@ -814,6 +941,7 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     } else {
       present = len
     }
+    await schedule()
   }
   const queue = () => {
     if (waiting) return
@@ -826,6 +954,10 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
   }
   const onDownload = (index) => {
     arrived.push(index)
+    if (phase === 'head') {
+      if (!noClear && deleted.has(index)) clearDeleted(core, [index]).catch(noop)
+      armStall()
+    }
     queue()
   }
   const onAppend = () => { queue() }
@@ -836,6 +968,8 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     timer = null
     core.off('download', onDownload)
     core.off('append', onAppend)
+    clearStall()
+    closeHeads()
     if (range !== null) {
       try { range.destroy() } catch {}
       range = null
@@ -848,6 +982,7 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
   core.on('append', onAppend)
   const ready = (async () => {
     const state = await presentState(core)
+    onScan(state)
     for (const entry of state.raw) {
       const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
       if (copy !== null && copy.type === 'delete') tombs.set(entry.seq, copy.seq)
@@ -857,7 +992,9 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     if (stopped) return
     if (!noClear) await clearDeleted(core, deleted)
     if (stopped) return
-    openRange()
+    scheduling = true
+    await schedule()
+    if (stopped) return
     const len = await settle(0)
     if (len === null) return
     later()
@@ -879,6 +1016,16 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
     present: () => present,
     deleted: () => deleted,
     steps: () => steps,
+    // The signed length a seeder advertised: it may only delay the body
+    // (by stallMs at most); requests stay below the signed length.
+    expect (length) {
+      if (!Number.isSafeInteger(length) || length <= hint) return
+      hint = length
+      if (newest <= 0 || stopped || !scheduling) return
+      // Closed now, before a link just attached sends the body's requests.
+      if (phase === 'body' && wantHead(Math.max(core.length, hint))) closeBody()
+      queue()
+    },
     destroy: stop
   }
 }
@@ -966,6 +1113,8 @@ async function syncRun ({
   groupsChangedMs = GROUPS_CHANGED_MS,
   socketCloseMs = SOCKET_CLOSE_MS,
   blocklistMinIntervalMs, // test-only: blocklist-net.js minIntervalMs
+  newestBlocks = NEWEST_BLOCKS, // followed diaries: trackPresent `newest`
+  headStallMs = HEAD_STALL_MS,
   noClear = false // keep the bytes of deleted blocks (tombstones still apply)
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
@@ -1064,7 +1213,7 @@ async function syncRun ({
   let groupKvChain = Promise.resolve() // kv groupReplicas changes, one at a time
   const changedGroups = new Set()
   let changedTimer = null
-  const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
+  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
   let holds = 0 // reader holds outstanding
   let drained = Promise.resolve() // resolves when holds reaches 0
@@ -1741,6 +1890,8 @@ async function syncRun ({
     // block is never asked for and is cleared when it arrives anyway.
     const tracker = trackPresent(core, {
       noClear,
+      newest: newestBlocks,
+      stallMs: headStallMs,
       onReady: (present) => {
         if (entry.core !== core) return
         if (entry.state === 'regate') {
@@ -1762,6 +1913,7 @@ async function syncRun ({
     })
     entry.tracker = tracker
     entry.stopGrow = () => tracker.destroy()
+    expectLength(entry, theirs(entry.key) || 0)
     if (checkQuota(entry)) return
     const l = seederLink()
     if (l !== null) core.replicate(l.noise)
@@ -1838,10 +1990,19 @@ async function syncRun ({
     failFollow(entry, 'fork', { purge: true })
   }
 
+  // A follow's newest window is anchored on its signed length; the
+  // seeder's claim only tells the tracker to wait for it.
+  function expectLength (entry, length) {
+    if (entry.tracker && (entry.state === 'active' || entry.state === 'regate')) {
+      entry.tracker.expect(Math.min(length, maxLogBlocks))
+    }
+  }
+
   function noteAdvertisement (key, length) {
     if (key === ownHex) return // G2 reads the advertisement itself
     if (isBlockedKey(key)) return
     const entry = follows.get(key)
+    if (entry && Number.isSafeInteger(length)) expectLength(entry, length)
     if (!entry || entry.state !== 'pending' || length < 1) return
     entry.advSeq++
     maybeFetch(entry)
@@ -3827,6 +3988,15 @@ async function syncRun ({
   async function replayFollows () {
     const length = ownPresent()
     const deleted = ownTracker === null ? new Set() : ownTracker.deleted()
+    if (fold.seed !== null) {
+      for (const record of fold.seed) {
+        if (deleted.has(record.seq)) continue
+        fold.seen = true
+        if (record.key === ownHex) continue
+        fold.ops.set(record.key, record.on)
+      }
+      fold.seed = null
+    }
     // The cursor passes a seq only once it was handled: a throw leaves it
     // there, so the next fold retries it.
     for (let seq = fold.cursor; seq < length; seq = ++fold.cursor) {
@@ -3849,6 +4019,22 @@ async function syncRun ({
       const r = await store.writeFoldedFollows(storage, derived, ownHex)
       if (r && r.changed === true) emit({ event: 'follows-changed', count: r.follows.length, length })
     } while (fold.again)
+  }
+
+  // The follow records of the own tracker's initial scan below its present
+  // length, in seq order, kept until the first fold applies them with the
+  // deleted set of that moment (as reading them there would); the cursor
+  // starts past them.
+  function seedFold (state) {
+    const seed = []
+    for (const entry of state.raw) {
+      if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
+      const record = validRecordCopy(entry.record, entry.seq)
+      if (record === null || record.type !== 'follow') continue
+      seed.push({ seq: entry.seq, key: record.key, on: record.on })
+    }
+    fold.seed = seed
+    fold.cursor = Math.max(1, state.present)
   }
 
   function scheduleFold () {
@@ -3881,6 +4067,7 @@ async function syncRun ({
     // diary, onVerified), deleted blocks never.
     ownTracker = trackPresent(diary, {
       noClear,
+      onScan: seedFold,
       onGrow: (length) => {
         send({ type: 'have', key: ownHex, length })
         if (cert === null) recoverCert()
@@ -3907,63 +4094,124 @@ async function syncRun ({
       log('aviso: limite de diários seguidos excedido: só os primeiros ' + maxFollows + ' serão sincronizados')
       followList = followList.slice(0, maxFollows)
     }
+    // Pass 1, in list order: what is followed and what is blocked.
+    const items = []
+    const listed = new Set()
     for (const raw of followList) {
-      if (ending) break
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
-      if (!HEX64.test(key) || key === ownHex || follows.has(key)) {
+      if (!HEX64.test(key) || key === ownHex || listed.has(key)) {
         if (key !== ownHex) log('aviso: chave seguida inválida ignorada')
         continue
       }
-      const entry = {
-        key,
-        state: 'pending',
-        core: null,
-        range: null,
-        stopGrow: null,
-        stopFork: null,
-        stopQuota: null,
-        tracker: null, // trackPresent of the open core
-        retryTimer: null,
-        fetching: false,
-        fetch: null, // the quarantine fetch in flight (peeks wait for it)
-        gating: false,
-        advSeq: 0,
-        fetchedAdv: 0,
-        cutByDeadline: false,
-        discardedRegate: false
+      listed.add(key)
+      items.push({ key, blocked: isBlockedKey(key) })
+    }
+    // Pass 2: the stored follows are opened and gated locally, a few at a
+    // time (each key once, and nothing else opens a replica before the
+    // first connection). A slot touches no shared state; none starts once
+    // the run is ending.
+    const slots = new Array(items.length).fill(null)
+    const opened = items.map(() => {
+      let resolve
+      const p = new Promise((_resolve) => { resolve = _resolve })
+      return { p, resolve }
+    })
+    const openSlot = async ({ key, blocked }) => {
+      const slot = { core: null, reason: null, held0: false, error: null }
+      if (blocked) return slot
+      try {
+        if (ending || !(await store.replicaExists(storage, key)) || ending) return slot
+        slot.core = await store.openReplica(storage, key)
+        slot.held0 = slot.core.length > 0 && await slot.core.has(0)
+        if (slot.core.fork !== 0) slot.reason = 'fork'
+        else if (slot.held0) slot.reason = await localGate(slot.core, key, association, gateOpts())
+      } catch (err) {
+        slot.error = err
+        if (slot.core !== null) await slot.core.close().catch(noop)
+        slot.core = null
       }
-      follows.set(key, entry)
-      if (isBlockedKey(key)) {
-        // Never opened: the sweep below purges whatever is stored.
-        entry.state = 'failed'
-        skipped.push({ key, reason: 'blocked' })
-        emit({ event: 'skipped', key, reason: 'blocked' })
-        continue
+      return slot
+    }
+    let nextOpen = 0
+    let stopOpens = false // pass 3 is over: no new opens (a failed purge, a throw)
+    const workers = []
+    for (let w = 0; w < Math.min(MAX_PARALLEL_OPENS, items.length); w++) {
+      workers.push((async () => {
+        while (nextOpen < items.length) {
+          if (stopOpens) break
+          const i = nextOpen++
+          slots[i] = await openSlot(items[i])
+          opened[i].resolve(slots[i])
+        }
+      })())
+    }
+    // Pass 3, serial and in list order: the follow states, skip events and
+    // purges as each slot is ready. A core opened but never taken (the run
+    // ending, a failed purge, an error) is closed before going on.
+    try {
+      for (let i = 0; i < items.length; i++) {
+        if (ending) break
+        const { key, blocked } = items[i]
+        const entry = {
+          key,
+          state: 'pending',
+          core: null,
+          range: null,
+          stopGrow: null,
+          stopFork: null,
+          stopQuota: null,
+          tracker: null, // trackPresent of the open core
+          retryTimer: null,
+          fetching: false,
+          fetch: null, // the quarantine fetch in flight (peeks wait for it)
+          gating: false,
+          advSeq: 0,
+          fetchedAdv: 0,
+          cutByDeadline: false,
+          discardedRegate: false
+        }
+        follows.set(key, entry)
+        if (blocked) {
+          // Never opened: the sweep below purges whatever is stored.
+          entry.state = 'failed'
+          skipped.push({ key, reason: 'blocked' })
+          emit({ event: 'skipped', key, reason: 'blocked' })
+          continue
+        }
+        const slot = await opened[i].p
+        if (slot.error !== null) throw slot.error
+        if (slot.core === null) continue
+        const core = slot.core
+        slot.core = null
+        const { reason, held0 } = slot
+        if (held0 && reason === null) {
+          activate(entry, core)
+          continue
+        }
+        let purged = true
+        await track((async () => {
+          await core.close()
+          await store.purgeReplica(storage, key)
+        })(), noop, () => {
+          purged = false
+          purgeFailed(key)
+        })
+        if (!purged) break
+        if (reason) {
+          entry.state = 'failed'
+          if (reason === 'revoked-issuer') revokedDiaries.add(key)
+          skipped.push({ key, reason })
+          emit({ event: 'skipped', key, reason })
+        }
       }
-      if (!(await store.replicaExists(storage, key))) continue
-      const core = await store.openReplica(storage, key)
-      let reason = null
-      const held0 = core.length > 0 && await core.has(0)
-      if (core.fork !== 0) reason = 'fork'
-      else if (held0) reason = await localGate(core, key, association, gateOpts())
-      if (held0 && reason === null) {
-        activate(entry, core)
-        continue
-      }
-      let purged = true
-      await track((async () => {
-        await core.close()
-        await store.purgeReplica(storage, key)
-      })(), noop, () => {
-        purged = false
-        purgeFailed(key)
-      })
-      if (!purged) break
-      if (reason) {
-        entry.state = 'failed'
-        if (reason === 'revoked-issuer') revokedDiaries.add(key)
-        skipped.push({ key, reason })
-        emit({ event: 'skipped', key, reason })
+    } finally {
+      stopOpens = true
+      await Promise.all(workers)
+      for (const slot of slots) {
+        if (slot === null || slot.core === null) continue
+        const core = slot.core
+        slot.core = null
+        await core.close().catch(noop)
       }
     }
 
@@ -4044,4 +4292,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

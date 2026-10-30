@@ -160,6 +160,31 @@ test('feed, log, profile and engagement reads are served on the live run without
   t.alike(internal, [])
 })
 
+test('borrowed reads of a followed diary the run holds never ask the storage whether it exists', async (t) => {
+  await testnet(t)
+  const { web, storage, own, F } = await fixture(t)
+  const F0 = await web.request('feed.read', {})
+  const P0 = await web.request('profile.read', { authors: [own, F] })
+  const { runId } = await web.request('sync.start', {})
+  // The run published its cores once a borrowed read went through.
+  await web.request('profile.read', { authors: [own] })
+  const hasCore = storage.hasCore
+  const asked = []
+  storage.hasCore = function (name) {
+    asked.push(name)
+    return hasCore.apply(this, arguments)
+  }
+  t.teardown(() => { storage.hasCore = hasCore })
+  const from = web.events.length
+  t.alike(await web.request('feed.read', {}), F0, 'the same feed')
+  t.alike(await web.request('profile.read', { authors: [own, F] }), P0, 'the same profiles')
+  storage.hasCore = hasCore
+  t.is(asked.filter((name) => name === 'replica/' + F).length, 0, 'no existence check for the held replica')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  t.is(preempted(web, from).length, 0)
+  await web.request('sync.stop')
+})
+
 test('a blocked followed diary stays hidden on the borrowed path', async (t) => {
   await testnet(t)
   const { web, own, F } = await fixture(t, { blockFollowed: true })
