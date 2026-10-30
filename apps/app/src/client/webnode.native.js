@@ -2,7 +2,7 @@
 // session inside the Bare worklet, src/client/native.js), shaped like
 // connectBrowserNode's (src/client/browser.js; docs/rpc.md section 11) so
 // src/node.js treats both alike. The host controls cross the IPC as the
-// IPC-only methods of docs/rpc.md 5.35 to 5.41.
+// IPC-only methods of docs/rpc.md 5.36 to 5.42.
 //
 // The passkey ceremony is not wired yet: status reports no WebAuthn, and
 // unlock / complete refuse with UNSUPPORTED. The handle exists as soon as the
@@ -66,7 +66,7 @@ export function webNodeHandle (request) {
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped
-  // at 64 KiB (docs/rpc.md 5.41). The worklet deletes the file after a
+  // at 64 KiB (docs/rpc.md 5.42). The worklet deletes the file after a
   // successful upload; on any failure it is deleted here.
   const media = {
     upload: async ({ bytes, mime, width, height, onProgress } = {}) => {

@@ -8,6 +8,7 @@ import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
 import { isAppClient } from './appClient.js'
+import { KYC_STATES, canonicalJson } from './wallet.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -41,7 +42,24 @@ const ERROR_MESSAGES = {
   'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
   'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
-  'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.'
+  'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
+  'carteira-pendente': 'Abra a conta de pagamentos antes.',
+  'kyc-pendente': 'A verificação de identidade ainda não terminou.',
+  'kyc-recusado': 'A verificação de identidade não foi aprovada.',
+  'documentos-pendentes': 'Envie o documento e a selfie antes.',
+  'pin-invalido': 'PIN incorreto.',
+  'pin-bloqueado': 'PIN bloqueado por 24 horas após três erros.',
+  'limite-carteira': 'Muitas operações. Tente de novo mais tarde.',
+  'valor-invalido': 'Valor inválido.',
+  'destino-invalido': 'Destino inválido.',
+  'saldo-insuficiente': 'Saldo insuficiente.',
+  'carteira-incerta': 'A criação da carteira ainda não foi confirmada.',
+  'taxa-mudou': 'A taxa mudou. Confira de novo antes de confirmar.',
+  'idade-minima': 'Por enquanto a conta de pagamentos só pode ser aberta por quem tem 18 anos ou mais.',
+  'operacao-pendente': 'Uma operação anterior ainda não foi confirmada. Aguarde a confirmação antes de fazer outra.',
+  // Never sent by the service: the app's name for the 404 that wallet
+  // creation answers while the operator keeps the 'cadastro' mode.
+  'aguardando-carteira': 'Verificação aprovada. A carteira será liberada em breve.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -115,12 +133,12 @@ export function toError (code, nextChangeAt) {
   return err
 }
 
-async function readJson (res) {
+async function readJson (res, maxBody = MAX_BODY) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
   let text
   try { text = await res.text() } catch { return null }
-  if (typeof text !== 'string' || new TextEncoder().encode(text).length > MAX_BODY) return null
+  if (typeof text !== 'string' || new TextEncoder().encode(text).length > maxBody) return null
   try { return JSON.parse(text) } catch { return null }
 }
 
@@ -143,7 +161,7 @@ export function buildRequest (method, path, body) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false } = {}) {
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, map404 = null } = {}) {
   const { url, init } = buildRequest(method, path, body)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
@@ -156,7 +174,7 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   let data
   try {
     res = await fetch(url, { ...init, signal: ctl.signal })
-    data = await readJson(res)
+    data = await readJson(res, maxBody)
   } catch {
     throw fail('indisponivel', undefined, true)
   } finally {
@@ -168,6 +186,7 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   }
   if (allow404 && res.status === 404) return null
   const code = data && typeof data.error === 'string' ? data.error : ''
+  if (map404 && res.status === 404) throw fail(map404(code))
   // `definite`: the route answers a 5xx with an error token only before it
   // changed anything, so that answer is a refusal, not an unknown outcome. A
   // 5xx without a known token (a proxy page, a crash) stays uncertain.
@@ -323,4 +342,183 @@ export const ageResult = async ({ member, nonce, signature }) => {
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
+}
+
+// Optional payments account (Hodle). Every signed POST carries the action and
+// the exact op the member signed: the service recomputes the op hash from
+// what it receives. The PIN and the KYC fields go straight into one request
+// body and are never kept here.
+const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
+const NETWORK_RE = /^[a-z]{1,16}$/
+const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
+const UPLOAD_HOST = 'uploads.hodle.com.br'
+const LIVENESS_HOST = 'app.hodle.com.br'
+const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
+const UPLOAD_MAX = 10 * 1024 * 1024
+const UPLOAD_TIMEOUT_MS = 30000
+// Two presigned provider URLs of up to 4096 characters each fit.
+const WALLET_MAX_BODY = 16384
+
+const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+
+function isHodleUrl (v, host) {
+  if (!isVerificationUrl(v)) return false
+  const u = new URL(v)
+  return u.hostname === host && u.port === ''
+}
+
+function uncertainError () {
+  const err = toError('indisponivel')
+  err.uncertain = true
+  return err
+}
+
+// The service answers 404 with two tokens: 'nao-encontrado' when the route
+// is not mounted (wallet creation while the operator keeps the 'cadastro'
+// mode) and 'expirado' for a missing or expired nonce. Both are definite.
+async function walletCall (path, body, opts = {}) {
+  const map404 = (code) => {
+    if (code === 'nao-encontrado' && body.action === 'wallet-create') return 'aguardando-carteira'
+    return code === 'expirado' ? 'expirado' : 'indisponivel'
+  }
+  return call('POST', path, body, { ...opts, maxBody: WALLET_MAX_BODY, map404 })
+}
+
+function parseAccount (a) {
+  if (a === null) return null
+  if (!isObject(a) || !isObject(a.kyc)) return undefined
+  const { state, attempt } = a.kyc
+  if (typeof state !== 'string' || !KYC_STATES.includes(state) || !Number.isSafeInteger(attempt) || attempt < 0) return undefined
+  if (typeof a.network !== 'string' || !NETWORK_RE.test(a.network)) return undefined
+  if (a.address !== null && (typeof a.address !== 'string' || !WALLET_ADDRESS_RE.test(a.address))) return undefined
+  let wallet = null
+  if (a.wallet !== null) {
+    if (!isObject(a.wallet) || typeof a.wallet.address !== 'string' || !WALLET_ADDRESS_RE.test(a.wallet.address)) return undefined
+    wallet = { address: a.wallet.address }
+  }
+  for (const k of ['subaccountUncertain', 'walletUncertain', 'documentReady', 'selfieReady']) {
+    if (typeof a[k] !== 'boolean') return undefined
+  }
+  return {
+    kyc: { state, attempt },
+    network: a.network,
+    address: a.address,
+    wallet,
+    subaccountUncertain: a.subaccountUncertain,
+    walletUncertain: a.walletUncertain,
+    documentReady: a.documentReady,
+    selfieReady: a.selfieReady
+  }
+}
+
+// null on any failure: walletStep treats a missing policy as off.
+export const walletPolicy = async () => {
+  try {
+    const data = await call('GET', '/account/wallet/policy')
+    if (!isObject(data) || typeof data.available !== 'boolean' || !WALLET_MODES.includes(data.mode)) return null
+    const network = data.network === undefined ? null : data.network
+    if (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network))) return null
+    return { available: data.available, network, mode: data.mode }
+  } catch {
+    return null
+  }
+}
+
+export const walletStart = async ({ member, action }) => {
+  const data = await walletCall('/account/wallet/start', { member, action })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+
+// Creates the subaccount at the provider; the service's 503 'indisponivel'
+// comes only before it sent anything.
+export const walletOptin = async ({ member, nonce, signature, op }) => {
+  const data = await walletCall('/account/wallet/optin', { member, nonce, action: 'optin', op, signature }, { uncertain: true, definite: true })
+  const out = { ok: true }
+  if (Object.hasOwn(data, 'account')) {
+    const account = parseAccount(data.account)
+    if (account !== undefined) out.account = account
+  }
+  return out
+}
+
+// The upload and liveness URLs are single-use capabilities: returned to the
+// caller, never kept. The call creates a provider document, so an unknown
+// outcome (or a success without usable URLs) is uncertain.
+export const walletKycDocument = async ({ member, nonce, signature, op }) => {
+  const data = await walletCall('/account/wallet/kyc-document', { member, nonce, action: 'kyc-document', op, signature }, { uncertain: true, definite: true })
+  if (isObject(op) && op.documentType === 'SELFIE-FROM-LIVENESS') {
+    if (isHodleUrl(data.livenessUrl, LIVENESS_HOST)) return { livenessUrl: data.livenessUrl }
+    throw uncertainError()
+  }
+  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOST)) throw uncertainError()
+  const out = { uploadUrlFront: data.uploadUrlFront }
+  if (isObject(op) && op.isDoubleSided === 1) {
+    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOST)) throw uncertainError()
+    out.uploadUrlBack = data.uploadUrlBack
+  }
+  return out
+}
+
+export const walletKycSubmit = async ({ member, nonce, signature, op, kyc }) => {
+  const data = await walletCall('/account/wallet/kyc-submit', { member, nonce, action: 'kyc-submit', op, signature, kyc }, { uncertain: true, definite: true })
+  const out = { ok: true }
+  if (Object.hasOwn(data, 'account')) {
+    const account = parseAccount(data.account)
+    if (account !== undefined) out.account = account
+  }
+  return out
+}
+
+export const walletStatus = async ({ member, nonce, signature, op }) => {
+  const data = await walletCall('/account/wallet/status', { member, nonce, action: 'status', op, signature })
+  const account = Object.hasOwn(data, 'account') ? parseAccount(data.account) : undefined
+  if (account === undefined) throw toError('indisponivel')
+  return { account }
+}
+
+export const walletCreate = async ({ member, nonce, signature, op, pin }) => {
+  const data = await walletCall('/account/wallet/wallet-create', { member, nonce, action: 'wallet-create', op, signature, pin }, { uncertain: true, definite: true })
+  if (typeof data.address === 'string' && WALLET_ADDRESS_RE.test(data.address)) return { address: data.address }
+  throw uncertainError()
+}
+
+function toHex (buf) {
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Lowercase hex SHA-256 of the UTF-8 canonical JSON: the signed op carries
+// only this hash, the service recomputes it from the fields it forwards.
+export async function kycHash (kyc) {
+  const bytes = new TextEncoder().encode(canonicalJson(kyc))
+  return toHex(await globalThis.crypto.subtle.digest('SHA-256', bytes))
+}
+
+// The image goes from the browser straight to the provider's single-use URL,
+// never through the account service; no cookies, no redirects.
+export async function uploadDocument (url, blob) {
+  if (!isHodleUrl(url, UPLOAD_HOST)) throw toError('indisponivel')
+  if (!blob || typeof blob !== 'object' || !UPLOAD_TYPES.includes(blob.type) ||
+    !Number.isSafeInteger(blob.size) || blob.size < 1 || blob.size > UPLOAD_MAX) {
+    throw new Error('arquivo inválido')
+  }
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), UPLOAD_TIMEOUT_MS)
+  let res
+  try {
+    res = await fetch(url, {
+      method: 'PUT',
+      body: blob,
+      headers: { 'content-type': blob.type },
+      credentials: 'omit',
+      redirect: 'error',
+      cache: 'no-store',
+      signal: ctl.signal
+    })
+  } catch {
+    throw toError('indisponivel')
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!res || !(res.status >= 200 && res.status < 300)) throw toError('indisponivel')
 }
