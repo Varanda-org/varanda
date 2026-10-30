@@ -13,6 +13,7 @@
     "web": "npm run build:node && expo start --web",
     "export:web": "npm run build:node && expo export --platform web && node scripts/finish-web.js",
     "prepare:native": "bash scripts/prepare-native.sh",
+    "eas-build-post-install": "bash scripts/eas-post-install.sh",
     "link:addons": "bash scripts/link-addons.sh",
     "pack:worklet": "bash scripts/pack-worklet.sh",
     "gate": "node scripts/gate-server.js",
