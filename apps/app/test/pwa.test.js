@@ -70,6 +70,30 @@ test('index.html carries the install metas in pt-BR', (t) => {
   t.is(app.expo.web.lang, 'pt-BR')
 })
 
+test('index.html paints the brand before the bundle runs', (t) => {
+  t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, conectando">/.test(html), 'splash follows the empty root')
+  const start = html.indexOf('<div id="varanda-pre-splash"')
+  const block = html.slice(start, html.indexOf('</div>', start))
+  t.ok(block.includes('<svg'), 'chair svg')
+  t.ok(block.includes('viewBox="0 0 256 256"'), 'chair viewBox')
+  for (const fill of ['#2a7fb8', '#e8805a', '#f2b705', '#e94e3c', '#1d6b4f', '#a7382b', '#ae8303']) {
+    t.ok(block.includes(fill), fill)
+  }
+  t.is((block.match(/<path/g) || []).length, 21, '21 chair paths')
+  t.absent(/href|<text|<filter|<img|<iframe|<object|<embed|<script/i.test(block), 'no external or forbidden markup in the splash')
+  t.ok(block.includes('conectando…'), 'hint ellipsis')
+  const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
+  const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
+  t.ok(block.includes(spans), 'Varanda letter spans in order')
+  t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
+  t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
+  t.ok(html.includes('visibility: hidden'), 'expiry keyframe')
+  t.ok(/<noscript><style>#varanda-pre-splash \{ display: none; }<\/style><\/noscript>/.test(html), 'noscript hides the splash')
+  const reset = /<style id="expo-reset">([\s\S]*?)<\/style>/.exec(html)
+  t.ok(reset && reset[1].includes('#root {'), 'expo-reset still has #root')
+  t.ok(reset && reset[1].includes('display: flex'), 'expo-reset still has display flex')
+})
+
 test('the service worker is a template outside public/', (t) => {
   t.absent(fs.existsSync(path.join(PUBLIC, 'sw.js')), 'no public/sw.js (the dev server would serve it)')
   const sw = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'sw.js'), 'utf8')

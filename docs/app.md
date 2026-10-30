@@ -29,7 +29,7 @@ Há três jeitos de ter um nó, e a interface é a mesma:
 
 ### Abertura e cartões de apresentação
 
-Ao abrir o app, aparece uma marca animada (a cadeira e "Varanda", com "conectando…") sobre o mesmo fundo das telas de abertura nativas. Ela substitui o texto simples que aparecia enquanto o registro dos Termos carregava e enquanto o nó conectava. A animação respeita a opção "reduzir movimento" do aparelho.
+Ao abrir o app, a cadeira sobe e assenta, as letras de "Varanda" entram uma a uma e "conectando…" pulsa, sobre o mesmo fundo das telas de abertura nativas. Na web hospedada, a própria página já desenha essa animação antes de o app carregar. A marca fica pelo menos 1,5 s e cobre também a conexão com o semeador. A tela "Conectar" (com "tentar de novo" e "Detalhes técnicos") só aparece quando a conexão falha ou depois de 10 s sem resposta, e continua no lugar durante uma nova tentativa. Com "reduzir movimento" ligado, nada se move. Verificação em `docs/verification.md` seção 44.
 
 Na primeira abertura do aparelho, antes dos Termos, três cartões explicam o app: o diário que fica no aparelho, o que é seu continua seu, e a varanda para conversar. Dá para pular, voltar, avançar ou começar. Na web, deslizar, os botões e as setas do teclado funcionam, e cada cartão é anunciado para leitor de tela. Os cartões são só apresentação e não são aceite de nada. O registro, `varanda-intro` no `localStorage` (web) ou `varanda-intro.json` na pasta de documentos (nativo), guarda só a versão vista e a data. Não há telemetria nem dependência nova.
 
