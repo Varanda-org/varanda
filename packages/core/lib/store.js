@@ -397,6 +397,28 @@ async function openDiary (store) {
   return core
 }
 
+async function openGroupWriter (store, nonce) {
+  if (typeof nonce !== 'string' || !/^[0-9a-f]{32}$/.test(nonce)) throw new Error('nonce inválido')
+  const core = store.get({ name: 'group:' + nonce, valueEncoding: 'json' })
+  await core.ready()
+  return core
+}
+
+async function openGroupReplica (store, hex) {
+  if (typeof hex !== 'string' || !/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error('chave inválida')
+  // Check ownership before making the read-only session, which would mask it.
+  const probe = store.get({ key: b4a.from(hex.toLowerCase(), 'hex') })
+  try {
+    await probe.ready()
+    if (probe.writable) throw new Error('chave do próprio grupo')
+    const replica = probe.session({ writable: false })
+    await replica.ready()
+    return replica
+  } finally {
+    await probe.close()
+  }
+}
+
 // Replicas are always read-only sessions: `writable: false` makes hypercore
 // mark the session read-only (_readonly), even for a key whose secret this
 // store holds (the own diary). The check below is a defensive backstop.
@@ -535,7 +557,7 @@ async function appendNow (core, record, limits) {
     plain = decodeBlock(b4a.from(JSON.stringify(record)))
   } catch {}
   if (plain === null) throw invalidRecord('malformed')
-  const reason = validateRecord(plain, core.length)
+  const reason = (limits.validator || validateRecord)(plain, core.length)
   if (reason) throw invalidRecord(reason)
   // The json value encoding stores JSON.stringify(plain); core.byteLength is
   // the byte total of the log so far.
@@ -652,6 +674,18 @@ function writeFollows (dataDir, list) {
   writeJsonAtomic(path.join(dataDir, 'follows.json'), { v: 1, follows })
 }
 
+function readGroups (dataDir) {
+  const data = readJson(path.join(dataDir, 'groups.json'), null)
+  return data && data.v === 1 && Array.isArray(data.groups) ? data.groups : []
+}
+
+function writeGroups (dataDir, groups) {
+  writeJsonAtomic(path.join(dataDir, 'groups.json'), {
+    v: 1,
+    groups: groups.map(({ group, writer, nonce }) => ({ group, writer, nonce }))
+  }, 0o600)
+}
+
 function blocklistShape (data) {
   return data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
     data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
@@ -731,6 +765,8 @@ module.exports = {
   lockHeld,
   storeExists,
   openDiary,
+  openGroupWriter,
+  openGroupReplica,
   openReplica,
   openMediaReplica,
   openQuarantine,
@@ -744,6 +780,8 @@ module.exports = {
   writeConfig,
   readFollows,
   writeFollows,
+  readGroups,
+  writeGroups,
   readBlocklist,
   hasUnreadableBlocklist,
   writeBlocklist,

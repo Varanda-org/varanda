@@ -13,6 +13,7 @@ const { createModRoutes } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { createWalletRoutes } = require('./wallet-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -106,6 +107,11 @@ const ERROR_STATUS = Object.freeze({
   'limite-denuncias': 429,
   limite: 503,
   defasado: 409,
+  // A group block whose key the seeder did not confirm as a group root.
+  'grupo-nao-confirmado': 409,
+  // A block of a key without a linked account that the seeder did not
+  // confirm as a served diary (it could be a group root).
+  'alvo-nao-confirmado': 409,
   'ja-revertido': 409,
   // Sign-up invites (./invites-store.js): one public token for an unknown,
   // used, expired or held code.
@@ -121,7 +127,22 @@ const ERROR_STATUS = Object.freeze({
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
-  'resultado-incerto': 503
+  'resultado-incerto': 503,
+  // The optional payments account (./wallet-routes.js).
+  'carteira-pendente': 403,
+  'kyc-pendente': 409,
+  'kyc-recusado': 403,
+  'documentos-pendentes': 409,
+  'pin-invalido': 400,
+  'pin-bloqueado': 429,
+  'limite-carteira': 429,
+  'valor-invalido': 400,
+  'destino-invalido': 400,
+  'saldo-insuficiente': 409,
+  'carteira-incerta': 503,
+  'taxa-mudou': 409,
+  'idade-minima': 403,
+  'rede-divergente': 409
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -540,7 +561,7 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms, invites })
+// terms, invites, groupCheck })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -552,8 +573,10 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // (the AI report triage worker of ./ai/worker.js, or null when it is off),
 // `statsEmails` (lowercase e-mails, a subset of `modEmails`, allowed to see
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
-// or null when the stats tab is off) and `panelDir` (tests only) are passed
-// to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
+// or null when the stats tab is off), `groupCheck` (a createGroupCheck of
+// ./group-check.js that confirms a group key at the seeder before a group
+// block, or null: group blocks are then refused) and `panelDir` (tests only)
+// are passed to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
 // null: the terms routes then answer 503 'indisponivel'. `invites` is an
 // openInvitesStore (./invites-store.js) or null: null is open sign-up (the
 // policy route answers { required: false }, the two POST invite routes are
@@ -566,7 +589,13 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
-// paid Didit sessions opened per day across all members.
+// paid Didit sessions opened per day across all members. `hodle` (a
+// createHodle of ./hodle.js) and `wallets` (an openWalletStore of
+// ./wallet-store.js) turn on the optional payments account when both are
+// set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
+// `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
+// names the chain. Either null keeps the wallet policy at
+// { available: false }.
 function createAccountServer ({
   association,
   origin,
@@ -581,6 +610,7 @@ function createAccountServer ({
   triage = null,
   statsEmails = [],
   usage = null,
+  groupCheck = null,
   panelDir,
   terms = null,
   invites = null,
@@ -588,6 +618,11 @@ function createAccountServer ({
   didit = null,
   ages = null,
   ageDailyLimit = 200,
+  hodle = null,
+  wallets = null,
+  walletMode = 'cadastro',
+  walletDailyLimit = 100,
+  walletNetwork,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -627,6 +662,7 @@ function createAccountServer ({
     triage,
     statsEmails,
     usage,
+    groupCheck,
     panelDir,
     log,
     now,
@@ -657,6 +693,23 @@ function createAccountServer ({
     log,
     now,
     dailyLimit: ageDailyLimit,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Always mounted, so /account/wallet/policy answers even when the feature is off.
+  const walletRoutes = createWalletRoutes({
+    hodle,
+    wallets,
+    ages,
+    terms,
+    mode: walletMode,
+    association,
+    origin,
+    store,
+    log,
+    now,
+    dailyLimit: walletDailyLimit,
+    network: walletNetwork,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
@@ -1164,6 +1217,7 @@ function createAccountServer ({
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === '/account/pending') return pending(req, res)
@@ -1231,7 +1285,7 @@ function createAccountServer ({
 
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats() }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats() }
 }
 
 module.exports = {

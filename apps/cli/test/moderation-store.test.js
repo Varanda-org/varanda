@@ -85,7 +85,7 @@ test('a missing file is created empty, 0o600 in a 0o700 dir', async (t) => {
   t.is(fs.statSync(dir).mode & 0o777, 0o700)
   t.is(fs.statSync(path.join(dir, FILE)).mode & 0o777, 0o600)
   const disk = onDisk(dir)
-  t.is(disk.v, 1)
+  t.is(disk.v, 2)
   t.alike(disk.pending, [])
   t.alike(disk.published, { snapshot: null, at: null, moderatorDate: '' })
   t.alike(store.stats(), { open: 0, pending: 0, blocked: 0, publishedSeq: null })
@@ -190,6 +190,14 @@ test('list: exclude leaves a member out before the cut, so truncated counts only
   throwsCode(t, () => store.list({ exclude: 7 }), 'pedido-invalido', 'exclude must be a string or null')
 })
 
+test('list: exclude keeps a group report whose group key is that member (the reporter chose it)', async (t) => {
+  const { store } = setup(t)
+  const me = key()
+  const named = (await store.add(report(key(), key(), { writer: key(), group: me }))).report.id
+  const other = (await store.add(report(key(), key(), { writer: key(), group: key() }))).report.id
+  t.alike(store.list({ exclude: me }).reports.map((r) => r.id), [named, other])
+})
+
 test('per-reporter daily cap follows the injected clock', async (t) => {
   const { store, c } = setup(t)
   const reporter = key()
@@ -251,6 +259,122 @@ test('decide bloquear merges reports of the same member into one pending block',
   t.is(changes[0].claimedAt, null)
 })
 
+test('a group report round-trips writer and group; diary rows carry null', async (t) => {
+  const { store, open } = setup(t)
+  const target = key()
+  const writer = key()
+  const group = key()
+  const diary = (await store.add(report(target))).report
+  t.is(diary.writer, null)
+  t.is(diary.group, null)
+  const added = (await store.add(report(target, key(), { writer, group }))).report
+  t.is(added.kind, 'post')
+  t.is(added.writer, writer)
+  t.is(added.group, group)
+  const reopened = open()
+  t.is(reopened.get(added.id).writer, writer)
+  t.is(reopened.get(added.id).group, group)
+  t.is(reopened.get(diary.id).writer, null)
+  await rejects(t, store.add(report(target, key(), { writer })), 'pedido-invalido', 'writer without group')
+  await rejects(t, store.add(report(target, key(), { group })), 'pedido-invalido', 'group without writer')
+  await rejects(t, store.add(report(target, key(), { writer, group, seq: null, quote: '' })), 'pedido-invalido', 'writer without seq')
+  await rejects(t, store.add(report(target, key(), { writer: writer.toUpperCase(), group })), 'pedido-invalido', 'upper-case writer')
+})
+
+test('dedupe key holds the writer: a diary post and group messages at one seq are distinct reports', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const reporter = key()
+  const group = key()
+  const w1 = key()
+  const w2 = key()
+  const diary = await store.add(report(target, reporter, { seq: 1 }))
+  const first = await store.add(report(target, reporter, { seq: 1, writer: w1, group }))
+  const second = await store.add(report(target, reporter, { seq: 1, writer: w2, group }))
+  t.is(diary.duplicate, false)
+  t.is(first.duplicate, false, 'group message at the diary seq')
+  t.is(second.duplicate, false, 'another writer at seq 1')
+  t.is(new Set([diary.report.id, first.report.id, second.report.id]).size, 3)
+  const again = await store.add(report(target, reporter, { seq: 1, writer: w1, group }))
+  t.is(again.duplicate, true)
+  t.is(again.report.id, first.report.id)
+})
+
+test('decide with block grupo puts the group root key in the pending change', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const group = key()
+  const diaryRow = (await store.add(report(target))).report
+  const groupRow = (await store.add(report(target, key(), { writer: key(), group }))).report
+  await rejects(t, store.decide(diaryRow.id, { decision: 'bloquear', by: MOD, block: 'grupo' }), 'pedido-invalido', 'grupo needs a group report')
+  await rejects(t, store.decide(groupRow.id, { decision: 'bloquear', by: MOD, block: 'conta' }), 'pedido-invalido', 'unknown block target')
+  const { change } = await store.decide(groupRow.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  t.is(change.op, 'block')
+  t.is(change.member, group, 'the root key, not the author')
+  t.alike(change.reportIds, [groupRow.id])
+  const diary = await store.decide(diaryRow.id, { decision: 'bloquear', by: MOD })
+  t.is(diary.change.member, target, 'default diario blocks the author')
+})
+
+test('an old v1 file is read with writer null and rewritten as v2', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const m = moderation()
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const id = 'old'.padEnd(22, '_')
+  const target = key()
+  const reporter = key()
+  const row = { id, at: new Date(T0).toISOString(), kind: 'post', target, seq: 4, quote: 'q', reporter, reason: 'spam', text: '', nonce: NONCE, signature: SIG, status: 'aberta', decidedBy: null, decidedAt: null, note: '' }
+  const state = { v: 1, reports: { [id]: row }, pending: [], published: { snapshot: null, at: null, moderatorDate: '' }, events: [] }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(state), { mode: 0o600 })
+  const store = openModerationStore(dir, { now: () => T0, association: m.association })
+  t.alike(store.get(id), { ...row, writer: null, group: null, blocked: null })
+  const again = await store.add({ reporter, target, seq: 4, reason: 'spam', text: '', quote: 'q', signature: SIG, nonce: NONCE })
+  t.is(again.duplicate, true, 'an old diary row still dedupes')
+  await store.decide(id, { decision: 'descartar', by: MOD })
+  const disk = onDisk(dir)
+  t.is(disk.v, 2)
+  t.is(disk.reports[id].writer, null)
+  t.is(disk.reports[id].group, null)
+  t.is(disk.reports[id].blocked, null)
+})
+
+test('a v2 row written before the blocked field opens with blocked null', async (t) => {
+  const { dir, m, store } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  const disk = onDisk(dir)
+  t.is(disk.reports[r.id].blocked, 'diario')
+  delete disk.reports[r.id].blocked
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const reopened = openModerationStore(dir, { now: () => T0, association: m.association })
+  t.is(reopened.get(r.id).blocked, null)
+  t.is(reopened.stats().pending, 1)
+})
+
+test('a group block is remembered on the row: blocked() and humanReversed() follow the key actually blocked', async (t) => {
+  const { store, m } = setup(t)
+  const author = key()
+  const group = key()
+  const groupRow = (await store.add(report(author, key(), { writer: key(), group }))).report
+  const g = await store.decide(groupRow.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  t.is(g.report.blocked, 'grupo')
+  t.is(store.humanReversed(author), false, 'blocking the group reversed nothing about the author')
+  await store.ack({ changeIds: [g.change.id], snapshot: m.snap(1, [group]), moderatorCert: m.cert })
+  t.alike(store.blocked(), [{ member: group, reportIds: [groupRow.id], kind: 'grupo' }], 'the published group block carries its report')
+  t.is(store.humanReversed(author), false, 'still false once the pending change is acked')
+
+  const diaryRow = (await store.add(report(author))).report
+  const d = await store.decide(diaryRow.id, { decision: 'bloquear', by: MOD })
+  t.is(d.report.blocked, 'diario')
+  await store.ack({ changeIds: [d.change.id], snapshot: m.snap(2, [group, author]), moderatorCert: m.cert })
+  const byMember = Object.fromEntries(store.blocked().map((b) => [b.member, b.reportIds]))
+  t.alike(byMember[author], [diaryRow.id], 'the account block does not claim the group report')
+  t.alike(byMember[group], [groupRow.id])
+  t.alike([...store.groupKeys()], [group], 'groupKeys: every key blocked as a group root, the author excluded')
+  const discarded = (await store.add(report(key()))).report
+  t.is((await store.decide(discarded.id, { decision: 'descartar', by: MOD })).report.blocked, null)
+})
+
 test('decide validates the note and refuses a decided report', async (t) => {
   const { store } = setup(t)
   const r = (await store.add(report(key()))).report
@@ -291,7 +415,7 @@ test('a pending unblock is cancelled by a later bloquear; unblock again makes on
   const { store, m } = setup(t)
   const target = key()
   await store.ack({ changeIds: [], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
-  t.alike(store.blocked(), [{ member: target, reportIds: [] }])
+  t.alike(store.blocked(), [{ member: target, reportIds: [], kind: 'conta' }])
   const u = await store.unblock(target, { by: MOD })
   t.is(u.change.op, 'unblock')
   const r = (await store.add(report(target))).report
@@ -314,7 +438,7 @@ test('bloquear of an already published member creates no change', async (t) => {
   const d = await store.decide(r.id, { decision: 'bloquear', by: MOD })
   t.is(d.change, null)
   t.is(store.pending().changes.length, 0)
-  t.alike(store.blocked(), [{ member: target, reportIds: [r.id] }])
+  t.alike(store.blocked(), [{ member: target, reportIds: [r.id], kind: 'conta' }])
 })
 
 test('ack refuses a forged snapshot, an older seq and a block missing from the list', async (t) => {
@@ -595,6 +719,13 @@ test('strict open: every report field, change and event is checked, never filter
     ['missing nonce', (s) => { delete s.reports[reportId].nonce }],
     ['missing reason', (s) => { delete s.reports[reportId].reason }],
     ['missing seq', (s) => { delete s.reports[reportId].seq }],
+    ['missing writer', (s) => { delete s.reports[reportId].writer }],
+    ['group without writer', (s) => { s.reports[reportId].group = key() }],
+    ['writer without group', (s) => { s.reports[reportId].writer = key() }],
+    ['v1 file with a v2 row', (s) => { s.v = 1 }],
+    ['blocked on an open row', (s) => { s.reports[reportId].blocked = 'diario'; s.reports[reportId].status = 'aberta' }],
+    ['unknown blocked kind', (s) => { s.reports[reportId].blocked = 'conta' }],
+    ['grupo blocked without a group', (s) => { s.reports[reportId].blocked = 'grupo' }],
     ['bad reason', (s) => { s.reports[reportId].reason = 'outra' }],
     ['upper-case signature', (s) => { s.reports[reportId].signature = SIG.toUpperCase() }],
     ['extra report key', (s) => { s.reports[reportId].email = 'x' }],

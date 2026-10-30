@@ -16,6 +16,7 @@ const { memberCertRecord } = require('@varanda/core/lib/records')
 const { openStore, writeBlocklist } = require('@varanda/core/lib/store')
 const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { startHealth, metricsText } = require('../lib/health')
+const { listLines } = require('../lib/commands/seed')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64_ANYWHERE = /[0-9a-f]{64}/i
@@ -314,7 +315,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
@@ -453,4 +454,25 @@ test('metrics: a missing or non-finite connection gauge prints 0', (t) => {
   t.ok(text.includes('\nvaranda_seeder_max_external 0\n'))
   t.ok(text.includes('\nvaranda_seeder_active_diaries_day 0\n'), 'missing active day prints 0')
   t.ok(text.includes('\nvaranda_seeder_active_diaries_week 0\n'), 'missing active week prints 0')
+})
+
+test('seed list: group cores are indented under their diary, peer text through safe', (t) => {
+  const k = 'a'.repeat(64)
+  const g = 'b'.repeat(64)
+  const text = listLines({
+    admitted: [{
+      key: k,
+      length: 4,
+      byteLength: 100,
+      media: [{ key: 'c'.repeat(64), length: 1, byteLength: 5 }],
+      groups: [{ key: 'd'.repeat(64), group: g, length: 2, byteLength: 30 }]
+    }]
+  })
+  t.alike(text.split('\n'), [
+    k + ' 4 blocos 100 bytes',
+    '  mídia ' + 'c'.repeat(64) + ' 1 blocos 5 bytes',
+    '  grupo ' + 'd'.repeat(64) + ' (grupo bbbbbbbb) 2 blocos 30 bytes'
+  ])
+  t.is(listLines({ admitted: [{ key: k, length: 0, byteLength: 0 }] }), k + ' 0 blocos 0 bytes', 'no groups array is fine')
+  t.absent(listLines({ admitted: [{ key: k, length: 0, byteLength: 0, groups: [{ key: 'x\u001b[31m', group: g, length: 1, byteLength: 1 }] }] }).includes('\u001b'), 'control characters are escaped')
 })

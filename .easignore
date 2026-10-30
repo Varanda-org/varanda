@@ -1,0 +1,46 @@
+# Its presence REPLACES .gitignore for the EAS upload, so it carries both the
+# build outputs and every secret pattern of the .gitignore files.
+
+# build outputs
+node_modules
+.git
+.claude
+**/ios/Pods
+**/ios/build
+**/android/build
+**/android/.gradle
+**/android/app/build
+**/.cxx
+*.hprof
+apps/app/dist
+apps/app/.expo
+apps/app/assets/worklet
+apps/app/public/varanda-node.js
+packages/web-member/dist
+*.bundle
+data
+demo-data
+# npm ci reads every workspace's package.json, so the site keeps only that.
+apps/site/*
+!apps/site/package.json
+docs/verification.md
+deploy/seeder/www
+.deploy-build
+
+# secrets and signing material (the committed Android debug.keystore is
+# excluded too: the preview profile builds release)
+deploy/seeder/.env
+**/.env
+**/.env.local
+**/.env*.local
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.pem
+*.mobileprovision
+credentials.json
+**/key.properties
+**/local.properties
+**/.xcode.env.local

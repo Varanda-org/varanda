@@ -6,7 +6,7 @@ How to work in this repository. Normative facts about formats and the wire are i
 
 - Node.js 20 or newer (`engines.node` is `>=20`) and npm. On the Mac this was written on: Node v26.10.0 and npm 11.19.1 (an example, not a requirement).
 - For the iOS app only: Xcode and CocoaPods. The gate passed with Xcode 26.2, CocoaPods 1.16.2 and an iPhone 17 Pro simulator (iOS 26.2). These are examples from [ios-gate.md](ios-gate.md).
-- For a native Android build: an Android SDK and Java. Neither is installed on that Mac, so no native Android run has been verified (see "Android").
+- For a native Android build: an Android SDK and JDK 17 or 21. The debug build has run on an x86_64 emulator (see "Android"); a real device, arm64-v8a and a release build have not.
 
 ## Layout (npm workspaces)
 
@@ -138,6 +138,27 @@ npm run ios                          # expo run:ios
 Status: the debug build runs on an x86_64 emulator (API 36) and passes the worklet gate (steps a to i of [ios-gate.md](ios-gate.md), 2026-10-28; the `.so` addons are packed in `lib/x86_64` and loaded). Not run: a real device, arm64-v8a and a release build. `npm run android` is `expo run:android`. Gradle needs JDK 17 or 21; the commands for the gate are in the "Android emulator" section of ios-gate.md.
 
 Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. Signing was not exercised in the emulator run (debug build only). See "Residual risks" in [ios-gate.md](ios-gate.md).
+
+## Builds de teste (EAS)
+
+Configuração em `apps/app/eas.json` (perfis `preview` e `preview-simulator`) e `.easignore` na raiz. Nenhum comando abaixo roda na CI nem num agente: quem tem a conta Expo roda, da pasta `apps/app`.
+
+```sh
+eas login
+eas init
+eas env:create --name EXPO_PUBLIC_VARANDA_INSTALLATION --value https://<dominio> --environment preview --visibility plaintext
+eas build --profile preview --platform android
+eas credentials -p android
+```
+
+- `eas init` escreve `owner` e `extra.eas.projectId` no `app.json`; eles não estão no repositório de propósito.
+- O hook `eas-build-post-install` (`scripts/eas-post-install.sh`) roda `prepare-native.sh` para a plataforma do build: link dos addons, `main.bundle.js` do worklet e, no iOS, `pod install`. No iOS o serviço pode rodar o `pod install` dele antes ou depois do hook, e o hook roda de novo; o script é idempotente, então a ordem não importa. Ele falha se `assets/worklet/main.bundle.js` não existir no fim.
+- No log do primeiro build, confira as etapas `link-addons` e `pack-worklet` e a configuração de assinatura injetada pela EAS. `android/app/build.gradle` continua falhando fechado sem as credenciais `VARANDA_RELEASE_*`.
+- Se a assinatura injetada não funcionar, o plano B é `credentialsSource: local` no perfil, com um `credentials.json` fora do git (ele está no `.gitignore` do app e no `.easignore`).
+- `ios/` e `android/` continuam mantidos à mão: nunca rode `expo prebuild`.
+- O `.easignore` substitui o `.gitignore` no envio, por isso repete as saídas de build e todos os padrões de segredo, e deixa de fora até o `debug.keystore` (o perfil `preview` compila release).
+- iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`.
+- A CI continua sem compilar nada nativo.
 
 ## Browser member spike (packages/web-member)
 

@@ -108,6 +108,15 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
+  group create               cria um grupo público (--name, --join open|approval)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group post <chave>         publica no grupo (--text)
+  group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
+  group list                 grupos dos quais você participa
+  group info|members|requests <chave>  dados do grupo, membros e pedidos de entrada
+  group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
+  group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
+  group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -119,6 +128,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --join --undo
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -193,6 +203,10 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_DIDIT_API_KEY` | Chave da API do Didit para a verificação de idade (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar). Segredo. Vazia junto com `VARANDA_DIDIT_WORKFLOW_ID`, a checagem fica desligada. Ver "Verificação de idade (Didit)". |
 | `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
 | `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
+| `VARANDA_HODLE_API_KEY` | Chave da API do Hodle para a conta de pagamentos (em `deploy/seeder/.env`; só o serviço `account` a recebe). Segredo. O prefixo `hodle_live_` ou `hodle_test_` escolhe produção ou sandbox. Vazia, o recurso fica desligado e `GET /account/wallet/policy` responde `{ available:false }`. Ver "Conta de pagamentos (Hodle)". |
+| `VARANDA_HODLE_NETWORK` | Rede da carteira: `polygon` (padrão) ou `base`. Fica fixa por membro desde a primeira carteira. Opcional. |
+| `VARANDA_HODLE_MODE` | Quais rotas existem: `cadastro` (padrão: só subconta e verificação) ou `carteira` (acrescenta criar a carteira com o PIN do membro). `pix` e `completo` virão em versões futuras. Atualizar a imagem nunca liga movimento de dinheiro sozinho. Só defina `carteira` depois que o Hodle confirmar por escrito que os PINs escolhidos por cada membro funcionam. Opcional. |
+| `VARANDA_HODLE_DAILY_LIMIT` | Teto por dia de subcontas novas, envios de verificação e operações de saída somados (padrão: 100; de 1 a 100000). Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
@@ -373,6 +387,12 @@ node bin/varanda.js sync --data data/bob --once --timeout-ms 30000 --bootstrap "
 `reply` imprime `publicado #<seq>`. O segundo `sync` entrega a resposta ao semeador. `--to` é `<64 hex>:<seq>` com `seq` maior ou igual a 1, sem zero à esquerda. Fora isso o uso é `referência inválida`.
 
 Para encerrar: Ctrl-C no semeador (código 0) e Ctrl-C na DHT local.
+
+### 7. Grupos públicos
+
+`group create --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Grupos privados ainda não existem: `--join private` é recusado. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
+
+`group read <chave>` imprime uma linha por mensagem, das mais novas para as mais antigas: `<at> <nome|@usuário|8 hex>: <texto>`, ou `(mensagem oculta)`. Com `--limit <n>` (até 31) e se há mais antigas, a última linha é `mais antigas: --before <at>,<escritor>,<seq>`. Com `--json`, a última linha é o resultado. Um pedido que altera estado nunca é reenviado: se o resultado for incerto, o erro avisa.
 
 ## Demo automática
 
@@ -619,6 +639,39 @@ Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para 
 
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
 
+#### Conta de pagamentos (Hodle, serviço `account`)
+
+É uma conta opcional de Pix e reais digitais (BRLA) dentro do Varanda, feita com o Hodle. Sem `VARANDA_HODLE_API_KEY` nada muda: o recurso não existe e a política responde `{ available:false }`. Ligá-lo não é necessário para usar a rede.
+
+Pré-requisitos no Hodle, antes de ligar:
+
+- Conta com subcontas, verificação de identidade (KYC) e carteiras habilitadas.
+- Peça ao suporte para habilitar operações de terceiros e saques por API.
+- Confirme por escrito que cada membro pode ter o próprio PIN de carteira. A página de chaves de carteira do Hodle diz que carteiras de subcontas usam o PIN da plataforma, a menos que a subconta tenha usuário próprio. Até essa confirmação, não use produção com `carteira`.
+
+Modos (`VARANDA_HODLE_MODE`), em ordem: `cadastro` (padrão: subconta e verificação) < `carteira` (acrescenta criar a carteira com o PIN do membro) < `pix` < `completo`. Nesta versão só `cadastro` e `carteira` existem; `pix` e `completo` virão depois. Em `cadastro`, criar a carteira responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". Defina `carteira` só depois da confirmação do Hodle acima (no sandbox, a primeira carteira protegida pode fixar o PIN enviado).
+
+O que fica guardado: o `wallet.json` no volume `account-data`, com o vínculo do membro à subconta, o estado da verificação e a carteira. O que nunca fica: o PIN, o CPF, as imagens de documento e o endereço postal.
+
+CSP: o `Caddyfile` agora libera `https://uploads.hodle.com.br` em `connect-src`. As imagens de documento vão do navegador direto ao Hodle por URLs de uso único e nunca passam pelo Varanda. O `img-src` não muda (o código Pix aparece como texto).
+
+Diagnóstico: o serviço registra `{ event: 'carteira', reason }` só com palavras fixas, nunca a chave, o PIN ou o que o Hodle respondeu. Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"carteira"'`.
+
+| Registro (`reason`) | O que fazer |
+| --- | --- |
+| `teto-diario` | O teto `VARANDA_HODLE_DAILY_LIMIT` encheu; volta no dia seguinte. |
+| `armazenamento-indisponivel` | O `wallet.json` não pôde ser lido ou gravado no volume `account-data`. Se aparecer logo depois de uma chamada aceita pela Hodle, a pessoa recebe "resultado incerto" e nada é refeito sozinho. |
+| `ligada` / `desligada` / `indisponivel` | Estado da conta de pagamentos na partida do serviço (`indisponivel`: o `wallet.json` existe mas não pôde ser aberto). |
+| `carteira-incerta` | A criação da subconta ou da carteira perdeu a resposta e não foi confirmada por leitura. A pessoa fica parada até uma leitura confirmar ou o operador resolver; o serviço nunca cria de novo sozinho. |
+| `conflito` | A Hodle devolveu uma subconta ou carteira que já está guardada para outra pessoa. Nada foi gravado; confira na Hodle. |
+| `kyc-incerto` | Um envio de KYC perdeu a resposta e a consulta só achou uma tentativa anterior recusada ou expirada. A pessoa fica em "verificação em andamento" até uma leitura achar a tentativa nova ou o operador conferir na Hodle. |
+| `rede-divergente` | `VARANDA_HODLE_NETWORK` mudou depois que a pessoa abriu a conta e antes da carteira. A carteira não é criada; volte a variável para a rede da conta. |
+| `pin-plataforma` | A Hodle recusou a criação da carteira com o PIN da pessoa (403). Sinal de que a conta da chave usa o PIN da plataforma: mantenha `VARANDA_HODLE_MODE` em `cadastro` e fale com o suporte da Hodle. |
+
+Os motivos de falha da chamada ao Hodle seguem o padrão `hodle-<passo>-<causa>`, com `<passo>` em `subconta`, `documento`, `kyc`, `carteira`, `chaves` ou `leitura` e `<causa>` como `http-401`, `tempo`, `rede`, `formato`, `entrada` (pedido recusado antes de sair) ou `falha` (erro inesperado); confira o código em `apps/cli/lib/account/hodle.js` e `apps/cli/lib/account/wallet-routes.js`.
+
+Sandbox: os fluxos de dinheiro de subconta não estão disponíveis nele, então o teste de fumaça dessas operações só vale com a conta principal.
+
 ### Implantação automática pelo GitHub Actions
 
 O fluxo `deploy` (`.github/workflows/deploy.yml`) implanta `main` no servidor a cada push. Ele repete as checagens do CI (`npm ci`, lint, testes e demo) como os mesmos seis jobs em paralelo, no Node 24. O job `check` reúne os seis e só passa se todos passaram. Se `check` passar, o fluxo entra no servidor por SSH como `varanda-deploy` e roda `deploy/seeder/deploy.sh`. O SHA testado vai pela entrada padrão do SSH, nunca por argumento.
@@ -832,8 +885,8 @@ A triagem lê a publicação denunciada no semeador e compara com decisões huma
 No `deploy/seeder/.env` (o contêiner só lê o arquivo ao ser criado: depois de gravar estas linhas, recrie `account` e o `seeder`, como no passo 3):
 
 - `VARANDA_AI`: vazio ou ausente desliga (padrão). `sombra` só registra o que a IA faria e mostra a sugestão no painel. `1` deixa a IA decidir. Outro valor é erro de uso antes de abrir a porta. Sem o modelo o serviço sobe sem triagem (`sem-modelo`) e a checagem de saúde continua verde.
-- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele a rota de leitura não existe no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando.
-- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`.
+- `VARANDA_TRIAGE_TOKEN`: 64 hex minúsculos, o mesmo valor no semeador e no serviço de conta (`openssl rand -hex 32`). Sem ele as rotas de leitura (`/moderation-post/` e `/moderation-group-post/`) não existem no semeador; com `VARANDA_AI` ligado e o token vazio ou inválido, o serviço de conta recusa subir (erro de uso), e no Compose o contêiner fica reiniciando. Um token malformado é erro de partida mesmo com a IA desligada. Para bloquear uma denúncia de grupo (conta ou grupo) o serviço de conta lê a mensagem em `/moderation-group-post/` e confere grupo e diário; sem o token os dois bloqueios de uma denúncia de grupo são recusados, mesmo com a IA desligada, e o painel mostra o texto conferido ("Texto conferido no semeador:"). Defina o mesmo token nos dois serviços para moderar grupos. Com o token configurado, o serviço de conta também o envia nas leituras `/index/group` e `/index/groups` do semeador, que as cobra do orçamento de moderação e não do balde público do índice (a resposta é a mesma; token ausente ou errado cai no balde público).
+- `VARANDA_SEEDER_HTTP`: onde a conta alcança o HTTP do semeador. Padrão `http://127.0.0.1:8789`. É lido e validado mesmo com a triagem desligada: o painel só decide `Bloquear grupo` depois de confirmar o grupo, o escritor e a existência da mensagem (o comprimento do escritor passa da posição; senão `sem-mensagem`) na rota pública `/index/group/<chave>` desse endereço (no máximo 8 páginas, 5 s, sem nova tentativa). Numa denúncia de grupo, tanto `Bloquear conta` quanto `Bloquear grupo` exigem essa confirmação; qualquer falha, inclusive um semeador fora do ar ou não configurado, recusa a decisão (`grupo-nao-confirmado`). Sem um semeador alcançável, uma denúncia de grupo só pode ser descartada (`Descartar` sempre funciona). O mesmo vale para toda denúncia sem grupo, com ou sem conta vinculada no alvo: `Bloquear` exige que o semeador confirme um diário servido (`GET /index/groups/<chave>` responde 200; senão `alvo-nao-confirmado`). Sem um semeador alcançável, nenhuma conta pode ser bloqueada pelo painel: todas as denúncias só podem ser descartadas.
 - `VARANDA_AI_MODEL_DIR`: diretório dos pesos, só fora do Compose. Padrão `<dataDir>/ai-model`. No Compose ele é fixo em `/data/ai-model`, dentro do volume `account-data`: não o defina no `.env`.
 
 Baixe os pesos uma vez. O script confere o sha256 dos cinco arquivos e recusa um diretório dentro do repositório. No Compose, grave direto no volume do serviço de conta, com a própria imagem:
