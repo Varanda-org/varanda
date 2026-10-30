@@ -16,6 +16,7 @@
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
 // message for the person.
 
+import { gifSize } from './gif.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, checkFile, fitWithin, kindOf } from './plan.js'
 
 const QUALITY = 0.85
@@ -28,12 +29,6 @@ function fail (message) {
 
 async function bytesOf (blob) {
   return new Uint8Array(await blob.arrayBuffer())
-}
-
-function gifSize (bytes) {
-  const sig = String.fromCharCode(...bytes.subarray(0, 6))
-  if (bytes.byteLength < 10 || (sig !== 'GIF87a' && sig !== 'GIF89a')) return null
-  return { width: bytes[6] | (bytes[7] << 8), height: bytes[8] | (bytes[9] << 8) }
 }
 
 async function encodeGif (file) {

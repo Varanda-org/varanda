@@ -45,6 +45,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>O Varanda abre sua fototeca só para você escolher fotos. Elas são refeitas sem dados de localização e só são publicadas quando você toca em Publicar ou Salvar.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
