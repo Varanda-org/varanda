@@ -6,8 +6,10 @@
 // Instalar o app and, apart, Sair. Everything technical sits behind a
 // collapsed 'Avançado' row: Conexão, Sincronização (state, log and the old
 // top-bar chip text), Identidade técnica (public key behind a reveal,
-// association, certificate) and Recomeçar. Rows that only exist on the
-// browser node (passkey) hide when `node.passkey === null`. Termos e
+// association, certificate) and Recomeçar. Rows that only exist on a
+// passkey node (the browser node, and the app's in-app web node, whose Sair
+// and Recomeçar go through src/identity.native.js) hide when
+// `node.passkey === null`. Termos e
 // privacidade stays in every mode and shows the record in `termsInfo`. Sair
 // drops the key derived from the passkey from memory (signOut, or lock on a
 // provider without it) and the shell returns to Entrar; it does not touch

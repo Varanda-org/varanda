@@ -44,8 +44,13 @@ ler_associacoes() {
 # movidos por cima (um rename, então o Caddy nunca serve um JSON pela metade)
 # e os de variável vazia apagados. Se uma escrita falha (disco cheio, por
 # exemplo), os .tmp somem, os arquivos publicados ficam como estavam e a
-# função retorna 1, para quem chamou falhar com a mensagem certa. Sem
-# handle_all_urls no Android: o app só reivindica o esquema varanda://.
+# função retorna 1, para quem chamou falhar com a mensagem certa. O
+# handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
+# retorno https /account/app/conta depois de conferir esta declaração do
+# Digital Asset Links; o app não declara intent-filter https, então não
+# toma para si nenhum link do site. No iOS basta webcredentials: a Apple
+# exige que o host do retorno https do ASWebAuthenticationSession esteja
+# associado ao app pelos domínios de webcredentials.
 gravar_associacoes() {
   local dir="$1/.well-known"
   local android="$dir/assetlinks.json" ios="$dir/apple-app-site-association"
@@ -53,7 +58,7 @@ gravar_associacoes() {
     log "não foi possível criar $dir; associações do app nativo não alteradas"
     return 1
   fi
-  if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "$android_cert" >"$android.tmp"; } \
+  if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "$android_cert" >"$android.tmp"; } \
     || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]}}\n' "$ios_app_id" >"$ios.tmp"; }; then
     rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true

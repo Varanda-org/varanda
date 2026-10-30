@@ -98,3 +98,17 @@ test('confirmSaved: photo set and removed', async (t) => {
   t.ok(confirmSaved(removed, { name: 'Ana', bio: '' }))
   t.absent(confirmSaved(removed, { name: 'Ana', bio: '', avatar: A }))
 })
+
+test('planSave: a replaced photo uploads once and only then sends the new key', async (t) => {
+  const { planSave } = await load()
+  // A native draft keeps a file:// preview; the rules do not depend on it.
+  const previewUrl = 'file:///cache/varanda-media/' + 'c'.repeat(32) + '.jpg'
+  const current = { name: 'Ana', avatar: A }
+  const before = planSave({ name: 'Ana', bio: 'oi', draft: { encoded, previewUrl, descriptor: null }, current })
+  t.alike(before, { firstPlain: false, needsUpload: true, params: { name: 'Ana', bio: 'oi' } })
+  const after = planSave({ name: 'Ana', bio: 'oi', draft: { encoded, previewUrl, descriptor: B }, current })
+  t.alike(after, { firstPlain: false, needsUpload: false, params: { name: 'Ana', bio: 'oi', avatar: B } })
+  // Name and bio edited with the photo kept: no avatar key, no upload.
+  const kept = planSave({ name: 'Bia', bio: 'x', draft: undefined, current })
+  t.alike(kept, { firstPlain: false, needsUpload: false, params: { name: 'Bia', bio: 'x' } })
+})
