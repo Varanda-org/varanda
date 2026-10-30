@@ -18,13 +18,13 @@ export const HELP = Object.freeze({
       PEEK_RULE_TEXT,
       'Essas publicações não ficam guardadas neste aparelho: ficam só enquanto a aba está aberta.',
       'Em pesquisar por assunto, você procura palavras nas publicações públicas, inclusive de quem você segue.',
-      'A Espiadinha só funciona na versão web, no site da associação.'
+      'A Espiadinha funciona no site da associação e no app ligado à instalação da associação. Não funciona com uma configuração manual.'
     ])
   }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
-      'Siga pessoas para ver as publicações delas na Rua. Na versão web, dá para encontrar alguém pelo nome ou pelo @nome.',
+      'Siga pessoas para ver as publicações delas na Rua. No site da associação e no app ligado à instalação, dá para encontrar alguém pelo nome ou pelo @nome.',
       'No lugar do @nome também vale o código da pessoa, com 64 letras e números.',
       'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
       'No topo, um só campo encontra pessoas: digite um nome ou @nome para buscar, ou cole o código da pessoa para seguir direto. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
@@ -36,7 +36,7 @@ export const HELP = Object.freeze({
       'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
       'O Varanda não mostra contagem nem lista de seguidores.',
       'Quando há algo novo, a aba ganha um ponto, nunca um número.',
-      'Os Avisos só funcionam na versão web, no site da associação.'
+      'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
     ])
   }),
   diario: Object.freeze({

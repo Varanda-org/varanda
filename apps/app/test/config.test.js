@@ -159,3 +159,37 @@ test('formOf: no config gives an empty form, a config round-trips through checkF
   t.alike(formOf(pub), { association: ASSOC, bootstrapText: '', publicDht: true, dhtHost: '' })
   t.alike(checkForm(formOf(pub)).config, pub, 'public DHT config')
 })
+
+test('nativeHostedConfigOf: the installation /varanda.json for the app', async (t) => {
+  const { nativeHostedConfigOf } = await load()
+  const json = { v: 1, association: ASSOC.toUpperCase() }
+  t.alike(nativeHostedConfigOf(json, { installation: 'https://varanda.example' }), {
+    config: {
+      kind: 'hosted',
+      installationUrl: 'https://varanda.example',
+      association: ASSOC,
+      seederUrl: 'wss://varanda.example/seeder',
+      rpId: 'varanda.example'
+    }
+  })
+  const port = nativeHostedConfigOf(json, { installation: 'https://varanda.example:8443/' }).config
+  t.is(port.installationUrl, 'https://varanda.example:8443')
+  t.is(port.seederUrl, 'wss://varanda.example:8443/seeder', 'a non-default port stays')
+  t.is(port.rpId, 'varanda.example')
+
+  t.is(nativeHostedConfigOf({ v: 2, association: ASSOC }, { installation: 'https://varanda.example' }).error,
+    'versão da configuração da instalação não suportada')
+  for (const bad of [{ v: 1 }, { v: 1, association: 'ab' }, { v: 1, association: 'zz'.repeat(32) }, { v: 1, association: 7 }]) {
+    t.is(nativeHostedConfigOf(bad, { installation: 'https://varanda.example' }).error,
+      'chave da associação inválida (64 dígitos hexadecimais)', JSON.stringify(bad))
+  }
+  for (const bad of [null, [], 'x']) {
+    t.is(nativeHostedConfigOf(bad, { installation: 'https://varanda.example' }).error, 'configuração da instalação inválida')
+  }
+  for (const installation of ['http://varanda.example', 'http://localhost:8080', 'ws://varanda.example',
+    'https://varanda.example/x', 'https://varanda.example?x', 'https://u:p@varanda.example', 'https://Varanda.example',
+    'https://varanda.example:443', 'https://127.0.0.1', 'https://[::1]', 'varanda.example', '', null, undefined, 42]) {
+    t.is(nativeHostedConfigOf({ v: 1, association: ASSOC }, { installation }).error, 'endereço da instalação inválido', String(installation))
+  }
+  t.is(nativeHostedConfigOf({ v: 1, association: ASSOC }).error, 'endereço da instalação inválido')
+})

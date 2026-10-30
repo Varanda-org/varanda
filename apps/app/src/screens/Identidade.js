@@ -12,8 +12,10 @@
 // chosen passkey's manager gives no PRF (src/passkeyTrouble.js), and after a
 // successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
-// the certificate and the posts back from the seeder). The native node and
-// varanda-serve keep the plain identity card.
+// the certificate and the posts back from the seeder). The app's in-app web
+// node (the native web kind) shows the same cards with device wording (no
+// browser or page address texts); the core node and varanda-serve keep the
+// plain identity card.
 //
 // With `setup` (the first run, App.js) the same cards render inside the
 // onboarding Stepper (src/onboarding.js decides the step) with welcome copy,
@@ -27,11 +29,13 @@
 // Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, TextInput } from 'react-native'
+import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink, toError } from '../account'
+import { isAppClient } from '../appClient'
+import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
@@ -39,6 +43,10 @@ import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } 
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { hostOf, installationOrigin } from '../installation'
+import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
+import * as AuthSession from '../authSession'
+import { InvitePaste } from './Idade'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -58,12 +66,20 @@ const PLAIN_CERT_LABEL = 'O que a associação devolveu'
 const PLAIN_SUBMIT = 'gravar e continuar'
 // Replaces parseCertificateText's JSON wording in the setup only.
 const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
-const EXISTS_TEXT = 'Já existe uma conta neste navegador; outra passkey é outra conta.'
+// The in-app web node (native web kind) has the same passkey cards; only the
+// place they name changes.
+const NATIVE = Platform.OS !== 'web'
+const PLACE = NATIVE ? 'neste aparelho' : 'neste navegador'
+const EXISTS_TEXT = 'Já existe uma conta ' + PLACE + '; outra passkey é outra conta.'
 const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
+// The app's counterpart of BROWSER_TEXT: this device's credential manager
+// gives no PRF (or passkeys are not available here yet), so nothing can be
+// derived on it.
+const DEVICE_TEXT = 'Este aparelho ainda não consegue abrir sua conta com a passkey. Use o Varanda no navegador (Chrome, Edge ou Safari 18 ou mais novo).'
 const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
 
 function mismatchText (legacy) {
-  return 'A conta guardada neste navegador é de outra passkey' +
+  return 'A conta guardada ' + PLACE + ' é de outra passkey' +
     (legacy ? ' (de uma versão anterior do app)' : '') + '.'
 }
 
@@ -197,6 +213,52 @@ function takeReturnWaitlist () {
   takeReturnNotice()
   return returnWaitlist
 }
+
+// The native sign-in (apps/cli/lib/account/app-return.js). V is held in this
+// process's memory only, never in storage or a log, for the member that
+// started: appLink = { member, secret, redeem }. R comes only from the result
+// of the auth session the app opened (its https return reaches this app
+// only); varanda://conta is no longer a return, since any app can claim or
+// forge it. Each start clears R.
+// A restarted app holds no V, so its return cannot be redeemed ('expirado').
+let appLink = null
+let appExpired = false
+// An auth session that ended 'failed' (Auth Tab verification failed or timed
+// out, e.g. no assetlinks): later starts send the person to the site.
+let authSessionBroken = false
+const returnListeners = new Set()
+const SESSION_RETURN_PATH = '/account/app/conta'
+
+function siteHost () {
+  try {
+    return hostOf(installationOrigin())
+  } catch {
+    return null
+  }
+}
+// No auth session on this device: the link is done on the site, with the
+// same passkey (the same diary key, so the same account).
+function noSessionText () {
+  const host = siteHost()
+  const where = host ? 'pelo site ' + host : 'pelo site da instalação'
+  return 'Este aparelho não consegue abrir o login do Google dentro do app. Ligue a conta Google ' + where + ' no navegador, entrando com a mesma passkey: é a mesma conta.'
+}
+
+function noteAccountReturn (outcome) {
+  const search = '?conta=' + outcome
+  returnNotice = parseReturn(search)
+  returnWaitlist = parseReturnWaitlist(search)
+  returnInvite = parseReturnInvite(search)
+}
+function notifyReturn () {
+  for (const fn of returnListeners) fn()
+}
+
+// The proofs for this key's app row, or {} (the web, or nothing held).
+function appProofs (member) {
+  if (appLink === null || appLink.member !== member) return {}
+  return { linkSecret: appLink.secret, redeem: appLink.redeem }
+}
 function takeReturnInvite () {
   takeReturnNotice()
   return returnInvite
@@ -230,21 +292,22 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   // { key, status, pending } of the last load for this key.
   const [acct, setAcct] = useState(null)
   const [acctError, setAcctError] = useState('')
-  const [returned] = useState(takeReturnNotice)
+  const [returned, setReturned] = useState(takeReturnNotice)
   const [name, setName] = useState('')
   const [formOpen, setFormOpen] = useState(false)
   // A pending Google account the member gives up on (rejected by finish, or
   // 'começar de novo'): the stale row is ignored for this page load and the
   // link form shows; its 'vincular conta Google' starts a new row, whose
   // cookie replaces the old one (the service lets the old row expire).
-  const [restart, setRestart] = useState(false)
+  const [restart, setRestart] = useState(() => NATIVE && appExpired)
   const [confirmFailed, setConfirmFailed] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const busyRef = useRef(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(() => (NATIVE && appExpired ? toError('expirado').message : ''))
   const [note, setNote] = useState('')
+  const [, setPasteTick] = useState(0)
   // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
   const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
   // Sentence for an invite refusal ('convite-obrigatorio', 'convite-invalido'),
@@ -269,7 +332,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const mine = ++seqRef.current
     try {
       const status = await accountStatus(publicKey)
-      const pending = status.linked === true ? null : await readPending()
+      const pending = status.linked === true ? null : await readPending(appProofs(publicKey))
       if (mine !== seqRef.current) return
       setAcct({ key: publicKey, status, pending })
       setAcctError('')
@@ -279,6 +342,31 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   }, [publicKey])
 
   useEffect(() => { if (active) load() }, [active, load])
+
+  // An auth session's return while this card is mounted (the app was not
+  // reloaded, unlike the web page): the same states as a page load, then the
+  // service is asked again.
+  useEffect(() => {
+    if (!NATIVE) return
+    const take = () => {
+      setReturned(returnNotice)
+      setWaitlist(returnWaitlist)
+      setInviteNote(returnInvite)
+      setConfirmFailed(false)
+      setNote('')
+      if (appExpired) {
+        setError(toError('expirado').message)
+        setRestart(true)
+        setFormOpen(true)
+      } else {
+        setError('')
+        setRestart(false)
+      }
+      load()
+    }
+    returnListeners.add(take)
+    return () => { returnListeners.delete(take) }
+  }, [load])
 
   const cur = acct !== null && acct.key === publicKey ? acct : null
   const status = cur === null ? null : cur.status
@@ -377,14 +465,30 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     if (username === null) return setError(NAME_RULE)
     run(async () => {
       try {
-        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code })
+        // The app: a fresh V per start, whose hash names the new row; a V
+        // still held for this key proves the old row, so a restart may
+        // replace it. V is kept only once the service took its proof.
+        const app = isAppClient()
+        // Checked before start, so no row is created for a link that cannot
+        // come back.
+        if (app && (authSessionBroken || !AuthSession.isAvailable())) throw new Error(noSessionText())
+        const link = app ? newLinkSecret(deviceRandomBytes) : null
+        const held = app ? appProofs(publicKey).linkSecret : undefined
+        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code, appProof: link?.proof, linkSecret: held })
+        const current = link === null ? null : { member: publicKey, secret: link.secret, redeem: null }
+        if (current !== null) {
+          appLink = current
+          appExpired = false
+        }
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
-        const { authorizeUrl } = await authorizeLink({ signature })
+        const { authorizeUrl } = await authorizeLink({ signature, linkSecret: link?.secret })
         if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
         setWaitlist('')
         setInviteNote('')
         setNote(RELOAD_TEXT)
-        globalThis.location.assign(authorizeUrl)
+        // The auth session hands its https return to this app only.
+        if (app) await linkInSession(current, authorizeUrl)
+        else globalThis.location.assign(authorizeUrl)
       } catch (err) {
         // Full cap: a calm notice. The name stays; nothing retries on its own.
         if (err && err.code === 'lista-de-espera') {
@@ -394,8 +498,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         }
         setWaitlist('')
         if (err && INVITE_REFUSALS.has(err.code)) {
-          // The code stays stored: start answers 'convite-invalido' for a
-          // code held by another pending link too, and that one may free up.
+          // The web keeps its stored code: start answers 'convite-invalido'
+          // for a code held by another pending link too, and that one may
+          // free up. The app drops it, so its paste field shows again for
+          // another link instead of resending a dead code.
+          if (dropsHeldInvite(err, NATIVE)) dropSignupInvite()
           setInviteNote(err.message)
           return
         }
@@ -404,14 +511,51 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     })
   }
 
+  const linkInSession = async (current, authorizeUrl) => {
+    let res
+    try {
+      res = await AuthSession.open(authorizeUrl, hostOf(installationOrigin()), SESSION_RETURN_PATH)
+    } catch (err) {
+      if (appLink !== current) return
+      // INVALID: an installation the session cannot name (a port, or not
+      // https). Nothing else ever opens the link.
+      if (err && err.code === 'BUSY') throw new Error(LINK_FAILED)
+      throw new Error(noSessionText())
+    }
+    if (appLink !== current || !res) return
+    if (res.type === 'failed') {
+      // The browser may have loaded the return as a page and kept R in its
+      // history: without V, which goes here, nobody can redeem it.
+      appLink = null
+      authSessionBroken = true
+      throw new Error(noSessionText())
+    }
+    if (res.type !== 'ok') return
+    const ret = parseSessionReturn(res.url)
+    if (ret === null) return
+    noteAccountReturn(ret.outcome)
+    if (ret.code) current.redeem = ret.code
+    notifyReturn()
+  }
+
   const doConfirm = () => run(async () => {
     const row = cur === null ? null : cur.pending
     // Never sign for a pending link of another key.
     if (row === null || row.member !== publicKey || typeof row.sub !== 'string' || row.sub === '') throw new Error(LINK_FAILED)
     setConfirmFailed(false)
+    // The app's row answers only to V and R: without both, nothing is
+    // signed or sent, and the member starts again.
+    const proofs = appProofs(publicKey)
+    if (isAppClient() && (typeof proofs.linkSecret !== 'string' || typeof proofs.redeem !== 'string')) {
+      setConfirmFailed(true)
+      throw toError('expirado')
+    }
     try {
       const { signature } = await node.request('account.sign', { phase: 'finish', nonce: row.nonce, username: row.username, sub: row.sub })
-      const done = await finishLink({ signature })
+      // R is spent by this finish whatever its answer.
+      if (isAppClient() && appLink !== null) appLink.redeem = null
+      const done = await finishLink({ signature, ...proofs })
+      if (isAppClient()) appLink = null
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
       dropSignupInvite()
@@ -459,6 +603,14 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         await load()
       }
     })
+  }
+
+  // The app's paste field (Idade.js InvitePaste) now holds a code: the form
+  // comes back (the tick re-renders when no note was showing).
+  const usePasted = () => {
+    setError('')
+    setInviteNote('')
+    setPasteTick((n) => n + 1)
   }
 
   const restartLink = () => {
@@ -532,6 +684,12 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       : inviteNote !== ''
         ? <Body>{inviteNote}</Body>
         : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
+    const inviteNeeded = (
+      <>
+        <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy} /> : null}
+      </>
+    )
     // Until the policy answers, the button waits rather than racing it.
     const linkDisabled = name.trim() === '' || policy === undefined
     body = (
@@ -564,7 +722,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Body>{SHORT.link}</Body>
               {inviteLine}
               {inviteBlocked
-                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                ? inviteNeeded
                 : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
             </>
             )
@@ -575,7 +733,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>
               {inviteLine}
               {inviteBlocked
-                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                ? inviteNeeded
                 : (
                   <>
                     <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
@@ -832,7 +990,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)
-      setPkNote('A conta antiga foi apagada deste navegador. Entre com a passkey para recomeçar.')
+      setPkNote('A conta antiga foi apagada ' + (NATIVE ? 'deste aparelho' : 'deste navegador') + '. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
 
@@ -865,7 +1023,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           </Card>
           )
         : <Soft>carregando…</Soft>
-    } else if (pkStatus.rpIdError) {
+    } else if (pkStatus.rpIdError && !NATIVE) {
       // The address cannot carry a passkey (an IP): the page must be opened
       // by its domain name (localhost in development).
       entrar = (
@@ -878,7 +1036,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       const stale = deleteStep(staleIds)
       entrar = (
         <Card>
-          <Notice>{BROWSER_TEXT}</Notice>
+          <Notice>{NATIVE ? DEVICE_TEXT : BROWSER_TEXT}</Notice>
           {stale ? <Body>{stale}</Body> : null}
           {blockedInvite}
         </Card>
@@ -887,7 +1045,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // A passkey was created or chosen but its password manager gives no
       // PRF. The node keeps a created one out of the next creation, so
       // another try can save the new one elsewhere.
-      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true })
+      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true, native: NATIVE })
       entrar = (
         <Card>
           <Notice>{UNUSABLE_TITLE}</Notice>

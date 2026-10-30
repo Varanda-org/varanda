@@ -1,44 +1,48 @@
-/* global URL */
-
 // A round avatar with the person's initials on the stripe colour picked by
 // the first byte of the key. With no name it shows a person glyph instead:
 // no character derived from a key is ever drawn. Decorative: the name is
 // read elsewhere.
 //
-// A profile photo is drawn over the initials only in the hosted web app (as
-// MediaView does for post photos): the bytes come from the same origin's
+// A profile photo is drawn over the initials only on a hosted node (as
+// MediaView does for post photos): the bytes come from the installation's
 // /media route, verified by ../media/avatar.js (SHA-256, still image, exact
-// 512x512), and only a blob: URL is ever drawn. Retryable failures retry
+// 512x512), and only a blob: URL (web) or a cache file:// URI (native, from
+// ../media/display) is ever drawn. Retryable failures retry
 // after 2, 5 and 15 s while mounted; any final failure, or an image that
 // does not render, leaves the initials. localUri (a blob: URL the editor
-// just made) is drawn as is. Natively or on a page that is not hosted
-// nothing is fetched. persist is false for authors the device does not
-// follow (cache: 'no-store').
+// just made) is drawn as is. Without a hosted node nothing is fetched.
+// persist is false for authors the device does not follow (cache: 'no-store'
+// on the web; natively no cache option, see fetchMedia).
 
 import { useEffect, useRef, useState } from 'react'
-import { Image, Platform, StyleSheet, Text, View } from 'react-native'
+import { fetch as expoFetch } from 'expo/fetch'
+import { Image, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { hostedPage } from '../configStore'
+import { useNode } from '../node'
 import { avatarColorOf } from '../format'
 import { avatarKey, loadAvatarUrl, validAvatar } from '../media/avatar'
 import { createMediaCache, retryDelay } from '../media/cache'
+import { revokeUrl, urlFromBytes } from '../media/display'
+import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
 import { colors, stripes } from './theme'
 
-const canFetch = Platform.OS === 'web' && hostedPage === true
+// The native app streams media through expo/fetch so the byte cap stops the
+// download (see fetchMedia); the web keeps the global fetch.
+const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
 
-const cache = createMediaCache({ max: 128, concurrency: 4 })
+const cache = createMediaCache({ max: 128, concurrency: 4, revoke: revokeUrl })
 
-const isBlobUrl = (url) => typeof url === 'string' && url.startsWith('blob:')
+const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
 // Hands a blob: URL of verified bytes (the editor's own upload) to the
 // cache, which then owns it; a URL already cached for the key wins. The
 // caller must pass bytes that passed checkAvatarBytes and whose SHA-256 the
 // descriptor carries: a cache hit is drawn without a second check.
 export function primeAvatar (author, descriptor, blobUrl) {
-  if (!validAvatar(descriptor) || !isBlobUrl(blobUrl)) return
+  if (!validAvatar(descriptor) || !isShownUrl(blobUrl)) return
   const key = avatarKey(author, descriptor)
-  const revoke = () => { try { URL.revokeObjectURL(blobUrl) } catch {} }
+  const revoke = () => revokeUrl(blobUrl)
   const hit = cache.peek(key)
   if (hit === blobUrl) return
   if (hit !== null) {
@@ -52,8 +56,10 @@ export function primeAvatar (author, descriptor, blobUrl) {
   prime().then(settle, () => prime().then(settle, revoke))
 }
 
-// -> a blob: URL to draw, or null.
+// -> a blob: or file: URL to draw, or null.
 function useAvatarUrl (publicKey, picture, persist) {
+  const node = useNode()
+  const canFetch = node !== null && node.hosted === true
   const key = canFetch && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const [attempt, setAttempt] = useState(0)
   const autoRef = useRef({ key: null, done: 0 })
@@ -72,7 +78,7 @@ function useAvatarUrl (publicKey, picture, persist) {
       return
     }
     const fresh = attempt > 0
-    cache.get(key, () => loadAvatarUrl(publicKey, picture, { persist, fresh })).then(
+    cache.get(key, () => loadAvatarUrl(publicKey, picture, { persist, fresh, urlFromBytes, fetch: mediaFetch() })).then(
       (url) => { if (alive) setResult({ key, url }) },
       (err) => {
         if (!alive) return
@@ -88,7 +94,7 @@ function useAvatarUrl (publicKey, picture, persist) {
     }
     // The descriptor is identified by its key (deps omit the object itself).
   }, [publicKey, key, attempt, persist])
-  return key !== null && result.key === key && isBlobUrl(result.url) ? result.url : null
+  return key !== null && result.key === key && isShownUrl(result.url) ? result.url : null
 }
 
 // First letter of the first and last word, or two letters of a single word;
@@ -107,7 +113,7 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
   const [broken, setBroken] = useState(null)
   // A local URL that failed (primeAvatar may revoke it when the cache already
   // holds a verified copy) falls back to the fetched one.
-  const uri = isBlobUrl(localUri) && localUri !== broken ? localUri : fetched
+  const uri = isShownUrl(localUri) && localUri !== broken ? localUri : fetched
   const photo = uri !== null && uri !== broken ? uri : null
   const stripe = stripes[avatarColorOf(publicKey)]
   const fontSize = size >= 80 ? 30 : size <= 40 ? 15 : 16

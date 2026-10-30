@@ -6,8 +6,10 @@
 // Instalar o app and, apart, Sair. Everything technical sits behind a
 // collapsed 'Avançado' row: Conexão, Sincronização (state, log and the old
 // top-bar chip text), Identidade técnica (public key behind a reveal,
-// association, certificate) and Recomeçar. Rows that only exist on the
-// browser node (passkey) hide when `node.passkey === null`. Termos e
+// association, certificate) and Recomeçar. Rows that only exist on a
+// passkey node (the browser node, and the app's in-app web node, whose Sair
+// and Recomeçar go through src/identity.native.js) hide when
+// `node.passkey === null`. Termos e
 // privacidade stays in every mode and shows the record in `termsInfo`. Sair
 // drops the key derived from the passkey from memory (signOut, or lock on a
 // provider without it) and the shell returns to Entrar; it does not touch
@@ -27,7 +29,7 @@
 // the key can still sign; a failure there never stops them.
 
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { invitePolicy, walletPolicy } from '../account'
 import { useNames } from '../names'
@@ -284,10 +286,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   />
                   )
                 : null}
-              {hasPasskey
+              {hasPasskey && Platform.OS === 'web'
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
-              {hasPasskey ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
+              {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
             </View>
             {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
             {pushRow ? <ErrorText>{pushError}</ErrorText> : null}

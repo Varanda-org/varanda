@@ -115,8 +115,7 @@ function deps (res, over = {}) {
     calls,
     fetch: async (url, opts) => { calls.push({ url, opts }); return typeof res === 'function' ? res() : res },
     subtle: webcrypto.subtle,
-    Blob: class { constructor (parts, opts) { this.parts = parts; this.type = opts.type } },
-    createObjectURL: (blob) => 'blob:test/' + blob.type,
+    urlFromBytes: (bytes, mime) => 'blob:test/' + mime,
     ...over
   }
 }

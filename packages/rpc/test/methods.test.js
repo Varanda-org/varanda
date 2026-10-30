@@ -20,19 +20,22 @@ test('method list and mutating set', (t) => {
     'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.requests',
-    'identity.create', 'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create',
-    'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open',
-    'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
+    'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
+    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
+    'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.join', 'group.leave',
-    'group.meta', 'group.post', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
+    'group.meta', 'group.post', 'identity.clear', 'identity.create', 'identity.forget', 'identity.install',
+    'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
 test('no-param methods reject any key', (t) => {
-  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close']) {
+  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close', 'identity.clear', 'identity.status',
+    'identity.reset', 'identity.forget', 'identity.sessionSaved']) {
     ok(t, m, {}, {})
     bad(t, m, { x: 1 })
     // No method takes node configuration.
@@ -868,6 +871,64 @@ test('sync.start', (t) => {
   bad(t, 'sync.start', { once: false, timeoutMs: 5000 })
   bad(t, 'sync.start', { once: 'yes' })
   bad(t, 'sync.start', { once: true, bootstrap: ['x'] })
+})
+
+test('web-node host controls: mutating flags', (t) => {
+  for (const m of ['identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.sessionSaved', 'media.uploadFile']) {
+    t.ok(isMutating(m), m + ' mutating')
+  }
+  t.absent(isMutating('identity.status'), 'identity.status not mutating')
+  for (const m of ['follows.legacy', 'follows.confirmLegacy']) t.is(validateParams(m, {}).message, 'método desconhecido', m + ' not offered')
+})
+
+test('identity.install', (t) => {
+  const base = { prf: 'cd'.repeat(32), credentialId: 'AbC-_9', userId: KEY, rpId: 'varanda.org', resumed: false }
+  ok(t, 'identity.install', base, base)
+  ok(t, 'identity.install', { ...base, userId: '', resumed: true })
+  ok(t, 'identity.install', { ...base, credentialId: '~'.repeat(1024), rpId: 'a'.repeat(253) })
+  for (const k of Object.keys(base)) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'identity.install', p, 'missing ' + k)
+  }
+  for (const prf of ['CD'.repeat(32), 'cd'.repeat(31), 'cd'.repeat(33), 'zz'.repeat(32), '', 1, null, ['cd'.repeat(32)]]) {
+    bad(t, 'identity.install', { ...base, prf }, 'bad prf')
+  }
+  for (const credentialId of ['', 'a'.repeat(1025), 'a b', 'a\nb', 'a\u0000', 'é', 1, null]) {
+    bad(t, 'identity.install', { ...base, credentialId }, 'bad credentialId')
+  }
+  for (const userId of ['AB'.repeat(32), 'ab'.repeat(31), 'x', null, 0]) bad(t, 'identity.install', { ...base, userId }, 'bad userId')
+  for (const rpId of ['', 'a'.repeat(254), 1, null]) bad(t, 'identity.install', { ...base, rpId }, 'bad rpId')
+  for (const resumed of ['true', 1, 0, null]) bad(t, 'identity.install', { ...base, resumed }, 'bad resumed')
+  bad(t, 'identity.install', { ...base, secretKey: KEY })
+})
+
+test('media.uploadFile', (t) => {
+  const base = { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 1, height: 16384 }
+  ok(t, 'media.uploadFile', base, base)
+  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...base, mime })
+  ok(t, 'media.uploadFile', { ...base, name: 'f'.repeat(32) + '.bin' })
+  for (const k of Object.keys(base)) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'media.uploadFile', p, 'missing ' + k)
+  }
+  const hex = '0123456789abcdef0123456789abcdef'
+  const names = [
+    '', 1, null, '.bin', hex, hex + '.jpg', hex + '.BIN', hex.toUpperCase() + '.bin',
+    hex.slice(1) + '.bin', hex + '0.bin', '../' + hex.slice(3) + '.bin', '/' + hex.slice(1) + '.bin',
+    hex.slice(0, 16) + '/' + hex.slice(17) + '.bin', '..', hex + '.bin\n', hex + '.bin/', 'g' + hex.slice(1) + '.bin'
+  ]
+  for (const name of names) bad(t, 'media.uploadFile', { ...base, name }, 'bad name')
+  bad(t, 'media.uploadFile', { ...base, path: '/cache/' + base.name }, 'a path is refused')
+  const { name, ...rest } = base
+  bad(t, 'media.uploadFile', { ...rest, path: '/cache/' + name }, 'a path instead of a name is refused')
+  for (const mime of ['image/svg+xml', 'IMAGE/JPEG', 'video/mp4', '', 1]) bad(t, 'media.uploadFile', { ...base, mime }, 'bad mime')
+  for (const v of [0, 16385, 1.5, -1, '10', null]) {
+    bad(t, 'media.uploadFile', { ...base, width: v }, 'bad width')
+    bad(t, 'media.uploadFile', { ...base, height: v }, 'bad height')
+  }
+  bad(t, 'media.uploadFile', { ...base, bytes: 'x' })
 })
 
 test('unknown method and non-object params', (t) => {
