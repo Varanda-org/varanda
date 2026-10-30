@@ -2217,6 +2217,8 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - [ ] A partially synced follow: after a short page the footer reads "Ainda sincronizando quem você segue.".
 - [ ] The list fills without pull-to-refresh as the follow downloads; on native no pull spinner appears.
 - [ ] A fully synced follow: the footer reads "Isso é tudo por enquanto." as before.
+- [ ] With an empty feed and a follow still syncing, "Ainda não chegou nada" carries "Ainda sincronizando quem você segue."; once synced, the old body returns.
+- [ ] Pull to refresh right after the diary grows: no second read follows the manual one.
 - [ ] 'mostrar mais' still pages 30 then 31 items.
 - [ ] Follow a diary with hundreds of posts, keep A Rua open at the end of the list, and confirm the download finishes (every automatic read preempts the sync run).
 
@@ -2226,8 +2228,7 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - A download usually costs one extra read at its end, because the stopped run reports growth the read already saw.
 - A follow with no local replica is not reported, so a follow nobody serves keeps the old footer; an author who signs a length nobody serves keeps the syncing footer.
 - Arrivals that sort inside the range already shown come through 'ver novidades' or pull-to-refresh; once the download ends the footer can say "Isso é tudo por enquanto." while such arrivals wait behind the pill.
-- An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
-- A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
+- An empty feed shows "Ainda sincronizando quem você segue." as the body of "Ainda não chegou nada" while followed diaries sync.
 - `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
 
 ## 37. Convites para entrar na rede (2026-10-29)
