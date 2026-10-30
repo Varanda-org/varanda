@@ -6,7 +6,7 @@ How to work in this repository. Normative facts about formats and the wire are i
 
 - Node.js 20 or newer (`engines.node` is `>=20`) and npm. On the Mac this was written on: Node v26.10.0 and npm 11.19.1 (an example, not a requirement).
 - For the iOS app only: Xcode and CocoaPods. The gate passed with Xcode 26.2, CocoaPods 1.16.2 and an iPhone 17 Pro simulator (iOS 26.2). These are examples from [ios-gate.md](ios-gate.md).
-- For a native Android build: an Android SDK and Java. Neither is installed on that Mac, so no native Android run has been verified (see "Android").
+- For a native Android build: an Android SDK and JDK 17 or 21. The debug build has run on an x86_64 emulator (see "Android"); a real device, arm64-v8a and a release build have not.
 
 ## Layout (npm workspaces)
 
@@ -128,8 +128,9 @@ npm run ios                          # expo run:ios
 ```
 
 - `prepare:native` runs `scripts/prepare-native.sh [ios|android|all]`: the three steps below in order, then checks again that every addon is linked. `npm run ios` and `npm run android` run the same check (`scripts/link-addons.sh check`) before `expo run:*`, so a build without the addons fails with a message instead of producing an app whose worklet cannot load them.
-- `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native and bare-fs are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
+- `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native, bare-fs, fs-native-extensions, bare-crypto and bare-tls are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
 - `pack:worklet` runs `scripts/pack-worklet.sh` and writes `apps/app/assets/worklet/main.bundle.js` (generated and ignored by version control).
+- One bundle serves both node kinds of the worklet: the start argument's `kind` picks `core` (the default, `@varanda/core` on RocksDB) or `web` (`worklet/web-node.js`: the `packages/web-member` session on file storage under `<dataDir>/web-node`, syncing with the installation's seeder over `wss://`). The `web` kind is why `@varanda/web-member`, `bare-crypto` and `bare-ws` are runtime dependencies of `apps/app`: bare-pack bundles only what the worklet's module graph reaches. To check it, run `npm run pack:worklet -w apps/app` (it ends with `node scan: clean`: `scripts/check-bundle.js` refuses a bundle that could reach a Node built-in), then `bash apps/app/scripts/link-addons.sh ios` and `bash apps/app/scripts/link-addons.sh android` and read the `linked` lists. The `web` kind adds bare-crypto, bare-tls, bare-tcp, bare-dns, crc-native and a second sodium-native (4.3.3, Hypercore 10's, next to 5.2.0); the two sodium-native versions link side by side because each addon name carries its version. `link-addons.sh` also requires fs-native-extensions (the `web` kind's `LOCK` fails closed without it), bare-crypto and bare-tls. `node apps/app/test/identityInstall.test.js` covers the identity host controls (`docs/rpc.md` 5.50 to 5.55) in Node; the `web` kind itself only runs in the app.
 - `ios/` and `android/` are committed and hand-maintained: do not run `expo prebuild` in `apps/app`. `plugins/with-hardening.js` (registered in `app.json`) reapplies the edits a prebuild would drop, and `test/hardening.test.js` runs a real `expo prebuild --clean --no-install` in a temporary copy, never in `apps/app`, and compares the three patched files with the committed ones. The edits: `ios/Varanda/AppDelegate.swift` marks `Documents/varanda` (the node's key material) as excluded from iCloud and device backups; `android/app/build.gradle` signs release builds only with a key supplied outside the repository and gives debug builds the `.debug` application ID suffix; `android/gradle.properties` limits `reactNativeArchitectures` to the two ABIs `link:addons` produces. Android's `allowBackup: false` and the iOS privacy manifest (`ios.privacyManifests`, which becomes `ios/Varanda/PrivacyInfo.xcprivacy`: no tracking and the required-reason API declarations) are in `app.json`, so prebuild keeps them; the test compares the generated manifest with the committed one. A fresh prebuild still differs from the committed projects in generated files that are not security edits (the icon and splash images, `Info.plist` without `RCTNewArchEnabled`, `styles.xml` without `windowSplashScreenBackground`, `project.pbxproj` before `pod install`), so the two apps are not byte for byte the same; only the patched files and the privacy manifest are checked.
 - `npm run gate -w apps/app` is the gate driver (`scripts/gate-server.js`), used with a Metro started with `EXPO_PUBLIC_VARANDA_GATE_URL`. See ios-gate.md.
 
@@ -138,6 +139,28 @@ npm run ios                          # expo run:ios
 Status: the debug build runs on an x86_64 emulator (API 36) and passes the worklet gate (steps a to i of [ios-gate.md](ios-gate.md), 2026-10-28; the `.so` addons are packed in `lib/x86_64` and loaded). Not run: a real device, arm64-v8a and a release build. `npm run android` is `expo run:android`. Gradle needs JDK 17 or 21; the commands for the gate are in the "Android emulator" section of ios-gate.md.
 
 Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. Signing was not exercised in the emulator run (debug build only). See "Residual risks" in [ios-gate.md](ios-gate.md).
+
+## Builds de teste (EAS)
+
+Configuração em `apps/app/eas.json` (perfis `preview` e `preview-simulator`) e `.easignore` na raiz. Nenhum comando abaixo roda na CI nem num agente: quem tem a conta Expo roda, da pasta `apps/app`.
+
+```sh
+eas login
+eas init
+eas env:create --name EXPO_PUBLIC_VARANDA_INSTALLATION --value https://<dominio> --environment preview --visibility plaintext
+eas build --profile preview --platform android
+eas credentials -p android
+```
+
+- `eas init` escreve `owner` e `extra.eas.projectId` no `app.json`; eles não estão no repositório de propósito.
+- O hook `eas-build-post-install` (`scripts/eas-post-install.sh`) roda `prepare-native.sh` para a plataforma do build: link dos addons, `main.bundle.js` do worklet e, no iOS, `pod install`. No iOS o serviço pode rodar o `pod install` dele antes ou depois do hook, e o hook roda de novo; o script é idempotente, então a ordem não importa. Ele falha se `assets/worklet/main.bundle.js` não existir no fim.
+- No log do primeiro build, confira as etapas `link-addons` e `pack-worklet` e a configuração de assinatura injetada pela EAS. `android/app/build.gradle` continua falhando fechado sem as credenciais `VARANDA_RELEASE_*`.
+- Se a assinatura injetada não funcionar, o plano B é `credentialsSource: local` no perfil, com um `credentials.json` fora do git (ele está no `.gitignore` do app e no `.easignore`).
+- `ios/` e `android/` continuam mantidos à mão: nunca rode `expo prebuild`.
+- O `.easignore` substitui o `.gitignore` no envio, por isso repete as saídas de build e todos os padrões de segredo, e deixa de fora até o `debug.keystore` (o perfil `preview` compila release).
+- iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`. Para entrar com passkey no iOS: adicione `webcredentials:<domínio>` em `ios/Varanda/Varanda.entitlements`, defina `VARANDA_IOS_APP_ID` no `.env` do deploy e troque `VarandaWebCredentials` para `true` em `ios/Varanda/Info.plist`.
+- O módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
+- A CI continua sem compilar nada nativo.
 
 ## Browser member spike (packages/web-member)
 

@@ -9,6 +9,9 @@
 // says so and the body is under 4096 bytes); it is a local copy so that file
 // stays untouched.
 
+import { resolveUrl } from './installation.js'
+import { isAppClient } from './appClient.js'
+
 // Same order and labels as @varanda/core lib/report.js REASONS/REASON_LABELS.
 export const REASONS = [['spam', 'spam'], ['assedio', 'assédio'], ['ilegal', 'conteúdo ilegal'], ['outro', 'outro']]
 // Code points (Array.from length), as report.js TEXT_MAX and format.js countChars.
@@ -82,13 +85,18 @@ async function readJson (res) {
 }
 
 function buildPost (path, body) {
+  const app = isAppClient()
+  const headers = { accept: 'application/json', 'content-type': 'application/json' }
+  if (app) headers['x-varanda-client'] = 'app'
   return {
-    url: path,
+    url: resolveUrl(path),
     init: {
       method: 'POST',
-      credentials: 'same-origin',
-      cache: 'no-store',
-      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      credentials: app ? 'omit' : 'same-origin',
+      // React Native's fetch (whatwg-fetch) appends '_=<timestamp>' to the
+      // URL for 'no-store'; one rule for every app request (media/fetch.js).
+      ...(app ? {} : { cache: 'no-store' }),
+      headers,
       body: JSON.stringify(body)
     }
   }

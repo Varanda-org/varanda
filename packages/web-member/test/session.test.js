@@ -27,6 +27,7 @@ const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { verifyAge } = require('@varanda/core/lib/age')
+const { verifyWallet, opHash } = require('@varanda/core/lib/wallet-proof')
 const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
@@ -196,7 +197,8 @@ test('before an identity exists', async (t) => {
     memberCert: false,
     followCount: 0,
     sync: { state: 'idle' },
-    publicDht: false
+    publicDht: false,
+    groups: true
   })
   for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }], ['peek.read', {}]]) {
     const err = await errorOf(web.request(method, params))
@@ -711,6 +713,68 @@ test('age.sign: the unlocked key signs the age-verification request without a ce
 
   const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
   const mismatch = await errorOf(other.web.request('age.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('wallet.sign: the unlocked key signs the wallet statement over the operation hash, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const op = { kind: 'pf', amount: 1500 }
+  const params = { action: 'optin', nonce, op }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('wallet.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('wallet.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { action: 'optin', nonce, member: key, association: assoc.hex, opHash: opHash(op) }
+  t.alike(verifyWallet(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyWallet({ ...fields, opHash: opHash({ amount: 1500, kind: 'pf' }) }, r.signature), { ok: true }, 'key order does not matter')
+  t.alike(verifyWallet({ ...fields, action: 'status' }, r.signature), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyWallet({ ...fields, nonce: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' }, 'another nonce')
+  t.alike(verifyWallet({ ...fields, opHash: opHash({ ...op, amount: 1501 }) }, r.signature), { ok: false, reason: 'bad-signature' }, 'another operation')
+
+  // Owner amendment 2: receive USDC and convert it to BRLA with a swap the
+  // member confirms.
+  const swapOp = { quoteId: 'q-1', from: 'USDC', to: 'BRLA', amount: 2500000 }
+  const swap = await s.web.request('wallet.sign', { action: 'swap', nonce, op: swapOp })
+  t.alike(verifyWallet({ ...fields, action: 'swap', opHash: opHash(swapOp) }, swap.signature), { ok: true }, 'a swap')
+
+  // Domain separation against the age request.
+  const ageSig = await s.web.request('age.sign', { action: 'session', nonce })
+  t.alike(verifyWallet(fields, ageSig.signature), { ok: false, reason: 'bad-signature' }, 'an age request is not a wallet statement')
+  t.alike(verifyAge({ action: 'session', nonce, member: key, association: assoc.hex }, r.signature), { ok: false, reason: 'bad-signature' }, 'a wallet statement is not an age request')
+
+  for (const k of ['member', 'association', 'opHash', 'pin']) {
+    const extra = await errorOf(s.web.request('wallet.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot hand in ' + k)
+  }
+  const pin = await errorOf(s.web.request('wallet.sign', { ...params, op: { ...op, pin: '1234' } }))
+  t.alike([pin.code, pin.message], ['USAGE', 'parâmetro inválido: op'], 'a PIN in the operation is refused')
+  const unknown = await errorOf(s.web.request('wallet.sign', { ...params, action: 'session' }))
+  t.is(unknown.code, 'USAGE', 'an unknown action is refused')
+  const after = await s.web.request('log.read', {})
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('wallet.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('wallet.sign', params))
   t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
 })
 

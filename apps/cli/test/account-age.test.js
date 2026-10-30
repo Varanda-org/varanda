@@ -82,7 +82,7 @@ async function waitFor (fn, ms = 3000) {
 // `age: false` leaves didit and ages null. `inviting` opens an invites
 // sidecar; `maxMembers` caps the directory. `c.guardOk = false` makes every
 // age.json write fail.
-async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs } = {}) {
+async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -113,16 +113,22 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     opts.ages = ages
   }
   if (dailyLimit !== undefined) opts.ageDailyLimit = dailyLimit
+  if (burst !== undefined) {
+    opts.burst = burst
+    opts.ratePerSecond = burst
+  }
   const server = createAccountServer(opts)
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => listener.close(), { force: true })
   const base = 'http://127.0.0.1:' + listener.port
 
-  async function api (method, pathname, { body, cookie } = {}) {
+  // `app`: the native app's request (no Origin, x-varanda-client: app).
+  async function api (method, pathname, { body, cookie, app = false } = {}) {
     const init = { method, redirect: 'manual', headers: {} }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
+    if (app) init.headers['x-varanda-client'] = 'app'
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      if (!app) init.headers.origin = ORIGIN
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -741,4 +747,109 @@ test('age: forged return params have no server effect', async (t) => {
   t.absent(s.ages.verified(m.hex))
   t.alike((await s.step(m, 'result')).body, { state: 'pendente' })
   t.absent(s.ages.verified(m.hex))
+})
+
+test('age app clients: the app return URL only with the app header; app-return ignores every parameter', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const started = await s.api('POST', '/account/age/start', { app: true, body: { member: m.hex } })
+  t.is(started.status, 200, 'an Origin-less app POST: ' + started.text)
+  const nonce = started.body.nonce
+  const sess = await s.api('POST', '/account/age/session', { app: true, body: { member: m.hex, nonce, signature: s.signFor(m, 'session', nonce) } })
+  t.is(sess.status, 200, sess.text)
+  t.is(s.creates().length, 1)
+  t.is(s.creates()[0].body.callback, ORIGIN + '/account/age/app-return')
+
+  const web = member()
+  t.is((await s.step(web, 'session')).status, 200)
+  t.is(s.creates()[1].body.callback, ORIGIN + '/?idade=volta', 'the web keeps its return')
+
+  const id = s.lastSession()
+  for (const q of ['', '?status=Approved&verificationSessionId=' + id, '?next=https://evil.test/&idade=volta']) {
+    const r = await s.api('GET', '/account/age/app-return' + q)
+    t.is(r.status, 302)
+    t.is(r.headers.get('location'), 'varanda://idade?volta=1')
+    t.is(r.headers.get('cache-control'), 'no-store')
+  }
+  t.absent(s.ages.verified(m.hex), 'the return grants nothing')
+  const post = await s.api('POST', '/account/age/app-return', { body: {} })
+  t.is(post.status, 404, 'GET only')
+  noPersonalData(t, s)
+})
+
+test('age app clients: app-return has no window of its own and never answers 429', async (t) => {
+  const s = await setup(t, { burst: 5000 })
+  for (let i = 0; i < 1300; i++) {
+    const r = await s.api('GET', '/account/age/app-return?n=' + i)
+    if (r.status !== 302 || r.headers.get('location') !== 'varanda://idade?volta=1') {
+      t.fail('request ' + i + ' answered ' + r.status)
+      return
+    }
+  }
+  t.pass('1300 returns in a row all redirect to the app')
+})
+
+// One app session (no Origin, app header) for `who`: start + signed session.
+async function appSession (s, who) {
+  const started = await s.api('POST', '/account/age/start', { app: true, body: { member: who.hex } })
+  const nonce = started.body.nonce
+  return s.api('POST', '/account/age/session', { app: true, body: { member: who.hex, nonce, signature: s.signFor(who, 'session', nonce) } })
+}
+
+async function appResult (s, who) {
+  const started = await s.api('POST', '/account/age/start', { app: true, body: { member: who.hex } })
+  const nonce = started.body.nonce
+  return s.api('POST', '/account/age/result', { app: true, body: { member: who.hex, nonce, signature: s.signFor(who, 'result', nonce) } })
+}
+
+test('age app clients: a session is reused only by the client kind that opened it, both ways', async (t) => {
+  const s = await setup(t)
+  const callbacks = () => s.creates().map((r) => r.body.callback)
+  const APP_RETURN = ORIGIN + '/account/age/app-return'
+  const WEB_RETURN = ORIGIN + '/?idade=volta'
+
+  // Web first, then the app.
+  const m = member()
+  const web1 = await s.step(m, 'session')
+  t.is(web1.status, 200, web1.text)
+  const app1 = await appSession(s, m)
+  t.is(app1.status, 200, app1.text)
+  t.not(app1.body.url, web1.body.url, 'the app never gets the web session')
+  t.alike(callbacks(), [WEB_RETURN, APP_RETURN])
+  t.is((await appSession(s, m)).body.url, app1.body.url, 'the app reuses its own')
+  t.is((await s.step(m, 'session')).body.url, web1.body.url, 'the web reuses its own')
+  t.is(s.creates().length, 2)
+  t.is(s.deletes().length, 0, 'neither session replaced the other')
+
+  // App first, then the web.
+  const n = member()
+  const app2 = await appSession(s, n)
+  const web2 = await s.step(n, 'session')
+  t.not(web2.body.url, app2.body.url, 'the web never gets the app session')
+  t.alike(callbacks().slice(2), [APP_RETURN, WEB_RETURN])
+
+  // Each client reads its own session; an approval closes both.
+  const appId = [...s.fake.sessions.keys()][2]
+  s.fake.sessions.set(appId, FACE(30))
+  const read = await appResult(s, n)
+  t.is(read.status, 200, read.text)
+  t.alike(read.body, { state: 'verificado' })
+  t.ok(s.decisions().some((r) => r.path.includes(appId)), 'the app result read the app session')
+  t.ok(s.ages.verified(n.hex))
+  // The verifying call itself closes the web session too, with no later call.
+  await waitFor(() => s.deletes().length === 2)
+  t.is(s.deletes().length, 2, 'both sessions of the approved member are deleted by the first verifying call')
+  t.ok(s.deletes().some((r) => r.path.includes(appId)))
+  t.alike((await s.step(n, 'result')).body, { state: 'verificado' })
+  t.is(s.deletes().length, 2, 'nothing left to delete')
+})
+
+test('age app clients: concurrent web and app requests do not share one in-flight creation', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const [web, app] = await Promise.all([s.step(m, 'session'), appSession(s, m)])
+  t.is(web.status, 200, web.text)
+  t.is(app.status, 200, app.text)
+  t.not(web.body.url, app.body.url)
+  t.alike(s.creates().map((r) => r.body.callback).sort(), [ORIGIN + '/?idade=volta', ORIGIN + '/account/age/app-return'].sort())
 })

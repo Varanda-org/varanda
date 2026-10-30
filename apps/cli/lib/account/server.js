@@ -13,6 +13,8 @@ const { createModRoutes } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
+const { createWalletRoutes } = require('./wallet-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -68,6 +70,12 @@ const RENAME_TTL_MS = 600 * 1000
 const MAX_RENAMES = 1000
 const TERMS_TTL_MS = 600 * 1000
 const MAX_TERMS_NONCES = 1000
+const MAX_APP_STATES = 10000
+const APP_SWEEP_MS = 1000
+// How long R stays redeemable after the callback mints it: enough to confirm
+// in the app, short for an R a browser kept in its history after an auth
+// session that failed (R still needs V, which never leaves the app).
+const APP_REDEEM_TTL_MS = 180 * 1000
 const KEY_FILE = 'issuer-key.json'
 const CERT_FILE = 'issuer-cert.json'
 const LOCK_FILE = '.account-lock'
@@ -106,6 +114,11 @@ const ERROR_STATUS = Object.freeze({
   'limite-denuncias': 429,
   limite: 503,
   defasado: 409,
+  // A group block whose key the seeder did not confirm as a group root.
+  'grupo-nao-confirmado': 409,
+  // A block of a key without a linked account that the seeder did not
+  // confirm as a served diary (it could be a group root).
+  'alvo-nao-confirmado': 409,
   'ja-revertido': 409,
   // Sign-up invites (./invites-store.js): one public token for an unknown,
   // used, expired or held code.
@@ -121,7 +134,22 @@ const ERROR_STATUS = Object.freeze({
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
-  'resultado-incerto': 503
+  'resultado-incerto': 503,
+  // The optional payments account (./wallet-routes.js).
+  'carteira-pendente': 403,
+  'kyc-pendente': 409,
+  'kyc-recusado': 403,
+  'documentos-pendentes': 409,
+  'pin-invalido': 400,
+  'pin-bloqueado': 429,
+  'limite-carteira': 429,
+  'valor-invalido': 400,
+  'destino-invalido': 400,
+  'saldo-insuficiente': 409,
+  'carteira-incerta': 503,
+  'taxa-mudou': 409,
+  'idade-minima': 403,
+  'rede-divergente': 409
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -129,6 +157,7 @@ const BASE_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer'
 })
+const APP_RETURN_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 class RouteError extends Error {
   constructor (token, status, extra) {
@@ -532,15 +561,19 @@ function signatureParam (value) {
 // type (never sent cross-site without a CORS preflight, which is never
 // answered). `requireOrigin: false` only for the operator's signed routes
 // (./mod-routes.js), whose authority is a signature, not a browser.
+// The native app's fetch may send no Origin at all: an absent Origin passes
+// only with the custom x-varanda-client: app header, which a cross-site page
+// can no more send without a preflight than the JSON type. A present Origin
+// (including 'null') must still match exactly.
 function checkPost (req, origin, { requireOrigin = true } = {}) {
-  if (requireOrigin && req.headers.origin !== origin) throw new RouteError('pedido-invalido', 403)
+  if (requireOrigin && req.headers.origin !== origin && !(req.headers.origin === undefined && isAppRequest(req))) throw new RouteError('pedido-invalido', 403)
   const type = String(req.headers['content-type'] || '').toLowerCase()
   if (!/^application\/json(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
 }
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms, invites })
+// terms, invites, groupCheck })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -552,8 +585,10 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // (the AI report triage worker of ./ai/worker.js, or null when it is off),
 // `statsEmails` (lowercase e-mails, a subset of `modEmails`, allowed to see
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
-// or null when the stats tab is off) and `panelDir` (tests only) are passed
-// to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
+// or null when the stats tab is off), `groupCheck` (a createGroupCheck of
+// ./group-check.js that confirms a group key at the seeder before a group
+// block, or null: group blocks are then refused) and `panelDir` (tests only)
+// are passed to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
 // null: the terms routes then answer 503 'indisponivel'. `invites` is an
 // openInvitesStore (./invites-store.js) or null: null is open sign-up (the
 // policy route answers { required: false }, the two POST invite routes are
@@ -566,7 +601,13 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
-// paid Didit sessions opened per day across all members.
+// paid Didit sessions opened per day across all members. `hodle` (a
+// createHodle of ./hodle.js) and `wallets` (an openWalletStore of
+// ./wallet-store.js) turn on the optional payments account when both are
+// set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
+// `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
+// names the chain. Either null keeps the wallet policy at
+// { available: false }.
 function createAccountServer ({
   association,
   origin,
@@ -581,6 +622,7 @@ function createAccountServer ({
   triage = null,
   statsEmails = [],
   usage = null,
+  groupCheck = null,
   panelDir,
   terms = null,
   invites = null,
@@ -588,6 +630,11 @@ function createAccountServer ({
   didit = null,
   ages = null,
   ageDailyLimit = 200,
+  hodle = null,
+  wallets = null,
+  walletMode = 'cadastro',
+  walletDailyLimit = 100,
+  walletNetwork,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -627,6 +674,7 @@ function createAccountServer ({
     triage,
     statsEmails,
     usage,
+    groupCheck,
     panelDir,
     log,
     now,
@@ -657,6 +705,23 @@ function createAccountServer ({
     log,
     now,
     dailyLimit: ageDailyLimit,
+    http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Always mounted, so /account/wallet/policy answers even when the feature is off.
+  const walletRoutes = createWalletRoutes({
+    hodle,
+    wallets,
+    ages,
+    terms,
+    mode: walletMode,
+    association,
+    origin,
+    store,
+    log,
+    now,
+    dailyLimit: walletDailyLimit,
+    network: walletNetwork,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
@@ -687,6 +752,28 @@ function createAccountServer ({
   const held = new Map()
   // Pending ids with a finish in progress: never dropped meanwhile.
   const finishing = new Set()
+  // Native app rows (./app-return.js, RFC 8252): the system browser that
+  // runs the Google step shares no cookie jar with the app, so an app row
+  // gets no cookie. Pending id -> { proof, expiresAt, redeem, redeemUntil,
+  // google }: `proof` is base64url(sha256(V)) from start, `redeem` the hash
+  // of the one-time code R minted by the callback (null before it, once
+  // spent and once past `redeemUntil`), `google` the exchange result held
+  // until R is presented. Plus
+  // appProof -> pending id. Memory only beside the rows, pruned with them.
+  //
+  // Why both secrets: anyone who completes the authorizeUrl at Google sends
+  // the redirect carrying R to THEIR device, so an initiator who shares the
+  // link holds V but never sees R; R returns on our own https origin
+  // (APP_RETURN_PATH), captured only by the auth session the app opened,
+  // and even a holder of R lacks V, which stays in the app's memory.
+  // pending and finish need both.
+  const apps = new Map()
+  const appByProof = new Map()
+  // OAuth states ever minted for an app row: state -> expiresAt. A callback
+  // for one that is no longer live (its row superseded, taken over, expired
+  // or done) still returns to the app return with conta=erro, never to the
+  // website. Expiring, at most MAX_APP_STATES (the oldest evicted for room).
+  const appStates = new Map()
 
   function sweep (map) {
     const t = now()
@@ -698,11 +785,103 @@ function createAccountServer ({
   }
 
   function pendingRow (req) {
+    if (header(req, LINK_HEADER) !== null) return appRow(req)
     const id = cookieId(req)
     if (id === null) throw refuse('expirado')
+    // An app row is never named by a cookie, only by V.
+    if (apps.has(id)) throw refuse('expirado')
     const row = store.get(id)
     if (row === null) throw refuse('expirado')
     return row
+  }
+
+  // The appProof that the request's V proves, or null.
+  function linkProof (req) {
+    const link = header(req, LINK_HEADER)
+    return link === null ? null : proofOf(link)
+  }
+
+  // True when `proof` (from V) is the appProof of the app row `id`.
+  function appOwns (id, proof) {
+    const entry = apps.get(id)
+    return proof !== null && entry !== undefined && safeEqual(proof, entry.proof)
+  }
+
+  // Also kills the row's live OAuth state, so a Google page opened for a
+  // superseded row can never complete.
+  function forgetApp (id) {
+    const entry = apps.get(id)
+    if (entry === undefined) return
+    apps.delete(id)
+    if (appByProof.get(entry.proof) === id) appByProof.delete(entry.proof)
+    if (states.get(entry.state)?.id === id) states.delete(entry.state)
+  }
+
+  function rememberAppState (state, expiresAt) {
+    sweep(appStates)
+    while (appStates.size >= MAX_APP_STATES) appStates.delete(appStates.keys().next().value)
+    appStates.set(state, { expiresAt })
+  }
+
+  // The store expires and evicts rows on its own without telling this file,
+  // so every request (at most once per APP_SWEEP_MS) drops the entries, and
+  // any Google answer they hold, whose row is gone.
+  let appSweptAt = -Infinity
+  function sweepApps () {
+    const t = now()
+    appSweptAt = t
+    for (const [id, entry] of apps) {
+      if (entry.expiresAt <= t || store.get(id) === null) forgetApp(id)
+      else expireRedeem(entry, t)
+    }
+  }
+
+  // R past its window is spent, and the Google answer it guarded goes with it.
+  function expireRedeem (entry, t) {
+    if (entry.redeem === null || entry.redeemUntil > t) return
+    entry.redeem = null
+    entry.google = null
+  }
+
+  // The map is keyed by sha256(V), whose timing says nothing about V; the
+  // comparison that grants the row is constant time.
+  function appRow (req) {
+    const proof = linkProof(req)
+    const id = proof === null ? undefined : appByProof.get(proof)
+    if (id === undefined || !appOwns(id, proof)) throw refuse('expirado')
+    const row = store.get(id)
+    if (row === null) {
+      forgetApp(id)
+      throw refuse('expirado')
+    }
+    return row
+  }
+
+  // An app row past the callback also needs R (x-varanda-redeem); `spend`
+  // (finish) makes it single use whatever the outcome. The Google identity
+  // is bound to the row only here, so a callback completed by someone else
+  // writes nothing under their subject until the code is redeemed.
+  function redeemed (req, row, spend) {
+    const entry = apps.get(row.id)
+    if (entry !== undefined) expireRedeem(entry, now())
+    if (entry === undefined || entry.redeem === null || !redeemMatches(header(req, REDEEM_HEADER), entry.redeem)) throw refuse('expirado')
+    if (spend) entry.redeem = null
+    if (entry.google === null) return row
+    const google = entry.google
+    entry.google = null
+    try {
+      return store.putGoogle(row.id, google)
+    } catch (err) {
+      throw fromStore(err)
+    } finally {
+      // putGoogle may have dropped this subject's other rows for its cap.
+      sweepApps()
+    }
+  }
+
+  // The cookie clearing of the web flow; an app row never had a cookie.
+  function clearCookie (row) {
+    return apps.has(row.id) ? undefined : { 'Set-Cookie': cookieHeader(row.id, 0) }
   }
 
   function proof (fields, signature) {
@@ -735,8 +914,8 @@ function createAccountServer ({
   // gone is stale; one held by the same member (a retry) is taken over by
   // the caller only once the new row exists; a live row of another member,
   // or one with a finish in flight, keeps it. `cookie` is the link cookie
-  // of the request (or null).
-  function reserveInvite (member, code, cookie) {
+  // of the request (or null), `proof` the appProof its V proves (or null).
+  function reserveInvite (member, code, cookie, proof) {
     if (typeof code !== 'string') throw refuse('convite-obrigatorio')
     if (!CODE_RE.test(code)) throw refuse('convite-invalido')
     const id = inviteId(code)
@@ -755,7 +934,8 @@ function createAccountServer ({
     // naming that very row is the bearer proof of owning it (an outsider
     // with only the code and the public key has no cookie), so its own
     // browser may start over, for instance with another Google account.
-    const owner = cookie === old.id
+    // For an app row, V is that bearer proof.
+    const owner = cookie === old.id || appOwns(old.id, proof)
     if (!owner && (old.phase !== 'reserve' || typeof old.sub === 'string')) throw refuse('convite-invalido')
     return { id, takeover: old.id }
   }
@@ -764,12 +944,24 @@ function createAccountServer ({
     configured()
     const member = memberParam(body.member)
     const username = usernameParam(body.username)
+    const app = isAppRequest(req)
+    const proof = app ? linkProof(req) : null
+    if (app) {
+      if (!isAppProof(body.appProof)) throw refuse('pedido-invalido')
+      sweepApps()
+      // A live row already answers to this appProof: only the holder of its
+      // V may start over with it.
+      if (appByProof.has(body.appProof) && !safeEqual(proof ?? '', body.appProof)) throw refuse('pedido-invalido')
+    }
+    // The live app row the request's V owns: starting over abandons it.
+    const ownedId = proof === null ? undefined : appByProof.get(proof)
+    const superseded = ownedId !== undefined && appOwns(ownedId, proof) ? ownedId : null
     let reserved = null
     if (inviting) {
       // A linked key never reaches the sidecar: store.start refuses it.
       if (store.status(member).linked) throw refuse('conta-vinculada')
       if (!invites.available()) throw refuse('indisponivel')
-      reserved = reserveInvite(member, body.invite, cookieId(req))
+      reserved = reserveInvite(member, body.invite, cookieId(req), proof)
     }
     let row
     try {
@@ -780,8 +972,26 @@ function createAccountServer ({
     }
     if (inviting) {
       const old = reserved.takeover
-      if (old !== null && !finishing.has(old)) store.dropPending(old)
+      if (old !== null && !finishing.has(old)) {
+        store.dropPending(old)
+        forgetApp(old)
+      }
       held.set(reserved.id, { pendingId: row.id, expiresAt: row.expiresAt })
+    }
+    if (superseded !== null) {
+      // Its Google page dies with it (forgetApp drops the state), so a late
+      // completion of the old page cannot bind an identity no V can redeem.
+      const old = store.get(superseded)
+      if (old !== null && !finishing.has(superseded)) {
+        release(old)
+        store.dropPending(superseded)
+      }
+      forgetApp(superseded)
+    }
+    if (app) {
+      apps.set(row.id, { proof: body.appProof, state: row.state, expiresAt: row.expiresAt, redeem: null, redeemUntil: 0, google: null })
+      appByProof.set(body.appProof, row.id)
+      return send(res, 200, { nonce: row.nonce })
     }
     send(res, 200, { nonce: row.nonce }, { 'Set-Cookie': cookieHeader(row.id) })
   }
@@ -805,6 +1015,7 @@ function createAccountServer ({
     }
     sweep(states)
     states.set(row.state, { id: row.id, expiresAt: row.expiresAt })
+    if (apps.has(row.id)) rememberAppState(row.state, row.expiresAt + COOKIE_MAX_AGE_S * 1000)
     const authorizeUrl = google.authorizeUrl({ state: row.state, codeChallenge: codeChallenge(row.verifier) })
     send(res, 200, { authorizeUrl })
   }
@@ -813,19 +1024,31 @@ function createAccountServer ({
   // token endpoint is called; a mismatch sends the browser back with
   // ?conta=erro and nothing is exchanged (and charges no quota). Nothing
   // from Google (code, error, sub, e-mail) is ever put in the redirect.
+  // An app row has no cookie: the single-use state alone names it, every
+  // outcome returns to the app return, and 'ok' carries the redeem code R
+  // instead of binding the Google answer to the row (see `apps`).
   async function callback (req, res, url) {
     configured()
-    const back = (outcome) => {
-      log({ event: 'callback', reason: outcome })
-      redirect(res, origin + '/?conta=' + outcome)
-    }
-    const id = cookieId(req)
     const state = url.searchParams.get('state')
     const entry = typeof state === 'string' && TOKEN_RE.test(state) ? states.get(state) : undefined
+    const known = entry !== undefined && apps.has(entry.id)
+    // A dead app state (superseded, taken over, expired, spent) names no row
+    // but still returns to the app, with 'erro' and no code.
+    const app = known || (entry === undefined && typeof state === 'string' && TOKEN_RE.test(state) && appStates.get(state)?.expiresAt > now())
+    const to = (outcome) => (app ? accountReturnUrl(origin, outcome) : origin + '/?conta=' + outcome)
+    const clear = (id) => (app ? {} : { 'Set-Cookie': cookieHeader(id, 0) })
+    const back = (outcome) => {
+      log({ event: 'callback', reason: outcome })
+      redirect(res, to(outcome))
+    }
+    const id = known ? entry.id : app ? null : cookieId(req)
     if (id === null || entry === undefined || entry.id !== id) return back('erro')
     states.delete(state)
     const row = store.get(id)
-    if (row === null || row.state !== state || row.phase !== 'finish') return back('erro')
+    if (row === null || row.state !== state || row.phase !== 'finish') {
+      if (app) forgetApp(id)
+      return back('erro')
+    }
     // From here every exit short of putGoogle frees the row's invite, so a
     // fresh start can take the code.
     const out = (outcome) => {
@@ -845,8 +1068,9 @@ function createAccountServer ({
     if (store.isFull() && !store.status(row.member).linked) {
       release(row)
       store.dropPending(id)
+      forgetApp(id)
       log({ event: 'lista-de-espera' })
-      return redirect(res, origin + '/?conta=lista-de-espera', { 'Set-Cookie': cookieHeader(id, 0) })
+      return redirect(res, to('lista-de-espera'), clear(id))
     }
     // Invite-only: a new member reaches the token exchange only with a live
     // reservation on a usable code, so nothing from Google is collected for
@@ -865,15 +1089,36 @@ function createAccountServer ({
       if (why !== null) {
         release(row)
         store.dropPending(id)
+        forgetApp(id)
         log({ event: 'convite', reason: why })
         const outcome = why === 'indisponivel' ? 'erro' : 'convite-invalido'
-        return redirect(res, origin + '/?conta=' + outcome, { 'Set-Cookie': cookieHeader(id, 0) })
+        return redirect(res, to(outcome), clear(id))
       }
     }
     const code = url.searchParams.get('code')
     if (typeof code !== 'string' || !PARAM_RE.test(code)) return out('erro')
     const result = await google.exchange({ code, codeVerifier: row.verifier })
     if (!result.ok) return out('erro')
+    if (app) {
+      const pendingApp = apps.get(id)
+      // The store may have expired or evicted the row during the exchange (an
+      // app row is unproven until Google answers): a code no V could redeem is
+      // never handed out, and the Google answer is not kept.
+      if (pendingApp === undefined || store.get(id) === null) {
+        forgetApp(id)
+        return out('erro')
+      }
+      const redeem = mintRedeem()
+      pendingApp.google = { sub: result.sub, email: result.email }
+      pendingApp.redeem = redeem.hash
+      pendingApp.redeemUntil = now() + APP_REDEEM_TTL_MS
+      // Keeps a start flood from evicting the row while the person returns
+      // to the app; the sub itself still waits here for R. The subject's
+      // MAX_PER_SUB cap may drop its older rows: their app state goes too.
+      for (const old of store.markAnswered(id, result.sub) || []) forgetApp(old)
+      log({ event: 'callback', reason: 'ok' })
+      return redirect(res, accountReturnUrl(origin, 'ok', redeem.code))
+    }
     try {
       store.putGoogle(id, { sub: result.sub, email: result.email })
     } catch {
@@ -882,9 +1127,27 @@ function createAccountServer ({
     back('ok')
   }
 
+  // The static page of the app return, for a browser that loaded it instead
+  // of the app's auth session capturing it. No configured() and no window
+  // of its own: it holds no secret of the server and calls nothing paid,
+  // and a refusal would strand the person on an error page. The global
+  // bucket still bounds it. The query (it may carry R) is never read,
+  // echoed or logged.
+  async function appReturn (res) {
+    const text = appReturnPage()
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': Buffer.byteLength(text),
+      ...BASE_HEADERS,
+      'Content-Security-Policy': APP_RETURN_CSP
+    })
+    res.end(text)
+  }
+
   async function pending (req, res) {
     configured()
-    const row = pendingRow(req)
+    let row = pendingRow(req)
+    if (apps.has(row.id)) row = redeemed(req, row, false)
     const body = { nonce: row.nonce, member: row.member, username: row.username }
     if (typeof row.sub === 'string') body.sub = row.sub
     send(res, 200, body)
@@ -893,7 +1156,8 @@ function createAccountServer ({
   async function finish (req, res, body) {
     configured()
     const signature = signatureParam(body.signature)
-    const row = pendingRow(req)
+    let row = pendingRow(req)
+    if (apps.has(row.id)) row = redeemed(req, row, true)
     if (typeof row.sub !== 'string') throw refuse('expirado')
     proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
     if (!limits.finish(row.member)) throw over()
@@ -930,7 +1194,8 @@ function createAccountServer ({
         store.dropPending(row.id)
         log({ event: 'convite', reason: why })
         const err = refuse('convite-invalido')
-        err.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
+        err.headers = clearCookie(row)
+        forgetApp(row.id)
         throw err
       }
     }
@@ -942,6 +1207,7 @@ function createAccountServer ({
   // queue, so an overlapping finish may turn this one into an e-mail update
   // that records no invite.
   async function finishRow (res, row, signature, mark) {
+    const clear = clearCookie(row)
     let result
     try {
       result = await store.finish(row.id, { signature }, issuer.keyPair, issuer.cert, association)
@@ -955,9 +1221,10 @@ function createAccountServer ({
       if (taken) store.dropPending(row.id)
       // A waitlist or invite refusal deleted the row too: clear the cookie
       // as on success, so a retry starts over instead of answering 'expirado'.
-      if (taken || routeErr.token === 'lista-de-espera' || routeErr.token === 'convite-invalido') routeErr.headers = { 'Set-Cookie': cookieHeader(row.id, 0) }
+      if (taken || routeErr.token === 'lista-de-espera' || routeErr.token === 'convite-invalido') routeErr.headers = clear
       throw routeErr
     }
+    forgetApp(row.id)
     log({ event: 'linked' })
     if (mark && row.invite !== null && store.inviteUsed(row.invite)) {
       try {
@@ -968,7 +1235,7 @@ function createAccountServer ({
       }
     }
     // The row is gone (C8): the cookie has nothing left to name.
-    send(res, 200, result, { 'Set-Cookie': cookieHeader(row.id, 0) })
+    send(res, 200, result, clear)
   }
 
   async function status (req, res, url) {
@@ -1160,12 +1427,15 @@ function createAccountServer ({
     // token, dedupe and caps bound it (./push-routes.js).
     if (pushRoutes !== null && pathname === '/push-event') return pushRoutes.handleRelay(req, res)
     if (!limits.global()) throw over()
+    if (now() - appSweptAt >= APP_SWEEP_MS) sweepApps()
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
+      if (pathname === APP_RETURN_PATH) return appReturn(res)
       if (pathname === '/account/pending') return pending(req, res)
       if (pathname === '/account/status') return status(req, res, url)
       if (pathname === '/account/invites/policy') return invitesPolicy(req, res)
@@ -1231,7 +1501,8 @@ function createAccountServer ({
 
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats() }
+  // appStats: counts of app rows and of those holding a Google answer.
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

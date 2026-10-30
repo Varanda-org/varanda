@@ -52,6 +52,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore, AI_ACTOR } = require('../lib/account/moderation-store')
 const { createAccountServer } = require('../lib/account/server')
+const { createGroupCheck } = require('../lib/account/group-check')
 const { SESSION_COOKIE, LOGIN_COOKIE } = require('../lib/account/mod-routes')
 const { createPostReader } = require('../lib/account/ai/read-post')
 const { openExemplarStore } = require('../lib/account/ai/exemplar-store')
@@ -316,6 +317,9 @@ test('e2e: AI triage decides a spam block that mod apply publishes; illegal and 
   const endpoints = await fakeGoogle(t)
   const googleFor = (p) => createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + p, endpoints })
   const server = createAccountServer({
+    // The same seeder confirms that an unlinked reported key is a served
+    // diary before a person's Bloquear (it serves the reported diaries).
+    groupCheck: createGroupCheck({ baseUrl: 'http://127.0.0.1:' + ws.port, token: TRIAGE_TOKEN }),
     association,
     origin: ORIGIN,
     google: googleFor('/account/callback'),

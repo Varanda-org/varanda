@@ -39,7 +39,10 @@ const { isUnsafe } = require('@varanda/core/lib/safe')
 const { MAX_TEXT, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
 
 const FILE = 'moderation.json'
-const VERSION = 1
+// v2 rows add `writer` and `group` (a report of a group message,
+// packages/core/lib/report.js 'varanda-report-v2'); a v1 file is read with
+// both null and rewritten as v2 by the next mutation.
+const VERSION = 2
 // Open reports waiting for a moderator. Decided ones are kept (retention is
 // issue #38) and do not count here, so deciding junk frees intake; they are
 // bounded by MAX_STORED_REPORTS instead.
@@ -66,6 +69,9 @@ const SEQ_MAX = MAX_LOG_BLOCKS - 1
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const STATUSES = ['aberta', 'bloquear', 'descartar']
 const DECISIONS = ['bloquear', 'descartar']
+// What a 'bloquear' decision blocks: the author's diary, or (group reports
+// only) the group root key.
+const BLOCK_TARGETS = ['diario', 'grupo']
 
 function fail (code) {
   const err = new Error(code)
@@ -143,7 +149,12 @@ function emptyState () {
 const ID_RE = /^[A-Za-z0-9_-]{22}$/
 const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado']
 const EVENT_KEYS = ['at', 'by', 'action', 'member', 'reportId', 'changeId', 'seq']
-const REPORT_KEYS = ['id', 'at', 'kind', 'target', 'seq', 'quote', 'reporter', 'reason', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
+const REPORT_KEYS_V1 = ['id', 'at', 'kind', 'target', 'seq', 'quote', 'reporter', 'reason', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
+const REPORT_KEYS_V2_EARLY = [...REPORT_KEYS_V1, 'writer', 'group']
+// `blocked`: which key a 'bloquear' decision blocked ('diario' | 'grupo'),
+// null otherwise and for rows written before the field existed (those only
+// ever blocked the diary).
+const REPORT_KEYS = [...REPORT_KEYS_V2_EARLY, 'blocked']
 const CHANGE_KEYS = ['id', 'op', 'member', 'by', 'at', 'reportIds', 'claimedAt']
 
 function exactKeys (obj, keys) {
@@ -159,12 +170,21 @@ function validId (id) {
 // row this module wrote and must never be carried into a rewrite.
 function validReportRow (id, r) {
   if (!isPlainObject(r) || !exactKeys(r, REPORT_KEYS)) return false
+  if (r.writer === null) {
+    if (r.group !== null) return false
+  } else if (!isLowerHex(r.writer, 32) || !isLowerHex(r.group, 32) || r.seq === null) {
+    return false
+  }
   if (r.id !== id || !validId(id) || !isCanonicalIso(r.at)) return false
   if (!isLowerHex(r.target, 32) || !isLowerHex(r.reporter, 32) || r.reporter === r.target) return false
   if (r.seq === null) {
     if (r.kind !== 'account' || r.quote !== '') return false
   } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
     return false
+  }
+  if (r.blocked !== null) {
+    if (r.status !== 'bloquear' || !BLOCK_TARGETS.includes(r.blocked)) return false
+    if (r.blocked === 'grupo' && r.group === null) return false
   }
   if (!REASONS.includes(r.reason)) return false
   if (!boundedText(r.text, TEXT_MAX, false) || !boundedText(r.quote, QUOTE_MAX, true)) return false
@@ -204,7 +224,7 @@ function validEvent (e) {
 // 'indisponivel', so no later mutation can rewrite the file without it.
 function fromJson (obj, association) {
   const bad = () => new Error('moderação inválida')
-  if (!isPlainObject(obj) || !exactKeys(obj, ['v', 'reports', 'pending', 'published', 'events']) || obj.v !== VERSION) throw bad()
+  if (!isPlainObject(obj) || !exactKeys(obj, ['v', 'reports', 'pending', 'published', 'events']) || (obj.v !== 1 && obj.v !== VERSION)) throw bad()
   if (!isPlainObject(obj.reports) || !Array.isArray(obj.pending) || !Array.isArray(obj.events)) throw bad()
   if (obj.pending.length > MAX_PENDING || obj.events.length > MAX_EVENTS) throw bad()
   const p = obj.published
@@ -217,8 +237,15 @@ function fromJson (obj, association) {
   }
   const reports = dict()
   for (const [id, r] of Object.entries(obj.reports)) {
-    if (!validReportRow(id, r)) throw bad()
-    reports[id] = { ...r }
+    let row = r
+    if (obj.v === 1) {
+      if (!isPlainObject(r) || !exactKeys(r, REPORT_KEYS_V1)) throw bad()
+      row = { ...r, writer: null, group: null, blocked: null }
+    } else if (isPlainObject(r) && exactKeys(r, REPORT_KEYS_V2_EARLY)) {
+      row = { ...r, blocked: null }
+    }
+    if (!validReportRow(id, row)) throw bad()
+    reports[id] = { ...row }
   }
   const ids = new Set()
   for (const c of obj.pending) {
@@ -271,6 +298,11 @@ function netBlockedCount (s) {
     else set.delete(c.member)
   }
   return set.size
+}
+
+// The key a 'bloquear' row blocked.
+function blockedKey (r) {
+  return r.blocked === 'grupo' ? r.group : r.target
 }
 
 function lastIndexFor (changes, member) {
@@ -382,11 +414,16 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return { change, kind: 'novo' }
   }
 
-  function add ({ reporter, target, seq = null, reason, text = '', quote = '', signature, nonce } = {}) {
+  function add ({ reporter, target, seq = null, writer = null, group = null, reason, text = '', quote = '', signature, nonce } = {}) {
     return enqueue(() => {
       usable()
       if (!isLowerHex(reporter, 32) || !isLowerHex(target, 32) || reporter === target) throw fail('pedido-invalido')
       if (seq !== null && !(Number.isInteger(seq) && seq >= 1 && seq <= SEQ_MAX)) throw fail('pedido-invalido')
+      if (writer === null) {
+        if (group !== null) throw fail('pedido-invalido')
+      } else if (!isLowerHex(writer, 32) || !isLowerHex(group, 32) || seq === null) {
+        throw fail('pedido-invalido')
+      }
       if (!REASONS.includes(reason)) throw fail('pedido-invalido')
       if (!boundedText(text, TEXT_MAX, false)) throw fail('pedido-invalido')
       if (!boundedText(quote, QUOTE_MAX, true)) throw fail('pedido-invalido')
@@ -395,10 +432,12 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) throw fail('pedido-invalido')
 
       // A retry of an add that already landed answers the same row, even
-      // when the store is full or the reporter is at its daily cap.
+      // when the store is full or the reporter is at its daily cap. The
+      // writer is part of the key: a diary post and a group message share
+      // seq numbers, and so do two writer cores.
       const rows = Object.values(state.reports)
       for (const r of rows) {
-        if (r.status === 'aberta' && r.reporter === reporter && r.target === target && r.seq === seq) {
+        if (r.status === 'aberta' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq) {
           return { report: copyReport(r), duplicate: true }
         }
       }
@@ -428,7 +467,10 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         status: 'aberta',
         decidedBy: null,
         decidedAt: null,
-        note: ''
+        note: '',
+        writer,
+        group,
+        blocked: null
       }
       const next = cloneState(state)
       next.reports[report.id] = report
@@ -440,8 +482,8 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   // 'aberta': oldest first (legal deadlines run from the oldest report,
   // docs/design.md "Moderação e obrigações legais"); 'decidida': newest
   // decision first. `exclude` (a member key) leaves out the cases about that
-  // member or filed from it BEFORE the cut at `limit`, so `truncated` counts
-  // only what the caller may see.
+  // member or filed from it BEFORE the cut at
+  // `limit`, so `truncated` counts only what the caller may see.
   function list ({ status = 'aberta', limit = LIST_DEFAULT, exclude = null } = {}) {
     usable()
     if (status !== 'aberta' && status !== 'decidida') throw fail('pedido-invalido')
@@ -466,7 +508,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   }
 
   // -> { report, change | null }. 'descartar' never touches pending changes.
-  function decide (id, { decision, by, note = '' } = {}) {
+  // `block` 'grupo' (a group report only) blocks the group root key instead
+  // of the author's diary.
+  function decide (id, { decision, by, note = '', block = 'diario' } = {}) {
     return enqueue(() => {
       usable()
       if (typeof id !== 'string' || !has(state.reports, id) || state.reports[id].status !== 'aberta') {
@@ -474,19 +518,22 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       }
       if (!DECISIONS.includes(decision) || !validBy(by)) throw fail('pedido-invalido')
       if (!boundedText(note, NOTE_MAX, true)) throw fail('pedido-invalido')
+      if (!BLOCK_TARGETS.includes(block)) throw fail('pedido-invalido')
+      if (block === 'grupo' && state.reports[id].group === null) throw fail('pedido-invalido')
+      const blockKey = block === 'grupo' ? state.reports[id].group : state.reports[id].target
       const before = netBlockedCount(state)
       const next = cloneState(state)
-      const report = { ...state.reports[id], status: decision, decidedBy: by, decidedAt: iso(now()), note }
+      const report = { ...state.reports[id], status: decision, decidedBy: by, decidedAt: iso(now()), note, blocked: decision === 'bloquear' ? block : null }
       next.reports[id] = report
       event(next, { by, action: decision, reportId: id })
       let change = null
       if (decision === 'bloquear') {
-        const r = setIntent(next, report.target, true, by, [id], 'pedido')
+        const r = setIntent(next, blockKey, true, by, [id], 'pedido')
         change = r.change
         if (r.kind === 'igual') {
           // Already blocked (or about to be): the report still joins the
           // member's last block change while the operator has not pulled it.
-          const i = lastIndexFor(next.pending, report.target)
+          const i = lastIndexFor(next.pending, blockKey)
           if (i !== -1 && next.pending[i].op === 'block' && next.pending[i].claimedAt === null) {
             const c = next.pending[i]
             next.pending[i] = { ...c, reportIds: [...c.reportIds, id] }
@@ -652,18 +699,35 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return state.published.moderatorDate
   }
 
-  // The published list, sorted, each member with its 'bloquear' report ids.
+  // Every key a 'bloquear' row blocked as a group root, over all stored
+  // rows (not a listing window), so the panel labels an old group block
+  // 'grupo' too.
+  function groupKeys () {
+    usable()
+    const groups = new Set()
+    for (const r of Object.values(state.reports)) {
+      if (r.status === 'bloquear' && r.blocked === 'grupo') groups.add(r.group)
+    }
+    return groups
+  }
+
+  // The published list, sorted, each member with its 'bloquear' report ids
+  // and `kind`: 'grupo' when a report blocked it as a group root, else
+  // 'conta' (a key blocked outside the panel included).
   function blocked () {
     usable()
     const byMember = new Map()
     for (const r of Object.values(state.reports)) {
       if (r.status !== 'bloquear') continue
-      if (!byMember.has(r.target)) byMember.set(r.target, [])
-      byMember.get(r.target).push(r.id)
+      const member = blockedKey(r)
+      if (!byMember.has(member)) byMember.set(member, [])
+      byMember.get(member).push(r.id)
     }
+    const groups = groupKeys()
     return [...blockedSet(state.published.snapshot)].sort().map((member) => ({
       member,
-      reportIds: byMember.get(member) || []
+      reportIds: byMember.get(member) || [],
+      kind: groups.has(member) ? 'grupo' : 'conta'
     }))
   }
 
@@ -734,12 +798,12 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     }
     if (pendingBlock || blockedSet(state.published.snapshot).has(member)) return false
     for (const r of Object.values(state.reports)) {
-      if (r.target === member && r.status === 'bloquear') return true
+      if (r.status === 'bloquear' && blockedKey(r) === member) return true
     }
     return false
   }
 
-  return { add, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, stats, exportRows, humanReversed }
+  return { add, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
 }
 
 module.exports = {

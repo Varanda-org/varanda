@@ -18,13 +18,13 @@ export const HELP = Object.freeze({
       PEEK_RULE_TEXT,
       'Essas publicações não ficam guardadas neste aparelho: ficam só enquanto a aba está aberta.',
       'Em pesquisar por assunto, você procura palavras nas publicações públicas, inclusive de quem você segue.',
-      'A Espiadinha só funciona na versão web, no site da associação.'
+      'A Espiadinha funciona no site da associação e no app ligado à instalação da associação. Não funciona com uma configuração manual.'
     ])
   }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
-      'Siga pessoas para ver as publicações delas na Rua. Na versão web, dá para encontrar alguém pelo nome ou pelo @nome.',
+      'Siga pessoas para ver as publicações delas na Rua. No site da associação e no app ligado à instalação, dá para encontrar alguém pelo nome ou pelo @nome.',
       'No lugar do @nome também vale o código da pessoa, com 64 letras e números.',
       'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
       'No topo, um só campo encontra pessoas: digite um nome ou @nome para buscar, ou cole o código da pessoa para seguir direto. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
@@ -36,7 +36,7 @@ export const HELP = Object.freeze({
       'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
       'O Varanda não mostra contagem nem lista de seguidores.',
       'Quando há algo novo, a aba ganha um ponto, nunca um número.',
-      'Os Avisos só funcionam na versão web, no site da associação.'
+      'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
     ])
   }),
   diario: Object.freeze({
@@ -144,6 +144,16 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Esta conta não tem vínculo com uma conta Google, então o aceite fica registrado só neste aparelho.',
       'Para registrar também na conta, vincule uma conta Google em Ajustes → Conta e @nome.'
+    ])
+  }),
+  carteira: Object.freeze({
+    title: 'Sobre a conta de pagamentos',
+    paragraphs: Object.freeze([
+      'A conta de pagamentos é opcional: a Varanda continua funcionando igual sem ela. Nas próximas versões, ela vai servir para receber e enviar dinheiro por Pix.',
+      'Para abrir a conta, a lei pede uma verificação de identidade, feita pela Hodle, empresa parceira, com seus dados, a foto de um documento e uma selfie. Só pessoas com 18 anos ou mais podem abrir.',
+      'Seus dados e fotos vão para a Hodle. A Varanda guarda só os identificadores da conta e da carteira e o estado da verificação, nunca sua senha de 6 dígitos, seu CPF, suas fotos nem seu endereço.',
+      'A conta criada na Hodle não pode ser apagada depois.',
+      'O dinheiro fica em BRLA, uma moeda digital que vale 1 real, numa carteira em seu nome. A Varanda não é banco e o saldo não rende juros. Quando enviar dinheiro estiver disponível, a Varanda poderá cobrar uma taxa própria, sempre mostrada antes de você confirmar.'
     ])
   })
 })

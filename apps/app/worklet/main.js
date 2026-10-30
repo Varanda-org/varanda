@@ -3,9 +3,14 @@
 
 // The Varanda node inside the app: a Bare worklet (react-native-bare-kit)
 // started by src/client/native.js with one JSON argument
-//   { dataDir, association, bootstrap, dhtHost, allowPublicDht, recover, diagnostics }
-// It runs ONE node session (@varanda/core/lib/session) over the worklet IPC,
-// framed as docs/rpc.md section 3 (4-byte big-endian length + UTF-8 JSON).
+//   { kind, dataDir, association, bootstrap, dhtHost, allowPublicDht, recover,
+//     diagnostics, seederUrl, cacheDir }
+// It runs ONE node session over the worklet IPC, framed as docs/rpc.md
+// section 3 (4-byte big-endian length + UTF-8 JSON). kind 'core' (the
+// default, also when kind is absent) is @varanda/core/lib/session on the
+// manifest diary; kind 'web' is the browser node's session on file storage
+// (worklet/web-node.js: seederUrl, cacheDir; bootstrap, dhtHost,
+// allowPublicDht and recover do not apply).
 // Packed by scripts/pack-worklet.sh (bare-pack --linked); its native addons
 // are linked into the app by scripts/link-addons.sh (bare-link).
 
@@ -91,6 +96,11 @@ function main () {
     console.error('varanda worklet: start argument missing')
     return close()
   }
+  if (args.kind === 'web') return mainWeb(args)
+  if (args.kind !== undefined && args.kind !== 'core') {
+    console.error('varanda worklet: invalid configuration: kind')
+    return close()
+  }
   try {
     session = createSession({
       dataDir: args.dataDir,
@@ -138,6 +148,45 @@ function main () {
 
   Bare.on('suspend', () => { session.suspend().catch(() => {}) })
   Bare.on('resume', () => { session.resume() })
+}
+
+// kind 'web': the same framed dispatcher over worklet/web-node.js. The
+// web session has no suspend/resume (its lease redials), so the Bare
+// suspend/resume events change nothing here.
+function mainWeb (args) {
+  // WebCrypto (subtle.digest) for web-member's session and member-ops,
+  // before any of them loads.
+  require('bare-crypto/global')
+  const { createWebNode } = require('./web-node')
+  try {
+    session = createWebNode(args, {
+      onInternalError: (err) => console.error('varanda worklet: internal error', err && err.stack ? err.stack : err)
+    })
+  } catch (err) {
+    console.error('varanda worklet: invalid configuration:', err && err.message)
+    return close()
+  }
+
+  const handlers = { ...session.handlers, 'node.close': nodeClose }
+  dispatcher = createServerDispatcher({
+    handlers,
+    token: null,
+    send: (message) => {
+      send(message)
+      if (closed && message.ok === true && message.result && message.result.closed === true) return finish()
+    },
+    onProtocolError: close
+  })
+  session.attach(dispatcher.emit)
+
+  const decoder = createFrameDecoder({
+    max: MAX_REQUEST,
+    onMessage: (obj) => { if (!closing) dispatcher.receive(obj) },
+    onError: close
+  })
+  IPC.on('data', (chunk) => { if (!closing) decoder.push(chunk) })
+  IPC.on('end', close)
+  IPC.on('error', close)
 }
 
 main()

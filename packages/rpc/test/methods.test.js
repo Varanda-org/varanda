@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -17,19 +17,25 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.delete',
-    'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start',
-    'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.meta', 'group.post', 'group.read', 'group.requests',
+    'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
+    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
+    'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
+    'cert.add', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.join', 'group.leave',
+    'group.meta', 'group.post', 'identity.clear', 'identity.create', 'identity.forget', 'identity.install',
+    'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
 test('no-param methods reject any key', (t) => {
-  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close']) {
+  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close', 'identity.clear', 'identity.status',
+    'identity.reset', 'identity.forget', 'identity.sessionSaved']) {
     ok(t, m, {}, {})
     bad(t, m, { x: 1 })
     // No method takes node configuration.
@@ -156,6 +162,54 @@ test('age.sign', (t) => {
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'age.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
+})
+
+test('wallet.sign', (t) => {
+  const base = { action: 'optin', nonce: 'n'.repeat(43), op: {} }
+  t.absent(isMutating('wallet.sign'))
+  ok(t, 'wallet.sign', base, base)
+  for (const action of ['kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap']) {
+    ok(t, 'wallet.sign', { ...base, action })
+  }
+  ok(t, 'wallet.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'wallet.sign', { action: 'swap', nonce: base.nonce, op: { quoteId: 'q-1', from: 'USDC', to: 'BRLA', amount: 2500000 } })
+  ok(t, 'wallet.sign', { ...base, op: { s: 'x'.repeat(512), n: Number.MAX_SAFE_INTEGER, z: 0, e: '', u: 'ção 😀' } })
+  const max = {}
+  for (let i = 0; i < 16; i++) max['k' + i] = i
+  ok(t, 'wallet.sign', { ...base, op: max })
+  const nullProto = Object.create(null)
+  nullProto.amount = 1
+  ok(t, 'wallet.sign', { ...base, op: nullProto })
+  bad(t, 'wallet.sign', {})
+  for (const k of ['action', 'nonce', 'op']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'wallet.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association, the hash or the
+  // bytes, and never hands the PIN to the node.
+  for (const k of ['member', 'association', 'opHash', 'payload', 'bytes', 'key', 'pin', 'walletPin']) {
+    bad(t, 'wallet.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['OPTIN', 'session', 'swap ', '', null, 1]) bad(t, 'wallet.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'wallet.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']) {
+    bad(t, 'wallet.sign', { ...base, op: { amount: 1, [key]: '1234' } }, 'op key ' + key)
+  }
+  const tooMany = {}
+  for (let i = 0; i < 17; i++) tooMany['k' + i] = i
+  const ops = [
+    null, [], 'x', 1, new Map(), tooMany,
+    { Amount: 1 }, { a_b: 1 }, { '': 1 }, { ['a' + 'b'.repeat(32)]: 1 }, { [Symbol('s')]: 1 },
+    { s: 'x'.repeat(513) }, { s: 'a\nb' }, { s: '\u007f' }, { s: '\u0085' }, { s: '\ud800' }, { s: 'a\udc00' },
+    { n: -1 }, { n: 1.5 }, { n: 2 ** 53 }, { n: true }, { n: null }, { n: {} }, { n: [] }
+  ]
+  for (const op of ops) bad(t, 'wallet.sign', { ...base, op }, 'op ' + typeof op)
+  const getter = {}
+  Object.defineProperty(getter, 'amount', { enumerable: true, get () { return 1 } })
+  bad(t, 'wallet.sign', { ...base, op: getter }, 'op accessor')
 })
 
 test('push.sign', (t) => {
@@ -495,6 +549,165 @@ test('follow.*', (t) => {
   }
 })
 
+test('report.sign: writer and group (a group post)', (t) => {
+  const nonce = 'n'.repeat(43)
+  const WRITER = 'cd'.repeat(32)
+  const base = { nonce, target: KEY, seq: 3, reason: 'spam' }
+  const full = { ...base, writer: WRITER, group: KEY }
+  ok(t, 'report.sign', full, { ...full, text: '', quote: '' })
+  ok(t, 'report.sign', { ...full, quote: 'citado' })
+  for (const [label, p] of [['writer only', { ...base, writer: WRITER }], ['group only', { ...base, group: KEY }]]) {
+    bad(t, 'report.sign', p, label)
+  }
+  const noSeq = { nonce, target: KEY, reason: 'spam', writer: WRITER, group: KEY }
+  bad(t, 'report.sign', noSeq, 'writer without seq')
+  t.is(validateParams('report.sign', { ...base, writer: WRITER }).message, 'writer só com seq e group')
+  t.is(validateParams('report.sign', { ...base, group: KEY }).message, 'group só com writer')
+  for (const writer of [WRITER.toUpperCase(), WRITER.slice(1), 1, null]) bad(t, 'report.sign', { ...full, writer }, 'writer ' + writer)
+  for (const group of [KEY.toUpperCase(), KEY.slice(1), 1, null]) bad(t, 'report.sign', { ...full, group }, 'group ' + group)
+})
+
+test('group.create', (t) => {
+  t.ok(isMutating('group.create'))
+  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open' })
+  ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval' })
+  ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open' })
+  bad(t, 'group.create', {})
+  bad(t, 'group.create', { name: 'Clube' })
+  bad(t, 'group.create', { join: 'open' })
+  bad(t, 'group.create', { name: '', join: 'open' })
+  bad(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open' })
+  for (const join of ['closed', 'Open', '', null, true]) bad(t, 'group.create', { name: 'Clube', join }, 'join ' + join)
+  bad(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'public' })
+})
+
+test('group.join and group.leave', (t) => {
+  for (const m of ['group.join', 'group.leave']) {
+    t.ok(isMutating(m))
+    ok(t, m, { group: KEY }, { group: KEY })
+    bad(t, m, {})
+    bad(t, m, { group: KEY.toUpperCase() })
+    bad(t, m, { group: KEY.slice(1) })
+    bad(t, m, { group: 1 })
+    bad(t, m, { group: KEY, extra: 1 })
+  }
+})
+
+test('group.post', (t) => {
+  t.ok(isMutating('group.post'))
+  const reply = { writer: KEY, seq: 4 }
+  ok(t, 'group.post', { group: KEY, text: 'oi' }, { group: KEY, text: 'oi' })
+  ok(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply }, { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply })
+  bad(t, 'group.post', { group: KEY, text: '' })
+  bad(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT + 1) })
+  bad(t, 'group.post', { text: 'oi' })
+  bad(t, 'group.post', { group: KEY })
+  for (const replyTo of [{ writer: KEY }, { seq: 1 }, { writer: KEY, seq: 0 }, { writer: KEY, seq: 1.5 }, { writer: 'x', seq: 1 }, { writer: KEY, seq: 1, extra: 1 }, KEY + ':1', null, []]) {
+    bad(t, 'group.post', { group: KEY, text: 'oi', replyTo }, 'replyTo ' + JSON.stringify(replyTo))
+  }
+  // The node computes `seen` from its own fold; a caller cannot pass it.
+  bad(t, 'group.post', { group: KEY, text: 'oi', seen: [] })
+})
+
+test('group.read', (t) => {
+  t.absent(isMutating('group.read'))
+  t.is(GROUP_LIMIT_DEFAULT, 30)
+  t.is(GROUP_LIMIT_MAX, 31)
+  const AT = '2026-10-28T12:00:00.000Z'
+  const cur = { at: AT, writer: KEY, seq: 9 }
+  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: 30 })
+  ok(t, 'group.read', { group: KEY, limit: 1 })
+  ok(t, 'group.read', { group: KEY, limit: 31, before: cur }, { group: KEY, limit: 31, before: cur })
+  bad(t, 'group.read', {})
+  bad(t, 'group.read', { group: KEY, limit: 0 })
+  bad(t, 'group.read', { group: KEY, limit: 32 })
+  bad(t, 'group.read', { group: KEY, limit: 1.5 })
+  for (const before of [{ at: AT, writer: KEY }, { at: AT, seq: 1 }, { writer: KEY, seq: 1 }, { at: '2026-10-28', writer: KEY, seq: 1 },
+    { at: AT, writer: KEY, seq: 0 }, { at: AT, writer: 'x', seq: 1 }, { at: AT, writer: KEY, seq: 1, extra: 1 }, 5, null, []]) {
+    bad(t, 'group.read', { group: KEY, before }, 'before ' + JSON.stringify(before))
+  }
+})
+
+test('group.list', (t) => {
+  t.absent(isMutating('group.list'))
+  ok(t, 'group.list', {}, { offset: 0, limit: 30 })
+  ok(t, 'group.list', { offset: 40, limit: 31 }, { offset: 40, limit: 31 })
+  bad(t, 'group.list', { offset: -1 })
+  bad(t, 'group.list', { offset: 1.5 })
+  bad(t, 'group.list', { limit: 0 })
+  bad(t, 'group.list', { limit: 32 })
+  bad(t, 'group.list', { group: KEY })
+})
+
+test('group.info', (t) => {
+  t.absent(isMutating('group.info'))
+  ok(t, 'group.info', { group: KEY }, { group: KEY })
+  bad(t, 'group.info', {})
+  bad(t, 'group.info', { group: 'x' })
+  bad(t, 'group.info', { group: KEY, limit: 1 })
+})
+
+test('group.members and group.requests', (t) => {
+  for (const m of ['group.members', 'group.requests']) {
+    t.absent(isMutating(m))
+    ok(t, m, { group: KEY }, { group: KEY, offset: 0, limit: GROUP_MEMBERS_LIMIT_MAX })
+    ok(t, m, { group: KEY, offset: 200, limit: 100 }, { group: KEY, offset: 200, limit: 100 })
+    ok(t, m, { group: KEY, limit: 1 })
+    bad(t, m, {})
+    bad(t, m, { group: KEY, limit: 0 })
+    bad(t, m, { group: KEY, limit: 101 })
+  }
+  bad(t, 'group.members', { group: KEY, offset: -1 })
+  bad(t, 'group.members', { group: KEY, offset: 1.5 })
+})
+
+test('group.admit, group.ban and group.admin', (t) => {
+  const OTHER = 'cd'.repeat(32)
+  for (const m of ['group.admit', 'group.ban', 'group.admin']) {
+    t.ok(isMutating(m))
+    ok(t, m, { group: KEY, member: OTHER, on: true }, { group: KEY, member: OTHER, on: true })
+    ok(t, m, { group: KEY, member: OTHER, on: false })
+    for (const k of ['group', 'member', 'on']) {
+      const p = { group: KEY, member: OTHER, on: true }
+      delete p[k]
+      bad(t, m, p, 'missing ' + k)
+    }
+    bad(t, m, { group: KEY, member: OTHER, on: 1 })
+    bad(t, m, { group: KEY, member: OTHER, on: 'true' })
+    bad(t, m, { group: KEY, member: 'x', on: true })
+    bad(t, m, { group: KEY, member: OTHER.toUpperCase(), on: true })
+    bad(t, m, { group: KEY, member: OTHER, on: true, extra: 1 })
+  }
+})
+
+test('group.hide', (t) => {
+  t.ok(isMutating('group.hide'))
+  const target = { writer: KEY, seq: 2 }
+  ok(t, 'group.hide', { group: KEY, target, on: true }, { group: KEY, target, on: true })
+  ok(t, 'group.hide', { group: KEY, target, on: false })
+  bad(t, 'group.hide', { group: KEY, target })
+  bad(t, 'group.hide', { group: KEY, on: true })
+  bad(t, 'group.hide', { group: KEY, target: KEY, on: true })
+  bad(t, 'group.hide', { group: KEY, target: { writer: KEY, seq: 0 }, on: true })
+  bad(t, 'group.hide', { group: KEY, target: { writer: KEY }, on: true })
+  bad(t, 'group.hide', { group: KEY, target, on: 'yes' })
+})
+
+test('group.meta', (t) => {
+  t.ok(isMutating('group.meta'))
+  ok(t, 'group.meta', { group: KEY, name: 'Novo' }, { group: KEY, name: 'Novo' })
+  ok(t, 'group.meta', { group: KEY, join: 'approval' }, { group: KEY, join: 'approval' })
+  ok(t, 'group.meta', { group: KEY, name: 'Novo', join: 'open' })
+  ok(t, 'group.meta', { group: KEY, name: 'x'.repeat(MAX_GROUP_NAME) })
+  bad(t, 'group.meta', {})
+  bad(t, 'group.meta', { group: KEY }, 'nothing to change')
+  bad(t, 'group.meta', { group: KEY, name: '' })
+  bad(t, 'group.meta', { group: KEY, name: 'x'.repeat(MAX_GROUP_NAME + 1) })
+  bad(t, 'group.meta', { group: KEY, join: 'closed' })
+  bad(t, 'group.meta', { group: KEY, name: null })
+  bad(t, 'group.meta', { group: KEY, name: 'a', visibility: 'private' })
+})
+
 test('follow.list', (t) => {
   ok(t, 'follow.list', {}, { offset: 0, limit: 100 })
   ok(t, 'follow.list', { offset: 4000, limit: 500 }, { offset: 4000, limit: 500 })
@@ -658,6 +871,64 @@ test('sync.start', (t) => {
   bad(t, 'sync.start', { once: false, timeoutMs: 5000 })
   bad(t, 'sync.start', { once: 'yes' })
   bad(t, 'sync.start', { once: true, bootstrap: ['x'] })
+})
+
+test('web-node host controls: mutating flags', (t) => {
+  for (const m of ['identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.sessionSaved', 'media.uploadFile']) {
+    t.ok(isMutating(m), m + ' mutating')
+  }
+  t.absent(isMutating('identity.status'), 'identity.status not mutating')
+  for (const m of ['follows.legacy', 'follows.confirmLegacy']) t.is(validateParams(m, {}).message, 'método desconhecido', m + ' not offered')
+})
+
+test('identity.install', (t) => {
+  const base = { prf: 'cd'.repeat(32), credentialId: 'AbC-_9', userId: KEY, rpId: 'varanda.org', resumed: false }
+  ok(t, 'identity.install', base, base)
+  ok(t, 'identity.install', { ...base, userId: '', resumed: true })
+  ok(t, 'identity.install', { ...base, credentialId: '~'.repeat(1024), rpId: 'a'.repeat(253) })
+  for (const k of Object.keys(base)) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'identity.install', p, 'missing ' + k)
+  }
+  for (const prf of ['CD'.repeat(32), 'cd'.repeat(31), 'cd'.repeat(33), 'zz'.repeat(32), '', 1, null, ['cd'.repeat(32)]]) {
+    bad(t, 'identity.install', { ...base, prf }, 'bad prf')
+  }
+  for (const credentialId of ['', 'a'.repeat(1025), 'a b', 'a\nb', 'a\u0000', 'é', 1, null]) {
+    bad(t, 'identity.install', { ...base, credentialId }, 'bad credentialId')
+  }
+  for (const userId of ['AB'.repeat(32), 'ab'.repeat(31), 'x', null, 0]) bad(t, 'identity.install', { ...base, userId }, 'bad userId')
+  for (const rpId of ['', 'a'.repeat(254), 1, null]) bad(t, 'identity.install', { ...base, rpId }, 'bad rpId')
+  for (const resumed of ['true', 1, 0, null]) bad(t, 'identity.install', { ...base, resumed }, 'bad resumed')
+  bad(t, 'identity.install', { ...base, secretKey: KEY })
+})
+
+test('media.uploadFile', (t) => {
+  const base = { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 1, height: 16384 }
+  ok(t, 'media.uploadFile', base, base)
+  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...base, mime })
+  ok(t, 'media.uploadFile', { ...base, name: 'f'.repeat(32) + '.bin' })
+  for (const k of Object.keys(base)) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'media.uploadFile', p, 'missing ' + k)
+  }
+  const hex = '0123456789abcdef0123456789abcdef'
+  const names = [
+    '', 1, null, '.bin', hex, hex + '.jpg', hex + '.BIN', hex.toUpperCase() + '.bin',
+    hex.slice(1) + '.bin', hex + '0.bin', '../' + hex.slice(3) + '.bin', '/' + hex.slice(1) + '.bin',
+    hex.slice(0, 16) + '/' + hex.slice(17) + '.bin', '..', hex + '.bin\n', hex + '.bin/', 'g' + hex.slice(1) + '.bin'
+  ]
+  for (const name of names) bad(t, 'media.uploadFile', { ...base, name }, 'bad name')
+  bad(t, 'media.uploadFile', { ...base, path: '/cache/' + base.name }, 'a path is refused')
+  const { name, ...rest } = base
+  bad(t, 'media.uploadFile', { ...rest, path: '/cache/' + name }, 'a path instead of a name is refused')
+  for (const mime of ['image/svg+xml', 'IMAGE/JPEG', 'video/mp4', '', 1]) bad(t, 'media.uploadFile', { ...base, mime }, 'bad mime')
+  for (const v of [0, 16385, 1.5, -1, '10', null]) {
+    bad(t, 'media.uploadFile', { ...base, width: v }, 'bad width')
+    bad(t, 'media.uploadFile', { ...base, height: v }, 'bad height')
+  }
+  bad(t, 'media.uploadFile', { ...base, bytes: 'x' })
 })
 
 test('unknown method and non-object params', (t) => {

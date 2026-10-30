@@ -16,6 +16,8 @@ const { openInvitesStore } = require('../account/invites-store')
 const { openPushStore } = require('../account/push-store')
 const { openAgeStore } = require('../account/age-store')
 const { createDidit } = require('../account/didit')
+const { createHodle, NETWORKS: HODLE_NETWORKS } = require('../account/hodle')
+const { openWalletStore } = require('../account/wallet-store')
 const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
@@ -23,6 +25,7 @@ const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
 const { createUsageStats } = require('../account/usage-stats')
 const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
+const { createGroupCheck } = require('../account/group-check')
 const { localDay } = require('@varanda/core/lib/activity')
 const {
   DEFAULT_HOST,
@@ -102,6 +105,16 @@ const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
 const DIDIT_DAILY_MAX = 100000
+// The client's own key shape (../account/hodle.js), so a key readEnv lets
+// through is never one createHodle refuses at start.
+const HODLE_KEY_RE = /^hodle_(live|test)_[\x21-\x7e]{8,200}$/
+// This release ships the first two modes of wallet-routes.js MODES: cadastro
+// (subaccount and KYC only) and carteira (adds wallet-create with the
+// member's PIN), the latter only once Hodle confirmed in writing that
+// member-chosen PINs work on individual subaccounts.
+const HODLE_MODES = Object.freeze(['cadastro', 'carteira'])
+const HODLE_DAILY_DEFAULT = 100
+const HODLE_DAILY_MAX = 100000
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -429,22 +442,30 @@ function statusLines (s) {
 // the Bearer token of the seeder's loopback post route: the seeder service
 // reads the SAME variable (deploy/seeder/*.env), so both must be given the
 // same 64-hex value.
+// The seeder's loopback HTTP listener (default DEFAULT_SEEDER_HTTP), without
+// a trailing slash. Read even with the AI off: a group block is confirmed
+// against its public /index/group route (../account/group-check.js).
+function readSeederHttp (env) {
+  const seederHttp = env.VARANDA_SEEDER_HTTP === undefined || env.VARANDA_SEEDER_HTTP === '' ? DEFAULT_SEEDER_HTTP : env.VARANDA_SEEDER_HTTP
+  const m = typeof seederHttp === 'string' ? SEEDER_HTTP_RE.exec(seederHttp) : null
+  const port = m === null ? 0 : Number(m[2])
+  if (port < 1 || port > 65535) throw new UsageError('VARANDA_SEEDER_HTTP inválido')
+  return seederHttp.replace(/\/$/, '')
+}
+
 function readTriageEnv (env, dataDir) {
   const ai = env.VARANDA_AI
   if (ai === undefined || ai === '') return null
   if (typeof ai !== 'string' || !Object.hasOwn(AI_MODES, ai)) throw new UsageError('VARANDA_AI inválido')
   const token = env.VARANDA_TRIAGE_TOKEN
   if (typeof token !== 'string' || !HEX64_RE.test(token)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
-  const seederHttp = env.VARANDA_SEEDER_HTTP === undefined || env.VARANDA_SEEDER_HTTP === '' ? DEFAULT_SEEDER_HTTP : env.VARANDA_SEEDER_HTTP
-  const m = typeof seederHttp === 'string' ? SEEDER_HTTP_RE.exec(seederHttp) : null
-  const port = m === null ? 0 : Number(m[2])
-  if (port < 1 || port > 65535) throw new UsageError('VARANDA_SEEDER_HTTP inválido')
+  const seederHttp = readSeederHttp(env)
   let modelDir = env.VARANDA_AI_MODEL_DIR
   if (modelDir === undefined || modelDir === '') {
     modelDir = typeof dataDir === 'string' ? path.join(dataDir, AI_MODEL_DIR) : null
   }
   if (modelDir !== null && typeof modelDir !== 'string') throw new UsageError('VARANDA_AI_MODEL_DIR inválido')
-  return { mode: AI_MODES[ai], token, seederHttp: seederHttp.replace(/\/$/, ''), modelDir }
+  return { mode: AI_MODES[ai], token, seederHttp, modelDir }
 }
 
 // Read once, validated by shape only; no value is ever printed.
@@ -465,15 +486,25 @@ function readEnv (env, dataDir) {
   // above, an error exit 1 that never carries the value.
   const statsEmails = parseModEmails(env.VARANDA_STATS_EMAILS)
   if (statsEmails === null || statsEmails.some((e) => !modEmails.includes(e))) throw new Error('VARANDA_STATS_EMAILS inválido')
-  // Ignored while stats are off (as VARANDA_SEEDER_HTTP with VARANDA_AI
-  // off), so a leftover value never stops a service that does not use it.
+  // Ignored while stats are off, so a leftover value never stops a service
+  // that does not use it.
   let seederHealth = null
   if (statsEmails.length > 0) {
     seederHealth = parseSeederHealthUrl(env.VARANDA_SEEDER_HEALTH)
     if (seederHealth === null) throw new UsageError('VARANDA_SEEDER_HEALTH inválido')
   }
   const triage = readTriageEnv(env, dataDir)
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage, didit: readDiditEnv(env) }
+  const seederHttp = readSeederHttp(env)
+  // Read even with the AI off: a block of a group report needs the reported
+  // message, read through the seeder's token-gated loopback route
+  // (../account/group-check.js). Unset or '' leaves group blocks refused.
+  const tokenEnv = env.VARANDA_TRIAGE_TOKEN
+  let groupToken = null
+  if (tokenEnv !== undefined && tokenEnv !== '') {
+    if (typeof tokenEnv !== 'string' || !HEX64_RE.test(tokenEnv)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
+    groupToken = tokenEnv
+  }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit: readDiditEnv(env), hodle: readHodleEnv(env) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -498,6 +529,33 @@ function readDiditEnv (env) {
     dailyLimit = value
   }
   return { apiKey, workflowId, dailyLimit }
+}
+
+// The optional payments account with Hodle: off unless the API key is set,
+// and then every other VARANDA_HODLE_* is ignored. No value is ever echoed.
+function readHodleEnv (env) {
+  const apiKey = env.VARANDA_HODLE_API_KEY
+  if (apiKey === undefined || apiKey === '') return null
+  if (typeof apiKey !== 'string' || apiKey.length > MAX_SECRET || !HODLE_KEY_RE.test(apiKey)) {
+    throw new UsageError('VARANDA_HODLE_API_KEY inválido')
+  }
+  const network = optionalChoice(env.VARANDA_HODLE_NETWORK, HODLE_NETWORKS, 'polygon', 'VARANDA_HODLE_NETWORK inválido')
+  const mode = optionalChoice(env.VARANDA_HODLE_MODE, HODLE_MODES, 'cadastro', 'VARANDA_HODLE_MODE inválido')
+  let dailyLimit = HODLE_DAILY_DEFAULT
+  const raw = env.VARANDA_HODLE_DAILY_LIMIT
+  const text = typeof raw === 'string' ? raw.trim() : null
+  if (raw !== undefined && text !== '') {
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= 1 && value <= HODLE_DAILY_MAX)) throw new UsageError('VARANDA_HODLE_DAILY_LIMIT inválido')
+    dailyLimit = value
+  }
+  return { apiKey, network, mode, dailyLimit }
+}
+
+function optionalChoice (raw, choices, fallback, message) {
+  if (raw === undefined || raw === '') return fallback
+  if (typeof raw !== 'string' || !choices.includes(raw)) throw new UsageError(message)
+  return raw
 }
 
 // Builds and returns the triage worker, or null when it cannot run: a
@@ -597,7 +655,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig, didit: diditConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, hodle: hodleConfig } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -630,10 +688,12 @@ async function serve (flags, env) {
   let stopPushHeal = null
   let ages = null
   let stopAgeHeal = null
+  let wallets = null
+  let stopWalletHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, wallets)
     }
   })
   let listener = null
@@ -702,6 +762,17 @@ async function serve (flags, env) {
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    // The payments account (wallet.json), only with VARANDA_HODLE_API_KEY
+    // set. The routes log 'ligada' or 'desligada' themselves; an unreadable
+    // file is logged here and keeps the service up with the routes failing
+    // closed.
+    let hodle = null
+    if (hodleConfig !== null) {
+      hodle = createHodle({ apiKey: hodleConfig.apiKey, network: hodleConfig.network })
+      wallets = openWalletStore(flags.dataDir, { guard: () => lock.owned() })
+      if (!wallets.available()) log({ event: 'carteira', reason: 'indisponivel' })
+      stopWalletHeal = startHeal(wallets, 'carteira', log)
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -728,7 +799,8 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, maxConnections, ratePerSecond, burst })
+      const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -762,10 +834,12 @@ async function serve (flags, env) {
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
+    if (stopWalletHeal !== null) stopWalletHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
+    if (wallets !== null && wallets.available()) await wallets.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
     // skips the write, as closeIfOwned below does.
@@ -790,14 +864,15 @@ function storeUnavailable (log, stop) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push and age stores too: their next write must
-// not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null) {
+// stops. The terms, invites, push, age and wallet stores too: their next
+// write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, wallets = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (invites !== null) invites.fail()
   if (pushStore !== null) pushStore.fail()
   if (ages !== null) ages.fail()
+  if (wallets !== null) wallets.fail()
   log({ event: 'lock', reason: 'perdido' })
   stop()
 }

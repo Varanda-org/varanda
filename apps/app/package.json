@@ -13,6 +13,7 @@
     "web": "npm run build:node && expo start --web",
     "export:web": "npm run build:node && expo export --platform web && node scripts/finish-web.js",
     "prepare:native": "bash scripts/prepare-native.sh",
+    "eas-build-post-install": "bash scripts/eas-post-install.sh",
     "link:addons": "bash scripts/link-addons.sh",
     "pack:worklet": "bash scripts/pack-worklet.sh",
     "gate": "node scripts/gate-server.js",
@@ -21,11 +22,20 @@
   "dependencies": {
     "@expo/metro-runtime": "55.0.12",
     "@expo/vector-icons": "15.1.1",
+    "@noble/hashes": "2.4.0",
+    "@react-native-community/netinfo": "11.5.2",
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
+    "@varanda/web-member": "0.1.0",
+    "bare-crypto": "1.15.4",
+    "bare-ws": "3.2.0",
     "expo": "55.0.31",
     "expo-build-properties": "55.0.18",
+    "expo-crypto": "55.0.19",
     "expo-file-system": "55.0.26",
+    "expo-image-manipulator": "55.0.21",
+    "expo-image-picker": "55.0.24",
+    "expo-secure-store": "55.0.18",
     "expo-status-bar": "55.0.6",
     "react": "19.2.0",
     "react-dom": "19.2.0",
@@ -35,7 +45,6 @@
     "react-native-web": "0.21.3"
   },
   "devDependencies": {
-    "@varanda/web-member": "0.1.0",
     "bare-link": "4.0.1",
     "bare-pack": "2.2.4",
     "brittle": "4.5.0"

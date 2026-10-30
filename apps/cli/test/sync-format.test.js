@@ -20,4 +20,7 @@ test('formatEvent lines', (t) => {
   t.is(formatEvent({ event: 'withdrawn', key: k, peerKey: k, reason: 'not-in-log' }), 'withdrawn ' + k + ' abababab not-in-log')
   t.is(formatEvent({ event: 'have', key: k, length: 2 }), 'have ' + k + ' 2')
   t.is(formatEvent({ event: 'downloaded', key: k, length: 2 }), 'downloaded ' + k + ' 2')
+  t.is(formatEvent({ event: 'group-downloaded', key: k, group: k, length: 5 }), 'grupo abababab 5')
+  t.is(formatEvent({ event: 'group-downloaded', key: '\u001b[2J' + k, length: 1 }), 'grupo \\u{1b}[2Jabab 1')
+  t.is(formatEvent({ event: 'group-skipped', key: k, reason: 'wrong-group' }), null)
 })
