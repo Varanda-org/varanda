@@ -3,6 +3,7 @@
 const nodeCrypto = require('node:crypto')
 const { verifyAge } = require('@varanda/core/lib/age')
 const { inviteId, CODE_RE } = require('./invites-store')
+const { isAppRequest, ageReturnUrl } = require('./app-return')
 
 // Hosted age verification with Didit (mounted by ./server.js):
 //
@@ -15,8 +16,9 @@ const { inviteId, CODE_RE } = require('./invites-store')
 //     bucket.
 //   - session and result each need the member's diary-key proof over that
 //     nonce (packages/core/lib/age.js), action-bound, the nonce spent first.
-//     session opens one paid Didit session per member at most, reusing its
-//     hosted URL for an hour so a lost answer never opens a second one, and
+//     session opens one paid Didit session per member and client (web or
+//     app) at most, reusing its hosted URL for an hour so a lost answer
+//     never opens a second one, and
 //     only after the same eligibility checks a link would face (member cap,
 //     invite), so nobody shows a face or a document for a link that would
 //     be refused anyway. result reads the decision and records only the age
@@ -27,6 +29,12 @@ const { inviteId, CODE_RE } = require('./invites-store')
 // member starts over. The Didit session id and URL, the API key, the vendor
 // JSON, the band and any age never reach a log line; the URL reaches only
 // the member that just proved its key. Logs carry only { event, reason }.
+//
+// The native app (header x-varanda-client: app) gets Didit's return at
+// GET /account/age/app-return, which ignores every parameter and sends the
+// system browser to the fixed varanda://idade?volta=1: nothing the provider
+// or a forger appends reaches the app, which re-asks the result with its
+// signature as the web does.
 
 const MAX_BODY = 4096
 const NONCE_TTL_MS = 600 * 1000
@@ -79,7 +87,7 @@ function createAgeRoutes ({
   dailyLimit = 200,
   cleanupDelays = CLEANUP_DELAYS_MS
 }) {
-  const { send, readJsonBody, checkPost, RouteError, refuse, keyedWindow, fixedWindow } = http
+  const { send, redirect, readJsonBody, checkPost, RouteError, refuse, keyedWindow, fixedWindow } = http
   if (didit !== null && (typeof didit.createSession !== 'function' || typeof didit.decision !== 'function' || typeof didit.deleteSession !== 'function')) {
     throw new TypeError('didit inválido')
   }
@@ -105,12 +113,19 @@ function createAgeRoutes ({
 
   // nonce -> { member, expiresAt }, single-use, the oldest evicted for room.
   const nonces = new Map()
-  // member -> { sessionId, url, createdAt }, the oldest evicted for room.
+  // slot -> { sessionId, url, createdAt }, the oldest evicted for room. A
+  // slot is the member and the client kind (see slotOf): the return URL is
+  // fixed when the session is created, so a web session is never handed to
+  // the app nor an app session to the web.
   const sessions = new Map()
-  // member -> Promise<{ url } | { error } | {}> of a session creation in flight.
+  // slot -> Promise<{ url } | { error } | {}> of a session creation in flight.
   const creating = new Map()
   // Abandoned sessions reach the provider's deletion even with no traffic.
   if (on) setInterval(sweep, 3600 * 1000).unref()
+
+  function slotOf (member, app) {
+    return (app ? 'app:' : 'web:') + member
+  }
 
   function required () {
     return on
@@ -211,14 +226,29 @@ function createAgeRoutes ({
       })
   }
 
-  function finalize (member, open) {
-    if (sessions.get(member) === open) sessions.delete(member)
+  function finalize (slot, open) {
+    if (sessions.get(slot) === open) sessions.delete(slot)
     cleanup(open.sessionId)
+  }
+
+  // Closes every open session of an approved member, web and app.
+  function finalizeAll (member) {
+    for (const kind of [false, true]) {
+      const leftover = sessions.get(slotOf(member, kind))
+      if (leftover !== undefined) finalize(slotOf(member, kind), leftover)
+    }
   }
 
   async function policy (req, res) {
     if (!limits.policy()) throw new RouteError('pedido-invalido', 429)
     send(res, 200, { required: on })
+  }
+
+  // No window of its own: a fixed redirect with no secret and no paid call,
+  // and a 429 here would strand the browser on an error page instead of
+  // returning to the app. The global bucket still bounds it.
+  async function appReturn (req, res) {
+    redirect(res, ageReturnUrl())
   }
 
   async function start (req, res, body) {
@@ -235,11 +265,13 @@ function createAgeRoutes ({
     available()
     const member = prove(body, 'session')
     if (verified(member)) return send(res, 200, { state: 'verificado' })
-    const open = sessions.get(member)
+    const app = isAppRequest(req)
+    const slot = slotOf(member, app)
+    const open = sessions.get(slot)
     if (open !== undefined && now() - open.createdAt < URL_REUSE_MS) return send(res, 200, { url: open.url })
-    // A creation already in flight for this member is shared: a second paid
+    // A creation already in flight for this slot is shared: a second paid
     // session would replace (and delete) the one whose URL was just returned.
-    const inflight = creating.get(member)
+    const inflight = creating.get(slot)
     if (inflight !== undefined) {
       // { url } or { error } of the shared creation, the same answer as the
       // request that made it (an uncertain outcome stays uncertain here too).
@@ -273,18 +305,18 @@ function createAgeRoutes ({
     // Registered before the first await, so no other request for this member
     // can pass the checks above while this one waits on the provider.
     let settle
-    creating.set(member, new Promise((resolve) => { settle = resolve }))
+    creating.set(slot, new Promise((resolve) => { settle = resolve }))
     let r
     try {
       r = await didit.createSession({
         vendorData: nodeCrypto.randomBytes(16).toString('base64url'),
-        callback: origin + '/?idade=volta',
+        callback: app ? origin + '/account/age/app-return' : origin + '/?idade=volta',
         language: 'pt'
       })
     } catch {
       r = { ok: false, reason: 'falha' }
     } finally {
-      creating.delete(member)
+      creating.delete(slot)
     }
     // A result call may have approved the member while this creation waited:
     // the new session is then useless and goes straight to deletion.
@@ -301,9 +333,9 @@ function createAgeRoutes ({
     }
     settle({ url: r.url })
     sweep()
-    const replaced = sessions.get(member)
+    const replaced = sessions.get(slot)
     if (replaced !== undefined) {
-      sessions.delete(member)
+      sessions.delete(slot)
       cleanup(replaced.sessionId)
     }
     while (sessions.size >= MAX_SESSIONS) {
@@ -311,7 +343,7 @@ function createAgeRoutes ({
       sessions.delete(oldest)
       cleanup(evicted.sessionId)
     }
-    sessions.set(member, { sessionId: r.sessionId, url: r.url, createdAt: now() })
+    sessions.set(slot, { sessionId: r.sessionId, url: r.url, createdAt: now() })
     log({ event: 'idade', reason: 'sessao' })
     send(res, 200, { url: r.url })
   }
@@ -323,14 +355,15 @@ function createAgeRoutes ({
     if (verified(member)) {
       // A session left open after the approval (a race with a replacement)
       // is closed here rather than at the 24 h sweep.
-      const leftover = sessions.get(member)
-      if (leftover !== undefined) finalize(member, leftover)
+      finalizeAll(member)
       return send(res, 200, { state: 'verificado' })
     }
-    const open = sessions.get(member)
+    // Each client reads the session it opened.
+    const slot = slotOf(member, isAppRequest(req))
+    const open = sessions.get(slot)
     if (open === undefined || now() - open.createdAt >= SESSION_TTL_MS) {
       if (open !== undefined) {
-        sessions.delete(member)
+        sessions.delete(slot)
         cleanup(open.sessionId)
       }
       return send(res, 200, { state: 'nenhum' })
@@ -350,9 +383,11 @@ function createAgeRoutes ({
         log({ event: 'idade', reason: 'gravacao-falhou' })
         throw refuse('resultado-incerto')
       }
-      finalize(member, open)
+      // The other client's session is useless now too.
+      finalize(slot, open)
+      finalizeAll(member)
     } else if (state === 'recusado' || state === 'inconclusivo' || state === 'expirado') {
-      finalize(member, open)
+      finalize(slot, open)
     } else if (state !== 'pendente') {
       log({ event: 'idade', reason: 'estado-desconhecido' })
       throw refuse('indisponivel')
@@ -374,6 +409,7 @@ function createAgeRoutes ({
   async function handle (req, res, url) {
     const p = url.pathname
     if (req.method === 'GET' && p === '/account/age/policy') return policy(req, res)
+    if (req.method === 'GET' && p === '/account/age/app-return') return appReturn(req, res)
     if (req.method === 'POST' && Object.hasOwn(POST, p)) {
       checkPost(req)
       const body = await readJsonBody(req, MAX_BODY)

@@ -2775,3 +2775,44 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
 - Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
+
+## 48. Vínculo de conta pelo app nativo: segredo V e código de resgate R (PR feat/account-app-clients, 2026-10-30)
+
+### O que mudou
+
+- O serviço `account` aceita clientes nativos no padrão RFC 8252 (`apps/cli/lib/account/server.js`, regras puras em `apps/cli/lib/account/app-return.js`). Todos os caminhos da web ficam como estavam: cookie `__Host-varanda-link`, `Origin` exato e volta para `/?conta=`.
+- Um `POST` sem `Origin` só passa com `x-varanda-client: app` e corpo JSON. Um `Origin` presente (inclusive `null`) tem de ser a origem exata.
+- `POST /account/start` do app traz `appProof` (base64url do SHA-256 de um segredo V de 32 bytes, 43 caracteres, forma canônica) e não recebe cookie. `authorize`, `pending` e `finish` acham a linha por V (`x-varanda-link`), comparando em tempo constante.
+- A volta do Google de uma linha do app é achada só pelo `state` de uso único. Com sucesso, o serviço sorteia R, guarda só o hash de R e redireciona para `varanda://conta?conta=ok&codigo=<R>`; recusas vão para `varanda://conta?conta=<resultado>` sem código.
+- `pending` exige V e R (`x-varanda-redeem`); `finish` exige V e R e gasta R na primeira tentativa, qualquer que seja o resultado.
+- Escritas da volta do Google: a resposta do Google (`sub`, e-mail) de uma linha do app fica guardada só na memória ao lado da linha e só é associada a ela (`putGoogle`, que segura o @nome e conta no limite por conta Google) quando R é apresentado. A lista de espera e o convite recusados na volta só apagam a linha pendente e a reserva do convite, que não dependem da conta Google; nada é gravado em disco antes da conclusão.
+- Recomeçar um vínculo com convite já assinado ou já no Google aceita V como prova de dono, como o cookie na web. Um início do app que apresenta V abandona a linha anterior desse V: ela é apagada e o `state` dela morre, então a página do Google aberta para ela não troca código nenhum. Um `state` que já pertenceu a uma linha do app (abandonada, tomada, vencida ou usada) volta sempre para `varanda://conta?conta=erro`, nunca para o site e nunca com código (registro em memória, até 10 minutos depois do vencimento da linha, no máximo 10000).
+- Idade: `POST /account/age/session` com o cabeçalho do app pede ao Didit a volta em `/account/age/app-return`, que ignora parâmetros e responde 302 para `varanda://idade?volta=1`, sem janela própria (só o balde global), para nunca trocar a volta por uma página de erro 429. A sessão aberta é reaproveitada só pelo mesmo tipo de cliente (web ou app), e cada cliente lê o resultado da sua sessão; a chamada que registra a aprovação apaga no Didit as duas sessões do membro.
+- O serviço não guarda resposta do Google de linha que não existe mais: se a linha do app vence ou é despejada durante a troca do código, a volta é `varanda://conta?conta=erro`, sem código, e a resposta é descartada; a cada pedido (no máximo uma vez por segundo) o serviço descarta as entradas do app, e o `sub` e o e-mail guardados nelas, cuja linha venceu ou foi despejada.
+
+### Testes automatizados
+
+- Novo: `apps/cli/test/app-return.test.js` (forma do `appProof`, hash de V, comparação em tempo constante, forma e hash de R, lista de resultados, URLs fixas de volta).
+- `apps/cli/test/account.test.js`: `POST` sem `Origin` com e sem o cabeçalho, `Origin` `null` e diferente; `appProof` malformado e sem cookie; fluxo completo do app; ataque com V sem R; R repetido, V errado com R certo, R gasto depois de conclusão recusada; recusas da volta para `varanda://conta`; recomeço com o mesmo V (a primeira página do Google volta com `erro` sem troca de código, a nova linha conclui); recomeço com V num servidor com convites (o `state` da linha tomada volta com `erro`); linha despejada durante a troca ou vencida antes da volta dá `erro` sem código e some com a resposta do Google; entrada vencida some no pedido seguinte de qualquer rota; registros sem V, `appProof`, R, `state`, `sub`, e-mail e nonce.
+- `apps/cli/test/account-age.test.js`: volta do Didit do app só com o cabeçalho; `/account/age/app-return` ignora parâmetros e responde 302 a 1300 pedidos seguidos; sessão reaproveitada só pelo mesmo tipo de cliente, nos dois sentidos, e criações simultâneas da web e do app não se misturam; a primeira chamada que aprova apaga as duas sessões no Didit.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Num servidor de teste, `curl -si -X POST https://<domínio>/account/start -H 'content-type: application/json' -d '{}'` (sem `Origin`) responde 403; com `-H 'x-varanda-client: app'` responde 400 `pedido-invalido` (corpo inválido, não 403) (não realizada ainda).
+- [ ] O mesmo com `-H 'Origin: null' -H 'x-varanda-client: app'` responde 403 (não realizada ainda).
+- [ ] Pelo app de teste: vincular uma conta Google nova; o navegador do sistema volta ao app por `varanda://conta?conta=ok&codigo=...` e o app mostra o @nome (não realizada ainda).
+- [ ] Copiar o link do Google do app e abri-lo em outro aparelho: depois do Google, o outro aparelho tenta abrir `varanda://conta...` e o app de origem não conclui o vínculo (não realizada ainda).
+- [ ] Cancelar no Google volta ao app com `conta=cancelado` e sem `codigo` (não realizada ainda).
+- [ ] Verificação de idade pelo app: o Didit volta por `/account/age/app-return` para `varanda://idade?volta=1` e o app lê o resultado (não realizada ainda).
+- [ ] `docker compose ... logs account` depois desses passos não mostra `codigo`, `state`, e-mail, `sub` nem os valores dos cabeçalhos `x-varanda-*` (não realizada ainda).
+- [ ] A web segue igual: vínculo pelo navegador volta para `https://<domínio>/?conta=ok` com o cookie (não realizada ainda).
+
+### Limites que sobram
+
+- Outro app no mesmo aparelho pode registrar o esquema `varanda://` e receber R. Sem V, que só existe na memória do app, ele não lê o pendente nem conclui.
+- R é gasto na primeira conclusão, mesmo recusada (assinatura inválida, 429 ou falha passageira): o app recomeça o vínculo.
+- Entre a volta do Google e o resgate de R, a linha do app ainda não conta como respondida pelo Google, então uma enxurrada de inícios pode despejá-la para dar lugar a outras (o app recebe `expirado` e recomeça).
+- Quem verifica a idade pela web e pelo app na mesma hora abre duas sessões pagas do Didit (uma por tipo de cliente), porque a URL de volta é fixada na criação da sessão. As duas contam no limite de 3 sessões por membro em 24 h.
+- `/account/age/app-return` não tem janela própria: uma enxurrada nele gasta só o balde global, como qualquer rota.
