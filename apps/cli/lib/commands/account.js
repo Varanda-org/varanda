@@ -16,6 +16,8 @@ const { openInvitesStore } = require('../account/invites-store')
 const { openPushStore } = require('../account/push-store')
 const { openAgeStore } = require('../account/age-store')
 const { createDidit } = require('../account/didit')
+const { createHodle, NETWORKS: HODLE_NETWORKS } = require('../account/hodle')
+const { openWalletStore } = require('../account/wallet-store')
 const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
@@ -102,6 +104,16 @@ const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
 const DIDIT_DAILY_MAX = 100000
+// The client's own key shape (../account/hodle.js), so a key readEnv lets
+// through is never one createHodle refuses at start.
+const HODLE_KEY_RE = /^hodle_(live|test)_[\x21-\x7e]{8,200}$/
+// This release ships the first two modes of wallet-routes.js MODES: cadastro
+// (subaccount and KYC only) and carteira (adds wallet-create with the
+// member's PIN), the latter only once Hodle confirmed in writing that
+// member-chosen PINs work on individual subaccounts.
+const HODLE_MODES = Object.freeze(['cadastro', 'carteira'])
+const HODLE_DAILY_DEFAULT = 100
+const HODLE_DAILY_MAX = 100000
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -473,7 +485,7 @@ function readEnv (env, dataDir) {
     if (seederHealth === null) throw new UsageError('VARANDA_SEEDER_HEALTH inválido')
   }
   const triage = readTriageEnv(env, dataDir)
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage, didit: readDiditEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage, didit: readDiditEnv(env), hodle: readHodleEnv(env) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -498,6 +510,33 @@ function readDiditEnv (env) {
     dailyLimit = value
   }
   return { apiKey, workflowId, dailyLimit }
+}
+
+// The optional payments account with Hodle: off unless the API key is set,
+// and then every other VARANDA_HODLE_* is ignored. No value is ever echoed.
+function readHodleEnv (env) {
+  const apiKey = env.VARANDA_HODLE_API_KEY
+  if (apiKey === undefined || apiKey === '') return null
+  if (typeof apiKey !== 'string' || apiKey.length > MAX_SECRET || !HODLE_KEY_RE.test(apiKey)) {
+    throw new UsageError('VARANDA_HODLE_API_KEY inválido')
+  }
+  const network = optionalChoice(env.VARANDA_HODLE_NETWORK, HODLE_NETWORKS, 'polygon', 'VARANDA_HODLE_NETWORK inválido')
+  const mode = optionalChoice(env.VARANDA_HODLE_MODE, HODLE_MODES, 'cadastro', 'VARANDA_HODLE_MODE inválido')
+  let dailyLimit = HODLE_DAILY_DEFAULT
+  const raw = env.VARANDA_HODLE_DAILY_LIMIT
+  const text = typeof raw === 'string' ? raw.trim() : null
+  if (raw !== undefined && text !== '') {
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= 1 && value <= HODLE_DAILY_MAX)) throw new UsageError('VARANDA_HODLE_DAILY_LIMIT inválido')
+    dailyLimit = value
+  }
+  return { apiKey, network, mode, dailyLimit }
+}
+
+function optionalChoice (raw, choices, fallback, message) {
+  if (raw === undefined || raw === '') return fallback
+  if (typeof raw !== 'string' || !choices.includes(raw)) throw new UsageError(message)
+  return raw
 }
 
 // Builds and returns the triage worker, or null when it cannot run: a
@@ -597,7 +636,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig, didit: diditConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig, didit: diditConfig, hodle: hodleConfig } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -630,10 +669,12 @@ async function serve (flags, env) {
   let stopPushHeal = null
   let ages = null
   let stopAgeHeal = null
+  let wallets = null
+  let stopWalletHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, wallets)
     }
   })
   let listener = null
@@ -702,6 +743,17 @@ async function serve (flags, env) {
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    // The payments account (wallet.json), only with VARANDA_HODLE_API_KEY
+    // set. The routes log 'ligada' or 'desligada' themselves; an unreadable
+    // file is logged here and keeps the service up with the routes failing
+    // closed.
+    let hodle = null
+    if (hodleConfig !== null) {
+      hodle = createHodle({ apiKey: hodleConfig.apiKey, network: hodleConfig.network })
+      wallets = openWalletStore(flags.dataDir, { guard: () => lock.owned() })
+      if (!wallets.available()) log({ event: 'carteira', reason: 'indisponivel' })
+      stopWalletHeal = startHeal(wallets, 'carteira', log)
+    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -728,7 +780,7 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -762,10 +814,12 @@ async function serve (flags, env) {
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
+    if (stopWalletHeal !== null) stopWalletHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
+    if (wallets !== null && wallets.available()) await wallets.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
     // skips the write, as closeIfOwned below does.
@@ -790,14 +844,15 @@ function storeUnavailable (log, stop) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push and age stores too: their next write must
-// not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null) {
+// stops. The terms, invites, push, age and wallet stores too: their next
+// write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, wallets = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (invites !== null) invites.fail()
   if (pushStore !== null) pushStore.fail()
   if (ages !== null) ages.fail()
+  if (wallets !== null) wallets.fail()
   log({ event: 'lock', reason: 'perdido' })
   stop()
 }

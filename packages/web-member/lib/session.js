@@ -35,15 +35,16 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, terms.sign, invite.sign, push.sign and age.sign: the
+// report.sign, terms.sign, invite.sign, push.sign, age.sign and wallet.sign: the
 // domain-separated account-link statement (@varanda/core lib/account-link.js,
 // prefix 'varanda-account-link-v1'), report statement (@varanda/core
 // lib/report.js, prefix 'varanda-report-v1'), terms-acceptance statement
 // (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'), signup-invite
 // request (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
-// 'varanda-push-v1') and age-verification request (@varanda/core
-// lib/age.js, prefix 'varanda-age-v1'), whose member and association the
+// 'varanda-push-v1'), age-verification request (@varanda/core
+// lib/age.js, prefix 'varanda-age-v1') and wallet statement (@varanda/core
+// lib/wallet-proof.js, prefix 'varanda-wallet-v1'), whose member and association the
 // session fills in
 // itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
@@ -226,6 +227,7 @@ const { signReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { signAge } = require('@varanda/core/lib/age')
+const { signWallet, opHash } = require('@varanda/core/lib/wallet-proof')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
@@ -248,6 +250,7 @@ const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
 const BAD_PUSH = 'inscrição de notificação inválida'
+const BAD_WALLET = 'operação de pagamento inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
@@ -1306,6 +1309,32 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signAge({ action, nonce, member: own, association: cfg.association }, keyPair)
+      return { signature }
+    }),
+
+    // Signs the wallet statement with the in-memory key (docs/rpc.md 5.35),
+    // exactly like age.sign. The session fills in member, association and
+    // the operation hash, so the caller never hands in bytes to sign, and
+    // the operation itself never leaves this call.
+    'wallet.sign': serial(async ({ action, nonce, op }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      let signature
+      try {
+        signature = signWallet({ action, nonce, member: own, association: cfg.association, opHash: opHash(op) }, keyPair)
+      } catch (err) {
+        // The RPC layer checks the same operation rules, but the session
+        // also runs behind callers that skip it.
+        if (err instanceof TypeError) throw new UsageError(BAD_WALLET)
+        throw err
+      }
       return { signature }
     }),
 
