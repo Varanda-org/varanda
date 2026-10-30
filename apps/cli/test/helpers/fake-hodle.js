@@ -17,6 +17,18 @@
 //                   walletCreates    number of successful wallet creations
 //                   now              fake clock in ms, advanced by the tests
 //                   keysAt           Map subAccountId -> fake time of the last wallet/keys call
+//                   balances         Map subAccountId -> BRLA cents, moved by payouts and transfers
+//                   deposits         Map externalId -> deposit record
+//                   quotes           Map quoteId -> the quoted fields and `used`
+//                   payouts          Map transactionId -> payout record (status settable)
+//                   transfers        Map reference -> transfer record
+//                   pinFailures      Map walletId -> wrong PIN count (3 locks the wallet)
+//                   depositFeeCents  fee of a new deposit, in cents
+//                   payoutFeeCents   fee of a payout or quote, in cents
+//                   payoutStatus     null (a new payout answers PROCESSING and
+//                                    stays PENDING) or the status a new payout
+//                                    answers and keeps, e.g. 'COMPLETED'
+//                   sends            counts of executed money calls: { deposit, payout, transfer }
 //   fake.script(handlers)
 //                 replaces the routes. `handlers` is either a function
 //                 (req, res, ctx) or a map with any of:
@@ -30,9 +42,22 @@
 //                   walletCreate     POST /api/wallet/create
 //                   walletKeys       POST /api/wallet/keys
 //                   walletGet        POST /api/wallet/get
+//                   deposit          POST /api/deposit/asset
+//                   depositStatus    GET  /api/deposit/:id
+//                   payoutQuote      POST /api/wallet/payout/beneficiary
+//                   payout           POST /api/wallet/payout
+//                   payoutStatus     GET  /api/wallet/payout/:id
+//                   transfer         POST /api/wallet/transfer
+//                   statement        POST /api/account/statement
 //                 each called as (req, res, ctx) with ctx = { id, query, body, json }.
 //                 ctx.json(res, code, obj) writes a JSON response. A map only
 //                 replaces the routes it names; unknown paths answer 404.
+//   fake.apply(name, ctx)
+//                 runs the default route `name` without answering, so a scripted
+//                 handler can execute a call and then drop or delay the response.
+//                 Returns { code, body }.
+//   fake.settleDeposit(externalId)
+//                 marks a deposit paid and credits its value minus the fee.
 //   fake.close()  closes the server and its connections.
 //
 // loopbackFetch(base) returns a fetch that throws for any URL not under base.
@@ -43,6 +68,11 @@ const crypto = require('node:crypto')
 const KEYS_WINDOW_MS = 60000
 const PROTECTED_KEY = 'psk-fake-hodle-protected-key'
 const DOCUMENT_RE = /^\/api\/kyc\/document\/([^/]+)$/
+const DEPOSIT_RE = /^\/api\/deposit\/([^/]+)$/
+const PAYOUT_RE = /^\/api\/wallet\/payout\/([^/]+)$/
+const PIX_KEY_TYPES = new Set(['PHONE', 'CPF', 'EMAIL', 'RANDOM', 'CNPJ'])
+const PER_TX_LIMIT_CENTS = 300000
+const PIN_ATTEMPTS = 3
 const KYC_RE = /^\/api\/kyc\/([^/]+)$/
 
 function json (res, code, obj, headers = {}) {
@@ -59,6 +89,21 @@ function hex (n) {
   return crypto.randomBytes(n).toString('hex')
 }
 
+function amountText (cents) {
+  const s = String(cents).padStart(3, '0')
+  return s.slice(0, -2) + '.' + s.slice(-2)
+}
+
+function amountCents (text) {
+  const m = /^([0-9]+)(?:\.([0-9]{1,18}))?$/.exec(String(text))
+  if (!m) return null
+  return Number(m[1]) * 100 + Number((m[2] || '').slice(0, 2).padEnd(2, '0'))
+}
+
+function txHash () {
+  return '0x' + hex(32)
+}
+
 function notFound (res, what) {
   json(res, 404, { success: false, error: what + ' not found' })
 }
@@ -72,7 +117,79 @@ async function startFakeHodle () {
     wallets: new Map(),
     walletCreates: 0,
     now: 0,
-    keysAt: new Map()
+    keysAt: new Map(),
+    balances: new Map(),
+    deposits: new Map(),
+    quotes: new Map(),
+    payouts: new Map(),
+    transfers: new Map(),
+    pinFailures: new Map(),
+    depositFeeCents: 100,
+    payoutFeeCents: 75,
+    payoutStatus: null,
+    sends: { deposit: 0, payout: 0, transfer: 0 }
+  }
+  let seq = 0
+
+  function stamp () {
+    seq++
+    return { seq, createdAt: new Date(Date.now() + seq).toISOString() }
+  }
+
+  function balanceOf (subAccountId) {
+    return state.balances.get(subAccountId) || 0
+  }
+
+  function move (subAccountId, cents) {
+    state.balances.set(subAccountId, balanceOf(subAccountId) + cents)
+  }
+
+  // Wrong PIN or protected key -> 400 with a bare message, as documented.
+  // The third wrong PIN locks the wallet; later calls are refused even with
+  // the right PIN.
+  function checkCredentials (res, wallet, b) {
+    const failures = state.pinFailures.get(wallet.id) || 0
+    if (failures >= PIN_ATTEMPTS) {
+      json(res, 400, { success: false, error: 'PIN locked for 24 hours after three failures' })
+      return false
+    }
+    if (b.walletPin !== wallet.pin) {
+      state.pinFailures.set(wallet.id, failures + 1)
+      json(res, 400, { success: false, error: 'Invalid PIN' })
+      return false
+    }
+    if (b.protectedSymmetricKey !== wallet.protectedSymmetricKey) {
+      json(res, 400, { success: false, error: 'Invalid protected key' })
+      return false
+    }
+    return true
+  }
+
+  function depositBody (dep) {
+    return {
+      success: true,
+      externalId: dep.externalId,
+      qrCode: dep.qrCode,
+      qrCodeImage: 'https://api.hodle.com.br/api/public/qrcode/' + dep.walletCharge + '.png',
+      expiresAt: dep.expiresAt,
+      fee: dep.feeCents,
+      fxRateAtTx: 1,
+      walletCharge: dep.walletCharge
+    }
+  }
+
+  function payoutBody (p) {
+    return {
+      success: true,
+      transactionId: p.transactionId,
+      status: p.answer,
+      stableAmount: amountText(p.value + p.feeCents),
+      valueInBrl: amountText(p.value),
+      fee: amountText(p.feeCents),
+      network: p.network,
+      asset: 'BRLA',
+      jobId: String(p.seq)
+    }
   }
 
   function findWallet (subAccountId, walletId) {
@@ -183,7 +300,8 @@ async function startFakeHodle () {
         id: hex(12),
         address: '0x' + hex(20).toUpperCase().replace(/^(.)/, 'a'),
         network,
-        protectedSymmetricKey: PROTECTED_KEY + '-' + hex(4)
+        protectedSymmetricKey: PROTECTED_KEY + '-' + hex(4),
+        pin: walletPin
       }
       const list = state.wallets.get(subAccountId) || []
       list.push(wallet)
@@ -227,11 +345,281 @@ async function startFakeHodle () {
         data.addresses[wallet.network] = wallet.address
         data.addresses.tron = 'TQHvPfake'
         data.balances.push(
-          { network: wallet.network, asset: 'BRLA', amount: '0.00' },
+          { network: wallet.network, asset: 'BRLA', amount: amountText(balanceOf(subAccountId)) },
           { network: 'tron', asset: 'USDT', amount: '0.00' }
         )
       }
       if (walletId !== undefined) data.walletId = walletId
+      json(res, 200, { success: true, data })
+    },
+    deposit (req, res, ctx) {
+      const b = ctx.body || {}
+      if (!state.subaccounts.has(b.subAccountId)) return notFound(res, 'Subaccount')
+      if (!Number.isSafeInteger(b.value) || b.value < 100 || b.asset !== 'BRLA' || typeof b.address !== 'string') {
+        return json(res, 400, { success: false, error: 'Validation failed' })
+      }
+      const known = state.deposits.get(b.externalId)
+      if (known) {
+        if (known.subAccountId !== b.subAccountId) {
+          return json(res, 409, { success: false, error: 'A deposit with this externalId already exists' })
+        }
+        return json(res, 200, depositBody(known))
+      }
+      const expiresIn = Number.isSafeInteger(b.expiresIn) ? b.expiresIn : 600
+      const dep = {
+        ...stamp(),
+        externalId: b.externalId,
+        subAccountId: b.subAccountId,
+        walletCharge: hex(12),
+        trackId: 'trk_' + hex(6),
+        value: b.value,
+        feeCents: state.depositFeeCents,
+        status: 'PENDING',
+        network: b.network,
+        address: b.address,
+        qrCode: '00020126580014br.gov.bcb.pix0136' + crypto.randomUUID() + '5204000053039865802BR5913Fulano de Tal6009Sao Paulo6304ABCD',
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
+      }
+      state.deposits.set(dep.externalId, dep)
+      state.sends.deposit++
+      json(res, 200, depositBody(dep))
+    },
+    depositStatus (req, res, ctx) {
+      let dep = state.deposits.get(ctx.id)
+      if (!dep) for (const d of state.deposits.values()) if (d.walletCharge === ctx.id || d.trackId === ctx.id) dep = d
+      if (!dep || dep.subAccountId !== ctx.query.get('subAccountId')) return notFound(res, 'Deposit')
+      json(res, 200, {
+        success: true,
+        data: {
+          externalId: dep.externalId,
+          walletCharge: dep.walletCharge,
+          trackId: dep.trackId,
+          status: dep.status,
+          processingStep: null,
+          asset: 'BRLA',
+          network: dep.network,
+          address: dep.address,
+          value: dep.value,
+          valueInBrl: amountText(dep.value),
+          fee: dep.feeCents,
+          feeInBrl: amountText(dep.feeCents),
+          fxRateAtTx: 1,
+          transactionHash: dep.status === 'COMPLETED' ? dep.txHash : null,
+          qrCode: dep.qrCode,
+          qrCodeImage: 'https://api.hodle.com.br/api/public/qrcode/' + dep.walletCharge + '.png',
+          expiresAt: dep.expiresAt,
+          payer: dep.status === 'COMPLETED' ? { name: 'FULANO DE TAL', taxId: '12345678901' } : null,
+          createdAt: dep.createdAt,
+          updatedAt: dep.createdAt
+        }
+      })
+    },
+    payoutQuote (req, res, ctx) {
+      const b = ctx.body || {}
+      if (!Number.isSafeInteger(b.value) || b.value < 10 || typeof b.pixKey !== 'string' || !PIX_KEY_TYPES.has(b.pixKeyType)) {
+        return json(res, 400, { success: false, error: 'Validation failed' })
+      }
+      const quoteId = crypto.randomUUID()
+      const quote = {
+        value: b.value,
+        network: b.network,
+        asset: b.asset,
+        pixKey: b.pixKey,
+        pixKeyType: b.pixKeyType,
+        subAccountId: b.subAccountId,
+        walletId: b.walletId,
+        taxId: b.taxId,
+        feeCents: state.payoutFeeCents,
+        used: false
+      }
+      state.quotes.set(quoteId, quote)
+      json(res, 200, {
+        success: true,
+        status: 'PENDING',
+        quoteId,
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        settlement: 'OWN_ACCOUNT',
+        network: b.network,
+        asset: 'BRLA',
+        pixKey: b.pixKey,
+        pixKeyOwner: { name: 'Thiago Mota dos Santos', taxId: '545.***.***-10', bankName: 'NU PAGAMENTOS - IP' },
+        quote: {
+          inputAmount: (b.value + quote.feeCents) / 100,
+          inputCurrency: 'BRLA',
+          outputAmount: b.value / 100,
+          outputCurrency: 'BRL',
+          rate: 1,
+          fee: quote.feeCents / 100
+        },
+        payoutId: hex(12),
+        correlationId: quoteId
+      })
+    },
+    payout (req, res, ctx) {
+      const b = ctx.body || {}
+      if (!state.subaccounts.has(b.subAccountId)) return notFound(res, 'Subaccount')
+      const wallet = findWallet(b.subAccountId, b.walletId)
+      if (!wallet) return notFound(res, 'Wallet')
+      if (!checkCredentials(res, wallet, b)) return
+      for (const p of state.payouts.values()) {
+        if (b.externalId !== undefined && p.externalId === b.externalId) {
+          return json(res, 202, { ...payoutBody(p), alreadyProcessed: true })
+        }
+      }
+      if (!Number.isSafeInteger(b.value) || b.value < 10) return json(res, 400, { success: false, error: 'Validation failed' })
+      let quote = null
+      if (b.quoteId !== undefined) {
+        quote = state.quotes.get(b.quoteId)
+        if (!quote || quote.used) return json(res, 400, { success: false, error: 'Quote expired, used or unknown' })
+        if (b.pixKey !== undefined || b.pixKeyType !== undefined) {
+          return json(res, 400, { success: false, error: 'pixKey comes from the quote' })
+        }
+        for (const k of ['value', 'network', 'asset', 'subAccountId', 'walletId', 'taxId']) {
+          if (b[k] !== quote[k]) return json(res, 400, { success: false, error: 'Fields differ from the quote' })
+        }
+      } else if (typeof b.pixKey !== 'string' || !PIX_KEY_TYPES.has(b.pixKeyType)) {
+        return json(res, 400, { success: false, error: 'Validation failed' })
+      }
+      if (b.value > PER_TX_LIMIT_CENTS) {
+        return json(res, 403, { success: false, error: 'Limit exceeded', errorCode: 'PER_TX_LIMIT_EXCEEDED' })
+      }
+      const feeCents = quote ? quote.feeCents : state.payoutFeeCents
+      if (balanceOf(b.subAccountId) < b.value + feeCents) {
+        return json(res, 400, { success: false, error: 'Insufficient balance for the payout', errorCode: 'INSUFFICIENT_BALANCE' })
+      }
+      if (quote) quote.used = true
+      move(b.subAccountId, -(b.value + feeCents))
+      const p = {
+        ...stamp(),
+        transactionId: hex(12),
+        externalId: b.externalId,
+        subAccountId: b.subAccountId,
+        network: b.network,
+        value: b.value,
+        feeCents,
+        status: state.payoutStatus || 'PENDING',
+        answer: state.payoutStatus || 'PROCESSING',
+        txHash: txHash(),
+        endToEndId: 'E' + hex(15).toUpperCase()
+      }
+      state.payouts.set(p.transactionId, p)
+      state.sends.payout++
+      json(res, 202, payoutBody(p))
+    },
+    payoutStatus (req, res, ctx) {
+      const p = state.payouts.get(ctx.id)
+      if (!p) return notFound(res, 'Payout')
+      const done = p.status === 'COMPLETED'
+      json(res, 200, {
+        success: true,
+        data: {
+          transactionId: p.transactionId,
+          status: p.status,
+          network: p.network,
+          txHash: p.status === 'PENDING' ? null : p.txHash,
+          endToEndId: done ? p.endToEndId : null,
+          valueInBrl: amountText(p.value),
+          fee: amountText(p.feeCents),
+          pixKey: 'recipient@example.com',
+          creditParty: done ? { name: 'MARIA SOUZA', taxId: '***.241.413-**' } : null,
+          failureCode: p.status === 'REFUNDED' ? 'PAYOUT_FAILED' : null,
+          failureReason: p.status === 'REFUNDED' ? 'Chave Pix de MARIA SOUZA inválida' : null,
+          createdAt: p.createdAt,
+          updatedAt: p.createdAt
+        }
+      })
+    },
+    transfer (req, res, ctx) {
+      const b = ctx.body || {}
+      const from = b.fromSubAccountId
+      if (!state.subaccounts.has(from)) return notFound(res, 'Subaccount')
+      const wallet = findWallet(from, b.walletId)
+      if (!wallet) return notFound(res, 'Wallet')
+      if (!checkCredentials(res, wallet, b)) return
+      if (b.reference !== undefined && state.transfers.has(b.reference)) {
+        const first = state.transfers.get(b.reference)
+        return json(res, 409, {
+          success: false,
+          error: 'A transfer with this reference already exists',
+          transactionId: first.transactionId,
+          status: 'COMPLETED',
+          txHash: first.txHash
+        })
+      }
+      if ((b.toSubAccountId === undefined) === (b.recipientAddress === undefined)) {
+        return json(res, 400, { success: false, error: 'Provide toSubAccountId or recipientAddress' })
+      }
+      let recipientAddress = b.recipientAddress
+      if (b.toSubAccountId !== undefined) {
+        const target = findWallet(b.toSubAccountId)
+        if (!state.subaccounts.has(b.toSubAccountId) || !target) {
+          return json(res, 400, { success: false, error: 'Unresolvable recipient' })
+        }
+        recipientAddress = target.address
+      }
+      const cents = amountCents(b.amount)
+      if (b.asset !== 'BRLA' || cents === null || cents < 1) return json(res, 400, { success: false, error: 'Validation failed' })
+      if (balanceOf(from) < cents) return json(res, 400, { success: false, error: 'Insufficient balance', errorCode: 'INSUFFICIENT_BALANCE' })
+      move(from, -cents)
+      if (b.toSubAccountId !== undefined) move(b.toSubAccountId, cents)
+      const record = {
+        ...stamp(),
+        transactionId: hex(12),
+        reference: b.reference,
+        from,
+        to: b.toSubAccountId,
+        cents,
+        txHash: txHash()
+      }
+      if (b.reference !== undefined) state.transfers.set(b.reference, record)
+      else state.transfers.set('unreferenced-' + record.seq, record)
+      state.sends.transfer++
+      json(res, 200, { success: true, data: { txHash: record.txHash, recipientAddress, amount: b.amount } })
+    },
+    statement (req, res, ctx) {
+      const b = ctx.body || {}
+      const sub = b.subAccountId
+      if (!state.subaccounts.has(sub)) return notFound(res, 'Subaccount')
+      const ops = []
+      const base = (rec, type, direction, cents, feeCents, status) => ({
+        seq: rec.seq,
+        id: 'op_' + rec.seq,
+        type,
+        status,
+        amount: amountText(cents),
+        asset: 'BRLA',
+        network: 'polygon',
+        valueInBrl: amountText(cents),
+        fee: amountText(feeCents),
+        txHash: null,
+        endToEndId: null,
+        externalId: null,
+        reference: null,
+        direction,
+        createdAt: rec.createdAt,
+        completedAt: null,
+        vendorNote: 'dropped by the client'
+      })
+      for (const d of state.deposits.values()) {
+        if (d.subAccountId !== sub) continue
+        ops.push({ ...base(d, 'deposit', 'in', d.value, d.feeCents, d.status), externalId: d.externalId, txHash: d.txHash || null })
+      }
+      for (const p of state.payouts.values()) {
+        if (p.subAccountId !== sub) continue
+        ops.push({ ...base(p, 'payout', 'out', p.value, p.feeCents, p.status), externalId: p.externalId, txHash: p.txHash, endToEndId: p.endToEndId })
+      }
+      for (const t of state.transfers.values()) {
+        const ref = t.reference === undefined ? null : t.reference
+        if (t.from === sub) ops.push({ ...base(t, 'transfer', 'out', t.cents, 0, 'COMPLETED'), reference: ref, txHash: t.txHash })
+        if (t.to === sub) ops.push({ ...base(t, 'transfer', 'in', t.cents, 0, 'COMPLETED'), reference: ref, txHash: t.txHash })
+      }
+      const types = b.type === undefined ? null : [].concat(b.type)
+      const rows = ops.filter((op) => !types || types.includes(op.type)).sort((x, y) => y.seq - x.seq)
+      const start = b.cursor === undefined ? 0 : Number(b.cursor)
+      const limit = Number.isSafeInteger(b.limit) ? b.limit : 50
+      const page = rows.slice(start, start + limit).map(({ seq, ...op }) => op)
+      const data = { balances: [], subAccountId: sub, operations: page, total: rows.length }
+      if (start + limit < rows.length) data.nextCursor = String(start + limit)
       json(res, 200, { success: true, data })
     }
   }
@@ -249,7 +637,16 @@ async function startFakeHodle () {
     if (method === 'POST' && path === '/api/wallet/create') return ['walletCreate', null]
     if (method === 'POST' && path === '/api/wallet/keys') return ['walletKeys', null]
     if (method === 'POST' && path === '/api/wallet/get') return ['walletGet', null]
-    let m = DOCUMENT_RE.exec(path)
+    if (method === 'POST' && path === '/api/deposit/asset') return ['deposit', null]
+    if (method === 'POST' && path === '/api/wallet/payout/beneficiary') return ['payoutQuote', null]
+    if (method === 'POST' && path === '/api/wallet/payout') return ['payout', null]
+    if (method === 'POST' && path === '/api/wallet/transfer') return ['transfer', null]
+    if (method === 'POST' && path === '/api/account/statement') return ['statement', null]
+    let m = DEPOSIT_RE.exec(path)
+    if (method === 'GET' && m) return ['depositStatus', decodeURIComponent(m[1])]
+    m = PAYOUT_RE.exec(path)
+    if (method === 'GET' && m) return ['payoutStatus', decodeURIComponent(m[1])]
+    m = DOCUMENT_RE.exec(path)
     if (method === 'GET' && m) return ['documentReady', decodeURIComponent(m[1])]
     m = KYC_RE.exec(path)
     if (method === 'GET' && m) return ['kycStatus', decodeURIComponent(m[1])]
@@ -289,6 +686,27 @@ async function startFakeHodle () {
     routes = { ...defaults, ...(handlers || {}) }
   }
 
+  function apply (name, ctx) {
+    const sink = {
+      code: 0,
+      text: '',
+      writeHead (code) { this.code = code; return this },
+      end (text) { this.text = text || '' }
+    }
+    defaults[name](null, sink, { id: null, query: new URLSearchParams(), json, ...ctx })
+    let parsed = sink.text
+    try { parsed = JSON.parse(sink.text) } catch {}
+    return { code: sink.code, body: parsed }
+  }
+
+  function settleDeposit (externalId) {
+    const dep = state.deposits.get(externalId)
+    if (!dep || dep.status === 'COMPLETED') return
+    dep.status = 'COMPLETED'
+    dep.txHash = txHash()
+    move(dep.subAccountId, dep.value - dep.feeCents)
+  }
+
   function close () {
     return new Promise((resolve) => {
       server.closeAllConnections()
@@ -296,7 +714,7 @@ async function startFakeHodle () {
     })
   }
 
-  return { base, seen, state, script, close }
+  return { base, seen, state, script, apply, settleDeposit, close }
 }
 
 // A fetch that refuses any origin other than the fake, so a wrong default can

@@ -121,6 +121,33 @@
 	# form-action 'none' só vale para envio de formulários. O service worker
 	# também deixa /account/* passar direto para a rede (apps/app/scripts/sw.js).
 	# Antes do handle abaixo: sem este, /account/* cairia no index.html.
+	#
+	# Os avisos do Hodle (POST /account/wallet/webhook/<evento>) vão ao mesmo
+	# serviço de conta, com o mesmo proxy, mas antes do /account/* para ter um
+	# limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 20
+	# requisições a cada 10 s por endereço. O serviço lê e confere a
+	# assinatura de cada corpo, e a janela dele (300 por minuto) só conta os
+	# avisos já conferidos; este limite segura quantos corpos um único cliente
+	# faz o serviço ler e conferir. O serviço não tem identidade por cliente
+	# (os cabeçalhos com o endereço saem), por isso o limite fica aqui. O
+	# endereço do cliente ({remote_host}) existe só na memória do Caddy,
+	# durante a janela de 10 s: não vai para registro algum nem para o serviço
+	# de conta (os cabeçalhos abaixo o tiram).
+	handle /account/wallet/webhook/* {
+		rate_limit {
+			zone webhook {
+				key {remote_host}
+				events 20
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
 	handle /account/* {
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
 			header_up Host {upstream_hostport}

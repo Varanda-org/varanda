@@ -14,6 +14,7 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createWalletRoutes } = require('./wallet-routes')
+const { createWalletWebhook } = require('./wallet-webhook')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -136,6 +137,9 @@ const ERROR_STATUS = Object.freeze({
   'saldo-insuficiente': 409,
   'carteira-incerta': 503,
   'taxa-mudou': 409,
+  // One unresolved debit per member, and one set of terms per tap.
+  'operacao-pendente': 409,
+  'operacao-divergente': 409,
   'idade-minima': 403,
   'rede-divergente': 409
 })
@@ -588,7 +592,12 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
 // `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
 // names the chain. Either null keeps the wallet policy at
-// { available: false }.
+// { available: false }. In the pix and completo modes `ops` (an
+// openWalletOpsStore of ./wallet-ops-store.js) is the money ledger, `fees`
+// the parseFees result of ./fees.js, `walletMaxCents` the largest debit or
+// deposit and `walletMoneyTimeoutMs` each money leg's deadline.
+// `walletWebhookSecrets` (a Map from Hodle event to its hex secret or
+// 'registrar', or null for no sink) turns on ./wallet-webhook.js.
 function createAccountServer ({
   association,
   origin,
@@ -615,6 +624,11 @@ function createAccountServer ({
   walletMode = 'cadastro',
   walletDailyLimit = 100,
   walletNetwork,
+  ops = null,
+  fees = null,
+  walletMaxCents = 300000,
+  walletMoneyTimeoutMs,
+  walletWebhookSecrets = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -701,7 +715,23 @@ function createAccountServer ({
     now,
     dailyLimit: walletDailyLimit,
     network: walletNetwork,
+    ops,
+    fees,
+    maxCents: walletMaxCents,
+    moneyTimeoutMs: walletMoneyTimeoutMs,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Hodle's deliveries are authenticated by their signature and bounded by
+  // the sink's own window, never by the browsers' budget.
+  const walletWebhook = createWalletWebhook({
+    secrets: walletWebhookSecrets,
+    ops,
+    wallets,
+    refresh: walletRoutes.refreshOp,
+    log,
+    now,
+    http: { send, sendError, refuse, RouteError, fixedWindow }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1203,6 +1233,7 @@ function createAccountServer ({
     // The seeder's relay never spends the browsers' global bucket; its own
     // token, dedupe and caps bound it (./push-routes.js).
     if (pushRoutes !== null && pathname === '/push-event') return pushRoutes.handleRelay(req, res)
+    if (walletWebhook.owns(pathname)) return walletWebhook.handle(req, res, url)
     if (!limits.global()) throw over()
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)

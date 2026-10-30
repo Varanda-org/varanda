@@ -162,8 +162,12 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/* and /media/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 2, 'exactly two rate_limit blocks')
-  const limits = { 'handle /index/* {': ['index', '20'], 'handle /media/* {': ['media', '120'] }
+  t.is(count('rate_limit {'), 3, 'exactly three rate_limit blocks')
+  const limits = {
+    'handle /index/* {': ['index', '20'],
+    'handle /media/* {': ['media', '120'],
+    'handle /account/wallet/webhook/* {': ['webhook', '20']
+  }
   for (const [head, [zone, events]] of Object.entries(limits)) {
     const b = block(head)
     const text = b.map((l) => l.trim())
@@ -179,6 +183,26 @@ test('Caddyfile: /index/* and /media/* have a per-client rate limit', (t) => {
     t.ok(text.includes('header_up -X-Forwarded-For') && text.includes('header_up -X-Real-Ip'), head + ' still strips client address headers')
   }
   t.absent(lines.some((l) => /^\s*log_key\b/.test(l)), 'log_key is never enabled')
+})
+
+// The Hodle webhook path reaches the account service through its own handle,
+// matched before /account/*, so unsigned bodies are capped per client address
+// in Caddy (the service never sees the address).
+test('Caddyfile: the wallet webhook path has its own per-client limit, before /account/*', (t) => {
+  const head = 'handle /account/wallet/webhook/* {'
+  t.is(count(head), 1, 'exactly one webhook handle')
+  const hook = block(head).map((l) => l.trim())
+  const account = block('handle /account/* {').map((l) => l.trim())
+  const start = lines.findIndex((l) => l.trim() === head)
+  const acc = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  t.ok(start !== -1 && acc > start, 'the webhook handle comes before handle /account/*')
+  t.ok(hook.includes('zone webhook {'), 'zone webhook')
+  t.ok(hook.includes('key {remote_host}'), 'keyed exactly on {remote_host}')
+  t.ok(hook.includes('events 20'), 'events 20')
+  t.ok(hook.includes('window 10s'), 'window 10s')
+  const proxy = (b) => b.slice(b.findIndex((l) => l.startsWith('reverse_proxy ')))
+  t.alike(proxy(hook), proxy(account), 'the same reverse_proxy block as /account/*')
+  t.ok(hook.includes('header_up -X-Forwarded-For') && hook.includes('header_up -X-Real-Ip'), 'client address headers stripped')
 })
 
 // No access log. The only log block is the global one that EXCLUDES the

@@ -115,3 +115,18 @@ test('help and short texts avoid jargon and em dashes', async (t) => {
     t.alike(words.filter((word) => jargon.has(word)), [], 'no jargon: ' + text)
   }
 })
+
+test('wallet help lists only the fees of features the mode offers', async (t) => {
+  const { HELP, carteiraHelp } = await load()
+  const fees = { payout: 'sem taxa', transfer: 'sem taxa', crypto: 'R$ 1,00 + 1%' }
+  const pix = carteiraHelp({ mode: 'pix', fees, maxCents: null })
+  const pixFee = pix.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
+  t.is(pixFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Receber por Pix: sem taxa da Varanda.')
+  t.absent(pix.paragraphs.some((p) => p.includes('Enviar para')))
+  const full = carteiraHelp({ mode: 'completo', fees, maxCents: null })
+  const fullFee = full.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
+  t.is(fullFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Enviar para alguém da Varanda: sem taxa. Enviar para outra carteira: R$ 1,00 + 1%. Receber por Pix: sem taxa da Varanda.')
+  t.is(carteiraHelp(null), HELP.carteira)
+  t.ok(HELP.carteira.paragraphs[0].includes('quando o serviço liberar'))
+  t.absent(HELP.carteira.paragraphs.some((p) => p.includes('próximas versões') || p.includes('Quando enviar dinheiro estiver disponível')))
+})

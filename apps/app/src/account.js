@@ -50,11 +50,12 @@ const ERROR_MESSAGES = {
   'limite-carteira': 'Muitas operações. Tente de novo mais tarde.',
   'valor-invalido': 'Valor inválido.',
   'destino-invalido': 'Destino inválido.',
-  'saldo-insuficiente': 'Saldo insuficiente.',
+  'saldo-insuficiente': 'Saldo insuficiente. O saldo precisa cobrir também as taxas pendentes.',
   'carteira-incerta': 'A criação da carteira ainda não foi confirmada.',
   'taxa-mudou': 'A taxa mudou. Confira de novo antes de confirmar.',
   'idade-minima': 'Por enquanto a conta de pagamentos só pode ser aberta por quem tem 18 anos ou mais.',
   'operacao-pendente': 'Uma operação anterior ainda não foi confirmada. Aguarde a confirmação antes de fazer outra.',
+  'operacao-divergente': 'Esta operação já foi pedida com outros valores. Comece de novo.',
   // Never sent by the service: the app's name for the 404 that wallet
   // creation answers while the operator keeps the 'cadastro' mode.
   'aguardando-carteira': 'Verificação aprovada. A carteira será liberada em breve.'
@@ -152,10 +153,10 @@ export function buildRequest (method, path, body) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, map404 = null } = {}) {
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, map404 = null, timeoutMs = TIMEOUT_MS } = {}) {
   const { url, init } = buildRequest(method, path, body)
   const ctl = new AbortController()
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
   const fail = (code, nextChangeAt, unknown) => {
     const err = toError(code, nextChangeAt)
     if (uncertain && unknown) err.uncertain = true
@@ -347,10 +348,23 @@ const LIVENESS_HOST = 'app.hodle.com.br'
 const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
 const UPLOAD_MAX = 10 * 1024 * 1024
 const UPLOAD_TIMEOUT_MS = 30000
-// Two presigned provider URLs of up to 4096 characters each fit.
+// Two presigned provider URLs of up to 4096 characters each fit, and so does
+// a statement page (provider rows merged with the ledger's own rows).
 const WALLET_MAX_BODY = 16384
+// Reads and quotes may wait on one or two provider calls; the service's own
+// request timeout bounds receipt of the request, not the handler.
+const WALLET_TIMEOUT_MS = 20000
+// A debit runs up to three provider legs of 30 s each (C2). Giving up sooner
+// would only turn a known outcome into an uncertain one.
+const WALLET_MONEY_TIMEOUT_MS = 100000
+// op-status may read up to 10 statement pages before it answers.
+const WALLET_OP_STATUS_TIMEOUT_MS = 60000
+const FEE_KEY_RE = /^[a-z]{1,16}$/
+const FEE_TEXT_MAX = 64
 
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
 
 function isHodleUrl (v, host) {
   if (!isVerificationUrl(v)) return false
@@ -372,7 +386,7 @@ async function walletCall (path, body, opts = {}) {
     if (code === 'nao-encontrado' && body.action === 'wallet-create') return 'aguardando-carteira'
     return code === 'expirado' ? 'expirado' : 'indisponivel'
   }
-  return call('POST', path, body, { ...opts, maxBody: WALLET_MAX_BODY, map404 })
+  return call('POST', path, body, { maxBody: WALLET_MAX_BODY, ...opts, map404 })
 }
 
 function parseAccount (a) {
@@ -402,6 +416,21 @@ function parseAccount (a) {
   }
 }
 
+// The fee descriptions the service builds (fees.js describe): short texts
+// shown as they are, keyed by operation kind.
+function parseFeeTexts (v) {
+  if (!isObject(v)) return null
+  const keys = Object.keys(v)
+  if (keys.length > 16) return null
+  const out = {}
+  for (const k of keys) {
+    const text = v[k]
+    if (!FEE_KEY_RE.test(k) || typeof text !== 'string' || text.length > FEE_TEXT_MAX || CONTROL_RE.test(text)) return null
+    out[k] = text
+  }
+  return out
+}
+
 // null on any failure: walletStep treats a missing policy as off.
 export const walletPolicy = async () => {
   try {
@@ -409,7 +438,18 @@ export const walletPolicy = async () => {
     if (!isObject(data) || typeof data.available !== 'boolean' || !WALLET_MODES.includes(data.mode)) return null
     const network = data.network === undefined ? null : data.network
     if (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network))) return null
-    return { available: data.available, network, mode: data.mode }
+    const out = { available: data.available, network, mode: data.mode }
+    // Absent from a service without the money routes.
+    if (data.maxCents !== undefined) {
+      if (!isCount(data.maxCents)) return null
+      out.maxCents = data.maxCents
+    }
+    if (data.fees !== undefined) {
+      const fees = parseFeeTexts(data.fees)
+      if (fees === null) return null
+      out.fees = fees
+    }
+    return out
   } catch {
     return null
   }
@@ -472,6 +512,212 @@ export const walletCreate = async ({ member, nonce, signature, op, pin }) => {
   const data = await walletCall('/account/wallet/wallet-create', { member, nonce, action: 'wallet-create', op, signature, pin }, { uncertain: true, definite: true })
   if (typeof data.address === 'string' && WALLET_ADDRESS_RE.test(data.address)) return { address: data.address }
   throw uncertainError()
+}
+
+// Money (Pix and BRLA). Every shape is checked before the screen sees it; the
+// screen still passes provider text (names, bank) through displayText.
+// Debits and deposits are never retried here: an unknown outcome is reported
+// as uncertain and settled by walletOpStatus or the statement, under the same
+// opId.
+const OP_KINDS = Object.freeze(['deposit', 'payout', 'transfer', 'crypto', 'swap'])
+const OP_STATUSES = Object.freeze(['enviado', 'incerto', 'pendente', 'expirado', 'concluido', 'falhou', 'devolvido'])
+const FEE_STATUSES = Object.freeze(['nenhuma', 'pendente', 'enviada', 'incerta', 'cobrada'])
+const DISPUTES = Object.freeze(['aberta', 'aceita', 'rejeitada', 'cancelada'])
+const EXTERNAL_ID_RE = /^var-[0-9a-f]{32}$/
+const FEE_REF_RE = /^[A-Za-z0-9_.:-]{1,64}$/
+const QR_RE = /^[\x20-\x7e]{1,1024}$/
+const QUOTE_ID_RE = /^(?!\.+$)[A-Za-z0-9_.:-]{1,128}$/
+const E2E_RE = /^[A-Za-z0-9]{1,64}$/
+const CURSOR_RE = /^[\x21-\x7e]{1,512}$/
+const DIRECTION_RE = /^[a-z]{1,16}$/
+const REASON_RE = /^[a-z-]{1,32}$/
+const PROVIDER_ISO_RE = /^\d{4}-\d{2}-\d{2}T[\x20-\x7e]{1,40}$/
+const STATEMENT_MAX_ITEMS = 100
+const MASKED_TO_MAX = 64
+// The caps the service applies when it relays a quote (hodle.js).
+const OWNER_NAME_MAX = 128
+const TAX_ID_MASKED_MAX = 32
+const BANK_NAME_MAX = 64
+// A first statement page of 100 rows does not fit the 16 KiB wallet reader.
+const STATEMENT_MAX_BODY = 65536
+// Kinds whose recipient gets exactly the amount sent: every fee is on top.
+const FULL_AMOUNT_KINDS = Object.freeze(['payout', 'transfer', 'crypto'])
+
+// Provider timestamps keep their own offset form; any parseable ISO date is
+// accepted.
+const isProviderIso = (v) => typeof v === 'string' && PROVIDER_ISO_RE.test(v) && Number.isFinite(Date.parse(v))
+const isShortText = (v, max) => typeof v === 'string' && v.length <= max && !CONTROL_RE.test(v)
+
+function moneyCall (action, body, opts = {}) {
+  return walletCall('/account/wallet/' + action, { ...body, action }, { timeoutMs: WALLET_TIMEOUT_MS, ...opts })
+}
+
+const signedBody = ({ member, nonce, signature, op }) => ({ member, nonce, op, signature })
+
+// One ledger or statement row, only its known keys. undefined when malformed.
+function parseOp (o) {
+  if (!isObject(o)) return undefined
+  if (!OP_KINDS.includes(o.kind) || !OP_STATUSES.includes(o.status) || !isCount(o.cents)) return undefined
+  const hodleFeeCents = o.hodleFeeCents ?? null
+  if (hodleFeeCents !== null && !isCount(hodleFeeCents)) return undefined
+  let fee = null
+  if (o.fee !== undefined && o.fee !== null) {
+    if (!isObject(o.fee) || !isCount(o.fee.cents) || !FEE_STATUSES.includes(o.fee.status)) return undefined
+    fee = { cents: o.fee.cents, status: o.fee.status }
+  }
+  const dispute = o.dispute ?? null
+  if (dispute !== null && !DISPUTES.includes(dispute)) return undefined
+  const at = o.at ?? null
+  if (at !== null && !isProviderIso(at)) return undefined
+  const to = o.to ?? null
+  if (to !== null && !isShortText(to, MASKED_TO_MAX)) return undefined
+  const direction = o.direction ?? null
+  if (direction !== null && (typeof direction !== 'string' || !DIRECTION_RE.test(direction))) return undefined
+  const externalId = o.externalId ?? null
+  if (externalId !== null && (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId))) return undefined
+  const out = { kind: o.kind, status: o.status, cents: o.cents, hodleFeeCents, fee, dispute, at, to, direction, externalId }
+  if (o.endToEndId !== undefined && o.endToEndId !== null) {
+    if (typeof o.endToEndId !== 'string' || !E2E_RE.test(o.endToEndId)) return undefined
+    out.endToEndId = o.endToEndId
+  }
+  return out
+}
+
+export const walletBalance = async (args) => {
+  const data = await moneyCall('balance', signedBody(args))
+  const address = data.address ?? null
+  const network = data.network ?? null
+  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) ||
+    (address !== null && (typeof address !== 'string' || !WALLET_ADDRESS_RE.test(address))) ||
+    (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network)))) {
+    throw toError('indisponivel')
+  }
+  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents }
+}
+
+// A malformed row refuses the whole page: dropping it could hide an
+// uncertain operation the member has to settle first.
+export const walletStatement = async (args) => {
+  const data = await moneyCall('statement', signedBody(args), { maxBody: STATEMENT_MAX_BODY })
+  const cursor = data.cursor ?? null
+  if (!Array.isArray(data.items) || data.items.length > STATEMENT_MAX_ITEMS ||
+    (cursor !== null && (typeof cursor !== 'string' || !CURSOR_RE.test(cursor)))) {
+    throw toError('indisponivel')
+  }
+  const items = data.items.map(parseOp)
+  if (items.includes(undefined)) throw toError('indisponivel')
+  return { items, cursor }
+}
+
+// Creates a Pix charge at the provider, so an unknown outcome is uncertain; a
+// new tap with the same opId gets the same charge back. expiresAt may be null
+// because the provider does not always send it. qrCode null with a ledger
+// status is a known answer: the charge was reconciled or is already final,
+// so the screen shows the status instead of a code.
+export const walletDeposit = async (args) => {
+  const data = await moneyCall('deposit', signedBody(args), { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
+  const qrCode = data.qrCode ?? null
+  const expiresAt = data.expiresAt ?? null
+  const hodleFeeCents = data.hodleFeeCents ?? null
+  const netCents = data.netCents ?? null
+  const status = data.status ?? null
+  const qrOk = qrCode === null
+    ? OP_STATUSES.includes(status)
+    : typeof qrCode === 'string' && QR_RE.test(qrCode) && qrCode.trim() !== ''
+  if (!qrOk || (status !== null && !OP_STATUSES.includes(status)) ||
+    (expiresAt !== null && !isProviderIso(expiresAt)) ||
+    typeof data.externalId !== 'string' || !EXTERNAL_ID_RE.test(data.externalId) ||
+    (hodleFeeCents !== null && !isCount(hodleFeeCents)) ||
+    (netCents !== null && !isCount(netCents))) {
+    throw uncertainError()
+  }
+  return { qrCode, expiresAt, externalId: data.externalId, hodleFeeCents, netCents, status }
+}
+
+export const walletPayoutQuote = async (args) => {
+  const data = await moneyCall('payout-quote', signedBody(args))
+  const text = (v, max) => v === null || v === undefined ? '' : (isShortText(v, max) ? v : null)
+  const ownerName = text(data.ownerName, OWNER_NAME_MAX)
+  const bankName = text(data.bankName, BANK_NAME_MAX)
+  const taxIdMasked = text(data.taxIdMasked, TAX_ID_MASKED_MAX)
+  const expiresAt = data.expiresAt ?? null
+  if (typeof data.quoteId !== 'string' || !QUOTE_ID_RE.test(data.quoteId) || !isCount(data.feeCents) ||
+    ownerName === null || bankName === null || taxIdMasked === null ||
+    (expiresAt !== null && !isProviderIso(expiresAt))) {
+    throw toError('indisponivel')
+  }
+  return { quoteId: data.quoteId, ownerName, taxIdMasked, bankName, feeCents: data.feeCents, expiresAt }
+}
+
+// The total must be the sum of its lines, so the confirmation never shows a
+// total its lines do not add up to.
+export const walletPreview = async (args) => {
+  const data = await moneyCall('preview', signedBody(args))
+  const keys = ['amountCents', 'varandaFeeCents', 'hodleFeeCents', 'pendingFeeCents', 'totalDebitCents', 'netReceivedCents']
+  if (!keys.every((k) => isCount(data[k]))) throw toError('indisponivel')
+  const ref = data.pendingFeeRef ?? ''
+  const refOk = data.pendingFeeCents === 0 ? ref === '' : (typeof ref === 'string' && FEE_REF_RE.test(ref))
+  const sum = data.amountCents + data.varandaFeeCents + data.hodleFeeCents + data.pendingFeeCents
+  const ok = data.ok ?? true
+  const reason = data.reason ?? null
+  const kind = isObject(args && args.op) ? args.op.kind : undefined
+  const netOk = !FULL_AMOUNT_KINDS.includes(kind) || data.netReceivedCents === data.amountCents
+  if (!refOk || !netOk || !Number.isSafeInteger(sum) || sum !== data.totalDebitCents || typeof ok !== 'boolean' ||
+    (reason !== null && (typeof reason !== 'string' || !REASON_RE.test(reason)))) {
+    throw toError('indisponivel')
+  }
+  // The other pending fees, held in the balance but not debited by this send.
+  // An older service leaves it out.
+  const reserved = data.reservedFeeCents
+  if (reserved !== undefined && reserved !== null && !isCount(reserved)) throw toError('indisponivel')
+  const out = { ok, reason, pendingFeeRef: ref }
+  for (const k of keys) out[k] = data[k]
+  if (isCount(reserved)) out.reservedFeeCents = reserved
+  return out
+}
+
+// The debit fields a signed op carries (C10), exactly as the preview showed
+// them; the service recomputes each one and answers 'taxa-mudou' otherwise.
+export function debitTerms (preview) {
+  return {
+    feeCents: preview.varandaFeeCents,
+    pendingFeeCents: preview.pendingFeeCents,
+    pendingFeeRef: preview.pendingFeeRef,
+    totalDebitCents: preview.totalDebitCents
+  }
+}
+
+function parseLeg (v) {
+  if (v === undefined || v === null) return null
+  if (!isObject(v) || !FEE_STATUSES.includes(v.status)) return undefined
+  const cents = v.cents ?? null
+  if (cents !== null && !isCount(cents)) return undefined
+  return { cents, status: v.status }
+}
+
+// The principal and each fee leg are reported apart (C2): a sent payout whose
+// fee stayed pendente is a success with a separate note, not a failure. The
+// PIN goes into this one request body and nowhere else.
+export const walletPayout = async ({ member, nonce, signature, op, pin }) => {
+  const data = await moneyCall('payout', { member, nonce, op, signature, pin }, { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
+  const principal = isObject(data.principal) ? data.principal : data
+  const externalId = principal.externalId ?? data.externalId
+  const fee = parseLeg(data.fee)
+  const pendingFee = parseLeg(data.pendingFee)
+  if (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId) || !OP_STATUSES.includes(principal.status) ||
+    fee === undefined || pendingFee === undefined) {
+    throw uncertainError()
+  }
+  return { externalId, status: principal.status, fee, pendingFee }
+}
+
+// One of the member's own operations; the service may poll the provider but
+// never sends anything for it.
+export const walletOpStatus = async (args) => {
+  const data = await moneyCall('op-status', signedBody(args), { timeoutMs: WALLET_OP_STATUS_TIMEOUT_MS })
+  const op = parseOp(isObject(data.operation) ? data.operation : data)
+  if (op === undefined || op.externalId === null) throw toError('indisponivel')
+  return op
 }
 
 function toHex (buf) {
