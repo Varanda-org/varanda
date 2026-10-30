@@ -2816,3 +2816,32 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Entre a volta do Google e o resgate de R, a linha do app ainda não conta como respondida pelo Google, então uma enxurrada de inícios pode despejá-la para dar lugar a outras (o app recebe `expirado` e recomeça).
 - Quem verifica a idade pela web e pelo app na mesma hora abre duas sessões pagas do Didit (uma por tipo de cliente), porque a URL de volta é fixada na criação da sessão. As duas contam no limite de 3 sessões por membro em 24 h.
 - `/account/age/app-return` não tem janela própria: uma enxurrada nele gasta só o balde global, como qualquer rota.
+
+## 49. Identidade por passkey no app nativo (PRF) e sessão guardada no aparelho (PR feat/native-passkey-identity, 2026-10-30)
+
+O app nativo (nó web dentro do worklet) roda a cerimônia da passkey no próprio aparelho pelo módulo local `apps/app/modules/passkey-prf` (Android: Credential Manager do `androidx.credentials`; iOS 18 ou mais novo: `ASAuthorizationPlatformPublicKeyCredentialProvider` com a extensão PRF), com o mesmo rp.id (o domínio da instalação) e a mesma entrada da PRF da web (`utf8('varanda/member-identity/prf/v1')`). Só a saída de 32 bytes da PRF cruza o IPC, em `identity.install` (docs/rpc.md 5.35). Depois de uma instalação não retomada que deu certo, a saída da PRF fica no chaveiro do aparelho (`expo-secure-store`, `WHEN_UNLOCKED_THIS_DEVICE_ONLY`), ligada ao rp.id e à chave pública, e vence com 30 dias sem uso; só um salvamento que deu certo chama `identity.sessionSaved`. Sair grava a marca `signedOut` no worklet (`identity.forget`) e então apaga o item; se o item não sair, a resposta é `SIGNOUT_INCOMPLETE` com o nó bloqueado.
+
+### Testes automatizados
+
+- Novo: `apps/app/test/passkeyOptions.test.js` (opções de criação e de entrada iguais às de `packages/web-member/lib/passkey.js`, entrada da PRF byte a byte igual a `PRF_EVAL`, base64url, `parsePrf` e `NO_PRF`, mensagens iguais às da web).
+- Novo: `apps/app/test/sessionStoreNative.test.js` (sessão guardada: ligação ao rp.id e à chave, 30 dias, data mais de 1 dia no futuro, `usedAt` ausente, apagamento; identidade: `identity.install` com `resumed: false`, `identity.sessionSaved` só depois de um salvamento que deu certo, `NO_PRF` nunca instala, ordem de Sair e `SIGNOUT_INCOMPLETE`, Recomeçar apaga a sessão qualquer que seja a resposta, retomada sem cerimônia e recusas).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda: a compilação nativa (Kotlin e Swift) só acontece no build do EAS, e os passos abaixo pedem aparelhos de verdade. Marcar só o que for de fato executado, com a saída.
+
+Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instalação para o pacote do app (`delegate_permission/common.get_login_creds`); iOS 18 ou mais novo com `com.apple.developer.associated-domains` contendo `webcredentials:<domínio>` (precisa do Apple Developer Program) e o `apple-app-site-association` no domínio. Sem isso, o iOS responde `UNSUPPORTED` e o app mostra o aviso do aparelho.
+
+- [ ] Mesma chave do diário que a web, ANTES de publicar qualquer coisa: entrar na web com a passkey e anotar a chave pública (Ajustes, Identidade técnica); no app, entrar com a mesma passkey (o gerenciador de senhas oferece a passkey criada na web) e conferir que a chave pública é a mesma. Se for diferente, não publicar nada e relatar (não realizada ainda).
+- [ ] Criar passkey pelo app numa instalação de teste: o app entra, e a mesma passkey abre a mesma conta na web (não realizada ainda).
+- [ ] Retomada a frio: depois de entrar, encerrar o app à força e abrir de novo; ele abre já desbloqueado, sem pedir a passkey (não realizada ainda).
+- [ ] Sair pede de novo: Ajustes, Sair; encerrar e abrir o app; ele pede a passkey (não retoma a sessão) (não realizada ainda).
+- [ ] Aparelho ou gerenciador sem PRF: o app mostra o aviso de que o aparelho ainda não consegue abrir a conta, nada é derivado e nenhuma chave aparece em Identidade técnica (não realizada ainda).
+- [ ] Os logs do app (`adb logcat`, console do Xcode) durante entrar, retomar e Sair não mostram a saída da PRF nem o `prfHex` (não realizada ainda).
+
+### Limites que sobram
+
+- A saída da PRF passa pela ponte JS como texto hexadecimal (uma string não pode ser zerada); os bytes locais são zerados depois do `identity.install`.
+- Depois de um `NO_PRF` o status passa a `prf: 'no'` até o app reabrir, e o cartão Entrar mostra o aviso do aparelho sem `tentar de novo`.
+- O item no chaveiro dá a identidade a quem tiver o aparelho desbloqueado (ou código rodando dentro do app) até Sair ou 30 dias sem uso. Não vai para backups nem para o iCloud Keychain.
+- No iOS, se a plataforma não aplicar à entrada da PRF o mesmo prefixo "WebAuthn PRF" que o navegador aplica, a chave sai diferente da web: o primeiro passo da verificação humana existe para pegar isso antes de publicar.

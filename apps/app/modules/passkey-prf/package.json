@@ -1,0 +1,7 @@
+{
+  "name": "passkey-prf",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebAuthn passkey ceremonies with the PRF extension for the Varanda app",
+  "main": "index.js"
+}

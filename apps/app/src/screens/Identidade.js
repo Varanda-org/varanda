@@ -12,8 +12,10 @@
 // chosen passkey's manager gives no PRF (src/passkeyTrouble.js), and after a
 // successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
-// the certificate and the posts back from the seeder). The native node and
-// varanda-serve keep the plain identity card.
+// the certificate and the posts back from the seeder). The app's in-app web
+// node (the native web kind) shows the same cards with device wording (no
+// browser or page address texts); the core node and varanda-serve keep the
+// plain identity card.
 //
 // With `setup` (the first run, App.js) the same cards render inside the
 // onboarding Stepper (src/onboarding.js decides the step) with welcome copy,
@@ -27,7 +29,7 @@
 // Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, TextInput } from 'react-native'
+import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
@@ -58,12 +60,20 @@ const PLAIN_CERT_LABEL = 'O que a associação devolveu'
 const PLAIN_SUBMIT = 'gravar e continuar'
 // Replaces parseCertificateText's JSON wording in the setup only.
 const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
-const EXISTS_TEXT = 'Já existe uma conta neste navegador; outra passkey é outra conta.'
+// The in-app web node (native web kind) has the same passkey cards; only the
+// place they name changes.
+const NATIVE = Platform.OS !== 'web'
+const PLACE = NATIVE ? 'neste aparelho' : 'neste navegador'
+const EXISTS_TEXT = 'Já existe uma conta ' + PLACE + '; outra passkey é outra conta.'
 const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
+// The app's counterpart of BROWSER_TEXT: this device's credential manager
+// gives no PRF (or passkeys are not available here yet), so nothing can be
+// derived on it.
+const DEVICE_TEXT = 'Este aparelho ainda não consegue abrir sua conta com a passkey. Use o Varanda no navegador (Chrome, Edge ou Safari 18 ou mais novo).'
 const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
 
 function mismatchText (legacy) {
-  return 'A conta guardada neste navegador é de outra passkey' +
+  return 'A conta guardada ' + PLACE + ' é de outra passkey' +
     (legacy ? ' (de uma versão anterior do app)' : '') + '.'
 }
 
@@ -832,7 +842,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)
-      setPkNote('A conta antiga foi apagada deste navegador. Entre com a passkey para recomeçar.')
+      setPkNote('A conta antiga foi apagada ' + (NATIVE ? 'deste aparelho' : 'deste navegador') + '. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
 
@@ -865,7 +875,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           </Card>
           )
         : <Soft>carregando…</Soft>
-    } else if (pkStatus.rpIdError) {
+    } else if (pkStatus.rpIdError && !NATIVE) {
       // The address cannot carry a passkey (an IP): the page must be opened
       // by its domain name (localhost in development).
       entrar = (
@@ -878,7 +888,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       const stale = deleteStep(staleIds)
       entrar = (
         <Card>
-          <Notice>{BROWSER_TEXT}</Notice>
+          <Notice>{NATIVE ? DEVICE_TEXT : BROWSER_TEXT}</Notice>
           {stale ? <Body>{stale}</Body> : null}
           {blockedInvite}
         </Card>

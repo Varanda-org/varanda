@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Later human step (needs the Apple Developer Program): add
+     com.apple.developer.associated-domains with webcredentials:<installation host>
+     (and publish apple-app-site-association there) so the passkey-prf module can use
+     the installation's passkeys; until then iOS answers UNSUPPORTED. -->
 <plist version="1.0">
   <dict/>
 </plist>
