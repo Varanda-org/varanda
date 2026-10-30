@@ -11,7 +11,10 @@ const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const passkey = require('@varanda/web-member/lib/passkey')
 const { createIdentityHost } = require('../worklet/identity-install')
-const { readAll, createLifecycle, uploadMedia } = require('../worklet/web-node-parts')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -186,13 +189,15 @@ test('sessionSaved without a non-resumed install is refused', async (t) => {
   t.is(err.code, 'USAGE', 'after a lock')
   t.is((await host.status()).signedOut, true)
 
-  // Nor a later failed install.
+  // A resumed install refused by the barrier (a startup resume racing the
+  // ceremony) changes nothing: the ceremony's save can still lift it.
   const third = setup()
   await third.host.forget()
   await third.host.install(params())
-  await third.host.install(params({ resumed: true })).catch(() => {})
-  err = await third.host.sessionSaved().catch((e) => e)
-  t.is(err.code, 'USAGE', 'after a refused install')
+  err = await third.host.install(params({ resumed: true })).catch((e) => e)
+  t.is(err.code, 'USAGE', 'the resumed install is refused')
+  t.alike(await third.host.sessionSaved(), {}, 'sessionSaved still lifts the barrier')
+  t.is((await third.host.status()).signedOut, false)
 })
 
 test('a resumed install is refused while signed out', async (t) => {
@@ -262,6 +267,92 @@ test('readAll enforces the cap and a short file', async (t) => {
   t.is(over.calls.length, 0, 'nothing read over the cap')
   t.is(await readAll(fakeHandle(data, 64), 0, 99), null, 'empty')
   t.is(await readAll(fakeHandle(data, 64), 150, 4096), null, 'file shorter than its size')
+})
+
+const MEDIA_NAME = '0123456789abcdef0123456789abcdef.bin'
+
+function mediaDirs (t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-media-'))
+  t.teardown(() => fs.rmSync(root, { recursive: true, force: true }), { force: true })
+  const cacheDir = path.join(root, 'cache')
+  fs.mkdirSync(cacheDir)
+  return { root, cacheDir }
+}
+
+// fs.promises with every call recorded, to prove a refused name touches
+// nothing.
+function recordingFs () {
+  const calls = []
+  return {
+    calls,
+    lstat: (p) => { calls.push(['lstat', p]); return fs.promises.lstat(p) },
+    open: (p, flags) => { calls.push(['open', p]); return fs.promises.open(p, flags) }
+  }
+}
+
+function readMedia (fsApi, cacheDir, name, max = 4096) {
+  return readMediaFile({ fs: fsApi, join: path.join, cacheDir, name, max, flags: fs.constants.O_RDONLY })
+}
+
+test('isMediaName accepts only the host-generated cache name', (t) => {
+  const hex = MEDIA_NAME.slice(0, 32)
+  t.ok(isMediaName(MEDIA_NAME))
+  const bad = [
+    '', null, 1, hex, hex + '.jpg', hex + '.BIN', hex.toUpperCase() + '.bin', hex.slice(1) + '.bin',
+    hex + 'a.bin', '../' + hex.slice(3) + '.bin', '/' + hex.slice(1) + '.bin',
+    hex.slice(0, 16) + '/' + hex.slice(17) + '.bin', '..', hex + '.bin/', hex + '.bin\n'
+  ]
+  for (const name of bad) t.absent(isMediaName(name), JSON.stringify(name))
+})
+
+test('readMediaFile reads the named file from cacheDir and returns its path', async (t) => {
+  const { cacheDir } = mediaDirs(t)
+  const data = new Uint8Array(300).map((_, i) => i % 256)
+  fs.writeFileSync(path.join(cacheDir, MEDIA_NAME), data)
+  const fsApi = recordingFs()
+  const { file, bytes } = await readMedia(fsApi, cacheDir, MEDIA_NAME)
+  t.is(file, path.join(cacheDir, MEDIA_NAME))
+  t.alike(bytes, data)
+  t.alike(fsApi.calls.map((c) => c[1]), [file, file], 'only the joined path is touched')
+})
+
+test('readMediaFile refuses a bad name without touching the file system', async (t) => {
+  const { root, cacheDir } = mediaDirs(t)
+  const outside = path.join(root, MEDIA_NAME)
+  fs.writeFileSync(outside, 'secret')
+  const fsApi = recordingFs()
+  for (const name of ['../' + MEDIA_NAME, outside, MEDIA_NAME.toUpperCase(), 'a.bin', undefined]) {
+    const err = await readMedia(fsApi, cacheDir, name).catch((e) => e)
+    t.is(err.code, 'USAGE', String(name))
+    t.is(err.message, 'arquivo de mídia inválido')
+  }
+  t.alike(fsApi.calls, [], 'no lstat or open')
+  const err = await readMedia(fsApi, '', MEDIA_NAME).catch((e) => e)
+  t.is(err.code, 'USAGE', 'no cacheDir')
+})
+
+test('readMediaFile refuses a link, a directory, a missing file and a bad size', async (t) => {
+  const { root, cacheDir } = mediaDirs(t)
+  const target = path.join(root, 'outside.bin')
+  fs.writeFileSync(target, 'secret')
+  const link = 'a'.repeat(32) + '.bin'
+  fs.symlinkSync(target, path.join(cacheDir, link))
+  const dir = 'b'.repeat(32) + '.bin'
+  fs.mkdirSync(path.join(cacheDir, dir))
+  const empty = 'c'.repeat(32) + '.bin'
+  fs.writeFileSync(path.join(cacheDir, empty), '')
+  const big = 'd'.repeat(32) + '.bin'
+  fs.writeFileSync(path.join(cacheDir, big), new Uint8Array(11))
+  const missing = 'e'.repeat(32) + '.bin'
+  for (const name of [link, dir, missing]) {
+    const err = await readMedia(fs.promises, cacheDir, name).catch((e) => e)
+    t.is(err.message, 'arquivo de mídia inválido', name.slice(0, 1))
+  }
+  for (const name of [empty, big]) {
+    const err = await readMedia(fs.promises, cacheDir, name, 10).catch((e) => e)
+    t.is(err.message, 'mídia inválida', name.slice(0, 1))
+  }
+  t.is(fs.readFileSync(target, 'utf8'), 'secret')
 })
 
 // A storage whose writeJson resolves only when released.
@@ -334,7 +425,7 @@ test('an upload still reading at close never reaches mediaUpload; close does not
   const upload = lifecycle.guardUpload(() => uploadMedia({
     read: () => new Promise((resolve) => { finishRead = resolve }),
     session,
-    unlink: (real) => unlinked.push(real),
+    unlink: (file) => unlinked.push(file),
     isClosing: lifecycle.isClosing
   }, { mime: 'image/jpeg', width: 1, height: 1 }))
 
@@ -342,7 +433,7 @@ test('an upload still reading at close never reaches mediaUpload; close does not
   await new Promise((resolve) => setTimeout(resolve, 5))
   const closing = lifecycle.close()
   const bytes = new Uint8Array([1, 2, 3])
-  finishRead({ real: '/cache/photo.jpg', bytes })
+  finishRead({ file: '/cache/photo.jpg', bytes })
   const err = await uploading.catch((e) => e)
   t.is(err.code, 'LOCKED', 'the upload fails with the closed error')
   t.is(mediaUploads, 0, 'mediaUpload never started')
@@ -370,7 +461,7 @@ test('close cancels a running upload by closing the session first', async (t) =>
   const storage = { async close () { order.push('storage') } }
   const lifecycle = createLifecycle({ session, storage })
   const upload = lifecycle.guardUpload(() => uploadMedia({
-    read: async () => ({ real: '/cache/p.jpg', bytes: new Uint8Array(4) }),
+    read: async () => ({ file: '/cache/p.jpg', bytes: new Uint8Array(4) }),
     session,
     unlink: () => {},
     isClosing: lifecycle.isClosing

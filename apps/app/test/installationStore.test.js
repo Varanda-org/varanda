@@ -229,11 +229,12 @@ test('discovery on native asks the installation, never the network in tests', as
     t.is(store.hostedPage, false)
 
     const association = 'ab'.repeat(32)
+    const body = JSON.stringify({ v: 1, association })
     globalThis.fetch = async () => ({
       status: 200,
       redirected: false,
-      headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) },
-      text: async () => JSON.stringify({ v: 1, association })
+      headers: jsonHeaders(String(Buffer.byteLength(body))),
+      text: async () => body
     })
     const config = await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) })
     t.is(config && config.kind, 'hosted')
@@ -248,14 +249,55 @@ test('discovery on native asks the installation, never the network in tests', as
 
 const ASSOC_A = 'ab'.repeat(32)
 const ASSOC_B = 'cd'.repeat(32)
-const jsonAnswer = (association, url) => async () => ({
-  status: 200,
-  redirected: false,
-  url,
-  headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) },
-  text: async () => JSON.stringify({ v: 1, association })
-})
+function jsonHeaders (length) {
+  return {
+    get: (name) => {
+      if (name === 'content-type') return 'application/json'
+      if (name === 'content-length') return length
+      return null
+    }
+  }
+}
+const jsonAnswer = (association, url) => async () => {
+  const body = JSON.stringify({ v: 1, association })
+  return { status: 200, redirected: false, url, headers: jsonHeaders(String(Buffer.byteLength(body))), text: async () => body }
+}
 const stored = () => JSON.parse(files().get(INSTALLATION))
+
+test('discovery: only a canonical Content-Length within the cap is read', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await store.saveInstallation('https://example.test')
+    let reads = 0
+    const answer = (length, body) => async () => ({
+      status: 200,
+      redirected: false,
+      url: 'https://example.test/varanda.json',
+      headers: jsonHeaders(length),
+      text: async () => { reads++; return body }
+    })
+    const body = JSON.stringify({ v: 1, association: ASSOC_A, pad: 'x'.repeat(23) })
+    t.is(Buffer.byteLength(body), 120)
+
+    for (const length of [null, '4097', '0120', '+120', '120 ', '1e2', '']) {
+      const statuses = []
+      globalThis.fetch = answer(length, body)
+      t.is(await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) }), null, JSON.stringify(length))
+      t.alike(statuses, ['invalid'], JSON.stringify(length) + ': invalid')
+      t.is(reads, 0, JSON.stringify(length) + ': nothing read')
+    }
+
+    globalThis.fetch = answer('120', body)
+    const config = await store.discoverConfig()
+    t.is(config && config.association, ASSOC_A, '120 with a 120-byte body is accepted')
+    t.is(reads, 1)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
 
 test('discovery: a redirect is never remembered and keeps the remembered answer', async (t) => {
   const { store } = await load()

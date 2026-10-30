@@ -9,7 +9,8 @@
 // browser, a drain step that settles after its effect was cleaned up and a
 // reset may all change it, so every change is a read-modify-write of the
 // stored queue (never of a captured array) and `items` mirrors what was
-// stored. Natively (outboxAvailable false) the store is never touched.
+// stored. Natively the store is a file in the app's documents
+// (outboxStore.native.js) and only the installation's node queues.
 //
 // Automatic sending is scoped to this page session. The stored queue is not
 // authenticated: any script of this origin can write localStorage, also while

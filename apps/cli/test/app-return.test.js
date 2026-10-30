@@ -13,12 +13,21 @@ const {
   safeEqual,
   mintRedeem,
   redeemMatches,
+  APP_RETURN_PATH,
   accountReturnUrl,
+  appReturnPage,
   ageReturnUrl,
   header
 } = require('../lib/account/app-return')
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
+
+// The same 32 bytes spelled with stray low bits in the last character.
+function nonCanonical (token) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const i = alphabet.indexOf(token[42])
+  return token.slice(0, 42) + alphabet[(i & ~3) | ((i & 3) ^ 1)]
+}
 
 function secret () {
   return nodeCrypto.randomBytes(32).toString('base64url')
@@ -75,18 +84,35 @@ test('mintRedeem / redeemMatches: a fresh token shape, only its hash matches', (
   t.not(mintRedeem().code, r.code)
 })
 
-test('accountReturnUrl: the fixed varanda://conta return, a code only on ok', (t) => {
+test('accountReturnUrl: the fixed https app return, a code only on ok', (t) => {
   t.alike(OUTCOMES, ['ok', 'erro', 'cancelado', 'lista-de-espera', 'convite-invalido'])
+  t.is(APP_RETURN_PATH, '/account/app/conta')
+  const origin = 'https://varanda.example'
+  const base = origin + '/account/app/conta?conta='
   const { code } = mintRedeem()
-  t.is(accountReturnUrl('ok', code), 'varanda://conta?conta=ok&codigo=' + code)
-  t.is(accountReturnUrl('ok'), 'varanda://conta?conta=ok')
-  t.is(accountReturnUrl('ok', 'x&y=1'), 'varanda://conta?conta=ok', 'a malformed code is dropped')
+  t.is(accountReturnUrl(origin, 'ok', code), base + 'ok&codigo=' + code)
+  t.is(accountReturnUrl(origin, 'ok'), base + 'ok')
+  t.is(accountReturnUrl(origin, 'ok', 'x&y=1'), base + 'ok', 'a malformed code is dropped')
+  t.is(accountReturnUrl(origin, 'ok', nonCanonical(code)), base + 'ok', 'a non-canonical code is dropped')
   for (const o of ['erro', 'cancelado', 'lista-de-espera', 'convite-invalido']) {
-    t.is(accountReturnUrl(o, code), 'varanda://conta?conta=' + o, o + ' carries no code')
+    t.is(accountReturnUrl(origin, o, code), base + o, o + ' carries no code')
   }
   for (const o of [undefined, '', 'OK', 'ok&codigo=x', 'https://evil.test', 'indisponivel']) {
-    t.is(accountReturnUrl(o, code), 'varanda://conta?conta=erro', 'unknown outcome: ' + o)
+    t.is(accountReturnUrl(origin, o, code), base + 'erro', 'unknown outcome: ' + o)
   }
+})
+
+test('appReturnPage: a static page, no link, no code, no script', (t) => {
+  const html = appReturnPage()
+  t.is(appReturnPage(), html, 'the same page every time')
+  t.ok(html.includes('<title>Varanda</title>'))
+  t.ok(html.includes('Volte ao app Varanda'))
+  t.ok(html.includes('Este endereço só funciona dentro do app Varanda.'))
+  t.ok(html.includes('mesma passkey'), 'points to linking on the site')
+  t.absent(/<script/i.test(html), 'no script')
+  t.absent(html.includes('intent:'), 'no intent')
+  t.absent(html.includes('codigo'), 'no code parameter')
+  t.absent(/<a\b/i.test(html), 'no link at all')
 })
 
 test('ageReturnUrl: fixed, no secret', (t) => {

@@ -178,6 +178,7 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(send.url, 'https://example.test/account/report')
   for (const r of [start, send]) {
     t.is(r.init.credentials, 'omit')
+    t.absent('cache' in r.init, 'no cache option in the app')
     t.alike(r.init.headers, { accept: 'application/json', 'content-type': 'application/json', 'x-varanda-client': 'app' })
   }
 
@@ -186,5 +187,6 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   const web = buildReportStart({ member: M })
   t.is(web.url, '/account/report/start')
   t.is(web.init.credentials, 'same-origin')
+  t.is(web.init.cache, 'no-store', 'the web keeps no-store')
   t.alike(web.init.headers, { accept: 'application/json', 'content-type': 'application/json' })
 })
