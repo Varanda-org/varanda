@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.authsession"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // Auth Tab (an https redirect that only returns to this app) arrived in
+  // 1.9.0, which needs compileSdk 36 and AGP 8.9.1 or newer.
+  implementation "androidx.browser:browser:1.9.0"
+}

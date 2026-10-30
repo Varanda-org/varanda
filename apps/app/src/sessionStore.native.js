@@ -23,6 +23,7 @@
 // null; a successful load rewrites usedAt (best effort).
 
 import * as SecureStore from 'expo-secure-store'
+import { File, Paths } from 'expo-file-system'
 
 const VERSION = 1
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -154,7 +155,42 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     await secureStore.deleteItemAsync(INDEX_KEY, options)
   }
 
-  return { save, load, clear }
+  // Deletes every stored session the index names (one per device), or only
+  // one of `rpId` when given, whatever its public key: a status with no
+  // diary has no key to bind to. Throws when the keychain refuses.
+  async function clearAll ({ rpId } = {}) {
+    const key = await secureStore.getItemAsync(INDEX_KEY, options)
+    if (typeof key !== 'string' || !key.startsWith(ITEM_PREFIX)) {
+      await secureStore.deleteItemAsync(INDEX_KEY, options)
+      return
+    }
+    if (rpId !== undefined && !(validRpId(rpId) && key.startsWith(ITEM_PREFIX + rpId + '.') && HEX64.test(key.slice((ITEM_PREFIX + rpId + '.').length)))) return
+    await secureStore.deleteItemAsync(key, options)
+    await secureStore.deleteItemAsync(INDEX_KEY, options)
+  }
+
+  return { save, load, clear, clearAll }
 }
 
 export const sessionStore = createSessionStore()
+
+// iOS deletes the app's Documents with the app but keeps its keychain items,
+// so a reinstall would find the PRF root secret of the deleted app. A marker
+// file in Documents tells a fresh install: absent at the first resume, every
+// stored session is deleted before the marker is written.
+const EPOCH_FILE = 'varanda-keychain-epoch'
+
+export function createKeychainEpoch ({ file = () => new File(Paths.document, EPOCH_FILE) } = {}) {
+  return {
+    present () {
+      try { return file().exists === true } catch { return false }
+    },
+    mark () {
+      const f = file()
+      if (!f.exists) f.create()
+      f.write('1')
+    }
+  }
+}
+
+export const keychainEpoch = createKeychainEpoch()

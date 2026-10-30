@@ -17,7 +17,7 @@
 // node locked.
 
 import * as PasskeyPrf from '../modules/passkey-prf'
-import { sessionStore } from './sessionStore'
+import { keychainEpoch, sessionStore } from './sessionStore'
 import {
   CHALLENGE_BYTES,
   USER_ID_BYTES,
@@ -63,7 +63,8 @@ function noop () {}
 // passkey: { isAvailable, create, get } (modules/passkey-prf).
 // request(method, params): the connection's request.
 // rpId(): the installation's rp.id or null.
-// store: { save, load, clear } (src/sessionStore.native.js).
+// store: { save, load, clear, clearAll } (src/sessionStore.native.js).
+// epoch: { present, mark }, the fresh-install marker (keychainEpoch).
 //
 // As in packages/web-member/web/node.js: lock, signOut and reset bump
 // `generation`; a ceremony or resume that sees it changed after any await
@@ -71,7 +72,7 @@ function noop () {}
 // installed) and rejects CANCELLED. signOut and reset wait for the
 // post-ceremony part in flight (`finishing`) before they delete the stored
 // session, so a save racing 'Sair' is deleted after it.
-export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, random = randomBytes } = {}) {
+export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, random = randomBytes } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
@@ -83,6 +84,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // { credentialId, userId } of a creation whose PRF output needs complete().
   let pendingReg = null
   let resuming = Promise.resolve()
+  let epochChecked = false
 
   function invalidate () {
     generation++
@@ -345,6 +347,23 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // stored diary exists, is not legacy, is for the same public key and 'Sair'
   // did not happen since. Fails closed and never throws.
   async function resumeOnce (gen) {
+    // A fresh install (iOS keeps keychain items across app deletion): every
+    // stored session goes before anything can load one. The marker is
+    // written only once that delete went through, so a refusal tries again
+    // on the next start.
+    if (!epochChecked) {
+      epochChecked = true
+      let fresh = false
+      try { fresh = epoch.present() !== true } catch {}
+      if (fresh) {
+        try {
+          await store.clearAll()
+          epoch.mark()
+        } catch {
+          return
+        }
+      }
+    }
     const rpId = rpIdOf()
     if (typeof rpId !== 'string' || rpId === '') return
     let st
@@ -358,7 +377,13 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}
       return
     }
-    if (st.exists !== true || st.legacy === true || typeof st.publicKey !== 'string') return
+    // No diary (a reinstall wiped it) or a legacy one: no stored session of
+    // this rp.id can resume, so none is left behind.
+    if (st.exists !== true || st.legacy === true) {
+      try { await store.clearAll({ rpId }) } catch {}
+      return
+    }
+    if (typeof st.publicKey !== 'string') return
     const record = await store.load({ rpId, publicKey: st.publicKey }).catch(() => null)
     if (record === null || gen !== generation) return
     if (typeof st.credentialId === 'string' && st.credentialId !== record.credentialId) {
