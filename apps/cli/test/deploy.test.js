@@ -647,9 +647,9 @@ const ASSOC_BAD = [
 
 function checkAssocShapes (t, wk) {
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8')), [{
-    relation: ['delegate_permission/common.get_login_creds'],
+    relation: ['delegate_permission/common.get_login_creds', 'delegate_permission/common.handle_all_urls'],
     target: { namespace: 'android_app', package_name: 'app.varanda', sha256_cert_fingerprints: [FAKE_CERT] }
-  }], 'assetlinks.json shape (no handle_all_urls)')
+  }], 'assetlinks.json shape (handle_all_urls for the Auth Tab return)')
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
     { webcredentials: { apps: [FAKE_IOS] } }, 'apple-app-site-association shape')
 }

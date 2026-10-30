@@ -185,7 +185,7 @@ export const accountStatus = (member) =>
   call('GET', '/account/status?member=' + encodeURIComponent(member))
 // The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
 // web's link cookie with V (linkSecret, kept in the app's memory) and R
-// (redeem, from the varanda://conta return). Both ride in headers, only from
+// (redeem, from the auth session's result). Both ride in headers, only from
 // the app, and only when well formed.
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const isToken = (v) => typeof v === 'string' && TOKEN_RE.test(v)

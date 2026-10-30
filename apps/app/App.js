@@ -96,7 +96,7 @@ import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
-import Identidade, { receiveAccountReturn } from './src/screens/Identidade'
+import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppReturn } from './src/linkReturn'
 import Membro from './src/screens/Membro'
@@ -132,7 +132,7 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'ident
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
 // Identidade's LinkCard is the one that removes the query. Native has no
-// location: its varanda://conta return arrives through Linking (Member).
+// location: its Google step returns through the auth session (Identidade).
 const LINK_RETURN = (() => {
   try {
     const search = globalThis.location?.search
@@ -706,34 +706,29 @@ function Member () {
   // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
   // handles the return.
   const linkReturnRef = useRef(LINK_RETURN)
-  // Native: bumped by each varanda://conta return, which plays the part of
-  // the web's ?conta= page load.
-  const [appReturnTick, setAppReturnTick] = useState(0)
-  const linkReturned = LINK_RETURN || appReturnTick > 0
+  // Native has no ?conta= load: an auth session's result lands in the
+  // Identidade card that opened it, which is still mounted (the native
+  // install card is always 'none', so the signup offer needs no signal).
+  const linkReturned = LINK_RETURN
   useEffect(() => {
     if (!termsOk || setupStep || !linkReturnRef.current) return
     linkReturnRef.current = false
     setAjustes('conta')
-  }, [setupStep, termsOk, appReturnTick])
+  }, [setupStep, termsOk])
 
   // Native: the URLs the app is opened with (Linking's initial URL and its
-  // 'url' events), all untrusted. The fixed returns of the system browser
-  // feed the same paths as the web's ?conta= and ?idade= loads, and the
-  // outcome is always asked of the service again; invite and profile links
-  // go to their stores. A link is never consent to follow.
+  // 'url' events), all untrusted. varanda://idade feeds the same path as the
+  // web's ?idade= load, and the outcome is always asked of the service again;
+  // invite and profile links go to their stores. varanda://conta is not a
+  // return (the Google step comes back only through the auth session). A
+  // link is never consent to follow.
   const appUrlRef = useRef(null)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
     const ret = parseAppReturn(url)
     if (ret !== null) {
-      if (ret.kind === 'conta') {
-        receiveAccountReturn(ret)
-        linkReturnRef.current = true
-        setAppReturnTick((n) => n + 1)
-      } else {
-        setAgeNote('')
-        checkAge()
-      }
+      setAgeNote('')
+      checkAge()
       return
     }
     if (captureSignupInvite(url) !== null) {

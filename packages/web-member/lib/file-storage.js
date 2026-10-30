@@ -7,7 +7,7 @@
 // Layout under `dir`:
 //   LOCK                          held with an OS-level exclusive lock by lock()
 //   cores/<hex(utf8 name)>/<file> one random-access-file per hypercore file
-//   kv/<hex(utf8 key)>.json       the JSON key-value area (atomic replace)
+//   kv/<hex(utf8 key)>.json       the JSON key-value area (atomic, durable replace)
 // random-access-file reads and writes on demand, so a large data file is
 // never loaded whole; core() ignores `lazy` and `cachePages` for that reason.
 const RandomAccessFile = require('random-access-file')
@@ -30,6 +30,57 @@ function call (fn, ...args) {
 
 function closeFile (raf) {
   return new Promise((resolve) => raf.close(() => resolve()))
+}
+
+// A directory fsync is not offered everywhere (Windows refuses to open or
+// sync one): only these codes of the directory step are ignored.
+const DIR_SYNC_UNSUPPORTED = new Set(['EINVAL', 'EISDIR', 'ENOTSUP', 'EPERM'])
+
+function dirSyncUnsupported (err) {
+  return err !== null && typeof err === 'object' && DIR_SYNC_UNSUPPORTED.has(err.code)
+}
+
+async function writeFully (fd, data) {
+  let at = 0
+  while (at < data.byteLength) {
+    const n = await call(fs.write, fd, data, at, data.byteLength - at, at)
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error('short write')
+    at += n
+  }
+}
+
+// tmp is on disk before it replaces file, so a crash right after the rename
+// never leaves an empty or partial value under the key.
+async function writeSynced (tmp, data) {
+  const fd = await call(fs.open, tmp, 'w')
+  try {
+    await writeFully(fd, data)
+    await call(fs.fsync, fd)
+  } catch (err) {
+    await call(fs.close, fd).catch(() => {})
+    throw err
+  }
+  await call(fs.close, fd)
+}
+
+// Makes the rename itself durable (the directory entry).
+async function syncDir (dir) {
+  let fd
+  try {
+    fd = await call(fs.open, dir, 'r')
+  } catch (err) {
+    if (dirSyncUnsupported(err)) return
+    throw err
+  }
+  try {
+    await call(fs.fsync, fd)
+  } catch (err) {
+    if (!dirSyncUnsupported(err)) {
+      await call(fs.close, fd).catch(() => {})
+      throw err
+    }
+  }
+  await call(fs.close, fd)
 }
 
 async function fileSize (file) {
@@ -93,7 +144,9 @@ function fileNodeStorage (dir) {
       return JSON.parse(text)
     },
     // Writes of one key run one after another: they share the .tmp path, and
-    // an overlapping pair would rename each other's bytes into place.
+    // an overlapping pair would rename each other's bytes into place. A
+    // resolved write survives a crash (the native sign-out marker relies on
+    // it): the tmp file is fsynced before the rename and the directory after.
     writeJson (key, value) {
       const file = kvFile(key)
       const text = JSON.stringify(value)
@@ -101,8 +154,9 @@ function fileNodeStorage (dir) {
       const next = prev.catch(() => {}).then(async () => {
         const tmp = file + '.tmp'
         await call(fs.mkdir, kvDir, { recursive: true })
-        await call(fs.writeFile, tmp, text)
+        await writeSynced(tmp, b4a.from(text, 'utf8'))
         await call(fs.rename, tmp, file)
+        await syncDir(kvDir)
       })
       writes.set(file, next)
       const forget = () => { if (writes.get(file) === next) writes.delete(file) }
