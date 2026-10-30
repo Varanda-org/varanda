@@ -29,18 +29,20 @@
 // Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Platform, StyleSheet, Text, TextInput } from 'react-native'
+import { Linking, Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink, toError } from '../account'
+import { isAppClient } from '../appClient'
+import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
 import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
-import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -163,6 +165,11 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // profile invite in sessionStorage (src/profileLink.js), which is never sent
 // to /account/*.
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
+// The app has no App Links: an invite opened in the browser never reaches it,
+// so the link step takes the link (or the bare code) pasted by hand.
+const PASTE_LABEL = 'Cole o link de convite'
+const PASTE_BUTTON = 'usar este convite'
+const PASTE_INVALID = 'Esse link de convite não serve. Confira se copiou o link inteiro.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const LINK_FAILED = 'não foi possível vincular a conta'
@@ -207,6 +214,35 @@ function takeReturnWaitlist () {
   takeReturnNotice()
   return returnWaitlist
 }
+
+// The native sign-in (apps/cli/lib/account/app-return.js). V is held in this
+// process's memory only, never in storage or a log, for the member that
+// started; R is the one-time code of the last varanda://conta?conta=ok.
+// A restarted app holds no V, so its return cannot be redeemed ('expirado').
+let appLink = null
+let appRedeem = null
+let appExpired = false
+const returnListeners = new Set()
+
+// App.js hands every parsed varanda://conta return here (src/linkReturn.js).
+// It only sets what the card shows; the card then asks the service again.
+export function receiveAccountReturn (ret) {
+  if (!ret || ret.kind !== 'conta') return
+  const search = '?conta=' + ret.outcome
+  appRedeem = ret.outcome === 'ok' && typeof ret.code === 'string' ? ret.code : null
+  appExpired = ret.outcome === 'ok' && (appRedeem === null || appLink === null)
+  returnNotice = appExpired ? null : parseReturn(search)
+  returnWaitlist = parseReturnWaitlist(search)
+  returnInvite = parseReturnInvite(search)
+  if (returnInvite !== '') dropSignupInvite()
+  for (const fn of returnListeners) fn()
+}
+
+// The proofs for this key's app row, or {} (the web, or nothing held).
+function appProofs (member) {
+  if (appLink === null || appLink.member !== member) return {}
+  return { linkSecret: appLink.secret, redeem: appRedeem }
+}
 function takeReturnInvite () {
   takeReturnNotice()
   return returnInvite
@@ -240,21 +276,22 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   // { key, status, pending } of the last load for this key.
   const [acct, setAcct] = useState(null)
   const [acctError, setAcctError] = useState('')
-  const [returned] = useState(takeReturnNotice)
+  const [returned, setReturned] = useState(takeReturnNotice)
   const [name, setName] = useState('')
   const [formOpen, setFormOpen] = useState(false)
   // A pending Google account the member gives up on (rejected by finish, or
   // 'começar de novo'): the stale row is ignored for this page load and the
   // link form shows; its 'vincular conta Google' starts a new row, whose
   // cookie replaces the old one (the service lets the old row expire).
-  const [restart, setRestart] = useState(false)
+  const [restart, setRestart] = useState(() => NATIVE && appExpired)
   const [confirmFailed, setConfirmFailed] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const busyRef = useRef(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(() => (NATIVE && appExpired ? toError('expirado').message : ''))
   const [note, setNote] = useState('')
+  const [pasted, setPasted] = useState('')
   // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
   const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
   // Sentence for an invite refusal ('convite-obrigatorio', 'convite-invalido'),
@@ -279,7 +316,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const mine = ++seqRef.current
     try {
       const status = await accountStatus(publicKey)
-      const pending = status.linked === true ? null : await readPending()
+      const pending = status.linked === true ? null : await readPending(appProofs(publicKey))
       if (mine !== seqRef.current) return
       setAcct({ key: publicKey, status, pending })
       setAcctError('')
@@ -289,6 +326,31 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   }, [publicKey])
 
   useEffect(() => { if (active) load() }, [active, load])
+
+  // A varanda://conta return while this card is mounted (the app was not
+  // reloaded, unlike the web page): the same states as a page load, then the
+  // service is asked again.
+  useEffect(() => {
+    if (!NATIVE) return
+    const take = () => {
+      setReturned(returnNotice)
+      setWaitlist(returnWaitlist)
+      setInviteNote(returnInvite)
+      setConfirmFailed(false)
+      setNote('')
+      if (appExpired) {
+        setError(toError('expirado').message)
+        setRestart(true)
+        setFormOpen(true)
+      } else {
+        setError('')
+        setRestart(false)
+      }
+      load()
+    }
+    returnListeners.add(take)
+    return () => { returnListeners.delete(take) }
+  }, [load])
 
   const cur = acct !== null && acct.key === publicKey ? acct : null
   const status = cur === null ? null : cur.status
@@ -387,14 +449,28 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     if (username === null) return setError(NAME_RULE)
     run(async () => {
       try {
-        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code })
+        // The app: a fresh V per start, whose hash names the new row; a V
+        // still held for this key proves the old row, so a restart may
+        // replace it. V is kept only once the service took its proof.
+        const app = isAppClient()
+        const link = app ? newLinkSecret(deviceRandomBytes) : null
+        const held = app ? appProofs(publicKey).linkSecret : undefined
+        const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code, appProof: link?.proof, linkSecret: held })
+        if (link !== null) {
+          appLink = { member: publicKey, secret: link.secret }
+          appRedeem = null
+          appExpired = false
+        }
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
-        const { authorizeUrl } = await authorizeLink({ signature })
+        const { authorizeUrl } = await authorizeLink({ signature, linkSecret: link?.secret })
         if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
         setWaitlist('')
         setInviteNote('')
         setNote(RELOAD_TEXT)
-        globalThis.location.assign(authorizeUrl)
+        // The system browser shares nothing with the app; it comes back
+        // through varanda://conta (App.js).
+        if (app) await Linking.openURL(authorizeUrl)
+        else globalThis.location.assign(authorizeUrl)
       } catch (err) {
         // Full cap: a calm notice. The name stays; nothing retries on its own.
         if (err && err.code === 'lista-de-espera') {
@@ -419,9 +495,19 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     // Never sign for a pending link of another key.
     if (row === null || row.member !== publicKey || typeof row.sub !== 'string' || row.sub === '') throw new Error(LINK_FAILED)
     setConfirmFailed(false)
+    // The app's row answers only to V and R: without both, nothing is
+    // signed or sent, and the member starts again.
+    const proofs = appProofs(publicKey)
+    if (isAppClient() && (typeof proofs.linkSecret !== 'string' || typeof proofs.redeem !== 'string')) {
+      setConfirmFailed(true)
+      throw toError('expirado')
+    }
     try {
       const { signature } = await node.request('account.sign', { phase: 'finish', nonce: row.nonce, username: row.username, sub: row.sub })
-      const done = await finishLink({ signature })
+      // R is spent by this finish whatever its answer.
+      if (isAppClient()) appRedeem = null
+      const done = await finishLink({ signature, ...proofs })
+      if (isAppClient()) appLink = null
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
       dropSignupInvite()
@@ -469,6 +555,16 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         await load()
       }
     })
+  }
+
+  // The app's paste field (PASTE_LABEL): the code is held in memory for this
+  // session, like a captured link, and goes only to the account service.
+  const usePasted = () => {
+    const rec = captureSignupInvite(pasted, { paste: true })
+    if (rec === null) return setError(PASTE_INVALID)
+    setError('')
+    setPasted('')
+    setInviteNote('')
   }
 
   const restartLink = () => {
@@ -542,6 +638,19 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       : inviteNote !== ''
         ? <Body>{inviteNote}</Body>
         : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
+    const inviteNeeded = (
+      <>
+        <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+        {NATIVE
+          ? (
+            <>
+              <Field label={PASTE_LABEL} placeholder='link ou código do convite' value={pasted} onChangeText={setPasted} mono />
+              <Btn label={PASTE_BUTTON} onPress={usePasted} disabled={busy || pasted.trim() === ''} />
+            </>
+            )
+          : null}
+      </>
+    )
     // Until the policy answers, the button waits rather than racing it.
     const linkDisabled = name.trim() === '' || policy === undefined
     body = (
@@ -574,7 +683,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <Body>{SHORT.link}</Body>
               {inviteLine}
               {inviteBlocked
-                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                ? inviteNeeded
                 : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
             </>
             )
@@ -585,7 +694,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               <HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>
               {inviteLine}
               {inviteBlocked
-                ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
+                ? inviteNeeded
                 : (
                   <>
                     <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />

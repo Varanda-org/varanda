@@ -1,8 +1,9 @@
-// 'Confirme sua idade' (hosted web only): the setup step between the
+// 'Confirme sua idade' (hosted web and the app's web node): the setup step between the
 // recovery and the @nome. Presentational: the shell reads the state from the
 // account service and starts the verification; nothing here comes from the
 // URL, and the state is never stored on the device.
 
+import { Platform } from 'react-native'
 import { AGE_TEXTS } from '../age'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { Body, Btn, Card, ErrorText, Notice, Page, Row, Soft, Spinner } from '../ui'
@@ -19,6 +20,11 @@ const CHECK_LABEL = 'Conferir de novo'
 // service hands back the same session for an hour, so it can be resumed.
 const RESUME_LABEL = 'Continuar a verificação'
 const RESUME_TEXT = 'Se você saiu antes de terminar, continue de onde parou.'
+// The app opens the partner in the system browser and is not reloaded on the
+// way back, so it says how to return and that the result is asked again.
+const NATIVE = Platform.OS !== 'web'
+const APP_BROWSER_TEXT = 'A verificação abre no navegador. Ao terminar, volte para a Varanda: o resultado é conferido de novo.'
+export const AGE_APP_NOTE = 'Abrimos a verificação no navegador. Quando terminar, volte para a Varanda.'
 
 // The states that offer a (new) verification.
 const STARTABLE = new Set(['nenhum', 'inconclusivo', 'expirado', 'recusado'])
@@ -34,6 +40,7 @@ export default function Idade ({ state, busy = false, error = '', note = '', off
       <Stepper index={index} total={total} title={STEP_TITLES.idade} hint={STEP_HINTS.idade}>
         <Body>{WHO_TEXT}</Body>
         <Soft>{KEPT_TEXT}</Soft>
+        {NATIVE ? <Soft>{APP_BROWSER_TEXT}</Soft> : null}
         <Card>
           {stateText ? <Body>{stateText}</Body> : null}
           {showResume ? <Soft>{RESUME_TEXT}</Soft> : null}

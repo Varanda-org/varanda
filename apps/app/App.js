@@ -46,7 +46,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
-import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
@@ -96,8 +96,9 @@ import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
 import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
-import Identidade from './src/screens/Identidade'
-import Idade from './src/screens/Idade'
+import Identidade, { receiveAccountReturn } from './src/screens/Identidade'
+import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
+import { parseAppReturn } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -131,7 +132,7 @@ const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'ident
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
 // Identidade's LinkCard is the one that removes the query. Native has no
-// location.
+// location: its varanda://conta return arrives through Linking (Member).
 const LINK_RETURN = (() => {
   try {
     const search = globalThis.location?.search
@@ -170,6 +171,9 @@ const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.
 const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
+// The native app reads Linking's initial URL once per process: it stays the
+// same for the whole run, and Member may mount again.
+let initialUrlTaken = false
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
@@ -492,6 +496,13 @@ function Member () {
       if (stale()) return
       if (r.state === 'verificado') return setAgeState('verificado')
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
+      // The app opens the provider in the system browser, which comes back
+      // through varanda://idade?volta=1 (the Linking effect below).
+      if (Platform.OS !== 'web') {
+        setAgeNote(AGE_APP_NOTE)
+        await Linking.openURL(r.url)
+        return
+      }
       setAgeNote(AGE_REDIRECT_TEXT)
       globalThis.location.assign(r.url)
     })
@@ -656,11 +667,55 @@ function Member () {
   // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
   // handles the return.
   const linkReturnRef = useRef(LINK_RETURN)
+  // Native: bumped by each varanda://conta return, which plays the part of
+  // the web's ?conta= page load.
+  const [appReturnTick, setAppReturnTick] = useState(0)
+  const linkReturned = LINK_RETURN || appReturnTick > 0
   useEffect(() => {
     if (!termsOk || setupStep || !linkReturnRef.current) return
     linkReturnRef.current = false
     setAjustes('conta')
-  }, [setupStep, termsOk])
+  }, [setupStep, termsOk, appReturnTick])
+
+  // Native: the URLs the app is opened with (Linking's initial URL and its
+  // 'url' events), all untrusted. The fixed returns of the system browser
+  // feed the same paths as the web's ?conta= and ?idade= loads, and the
+  // outcome is always asked of the service again; invite and profile links
+  // go to their stores. A link is never consent to follow.
+  const appUrlRef = useRef(null)
+  appUrlRef.current = (url) => {
+    if (typeof url !== 'string') return
+    const ret = parseAppReturn(url)
+    if (ret !== null) {
+      if (ret.kind === 'conta') {
+        receiveAccountReturn(ret)
+        linkReturnRef.current = true
+        setAppReturnTick((n) => n + 1)
+      } else {
+        setAgeNote('')
+        checkAge()
+      }
+      return
+    }
+    captureSignupInvite(url)
+    const rec = captureInvite(url)
+    if (rec !== null) {
+      inviteRef.current = rec
+      setInvite(rec)
+      setCardShown(false)
+      setAcceptedHere(false)
+    }
+  }
+  useEffect(() => {
+    if (Platform.OS === 'web') return
+    const take = (url) => { try { appUrlRef.current(url) } catch {} }
+    if (!initialUrlTaken) {
+      initialUrlTaken = true
+      Linking.getInitialURL().then(take, () => {})
+    }
+    const sub = Linking.addEventListener('url', (e) => take(e && e.url))
+    return () => sub.remove()
+  }, [])
 
   // The own profile (one profile.read through the profiles cache): the
   // onboarding's name step, the Publicar avatar and the own rows.
@@ -727,7 +782,7 @@ function Member () {
   // cover the card for a moment.
   const signupRef = useRef(false)
   const certMissing = info !== null && info.memberCert !== true
-  useEffect(() => { if (LINK_RETURN && step === 'vinculo' && certMissing) signupRef.current = true }, [step, certMissing])
+  useEffect(() => { if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true }, [linkReturned, step, certMissing])
   const [installCardOpen, setInstallCardOpen] = useState(false)
   useEffect(() => {
     if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
