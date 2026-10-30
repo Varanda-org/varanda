@@ -1301,6 +1301,8 @@ None of these was performed for this change.
 
 ### Duty cycle; the Espiadinha keeps its own link (2026-10-27)
 
+Superseded on 2026-10-30 by section 54: the hosted web no longer ends the link when idle (lease off), so the 8 s hold and 45 s gap checks below no longer apply; the Espiadinha part stands.
+
 Scope: the hosted web app with the node in the browser (`packages/web-member`, `apps/app`). The native app, `varanda-serve` and the CLI are unchanged.
 
 #### Summary
@@ -2215,6 +2217,8 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - [ ] A partially synced follow: after a short page the footer reads "Ainda sincronizando quem você segue.".
 - [ ] The list fills without pull-to-refresh as the follow downloads; on native no pull spinner appears.
 - [ ] A fully synced follow: the footer reads "Isso é tudo por enquanto." as before.
+- [ ] With an empty feed and a follow still syncing, "Ainda não chegou nada" carries "Ainda sincronizando quem você segue."; once synced, the old body returns.
+- [ ] Pull to refresh right after the diary grows: no second read follows the manual one.
 - [ ] 'mostrar mais' still pages 30 then 31 items.
 - [ ] Follow a diary with hundreds of posts, keep A Rua open at the end of the list, and confirm the download finishes (every automatic read preempts the sync run).
 
@@ -2224,8 +2228,7 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - A download usually costs one extra read at its end, because the stopped run reports growth the read already saw.
 - A follow with no local replica is not reported, so a follow nobody serves keeps the old footer; an author who signs a length nobody serves keeps the syncing footer.
 - Arrivals that sort inside the range already shown come through 'ver novidades' or pull-to-refresh; once the download ends the footer can say "Isso é tudo por enquanto." while such arrivals wait behind the pill.
-- An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
-- A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
+- An empty feed shows "Ainda sincronizando quem você segue." as the body of "Ainda não chegou nada" while followed diaries sync.
 - `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
 
 ## 37. Convites para entrar na rede (2026-10-29)
@@ -3138,6 +3141,34 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Um Pix devolvido não devolve sozinho uma taxa da Varanda já debitada.
 - O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
 - A ida ao ar depende do parecer jurídico, inclusive sobre o Código de Defesa do Consumidor.
+
+## 54. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
+
+As seções 1 a 53 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
+
+### O que mudou
+
+- `packages/web-member/web/node.js` passa `leaseHoldMs: 0`: a rodada contínua da web hospedada não termina mais com `'idle'` depois de 8 s nem espera 45 s sem discar. Uma aba visível mantém a conexão com o semeador (uma vaga externa por aba); a aba oculta continua parando a sincronização (`shouldStopForHidden`) e, ao voltar, começa uma rodada nova.
+- A lease continua no código como saída de emergência para capacidade. As esperas de 45 s do app só valiam depois de um `'idle'` e ficaram inalcançáveis; o app não mudou.
+- A conexão é mantida viva pelo keepalive do Hypercore (a cada 5 s); o semeador derruba um socket externo sem dados depois de 30 s. Uma conexão que cai disca de novo (1 s dobrando até 30 s); com o semeador cheio, a resposta 1013 vira "Semeador ocupado".
+
+### Testes automatizados
+
+- `packages/web-member/test/resume.test.js`: o nó que `web/node.js` cria recebe `leaseHoldMs` 0 (falha com 8000).
+- `packages/web-member/test/lease.test.js`: com a lease desligada e um semeador de mentira que usa `noise.setTimeout(6000)` como o real, um enlace estabelecido passa de 13 s com um só socket e sem parar (documenta o keepalive de que a decisão depende; passa antes e depois).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] Uma aba visível mantém um socket com o semeador por vários minutos e uma publicação nova de outro aparelho chega em poucos segundos (não realizada ainda)
+- [ ] Uma aba oculta para a sincronização e libera a vaga; ao voltar, reconecta (não realizada ainda)
+- [ ] Com o semeador no limite de `VARANDA_MAX_EXTERNAL`, a próxima aba é recusada com "Semeador ocupado" e tenta de novo (não realizada ainda)
+
+### Limites
+
+- Capacidade: cada aba visível segura uma vaga externa o tempo todo. Dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo mais folga para os links curtos da Espiadinha e dos Avisos; `apps/cli/scripts/load-ws.js` mede conexões seguradas.
+- Não há teste automatizado no navegador nem medição em semeador real.
 
 ## 55. Partida mais rápida da sincronização na web (PR perf/faster-sync-startup, 2026-10-30)
 

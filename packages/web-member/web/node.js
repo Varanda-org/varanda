@@ -541,10 +541,10 @@ async function start ({ association, seederUrl } = {}) {
       association,
       seederUrl,
       createSocket: (url) => new WebSocket(url),
-      // The lease (lib/session.js header, docs/rpc.md 6.1): a settled link
-      // is released after 8 s and not redialled by member reads for 45 s.
-      leaseHoldMs: 8000,
-      leaseGapMs: 45000
+      // Lease off (lib/session.js header, docs/rpc.md 6.1): a visible hosted
+      // page keeps its seeder link; the app stops it when the tab is hidden.
+      // The lease stays as an escape hatch for seeder capacity.
+      leaseHoldMs: 0
     })
     const sessionStore = createSessionStore({ indexedDB: globalThis.indexedDB, crypto: globalThis.crypto })
     const identity = createIdentity(node, storage, sessionStore, globalThis.indexedDB)

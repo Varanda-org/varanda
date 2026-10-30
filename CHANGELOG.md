@@ -134,6 +134,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- Web hospedada: a conexão com o semeador fica aberta enquanto a aba está visível, em vez de ser liberada depois de 8 s e só voltar após 45 s; publicações de outros aparelhos chegam em segundos. Cada aba visível ocupa uma vaga externa: dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo. A aba oculta continua parando a sincronização.
 - Na web hospedada, cada conta seguida baixa primeiro os posts mais novos (PR `perf/newest-first-sync`): A Rua mostra o começo do diário e os 32 blocos mais recentes antes de o histórico terminar, e o resto chega depois, em ordem. Um nome pode aparecer como "sem nome" por um instante, até chegar o perfil. O próprio diário, o que é anunciado ao semeador e a moderação não mudam.
   Detalhes em `docs/verification.md`, seção 56.
 - Partida mais rápida da sincronização na web hospedada (PR `perf/faster-sync-startup`): numa visita de volta, as réplicas seguidas abrem e são verificadas até 8 ao mesmo tempo (antes, uma de cada vez), o próprio diário é lido uma vez só na partida (a lista de seguidos reaproveita a varredura inicial), e uma leitura emprestada de uma réplica que a sincronização já tem não consulta mais o armazenamento. As leituras de A Rua começam mais cedo; respostas, ordem dos eventos e moderação não mudam.
