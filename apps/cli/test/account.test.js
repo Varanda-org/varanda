@@ -1746,6 +1746,88 @@ test('app callback: a row evicted during the exchange gets erro, no code, and it
   t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'the entry and the Google answer are gone')
 })
 
+test('app flood: a row Google answered survives a start flood and still finishes with V and R', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 2 } })
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  t.ok(R !== null)
+  // The answer holds no name before R: another member may still start 'ana'.
+  t.ok(s.store.start({ member: member().hex, username: 'ana' }).id)
+  for (let i = 0; i < 5; i++) s.store.start({ member: member().hex, username: 'flood' + i })
+  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(pending.status, 200, pending.text)
+  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana', sub: SUB })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(finish.status, 200, finish.text)
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
+})
+
+test('app flood: an answered row counts against maxPending, so a full table answers lotado', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 1 } })
+  const a = await appAuthorize(s, member(), 'ana')
+  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
+  t.exception(() => s.store.start({ member: member().hex, username: 'bia' }), /lotado/)
+  const started = await s.api('POST', '/account/start', { origin: null, headers: appHeaders(null), body: { member: member().hex, username: 'bia', appProof: appSecret().proof } })
+  t.is(started.status, 503, started.text)
+})
+
+test('app flood: a row Google has not answered is still evicted by a start flood', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 1 } })
+  const a = await appAuthorize(s, member(), 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  s.store.start({ member: member().hex, username: 'bia' })
+  const cb = await callback(s, null, a.state)
+  t.is(cb.headers.get('location'), 'varanda://conta?conta=erro')
+  t.is(s.fake.tokenCalls(), 0, 'the evicted row exchanges nothing')
+})
+
+test('app flood: one Google subject keeps at most MAX_PER_SUB answered rows; the table never fills and the newest still finishes', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 3 } })
+  const flows = []
+  for (let i = 0; i < 5; i++) {
+    const m = member()
+    const a = await appAuthorize(s, m, 'ana' + i)
+    t.is(a.started.status, 200, 'start ' + i + ' is never lotado: ' + a.started.text)
+    if (a.started.status !== 200) return
+    t.is(a.auth.status, 200, a.auth.text)
+    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+    t.ok(R !== null, 'callback ' + i)
+    flows.push({ m, a, R })
+  }
+  t.is(s.server.appStats().google, 2, 'only the newest two answers are held')
+  t.ok(s.store.start({ member: member().hex, username: 'bia' }).id, 'an unrelated start is not lotado')
+  const old = flows[0]
+  t.is((await appApi(s, 'GET', '/account/pending', { secret: old.a.secret, redeem: old.R })).status, 404, 'the oldest answer was dropped')
+  const { m, a, R } = flows[4]
+  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(pending.status, 200, pending.text)
+  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana4', sub: SUB })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana4', SUB) } })
+  t.is(finish.status, 200, finish.text)
+})
+
+test('app flood: answered rows of different Google subjects do not evict each other', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 5 } })
+  const flows = []
+  for (const sub of ['2098765432109876543210', '2098765432109876543210', '3098765432109876543210', '3098765432109876543210']) {
+    s.fake.account.sub = sub
+    const m = member()
+    const a = await appAuthorize(s, m, 'u' + flows.length + 'x')
+    t.is(a.auth.status, 200, a.auth.text)
+    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+    t.ok(R !== null)
+    flows.push({ a, R, sub })
+  }
+  t.is(s.server.appStats().google, 4)
+  for (const { a, R, sub } of flows) {
+    const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+    t.is(pending.status, 200, pending.text)
+    t.is(pending.body.sub, sub)
+  }
+})
+
 test('app callback: a row expired before the callback gets erro and its entry goes', async (t) => {
   const s = await setup(t)
   const a = await appAuthorize(s, member(), 'ana')

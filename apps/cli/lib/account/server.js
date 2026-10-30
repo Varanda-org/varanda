@@ -802,6 +802,9 @@ function createAccountServer ({
       return store.putGoogle(row.id, google)
     } catch (err) {
       throw fromStore(err)
+    } finally {
+      // putGoogle may have dropped this subject's other rows for its cap.
+      sweepApps()
     }
   }
 
@@ -1028,7 +1031,7 @@ function createAccountServer ({
     if (app) {
       const pendingApp = apps.get(id)
       // The store may have expired or evicted the row during the exchange (an
-      // app row is unproven until R is redeemed): a code no V could redeem is
+      // app row is unproven until Google answers): a code no V could redeem is
       // never handed out, and the Google answer is not kept.
       if (pendingApp === undefined || store.get(id) === null) {
         forgetApp(id)
@@ -1037,6 +1040,10 @@ function createAccountServer ({
       const redeem = mintRedeem()
       pendingApp.google = { sub: result.sub, email: result.email }
       pendingApp.redeem = redeem.hash
+      // Keeps a start flood from evicting the row while the person returns
+      // to the app; the sub itself still waits here for R. The subject's
+      // MAX_PER_SUB cap may drop its older rows: their app state goes too.
+      for (const old of store.markAnswered(id, result.sub) || []) forgetApp(old)
       log({ event: 'callback', reason: 'ok' })
       return redirect(res, accountReturnUrl('ok', redeem.code))
     }
