@@ -29,8 +29,10 @@
 		Strict-Transport-Security "max-age=31536000"
 		# 'wasm-unsafe-eval' só permite compilar WebAssembly (os hashes do
 		# nó no navegador), não eval. connect-src: só a própria origem e o
-		# WebSocket do semeador nela.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+		# WebSocket do semeador nela, mais uploads.hodle.com.br: as imagens de
+		# documento da conta de pagamentos vão do navegador ao Hodle por URLs de uso
+		# único, nunca pelo Varanda. O service worker ignora pedidos de outra origem.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"

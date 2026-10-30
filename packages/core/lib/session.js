@@ -553,6 +553,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the wallet statement (docs/rpc.md 5.35).
+    'wallet.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // Espiadinha reads diaries this node does not store through the browser
     // node's seeder WebSocket link (packages/web-member/lib/peek.js).
     // Nothing is opened.

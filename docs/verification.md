@@ -2776,9 +2776,79 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
 - Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
 
-## 48. Grupos públicos (PR feat/groups-public, 2026-10-28)
+## 48. Conta de pagamentos opcional: abertura e KYC (feat/hodle-account, 2026-10-30)
 
-Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.35 a 5.48. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
+As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para as seções 48 e 49.
+
+### O que mudou
+
+- Recurso opcional, só na web hospedada, por um parceiro (Hodle). O saldo previsto é BRLA, emitido pela Avenia, 1 real, na Polygon (padrão documentado da Hodle). Não rende. Sem abrir a conta, o app segue igual. Decisão do dono do produto em 2026-10-30. O papel da associação ainda depende de parecer, e a ida ao ar depende do parecer jurídico (`docs/design.md`, Conta de pagamentos).
+- Cliente de saída `apps/cli/lib/account/hodle.js`: subconta, documento, prova de vida, envio do KYC, leitura do resultado e criação da carteira. A chave de API, o PIN, o CPF e o JSON do parceiro não saem num resultado nem num erro. Chamada que muda estado e pode ter chegado ao parceiro volta com `uncertain: true` e não é repetida. Redes aceitas: `polygon` e `base`, padrão `polygon`.
+- Arquivo `wallet.json` (`apps/cli/lib/account/wallet-store.js`, modo 0600, volume `account-data`): `subAccountId`, rede, estado do KYC, `attemptId`, `documentId`, `selfieId`, `walletId`, endereço e chave embrulhada. As marcas de criação incerta vão para o disco antes da chamada. A primeira carteira fica. O PIN, o CPF, o nome, o endereço, as fotos, as URLs e os saldos não entram.
+- Declaração `varanda-wallet-v1` (`packages/core/lib/wallet-proof.js`) e método RPC `wallet.sign` (`docs/rpc.md` 5.35), só no nó do navegador. O nó do núcleo, o `varanda-serve` e a CLI respondem `USAGE` `assinatura disponível só no navegador`. A operação assinada não leva PIN nem CPF.
+- App, módulo puro `apps/app/src/wallet.js`: os passos do opt-in ao PIN, a idade mínima de 18 anos no formulário, o PIN de 6 dígitos sem sequência óbvia, e os textos fixos. O operador escolhe `VARANDA_HODLE_MODE`, na ordem de ativação `cadastro` < `carteira` < `pix` < `completo`. O padrão `cadastro` permite só subconta e KYC e para no KYC aprovado. O modo `carteira` acrescenta a criação da carteira com o PIN da própria pessoa e só deve ser configurado depois que a Hodle confirmar por escrito o PIN por pessoa. Nesta versão existem apenas `cadastro` e `carteira`; `pix` e `completo` chegam nos próximos PRs.
+- As fotos não passam pelo serviço de conta. O documento sobe direto para `uploads.hodle.com.br`. A selfie abre `app.hodle.com.br`.
+- Variáveis: `VARANDA_HODLE_API_KEY` (`hodle_live_` ou `hodle_test_`; sem ela o recurso fica desligado), `VARANDA_HODLE_NETWORK` (`polygon` ou `base`, padrão `polygon`, só antes da primeira carteira), `VARANDA_HODLE_MODE` (`cadastro` por padrão, ou `carteira`) e `VARANDA_HODLE_DAILY_LIMIT`.
+- Termos de Uso e Política de Privacidade versão 7, com novo aceite. O `wallet-ops.json` é do PR2 e não faz parte desta abertura.
+- Bloqueio que continua: a documentação da Hodle descreve um PIN da plataforma herdado pela subconta. A Varanda quer um PIN por pessoa. Enquanto a Hodle não confirmar, a carteira não deve ser criada na API real. O sandbox é Base Sepolia e não exercita subcontas.
+
+### Testes automatizados
+
+Todos os testes desta etapa usam o falso em `127.0.0.1` (`apps/cli/test/helpers/fake-hodle.js`) ou não abrem rede. Nenhum cobre a Hodle real, o sandbox, a tela no navegador nem o parecer. Rodados em 30/10/2026 no Node 24 e no Node 20, sem falha.
+
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/wallet-store.test.js`
+- `node apps/cli/test/account-wallet.test.js` (rotas do serviço de conta)
+- `node apps/cli/test/account-wallet-e2e.test.js` (do `wallet.sign` no navegador até o falso, com reinício)
+- `node apps/cli/test/account.test.js` (variáveis `VARANDA_HODLE_*`, partida por modo, perda do lock)
+- `node apps/app/test/account.test.js` (cliente do app)
+- `node packages/core/test/wallet-proof.test.js`
+- `node packages/core/test/session.test.js`
+- `node packages/web-member/test/session.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/legal.test.js`
+- `node packages/core/test/terms.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Sem `VARANDA_HODLE_API_KEY`: a conta de pagamentos não aparece e o restante do app não muda (não realizada ainda).
+2. [ ] `VARANDA_HODLE_MODE` em `cadastro` (padrão): opt-in, documento, selfie, dados e KYC aprovado terminam na frase de que a carteira será liberada em breve, sem pedir PIN (não realizada ainda).
+3. [ ] Com `VARANDA_HODLE_MODE=carteira`: depois do KYC aprovado, o app pede o PIN e cria uma carteira. Uma segunda criação não cunha outra (não realizada ainda).
+4. [ ] "Deixar para depois" não cria subconta e a Varanda segue utilizável (não realizada ainda).
+5. [ ] Os textos dizem que a conta na Hodle não pode ser apagada, que o saldo não rende e que a Varanda não é banco (não realizada ainda).
+6. [ ] Data de nascimento de quem tem menos de 18 anos: o app recusa e o serviço não chama a Hodle (não realizada ainda).
+7. [ ] PIN `111111`, `123456` e `654321` não passam no app. Um PIN aceito não aparece no `wallet.json` nem no registro (não realizada ainda).
+8. [ ] O `wallet.json` tem só identificadores, chave embrulhada, estado e ids. Sem CPF, nome, endereço ou foto (não realizada ainda).
+9. [ ] A foto do documento não passa pelo serviço de conta. A selfie abre a página da Hodle em outra janela (não realizada ainda).
+10. [ ] Resposta perdida na criação: fica o estado incerto, a pessoa toca em Conferir, e o serviço não cria outra sozinho (não realizada ainda).
+11. [ ] Três PINs errados bloqueiam a criação da carteira por 24 horas na Hodle, sem nova tentativa automática (não realizada ainda).
+12. [ ] O aceite dos Termos e da Política versão 7 aparece de novo para quem aceitou a versão 6 (não realizada ainda).
+13. [ ] No app nativo e na CLI, `wallet.sign` responde que a assinatura só existe no navegador (não realizada ainda).
+14. [ ] `VARANDA_HODLE_NETWORK` mudada depois da primeira carteira não muda a rede já guardada (não realizada ainda).
+15. [ ] Enquanto a Hodle não confirmar por escrito o PIN por pessoa, o operador mantém `VARANDA_HODLE_MODE` em `cadastro` para deixar a criação de carteira na API real desligada. Isso é uma configuração do operador, não uma trava no código (não realizada ainda).
+16. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
+
+### Limites
+
+- O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
+- Até a Hodle confirmar por escrito o PIN por pessoa, o operador deve manter `VARANDA_HODLE_MODE` em `cadastro` para deixar a criação da carteira na API real desligada.
+- A subconta não pode ser apagada na Hodle. A eliminação pedida pelo titular segue em aberto, com a retenção (issue #38).
+- Quem tem 16 ou 17 anos não abre esta conta nesta etapa.
+- Esta etapa não envia dinheiro, não cobra taxa e não cria `wallet-ops.json`.
+- Sem `VARANDA_HODLE_API_KEY`, ninguém vê o recurso.
+- Uma criação cuja resposta se perdeu fica parada até leitura adotável ou limpeza pelo operador.
+- Uma recusa definitiva da Hodle no envio do KYC (por exemplo, um campo que ela não aceita) encerra a tentativa como recusada, e a pessoa refaz documento e selfie.
+- Um envio de KYC da segunda tentativa em diante que perde a resposta e é recusado pela Hodle antes da consulta fica em andamento até o operador conferir na Hodle (registro `kyc-incerto`).
+- Se a gravação do `wallet.json` falhar logo depois de uma recusa da Hodle, a marca de incerteza pode ficar, e a pessoa fica parada até o operador limpar.
+- Dois processos gravando o mesmo `wallet.json` só acontecem depois de perder o lock; nesse caso a mesclagem pode trazer de volta um identificador apagado. O serviço deixa de gravar ao perder o lock.
+- 16 e 17 anos: a barreira é a declaração no opt-in e a data de nascimento conferida pela Hodle no documento.
+
+## 49. Grupos públicos (PR feat/groups-public, 2026-10-28)
+
+Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.36 a 5.49. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
 
 ### Como verificar
 

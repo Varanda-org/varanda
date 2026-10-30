@@ -203,6 +203,10 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_DIDIT_API_KEY` | Chave da API do Didit para a verificação de idade (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar). Segredo. Vazia junto com `VARANDA_DIDIT_WORKFLOW_ID`, a checagem fica desligada. Ver "Verificação de idade (Didit)". |
 | `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
 | `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
+| `VARANDA_HODLE_API_KEY` | Chave da API do Hodle para a conta de pagamentos (em `deploy/seeder/.env`; só o serviço `account` a recebe). Segredo. O prefixo `hodle_live_` ou `hodle_test_` escolhe produção ou sandbox. Vazia, o recurso fica desligado e `GET /account/wallet/policy` responde `{ available:false }`. Ver "Conta de pagamentos (Hodle)". |
+| `VARANDA_HODLE_NETWORK` | Rede da carteira: `polygon` (padrão) ou `base`. Fica fixa por membro desde a primeira carteira. Opcional. |
+| `VARANDA_HODLE_MODE` | Quais rotas existem: `cadastro` (padrão: só subconta e verificação) ou `carteira` (acrescenta criar a carteira com o PIN do membro). `pix` e `completo` virão em versões futuras. Atualizar a imagem nunca liga movimento de dinheiro sozinho. Só defina `carteira` depois que o Hodle confirmar por escrito que os PINs escolhidos por cada membro funcionam. Opcional. |
+| `VARANDA_HODLE_DAILY_LIMIT` | Teto por dia de subcontas novas, envios de verificação e operações de saída somados (padrão: 100; de 1 a 100000). Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
@@ -634,6 +638,39 @@ Diagnóstico: quando o app mostra "A verificação de idade está fora do ar ago
 Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
 
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
+
+#### Conta de pagamentos (Hodle, serviço `account`)
+
+É uma conta opcional de Pix e reais digitais (BRLA) dentro do Varanda, feita com o Hodle. Sem `VARANDA_HODLE_API_KEY` nada muda: o recurso não existe e a política responde `{ available:false }`. Ligá-lo não é necessário para usar a rede.
+
+Pré-requisitos no Hodle, antes de ligar:
+
+- Conta com subcontas, verificação de identidade (KYC) e carteiras habilitadas.
+- Peça ao suporte para habilitar operações de terceiros e saques por API.
+- Confirme por escrito que cada membro pode ter o próprio PIN de carteira. A página de chaves de carteira do Hodle diz que carteiras de subcontas usam o PIN da plataforma, a menos que a subconta tenha usuário próprio. Até essa confirmação, não use produção com `carteira`.
+
+Modos (`VARANDA_HODLE_MODE`), em ordem: `cadastro` (padrão: subconta e verificação) < `carteira` (acrescenta criar a carteira com o PIN do membro) < `pix` < `completo`. Nesta versão só `cadastro` e `carteira` existem; `pix` e `completo` virão depois. Em `cadastro`, criar a carteira responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". Defina `carteira` só depois da confirmação do Hodle acima (no sandbox, a primeira carteira protegida pode fixar o PIN enviado).
+
+O que fica guardado: o `wallet.json` no volume `account-data`, com o vínculo do membro à subconta, o estado da verificação e a carteira. O que nunca fica: o PIN, o CPF, as imagens de documento e o endereço postal.
+
+CSP: o `Caddyfile` agora libera `https://uploads.hodle.com.br` em `connect-src`. As imagens de documento vão do navegador direto ao Hodle por URLs de uso único e nunca passam pelo Varanda. O `img-src` não muda (o código Pix aparece como texto).
+
+Diagnóstico: o serviço registra `{ event: 'carteira', reason }` só com palavras fixas, nunca a chave, o PIN ou o que o Hodle respondeu. Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"carteira"'`.
+
+| Registro (`reason`) | O que fazer |
+| --- | --- |
+| `teto-diario` | O teto `VARANDA_HODLE_DAILY_LIMIT` encheu; volta no dia seguinte. |
+| `armazenamento-indisponivel` | O `wallet.json` não pôde ser lido ou gravado no volume `account-data`. Se aparecer logo depois de uma chamada aceita pela Hodle, a pessoa recebe "resultado incerto" e nada é refeito sozinho. |
+| `ligada` / `desligada` / `indisponivel` | Estado da conta de pagamentos na partida do serviço (`indisponivel`: o `wallet.json` existe mas não pôde ser aberto). |
+| `carteira-incerta` | A criação da subconta ou da carteira perdeu a resposta e não foi confirmada por leitura. A pessoa fica parada até uma leitura confirmar ou o operador resolver; o serviço nunca cria de novo sozinho. |
+| `conflito` | A Hodle devolveu uma subconta ou carteira que já está guardada para outra pessoa. Nada foi gravado; confira na Hodle. |
+| `kyc-incerto` | Um envio de KYC perdeu a resposta e a consulta só achou uma tentativa anterior recusada ou expirada. A pessoa fica em "verificação em andamento" até uma leitura achar a tentativa nova ou o operador conferir na Hodle. |
+| `rede-divergente` | `VARANDA_HODLE_NETWORK` mudou depois que a pessoa abriu a conta e antes da carteira. A carteira não é criada; volte a variável para a rede da conta. |
+| `pin-plataforma` | A Hodle recusou a criação da carteira com o PIN da pessoa (403). Sinal de que a conta da chave usa o PIN da plataforma: mantenha `VARANDA_HODLE_MODE` em `cadastro` e fale com o suporte da Hodle. |
+
+Os motivos de falha da chamada ao Hodle seguem o padrão `hodle-<passo>-<causa>`, com `<passo>` em `subconta`, `documento`, `kyc`, `carteira`, `chaves` ou `leitura` e `<causa>` como `http-401`, `tempo`, `rede`, `formato`, `entrada` (pedido recusado antes de sair) ou `falha` (erro inesperado); confira o código em `apps/cli/lib/account/hodle.js` e `apps/cli/lib/account/wallet-routes.js`.
+
+Sandbox: os fluxos de dinheiro de subconta não estão disponíveis nele, então o teste de fumaça dessas operações só vale com a conta principal.
 
 ### Implantação automática pelo GitHub Actions
 
