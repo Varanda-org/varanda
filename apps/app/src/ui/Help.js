@@ -1,4 +1,4 @@
-// Help that stays out of the way: an info button or a link opens a sheet with
+// Help that stays out of the way: an info button opens a sheet with
 // the explanation. A doc is { title, paragraphs }, the app's own copy.
 //
 // Each trigger renders its sheet as its own child, so inside an open Sheet
@@ -8,7 +8,7 @@
 // sheet open app-wide; the shell calls closeHelp() on Back and on navigation.
 
 import { useEffect, useRef, useSyncExternalStore } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Sheet } from './Sheet'
 import { Icon } from './Icon'
 import { colors, type } from './theme'
@@ -77,7 +77,7 @@ export function HelpSheet ({ open, onClose, doc }) {
   )
 }
 
-export function HelpButton ({ doc, color = colors.soft, style }) {
+export function HelpButton ({ doc, color = colors.soft, style, size = 22 }) {
   const help = useHelpTrigger()
   if (!doc) return null
   return (
@@ -89,29 +89,19 @@ export function HelpButton ({ doc, color = colors.soft, style }) {
         onPress={help.handleShow}
         style={({ pressed }) => [styles.button, style, pressed && styles.pressed]}
       >
-        <Icon name='info' size={22} color={color} />
+        <Icon name='info' size={size} color={color} />
       </Pressable>
       <HelpSheet open={help.open} onClose={help.handleHide} doc={doc} />
     </>
   )
 }
 
-export function HelpLink ({ doc, label = 'Saiba mais' }) {
-  const help = useHelpTrigger()
-  if (!doc) return null
+export function HelpNote ({ doc, children }) {
   return (
-    <>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel={label + ': ' + doc.title}
-        hitSlop={13}
-        onPress={help.handleShow}
-        style={styles.link}
-      >
-        <Text style={styles.linkText}>{label}</Text>
-      </Pressable>
-      <HelpSheet open={help.open} onClose={help.handleHide} doc={doc} />
-    </>
+    <View style={styles.note}>
+      <View style={styles.noteText}>{children}</View>
+      <HelpButton doc={doc} size={18} />
+    </View>
   )
 }
 
@@ -121,6 +111,6 @@ const styles = StyleSheet.create({
   title: { ...type.sheetTitle, color: colors.ink },
   button: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.6 },
-  link: { alignSelf: 'flex-start' },
-  linkText: { ...type.counter, color: colors.accent }
+  note: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'stretch' },
+  noteText: { flexShrink: 1 }
 })

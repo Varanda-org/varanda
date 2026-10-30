@@ -3,7 +3,6 @@
 // page merging, the notice shown in place of the list and the fixed texts.
 // Pure: no imports and no globals, so Node tests load it directly.
 
-export const FOLLOW_BACK_LABEL = 'Seguir de volta'
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
 export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.'
 export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'

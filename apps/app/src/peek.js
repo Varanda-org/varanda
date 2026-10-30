@@ -1,6 +1,6 @@
-// The Espiadinha screen's building blocks: row keys, page merging, the round
-// separators, the notice shown in place of the list, useSocial's needs for a
-// page, the error tests and the fixed texts. Pure:
+// The Espiadinha screen's building blocks: row keys, page merging, the notice
+// shown in place of the list, useSocial's needs for a page, the error tests and
+// the fixed texts. Pure:
 // no imports and no globals, so Node tests load it directly. The rule text
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
@@ -44,27 +44,10 @@ export function withoutAuthor (items, author) {
   return items.filter((item) => item.author !== author)
 }
 
-// Indexes where the round changes. The first item always starts a round, so a
-// non-empty list begins with a separator.
-export function roundStarts (items) {
-  const starts = new Set()
-  items.forEach((item, index) => {
-    if (index === 0 || item.round !== items[index - 1].round) starts.add(index)
-  })
-  return starts
-}
-
 // The notice shown in place of the list, or null. Web-only wins over offline.
 export function peekNotice ({ supported, hosted, online, loadedAt }) {
   if (hosted !== true || supported === false) return 'web-only'
   if (online === false && loadedAt === null) return 'offline'
-  return null
-}
-
-export function roundLabel (round) {
-  if (round === 0) return '1ª publicação de cada diário'
-  if (round === 1) return '2ª publicação de cada diário'
-  if (round === 2) return '3ª publicação de cada diário'
   return null
 }
 

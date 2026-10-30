@@ -3,7 +3,7 @@
 // is { name, username, avatar } from the row tapped). The header (avatar, name,
 // @nome, bio) comes from profile.read when the node holds the diary, else
 // (hosted web) from a diary.peek of the seeder index's profile/username seq
-// hints. Seguir/Seguindo uses follow.list / follow.add / follow.remove;
+// hints. Seguindo asks for confirmation before follow.remove;
 // 'denunciar a conta' opens the report sheet without a post (hosted web). On
 // the hosted web the member's posts and reposts are paged from the index
 // (/index/member, newest first) and every one is fetched and verified with
@@ -22,6 +22,7 @@ import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -293,13 +294,13 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
       <View style={styles.actions}>
         {!own
           ? (
-            <Pill
-              label={isFollowed ? 'Seguindo' : 'Seguir'}
-              filled={!isFollowed}
+            <FollowPill
+              following={follows === null ? null : isFollowed}
+              title={displayText(who.title)}
               pending={following}
-              disabled={follows === null}
-              accessibilityLabel={isFollowed ? 'deixar de seguir ' + displayText(who.title) : 'seguir ' + displayText(who.title)}
-              onPress={toggleFollow}
+              disabled={false}
+              onFollow={toggleFollow}
+              onUnfollow={toggleFollow}
             />
             )
           : null}

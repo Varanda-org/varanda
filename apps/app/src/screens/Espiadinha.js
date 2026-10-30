@@ -15,7 +15,7 @@
 // posts of any diary the seeder indexed that contain the words; 'limpar'
 // brings the rounds back from memory, unchanged.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -25,7 +25,7 @@ import { HELP } from '../help'
 import {
   PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  roundLabel, roundStarts, skippedText, withoutAuthor
+  skippedText, withoutAuthor
 } from '../peek'
 import { whoOf } from '../who'
 import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
@@ -33,7 +33,7 @@ import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
 import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { Pill } from '../ui/Pill'
@@ -303,7 +303,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
-  const starts = useMemo(() => roundStarts(items), [items])
 
   // Submit only: the seeder allows a few /index requests per client per 10 s.
   const submit = () => {
@@ -360,7 +359,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     <View style={styles.header}>
       {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
-      <HelpLink doc={HELP.espiadinha} />
       <CountsNote social={social} />
     </View>
   )
@@ -387,8 +385,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       {skipped || meta.incomplete
         ? (
           <View style={styles.footer}>
-            {skipped ? <Soft>{skipped}</Soft> : null}
-            {skipped ? <HelpLink doc={HELP.ausentes} /> : null}
+            {skipped ? <HelpNote doc={HELP.ausentes}><Soft>{skipped}</Soft></HelpNote> : null}
             {meta.incomplete ? <Soft>A lista pode estar incompleta; puxe para atualizar.</Soft> : null}
           </View>
           )
@@ -463,23 +460,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       />
     )
   }
-  const renderItem = ({ item, index }) => {
-    // Every round is labelled, the first one too; only a separator below
-    // other rows draws a top border.
-    const label = starts.has(index) ? roundLabel(item.round) : null
-    return (
-      <View>
-        {label
-          ? (
-            <View style={[styles.separator, index > 0 && styles.separatorLine]}>
-              <Text accessibilityRole='header' style={styles.separatorText}>{label}</Text>
-            </View>
-            )
-          : null}
-        {rowOf(item)}
-      </View>
-    )
-  }
+  const renderItem = ({ item }) => rowOf(item)
 
   const shownItems = notice === null ? items : []
   // The rounds stay mounted (state and social cache) under the search. Only
@@ -514,7 +495,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       data={shownItems}
       keyExtractor={peekKey}
       renderItem={renderItem}
-      extraData={{ now, following, starts, social: social.social, names: names.profileOf }}
+      extraData={{ now, following, social: social.social, names: names.profileOf }}
       ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : (notice === null ? header : null)}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}
@@ -535,8 +516,5 @@ const styles = StyleSheet.create({
   header: { padding: 16, gap: 8 },
   searchTop: { padding: 16 },
   searchBox: { gap: 8 },
-  footer: { padding: 16, gap: 8 },
-  separator: { paddingHorizontal: 16, paddingVertical: 10 },
-  separatorLine: { borderTopWidth: 1, borderTopColor: colors.line },
-  separatorText: { fontSize: 14, lineHeight: 20, color: colors.soft }
+  footer: { padding: 16, gap: 8 }
 })

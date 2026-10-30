@@ -1,9 +1,9 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
 // @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
-// infinite scroll and pull to refresh. On the hosted web the header also
-// offers the member's profile link (copiar / compartilhar; the /m/<key> form
-// is never printed). Only publications are listed (PostRows):
-// technical records and invalid blocks are not shown. Posts still in the
+// infinite scroll and pull to refresh. On the hosted web, 'Compartilhar'
+// under the profile data opens a sheet with the link (copiar link /
+// compartilhar; the /m/<key> form is never printed). Only publications are
+// listed (PostRows): technical records and invalid blocks are not shown. Posts still in the
 // outbox ('Aguardando envio', browser node) are listed above them; they are
 // not PostRows (no reply, no publication date yet). The public key is shown
 // only in Ajustes > Avançado. A queued item this page session did not write waits for the person
@@ -38,6 +38,7 @@ import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
+import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { SunsetBand } from '../ui/SunsetBand'
 import { HelpButton } from '../ui/Help'
@@ -142,6 +143,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
   const [editing, setEditing] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -266,6 +268,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
+  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
 
@@ -348,10 +351,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         </SunsetBand>
         {/* The row rises into the band (marginTop -44) and is drawn after it,
             so its empty space would take the gear's touches: only the avatar
-            and the pill receive them. */}
+            takes touches. */}
         <View style={styles.headRow} pointerEvents='box-none'>
           <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} picture={profile && profile.avatar} persist ring />
-          <Pill label='Editar perfil' onPress={() => setEditing(true)} />
         </View>
         <View style={styles.data}>
           <Text style={styles.name}>{displayText(who.title)}</Text>
@@ -362,7 +364,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
           </Text>
-          {node.hosted === true && publicKey ? <ShareProfile url={buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey })} /> : null}
+          <View style={styles.actions}>
+            <View style={styles.action}><Pill label='Editar perfil' onPress={() => setEditing(true)} /></View>
+            {profileUrl !== null ? <View style={styles.action}><Pill label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /></View> : null}
+          </View>
         </View>
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
@@ -486,6 +491,15 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           pull.run(loadNewest)
         }}
       />
+      {profileUrl !== null
+        ? (
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+            <View style={styles.shareBody}>
+              <ShareProfile url={profileUrl} />
+            </View>
+          </Sheet>
+          )
+        : null}
       <SocialToast text={social.toast} />
     </View>
   )
@@ -529,6 +543,10 @@ const styles = StyleSheet.create({
   bio: { ...type.postText, color: colors.ink, marginTop: 8 },
   counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
   countsNum: { color: colors.ink, fontWeight: '700' },
+  // Pill sets no width, so the column has to stretch it.
+  actions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  action: { flex: 1, alignItems: 'stretch' },
+  shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,
     paddingHorizontal: 16,

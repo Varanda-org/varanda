@@ -6,7 +6,6 @@ const item = (key, seq, at = 1) => Object.freeze({ key, seq, at, name: 'Ana', us
 
 test('the fixed texts are the approved Portuguese', async (t) => {
   const {
-    FOLLOW_BACK_LABEL,
     EMPTY_TITLE,
     EMPTY_TEXT,
     NOTICES_WEB_ONLY_MESSAGE,
@@ -18,7 +17,6 @@ test('the fixed texts are the approved Portuguese', async (t) => {
     NOTICES_POLL_MS,
     SEEN_MAX
   } = await load()
-  t.is(FOLLOW_BACK_LABEL, 'Seguir de volta')
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
   t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.')
   t.is(NOTICES_WEB_ONLY_MESSAGE, 'Nesta versão, os Avisos só funcionam na versão web no site da associação.')

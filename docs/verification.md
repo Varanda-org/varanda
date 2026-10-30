@@ -2558,3 +2558,44 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Uma réplica nova ainda pode baixar o bloco de um par desatualizado antes de varrer a lápide; ela o descarta na varredura.
 - Uma lápide de lápide desfaz a primeira na dobra, mas não traz de volta bytes já descartados: o seq aparece sem registro (`malformed`) e os blocos seguintes continuam visíveis.
 - No Hypercore 10 do navegador o `contiguousLength` não é durável depois de `clear`; o nó usa o comprimento presente calculado com `has(i)`, e um par do navegador pode anunciar um intervalo contíguo que cruza um buraco descartado: o pedido desse bloco só expira.
+
+## 43. Ajustes de UX: Espiadinha sem rótulos de rodada, ajuda só pelo botão de informação, compartilhar perfil, campo único em Seguindo, aviso abre o perfil, confirmação ao deixar de seguir, cartão de instalação (2026-10-30)
+
+As seções 1 a 42 não mudam. Esta seção documenta uma rodada de sete ajustes de interface no app. Nenhum método do RPC, formato de registro ou rota mudou.
+
+### O que mudou
+
+- Espiadinha sem rótulos de rodada: as rodadas continuam (até três publicações por diário), mas a lista não mostra mais os títulos "Nª publicação de cada diário" (`apps/app/src/peek.js`, `apps/app/src/screens/Espiadinha.js`).
+- Ajuda só pelo botão de informação: o link "Saiba mais" deixou de existir; as linhas curtas terminam com um pequeno botão de informação que abre a mesma folha (`apps/app/src/ui/Help.js`, `apps/app/src/help.js` e as telas A Rua, Espiadinha, Seguindo, Avisos, Diário, Identidade, Ajustes, Denunciar, Termos e Busca).
+- Compartilhar perfil: no Diário, "Editar perfil" e "Compartilhar" ficam lado a lado embaixo dos dados do perfil (fora da faixa do topo); "Compartilhar" abre a folha "Compartilhar perfil" com o link, "copiar link" e "compartilhar" (`apps/app/src/screens/Diario.js`).
+- Campo único em Seguindo: "Encontrar pessoas" ("nome, @nome ou código") no lugar do campo "Buscar", da pílula "Buscar" e do campo de código; a classificação da entrada vive em `apps/app/src/followInput.js` (`apps/app/src/screens/Seguindo.js`).
+- Aviso abre o perfil: a linha "começou a seguir você" é um link para o perfil, sem a pílula "Seguir de volta"; o "Seguir" fica no perfil (`apps/app/src/screens/Avisos.js`, `apps/app/src/notices.js`).
+- Confirmação ao deixar de seguir: "Seguindo" abre a folha "Deixar de seguir <nome>?", e só o botão vermelho "Deixar de seguir" envia `follow.remove` (`apps/app/src/ui/FollowPill.js`, `apps/app/src/follow.js`; usado em Seguindo, na busca e em Membro).
+- Cartão de instalação: "Instale o Varanda" aparece uma vez depois do cadastro novo (`apps/app/src/ui/InstallCard.js`, `apps/app/src/install-offer.js`, `apps/app/src/install.web.js`, `apps/app/src/install.native.js`, `apps/app/App.js`).
+
+**Substitui.** As instruções de verificação humana que mandam procurar o link "Saiba mais" (seções 20, 22, 23, 26 e 33) passam a valer para o botão de informação ao fim da mesma linha. A pílula "Seguir de volta" da seção 20 deixa de existir: a linha abre o perfil. A pílula "Buscar" e o campo separado "@nome ou código" da seção 22 (e do acompanhamento da seção 26) viram o campo único "Encontrar pessoas". Os títulos de rodada da Espiadinha (seção 23) não aparecem mais. O "Seguindo" que deixava de seguir com um toque agora pede confirmação. A seção 39 (abertura do app antes do cadastro: splash e cartões de apresentação) continua valendo sem mudança; o cartão de instalação desta seção vem depois do cadastro e é outra coisa.
+
+### Testes automatizados
+
+- `node apps/app/test/peek.test.js`: os testes dos títulos de rodada foram removidos.
+- `node apps/app/test/notices.test.js`: o teste do rótulo "Seguir de volta" foi removido.
+- `node apps/app/test/follow.test.js` (novo): texto e rótulo da confirmação de deixar de seguir.
+- `node apps/app/test/followInput.test.js` (novo): classificação da entrada (nome, @nome, código, código incompleto).
+- `node apps/app/test/install-offer.test.js`: testes novos de `installCard`, de `getCard` e das exportações do módulo nativo.
+- `node apps/app/test/help.test.js`: não mudou.
+
+### Verificação humana (ainda não realizada)
+
+- [ ] A Espiadinha não mostra títulos entre as rodadas.
+- [ ] Cada ponto que tinha "Saiba mais" abre a folha certa pelo botão de informação ao fim da linha.
+- [ ] Diário, "Compartilhar": a folha "Compartilhar perfil" abre com e sem @nome, com a área de transferência recusada (o link fica selecionado) e a engrenagem continua tocável.
+- [ ] Seguindo, campo único: nome, @nome (com e sem resultado que bata, e sem internet), código completo, código incompleto e Enter.
+- [ ] Avisos: o aviso de quem seguiu abre o perfil, e "Seguir" ali tira o aviso na próxima leitura.
+- [ ] A confirmação "Deixar de seguir <nome>?" aparece na lista, na busca e em Membro, e "Cancelar" não envia nada.
+- [ ] O cartão "Instale o Varanda" aparece depois do cadastro no Chrome do Android, no Chrome do computador e no Safari do iPhone; nunca numa recarga, nem para conta existente, nem para conta que volta num aparelho novo.
+- [ ] "Agora não" também silencia a nota "Instalar o Varanda".
+
+### Limites
+
+- O cartão aparece só na carga de página que volta do Google depois do passo "vinculo", e vale também a chave de 30 dias; não há cartão no app nativo. Quem já é membro e vincula o Google em Ajustes › Conta e @nome não o recebe. "Instalar" abre o diálogo do navegador e fecha o cartão.
+- Na web, Escape ou Voltar com a folha de confirmação aberta em Membro também fecha a tela, e nada é enviado.

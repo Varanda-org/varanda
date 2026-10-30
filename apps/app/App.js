@@ -63,6 +63,7 @@ import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
+import { InstallCard } from './src/ui/InstallCard'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { watchRelease } from './src/pwa'
@@ -687,6 +688,24 @@ function Member () {
   }
   useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
 
+  // Offered once, right after a signup on this page load. LINK_RETURN alone
+  // also covers an existing member linking Google from Ajustes > Conta, so the
+  // signup signal is 'vinculo' with a node.info that has been read and holds no
+  // certificate: while info is still null the step machine shows 'vinculo' for
+  // that member too. Dismissing also quiets the top-bar note for 30 days. The
+  // Ajustes > Conta sheet the linkReturnRef effect may open on this load can
+  // cover the card for a moment.
+  const signupRef = useRef(false)
+  const certMissing = info !== null && info.memberCert !== true
+  useEffect(() => { if (LINK_RETURN && step === 'vinculo' && certMissing) signupRef.current = true }, [step, certMissing])
+  const [installCardOpen, setInstallCardOpen] = useState(false)
+  useEffect(() => {
+    if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
+      signupRef.current = false
+      setInstallCardOpen(true)
+    }
+  }, [setupStep, step, install.card])
+
   // 'Um instante': the cache retries the own key while it is unknown, and
   // after SLOW_LOOKUP_MS the person may continue without a name.
   const loadingProfile = step === 'carregando'
@@ -1275,7 +1294,9 @@ function Member () {
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed
           ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
-          : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
+          : installCardOpen && install.card !== 'none'
+            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+            : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
@@ -1334,6 +1355,7 @@ function Member () {
               refresh={version + avisosReload}
               ownKey={ownKey}
               onOpenThread={openThread}
+              onOpenMember={openMember}
               scrollToTop={scrollSignal.avisos}
               onFollowsChanged={followsChanged}
               onToast={showToast}

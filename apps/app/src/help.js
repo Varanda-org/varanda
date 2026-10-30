@@ -1,4 +1,4 @@
-// Info sheets and Saiba mais links stay pure so Node tests can load their texts.
+// Info sheets stay pure so Node tests can load their texts.
 // Keys match tab and setup-step ids so callers can use those ids directly.
 import { PEEK_RULE_TEXT } from './peek.js'
 import { SEARCH_HINT, SEARCH_MEMORY } from './topics.js'
@@ -27,13 +27,13 @@ export const HELP = Object.freeze({
       'Siga pessoas para ver as publicações delas na Rua. Na versão web, dá para encontrar alguém pelo nome ou pelo @nome.',
       'No lugar do @nome também vale o código da pessoa, com 64 letras e números.',
       'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
-      'Para deixar de seguir, toque em Seguindo. Para denunciar uma conta, toque na bandeira.'
+      'No topo, um só campo encontra pessoas: digite um nome ou @nome para buscar, ou cole o código da pessoa para seguir direto. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
     ])
   }),
   avisos: Object.freeze({
     title: 'Como funcionam os Avisos',
     paragraphs: Object.freeze([
-      'Aqui aparece quem começou a seguir você e que você ainda não segue, para você seguir de volta se quiser.',
+      'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
       'O Varanda não mostra contagem nem lista de seguidores.',
       'Quando há algo novo, a aba ganha um ponto, nunca um número.',
       'Os Avisos só funcionam na versão web, no site da associação.'
