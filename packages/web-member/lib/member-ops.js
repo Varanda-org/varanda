@@ -119,11 +119,96 @@ function keyPairOf (ctx) {
   return ctx.keyPair === undefined ? null : ctx.keyPair
 }
 
+// Borrowed path (reads only): ctx.cores = { diary, replica(key) } are the
+// cores the live sync run holds (./sync.js reader). A second Hypercore on
+// the same files would corrupt them, and closing or purging one would pull
+// it from under the run, so they are read in place and never closed or
+// purged (the run sweeps empty replicas). Whenever this path cannot give
+// exactly the exclusive path's answer (a stored replica the run does not
+// hold, a core closed or failing under the read) it throws NEEDS_EXCLUSIVE
+// and the session reruns the request exclusively.
+function needsExclusive () {
+  const e = new Error('leitura exclusiva necessária')
+  e.code = 'NEEDS_EXCLUSIVE'
+  return e
+}
+
+function isNeedsExclusive (err) {
+  return !!err && err.code === 'NEEDS_EXCLUSIVE'
+}
+
+function borrowedCores (ctx) {
+  return ctx.cores === undefined || ctx.cores === null ? null : ctx.cores
+}
+
+// read(core) on a borrowed core: any failure, or the core closing under
+// the read (a read may then come back short), is NEEDS_EXCLUSIVE.
+async function readBorrowed (core, read) {
+  let value
+  try {
+    value = await read(core)
+  } catch {
+    throw needsExclusive()
+  }
+  if (core.closing) throw needsExclusive()
+  return value
+}
+
+// read(core) on the stored replica of `key` (hex64, lowercase) -> its result,
+// or null when there is no local data (nothing is created). The result
+// carries `entries` (and `borrowed`, the core, on the borrowed path); an
+// empty replica is purged on the exclusive path only.
+async function withReplica (ctx, key, read) {
+  if (!(await store.replicaExists(ctx.storage, key))) return null
+  const cores = borrowedCores(ctx)
+  if (cores !== null) {
+    const core = cores.replica(key)
+    if (core === null) throw needsExclusive()
+    return { ...(await readBorrowed(core, read)), borrowed: core }
+  }
+  const replica = await store.openReplica(ctx.storage, key)
+  let value
+  try {
+    value = await read(replica)
+  } finally {
+    await replica.close()
+  }
+  // An empty core must not linger in the storage.
+  if (value.entries.length === 0) await store.purgeReplica(ctx.storage, key)
+  return value
+}
+
 // Opens the own diary (unlocked when ctx holds the key pair), runs fn and
-// always closes it.
+// always closes it; with ctx.cores, runs fn on the borrowed diary instead.
+// Right before answering, as diary.peek in ./sync.js: the run may have
+// closed or forked a borrowed core since it was read. A closed one ->
+// NEEDS_EXCLUSIVE; a fork seen since is judged as a fork (-> the fork to
+// judge). The exclusive path closes its cores after the read by design.
+function forkNow (read) {
+  if (read.borrowed === undefined) return read.fork
+  if (read.borrowed.closing) throw needsExclusive()
+  return read.fork !== 0 ? read.fork : read.borrowed.fork
+}
+
+function checkOwnDiary (ctx) {
+  const cores = borrowedCores(ctx)
+  if (cores !== null && cores.diary.closing) throw needsExclusive()
+}
+
 async function withIdentity (ctx, fn) {
   const association = await trustRoot(ctx)
   if (!(await store.diaryExists(ctx.storage))) throw new Error('identidade não encontrada')
+  const cores = borrowedCores(ctx)
+  if (cores !== null) {
+    // The run opened the diary without a key pair, so it never ran
+    // openDiary's passkey check: a pair of another key (or any pair on a
+    // legacy store) takes the exclusive path, which refuses it as before.
+    const keyPair = keyPairOf(ctx)
+    if (keyPair !== null && (store.isLegacy(ctx.storage) || !b4a.equals(cores.diary.key, keyPair.publicKey))) {
+      throw needsExclusive()
+    }
+    return readBorrowed(cores.diary, (diary) => fn({ diary, ownHex: hex(diary.key), association }))
+  }
   const diary = await store.openDiary(ctx.storage, keyPairOf(ctx))
   try {
     return await fn({ diary, ownHex: hex(diary.key), association })
@@ -937,20 +1022,9 @@ async function followList (ctx) {
 // Reads a replica that has local data, or throws 'sem dados locais para este
 // diário' without creating anything; an empty replica is purged (D).
 async function readReplica (ctx, key) {
-  if (!HEX64.test(key) || !(await store.replicaExists(ctx.storage, key))) {
-    throw new Error('sem dados locais para este diário')
-  }
-  const replica = await store.openReplica(ctx.storage, key)
-  let entries
-  let empty
-  try {
-    entries = await store.readAll(replica)
-    empty = entries.length === 0
-  } finally {
-    await replica.close()
-  }
-  if (empty) await store.purgeReplica(ctx.storage, key)
-  return entries
+  const read = HEX64.test(key) ? await withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork })) : null
+  if (read === null) throw new Error('sem dados locais para este diário')
+  return read
 }
 
 async function logRead (ctx, { author = null } = {}) {
@@ -963,8 +1037,14 @@ async function logRead (ctx, { author = null } = {}) {
   const key = String(author).toLowerCase()
   const mod = await moderation(ctx.storage, own.association)
   if (mod.blocked.has(key)) throw new Error('sem dados locais para este diário')
-  const entries = await readReplica(ctx, key)
-  if (mod.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, mod.revokedIssuers)) {
+  const read = await readReplica(ctx, key)
+  const entries = read.entries
+  // A snapshot adopted during the read (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, own.association)
+  // A fork is not refused here (nor on the exclusive path); a closed core is.
+  forkNow(read)
+  if (final.blocked.has(key)) throw new Error('sem dados locais para este diário')
+  if (final.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, final.revokedIssuers)) {
     throw new Error('sem dados locais para este diário')
   }
   return { key: author, entries }
@@ -996,9 +1076,9 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
-  const kept = [own]
-  const skipped = []
-  const incomplete = []
+  // One slot per followed key, in follow order: a fixed reason, or what was
+  // read, judged only once every read is done.
+  const slots = []
   const seen = new Set([own.key])
   for (const raw of await store.readFollows(ctx.storage)) {
     if (typeof raw !== 'string' || !HEX64.test(raw)) continue
@@ -1007,58 +1087,52 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     seen.add(key)
     // Hidden before any read, whether or not its purge already ran.
     if (mod.blocked.has(key)) {
-      skipped.push({ key, reason: 'blocked' })
+      slots.push({ key, reason: 'blocked' })
       continue
     }
     // Never create a core for a key with no local data (R5.4 a).
-    if (!(await store.replicaExists(ctx.storage, key))) {
-      skipped.push({ key, reason: 'no-cert' })
-      continue
-    }
-    const replica = await store.openReplica(ctx.storage, key)
-    let entries
-    let reason
-    let empty
-    let behind
-    try {
-      entries = await store.readAll(replica)
-      reason = skipReason(replica, entries, key, association, mod)
-      empty = entries.length === 0
-      behind = replica.length > entries.length
-    } finally {
-      await replica.close()
-    }
-    // An empty core must not linger in the storage.
-    if (empty) await store.purgeReplica(ctx.storage, key)
-    if (reason === null && behind) incomplete.push(key)
-    if (reason === null) kept.push({ key, entries })
+    const read = await withReplica(ctx, key, async (core) => {
+      const entries = await store.readAll(core)
+      return { entries, fork: core.fork, behind: core.length > entries.length }
+    })
+    slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
+  }
+  // A snapshot adopted during the reads (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, association)
+  checkOwnDiary(ctx)
+  const kept = [own]
+  const skipped = []
+  const incomplete = []
+  for (const { key, reason: fixed, read } of slots) {
+    // A key blocked in the first snapshot stays skipped 'blocked' even when
+    // the final one unblocks it (fail-safe, no second read pass).
+    const reason = read === undefined
+      ? (final.blocked.has(key) ? 'blocked' : fixed)
+      : skipReason({ fork: forkNow(read) }, read.entries, key, association, final)
+    if (reason === null && read.behind) incomplete.push(key)
+    if (reason === null) kept.push({ key, entries: read.entries })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: mod.revokedIssuers, before })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 
 // ---- profile.read ----
 
-// The entries of a non-own diary when feedRead would show it, else null:
-// the admission rules of feedRead (blocked, no local data, skipReason), not
-// those of logRead. Never creates a replica; an empty one is purged.
-async function admittedEntries (ctx, key, association, mod) {
+// What a non-own diary's admission needs ({ entries, fork }), or null when
+// feedRead would skip it before any read (blocked, no local data). Never
+// creates a replica; an empty one is purged (exclusive path only).
+async function replicaRead (ctx, key, mod) {
   if (mod.blocked.has(key)) return null
-  if (!(await store.replicaExists(ctx.storage, key))) return null
-  const replica = await store.openReplica(ctx.storage, key)
-  let entries
-  let reason
-  let empty
-  try {
-    entries = await store.readAll(replica)
-    reason = skipReason(replica, entries, key, association, mod)
-    empty = entries.length === 0
-  } finally {
-    await replica.close()
-  }
-  if (empty) await store.purgeReplica(ctx.storage, key)
-  return reason === null ? entries : null
+  return withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork }))
+}
+
+// The entries when feedRead would show the diary, else null: the admission
+// rules of feedRead (blocked, no local data, skipReason), not those of
+// logRead.
+function admittedEntries (read, key, association, mod) {
+  if (read === null) return null
+  return skipReason({ fork: forkNow(read) }, read.entries, key, association, mod) === null ? read.entries : null
 }
 
 // Names of the given authors from local data only (docs/rpc.md 5.21) ->
@@ -1079,10 +1153,17 @@ async function profileRead (ctx, { authors }) {
     key: ownHex,
     entries: seen.has(ownHex) ? await store.readAll(diary) : null
   }))
+  const reads = new Map()
+  for (const key of keys) {
+    if (key !== own.key && HEX64.test(key)) reads.set(key, await replicaRead(ctx, key, mod))
+  }
+  // A snapshot adopted during the reads (the run is live) decides the answer.
+  const final = await moderation(ctx.storage, association)
+  if (own.entries !== null) checkOwnDiary(ctx)
   const profiles = []
   const missing = []
   for (const key of keys) {
-    const entries = key === own.key ? own.entries : (HEX64.test(key) ? await admittedEntries(ctx, key, association, mod) : null)
+    const entries = key === own.key ? own.entries : (reads.has(key) ? admittedEntries(reads.get(key), key, association, final) : null)
     if (entries === null) {
       missing.push(key)
       continue
@@ -1093,7 +1174,7 @@ async function profileRead (ctx, { authors }) {
       name: profile === null ? null : profile.name,
       bio: profile === null ? null : profile.bio,
       avatar: profile === null ? null : profile.avatar,
-      username: latestUsername(entries, key, association, { revokedIssuers: mod.revokedIssuers })
+      username: latestUsername(entries, key, association, { revokedIssuers: final.revokedIssuers })
     })
   }
   return { profiles, missing }
@@ -1139,5 +1220,6 @@ module.exports = {
   logRead,
   feedRead,
   profileRead,
-  skipReason
+  skipReason,
+  isNeedsExclusive
 }

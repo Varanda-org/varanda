@@ -402,8 +402,10 @@ export function useSocial ({ ownKey, onToast }) {
     // Reply parents: only those of strangers are read (verified, with the
     // name and @nome); own and followed parent authors come from profile.read.
     // Only on the hosted web with a network: without the index hints the
-    // peek carries no name, and the core node's log.read fallback would
-    // preempt the sync for a mark that still reads 'sem nome'.
+    // peek carries no name. The native node's log.read fallback preempts the
+    // sync for a mark that still reads 'sem nome'. The browser node serves
+    // member reads from the live run's cores, so batching them still saves
+    // requests and native preemptions.
     const asked = hosted && online ? parents.filter((r) => typeof r === 'string') : []
     if (asked.some((r) => !isKnown(authorOfRef(r)))) await loadFollows()
     const needed = need.filter((r) => typeof r === 'string')
@@ -421,7 +423,9 @@ export function useSocial ({ ownKey, onToast }) {
       return { originals, ...(reset ? { flags: { indexing: false, complete: true } } : {}) }
     })
     const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
-    // engagement.read first: like every member read it preempts a sync.
+    // engagement.read first: a native read preempts the sync; the browser
+    // node serves it from the live run's cores. Batching the chunks still
+    // saves requests and native preemptions.
     for (const chunk of chunks(refs, ENGAGEMENT_LIMIT_MAX)) {
       const started = ++clockRef.current
       try {
@@ -831,8 +835,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         // A full page would cut rows off the end of the list being read: the
         // list stays and the unacknowledged 'ver novidades' pill shows the
         // rest. The list is no longer the whole local feed, so it leaves its
-        // end: 'mostrar mais' pages on, and automatic reads (each one
-        // preempting the sync) stop.
+        // end: 'mostrar mais' pages on, and automatic reads stop. Each one
+        // preempts the sync on the native node. The browser node serves them
+        // from the live run's cores, so this batching still saves requests
+        // and native preemptions.
         if (!replacesQuietly(page, FEED_LIMIT_DEFAULT, feedRef.current.items)) {
           commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), atEnd: false, loadingMore: false })
           return
@@ -849,7 +855,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
           loadingMore: false
         })
         learnPage(page.items)
-        // No ack and no reset: any other request would preempt the sync again.
+        // No ack and no reset. On the native node any other request would
+        // preempt the sync again. The browser node serves reads from the
+        // live run's cores, so keeping this path small still saves requests
+        // and native preemptions.
         ingest(pageNeeds(page.items))
       } catch (err) {
         if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'newest' })
@@ -949,13 +958,15 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadNewest()
   }, [active, refresh, scrollToTop, fresh, loadNewest])
 
-  // Every feed.read preempts the sync run on both nodes and the continuous
-  // run restarts after it (docs/rpc.md section 6.1), so the first growth past
+  // On the native node every feed.read preempts the sync run and the
+  // continuous run restarts after it (docs/rpc.md section 6.1). The browser
+  // node serves the read from the live run's cores. The first growth past
   // the baseline starts one timer (longer after empty older reads): later
-  // growth neither resets it nor adds another, and this effect has no cleanup,
-  // which would debounce it on every lengths change. With only the newest page loaded, re-reading it
-  // shows arrivals that sort inside the shown range; a before read would
-  // rarely return them.
+  // growth neither resets it nor adds another, and this effect has no
+  // cleanup, which would debounce it on every lengths change. That batching
+  // saves requests and native preemptions. With only the newest page
+  // loaded, re-reading it shows arrivals that sort inside the shown range;
+  // a before read would rarely return them.
   const lengths = node.signals ? node.signals.lengths : undefined
   const loadersRef = useRef(null)
   loadersRef.current = { loadNewest, loadOlder }

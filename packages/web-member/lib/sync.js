@@ -163,6 +163,21 @@
 // core are shared between concurrent peeks of the same key on the link.
 // The Espiadinha (peek.read, ./peek.js) never rides this link: it opens its
 // own short link with an ephemeral key (docs/rpc.md 5.22).
+//
+// Member reads over the run's cores: the session may hand in a `reader`;
+// once the startup sequence opened the own diary and the stored follows
+// (just before the first connection) the run publishes { diary, replica,
+// hold, release } on it (reader.set), withdrawing it (reader.clear) before
+// teardown closes any core and whenever runSync returns or throws. A second
+// Hypercore instance on the same storage corrupts it, so the reader only
+// ever sees cores this run already holds: replica(key) is the open follow
+// core in whatever state, or null, and never opens one (the run opens
+// replicas itself mid-run, after a quarantine fetch or a sweep). A hold
+// keeps teardown from closing the cores until it is released; none starts
+// once the run is ending. Holds do not fence the run's own mid-run closes
+// (a failed or forked follow, a re-gate, a sweep, cleared deleted blocks):
+// a read that meets a closed core fails and the session reruns it on its
+// exclusive path instead.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
@@ -204,6 +219,8 @@ const SEEDER_UNAVAILABLE = 'semeador indisponível'
 const DIARY_UNAVAILABLE = 'diário indisponível'
 
 function noop () {}
+
+const NO_READER = { set: noop, clear: noop }
 
 function key8 (hex) {
   return String(hex).slice(0, 8)
@@ -617,7 +634,24 @@ function watchFork (core, onFork) {
 // (optional): { set (fn), clear (fn) } that receives this run's diary.peek
 // function (see the header). The limits and timings after `signal` are
 // injectable for tests; their defaults are the protocol constants.
-async function runSync ({
+// The session's reader (see the header) is withdrawn however the run ends,
+// before it published too.
+async function runSync (opts = {}) {
+  const reader = (opts && opts.reader) || NO_READER
+  try {
+    return await syncRun({ ...opts, reader })
+  } finally {
+    clearReader(reader)
+  }
+}
+
+function clearReader (reader) {
+  try {
+    reader.clear()
+  } catch {}
+}
+
+async function syncRun ({
   storage,
   associationKey = null,
   seederUrl,
@@ -627,6 +661,7 @@ async function runSync ({
   log = noop,
   onEvent = noop,
   peeker = null,
+  reader = NO_READER,
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
@@ -721,6 +756,26 @@ async function runSync ({
   let mediaTimer = null
   const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
+  let holds = 0 // reader holds outstanding
+  let drained = Promise.resolve() // resolves when holds reaches 0
+  let drain = noop
+
+  function hold () {
+    if (ending) return false
+    if (holds++ === 0) drained = new Promise((resolve) => { drain = resolve })
+    return true
+  }
+
+  function release () {
+    if (holds === 0) return
+    if (--holds === 0) drain()
+  }
+
+  function replica (key) {
+    const e = follows.get(key)
+    if (!e || e.core === null || e.core.closing) return null
+    return e.core
+  }
 
   function track (p, onOk, onErr) {
     const wrapped = p.then(onOk, onErr).catch(noop)
@@ -2290,7 +2345,10 @@ async function runSync ({
     if (!ending) await sweepBlocked()
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevoked()
 
-    if (!ending) connect()
+    if (!ending) {
+      reader.set({ diary, replica, hold, release })
+      connect()
+    }
 
     await finished
     return result
@@ -2318,6 +2376,8 @@ async function runSync ({
     }
     discardRegate() // a throw may have skipped finish()
     await Promise.allSettled([...inflight])
+    clearReader(reader)
+    await drained
     for (const e of follows.values()) {
       stopEntry(e)
       if (e.core) {

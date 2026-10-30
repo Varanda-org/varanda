@@ -2,10 +2,10 @@
 // 6.1), against a fake seeder on loopback: a continuous run whose verified
 // link is settled for leaseHoldMs ends with sync.stopped reason 'idle' and
 // no result, the intent kept; nothing dials again during leaseGapMs except
-// sync.start, a diary.peek or a write; a profile.read burst that preempts
-// the run every 100 ms does not keep the link up; an own media core blocks
-// the lease until the seeder confirms it or leaseMediaMaxMs elapsed; a
-// borrow holds it; with leaseHoldMs 0 (the default) the run just runs; a
+// sync.start, a diary.peek or a write; a profile.read every 100 ms, served
+// on the run's cores, neither preempts nor keeps the link up; an own media
+// core blocks the lease until the seeder confirms it or leaseMediaMaxMs
+// elapsed; a borrow holds it; with leaseHoldMs 0 (the default) the run just runs; a
 // sync.stop while an idle run unwinds ends it 'stopped'; a reconnect must
 // confirm the media core again; a run ending during a reconnect backoff
 // waits for the previous socket's close. The sockets a session opens are
@@ -241,8 +241,8 @@ test('a profile.read every 100 ms does not keep the link up: the lease goes idle
   const { web, tap, internal, key } = await member(t, { seederUrl: seeder.url, assoc, leaseHoldMs: 800, leaseGapMs: 3000 })
 
   const startedAt = Date.now()
-  await web.request('sync.start', {})
-  // Reads until some run ends idle (each one preempts and restarts the run).
+  const { runId } = await web.request('sync.start', {})
+  // Reads until the run ends idle (each one is served on the run's cores).
   let idle = null
   while (idle === null && Date.now() - startedAt < 20000) {
     await web.request('profile.read', { authors: [key] })
@@ -251,7 +251,9 @@ test('a profile.read every 100 ms does not keep the link up: the lease goes idle
   }
   t.ok(idle !== null, 'the lease went idle under the burst')
   t.ok(Date.now() - startedAt >= 800, 'not before the hold')
-  t.ok(web.events.filter((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted').length > 0, 'the reads did preempt runs meanwhile')
+  t.is(idle.data.runId, runId, 'the run the burst started under went idle')
+  t.is(web.events.filter((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted').length, 0, 'no read preempted the run')
+  t.is(startedCount(web), 1, 'one run for the whole burst')
 
   // The reads go on inside the gap: no socket, no run.
   const sockets = tap.sockets.length
@@ -268,7 +270,7 @@ test('a profile.read every 100 ms does not keep the link up: the lease goes idle
   t.alike(internal, [])
 })
 
-test('a sync.stop queued behind a preempting read clears the hold clocks: a later start earns its own hold', async (t) => {
+test('a sync.stop queued behind a read clears the hold clocks: a later start earns its own hold', async (t) => {
   t.timeout(60000)
   const assoc = association()
   const seeder = await fakeSeeder(t, { signer: assoc.kp })
@@ -276,8 +278,8 @@ test('a sync.stop queued behind a preempting read clears the hold clocks: a late
 
   await web.request('sync.start', {})
   await sleep(450) // settled, the hold clock running
-  // The read preempts the run (a preempted end keeps the clocks); the stop
-  // queued behind it then finds no run.
+  // The read is served on the run's cores; the stop queued behind it ends
+  // the run.
   await Promise.all([web.request('profile.read', { authors: [key] }), web.request('sync.stop', {})])
   await sleep(400) // past the old hold deadline
   const before = web.events.length
@@ -489,7 +491,7 @@ test('a preemption during a reconnect backoff waits for the previous socket stil
   const seeder = await silentSeeder(t)
   // The link times out unverified after 300 ms; its socket then takes
   // 700 ms to close, and the reconnect waits at least 3 s.
-  const { web, tap, internal, key } = await member(t, {
+  const { web, tap, internal } = await member(t, {
     seederUrl: seeder.url,
     assoc,
     closeDelayMs: 700,
@@ -499,9 +501,9 @@ test('a preemption during a reconnect backoff waits for the previous socket stil
   const { runId } = await web.request('sync.start', {})
   t.ok(await until(() => tap.closeCalls === 1, 10000), 'the unverified link timed out')
   t.is(tap.sockets[0].readyState, WebSocket.CLOSING, 'its socket is still closing')
-  // Preempted inside the backoff: the restarted run must not dial before
-  // the old socket closed.
-  await web.request('profile.read', { authors: [key] })
+  // Preempted (by a write) inside the backoff: the restarted run must not
+  // dial before the old socket closed.
+  await web.request('post.create', { text: 'na varanda' })
   t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
   t.ok(await until(() => tap.sockets.length === 2, 10000), 'the restarted run dialled')
   t.is(tap.overlaps, 0, 'two sockets were never open at once')

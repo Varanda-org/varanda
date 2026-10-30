@@ -2690,3 +2690,40 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
 - Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
+
+## 46. Leituras sem parar a sincronização na web (PR perf/faster-content-loading, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), cada leitura de membro parava a sincronização em curso: o socket fechava, todos os núcleos fechavam, e a rodada recomeçava e reconectava. A Rua disparava uma rajada de leituras, e a sincronização caía de novo e de novo. Num armazenamento novo do navegador, a lista de seguidos (montada a partir do próprio diário quando ele fica em dia) só aparecia depois que as leituras paravam. Parecia que A Rua, a Espiadinha e Seguindo só carregavam depois do Diário.
+- `feed.read`, `log.read`, `profile.read`, `engagement.read` e a leitura do próprio diário em `notices.list` passam a ser servidas pelos núcleos que a rodada já tem abertos (`packages/web-member/lib/session.js`, `withCores`; `lib/sync.js`, o leitor). Elas não param mais a sincronização: nenhum `sync.stopped` com `'preempted'`, o mesmo `runId`. Sem rodada, abrem o armazenamento como antes. Uma leitura que a rodada não consegue servir (uma réplica guardada que a rodada não tem, ou um núcleo que a rodada fechou no meio da leitura) volta ao caminho exclusivo antigo e interrompe a rodada uma vez. A moderação (chaves bloqueadas, emissores revogados) é relida logo antes de responder.
+- `follow.list` lê só a lista guardada e nunca para a sincronização. A resposta continua em ordem, depois de um `follow.add`.
+- A Espiadinha (`peek.read`) e `notices.list` deixam de esperar atrás da fila de pedidos quando a chave própria já é conhecida, a menos que uma troca de identidade esteja pendente.
+- Escritas (publicar, curtir, seguir, perfil, apagar) continuam parando e recomeçando a sincronização como antes. O app nativo e o `varanda-serve` (`packages/core`) não mudam: as leituras deles ainda interrompem a rodada por causa do lock do diretório de dados (`docs/protocol.md` seção 9).
+
+### Testes automatizados
+
+- `packages/web-member/test/read-while-sync.test.js`: as leituras mantêm o `runId`, zero `'preempted'`, o mesmo feed que sem uma rodada, bloqueados e emissores revogados continuam escondidos, `follow.list` espera em ordem enquanto `peek.read` começa, o fechamento espera uma leitura em andamento, e uma réplica guardada de quem não se segue cai no caminho exclusivo uma vez.
+- `packages/web-member/test/sync-reader.test.js`: a rodada publica os núcleos dela, um empréstimo atrasa o desmonte, e uma falha cedo limpa o leitor.
+- `packages/web-member/test/member.test.js`: leituras emprestadas iguais às leituras exclusivas, nada aberto, fechado ou descartado, casos `NEEDS_EXCLUSIVE`, e bloco, bifurcação e fechamento adotados no meio da leitura.
+- `packages/web-member/test/session.test.js`: `follow.list` não interrompe a rodada, `peek.read` com a chave em cache pula a fila, e uma troca de identidade pendente entra na fila.
+- `packages/web-member/test/lease.test.js` e `packages/web-member/test/diary-peek.test.js`, reescritos: as leituras deixam de interromper a rodada; `diary.peek` durante um `feed.read` na mesma rodada.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Na web hospedada, com as ferramentas de desenvolvedor do navegador e o registro de RPC e de eventos. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Armazenamento com seguidos: desbloquear. No primeiro minuto, nenhum `'preempted'` causado por uma leitura. Paradas `'idle'` do lease, e paradas e recomeços depois de escritas, são esperados (não realizada ainda).
+- [ ] Abrir Seguindo enquanto A Rua carrega: a lista responde sem parar a sincronização. Ela pode ainda esperar uma leitura que já estava na fila (não realizada ainda).
+- [ ] Abrir a Espiadinha com um `feed.read` pendente: o socket próprio dela abre antes de esse `feed.read` responder (não realizada ainda).
+- [ ] Um diário bloqueado e um emissor revogado continuam escondidos em A Rua, nos nomes e na Espiadinha (não realizada ainda).
+- [ ] Armazenamento novo do navegador: ficar em A Rua. As publicações de quem se segue aparecem quando a lista de seguidos chega (`follows-changed`), sem visitar o Diário (não realizada ainda).
+- [ ] Anotar os números antes e depois desta PR: a quantidade de `'preempted'` no primeiro minuto e o tempo até a primeira linha de A Rua (não realizada ainda).
+
+### Limites
+
+- A primeira leitura depois que uma rodada começa espera a rodada abrir as réplicas seguidas, uma a uma.
+- O app nativo e o `varanda-serve` ainda interrompem a rodada em cada leitura.
+- Um desbloqueio adotado durante uma leitura só aparece na leitura seguinte (falha segura).
+- O portão de idade da web hospedada continua com 3 idas e voltas a cada carga da página (de propósito).
+
