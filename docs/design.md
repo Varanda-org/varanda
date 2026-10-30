@@ -20,7 +20,9 @@ A rede precisa funcionar sem servidor central, nos celulares dos brasileiros, e 
 | Custo baixo | Nenhuma conta de servidor por usuário; a infraestrutura é doada por parceiros |
 | Remoção de conteúdo | Atender notificações (decisão do STF sobre o Art. 19 do Marco Civil) e ordens judiciais |
 
-**Fora do escopo do MVP:** pagamentos e carteiras (evita as regras do Banco Central para ativos virtuais), publicidade. Quem tem 16 ou 17 anos entra, por enquanto, com as mesmas regras de quem tem 18 ou mais; o modo restritivo para adolescentes (issue #74) ainda está pendente.
+**Fora do escopo do MVP:** publicidade. Quem tem 16 ou 17 anos entra, por enquanto, com as mesmas regras de quem tem 18 ou mais; o modo restritivo para adolescentes (issue #74) ainda está pendente.
+
+Pagamentos são um recurso opcional da versão web hospedada, feito por um parceiro (Hodle; o BRLA é emitido pela Avenia). Decisão do dono do produto em 2026-10-30. O papel da associação ainda depende de parecer jurídico. O desenho está em Conta de pagamentos (opcional).
 
 ## Nomes no app
 
@@ -215,6 +217,44 @@ Usar o gov.br como login seria diferente: a rede receberia CPF e nome de cada me
 
 **Fiscalização:** multas a partir de janeiro de 2027, de até 10% do faturamento no Brasil, limitadas a R$ 50 milhões por infração ([Exame](https://exame.com/tecnologia/examelab/verificacao-de-idade-nas-redes-o-que-o-eca-digital-exige-e-como-funciona-em-cada-app/)).
 
+## Conta de pagamentos (opcional)
+
+Decisão do dono do produto (2026-10-30): a web hospedada pode oferecer uma conta de pagamentos opcional, por um parceiro. O parceiro é a Hodle. O saldo fica em BRLA, uma moeda digital que vale 1 real, emitida pela Avenia, numa carteira em nome da pessoa. A rede é a Polygon, o padrão documentado da Hodle para essa carteira. A Varanda não é banco, o saldo não rende, e quem não abre a conta usa a rede como hoje. O app nativo, o `varanda-serve` e a CLI não oferecem a conta: `wallet.sign` neles responde que a assinatura só existe no navegador.
+
+O papel da associação nas regras do Banco Central ainda depende de parecer. A ida ao ar depende do parecer jurídico. As perguntas estão no fim de Perguntas em aberto.
+
+**O que a pessoa faz.** O opt-in é explícito ("Quero abrir a conta"). "Deixar para depois" não cria nada. O KYC vem antes de qualquer dinheiro se mover. A Hodle e os parceiros dela tratam o nome, o CPF, a data de nascimento, o e-mail, o endereço, a foto do documento e a selfie com prova de vida. A Varanda só encaminha o texto desse cadastro, no pedido daquela tentativa. As fotos nunca passam pelo serviço de conta: o navegador envia o documento direto para `uploads.hodle.com.br`, e a selfie abre uma página da Hodle (`app.hodle.com.br`), fora de um iframe. O app só segue para os dados quando o documento e a selfie estão prontos. A conta de pagamentos pede 18 anos: o app confere a data de nascimento e recusa quem tem menos. Quem tem 16 ou 17 anos continua na rede social. Se um dia essa faixa poderá abrir a conta de pagamentos está em aberto.
+
+**Rede.** O cliente (`apps/cli/lib/account/hodle.js`) aceita `polygon` e `base`. O padrão é `polygon`. `VARANDA_HODLE_NETWORK` só vale antes da primeira carteira: cada criação na Hodle cunha uma carteira nova, presa à rede pedida, e a Varanda guarda a primeira para sempre. Trocar a variável depois não move o saldo. O sandbox da Hodle é a Base Sepolia (ativos de teste BRLH e USDH) e não exercita subcontas: as operações de teste valem para a conta principal da chave. Por isso os testes não falam com o sandbox nem com a API real. Usam um falso em `127.0.0.1` (`apps/cli/test/helpers/fake-hodle.js`), no modelo do falso da Didit.
+
+**PIN.** Cada pessoa escolhe um PIN de 6 dígitos e o digita a cada operação. O app o repassa só naquele pedido, o serviço de conta o repassa só naquele pedido à Hodle, e ninguém o guarda nem o registra. Ele não entra na declaração assinada: `wallet.sign` recusa as chaves `pin`, `walletPin`, `protectedSymmetricKey`, `taxId`, `taxIdNumber` e `cpf`. O app recusa um PIN óbvio: o mesmo dígito seis vezes, ou seis dígitos seguidos subindo ou descendo. Três PINs errados bloqueiam a criação da carteira por 24 horas na Hodle. A chave simétrica que a Hodle devolve (`protectedSymmetricKey`) fica no `wallet.json` e não volta para o navegador. Sem o PIN ela não abre a carteira. Quem junta os dois move o dinheiro, então os dois nunca ficam guardados juntos.
+
+**Bloqueio: PIN da plataforma e PIN da pessoa.** A documentação da Hodle descreve um PIN da plataforma: quem tem a chave de API define um PIN de 6 dígitos na própria Hodle, e uma subconta de referência herda esse PIN. Criar a carteira sem esse PIN da plataforma é erro. A decisão da Varanda é um PIN por pessoa, escolhido no app. Enquanto a Hodle não confirmar por escrito que `POST /api/wallet/create` com `subAccountId` e `walletPin` grava o PIN daquela pessoa, e não exige nem reaproveita o PIN da plataforma, a criação da carteira na API real fica bloqueada. O modo `cadastro` não cria carteira e não depende dessa confirmação. O falso de loopback não prova o que a Hodle faz com o PIN.
+
+**Modos de ativação.** O operador escolhe `VARANDA_HODLE_MODE`, e o serviço anuncia o modo ao app (`policy.mode`). A ordem de ativação é `cadastro` < `carteira` < `pix` < `completo`. O padrão `cadastro` permite só subconta e KYC: após a aprovação, a tela diz que a carteira será liberada em breve. O modo `carteira` acrescenta a criação da carteira com o PIN da própria pessoa e só deve ser configurado depois que a Hodle confirmar por escrito o PIN por pessoa. Nesta versão existem apenas `cadastro` e `carteira`; `pix` e `completo` chegam nos próximos PRs. Pix para o CPF de outra pessoa entra no desenho desde o primeiro dia em que o Pix existir (na Hodle isso é operação de terceiro e precisa estar ligado na chave). Nesta etapa ninguém envia dinheiro. Não há rendimento.
+
+**O que fica guardado.** Um arquivo, `wallet.json`, modo 0600, no volume `account-data` do serviço de conta, no Brasil, ao lado de `age.json` e `terms.json`. Por membro: `subAccountId`, a rede, o estado do KYC (`nenhum`, `documentos`, `pendente`, `aprovado`, `recusado`, `expirado`), o número da tentativa, `attemptId`, `documentId`, `selfieId` e, quando a carteira existe, o `walletId`, o endereço e a chave embrulhada. As marcas `subaccountUncertain` e `walletUncertain` são gravadas antes da chamada que cria, porque uma resposta perdida pode ter criado mesmo assim, e cada criação na Hodle cunha um id novo. Com a marca, a conta fica parada até uma leitura que dê para adotar, ou até o operador limpar a marca. O serviço não cria de novo sozinho. Nenhuma chamada que muda estado é repetida automaticamente. Uma falha que pode ter acontecido volta como resultado incerto (`uncertain`, resultado-incerto).
+
+O `wallet-ops.json`, com as operações e a taxa pendente, é do PR2 e não existe nesta abertura.
+
+**O que nunca fica na Varanda.** O PIN, o CPF, o nome, a data de nascimento, o e-mail, o endereço postal, as fotos, as URLs de envio e de prova de vida, o corpo cru da Hodle e os saldos. Nada disso vai para registro. A subconta, na Hodle, não pode ser apagada.
+
+**Taxa, para quando o envio existir.** O operador define a taxa de cada tipo de operação. O padrão é zero. A conta é em centavos inteiros, e meio centavo arredonda para cima. A taxa da associação vai numa segunda transferência, para a tesouraria, depois que a transferência principal termina. Se essa segunda ficar pendente, ela é mostrada de novo dentro do próximo envio que a pessoa assinar com o PIN. Nada disso se repete sozinho. A taxa sobre o Pix de entrada fica desligada até a Hodle confirmar que um acréscimo pode ser creditado à associação.
+
+**Contrato desta etapa.** Declaração `varanda-wallet-v1`, assinada com a chave do diário, método RPC `wallet.sign` (`docs/rpc.md` 5.35). As operações de abertura são `optin`, `kyc-document`, `kyc-submit`, `status` e `wallet-create`. A declaração leva o hash da operação, nunca o PIN, o CPF nem o valor em claro. Não é bloco do diário nem mensagem do enxame. O app fala só com o serviço de conta, por HTTPS. O serviço de conta é o único que chama a Hodle, nestas rotas: `POST /api/subaccount`, `GET /api/subaccount?name=` (recuperação), `POST /api/kyc/document`, `GET /api/kyc/document/<id>`, `POST /api/kyc`, `GET /api/kyc/<attemptId>`, `GET /api/kyc?subAccountId=` (recuperação), `POST /api/wallet/create`, `POST /api/wallet/keys` e `POST /api/wallet/get` (recuperação e conferência). A chave de API é `VARANDA_HODLE_API_KEY` (`hodle_live_` em produção, `hodle_test_` no sandbox). Sem ela, o recurso fica desligado. Termos de Uso e Política de Privacidade versão 7, com novo aceite. Roteiro em [verification.md](verification.md), seção 47. As operações de dinheiro ficam nas seções 49 e 50.
+
+```mermaid
+flowchart TD
+  A[Opt-in] --> B[Documentos]
+  B --> C[Selfie]
+  C --> D[Dados]
+  D --> E[KYC]
+  E --> F[PIN]
+  F --> G[Carteira]
+```
+
+No modo `cadastro` o fluxo para no KYC. Nesta versão, o PIN e a carteira só aparecem no modo `carteira`, e na API real só depois que a Hodle confirmar por escrito o PIN por pessoa. Uma recusa ou um KYC expirado recomeça nos documentos, numa tentativa nova. Uma criação incerta não volta para o PIN: a pessoa confere, e nada é refeito sozinho.
+
 ## LGPD
 
 **Hipóteses de desenho, não parecer.** As tabelas, bases legais e fluxos desta seção expressam o que o produto *pretende* fazer para cumprir a LGPD e o ECA Digital. São hipóteses para engenharia e para discussão com advogados; **não substituem parecer jurídico formal**. Onde o texto pede “parecer jurídico” ou lista itens em Perguntas em aberto, a validação legal ainda não foi fechada.
@@ -237,6 +277,9 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 | Convites de entrada (`invites.json`: chave de quem criou o convite, identificador aleatório, hash do código só enquanto não usado, data de criação, usado sim ou não; nada de quem recebeu nem de quem usou) | Serviço de conta, no Brasil (`invites.json`, modo 0600, volume `account-data`), só quando `VARANDA_INVITES_PER_WEEK` está definido | Execução de contrato (a confirmar em parecer); finalidade: entrada por convite | A semana atual e os convites ainda dentro dos 7 dias de validade (até 14 dias no total); o resto é apagado na próxima criação de convite |
 | E-mail de recuperação | Guardião, no Brasil | Execução de contrato | Enquanto a conta existir |
 | Inscrição de Web Push (endereço do aparelho, `endpoint`, e as chaves `p256dh` e `auth`) | Serviço de conta no Brasil (`push.json`, modo 0600, volume `account-data`). O texto cifrado atravessa o serviço de push do fabricante, que pode estar fora do Brasil | Consentimento (a confirmar no parecer) | Até a pessoa desligar ou o serviço responder 404 ou 410 |
+| Identificadores da conta de pagamentos | Serviço de conta, no Brasil (`wallet.json`, modo 0600, volume `account-data`): `subAccountId`, `walletId`, endereço da carteira, chave embrulhada (`protectedSymmetricKey`, inútil sem o PIN), estado do KYC, `attemptId`, `documentId` e `selfieId`. O `wallet-ops.json` das operações é do PR2 e ainda não existe | Execução de contrato (Art. 7º, V), a confirmar em parecer | Enquanto a conta existir (issue #38). A subconta não pode ser apagada na Hodle |
+| Dados de KYC | Tratados pela Hodle e pelos parceiros dela. O texto (nome, CPF, nascimento, e-mail, endereço) passa só em trânsito pelo serviço de conta. As fotos nunca: o documento sai do navegador direto para a Hodle e a selfie abre a página da Hodle. A Varanda não guarda nem registra esses dados | Dado pessoal e, na foto, dado sensível (Art. 7º e Art. 11), a confirmar em parecer | Nenhuma na Varanda |
+| PIN da carteira | Digitado a cada operação e repassado só naquele pedido, do app ao serviço de conta e do serviço à Hodle. Nunca guardado e nunca registrado, nem no `wallet.json` nem na declaração assinada | O trânsito acompanha a execução do contrato, a confirmar em parecer. Não há retenção | Nenhuma |
 | Registros de acesso (IP, data, hora) | Semeadores e serviços | Obrigação legal, se o Art. 15 do Marco Civil se aplicar | 6 meses, se aplicável |
 
 **Vínculo com a conta Google (hipóteses de desenho).**
@@ -265,8 +308,8 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 **Onde os dados ficam**
 
-- Semeadores, guardiões e o serviço de conta (onde ficam a inscrição de Web Push, `push.json`, e a faixa etária, `age.json`) ficam em datacenters no Brasil. O serviço de push do navegador e o parceiro de verificação de idade (Didit) podem estar fora.
-- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), a selfie e o documento da verificação de idade, tratados pela Didit, e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
+- Semeadores, guardiões e o serviço de conta (onde ficam a inscrição de Web Push, `push.json`, a faixa etária, `age.json`, e os identificadores da conta de pagamentos, `wallet.json`) ficam em datacenters no Brasil. O serviço de push do navegador, o parceiro de verificação de idade (Didit) e o parceiro da conta de pagamentos (Hodle) podem estar fora.
+- Saem do Brasil: o texto cifrado do aviso (de tamanho fixo, mas com o momento da entrega visível e cruzável com os registros públicos) e o endereço do aparelho, pelo serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), a selfie e o documento da verificação de idade, tratados pela Didit, os dados e as fotos do KYC da conta de pagamentos, tratados pela Hodle e pelos parceiros dela (as fotos saem do navegador direto para a Hodle; a Varanda não as guarda), e cópias em celulares de membros que estejam no exterior. A LGPD permite transferência internacional com os mecanismos da Resolução CD/ANPD nº 19/2024. Qual mecanismo vale para essa transferência ainda será confirmado por parecer jurídico, como a Política de Privacidade diz (`apps/app/src/legal.js`). A política de privacidade informa a transferência.
 
 **Antes do lançamento**
 
@@ -348,7 +391,7 @@ As fases ainda não têm datas: dependem de quem vai desenvolver e de quantos pa
 
 ## Perguntas em aberto
 
-As seis primeiras precisam de advogado antes do piloto; as demais, da comunidade.
+As seis primeiras precisam de advogado antes do piloto; as demais, da comunidade. As perguntas da conta de pagamentos, no fim da lista, também precisam de advogado antes de o recurso ir ao ar. Elas não substituem as seis primeiras.
 
 - [ ] Quem é o controlador LGPD numa rede P2P: a associação, cada parceiro semeador ou ambos?
 - [ ] O Art. 15 do Marco Civil (guardar registros de acesso por 6 meses) se aplica a uma associação sem fins lucrativos?
@@ -365,6 +408,12 @@ As seis primeiras precisam de advogado antes do piloto; as demais, da comunidade
 - [x] A Rua mantém os seguidos; a Espiadinha mostra uma publicação de cada diário não seguido por rodada, até três rodadas, da mais nova para a mais antiga dentro de cada rodada.
 - [ ] Gente da Gente: qual o critério de "construtivo", quem concede o selo e como ele é retirado?
 - [ ] Em que fase entra Cadeiras de Praia? (a Espiadinha entrou no piloto, só na versão web)
+- [ ] Qual é o papel da associação nas regras do Banco Central para a conta de pagamentos opcional (parceiro Hodle, BRLA emitido pela Avenia)?
+- [ ] Quem é o controlador e quem é o operador entre a associação e a Hodle?
+- [ ] O Pix para o CPF de outra pessoa, previsto desde o primeiro dia em que o Pix existir, cabe no desenho?
+- [ ] Quem tem 16 ou 17 anos pode abrir a conta de pagamentos? Nesta etapa o app só aceita 18 anos ou mais.
+- [ ] A subconta na Hodle não pode ser apagada. Como cumprir a eliminação pedida pelo titular?
+- [ ] A receita das taxas cabe no estatuto da associação sem fins lucrativos?
 
 ## Fontes
 
