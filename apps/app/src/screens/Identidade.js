@@ -21,7 +21,7 @@
 // names the key a code and the certificate the association's release.
 //
 // The cards keep one short line each; the passkey and Google-link
-// explanations sit behind Saiba mais (src/help.js), whose sheet nests in the
+// explanations sit behind the info button (src/help.js), whose sheet nests in the
 // Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -37,7 +37,7 @@ import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
 import { colors, fonts, type } from '../ui/theme'
@@ -567,7 +567,6 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
             <>
               {inviteBlocked ? null : <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />}
               <Body>{SHORT.link}</Body>
-              <HelpLink doc={HELP.vinculo} />
               {inviteLine}
               {inviteBlocked
                 ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
@@ -578,8 +577,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         {showForm && !setup
           ? (
             <>
-              <Body>{SHORT.link}</Body>
-              <HelpLink doc={HELP.vinculo} />
+              <HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>
               {inviteLine}
               {inviteBlocked
                 ? <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
@@ -908,7 +906,6 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             : null}
           <Body>{WELCOME_TEXT}</Body>
           <Soft>{SHORT.passkeyLoss}</Soft>
-          <HelpLink doc={HELP.entrar} />
           {shownMismatch
             ? (
               <>

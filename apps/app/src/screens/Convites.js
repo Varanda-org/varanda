@@ -12,7 +12,7 @@ import { HELP } from '../help'
 import { useNode } from '../node'
 import { INVITE_VALID_TEXT, WEEK_RESET_TEXT, allowanceText, buildSignupInviteUrl, inviteCountText } from '../signupInvite'
 import { Body, Btn, ErrorText, Page, Soft, errorText } from '../ui'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 
 const NOT_LINKED_TEXT = 'Vincule sua conta Google em Conta e @nome para poder convidar.'
@@ -139,8 +139,7 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
     body = (
       <>
         {text ? <Body>{text}</Body> : null}
-        <Soft>{WEEK_RESET_TEXT}</Soft>
-        <HelpLink doc={HELP.convites} />
+        <HelpNote doc={HELP.convites}><Soft>{WEEK_RESET_TEXT}</Soft></HelpNote>
         <Btn label='Criar link de convite' onPress={create} pending={busy} disabled={busy || limitHit || (last !== null && last.remaining === 0)} />
       </>
     )

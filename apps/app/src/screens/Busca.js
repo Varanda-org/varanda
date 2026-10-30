@@ -44,7 +44,7 @@ import { CountsNote, refOf, socialRowProps, useSocial } from './ARua'
 import { peekAll, useFollowSet } from './Conversa'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 
@@ -260,8 +260,7 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
       {notice === null
         ? (
           <View style={styles.notes}>
-            <Soft>{SHORT.search}</Soft>
-            <HelpLink doc={HELP.busca} />
+            <HelpNote doc={HELP.busca}><Soft>{SHORT.search}</Soft></HelpNote>
             {flags.indexing ? <Soft>{SEARCH_INDEXING_NOTE}</Soft> : null}
             {!flags.complete ? <Soft>{SEARCH_INCOMPLETE_NOTE}</Soft> : null}
             {gone ? <Soft>{gone}</Soft> : null}

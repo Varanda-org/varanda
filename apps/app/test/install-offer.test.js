@@ -505,10 +505,11 @@ test('controller: legacy media listeners are removed; throwing bindings are safe
   t.pass('failed attachment and removal do not escape')
 })
 
-test('native: exactly five exports, immutable snapshots, stable hook value and harmless actions', async (t) => {
+test('native: exactly six exports, immutable snapshots, stable hook value and harmless actions', async (t) => {
   const native = await loadNative()
-  t.alike(Object.keys(native).sort(), ['dismissInstall', 'getInstall', 'promptInstall', 'subscribeInstall', 'useInstall'])
+  t.alike(Object.keys(native).sort(), ['dismissInstall', 'getInstall', 'getInstallCard', 'promptInstall', 'subscribeInstall', 'useInstall'])
   t.alike(native.getInstall(), none)
+  t.is(native.getInstallCard(), 'none')
   t.ok(Object.isFrozen(native.getInstall()))
   t.is(native.getInstall(), native.getInstall())
   t.is(await native.promptInstall(), 'unavailable')
@@ -519,5 +520,46 @@ test('native: exactly five exports, immutable snapshots, stable hook value and h
   const view = native.useInstall()
   t.is(view, native.useInstall())
   t.ok(Object.isFrozen(view))
-  t.alike(view, { ...none, promptInstall: native.promptInstall, dismissInstall: native.dismissInstall })
+  t.alike(view, { ...none, card: 'none', promptInstall: native.promptInstall, dismissInstall: native.dismissInstall })
+})
+
+test('installCard: gates, dismissal and priority', async (t) => {
+  const { installCard, DISMISS_MS } = await load()
+  const base = { eligible: true, hasPrompt: true, iosSafari: true, now: 100 }
+  t.is(installCard(base), 'prompt')
+  t.is(installCard({ ...base, hasPrompt: false }), 'ios')
+  t.is(installCard({ ...base, hasPrompt: false, iosSafari: false }), 'none')
+  for (const gate of [{ eligible: false }, { standalone: true }, { installed: true }, { samsungInternet: true }]) {
+    t.is(installCard({ ...base, ...gate }), 'none', JSON.stringify(gate))
+  }
+  t.is(installCard({ ...base, dismissedAt: 100 }), 'none')
+  t.is(installCard({ ...base, dismissedAt: 100, now: 100 + DISMISS_MS + 1 }), 'prompt')
+  t.is(installCard({ ...base, handheld: false }), 'prompt')
+  t.is(installCard(undefined), 'none')
+  t.is(installCard(null), 'none')
+})
+
+test('controller: getCard follows the prompt, dismissal and installation', async (t) => {
+  const { createInstallOffer } = await load()
+  const f = fixture(createInstallOffer)
+  t.is(f.offer.getCard(), 'none')
+  f.win.dispatch('beforeinstallprompt', dialog())
+  t.is(f.offer.getCard(), 'prompt')
+  f.offer.dismiss()
+  t.is(f.offer.getCard(), 'none')
+  const g = fixture(createInstallOffer)
+  g.win.dispatch('beforeinstallprompt', dialog())
+  t.is(g.offer.getCard(), 'prompt')
+  g.win.dispatch('appinstalled')
+  t.is(g.offer.getCard(), 'none')
+  f.offer.stop()
+  g.offer.stop()
+})
+
+test('install card texts are plain strings without em dashes', async (t) => {
+  const { INSTALL_CARD_TITLE, INSTALL_CARD_TEXT } = await load()
+  for (const text of [INSTALL_CARD_TITLE, INSTALL_CARD_TEXT.prompt, INSTALL_CARD_TEXT.ios]) {
+    t.ok(typeof text === 'string' && text.length > 0)
+    t.absent(text.includes('—'))
+  }
 })

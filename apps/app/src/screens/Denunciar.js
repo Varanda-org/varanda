@@ -19,7 +19,7 @@ import { countChars } from '../format'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -137,8 +137,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             the counter and validateReportText enforce TEXT_MAX. */}
         <Field label='observação (opcional)' value={note} onChangeText={setNote} maxLength={TEXT_MAX * 2} />
         <Text style={[styles.counter, noteText === null && styles.over]}>{String(countChars(note)) + '/' + String(TEXT_MAX)}</Text>
-        <Soft>{SHORT.reportPrivacy}</Soft>
-        <HelpLink doc={HELP.denuncia} />
+        <HelpNote doc={HELP.denuncia}><Soft>{SHORT.reportPrivacy}</Soft></HelpNote>
         <ErrorText>{send.error}</ErrorText>
         <Btn
           label='enviar denúncia'

@@ -44,7 +44,7 @@ import { canDelete } from '../deletion'
 import { revokeDeletedMedia } from '../media/cache'
 import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -1013,8 +1013,9 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       {blocked > 0
         ? (
           <View style={styles.footer}>
-            <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
-            <HelpLink doc={HELP.bloqueio} />
+            <HelpNote doc={HELP.bloqueio}>
+              <Soft>{blocked === 1 ? 'Uma pessoa que você segue não aparece aqui.' : String(blocked) + ' pessoas que você segue não aparecem aqui.'}</Soft>
+            </HelpNote>
           </View>
           )
         : null}

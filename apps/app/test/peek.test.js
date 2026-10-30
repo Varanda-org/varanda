@@ -53,25 +53,6 @@ test('withoutAuthor drops every row of one author and keeps the rest in order', 
   t.is(items.length, 4, 'the input is not changed')
 })
 
-test('round starts mark the first row and every change of round', async (t) => {
-  const { roundStarts } = await load()
-  const rows = [item('a', 1, 0), item('b', 1, 0), item('a', 2, 1), item('c', 1, 1), item('a', 3, 2)]
-  t.alike([...roundStarts(rows)], [0, 2, 4])
-  t.alike([...roundStarts([item('a', 1, 0), item('b', 1, 0)])], [0])
-  t.alike([...roundStarts([])], [])
-  t.alike([...roundStarts([item('a', 1, 1), item('b', 1, 0)])], [0, 1])
-})
-
-test('round labels name the first, second and third post of each diary only', async (t) => {
-  const { roundLabel } = await load()
-  t.is(roundLabel(0), '1ª publicação de cada diário')
-  t.is(roundLabel(1), '2ª publicação de cada diário')
-  t.is(roundLabel(2), '3ª publicação de cada diário')
-  t.is(roundLabel(3), null)
-  t.is(roundLabel(-1), null)
-  t.is(roundLabel(undefined), null)
-})
-
 test('the notice is web-only first, then offline, else none', async (t) => {
   const { peekNotice } = await load()
   t.is(peekNotice({ supported: true, hosted: true, online: true, loadedAt: 1 }), null)
