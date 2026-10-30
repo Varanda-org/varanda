@@ -8,7 +8,9 @@
 // a passkey: the first card is 'Entrar' (entrar com a passkey, criar passkey,
 // concluir a criação when the PRF only arrives on a second ceremony,
 // recomeçar for an account of another identity), a blocking notice when the
-// browser cannot derive it (no PRF), and after a successful unlock the diary
+// browser cannot derive it (no PRF), steps and 'tentar de novo' when the
+// chosen passkey's manager gives no PRF (src/passkeyTrouble.js), and after a
+// successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
 // the certificate and the posts back from the seeder). The native node and
 // varanda-serve keep the plain identity card.
@@ -33,6 +35,7 @@ import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolic
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
+import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
@@ -55,14 +58,6 @@ const PLAIN_CERT_LABEL = 'O que a associação devolveu'
 const PLAIN_SUBMIT = 'gravar e continuar'
 // Replaces parseCertificateText's JSON wording in the setup only.
 const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
-// A passkey created but unusable (no PRF) is named so it can be deleted.
-function staleText (userId) {
-  return typeof userId === 'string' && /^[0-9a-f]{6,}$/i.test(userId)
-    ? 'Apague do gerenciador de senhas a passkey "Varanda ' + userId.slice(0, 6).toLowerCase() + '", que foi criada mas não serve.'
-    : ''
-}
-
-const NO_PRF_TEXT = 'Este navegador não consegue usar passkeys com o Varanda. Use o Chrome ou o Edge, ou o Safari 18 ou mais novo.'
 const EXISTS_TEXT = 'Já existe uma conta neste navegador; outra passkey é outra conta.'
 const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
 const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
@@ -633,8 +628,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [pkPending, setPkPending] = useState(false)
   const [pkError, setPkError] = useState('')
   const [pkNote, setPkNote] = useState('')
-  // null, or { userId } once a ceremony reported NO_PRF.
+  // null, or { created } once a ceremony reported NO_PRF, until 'tentar de
+  // novo'. staleIds: the user ids of every unusable passkey this page created
+  // (they stay in the password manager, so they outlive a retry).
   const [noPrf, setNoPrf] = useState(null)
+  const [staleIds, setStaleIds] = useState([])
   // null, or { legacy } once a ceremony reported MISMATCH (the stored diary
   // belongs to another identity): offers "recomeçar".
   const [mismatch, setMismatch] = useState(null)
@@ -642,6 +640,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [confirmCreate, setConfirmCreate] = useState(false)
   const [showKey, setShowKey] = useState(false)
   const [awaitingComplete, setAwaitingComplete] = useState(false)
+  // A passkey chosen at Entrar failed: a creation awaiting 'concluir' may be
+  // gone, so 'Criar passkey' is offered beside it (no effect when none awaits).
+  const [createToo, setCreateToo] = useState(false)
   // The once sync after an unlock (node.passkey.recovering, shared by every
   // mounted Identidade): no instance sends a request while it runs (any
   // member request would preempt and end it); the one that unlocked reads
@@ -733,9 +734,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     pkBusy.current = false
     setPkPending(false)
   }
-  const pkFail = (err) => {
+  // created: the failing passkey was made on this page (Criar or concluir),
+  // so it can be named for deletion; one chosen at Entrar may be the account.
+  const pkFail = (err, created = false) => {
     const code = err && err.code
-    if (code === 'NO_PRF') return setNoPrf({ userId: err.userId })
+    if (code === 'NO_PRF') {
+      const id = err.userId
+      if (created && typeof id === 'string') setStaleIds((ids) => ids.includes(id) ? ids : [...ids, id])
+      // After a failure at Entrar a pending creation may be gone (that same
+      // passkey) or still live (another one): 'Criar passkey' shows beside
+      // 'concluir'.
+      if (!created) setCreateToo(true)
+      return setNoPrf({ created })
+    }
     if (code === 'MISMATCH') return setMismatch({ legacy: err.legacy === true })
     setPkError(errorText(err))
   }
@@ -768,7 +779,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // The handle's unlock/complete is called synchronously in the click
   // handler: the WebAuthn ceremony needs this click's user activation, so
   // nothing is awaited before it.
-  const ceremony = (call) => {
+  const ceremony = (call, created = false, completing = false) => {
     if (!pkStart()) return
     passkey.beginRecovery()
     let pending
@@ -778,22 +789,26 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         if (r && r.pending === true) {
           passkey.endRecovery()
           setAwaitingComplete(true)
+          setCreateToo(false)
           return
         }
         setAwaitingComplete(false)
+        setCreateToo(false)
         setMismatch(null)
         setNoPrf(null)
         await afterUnlock()
       }, (err) => {
         passkey.endRecovery()
-        pkFail(err)
+        // The node drops the pending creation only when its own passkey fails.
+        if (completing && err && err.code === 'NO_PRF') setAwaitingComplete(false)
+        pkFail(err, created)
       })
       .finally(pkEnd)
   }
 
   const doUnlock = () => ceremony(() => passkey.unlock({}))
-  const doRegister = () => ceremony(() => passkey.unlock({ register: true }))
-  const doComplete = () => ceremony(() => passkey.complete())
+  const doRegister = () => ceremony(() => passkey.unlock({ register: true }), true)
+  const doComplete = () => ceremony(() => passkey.complete(), true, true)
 
   const onCreatePress = () => {
     if (pkStatus !== null && pkStatus.exists && !confirmCreate) return setConfirmCreate(true)
@@ -816,6 +831,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     passkey.reset().then(() => {
       setMismatch(null)
       setAwaitingComplete(false)
+      setCreateToo(false)
       setPkNote('A conta antiga foi apagada deste navegador. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
@@ -835,7 +851,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     : null
   let entrar = null
   if (passkey !== null && locked) {
-    const blocked = noPrf !== null || (pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no' || !!pkStatus.rpIdError))
+    // The browser itself cannot (no WebAuthn, or it reports no PRF): only
+    // another browser helps.
+    const browserBlocked = pkStatus !== null && (pkStatus.webauthn === false || pkStatus.prf === 'no')
     // A diary of an older version is known before any ceremony.
     const shownMismatch = mismatch || (pkStatus !== null && pkStatus.legacy ? { legacy: true } : null)
     if (pkStatus === null) {
@@ -856,12 +874,25 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           {blockedInvite}
         </Card>
       )
-    } else if (blocked) {
-      const stale = noPrf !== null ? staleText(noPrf.userId) : ''
+    } else if (browserBlocked) {
+      const stale = deleteStep(staleIds)
       entrar = (
         <Card>
-          <Notice>{NO_PRF_TEXT}</Notice>
-          {stale ? <Notice>{stale}</Notice> : null}
+          <Notice>{BROWSER_TEXT}</Notice>
+          {stale ? <Body>{stale}</Body> : null}
+          {blockedInvite}
+        </Card>
+      )
+    } else if (noPrf !== null) {
+      // A passkey was created or chosen but its password manager gives no
+      // PRF. The node keeps a created one out of the next creation, so
+      // another try can save the new one elsewhere.
+      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true })
+      entrar = (
+        <Card>
+          <Notice>{UNUSABLE_TITLE}</Notice>
+          {steps.map((step) => <Body key={step}>{step}</Body>)}
+          <Btn label={RETRY_LABEL} onPress={() => setNoPrf(null)} disabled={pkPending} />
           {blockedInvite}
         </Card>
       )
@@ -870,7 +901,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // with no passkey known, 'Entrar com a passkey' otherwise; the other is
       // secondary. Same handlers as before (doUnlock, onCreatePress, doRegister,
       // doComplete): only the order and the labels changed.
-      const createFirst = !pkStatus.passkeyKnown && !awaitingComplete
+      const createFirst = !pkStatus.passkeyKnown && (!awaitingComplete || createToo)
       const entrarBtn = (
         <Btn
           label='Entrar com a passkey'
