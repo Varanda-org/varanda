@@ -39,7 +39,7 @@ const FIELDS = {
 
 test('constants', (t) => {
   t.is(PREFIX, 'varanda-terms-v1')
-  t.is(TERMS_VERSION, 7)
+  t.is(TERMS_VERSION, 8)
   t.is(VERSION_MAX, 9999)
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')
   t.ok(NONCE_RE.test('A-_9'.repeat(32)))

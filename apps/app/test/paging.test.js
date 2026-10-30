@@ -177,6 +177,27 @@ test('empty automatic reads back off with a capped delay', async (t) => {
   }
 })
 
+test('a manual read cancels the armed timer, and the timer can be armed again', async (t) => {
+  const { rearmTimer } = await load()
+  const pending = new Map()
+  let next = 0
+  const timer = rearmTimer((fn) => { pending.set(++next, fn); return next }, (id) => pending.delete(id))
+  const fire = () => { for (const [id, fn] of [...pending]) { pending.delete(id); fn() } }
+  let reads = 0
+  t.is(timer.armed, false)
+  timer.arm(() => { reads++ }, 2000)
+  t.is(timer.armed, true)
+  timer.cancel()
+  t.is(timer.armed, false)
+  fire()
+  t.is(reads, 0, 'a cancelled timer never reads')
+  timer.cancel()
+  timer.arm(() => { reads++ }, 2000)
+  fire()
+  t.is(reads, 1, 'an armed timer reads once')
+  t.is(timer.armed, false, 'it is free again after firing')
+})
+
 test('a list shorter than its viewport is near its end; an unmeasured one is not', async (t) => {
   const { nearListEnd } = await load()
   t.is(nearListEnd({ offset: 0, content: 300, layout: 800 }, 0.6), true, 'a short list cannot scroll to reach its end')

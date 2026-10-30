@@ -78,6 +78,27 @@ export const FEED_SYNCING_END = 'Ainda sincronizando quem você segue.'
 export const FEED_REARM_MS = 2000
 export const FEED_REARM_MAX_STEPS = 4
 
+// The one timer of the automatic reads. A manual read cancels it: the timer
+// would fire after that read and cost one more preemption of the sync run;
+// the effect arms it again when the read ends and the diary still grows.
+export function rearmTimer (set = setTimeout, clear = clearTimeout) {
+  let id = null
+  return {
+    get armed () { return id !== null },
+    arm (fn, ms) {
+      id = set(() => {
+        id = null
+        fn()
+      }, ms)
+    },
+    cancel () {
+      if (id === null) return
+      clear(id)
+      id = null
+    }
+  }
+}
+
 // A diary downloaded in order grows with newer blocks, so after an empty
 // before read its next arrivals usually sort inside the range already shown.
 // Backing off bounds preemptions without ignoring diaries whose older posts

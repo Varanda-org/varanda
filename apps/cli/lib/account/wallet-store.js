@@ -60,6 +60,11 @@ const ENTRY_KEYS = [
   'wallet', 'walletUncertain', 'walletMarkAt', 'createdAt'
 ]
 const KYC_KEYS = ['status', 'attempt', 'attemptId', 'documentId', 'selfieId', 'updatedAt']
+// Attempt ids this member had before the current one, so a recovery read
+// never adopts a closed earlier attempt. Optional on disk: files written
+// before it existed have no such key, and it is written only when non-empty.
+const PREVIOUS_KEY = 'previousAttemptIds'
+const MAX_PREVIOUS = 5
 const WALLET_KEYS = ['id', 'address', 'protectedSymmetricKey', 'createdAt']
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/
@@ -108,9 +113,15 @@ function validAttempt (n) {
   return Number.isSafeInteger(n) && n >= 1 && n <= MAX_ATTEMPT
 }
 
+function validPrevious (list) {
+  return Array.isArray(list) && list.length <= MAX_PREVIOUS && list.every(validId) && new Set(list).size === list.length
+}
+
 function validKyc (k) {
-  return isPlainObject(k) &&
-    exactKeys(k, KYC_KEYS) &&
+  if (!isPlainObject(k)) return false
+  const withPrevious = has(k, PREVIOUS_KEY)
+  if (withPrevious && !validPrevious(k[PREVIOUS_KEY])) return false
+  return exactKeys(k, withPrevious ? [...KYC_KEYS, PREVIOUS_KEY] : KYC_KEYS) &&
     KYC_STATUSES.includes(k.status) &&
     validAttempt(k.attempt) &&
     validIdOrNull(k.attemptId) &&
@@ -152,8 +163,23 @@ function validEntry (e) {
     isCanonicalIso(e.createdAt)
 }
 
+function previousOf (k) {
+  return has(k, PREVIOUS_KEY) ? k[PREVIOUS_KEY] : []
+}
+
+// The last MAX_PREVIOUS distinct ids, most recent last.
+function boundPrevious (list) {
+  const out = []
+  for (const id of list) {
+    const at = out.indexOf(id)
+    if (at !== -1) out.splice(at, 1)
+    out.push(id)
+  }
+  return out.slice(-MAX_PREVIOUS)
+}
+
 function copyKyc (k) {
-  return {
+  const out = {
     status: k.status,
     attempt: k.attempt,
     attemptId: k.attemptId,
@@ -161,6 +187,16 @@ function copyKyc (k) {
     selfieId: k.selfieId,
     updatedAt: k.updatedAt
   }
+  const previous = previousOf(k)
+  if (previous.length > 0) out[PREVIOUS_KEY] = previous.slice()
+  return out
+}
+
+function withPrevious (k, list) {
+  const bounded = boundPrevious(list.filter((id) => id !== k.attemptId))
+  if (bounded.length > 0) k[PREVIOUS_KEY] = bounded
+  else delete k[PREVIOUS_KEY]
+  return k
 }
 
 function copyWallet (w) {
@@ -284,15 +320,23 @@ function pickKyc (a, b) {
 // Within one attempt two writers may each have recorded a different upload
 // or the attempt id, so the ids are merged one by one; the winning side's id
 // is kept when both have one.
+// The earlier ids are a union of both copies, the loser's first so the
+// winner's most recent ones survive the bound; an older attempt's own id
+// joins them.
 function mergeKyc (a, b) {
   const won = pickKyc(a, b)
-  if (a.attempt !== b.attempt) return copyKyc(won)
   const lost = won === a ? b : a
   const out = copyKyc(won)
+  const previous = [...previousOf(lost), ...previousOf(won)]
+  if (a.attempt !== b.attempt) {
+    if (lost.attemptId !== null) previous.unshift(lost.attemptId)
+    return withPrevious(out, previous)
+  }
   for (const f of ['attemptId', 'documentId', 'selfieId']) {
     if (out[f] === null) out[f] = lost[f]
   }
-  return out
+  if (lost.attemptId !== null && lost.attemptId !== out.attemptId) previous.unshift(lost.attemptId)
+  return withPrevious(out, previous)
 }
 
 function pickWallet (a, b) {
@@ -551,22 +595,29 @@ function openWalletStore (dataDir, { now = Date.now, guard = () => true, readOnl
         if (attempt !== undefined && attempt !== k.attempt) return null
         if (k.status === 'aprovado') return null
         let next
+        let previous = previousOf(k)
         if (status === 'documentos' && RANK[k.status] === RANK.recusado) {
           if (k.attempt >= MAX_ATTEMPT) return null
           next = freshKyc(k.updatedAt)
           next.attempt = k.attempt + 1
           next.status = 'documentos'
+          if (k.attemptId !== null) previous = [...previous, k.attemptId]
         } else if (RANK[status] < RANK[k.status]) {
           return null
         } else {
           next = copyKyc(k)
           next.status = status
         }
-        if (attemptId !== undefined) next.attemptId = attemptId
+        if (attemptId !== undefined) {
+          if (next.attemptId !== null && attemptId !== next.attemptId) previous = [...previous, next.attemptId]
+          next.attemptId = attemptId
+        }
+        withPrevious(next, previous)
         if (documentId !== undefined) next.documentId = documentId
         if (selfieId !== undefined) next.selfieId = selfieId
         const same = next.attempt === k.attempt && next.status === k.status &&
-          next.attemptId === k.attemptId && next.documentId === k.documentId && next.selfieId === k.selfieId
+          next.attemptId === k.attemptId && next.documentId === k.documentId && next.selfieId === k.selfieId &&
+          JSON.stringify(previousOf(next)) === JSON.stringify(previousOf(k))
         if (same) return null
         // A new intent is stamped strictly after the previous change, so it
         // always beats a revert of the last one, even within one millisecond.

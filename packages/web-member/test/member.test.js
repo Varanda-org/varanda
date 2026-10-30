@@ -1,14 +1,15 @@
 // The member diary on Hypercore 10 (memory storage): versions, key shape,
 // certificate then post, raw block 0 bytes, reopen on the same storage and a
 // wrong-association certificate. Also member-ops reads on borrowed cores
-// (ctx.cores) and readAll's fixed end.
+// (ctx.cores), readAll's fixed end and what a replica downloading
+// newest-first shows (readVisible).
 const test = require('brittle')
 const { createRequire } = require('node:module')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet } = require('./helpers/net')
-const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { validateRecord, postRecord } = require('@varanda/core/lib/records')
+const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { validateRecord, postRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { createMember, APPEND_MODE } = require('../lib/member')
 const { memoryStorage } = require('../lib/storage')
@@ -525,4 +526,243 @@ test('readAll returns the blocks present when it started, not those appended und
   const entries = await store.readAll(diary)
   t.ok(appended && diary.length === length + 1, 'fixture: a block was appended under the read')
   t.is(entries.length, length, 'only the prefix present at the start')
+})
+
+// ---- newest-first replicas (store.readVisible): block 0 and the newest
+// run of a followed diary are shown while the middle is still missing ----
+
+// A certified member with posts t0..t{n-1}; `name` null writes no profile
+// first; `issuer` ({ kp, cert }) certifies it instead of the association.
+async function longAuthor (assoc, { name = 'Ana', posts = 40, issuer = null } = {}) {
+  const ctx = { storage: memoryNodeStorage(), association: assoc.hex, keyPair: crypto.keyPair(), noClear: true }
+  const { publicKey } = await ops.idCreate(ctx)
+  const cert = issuer === null ? createCert({ member: publicKey }, assoc.kp) : createIssuedCert({ member: publicKey }, issuer.kp, issuer.cert)
+  await ops.certAdd(ctx, cert)
+  if (name !== null) await ops.profileSet(ctx, { name })
+  const seqs = []
+  for (let i = 0; i < posts; i++) seqs.push((await ops.postCreate(ctx, { text: 't' + i })).seq)
+  return { ctx, key: publicKey, seqs }
+}
+
+// Copies only the blocks of `ranges` ([start, end) pairs) of W's diary into
+// a replica on `storage`, then clears `clear` there: what a newest-first
+// download leaves while the history is on its way.
+async function windowed (storage, W, ranges, clear = []) {
+  const source = await store.openDiary(W.ctx.storage)
+  const local = await store.openReplica(storage, W.key)
+  const a = source.replicate(true)
+  const b = local.replicate(false)
+  a.pipe(b).pipe(a)
+  for (const [start, end] of ranges) await local.download({ start, end }).done()
+  a.destroy()
+  b.destroy()
+  for (const seq of clear) await local.clear(seq)
+  const length = local.length
+  await local.close()
+  await source.close()
+  return length
+}
+
+// The reader (one own post) following W, whose replica holds [0, 3) and
+// the blocks from `from` (counted back from the end) up to its length.
+async function newestFixture (W, assoc, { back = 12, top = true, clear = [] } = {}) {
+  const me = await author(assoc, 'Eu', ['minha'])
+  const source = await store.openDiary(W.ctx.storage)
+  const length = source.length
+  await source.close()
+  const ranges = [[0, 3], [length - back, top ? length : length - 1]]
+  t0ok(await windowed(me.ctx.storage, W, ranges, clear) === length)
+  await store.writeFollows(me.ctx.storage, [W.key])
+  return { me, storage: me.ctx.storage, ctx: { storage: me.ctx.storage, association: assoc.hex }, length }
+}
+
+function t0ok (ok) {
+  if (!ok) throw new Error('fixture: the replica does not know the signed length')
+}
+
+function textsOf (feed, key) {
+  return feed.items.filter((i) => i.author === key).map((i) => i.text).sort()
+}
+
+function texts (from, to) {
+  return Array.from({ length: to - from }, (_, i) => 't' + (from + i)).sort()
+}
+
+test('newest-first: the feed shows block 0\'s prefix and the newest run, never the middle, also borrowed', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const f = await newestFixture(W, assoc)
+  // Blocks 0..2: certificate, profile, t0; the run: the last 12 posts.
+  const want = ['t0', ...texts(28, 40)].sort()
+  const exclusive = await ops.feedRead(f.ctx)
+  t.alike(textsOf(exclusive, W.key), want)
+  t.alike(exclusive.incomplete, [W.key])
+  t.ok(exclusive.items.filter((i) => i.author === W.key).every((i) => i.name === 'Ana'))
+  const { cores } = await borrow(t, f.storage, [W.key])
+  const borrowed = await ops.feedRead({ ...f.ctx, cores })
+  t.alike(borrowed, exclusive, 'the borrowed path answers the same')
+})
+
+test('newest-first: a run that does not reach the signed length shows the prefix only', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const f = await newestFixture(W, assoc, { top: false })
+  const feed = await ops.feedRead(f.ctx)
+  t.alike(textsOf(feed, W.key), ['t0'])
+  t.alike(feed.incomplete, [W.key])
+})
+
+test('newest-first: a tombstone in the run hides its target in the prefix and in the run, cleared or not', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const run = W.seqs[30]
+  const kept = W.seqs[33]
+  await ops.postDelete(W.ctx, { to: { author: W.key, seq: W.seqs[0] } })
+  await ops.postDelete(W.ctx, { to: { author: W.key, seq: run } })
+  await ops.postDelete(W.ctx, { to: { author: W.key, seq: kept } })
+  // The run is the last 12 posts and the 3 tombstones; t33's block is
+  // cleared here, t30's is still held.
+  const f = await newestFixture(W, assoc, { back: 15, clear: [kept] })
+  const feed = await ops.feedRead(f.ctx)
+  t.alike(textsOf(feed, W.key), texts(28, 40).filter((x) => x !== 't30' && x !== 't33'))
+  const { cores } = await borrow(t, f.storage, [W.key])
+  t.alike(await ops.feedRead({ ...f.ctx, cores }), feed, 'borrowed')
+})
+
+test('newest-first: blocked and revoked authors stay hidden from feed and profile, borrowed included', async (t) => {
+  t.timeout(30000)
+  await testnet(t)
+  const assoc = association()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc.kp) }
+  const W = await longAuthor(assoc, { issuer })
+  const f = await newestFixture(W, assoc)
+  t.alike(textsOf(await ops.feedRead(f.ctx), W.key).length, 13, 'fixture: shown before any snapshot')
+  const mod = moderator(assoc.kp)
+  const snapshots = [
+    { seq: 1, blocked: [W.key], revokedIssuers: [], reason: 'blocked' },
+    { seq: 2, blocked: [], revokedIssuers: [hex(issuerKp.publicKey)], reason: 'revoked-issuer' }
+  ]
+  for (const { seq, blocked, revokedIssuers, reason } of snapshots) {
+    await store.writeBlocklist(f.storage, createSnapshot({ seq, blocked, revokedIssuers }, mod.keyPair, mod.cert))
+    // The exclusive reads first: they open and close the replica.
+    for (const path of ['exclusive', 'borrowed']) {
+      const held = path === 'borrowed' ? await borrow(t, f.storage, [W.key]) : null
+      const ctx = held === null ? f.ctx : { ...f.ctx, cores: held.cores }
+      const feed = await ops.feedRead(ctx)
+      t.absent(feed.items.some((i) => i.author === W.key), reason + ', ' + path + ': no item')
+      t.alike(feed.skipped, [{ key: W.key, reason }])
+      t.alike(feed.incomplete, [])
+      t.alike((await ops.profileRead(ctx, { authors: [W.key] })).missing, [W.key], reason + ', ' + path + ': no profile')
+      if (held !== null) {
+        for (const core of [held.diary, ...held.replicas.values()]) await core.close()
+      }
+    }
+  }
+})
+
+test('newest-first: profile.read takes the newest profile in the run; one only in the middle is not read', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  await ops.profileSet(W.ctx, { name: 'Ana Nova' })
+  const f = await newestFixture(W, assoc)
+  const read = await ops.profileRead(f.ctx, { authors: [W.key] })
+  t.is(read.profiles[0].name, 'Ana Nova', 'the run\'s profile wins over the prefix one')
+  t.ok((await ops.feedRead(f.ctx)).items.filter((i) => i.author === W.key).every((i) => i.name === 'Ana Nova'), 'the feed names it the same')
+
+  const N = await longAuthor(assoc, { name: null, posts: 20 })
+  await ops.profileSet(N.ctx, { name: 'Meio' })
+  for (let i = 0; i < 20; i++) await ops.postCreate(N.ctx, { text: 'u' + i })
+  const g = await newestFixture(N, assoc)
+  const nameless = await ops.profileRead(g.ctx, { authors: [N.key] })
+  t.alike(nameless.missing, [])
+  t.is(nameless.profiles[0].name, null, 'a profile only in the middle reads null')
+})
+
+test('newest-first: paging with before goes through the run, then the prefix, without overlap', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const f = await newestFixture(W, assoc)
+  const all = (await ops.feedRead(f.ctx)).items
+  const pages = []
+  let before = null
+  for (;;) {
+    const page = (await ops.feedRead(f.ctx, { limit: 5, before })).items
+    if (page.length === 0) break
+    pages.unshift(...page)
+    before = { at: page[0].at, author: page[0].author, seq: page[0].seq }
+  }
+  t.alike(pages, all, 'the pages put together are the whole feed')
+  const own = pages.filter((i) => i.author === W.key).map((i) => i.text)
+  t.alike(own, ['t0', ...Array.from({ length: 12 }, (_, i) => 't' + (28 + i))], 'the prefix, then the run, in time order')
+})
+
+test('newest-first: log.read of a followed author still ends at the present length', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const f = await newestFixture(W, assoc)
+  const log = await ops.logRead(f.ctx, { author: W.key })
+  t.is(log.entries.length, 3)
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2])
+  const { cores } = await borrow(t, f.storage, [W.key])
+  t.alike(await ops.logRead({ ...f.ctx, cores }, { author: W.key }), log, 'borrowed')
+})
+
+test('newest-first: a tombstone that arrives after the scan never bridges the run to the post it deletes', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const target = W.seqs[37]
+  const { seq: D } = await ops.postDelete(W.ctx, { to: { author: W.key, seq: target } })
+  await ops.postCreate(W.ctx, { text: 'u1' })
+  await ops.postCreate(W.ctx, { text: 'u2' })
+  const me = await author(assoc, 'Eu', ['minha'])
+  const source = await store.openDiary(W.ctx.storage)
+  const length = source.length
+  await source.close()
+  // Everything of the newest run but the tombstone itself.
+  t0ok(await windowed(me.ctx.storage, W, [[0, 3], [length - 12, D], [D + 1, length]]) === length)
+  await store.writeFollows(me.ctx.storage, [W.key])
+  const ctx = { storage: me.ctx.storage, association: assoc.hex }
+  const held = await borrow(t, me.ctx.storage, [W.key])
+  // The live core now answers that the tombstone is stored (it arrived
+  // after the scan); the scan itself still found a hole there.
+  const core = held.replicas.get(W.key)
+  const has = core.has.bind(core)
+  core.has = async (i) => (i === D ? true : has(i))
+  const feed = await ops.feedRead({ ...ctx, cores: held.cores })
+  t.absent(textsOf(feed, W.key).includes('t37'), 'the deleted post is not shown')
+  t.alike(textsOf(feed, W.key), ['t0', 'u1', 'u2'])
+})
+
+test('newest-first: a hole named only by a cancelled tombstone stops the run (the deletion below it stays applied)', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const target = W.seqs[37]
+  // D1 deletes t37, D2 deletes D1, D3 deletes D2: D2 is cancelled, so D1
+  // stands and t37 is deleted on a full replica.
+  const diary = await store.openDiary(W.ctx.storage, W.ctx.keyPair)
+  await store.appendRecord(diary, deleteRecord({ seq: target }))
+  const D1 = diary.length - 1
+  await store.appendRecord(diary, deleteRecord({ seq: D1 }))
+  const D2 = diary.length - 1
+  for (let i = 0; i < 5; i++) await store.appendRecord(diary, postRecord({ text: 'v' + i }))
+  await store.appendRecord(diary, deleteRecord({ seq: D2 }))
+  const length = diary.length
+  await diary.close()
+  const me = await author(assoc, 'Eu', ['minha'])
+  // The follower holds the newest run except D1 itself.
+  t0ok(await windowed(me.ctx.storage, W, [[0, 3], [length - 12, D1], [D1 + 1, length]]) === length)
+  t.ok(length - 12 <= target, 'fixture: t37 sits in the downloaded window')
+  await store.writeFollows(me.ctx.storage, [W.key])
+  const feed = await ops.feedRead({ storage: me.ctx.storage, association: assoc.hex })
+  t.absent(textsOf(feed, W.key).includes('t37'), 'the deleted post is not shown')
+  t.alike(textsOf(feed, W.key), ['t0', 'v0', 'v1', 'v2', 'v3', 'v4'])
 })

@@ -33,7 +33,7 @@ import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
-import { FEED_SYNCING_END, canSyncRead, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, quietNewestPlan, rearmDelay, resetWith, shouldReloadOnShow, syncBaseline, syncReadKind, syncTruncated } from '../paging'
+import { FEED_SYNCING_END, canSyncRead, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, quietNewestPlan, rearmDelay, rearmTimer, resetWith, shouldReloadOnShow, syncBaseline, syncReadKind, syncTruncated } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
@@ -796,6 +796,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const activeRef = useRef(active)
   activeRef.current = active
   const rearmRef = useRef(null)
+  if (rearmRef.current === null) rearmRef.current = rearmTimer()
   // Only the latest read may commit; the ref also blocks duplicate end reaches
   // before React renders. Rows and their loading flags always change together.
   const seqRef = useRef(0)
@@ -859,6 +860,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       }
       return
     }
+    rearmRef.current.cancel()
     const mine = ++seqRef.current
     const seen = signalsRef.current
     ownSeenRef.current = seen && typeof seen.ownLength === 'number' ? seen.ownLength : null
@@ -901,6 +903,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
     if (!active || current.loading || current.refreshing || current.loadingMore || (current.atEnd && !fromSync) || current.cursor === null) return
+    if (!fromSync) rearmRef.current.cancel()
     const mine = ++seqRef.current
     const before = current.cursor
     const seen = signalsRef.current
@@ -969,10 +972,9 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const loadersRef = useRef(null)
   loadersRef.current = { loadNewest, loadOlder }
   useEffect(() => {
-    if (rearmRef.current !== null || !canSyncRead(feedRef.current, lengths, active)) return
+    if (rearmRef.current.armed || !canSyncRead(feedRef.current, lengths, active)) return
     const kindOf = (f) => syncReadKind({ deep: f.deep, probeOlder: f.probeOlder, shown: f.items.length, limit: FEED_LIMIT_DEFAULT })
-    rearmRef.current = setTimeout(() => {
-      rearmRef.current = null
+    rearmRef.current.arm(() => {
       const current = feedRef.current
       const now = signalsRef.current ? signalsRef.current.lengths : undefined
       if (!canSyncRead(current, now, activeRef.current)) return
@@ -982,17 +984,11 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak, feed.probeOlder])
 
   useEffect(() => {
-    if (!active && rearmRef.current !== null) {
-      clearTimeout(rearmRef.current)
-      rearmRef.current = null
-    }
+    if (!active) rearmRef.current.cancel()
   }, [active])
 
   useEffect(() => () => {
-    if (rearmRef.current !== null) {
-      clearTimeout(rearmRef.current)
-      rearmRef.current = null
-    }
+    rearmRef.current.cancel()
     seqRef.current += 1
     // Effect replay may show the mounted screen again after cancelling a read.
     previous.current.active = false
@@ -1050,7 +1046,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       <EmptyState
         icon='gente'
         title='Ainda não chegou nada'
-        body='Quando as pessoas que você segue publicarem, aparece aqui.'
+        body={stillSyncing ? FEED_SYNCING_END : 'Quando as pessoas que você segue publicarem, aparece aqui.'}
       />
     )
   }
