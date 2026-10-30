@@ -1,6 +1,6 @@
 'use strict'
-// The identity host controls of the in-app web node (docs/rpc.md 5.35 to
-// 5.40), IPC only: the host runs the WebAuthn ceremony (or reopens its
+// The identity host controls of the in-app web node (docs/rpc.md 5.36 to
+// 5.41), IPC only: the host runs the WebAuthn ceremony (or reopens its
 // stored session) and hands over only the passkey's PRF output; this module
 // derives the key pairs and drives the web-member session, as the browser
 // entry (packages/web-member/web/node.js) does around its install / bind /
@@ -11,14 +11,14 @@
 //   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
 //   host.install({ prf, credentialId, userId, rpId, resumed }) -> { publicKey, resumed }
 //   host.clear() / host.reset() / host.forget() / host.sessionSaved() -> {}
-//   host.status() -> docs/rpc.md 5.37
+//   host.status() -> docs/rpc.md 5.38
 //
 // The PRF output (hex on the wire) is copied into a buffer that is zeroed
 // in a finally, with the nonce and both derived pairs; it never reaches a
 // result, an error message or a log. The controls run one at a time, in
 // arrival order (the session's own chain serializes only its handlers).
 //
-// The sign-out barrier (kv 'signedOut', 5.39): a resumed install is refused
+// The sign-out barrier (kv 'signedOut', 5.40): a resumed install is refused
 // while it is set, and nothing here lifts it except sessionSaved, which the
 // host calls only after durably storing the session of a NON-resumed
 // install; it is refused unless the last successful install of this
@@ -104,7 +104,7 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     }
   }
 
-  // Validated by the dispatcher (5.35); checked again since prf is the root
+  // Validated by the dispatcher (5.36); checked again since prf is the root
   // secret. -> a fresh 32-byte buffer the caller zeroes.
   function prfBytes (hex) {
     if (typeof hex !== 'string' || !PRF_RE.test(hex)) throw usage('pedido inválido')
