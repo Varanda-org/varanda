@@ -47,10 +47,14 @@ function apply (state) {
   }
 }
 
-function refresh () {
+// fresh: a new native read (NetInfo.refresh). fetch() answers from NetInfo's
+// cache once it has a state, which would keep a change missed in the
+// background.
+function refresh (fresh = false) {
   const asked = version
   try {
-    Promise.resolve(NetInfo.fetch()).then((state) => {
+    const ask = fresh && typeof NetInfo.refresh === 'function' ? NetInfo.refresh() : NetInfo.fetch()
+    Promise.resolve(ask).then((state) => {
       if (asked === version) apply(state)
     }, () => {})
   } catch {}
@@ -81,7 +85,7 @@ function start () {
   } catch {}
   try {
     const sub = AppState.addEventListener('change', (status) => {
-      if (status === 'active') refresh()
+      if (status === 'active') refresh(true)
     })
     stopAppState = sub && typeof sub.remove === 'function' ? () => sub.remove() : null
   } catch {}
@@ -95,12 +99,19 @@ function stop () {
   stopAppState = null
 }
 
-// fn(isOnline()) on every change. -> unsubscribe.
+// fn(isOnline()) on every change. -> unsubscribe. A new subscriber also gets
+// the current state once, right after subscribing: the first fetch may have
+// settled between its isOnline() read and this call, and that change
+// notified no one.
 export function subscribeOnline (fn) {
   setup()
   const entry = (value) => fn(value)
   subscribers.add(entry)
   if (subscribers.size === 1) start()
+  Promise.resolve().then(() => {
+    if (!subscribers.has(entry)) return
+    try { entry(onlineFromState(last)) } catch {}
+  })
   return () => {
     if (!subscribers.delete(entry)) return
     if (subscribers.size === 0) stop()

@@ -11,7 +11,8 @@ const netinfo = `
 const box = globalThis.__netinfo = globalThis.__netinfo || { calls: [], listeners: new Set(), state: null, config: null }
 export default {
   configure (config) { box.calls.push('configure'); box.config = config; box.listeners.clear() },
-  fetch () { box.calls.push('fetch'); return Promise.resolve(box.state) },
+  fetch () { box.calls.push('fetch'); return Promise.resolve(box.cached !== undefined ? box.cached : box.state) },
+  refresh () { box.calls.push('refresh'); return Promise.resolve(box.state) },
   addEventListener (fn) { box.calls.push('listen'); box.listeners.add(fn); return () => box.listeners.delete(fn) }
 }
 `
@@ -83,6 +84,9 @@ test('subscribe: notified on changes only, listeners removed with the last subsc
   const b = []
   const stopA = subscribeOnline((v) => a.push(v))
   const stopB = subscribeOnline((v) => b.push(v))
+  await settle()
+  t.alike(a, [true], 'the current state once, after subscribing')
+  t.alike(b, [true])
   t.is(box().listeners.size, 1, 'one NetInfo listener for all subscribers')
   t.is(appState().listeners.size, 1, 'one AppState listener')
   t.is(box().calls.filter((c) => c === 'configure').length, 1, 'never configured again')
@@ -94,8 +98,8 @@ test('subscribe: notified on changes only, listeners removed with the last subsc
   emit(DISCONNECTED_UNKNOWN)
   emit(REACHABLE)
   t.is(isOnline(), true)
-  t.alike(a, [false, true])
-  t.alike(b, [false, true])
+  t.alike(a, [true, false, true])
+  t.alike(b, [true, false, true])
 
   stopA()
   stopA()
@@ -104,25 +108,29 @@ test('subscribe: notified on changes only, listeners removed with the last subsc
   t.is(box().listeners.size, 0, 'NetInfo listener removed')
   t.is(appState().listeners.size, 0, 'AppState listener removed')
   emit(DISCONNECTED)
-  t.alike(a, [false, true])
+  t.alike(a, [true, false, true])
 })
 
 test('back to the foreground: asks NetInfo again and notifies a change', async (t) => {
   const { isOnline, subscribeOnline } = await load()
   const seen = []
-  const stopSub = subscribeOnline((v) => seen.push(v))
   emit(REACHABLE)
+  const stopSub = subscribeOnline((v) => seen.push(v))
+  await settle()
+  seen.length = 0
   t.is(isOnline(), true)
 
-  // The network went away while in the background and no event arrived.
+  // The network went away while in the background and no event arrived;
+  // NetInfo's cache (what fetch() answers) still says connected.
+  box().cached = REACHABLE
   box().state = DISCONNECTED
-  const fetches = () => box().calls.filter((c) => c === 'fetch').length
-  const before = fetches()
+  const refreshes = () => box().calls.filter((c) => c === 'refresh').length
+  const before = refreshes()
   toForeground('background')
   toForeground('inactive')
-  t.is(fetches(), before, 'only a return to active asks again')
+  t.is(refreshes(), before, 'only a return to active asks again')
   toForeground('active')
-  t.is(fetches(), before + 1)
+  t.is(refreshes(), before + 1, 'a fresh native read, not the cache')
   await settle()
   t.is(isOnline(), false)
   t.alike(seen, [false])
@@ -142,6 +150,27 @@ test('back to the foreground: asks NetInfo again and notifies a change', async (
 
   stopSub()
   t.is(appState().listeners.size, 0)
+  delete box().cached
+})
+
+test('the first fetch settling offline before subscribing still reaches the subscriber', async (t) => {
+  const mod = await import('../src/online.native.js?fresh')
+  box().state = DISCONNECTED
+  t.is(mod.isOnline(), true, 'unknown at render time')
+  await settle()
+  t.is(mod.isOnline(), false, 'settled offline, nobody subscribed yet')
+  const seen = []
+  const stopSub = mod.subscribeOnline((v) => seen.push(v))
+  await settle()
+  t.alike(seen, [false])
+  emit(DISCONNECTED)
+  t.alike(seen, [false], 'later notifications stay change-only')
+  stopSub()
+  const late = []
+  const stopLate = mod.subscribeOnline((v) => late.push(v))
+  stopLate()
+  await settle()
+  t.alike(late, [], 'nothing after unsubscribing')
 })
 
 test('same exported API as online.web.js', async (t) => {
