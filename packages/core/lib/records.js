@@ -33,6 +33,8 @@ const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
 const MAX_GROUPS_PER_COMMUNITY = 32
 const MAX_GROUP_CUTS = 16
+// Cuts of a community admin grant or demotion: writers across linked groups.
+const MAX_COMMUNITY_CUTS = 64
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
 const MAX_GROUP_NAME = 80
@@ -532,6 +534,7 @@ module.exports = {
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
+  MAX_COMMUNITY_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,

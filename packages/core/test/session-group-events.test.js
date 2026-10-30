@@ -16,11 +16,13 @@ require.cache[syncPath].exports = { ...realSync, runSync: (opts) => scripted(opt
 const { createClient, createServerDispatcher, validateEvent } = require('@varanda/rpc')
 const { tmpDir } = require('./helpers/tmp')
 const { newSession } = require('./helpers/net')
+const store = require('../lib/store')
 
 const hex = (key) => b4a.toString(key, 'hex')
 
 async function open (t) {
-  const session = newSession(t, { dataDir: tmpDir(t), association: hex(crypto.keyPair().publicKey), bootstrap: ['127.0.0.1:49737'] })
+  const dataDir = tmpDir(t)
+  const session = newSession(t, { dataDir, association: hex(crypto.keyPair().publicKey), bootstrap: ['127.0.0.1:49737'] })
   const events = []
   const dispatcher = createServerDispatcher({
     handlers: session.handlers,
@@ -46,7 +48,7 @@ async function open (t) {
   }, { force: true })
   await client.request('session.open')
   await client.request('identity.create')
-  return { call: (method, params) => client.request(method, params), events }
+  return { call: (method, params) => client.request(method, params), events, dataDir }
 }
 
 test('group-downloaded events become one groups.changed per group', async (t) => {
@@ -64,4 +66,21 @@ test('group-downloaded events become one groups.changed per group', async (t) =>
   const changed = s.events.filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
   t.alike(changed, [G, H], 'one per group, flushed by the end of the run')
   t.is(s.events.filter((e) => e.event === 'sync.event' && e.data.line.startsWith('grupo ')).length, 6, 'every download still has its line')
+})
+
+test('a grown community root also changes every group held here', async (t) => {
+  const G = 'a1'.repeat(32)
+  const C = 'c3'.repeat(32)
+  const L = 'd4'.repeat(32)
+  scripted = async ({ onEvent }) => {
+    onEvent({ event: 'group-downloaded', key: C, group: C, length: 2 })
+    onEvent({ event: 'group-downloaded', key: L, group: L, length: 1 })
+    return { ok: true, downloaded: {}, unadvertised: [], skipped: [], errors: [] }
+  }
+  const s = await open(t)
+  store.writeGroups(s.dataDir, [{ group: G, writer: G, nonce: 'ab'.repeat(16) }, { group: L, writer: L, nonce: 'cd'.repeat(16) }])
+  await s.call('sync.start', { once: true })
+  for (let i = 0; i < 200 && !s.events.some((e) => e.event === 'sync.stopped'); i++) await new Promise((resolve) => setTimeout(resolve, 10))
+  const changed = s.events.filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
+  t.alike(changed, [G, L, C].sort(), 'the community key and every local group')
 })

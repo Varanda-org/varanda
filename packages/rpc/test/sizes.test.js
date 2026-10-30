@@ -32,7 +32,8 @@ const {
   PEEK_SEQS_MAX,
   FOLLOW_LIMIT_MAX,
   GROUP_LIMIT_MAX,
-  GROUP_MEMBERS_LIMIT_MAX
+  GROUP_MEMBERS_LIMIT_MAX,
+  MAX_GROUP_NAME
 } = require('..')
 
 const HEX = 'f'.repeat(64)
@@ -274,6 +275,13 @@ test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
   const member = { member: HEX, name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), admin: true, banned: true, joinedAt: AT }
   const s = size({ members: Array(GROUP_MEMBERS_LIMIT_MAX).fill(member), total: SEQ })
   t.comment('group.members worst case at ' + GROUP_MEMBERS_LIMIT_MAX + ' members: ' + s + ' bytes')
+  t.ok(s <= MAX_MESSAGE)
+})
+
+test('community.info: 32 groups with maximal names fit', (t) => {
+  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME) }
+  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), creator: HEX, groups: Array(32).fill(group), admins: SEQ, state: 'ready', incomplete: true })
+  t.comment('community.info worst case at 32 groups: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
 })
 

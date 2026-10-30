@@ -79,7 +79,7 @@ const store = require('./node-store')
 
 const {
   buildGroup, groupJoinHistory, validateGroupHeader, validateWriterHeader,
-  orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY
+  orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_COMMUNITY_CUTS
 } = grp
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -1251,7 +1251,7 @@ async function openOwnGroupCore (ctx, entry) {
 async function appendToOwnGroupCore (ctx, entry, record) {
   const core = await openOwnGroupCore(ctx, entry)
   try {
-    return await store.appendGroupRecord(core, record, { root: entry.key === entry.group, limits: ctx.limits })
+    return await store.appendGroupRecord(core, record, { root: entry.key === entry.group, community: entry.kind === 'community', limits: ctx.limits })
   } finally {
     await core.close()
   }
@@ -1358,6 +1358,8 @@ async function makeGroupRoom (ctx, base, group) {
   if (entries.length < MAX_GROUPS_PER_DIARY) return
   const left = []
   for (const e of entries) {
+    // A community root this device created always keeps its slot.
+    if (e.kind === 'community') continue
     if (await ownCoreLeft(ctx.storage, e.key) || await rootUnfoldable(ctx.storage, e.group) || await foldSaysLeft(ctx, base, e.group)) left.push(e)
   }
   if (entries.length - left.length >= MAX_GROUPS_PER_DIARY) throw new UsageError(store.GROUPS_FULL)
@@ -1408,7 +1410,12 @@ async function loadGroup (ctx, base, group) {
     diaries.set(d, entries)
     if (entries !== null) joins.set(d, groupJoinHistory(entries, group))
   }
-  const built = buildGroup({ root: { key: group, entries: root.entries }, writers, joins, communities: [], now: Date.now() })
+  const communities = []
+  for (const key of linkedCommunityKeys(root.entries)) {
+    const c = await loadCommunityRoot(ctx, base, key)
+    if (c !== null) communities.push({ key, entries: c.entries, joins: c.joins })
+  }
+  const built = buildGroup({ root: { key: group, entries: root.entries }, writers, joins, communities, now: Date.now() })
   return { group, own, built, cores, diaries, joins }
 }
 
@@ -1880,6 +1887,7 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
     const base = { ownHex, ownEntries: await store.readAll(diary), association, mod }
     const groups = []
     for (const e of await store.readGroupWriters(ctx.storage)) {
+      if (e.kind === 'community') continue
       const g = await loadGroup(ctx, base, e.group)
       if (g === null) {
         if (await pendingOf(ctx, mod, e.group) !== null) groups.push({ group: e.group, ...PENDING_INFO })
@@ -1899,10 +1907,11 @@ async function groupInfo (ctx, { group }) {
     creator: g.built.creator,
     role: roleOf(g, ownHex),
     members: memberCount(g),
-    state: stateOf(g, ownHex)
+    state: stateOf(g, ownHex),
+    communities: g.built.community === null ? [] : [g.built.community]
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending' }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', communities: [] }
   })
 }
 
@@ -1940,11 +1949,319 @@ async function groupRequests (ctx, { group, offset = 0, limit = GROUP_MEMBERS_LI
   })
 }
 
+// ---- communities (docs/rpc.md 5.57 to 5.60) ----
+// A community root is a group core whose header kind is `community`: the
+// browser store keeps it as a group core, and the one this device created
+// in kv groupWriters with `kind: 'community'` (its root nonce).
+
+const COMMUNITY_NOT_FOUND = 'comunidade não encontrada'
+const COMMUNITY_FORBIDDEN = 'sem permissão na comunidade'
+const COMMUNITY_FULL = 'limite da comunidade atingido'
+const COMMUNITY_TAKEN = 'o grupo já está em outra comunidade'
+const COMMUNITY_CREATOR = 'o criador da comunidade já administra'
+// The communities a group fold loads from its root's links: every one a
+// community-link record names, on or off, since an earlier community's
+// admins acted while it was linked. At most this many distinct keys, in
+// root order of first appearance; a key beyond the bound is not passed, so
+// the fold reads as incomplete (as in the core node).
+const MAX_LINKED_COMMUNITIES = 32
+
+function communityHeader (h) {
+  return validateGroupHeader(h) === null && h.kind === 'community' && h.visibility === 'public'
+}
+
+// The distinct communities named by the community-link records of a group
+// root, in root order of first appearance, at most MAX_LINKED_COMMUNITIES.
+function linkedCommunityKeys (entries) {
+  const out = []
+  for (let i = 1; i < entries.length && out.length < MAX_LINKED_COMMUNITIES; i++) {
+    const r = entries[i].record
+    if (r === null || typeof r !== 'object' || r.type !== 'community-link' || !isHex64(r.community)) continue
+    const key = r.community.toLowerCase()
+    if (!out.includes(key)) out.push(key)
+  }
+  return out
+}
+
+// A held community root with its creator diary's join history for it (the
+// binding buildGroup and buildCommunity check) -> { key, header, entries,
+// joins } or null (not held, forked, blocked, or no community header).
+async function loadCommunityRoot (ctx, base, key) {
+  const { ownHex, ownEntries, association, mod } = base
+  if (mod.blocked.has(key)) return null
+  const root = await readGroupCore(ctx.storage, key)
+  if (root === null || root.length === 0 || root.fork !== 0) return null
+  const header = root.entries[0].record
+  if (!communityHeader(header)) return null
+  const d = header.diary
+  const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+  const joins = new Map()
+  if (entries !== null) joins.set(d, groupJoinHistory(entries, key))
+  return { key, header, entries: root.entries, joins }
+}
+
+// The group side of root `entries`: the community on now (one at a time,
+// as the fold reads it) and the latest community-link per community.
+function groupSide (entries) {
+  let current = null
+  const last = new Map()
+  for (let i = 1; i < entries.length; i++) {
+    const r = entries[i].record
+    if (r === null || typeof r !== 'object' || r.type !== 'community-link') continue
+    last.set(r.community, r)
+    if (r.on) {
+      if (current === null) current = r.community
+    } else if (current === r.community) {
+      current = null
+    }
+  }
+  return { current, last }
+}
+
+// The latest group-link for group G in a community root, or null.
+function communitySide (entries, G) {
+  let last = null
+  for (let i = 1; i < entries.length; i++) {
+    const r = entries[i].record
+    if (r !== null && typeof r === 'object' && r.type === 'group-link' && r.group === G) last = r
+  }
+  return last
+}
+
+// The groups a community root has on, as the fold counts them (a link over
+// the cap is ignored, an unlink of a group not on is ignored).
+function linkedGroups (entries) {
+  const on = new Set()
+  for (let i = 1; i < entries.length; i++) {
+    const r = entries[i].record
+    if (r === null || typeof r !== 'object' || r.type !== 'group-link') continue
+    if (r.on) {
+      if (!on.has(r.group) && on.size >= grp.MAX_GROUPS_PER_COMMUNITY) continue
+      on.add(r.group)
+    } else {
+      on.delete(r.group)
+    }
+  }
+  return on
+}
+
+function byWriter (a, b) {
+  return a.writer < b.writer ? -1 : a.writer > b.writer ? 1 : 0
+}
+
+// Cuts on the writers of `diaries` in group fold g: on true every counted
+// writer at max(contiguous, signed) length (never seq 0, nothing
+// retroactive), on false every known writer at its contiguous length.
+function diaryCuts (g, diaries, on) {
+  if (g === null) return []
+  const out = new Map()
+  for (const d of diaries) {
+    const list = on ? countedCuts(g, d, true) : boundWriters(g, d).map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), false) }))
+    for (const c of list) if (!out.has(c.writer)) out.set(c.writer, c)
+  }
+  return [...out.values()].sort(byWriter)
+}
+
+// Whether an on:true record would list nothing its side's current link
+// does not already list.
+function linkCovers (current, cuts) {
+  if (current === null || current.on !== true) return false
+  const listed = new Set(current.cuts.map((c) => c.writer))
+  return cuts.every((c) => listed.has(c.writer))
+}
+
+function ownRootEntry (writers, key, kind) {
+  return writers.find((e) => e.group === key && e.rootNonce !== null && (kind === 'community') === (e.kind === 'community')) || null
+}
+
+function rootWriter (entry) {
+  return { group: entry.group, key: entry.group, nonce: entry.rootNonce, ...(entry.kind === 'community' ? { kind: 'community' } : {}) }
+}
+
+// The community's creator and admins (buildCommunity over its own root);
+// none while the root is not held or not bound.
+function communityAdmins (c) {
+  if (c === null) return []
+  return [...grp.buildCommunity({ root: { key: c.key, entries: c.entries, joins: c.joins } }).admins]
+}
+
+// The groups held among those the community root links on its side, each
+// with its fold and as buildCommunity takes it (writers and joins).
+// Only the groups on under the fold's cap, at most MAX_GROUPS_PER_COMMUNITY,
+// each loaded once, as in the core node.
+async function heldLinkedGroups (ctx, base, c) {
+  const out = []
+  for (const key of [...linkedGroups(c.entries)].sort()) {
+    const g = await loadGroup(ctx, base, key)
+    if (g === null) continue
+    const writers = []
+    for (const [k, core] of g.cores) if (k !== key) writers.push({ key: k, entries: core.entries, diary: core.diary })
+    out.push({ g, item: { key, entries: g.cores.get(key).entries, writers, joins: g.joins } })
+  }
+  return out
+}
+
+// -> { built, groups: Map key -> group fold } over the groups linked two-way.
+async function foldHeldCommunity (ctx, base, c) {
+  const held = await heldLinkedGroups(ctx, base, c)
+  const built = grp.buildCommunity({ root: { key: c.key, entries: c.entries, joins: c.joins }, groups: held.map((h) => h.item) })
+  const groups = new Map()
+  for (const h of held) if (built.groups.includes(h.item.key)) groups.set(h.item.key, h.g)
+  return { built, groups }
+}
+
+async function withCommunityBase (ctx, write, fn) {
+  if (write) needGroupKeys(ctx)
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (write && diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    return fn({ diary, ownHex, base: { ownHex, ownEntries: await store.readAll(diary), association, mod } })
+  })
+}
+
+// -> { community }: a new community root in a new own core; the own diary
+// binds it at once (writer === community), as group.create binds a group.
+// It takes a kv groupWriters slot like a group (MAX_GROUPS_PER_DIARY).
+async function communityCreate (ctx, { name }) {
+  return withCommunityBase(ctx, true, async ({ diary, ownHex, base }) => {
+    const header = buildRecord(() => grp.groupHeader({ kind: 'community', diary: ownHex, visibility: 'public', join: 'open', name, box: null }))
+    await makeGroupRoom(ctx, base, null)
+    const { core, key, nonce } = await newOwnGroupCore(ctx)
+    try {
+      await store.appendGroupRecord(core, header, { root: true, community: true, limits: ctx.limits })
+    } finally {
+      await core.close()
+    }
+    await store.putGroupWriter(ctx.storage, { group: key, key, nonce, rootNonce: nonce, kind: 'community' })
+    await appendOwn(ctx, diary, groupJoinRecord({ group: key, writer: key, on: true }))
+    return { community: key }
+  })
+}
+
+// -> { community, group, on, sides }: every side the caller owns, written in
+// one call. `sides` lists the sides the caller owns, each written when it changes.
+async function communityLink (ctx, { community, group, on }) {
+  const C = groupKeyOf(community)
+  const G = groupKeyOf(group)
+  return withCommunityBase(ctx, true, async ({ ownHex, base }) => {
+    if (base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
+    if (base.mod.blocked.has(G)) throw new Error(GROUP_NOT_FOUND)
+    if (C === G) throw new UsageError(COMMUNITY_FORBIDDEN)
+    const gRoot = await readGroupCore(ctx.storage, G)
+    if (gRoot !== null && gRoot.length > 0 && communityHeader(gRoot.entries[0].record)) throw new UsageError(COMMUNITY_FORBIDDEN)
+    // An ordinary group root named as the community would take the group's
+    // one community slot on the group side alone.
+    const cRoot = await readGroupCore(ctx.storage, C)
+    if (cRoot !== null && cRoot.length > 0 && !communityHeader(cRoot.entries[0].record)) throw new UsageError(COMMUNITY_FORBIDDEN)
+    const writers = await store.readGroupWriters(ctx.storage)
+    const c = await loadCommunityRoot(ctx, base, C)
+    const g = await loadGroup(ctx, base, G)
+    const cEntry = ownRootEntry(writers, C, 'community')
+    const gEntry = ownRootEntry(writers, G, 'group')
+    const ownsC = cEntry !== null && c !== null && c.header.diary === ownHex
+    const ownsG = gEntry !== null && g !== null && g.built.creator === ownHex && statusOf(g, ownHex) === 'member'
+    if (!ownsC && !ownsG) throw new UsageError(COMMUNITY_FORBIDDEN)
+    if (ownsC && on === true) {
+      const linked = linkedGroups(c.entries)
+      if (!linked.has(G) && linked.size >= grp.MAX_GROUPS_PER_COMMUNITY) throw new UsageError(COMMUNITY_FULL)
+    }
+    const side = ownsG ? groupSide(g.cores.get(G).entries) : null
+    if (on === true && side !== null && side.current !== null && side.current !== C) throw new UsageError(COMMUNITY_TAKEN)
+    let cuts = diaryCuts(g, communityAdmins(c), on === true)
+    // An unlink is never refused for its size: the first MAX_GROUP_CUTS
+    // writers by key keep their known length and the rest are cut at 0,
+    // the safe side for a revocation. Only a link is refused.
+    if (cuts.length > MAX_GROUP_CUTS) {
+      if (on === true) throw new UsageError(COMMUNITY_FULL)
+      cuts = cuts.slice(0, MAX_GROUP_CUTS)
+    }
+    const owned = [...(ownsC ? ['community'] : []), ...(ownsG ? ['group'] : [])]
+    const write = []
+    if (ownsC) {
+      const current = communitySide(c.entries, G)
+      if (on === true ? !linkCovers(current, cuts) : (current !== null && current.on === true)) write.push('community')
+    }
+    if (ownsG) {
+      const current = side.last.get(C) || null
+      if (on === true ? !(side.current === C && linkCovers(current, cuts)) : (current !== null && current.on === true)) write.push('group')
+    }
+    if (write.includes('community')) await appendToOwnGroupCore(ctx, rootWriter(cEntry), buildRecord(() => grp.groupLink({ group: G, on: on === true, cuts })))
+    if (write.includes('group')) await appendToOwnGroupCore(ctx, rootWriter(gEntry), buildRecord(() => grp.communityLink({ community: C, on: on === true, cuts })))
+    return { community: C, group: G, on: on === true, sides: owned }
+  })
+}
+
+// -> { community, member, on }: a group-admin record in the community root,
+// by its creator only, with cuts over the member's writers in every group
+// linked two-way.
+async function communityAdmin (ctx, { community, member, on }) {
+  const C = groupKeyOf(community)
+  return withCommunityBase(ctx, true, async ({ ownHex, base }) => {
+    if (base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
+    const c = await loadCommunityRoot(ctx, base, C)
+    const entry = ownRootEntry(await store.readGroupWriters(ctx.storage), C, 'community')
+    if (c === null || entry === null || c.header.diary !== ownHex) throw new UsageError(COMMUNITY_FORBIDDEN)
+    const d = String(member).toLowerCase()
+    if (d === c.header.diary) throw new UsageError(COMMUNITY_CREATOR)
+    const { groups } = await foldHeldCommunity(ctx, base, c)
+    let cuts = []
+    for (const g of groups.values()) cuts.push(...diaryCuts(g, [d], on === true))
+    cuts.sort(byWriter)
+    // A demotion is never refused for its size: the first
+    // MAX_COMMUNITY_CUTS writers by key are listed and the rest cut at 0.
+    if (cuts.length > MAX_COMMUNITY_CUTS) {
+      if (on === true) throw new UsageError(COMMUNITY_FULL)
+      cuts = cuts.slice(0, MAX_COMMUNITY_CUTS)
+    }
+    await appendToOwnGroupCore(ctx, rootWriter(entry), buildRecord(() => grp.communityAdmin({ member: d, on: on === true, cuts })))
+    return { community: C, member: d, on: on === true }
+  })
+}
+
+const PENDING_COMMUNITY = { name: null, creator: null, groups: [], admins: 0, state: 'pending', incomplete: true }
+
+// A root not held yet is pending; a held root that is no community root is
+// NOT_FOUND.
+async function communityInfo (ctx, { community }) {
+  const C = groupKeyOf(community)
+  return withCommunityBase(ctx, false, async ({ base }) => {
+    if (base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
+    const c = await loadCommunityRoot(ctx, base, C)
+    if (c === null) {
+      const root = await readGroupCore(ctx.storage, C)
+      if (root !== null && root.length > 0) throw new Error(COMMUNITY_NOT_FOUND)
+      return { community: C, ...PENDING_COMMUNITY }
+    }
+    const { built, groups } = await foldHeldCommunity(ctx, base, c)
+    return {
+      community: C,
+      name: built.name,
+      creator: built.creator,
+      groups: built.groups.slice(0, grp.MAX_GROUPS_PER_COMMUNITY).map((key) => ({ group: key, name: groups.has(key) ? groups.get(key).built.name : null })),
+      admins: built.admins.size,
+      state: 'ready',
+      incomplete: built.incomplete
+    }
+  })
+}
+
+// The groups linked two-way with `community` held here (the groups.changed
+// of a community admin change); [] when it does not fold.
+async function communityGroups (ctx, { community }) {
+  try {
+    return (await communityInfo(ctx, { community })).groups.map((x) => x.group)
+  } catch {
+    return []
+  }
+}
+
 module.exports = {
   GENESIS_REQUIRED,
   GROUP_NOT_FOUND,
   GROUP_FORBIDDEN,
   GROUP_UNCHANGED,
+  COMMUNITY_NOT_FOUND,
   deepEqual,
   trustRoot,
   withIdentity,
@@ -1998,5 +2315,10 @@ module.exports = {
   groupInfo,
   groupMembers,
   groupRequests,
+  communityCreate,
+  communityLink,
+  communityInfo,
+  communityAdmin,
+  communityGroups,
   isNeedsExclusive
 }

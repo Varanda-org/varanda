@@ -3242,3 +3242,45 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
 - Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
 - Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.
+
+## 57. Comunidades (PR feat/communities)
+
+Segunda parte de Cadeiras de Praia: uma comunidade junta grupos públicos, `docs/protocol.md` seção 10 ("Communities") e `docs/rpc.md` 5.57 a 5.60. A raiz da comunidade (cabeçalho `kind: 'community'`) guarda só `group-meta`, `group-admin` e `group-link`; a raiz do grupo guarda `community-link`. O vínculo só vale com os dois lados ligados, um grupo fica em uma comunidade por vez e uma comunidade conta no máximo 32 grupos. O criador e os administradores da comunidade agem como administradores em todo grupo vinculado dos dois lados (banir, admitir, ocultar), nunca nomeiam administradores de grupo.
+
+### Como verificar
+
+Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `npm test`.
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/group.test.js` (testes de comunidade) | registros `group-link` e `community-link`, construtores, `buildGroup` com `communities` (vínculo dos dois lados, raiz vinculada pelo criador, uma comunidade por grupo, teto de 32 grupos, cortes de vínculo e de nomeação, rebaixamento e desvínculo, raízes ausentes ou bifurcadas, ordem de entrega) e `buildCommunity` |
+| `packages/core/test/community-member.test.js` | `community.create`, `community.link`, `community.admin`, `community.info` no nó do núcleo, `group.info` com `communities`, recusas e idempotência |
+| `packages/core/test/sync-communities.test.js` | sincronização do núcleo: raízes de comunidade seguidas pelos vínculos, portão por papel, `not-community`, evento `community-linked` |
+| `packages/core/test/seeder-communities.test.js` | semeador: admissão da raiz de comunidade, página com só a raiz, raiz sem vínculo do criador |
+| `packages/core/test/group-index.test.js` | índice do semeador: `community` nas linhas de `/index/group`, `/index/community/<C>`, busca só de grupos |
+| `packages/web-member/test/community-ops.test.js` | os mesmos métodos no nó do navegador (`member-ops.js`) |
+| `apps/cli/test/community-commands.test.js` | comandos `community create|link|admin|info` da CLI, saída `--json` e recusas |
+| `packages/web-member/test/groups-e2e.test.js` (segundo teste) | ponta a ponta em loopback: semeador real atrás de WebSocket e na DHT local; o criador (núcleo) vincula grupo e comunidade, nomeia uma administradora (outro nó do núcleo) que oculta uma mensagem, vista oculta pelo criador e pelo nó do navegador; rebaixada sem ter sincronizado, ela oculta outra mensagem, e essa ocultação não vale para os dois nós, enquanto a anterior continua |
+
+### Checagens humanas (a fazer)
+
+- CLI: `varanda community create --name <nome>` imprime `comunidade criada: <chave>`; `community info <chave>` mostra nome, criador e nenhum grupo.
+- Vincular dos dois lados: com outra pessoa dona do grupo, `community link <comunidade> <grupo>` de quem criou a comunidade imprime `vínculo gravado (lado: comunidade)`; `community info` ainda não lista o grupo. Depois de a dona do grupo rodar o mesmo comando (`lado: grupo`) e de uma sincronização, os dois lados listam o grupo e `group info <grupo> --json` mostra `communities` com a chave.
+- `community admin <comunidade> --member <diário>`: a pessoa nomeada oculta uma mensagem do grupo vinculado; no navegador, a mensagem aparece como oculta depois da sincronização.
+- Rebaixar (`--undo`): uma ocultação nova da pessoa rebaixada não vale; as anteriores continuam.
+- Desvincular (`community link ... --undo`) de qualquer lado: o grupo sai de `community info` e a pessoa administradora da comunidade perde o poder no grupo.
+- Semeador: `curl /index/community/<C>` numa comunidade vinculada dos dois lados mostra o grupo com `writerCount`; desvincular de qualquer lado tira o grupo, e `/index/group/<G>` passa a mostrar `community: null`.
+- Bloquear a raiz da comunidade: `/index/community/<C>` responde 404 e o log do semeador mostra `group-rejected` com `group-blocked`.
+
+### Não verificado / limites conhecidos
+
+- Um aparelho de uma pessoa administradora que existia antes do vínculo e que o criador do grupo não guardava conta a partir do início da nomeação, não do vínculo.
+- Depois de um desvínculo, um novo vínculo só vale para os escritores que ele lista.
+- Um grupo cujos vínculos já nomearam mais de 32 comunidades distintas fica marcado como incompleto.
+- O índice do semeador é só uma dica e ignora a retirada de registros por saída (`group-leave`).
+- A raiz vinculada que deixa de ser nomeada antes do portão (`unwanted`) não tem teste.
+- Um grupo cuja comunidade foi bloqueada pela associação não consegue desligá-la nem ligar outra (o pedido recusa a comunidade bloqueada antes do `on: false`); a autoridade não muda, porque uma raiz bloqueada nunca entra na dobra.
+- Num desligamento ou rebaixamento com mais escritores que o teto, cada nó lista os primeiros em ordem de chave e omite o resto (cortado em 0); o nó do núcleo conta também escritores guardados ainda não vinculados e o navegador só os vinculados, então os dois podem gravar listas diferentes para o mesmo pedido (os dois são seguros). A ramificação do navegador que deixa em repouso um escritor guardado sob uma chave só ligada não tem teste.
+- Núcleos de escritor que nomeiam uma comunidade são admitidos pelo semeador e contam nos tetos, mas nunca entram nas páginas.
+- A nova tentativa de uma leitura falha na varredura de vínculos e a nova varredura da própria raiz de grupo quando ela cresce não têm teste de regressão (não há gancho para forçá-las).
+- Sem interface nativa; as telas da web vêm na PR4.
