@@ -112,3 +112,53 @@ test('parseInviteInput: bare code or a full invite link', async (t) => {
     t.is(parseInviteInput(bad), null, String(bad))
   }
 })
+
+test('invite refusals and the native drop', async (t) => {
+  const { isInviteRefusal, dropsHeldInvite } = await load()
+  t.ok(isInviteRefusal({ code: 'convite-obrigatorio' }))
+  t.ok(isInviteRefusal({ code: 'convite-invalido' }))
+  t.absent(isInviteRefusal({ code: 'expirado' }))
+  t.absent(isInviteRefusal(null))
+  t.ok(dropsHeldInvite({ code: 'convite-invalido' }, true), 'the app drops a refused code')
+  t.absent(dropsHeldInvite({ code: 'convite-invalido' }, false), 'the web keeps its stored code')
+  t.absent(dropsHeldInvite({ code: 'convite-obrigatorio' }, true))
+  t.absent(dropsHeldInvite({ code: 'lista-de-espera' }, true))
+  t.absent(dropsHeldInvite(undefined, true))
+})
+
+test('invitePasteShown decision', async (t) => {
+  const { invitePasteShown } = await load()
+  t.ok(invitePasteShown({ native: true, required: true, held: false }))
+  t.ok(invitePasteShown({ native: true, required: false, held: false, refused: true }), 'a refusal shows it even when the policy read failed')
+  t.absent(invitePasteShown({ native: true, required: true, held: true }), 'a held code hides it')
+  t.absent(invitePasteShown({ native: true, required: true, held: true, refused: true }))
+  t.absent(invitePasteShown({ native: true, required: false, held: false }))
+  t.absent(invitePasteShown({ native: true, required: undefined, held: false }))
+  t.absent(invitePasteShown({ native: false, required: true, held: false, refused: true }), 'never on the web')
+  t.absent(invitePasteShown())
+})
+
+test('createLinkToken: an older lookup is stale once a newer link arrives', async (t) => {
+  const { createLinkToken } = await load()
+  const tok = createLinkToken()
+  const first = tok.current()
+  t.ok(tok.isCurrent(first))
+  const a = tok.next()
+  t.ok(tok.isCurrent(a))
+  t.absent(tok.isCurrent(first))
+  const b = tok.next()
+  t.absent(tok.isCurrent(a), 'the lookup for the older link is ignored')
+  t.ok(tok.isCurrent(b))
+})
+
+test('native store: a convite-invalido answer drops the held code so the field shows again', async (t) => {
+  const { dropsHeldInvite, invitePasteShown } = await load()
+  const n = await import('../src/signupInviteStore.native.js')
+  t.teardown(() => n.dropSignupInvite())
+  t.ok(n.captureSignupInvite(CODE, { paste: true }))
+  t.absent(invitePasteShown({ native: true, required: true, held: n.loadSignupInvite() !== null }))
+  const err = { code: 'convite-invalido' }
+  if (dropsHeldInvite(err, true)) n.dropSignupInvite()
+  t.is(n.loadSignupInvite(), null)
+  t.ok(invitePasteShown({ native: true, required: true, held: n.loadSignupInvite() !== null, refused: true }))
+})

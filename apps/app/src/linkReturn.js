@@ -122,3 +122,36 @@ export function parseInviteInput (text) {
   const link = parseAppLink(t)
   return link !== null && link.kind === 'convite' ? link.code : null
 }
+
+const INVITE_REFUSALS = ['convite-obrigatorio', 'convite-invalido']
+
+// An account answer that refuses the invite (missing, or used, expired or
+// unknown).
+export function isInviteRefusal (err) {
+  return !!err && INVITE_REFUSALS.includes(err.code)
+}
+
+// The app drops its held code on 'convite-invalido', so the paste field
+// shows again for another link. The web keeps its stored code (another
+// pending link may free it up).
+export function dropsHeldInvite (err, native) {
+  return native === true && !!err && err.code === 'convite-invalido'
+}
+
+// Whether a native step (Identidade's link step, Idade) offers the paste
+// field: the app holds no code and the network is by invite, or the service
+// just refused the invite.
+export function invitePasteShown ({ native, required, held, refused } = {}) {
+  return native === true && held !== true && (required === true || refused === true)
+}
+
+// One token per captured profile link: a lookup started for an older link
+// is stale once a newer link arrives, and must neither forget nor open.
+export function createLinkToken () {
+  let n = 0
+  return {
+    next: () => ++n,
+    current: () => n,
+    isCurrent: (t) => t === n
+  }
+}

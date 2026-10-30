@@ -42,7 +42,9 @@ import { useOutbox } from '../outboxProvider'
 import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
-import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { dropsHeldInvite } from '../linkReturn'
+import { InvitePaste } from './Idade'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -165,11 +167,6 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // profile invite in sessionStorage (src/profileLink.js), which is never sent
 // to /account/*.
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
-// The app has no App Links: an invite opened in the browser never reaches it,
-// so the link step takes the link (or the bare code) pasted by hand.
-const PASTE_LABEL = 'Cole o link de convite'
-const PASTE_BUTTON = 'usar este convite'
-const PASTE_INVALID = 'Esse link de convite não serve. Confira se copiou o link inteiro.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const LINK_FAILED = 'não foi possível vincular a conta'
@@ -291,7 +288,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(() => (NATIVE && appExpired ? toError('expirado').message : ''))
   const [note, setNote] = useState('')
-  const [pasted, setPasted] = useState('')
+  const [, setPasteTick] = useState(0)
   // Sentence for a full member cap ('lista-de-espera'), or ''. Not an error.
   const [waitlist, setWaitlist] = useState(takeReturnWaitlist)
   // Sentence for an invite refusal ('convite-obrigatorio', 'convite-invalido'),
@@ -480,8 +477,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         }
         setWaitlist('')
         if (err && INVITE_REFUSALS.has(err.code)) {
-          // The code stays stored: start answers 'convite-invalido' for a
-          // code held by another pending link too, and that one may free up.
+          // The web keeps its stored code: start answers 'convite-invalido'
+          // for a code held by another pending link too, and that one may
+          // free up. The app drops it, so its paste field shows again for
+          // another link instead of resending a dead code.
+          if (dropsHeldInvite(err, NATIVE)) dropSignupInvite()
           setInviteNote(err.message)
           return
         }
@@ -557,14 +557,12 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     })
   }
 
-  // The app's paste field (PASTE_LABEL): the code is held in memory for this
-  // session, like a captured link, and goes only to the account service.
+  // The app's paste field (Idade.js InvitePaste) now holds a code: the form
+  // comes back (the tick re-renders when no note was showing).
   const usePasted = () => {
-    const rec = captureSignupInvite(pasted, { paste: true })
-    if (rec === null) return setError(PASTE_INVALID)
     setError('')
-    setPasted('')
     setInviteNote('')
+    setPasteTick((n) => n + 1)
   }
 
   const restartLink = () => {
@@ -641,14 +639,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const inviteNeeded = (
       <>
         <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
-        {NATIVE
-          ? (
-            <>
-              <Field label={PASTE_LABEL} placeholder='link ou código do convite' value={pasted} onChangeText={setPasted} mono />
-              <Btn label={PASTE_BUTTON} onPress={usePasted} disabled={busy || pasted.trim() === ''} />
-            </>
-            )
-          : null}
+        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy} /> : null}
       </>
     )
     // Until the policy answers, the button waits rather than racing it.

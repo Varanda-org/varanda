@@ -52,13 +52,13 @@ import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
 import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureSignupInvite, loadSignupInvite } from './src/signupInviteStore'
+import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
@@ -98,7 +98,7 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade, { receiveAccountReturn } from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { parseAppReturn } from './src/linkReturn'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppReturn } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -174,6 +174,7 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
+const NATIVE_APP = Platform.OS !== 'web'
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
@@ -286,6 +287,11 @@ function Member () {
   // member who reaches the tabs without the Google reload is still followed;
   // after a reload it is gone.
   const inviteMemoryOnly = useRef(INVITE_IN_MEMORY)
+  // One token per profile link captured in this run (native: links arrive
+  // while the app runs, not only at load).
+  const inviteLinksRef = useRef(null)
+  if (inviteLinksRef.current === null) inviteLinksRef.current = createLinkToken()
+  const inviteLinks = inviteLinksRef.current
 
   // Stable (Identidade and Ajustes re-read node.info when it changes).
   const takeInfo = useCallback((i) => {
@@ -462,10 +468,43 @@ function Member () {
     setAgeError('')
     setAgeNote('')
     work(stale).catch((err) => {
-      if (!stale()) setAgeError(ageErrorText(err) || errorText(err))
+      if (stale()) return
+      // The app drops a refused code so the paste field shows again; the web
+      // keeps its stored code as it always did.
+      if (dropsHeldInvite(err, NATIVE_APP)) dropSignupInvite()
+      if (NATIVE_APP && isInviteRefusal(err)) setAgeInviteRefused(true)
+      setAgeError(ageErrorText(err) || errorText(err))
     }).finally(() => {
       if (!stale()) setAgeBusy(false)
     })
+  }
+
+  // The app's invite field on the age step: the age session needs an invite
+  // when the network is by invite, and the app has no App Links, so a code
+  // can only come in pasted (src/linkReturn.js invitePasteShown). The policy
+  // is read once; a failed read leaves the field to a refusal from the service.
+  const [ageInviteRequired, setAgeInviteRequired] = useState(undefined)
+  const [ageInviteRefused, setAgeInviteRefused] = useState(false)
+  const [, setAgeInviteTick] = useState(0)
+  useEffect(() => {
+    if (!NATIVE_APP || !ageHosted || !ready || ageInviteRequired !== undefined) return
+    let cancelled = false
+    readInvitePolicy().then(
+      (p) => { if (!cancelled) setAgeInviteRequired(!!p && p.required === true) },
+      () => { if (!cancelled) setAgeInviteRequired(false) }
+    )
+    return () => { cancelled = true }
+  }, [ageHosted, ready, ageInviteRequired])
+  const ageInvitePaste = invitePasteShown({
+    native: NATIVE_APP,
+    required: ageInviteRequired,
+    held: loadSignupInvite() !== null,
+    refused: ageInviteRefused
+  })
+  const ageInvitePasted = () => {
+    setAgeInviteRefused(false)
+    setAgeError('')
+    setAgeInviteTick((n) => n + 1)
   }
   useEffect(() => {
     if (!ageReadNow) return
@@ -697,13 +736,21 @@ function Member () {
       }
       return
     }
-    captureSignupInvite(url)
+    if (captureSignupInvite(url) !== null) {
+      setAgeInviteRefused(false)
+      setAgeInviteTick((n) => n + 1)
+    }
     const rec = captureInvite(url)
     if (rec !== null) {
+      // A lookup still running for an older link is now stale: it must
+      // neither forget this newer invite nor open the older profile. The
+      // tick runs the attempt again for this link once that one ends.
+      inviteLinks.next()
       inviteRef.current = rec
       setInvite(rec)
       setCardShown(false)
       setAcceptedHere(false)
+      setInviteTick((n) => n + 1)
     }
   }
   useEffect(() => {
@@ -1107,6 +1154,7 @@ function Member () {
     }
     inviteBusy.current = true
     const gen = generationRef.current
+    const link = inviteLinks.current()
     const attempt = async () => {
       const rec = currentInvite()
       if (rec === null) {
@@ -1122,6 +1170,9 @@ function Member () {
         return
       }
       const r = await resolveInvite(rec, lookupUsername)
+      // A newer link arrived during the lookup (native): this answer is for
+      // the older one and touches nothing.
+      if (!inviteLinks.isCurrent(link)) return
       // A lock, unlock or reset meanwhile, or the gate closed during the
       // lookup (a follow.add now would abort a starting once sync): the record
       // stays, and the effect runs again when the action comes back.
@@ -1175,6 +1226,7 @@ function Member () {
         // 'none', so comparing it here would never open the profile.
         if (gen !== generationRef.current) return
       }
+      if (!inviteLinks.isCurrent(link)) return
       openMember(key)
       // The newcomer back from Google: the profile is open, Seguir is one tap.
       if (action === 'confirm') showToast(confirmText({ username: rec.username }))
@@ -1295,6 +1347,8 @@ function Member () {
           offline={node.online === false}
           onStart={startAge}
           onCheck={checkAge}
+          invitePaste={ageInvitePaste}
+          onInvitePasted={ageInvitePasted}
           index={index}
           total={total}
         />
