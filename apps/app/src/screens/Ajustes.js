@@ -18,22 +18,25 @@
 // whose info sheet holds the per-browser facts. The button never appears in Samsung Internet, because
 // Play Protect blocks the app that browser builds.
 // Avisos no aparelho (hosted web only, src/pushClient.web.js): the browser
-// state, the worker ping and the VAPID key are read once when the sheet
-// opens, so a tap reaches pushManager.subscribe() with nothing awaited first
-// (Safari's user activation). Sair and Recomeçar switch this browser off
-// first, while the key can still sign; a failure there never stops them.
+// state, the worker ping and the VAPID key are read through the shared store
+// (src/push-offer.js via src/usePush) when the shell arms the member and when
+// the sheet opens, and the shell's 'Receber avisos neste aparelho' note drives
+// the same store, so a tap on the row or on the note reaches
+// pushManager.subscribe() with nothing awaited first (Safari's user
+// activation). Sair and Recomeçar still switch this browser off first, while
+// the key can still sign; a failure there never stops them.
 
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
-import { invitePolicy, pushCheck, pushKey, walletPolicy } from '../account'
+import { invitePolicy, walletPolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
-import { disablePush, enablePush, getPushState, pushSupportNow } from '../pushClient'
-import { PUSH_DENIED, PUSH_FAILED, PUSH_LABEL, PUSH_UNCERTAIN, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushStateAfter, pushUiState } from '../push-state'
+import { PUSH_LABEL, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushUiState } from '../push-state'
+import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
@@ -63,8 +66,6 @@ const TITLES = {
 
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
-
-const PUSH_ERRORS = { denied: PUSH_DENIED, failed: PUSH_FAILED, uncertain: PUSH_UNCERTAIN }
 
 function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded }) {
   const state = { disabled: disabled || pending }
@@ -116,13 +117,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
   const policySeq = useRef(0)
-  // Avisos no aparelho, read when the sheet opens (null: not read yet).
-  const [push, setPush] = useState(null)
-  const [pushPending, setPushPending] = useState(false)
-  const [pushError, setPushError] = useState('')
-  const pushBusy = useRef(false)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   const pushEligible = node.hosted === true && member !== null
+  // Avisos no aparelho, from the store the shell's note shares (null: not
+  // read yet, or this node is not the hosted one for this member any more).
+  const pushStore = usePush()
+  const push = pushEligible && pushStore.member === member ? pushStore.state : null
+  const pushPending = pushStore.pending
+  const pushError = pushStore.error
 
   // A closed sheet forgets the open confirmations.
   useEffect(() => {
@@ -132,85 +134,11 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }, [screen])
 
-  // The operation in flight outlives a close and reopen of the sheet (this
-  // component stays mounted): a reopen waits for it instead of racing it.
-  // Every read or result is applied only while it is the newest one.
-  const pushOp = useRef(null) // null | { member, promise }
-  const pushSeq = useRef(0)
-
-  const readPush = async (who) => {
-    const state = await getPushState()
-    if (state.support !== 'ok') return { ...state, key: null, registered: null }
-    const [key, check] = await Promise.all([
-      pushKey(),
-      state.endpoint ? pushCheck({ member: who, endpoint: state.endpoint, p256dh: state.p256dh, auth: state.auth }) : null
-    ])
-    return { ...state, key, registered: check ? check.registered : null }
-  }
-
+  // A fresh read on every opening. Closing keeps the state because the shell
+  // needs the registration; a lock clears it through the shell's readPush.
   useEffect(() => {
-    const seq = ++pushSeq.current
-    setPushError('')
-    if (!sheetOpen || !pushEligible) {
-      setPush(null)
-      return
-    }
-    ;(async () => {
-      const op = pushOp.current
-      if (op !== null && op.member === member) {
-        const view = await op.promise
-        if (seq !== pushSeq.current) return
-        setPush(view.push)
-        setPushError(view.error)
-        return
-      }
-      const state = await readPush(member)
-      if (seq === pushSeq.current) setPush(state)
-    })().catch(() => {})
-  }, [sheetOpen, pushEligible, member])
-
-  // Called straight from the press: enablePush awaits nothing before
-  // subscribe(), and neither may this handler. The outcome shown is a fresh
-  // read made after the step, never what the step was meant to do.
-  const togglePush = () => {
-    if (pushBusy.current || push === null || member === null) return
-    pushBusy.current = true
-    setPushPending(true)
-    setPushError('')
-    const before = push
-    const who = member
-    const seq = pushSeq.current
-    const turnOff = before.subscribed === true && before.registered === true
-    const step = turnOff
-      ? disablePush({ node, member: who, registration: before.registration, subscription: before.subscription })
-      : enablePush({ node, member: who, key: before.key, registration: before.registration, subscription: before.subscription, subscriptionKnown: before.subscribed !== null })
-    const promise = Promise.resolve(step).catch(() => ({ ok: false, reason: 'failed' })).then(async (result) => {
-      let after = null
-      try { after = await readPush(who) } catch {}
-      const { error, ...next } = pushStateAfter({ action: turnOff ? 'off' : 'on', result, before, after })
-      return { push: next, error: error === null ? '' : (PUSH_ERRORS[error] || PUSH_FAILED) }
-    })
-    const op = { member: who, promise }
-    pushOp.current = op
-    promise.then((view) => {
-      if (seq !== pushSeq.current) return
-      setPush(view.push)
-      setPushError(view.error)
-    }).finally(() => {
-      if (pushOp.current === op) pushOp.current = null
-      pushBusy.current = false
-      setPushPending(false)
-    })
-  }
-
-  // Before signing out or erasing, while push.sign still works. Its outcome
-  // never blocks Sair or Recomeçar.
-  const pushOffHere = async () => {
-    if (member === null || pushSupportNow() !== 'ok') return
-    try {
-      await disablePush({ node, member, registration: push ? push.registration : null, subscription: push ? push.subscription : null })
-    } catch {}
-  }
+    if (sheetOpen && pushEligible) pushStore.readPush(member)
+  }, [sheetOpen, pushEligible, member, pushStore.readPush])
 
   // Only the hosted web node has an account service on its own origin.
   const hosted = node.hosted === true
@@ -251,7 +179,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const doExit = async () => {
     const out = typeof passkey.signOut === 'function' ? passkey.signOut : passkey.lock
     const r = await exit.run(async () => {
-      await pushOffHere()
+      await pushStore.turnOffPush({ node, member })
       return out()
     })
     if (r.ok) {
@@ -266,7 +194,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       return reset.run(() => { throw new Error('não foi possível apagar as publicações que aguardam envio neste aparelho') })
     }
     const r = await reset.run(async () => {
-      await pushOffHere()
+      await pushStore.turnOffPush({ node, member })
       return passkey.reset()
     })
     if (r.ok) {
@@ -352,7 +280,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                     trailing={null}
                     pending={pushPending}
                     disabled={pushUi.disabled}
-                    onPress={togglePush}
+                    onPress={() => { pushStore.togglePush({ node, member }) }}
                   />
                   )
                 : null}
