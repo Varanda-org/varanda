@@ -10,8 +10,13 @@
 // that opens the screen's 'Como funciona' sheet), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
-// both show; its close is remembered for 30 days), the publish button and
-// the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
+// both show; its close is remembered for 30 days), then the 'Receber avisos
+// neste aparelho' note in the same slot (hosted web, every browser where Web
+// Push works, desktop included, src/usePush; one tap goes straight to the
+// browser's permission prompt; its close is remembered for 30 days; at most
+// one of the release note, the install card or note and the push note shows,
+// in that order, so the push note waits while an earlier one shows), the publish
+// button and the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
 // stops a run; its details live in Ajustes → Sincronização. Above the tabs a
 // small screen stack (src/nav.js) opens Conversa (a post and its replies),
@@ -67,8 +72,10 @@ import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
+import { PushNote } from './src/ui/PushNote'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
+import { readPush, usePush } from './src/usePush'
 import { watchRelease } from './src/pwa'
 import { captureLaunch, listenLaunch } from './src/pushClient'
 import { nextLaunch } from './src/push-state'
@@ -184,6 +191,7 @@ function Member () {
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   const install = useInstall()
+  const push = usePush()
   const bootAt = useRef(Date.now()).current
   const connectingAt = useRef(null)
   const released = useRef(false)
@@ -700,6 +708,14 @@ function Member () {
     index = total
   }
   useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
+
+  // Only the unlocked passkey key, behind the terms, age and setup gates: the
+  // browser registration is read here so the note's first tap already holds
+  // it, and read again when the connection returns (a read made offline has no
+  // key). A lock drops the view even when Ajustes filled it before the tabs.
+  const pushMember = node.hosted === true && termsOk && !setupStep && step === 'pronto' && pkStatus !== null && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey : null
+  useEffect(() => { if (pushMember !== null && node.online !== false) readPush(pushMember) }, [pushMember, node.online])
+  useEffect(() => { if (locked) readPush(null) }, [locked])
 
   // Offered once, right after a signup on this page load. LINK_RETURN alone
   // also covers an existing member linking Google from Ajustes > Conta, so the
@@ -1325,7 +1341,9 @@ function Member () {
           ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
           : installCardOpen && install.card !== 'none'
             ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
-            : install.note !== 'none' ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} /> : null}
+            : install.note !== 'none'
+              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} />
+              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
