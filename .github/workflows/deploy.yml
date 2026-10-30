@@ -34,24 +34,128 @@ concurrency:
 jobs:
   # Repeats the CI checks on purpose: the deploy runs only on a commit that
   # passed them in this same workflow, even if ci.yml was cancelled.
-  check:
+  #
+  # The checks run as six parallel jobs (the same legs as ci.yml on Node 24).
+  # There is no matrix on purpose: a matrix leg cancelled before a runner
+  # picked it up has been reported to leave the matrix result at success, and
+  # a leg that never ran must never authorize a deploy. Each leg is its own
+  # job, and the check gate reads every leg's own result.
+  #
+  # The first leg defines the step list (&test-steps) and the others reuse it;
+  # per-leg differences live only in env. `others` runs root npm test, so any
+  # workspace added later is covered there; the three workspaces split into
+  # their own legs are skipped by it. VARANDA_TEST_CONCURRENCY is pinned to 1:
+  # the jobs are the parallelism, and some asserts are load sensitive on the
+  # 4-vCPU runners.
+  core-1:
+    name: core 1/2
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    steps:
+    env:
+      NODE: '24'
+      SUITE: core-1
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: &test-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: ${{ env.NODE }}
           cache: npm
       # --ignore-scripts: no dependency install script runs (supply chain);
       # the native binaries the code uses ship in their packages.
       - run: npm ci --ignore-scripts
-      - run: npm run lint
-      - run: npm test
-      - run: npm run demo
+      - if: env.SUITE == 'others'
+        run: npm run lint
+      - run: if [ -n "$WORKSPACE" ]; then npm test -w "$WORKSPACE"; else npm test; fi
+      - if: env.SUITE == 'others'
+        run: npm run demo
+
+  core-2:
+    name: core 2/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: core-2
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-1:
+    name: cli 1/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-1
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-2:
+    name: cli 2/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-2
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member:
+    name: web-member
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  others:
+    name: others
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: others
+      VARANDA_TEST_SKIP_WORKSPACES: packages/core,apps/cli,packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  # The deploy keeps needing a single job named check. always() makes this gate
+  # run even when a leg failed, was cancelled or was skipped, and then fail
+  # closed; success() or !cancelled() would let it be skipped instead. The
+  # count check stops a vacuous pass if needs were ever cut down. The guard
+  # still applies, so a paused or foreign run skips the gate and the deploy.
+  check:
+    needs: [core-1, core-2, cli-1, cli-2, web-member, others]
+    if: always() && github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          set -- $RESULTS
+          [ "$#" -eq 6 ] || exit 1
+          for r in "$@"; do [ "$r" = success ] || exit 1; done
 
   # No checkout and no third-party action: only native ssh with the pinned key.
   deploy:

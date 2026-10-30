@@ -78,7 +78,7 @@ O `npm ci` é opcional localmente; ele apaga `node_modules` e reinstala tudo con
 O lint usa `standard`. Os testes usam `brittle` nos workspaces que têm testes.
 A demo deve terminar imprimindo `DEMO OK`.
 
-A CI executa esses mesmos quatro passos, nessa ordem, nas versões 20 e 24 do Node em cada pull request.
+A CI executa esses mesmos quatro passos, divididos em jobs paralelos, nas versões 20 e 24 do Node em cada pull request.
 
 ## Convenções
 
