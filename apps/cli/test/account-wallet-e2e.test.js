@@ -34,6 +34,8 @@ const { createHodle } = require('../lib/account/hodle')
 const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openWalletStore } = require('../lib/account/wallet-store')
+const { openWalletOpsStore } = require('../lib/account/wallet-ops-store')
+const { parseFees, feeCents } = require('../lib/account/fees')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { canonicalJson } = require('../lib/account/wallet-routes')
 // The browser node lives in packages/web-member; apps/cli does not depend
@@ -174,7 +176,7 @@ async function connectClient (node) {
 // `serve()` opens one service lifetime over `dir` (stores included) with the
 // current `h.mode`; `device()` a browser session with a fresh identity;
 // `client(dev)` that browser's cookie jar towards the service.
-async function harness (t, { mode = 'carteira' } = {}) {
+async function harness (t, { mode = 'carteira', fees = null, webhookSecrets = null } = {}) {
   const assocKp = crypto.keyPair()
   const issuerKp = crypto.keyPair()
   const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKp.publicKey, 'hex') }, assocKp)
@@ -195,6 +197,7 @@ async function harness (t, { mode = 'carteira' } = {}) {
     const store = openAccountStore(dir, { now })
     const terms = openTermsStore(dir, { now })
     const wallets = openWalletStore(dir, { now })
+    const ops = openWalletOpsStore(dir, { now })
     const hodle = createHodle({ apiKey: API_KEY, endpoints: { base: fake.base }, fetch: loopbackFetch(fake.base) })
     const server = createAccountServer({
       association,
@@ -206,11 +209,14 @@ async function harness (t, { mode = 'carteira' } = {}) {
       hodle,
       wallets,
       walletMode: h.mode,
+      ops,
+      fees,
+      walletWebhookSecrets: webhookSecrets,
       log: (e) => logs.push(JSON.stringify(e)),
       now
     })
     const listener = await server.listen({ host: '127.0.0.1', port: 0 })
-    const svc = { store, terms, wallets, closed: false, base: 'http://127.0.0.1:' + listener.port }
+    const svc = { store, terms, wallets, ops, closed: false, base: 'http://127.0.0.1:' + listener.port }
     svc.stop = async () => {
       if (svc.closed) return
       svc.closed = true
@@ -666,4 +672,181 @@ test('wallet e2e 4: cadastro answers 404 for wallet-create and balance, even aft
   t.is(created.status, 200, created.text)
   t.is(h.seen('POST', '/api/wallet/create').length, 1)
   noSecrets(t, h, 'cadastro')
+})
+
+test('wallet e2e 5: pix with a payout fee: deposit settles, a signed webhook concludes the payout through Hodle\'s read, the next payout collects its fee', async (t) => {
+  t.timeout(60000)
+  const SECRET = nodeCrypto.randomBytes(32).toString('hex')
+  const PIX_KEY = 'sentinela-pix@example.test'
+  const BENEFICIARY_CPF = '39053344705'
+  const fees = parseFees({ VARANDA_FEE_PAYOUT_CENTS: '50', VARANDA_FEE_PAYOUT_BPS: '100', VARANDA_FEE_TREASURY: 'sub:tesouro' })
+  const h = await harness(t, { mode: 'pix', fees, webhookSecrets: new Map([['PAYOUT_SUCCESSFUL', SECRET], ['PAYOUT_FAILED', SECRET]]) })
+  // The treasury is an operator subaccount at Hodle; the service never holds
+  // its PIN or key.
+  const treasuryWallet = { id: 'w-tesouro', address: '0x' + 'cd'.repeat(20), network: 'polygon', protectedSymmetricKey: 'psk-tesouro-sentinela' }
+  h.fake.state.subaccounts.set('tesouro', { name: 'tesouro' })
+  h.fake.state.wallets.set('tesouro', [treasuryWallet])
+  await h.serve()
+  const { dev, c } = await h.member('pixia')
+  const policy = await c.api('GET', '/account/wallet/policy')
+  t.is(policy.body.mode, 'pix')
+  t.is(policy.body.fees.payout, 'R$ 0,50 + 1%')
+  await approve(t, h, c, dev)
+  const created = await c.wallet('wallet-create', {}, { pin: PIN })
+  t.is(created.status, 200, created.text)
+  const sub = h.entry(dev.hex).subAccountId
+
+  // A deposit, paid at the fake, concluded by op-status.
+  const depositOp = { opId: nodeCrypto.randomBytes(16).toString('base64url'), cents: 10000 }
+  const dep = await c.wallet('deposit', depositOp)
+  t.is(dep.status, 200, dep.text)
+  t.ok(/^var-[0-9a-f]{32}$/.test(dep.body.externalId))
+  t.is(dep.body.status, 'pendente')
+  h.fake.settleDeposit(dep.body.externalId)
+  const depSt = await c.wallet('op-status', { externalId: dep.body.externalId })
+  t.is(depSt.status, 200, depSt.text)
+  t.is(depSt.body.status, 'concluido', 'the deposit is concluded')
+  t.is(depSt.body.kind, 'deposit')
+  const funded = 10000 - h.fake.state.depositFeeCents
+  t.is(h.fake.state.balances.get(sub), funded)
+  const bal = await c.wallet('balance')
+  t.is(bal.status, 200, bal.text)
+  t.is(bal.body.cents, funded, 'the balance shows the credit')
+
+  // 50 centavos + 1% of R$ 50,50 = 50,5 centavos, rounded half up to 51.
+  const cents = 5050
+  const quote = await c.wallet('payout-quote', { cents, pixKey: PIX_KEY, pixKeyType: 'EMAIL', beneficiaryCpf: BENEFICIARY_CPF })
+  t.is(quote.status, 200, quote.text)
+  const preview = await c.wallet('preview', { kind: 'payout', cents, quoteId: quote.body.quoteId })
+  t.is(preview.status, 200, preview.text)
+  t.is(preview.body.varandaFeeCents, 50 + 51, 'R$ 0,50 + 1% half up')
+  t.is(preview.body.varandaFeeCents, feeCents(fees.rates.payout, cents))
+  t.is(preview.body.hodleFeeCents, h.fake.state.payoutFeeCents)
+  t.is(preview.body.totalDebitCents, cents + 101 + h.fake.state.payoutFeeCents)
+  t.is(preview.body.ok, true)
+
+  const payOp = {
+    opId: nodeCrypto.randomBytes(16).toString('base64url'),
+    cents,
+    quoteId: quote.body.quoteId,
+    pixKey: PIX_KEY,
+    pixKeyType: 'EMAIL',
+    beneficiaryCpf: BENEFICIARY_CPF,
+    feeCents: preview.body.varandaFeeCents,
+    pendingFeeCents: preview.body.pendingFeeCents,
+    pendingFeeRef: preview.body.pendingFeeRef,
+    totalDebitCents: preview.body.totalDebitCents
+  }
+  const paid = await c.wallet('payout', payOp, { pin: PIN })
+  t.is(paid.status, 200, paid.text)
+  const externalId = paid.body.externalId
+  // Hodle answers the Pix as processing: the Varanda fee waits until Hodle
+  // reports it concluded (S12).
+  t.is(paid.body.status, 'pendente')
+  t.alike(paid.body.fee, { cents: 101, status: 'pendente' })
+  t.is(h.fake.state.sends.payout, 1, 'one payout')
+  t.is(h.fake.state.sends.transfer, 0, 'no fee transfer before the payout concludes')
+  const payouts = h.seen('POST', '/api/wallet/payout')
+  t.is(payouts.length, 1)
+  t.is(payouts[0].body.externalId, externalId)
+  const before = h.svc.ops.get(externalId)
+  t.is(before.status, 'pendente')
+  t.is(before.fee.status, 'pendente')
+  t.is(before.fee.reference, externalId + ':taxa')
+
+  // Hodle reports the payout, signed with the secret string.
+  const transactionId = [...h.fake.state.payouts.keys()][0]
+  async function deliver (event, data) {
+    const raw = JSON.stringify({ event, data })
+    const ts = String(Math.floor((Date.now() + h.offset) / 1000))
+    const signature = nodeCrypto.createHmac('sha256', SECRET).update(ts + '.' + raw).digest('hex')
+    const res = await fetch(h.svc.base + '/account/wallet/webhook/' + event, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-hodle-timestamp': ts, 'x-hodle-signature': signature },
+      body: raw
+    })
+    const text = await res.text()
+    h.responses.push({ path: '/account/wallet/webhook/' + event, status: res.status, text, location: '', cookie: '' })
+    return res.status
+  }
+  // A delivery never writes a final status: only Hodle's own read does.
+  t.is(await deliver('PAYOUT_FAILED', { externalId, transactionId, status: 'FAILED' }), 200)
+  t.is(h.svc.ops.get(externalId).status, 'pendente', 'a FAILED delivery while Hodle reports PENDING changes nothing')
+  t.ok(h.seen('GET', '/api/wallet/payout/' + transactionId).length > 0, 'the webhook read the payout from Hodle')
+  h.fake.state.payouts.get(transactionId).status = 'COMPLETED'
+  t.is(await deliver('PAYOUT_SUCCESSFUL', { externalId, transactionId, status: 'COMPLETED' }), 200)
+  t.is(h.svc.ops.get(externalId).status, 'concluido', 'the webhook flips the entry because Hodle reports COMPLETED')
+  t.ok(h.logs.includes(JSON.stringify({ event: 'carteira', reason: 'webhook-aplicado' })))
+  t.is(await deliver('PAYOUT_SUCCESSFUL', { externalId, transactionId, status: 'COMPLETED' }), 200)
+  t.ok(h.logs.includes(JSON.stringify({ event: 'carteira', reason: 'webhook-repetido' })), 'a repeated delivery is deduped')
+  const opSt = await c.wallet('op-status', { externalId })
+  t.is(opSt.status, 200, opSt.text)
+  t.is(opSt.body.status, 'concluido')
+  t.is(opSt.body.kind, 'payout')
+  t.alike(opSt.body.fee, { cents: 101, status: 'pendente' }, 'a conclusion charges nothing on its own')
+  t.is(h.fake.state.sends.transfer, 0)
+
+  // The next payout the member signs collects it, after its own principal.
+  const cents2 = 1000
+  const quote2 = await c.wallet('payout-quote', { cents: cents2, pixKey: PIX_KEY, pixKeyType: 'EMAIL', beneficiaryCpf: BENEFICIARY_CPF })
+  t.is(quote2.status, 200, quote2.text)
+  const preview2 = await c.wallet('preview', { kind: 'payout', cents: cents2, quoteId: quote2.body.quoteId })
+  t.is(preview2.status, 200, preview2.text)
+  t.is(preview2.body.pendingFeeCents, 101)
+  t.is(preview2.body.pendingFeeRef, externalId + ':taxa')
+  const paid2 = await c.wallet('payout', {
+    opId: nodeCrypto.randomBytes(16).toString('base64url'),
+    cents: cents2,
+    quoteId: quote2.body.quoteId,
+    pixKey: PIX_KEY,
+    pixKeyType: 'EMAIL',
+    beneficiaryCpf: BENEFICIARY_CPF,
+    feeCents: preview2.body.varandaFeeCents,
+    pendingFeeCents: preview2.body.pendingFeeCents,
+    pendingFeeRef: preview2.body.pendingFeeRef,
+    totalDebitCents: preview2.body.totalDebitCents
+  }, { pin: PIN })
+  t.is(paid2.status, 200, paid2.text)
+  t.alike(paid2.body.pendingFee, { cents: 101, status: 'cobrada' })
+  t.alike(paid2.body.fee, { cents: preview2.body.varandaFeeCents, status: 'pendente' })
+
+  // Two payouts and one fee transfer to the treasury, after the second.
+  t.is(h.fake.state.sends.payout, 2, 'two payouts')
+  t.is(h.fake.state.sends.transfer, 1, 'one transfer')
+  const payouts2 = h.seen('POST', '/api/wallet/payout')
+  const transfers = h.seen('POST', '/api/wallet/transfer')
+  t.is(transfers.length, 1)
+  t.is(transfers[0].body.toSubAccountId, 'tesouro')
+  t.is(transfers[0].body.reference, externalId + ':taxa')
+  t.is(transfers[0].body.fromSubAccountId, sub, 'the fee leaves the member wallet')
+  t.ok(h.fake.seen.indexOf(payouts2[1]) < h.fake.seen.indexOf(transfers[0]), 'the fee leg runs after the principal')
+  const record = h.fake.state.transfers.get(externalId + ':taxa')
+  t.ok(record, 'the fake recorded the fee transfer by reference')
+  t.is(record.to, 'tesouro')
+  t.is(record.cents, 101)
+  t.is(h.fake.state.balances.get('tesouro'), 101, 'the treasury received the fee')
+  const hodleFee = h.fake.state.payoutFeeCents
+  t.is(h.fake.state.balances.get(sub), funded - (cents + hodleFee) - (cents2 + hodleFee) - 101)
+  // No treasury PIN is ever asked for: every PIN Hodle saw is the member's,
+  // and nothing ever moved from or unlocked the treasury.
+  for (const r of h.fake.seen) {
+    const b = r.body && typeof r.body === 'object' ? r.body : {}
+    if (b.walletPin !== undefined) t.is(b.walletPin, PIN, 'only the member PIN: ' + r.path)
+    t.not(b.fromSubAccountId, 'tesouro', 'nothing moves from the treasury')
+    t.not(b.subAccountId, 'tesouro', 'no call acts as the treasury')
+    t.not(b.walletId, treasuryWallet.id, 'the treasury wallet is never unlocked')
+  }
+  t.is(h.svc.ops.get(externalId).fee.status, 'cobrada')
+
+  // Nothing secret anywhere: files (wallet.json and wallet-ops.json), logs,
+  // responses and session events.
+  noSecrets(t, h, 'pix')
+  const all = walk(h.root).concat(h.responses.map((r) => r.text), h.logs).join('\n')
+  t.absent(all.includes(BENEFICIARY_CPF), 'no beneficiary CPF anywhere')
+  t.absent(all.includes(PIX_KEY), 'no full Pix key anywhere')
+  t.absent(all.includes(SECRET), 'no webhook secret anywhere')
+  t.absent(all.includes(treasuryWallet.protectedSymmetricKey), 'no treasury key anywhere')
+  t.is(h.svc.ops.get(externalId).to, '***test', 'the destination is kept masked')
+  bearerOnlyInAuthorization(t, h)
+  t.alike(dev.internal, [], 'no internal error in the session')
 })

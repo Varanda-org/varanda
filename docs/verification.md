@@ -1301,6 +1301,8 @@ None of these was performed for this change.
 
 ### Duty cycle; the Espiadinha keeps its own link (2026-10-27)
 
+Superseded on 2026-10-30 by section 54: the hosted web no longer ends the link when idle (lease off), so the 8 s hold and 45 s gap checks below no longer apply; the Espiadinha part stands.
+
 Scope: the hosted web app with the node in the browser (`packages/web-member`, `apps/app`). The native app, `varanda-serve` and the CLI are unchanged.
 
 #### Summary
@@ -2215,6 +2217,8 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - [ ] A partially synced follow: after a short page the footer reads "Ainda sincronizando quem você segue.".
 - [ ] The list fills without pull-to-refresh as the follow downloads; on native no pull spinner appears.
 - [ ] A fully synced follow: the footer reads "Isso é tudo por enquanto." as before.
+- [ ] With an empty feed and a follow still syncing, "Ainda não chegou nada" carries "Ainda sincronizando quem você segue."; once synced, the old body returns.
+- [ ] Pull to refresh right after the diary grows: no second read follows the manual one.
 - [ ] 'mostrar mais' still pages 30 then 31 items.
 - [ ] Follow a diary with hundreds of posts, keep A Rua open at the end of the list, and confirm the download finishes (every automatic read preempts the sync run).
 
@@ -2224,8 +2228,7 @@ Check the hosted web (browser node) and the native app (core node) separately.
 - A download usually costs one extra read at its end, because the stopped run reports growth the read already saw.
 - A follow with no local replica is not reported, so a follow nobody serves keeps the old footer; an author who signs a length nobody serves keeps the syncing footer.
 - Arrivals that sort inside the range already shown come through 'ver novidades' or pull-to-refresh; once the download ends the footer can say "Isso é tudo por enquanto." while such arrivals wait behind the pill.
-- An empty feed keeps "Ainda não chegou nada" while followed diaries sync (a product decision for this change).
-- A timer already armed when a manual read starts still fires after that read (review note, not fixed here).
+- An empty feed shows "Ainda sincronizando quem você segue." as the body of "Ainda não chegou nada" while followed diaries sync.
 - `withStore`/`stopRun` preemption, `discardRegate` and the run-start purge are unchanged.
 
 ## 37. Convites para entrar na rede (2026-10-29)
@@ -2778,7 +2781,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 
 ## 48. Conta de pagamentos opcional: abertura e KYC (feat/hodle-account, 2026-10-30)
 
-As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para as seções 48 e 49.
+As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para a seção 53 e para a próxima etapa.
 
 ### O que mudou
 
@@ -2841,7 +2844,6 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Sem `VARANDA_HODLE_API_KEY`, ninguém vê o recurso.
 - Uma criação cuja resposta se perdeu fica parada até leitura adotável ou limpeza pelo operador.
 - Uma recusa definitiva da Hodle no envio do KYC (por exemplo, um campo que ela não aceita) encerra a tentativa como recusada, e a pessoa refaz documento e selfie.
-- Um envio de KYC da segunda tentativa em diante que perde a resposta e é recusado pela Hodle antes da consulta fica em andamento até o operador conferir na Hodle (registro `kyc-incerto`).
 - Se a gravação do `wallet.json` falhar logo depois de uma recusa da Hodle, a marca de incerteza pode ficar, e a pessoa fica parada até o operador limpar.
 - Dois processos gravando o mesmo `wallet.json` só acontecem depois de perder o lock; nesse caso a mesclagem pode trazer de volta um identificador apagado. O serviço deixa de gravar ao perder o lock.
 - 16 e 17 anos: a barreira é a declaração no opt-in e a data de nascimento conferida pela Hodle no documento.
@@ -3077,3 +3079,166 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Um "carregar mais" tocado quando o carregador não começa nada já tira a pausa, então a rolagem automática volta a contar três páginas secas.
 - No Diário, uma página mais antiga cancelada por uma releitura (voltar à aba) conta como página seca; três seguidas pausam a lista.
 - A lista em si (RefreshableList) não tem teste automatizado: só as regras puras de `paging.js` têm. As verificações acima cobrem o componente.
+
+## 53. Conta de pagamentos: saldo, receber e pagar por Pix, taxa da Varanda (feat/hodle-pix, 2026-10-30)
+
+As seções 1 a 47 e 49 a 52 não mudam; a 48 perde o limite da verificação perdida. Esta seção documenta o PR2: saldo, Pix de entrada e de saída, taxa da Varanda, webhook e Termos versão 8.
+
+### O que mudou
+
+- Modos de `VARANDA_HODLE_MODE`, em ordem: `cadastro` (padrão) < `carteira` < `pix`; `completo` vem no próximo PR. A criação da carteira tem o próprio modo: em `cadastro` ela responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". O operador só define `carteira` depois que o Hodle confirmar por escrito que PINs escolhidos pelo membro funcionam em subcontas individuais.
+- Em `pix`: saldo, receber por Pix (inclusive de CPF de outra pessoa) e pagar por Pix. A consulta ao Hodle é a fonte de verdade. O webhook só acelera o estado e nunca cria movimento ou dinheiro. `DISPUTE_*` vira uma marca ao lado do estado.
+- Webhook (`VARANDA_HODLE_WEBHOOK_SECRETS`, lista `EVENTO:hex64`; vazia, a rota responde 404): com `EVENTO:registrar`, só um corpo cujo evento é exatamente `WEBHOOK_TEST` recebe 200 `{}`, sem verificar e sem tocar em armazenamento, e todo outro corpo recebe 401. Com `EVENTO:<hex64>`, toda entrega é verificada, `WEBHOOK_TEST` inclusive.
+- Taxa da Varanda: ordem principal, taxa nova (só quando a resposta da principal diz que o Pix foi concluído; senão fica pendente) e no máximo uma taxa pendente, só de um Pix já concluído (só se as pernas anteriores deram 2xx em menos de 45 s). Como o Pix de saída costuma levar de 30 a 90 s, a taxa em geral é cobrada no próximo envio confirmado com o PIN. Pix que falha ou volta antes de concluir nunca paga taxa. Reserva: para enviar, o saldo precisa cobrir valor, taxa do Hodle, taxa nova e todas as taxas pendentes; a conferência mostra o valor reservado. A troca de moeda não tem taxa da Varanda (`VARANDA_FEE_SWAP_*` diferente de zero recusa a partida); `CRYPTO` mantém a taxa configurável. Nenhuma taxa pendente sai antes da principal. Cada perna é gravada no `wallet-ops.json` antes de sair. Prazo de 30 s por perna. PIN errado ou bloqueado na primeira perna aborta as outras. Estados: `cobrada`, `pendente`, `incerta`. Um 409 de referência existente só conta como cobrada com estado `completed` ou `txHash`. A resposta mostra principal e taxa em separado. Chamadas de dinheiro do app têm prazo de 100 s. A taxa sobre o Pix de entrada está desligada.
+- `wallet-ops.json` (0600): tipo, estado, valor, taxas, id do parceiro, destino mascarado e marca de contestação. Nunca a chave Pix inteira nem o CPF. Linhas finais são apagadas depois de 90 dias, exceto enquanto uma taxa da Varanda ainda puder ser cobrada, uma contestação estiver aberta ou uma revisão de suporte estiver aberta; um Pix de entrada que falhou e ainda está sendo devolvido não conta como finalizado.
+- Corrigido neste PR: um envio de KYC da segunda tentativa em diante que perde a resposta não fica mais em andamento. A lista `previousAttemptIds` separa uma tentativa anterior da nova, e a nova é adotada mesmo já encerrada. `kyc-incerto` agora só aparece quando a consulta achou o id de uma tentativa anterior.
+- Variáveis: `VARANDA_HODLE_MAX_CENTS` (padrão 300000; de 100 a 100000000), `VARANDA_HODLE_WEBHOOK_SECRETS`, `VARANDA_FEE_{TRANSFER,PAYOUT,CRYPTO,DEPOSIT}_{CENTS,BPS}`, `VARANDA_FEE_SWAP_BPS` e `VARANDA_FEE_TREASURY`. `DEPOSIT` deve ficar em zero. Qualquer taxa exige a tesouraria. Taxas são recusadas na partida nos modos `cadastro` e `carteira`, e em `pix` as de transferência, `CRYPTO` e `SWAP`; só `PAYOUT` é aceita. `VARANDA_HODLE_PIN` e `VARANDA_FEE_TREASURY_PIN` com qualquer valor recusam a partida. Webhook: `EVENTO:hex64` ou `EVENTO:registrar`.
+- Termos de Uso e Política de Privacidade versão 8, com novo aceite: cobranças do Pix, CPF de terceiro, taxa do Hodle como cotada, taxa da Varanda (desligada até o operador definir, sempre em reais antes de confirmar, presente no extrato, nenhuma ao receber), taxa cobrada só depois que o Pix é concluído, em geral no próximo envio confirmado com o PIN, nunca cobrada se o Pix falhar ou voltar antes, reserva das taxas pendentes no saldo, Pix concluído e depois devolvido não devolve sozinho uma taxa já cobrada.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela no navegador nem o parecer.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/wallet-ops-store.test.js`
+- `node apps/cli/test/wallet-webhook.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js` (o teste 5 é o e2e de dinheiro e taxa)
+- `node apps/cli/test/account.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/cli/test/deploy.test.js` (variáveis só no serviço `account`)
+- `node apps/cli/test/caddyfile.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Pagar o próprio CPF com R$ 1,00 por Pix: o app mostra valor, taxa do parceiro, taxa da Varanda e total em reais antes do PIN, e o saldo cai pelo total (não realizada ainda).
+2. [ ] Depósito de terceiro: um Pix de outro CPF para a chave da conta chega ao saldo, com o Hodle habilitado para terceiros (não realizada ainda).
+3. [ ] Três PINs errados: o app mostra o bloqueio, nenhuma perna seguinte sai e a tentativa de PIN gasta é uma só por toque (não realizada ainda).
+4. [ ] Matar o serviço no meio de um saque e subir de novo: a operação fica `incerta`, nada é refeito sozinho e o Hodle mostra um único saque para o `externalId` `var-` (não realizada ainda).
+5. [ ] A perna da taxa aparece na tesouraria, com a referência terminada em `:taxa` (não realizada ainda).
+6. [ ] Uma taxa que respondeu `WALLET_BUSY` aparece como `pendente` e é cobrada no envio seguinte que a pessoa confirma com o PIN, nunca por relógio (não realizada ainda).
+7. [ ] Webhook: cadastrar com `EVENTO:registrar`, copiar o segredo, trocar por `EVENTO:<hex64>` e reiniciar. Um corpo que não é `WEBHOOK_TEST` recebe 401 antes da troca, e depois dela toda entrega é verificada (não realizada ainda).
+8. [ ] Sem `VARANDA_HODLE_WEBHOOK_SECRETS`, a rota de webhook responde 404 (não realizada ainda).
+9. [ ] Em `cadastro`, criar a carteira responde 404 e o app mostra que a carteira será liberada em breve (não realizada ainda).
+10. [ ] `wallet-ops.json` tem modo 0600 e não contém chave Pix inteira, CPF nem PIN (não realizada ainda).
+11. [ ] `VARANDA_FEE_DEPOSIT_CENTS` diferente de zero recusa a partida do serviço, e uma taxa sem `VARANDA_FEE_TREASURY` também (não realizada ainda).
+12. [ ] O aceite dos Termos e da Política versão 8 aparece de novo para quem aceitou a versão 7 (não realizada ainda).
+13. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
+14. [ ] Com taxa de `PAYOUT` ligada, pagar por Pix: a taxa nova fica `pendente` enquanto o Pix não for concluído e só é cobrada no envio seguinte confirmado com o PIN, depois do Pix concluído. Um Pix que falha ou volta antes de concluir nunca tem a taxa cobrada (não realizada ainda).
+15. [ ] Com uma taxa pendente, tentar enviar com saldo que cobre valor, taxa do Hodle e taxa nova mas não todas as pendentes: o serviço recusa com saldo insuficiente. Com saldo suficiente, a conferência mostra o valor reservado para taxas pendentes, e esse valor continua no saldo depois do envio (não realizada ainda).
+
+### Limites
+
+- Não há tela de contestação: `DISPUTE_*` só marca a operação.
+- A taxa sobre o Pix de entrada está desligada.
+- Um Pix devolvido não devolve sozinho uma taxa da Varanda já debitada.
+- O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
+- A ida ao ar depende do parecer jurídico, inclusive sobre o Código de Defesa do Consumidor.
+
+## 54. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
+
+As seções 1 a 53 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
+
+### O que mudou
+
+- `packages/web-member/web/node.js` passa `leaseHoldMs: 0`: a rodada contínua da web hospedada não termina mais com `'idle'` depois de 8 s nem espera 45 s sem discar. Uma aba visível mantém a conexão com o semeador (uma vaga externa por aba); a aba oculta continua parando a sincronização (`shouldStopForHidden`) e, ao voltar, começa uma rodada nova.
+- A lease continua no código como saída de emergência para capacidade. As esperas de 45 s do app só valiam depois de um `'idle'` e ficaram inalcançáveis; o app não mudou.
+- A conexão é mantida viva pelo keepalive do Hypercore (a cada 5 s); o semeador derruba um socket externo sem dados depois de 30 s. Uma conexão que cai disca de novo (1 s dobrando até 30 s); com o semeador cheio, a resposta 1013 vira "Semeador ocupado".
+
+### Testes automatizados
+
+- `packages/web-member/test/resume.test.js`: o nó que `web/node.js` cria recebe `leaseHoldMs` 0 (falha com 8000).
+- `packages/web-member/test/lease.test.js`: com a lease desligada e um semeador de mentira que usa `noise.setTimeout(6000)` como o real, um enlace estabelecido passa de 13 s com um só socket e sem parar (documenta o keepalive de que a decisão depende; passa antes e depois).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] Uma aba visível mantém um socket com o semeador por vários minutos e uma publicação nova de outro aparelho chega em poucos segundos (não realizada ainda)
+- [ ] Uma aba oculta para a sincronização e libera a vaga; ao voltar, reconecta (não realizada ainda)
+- [ ] Com o semeador no limite de `VARANDA_MAX_EXTERNAL`, a próxima aba é recusada com "Semeador ocupado" e tenta de novo (não realizada ainda)
+
+### Limites
+
+- Capacidade: cada aba visível segura uma vaga externa o tempo todo. Dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo mais folga para os links curtos da Espiadinha e dos Avisos; `apps/cli/scripts/load-ws.js` mede conexões seguradas.
+- Não há teste automatizado no navegador nem medição em semeador real.
+
+## 55. Partida mais rápida da sincronização na web (PR perf/faster-sync-startup, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), numa visita de volta, toda leitura de membro espera a rodada abrir o próprio diário e as réplicas seguidas (seção 46). Essa partida era sequencial: para cada seguido, uma checagem de existência, a abertura da réplica (leituras inteiras do IndexedDB), o teste de bifurcação, `has(0)` e a verificação do bloco 0 (ed25519 em JavaScript puro), um de cada vez. E o próprio diário era decodificado duas vezes: na varredura do comprimento presente e de novo na leitura dos registros `follow`, cujo cursor recomeçava em 1 a cada rodada.
+- `lib/sync.js`, réplicas seguidas: a partida tem três passos. Primeiro, na ordem da lista, valida, descarta repetidas e marca as bloqueadas, como antes. Depois abre e verifica até 8 réplicas ao mesmo tempo (`MAX_PARALLEL_OPENS`), cada resultado no seu lugar, sem tocar em estado compartilhado, e nenhuma abertura começa depois que a rodada está terminando. Por último, em série e na ordem da lista, aplica o mesmo de antes: estado do seguido, eventos `skipped`, ativação, limpeza das rejeitadas e parada numa limpeza que falhou. Num término, numa limpeza que falhou ou num erro, todo núcleo aberto e ainda não usado é fechado antes de seguir. Cada chave abre uma vez só; nada mais abre réplicas antes da primeira conexão.
+- `lib/sync.js`, registros `follow`: `trackPresent` ganha `onScan(state)`, chamado com o resultado da varredura inicial. O rastreador do próprio diário usa essa varredura para semear a leitura dos registros `follow` abaixo do comprimento presente (mesmas regras: `decodeBlock` e `validRecordCopy`, seq a partir de 1, a última operação por chave vale, a chave própria é ignorada, os apagados ficam de fora, com o conjunto de apagados do momento da leitura) e começa o cursor ali. A lista gravada e o `follows-changed` são os mesmos de antes para o mesmo diário.
+- `lib/member-ops.js`, leituras emprestadas: com os núcleos da rodada, a réplica que a rodada já tem é lida direto, sem perguntar ao armazenamento se ela existe. Só uma chave que a rodada não tem consulta o armazenamento (sem dados: nada, como antes; guardada mas fora da rodada: caminho exclusivo, como antes). As respostas não mudam.
+- A varredura de chaves bloqueadas continua consultando o armazenamento diretamente (`docs/protocol.md`, normativo). Nenhum documento normativo muda.
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: 12 seguidos (2 com certificado de outra associação) com aberturas atrasadas para inverter a ordem de chegada: pico de aberturas simultâneas acima de 1 e no máximo 8, cada chave aberta uma vez, `skipped` e o inventário enviado ao semeador na ordem da lista, aberturas iguais a fechamentos. Uma rodada interrompida durante as aberturas termina com aberturas iguais a fechamentos e sem abrir as demais. Sem a mudança, o pico fica em 1 e o teste falha.
+- `packages/web-member/test/sync-media.test.js`: cada bloco do próprio diário depois do certificado é lido uma vez na partida (antes, duas), com a mesma lista e o mesmo `follows-changed`.
+- `packages/web-member/test/read-while-sync.test.js`: `feed.read` e `profile.read` emprestados não consultam `hasCore('replica/' + chave)` para a réplica que a rodada tem (antes, 1 vez por leitura). O teste do caminho exclusivo continua cobrindo `NEEDS_EXCLUSIVE`.
+- `packages/web-member/test/delete-purge.test.js`: o teste de um registro `follow` cuja leitura falha uma vez dependia de a partida ler o registro pela leitura dos seguidos, o que não acontece mais. Agora o registro chega depois da partida: a cópia do semeador (gravável, como outro aparelho) recebe o registro depois do primeiro `own-synced`, a primeira leitura dele falha, e um bloco seguinte dispara a leitura que o aplica.
+- `packages/web-member/scripts/startup-bench.js` (fora da CI): mede, no Node, o tempo entre `runSync` e a publicação do leitor, com as checagens de existência, as aberturas de réplica (e o pico simultâneo) e as leituras de blocos do próprio diário. Os tempos no Node não valem para o navegador; as contagens é que comparam. Resultado nesta máquina:
+
+| Cenário | Antes | Depois |
+|---|---|---|
+| 50 seguidos x 20 blocos, diário 200, memória, 5 rodadas | mediana 22.2 ms; pico 1; 398 leituras | mediana 16.1 ms; pico 8; 199 leituras |
+| 50 seguidos x 20 blocos, diário 200, fake-indexeddb, 5 rodadas | mediana 78 ms; pico 1; 398 leituras | mediana 71.1 ms; pico 8; 199 leituras |
+| 200 seguidos x 10 blocos, diário 400, fake-indexeddb, 3 rodadas | mediana 466.1 ms; pico 1; 798 leituras | mediana 387.5 ms; pico 8; 399 leituras |
+
+Em todos os cenários, as checagens de existência e as aberturas ficam iguais ao número de seguidos.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Web hospedada, visita de volta com muitos seguidos: medir o tempo entre desbloquear e a primeira linha de A Rua, antes e depois desta PR (não realizada ainda).
+- [ ] Na mesma visita, as ferramentas de desenvolvedor mostram as aberturas das réplicas sobrepostas e nenhum `'preempted'` causado por uma leitura (não realizada ainda).
+- [ ] Um diário seguido bloqueado e um com certificado inválido continuam aparecendo como ignorados, na mesma ordem (não realizada ainda).
+- [ ] Seguir alguém em outro aparelho: a lista de seguidos deste navegador atualiza depois que o diário próprio fica em dia, como antes (não realizada ainda).
+
+### Limites
+
+- No navegador o ganho depende de quanto o IndexedDB e a verificação ed25519 se sobrepõem; o bench no Node com fake-indexeddb não mede isso.
+- Até 8 réplicas abertas ao mesmo tempo na partida aumentam o pico de memória dessa fase.
+- A varredura de bloqueados e a de emissores revogados continuam em série, depois das aberturas.
+
+## 56. Diários seguidos baixam o mais novo primeiro (PR perf/newest-first-sync, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), um diário seguido baixava em uma só faixa linear, do bloco 0 ao fim, e A Rua só mostrava o que estava no prefixo contínuo. Com histórico longo, os posts novos eram os últimos a aparecer.
+- `lib/sync.js` `trackPresent`: com `newest` maior que 0 (diários seguidos, `NEWEST_BLOCKS` = 32), o download tem duas fases estritas, nunca as duas ao mesmo tempo (o Hypercore 10.38.2 sorteia entre as faixas abertas de um núcleo). A cabeça pede os blocos 0 a 2 (só eles enquanto falta o bloco 0), espera o comprimento assinado quando o semeador anunciou mais do que o núcleo conhece (nada é pedido além do comprimento assinado) e então pede os 32 blocos mais novos, sem os apagados. O corpo é o download linear de antes, a partir do bloco 0. O corpo começa quando a janela já encosta no prefixo (diário pequeno: igual a antes), quando a janela inteira está guardada ou apagada, ou quando a janela não trouxe bloco nenhum por `HEAD_STALL_MS` (3 s). `runSync` aceita `newestBlocks` e `headStallMs` (testes). O próprio diário continua do mais velho para o mais novo.
+- `lib/node-store.js` `readVisible`: o prefixo de `readAll` mais a sequência contínua de blocos que termina no comprimento assinado (um buraco nela só passa se uma tombstone guardada o aponta), só com o bloco 0 guardado e dentro de `MAX_LOG_BLOCKS`. Uma tombstone vem sempre depois do alvo, então toda tombstone que pode apagar um bloco da sequência está nela.
+- `lib/member-ops.js`: `feed.read` e `profile.read` (admissão e nome) leem com `readVisible`; `log.read` continua só com o prefixo. `incomplete` mantém o valor (comprimento presente abaixo do assinado), com nova definição em `docs/rpc.md` 5.13.
+- Tudo o que é anunciado ou medido (hello, `have`, `downloaded`, metas, `settled`) continua no comprimento presente. Documentos normativos: `docs/rpc.md` 5.12, 5.13 e 5.21; `docs/protocol.md` §2 e §6 "Browser node download order".
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: com 300 blocos, o semeador envia o bloco 0 primeiro, depois {1, 2} e [268, 300), depois o resto (sem a mudança, falha: o envio é linear). Um semeador sem o meio do diário: A Rua mostra o prefixo e os 32 mais novos, com `incomplete`, e o histórico quando o semeador o recebe (sem a troca de leitura, falha). Visita de volta: os envios começam em [268, 300) e nenhum `have` passa de blocos não guardados (sem a mudança, falha). Semeador que retém os blocos mais novos (`headStallMs: 200`): o histórico baixa assim mesmo. O próprio diário continua em ordem de blocos.
+- `packages/web-member/test/member.test.js`: réplica com [0, 3) e os blocos mais novos: o feed mostra prefixo e sequência nova, nada do meio, nos caminhos exclusivo e emprestado; uma sequência que não chega ao comprimento assinado mostra só o prefixo; uma tombstone na sequência esconde o alvo no prefixo e na sequência, guardado ou limpo; bloqueado e emissor revogado continuam escondidos do feed e do perfil; `profile.read` usa o perfil mais novo da sequência e um perfil só no meio lê `null`; a paginação com `before` passa pela sequência e depois pelo prefixo, sem repetir; `log.read` termina no comprimento presente. Sem a troca em `member-ops.js`, cinco desses falham.
+- `packages/web-member/test/delete-purge.test.js`: com `download()` registrado, só as faixas da cabeça abrem ([0, 3), [268, 280), [281, 300), o 280 apagado fica de fora), a faixa do corpo só abre com a janela guardada e as da cabeça fechadas, e o bloco apagado nunca chega (sem a mudança, falha). Diário dentro da janela, e `newest` 0, abrem o corpo de uma vez.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Navegador novo, seguindo contas com histórico longo: A Rua mostra os posts mais novos de cada conta em poucos segundos, enquanto o histórico completa (não realizada ainda).
+- [ ] Visita de volta depois de as contas postarem bastante: os posts novos aparecem antes do histórico que faltava (não realizada ainda).
+- [ ] Semeador sem o meio de um diário: A Rua mostra o começo e os mais novos, e o resto quando o semeador o tiver (não realizada ainda).
+- [ ] Um nome pode aparecer como "sem nome" por um instante, até chegar o bloco do perfil (não realizada ainda).
+
+### Limites
+
+- A Rua atualiza quando o comprimento presente cresce: os posts mais novos aparecem cerca de uma ida e volta depois do bloco 2, ou ao puxar para atualizar se o semeador não tem o meio do diário.
+- Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
+- Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
+- Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.

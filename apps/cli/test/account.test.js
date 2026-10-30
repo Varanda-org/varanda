@@ -21,6 +21,7 @@ const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/accoun
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openInvitesStore } = require('../lib/account/invites-store')
 const { openWalletStore } = require('../lib/account/wallet-store')
+const { openWalletOpsStore } = require('../lib/account/wallet-ops-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
 const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
@@ -38,6 +39,16 @@ const ACCESS = 'ya29.access-token-de-teste'
 const HEX16 = /[0-9a-f]{16}/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 
+const NO_FEES = Object.freeze({
+  rates: {
+    transfer: { cents: 0, bps: 0 },
+    payout: { cents: 0, bps: 0 },
+    crypto: { cents: 0, bps: 0 },
+    deposit: { cents: 0, bps: 0 },
+    swap: { cents: 0, bps: 0 }
+  },
+  treasury: null
+})
 const cleanEnv = {}
 for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_')) cleanEnv[k] = v
 
@@ -846,6 +857,17 @@ test('data-dir lock: a lost lock fails the wallet store before the service stops
   }
   t.is(await wallets.heal(), false, 'nor does heal() write')
   t.absent(fs.existsSync(path.join(dir, 'wallet.json')), 'nothing reached the disk')
+
+  // The money ledger too, after the wallet store and before the log.
+  const ops = openWalletOpsStore(dir)
+  const order = []
+  const opsFail = ops.fail
+  ops.fail = () => { order.push('ops'); opsFail() }
+  loseLock(null, (event) => order.push(event.event), () => order.push('stop'), null, null, null, null, null, ops)
+  t.alike(order, ['ops', 'lock', 'stop'], 'ops.fail() runs before the log and the stop')
+  t.is(ops.available(), false)
+  t.is(await ops.heal(), false, 'the ledger heal does not write')
+  t.absent(fs.existsSync(path.join(dir, 'wallet-ops.json')), 'no ledger reached the disk')
 })
 
 test('serve wiring: startTermsHeal heals on its interval and logs only a repair', async (t) => {
@@ -1503,11 +1525,11 @@ test('readEnv: Hodle on with its key, other variables ignored while off, values 
   t.is(readEnv(env).hodle, null, 'unset: off')
   t.is(readEnv({ ...env, VARANDA_HODLE_API_KEY: '' }).hodle, null, 'empty: off')
   t.is(readEnv({ ...env, VARANDA_HODLE_NETWORK: 'x', VARANDA_HODLE_MODE: 'pix', VARANDA_HODLE_DAILY_LIMIT: 'abc' }).hodle, null, 'the rest is ignored while off')
-  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY }).hodle, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100 })
+  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY }).hodle, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, fees: NO_FEES, webhookSecrets: null })
   t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: 'hodle_live_' + 'k'.repeat(40), VARANDA_HODLE_NETWORK: 'base', VARANDA_HODLE_MODE: 'carteira', VARANDA_HODLE_DAILY_LIMIT: '50' }).hodle,
-    { apiKey: 'hodle_live_' + 'k'.repeat(40), network: 'base', mode: 'carteira', dailyLimit: 50 })
-  const empties = readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: '', VARANDA_HODLE_MODE: '', VARANDA_HODLE_DAILY_LIMIT: '' }).hodle
-  t.alike(empties, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100 }, 'empty values: defaults')
+    { apiKey: 'hodle_live_' + 'k'.repeat(40), network: 'base', mode: 'carteira', dailyLimit: 50, maxCents: 300000, fees: NO_FEES, webhookSecrets: null })
+  const empties = readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: '', VARANDA_HODLE_MODE: '', VARANDA_HODLE_DAILY_LIMIT: '', VARANDA_HODLE_MAX_CENTS: '', VARANDA_HODLE_WEBHOOK_SECRETS: '' }).hodle
+  t.alike(empties, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, fees: NO_FEES, webhookSecrets: null }, 'empty values: defaults')
 
   const bad = [
     [{ VARANDA_HODLE_API_KEY: 'chave-sentinela-hodle' }, 'VARANDA_HODLE_API_KEY inválido'],
@@ -1519,10 +1541,10 @@ test('readEnv: Hodle on with its key, other variables ignored while off, values 
     [{ VARANDA_HODLE_API_KEY: 'hodle_test_' + 'k'.repeat(250) }, 'VARANDA_HODLE_API_KEY inválido'],
     [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: 'ethereum-sentinela' }, 'VARANDA_HODLE_NETWORK inválido'],
     [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: 'Polygon' }, 'VARANDA_HODLE_NETWORK inválido'],
-    // pix and completo come with the later releases; until then a typo or an
-    // early value must stop the service, never run a mode the code lacks.
-    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'pix' }, 'VARANDA_HODLE_MODE inválido'],
+    // completo comes with a later release; until then a typo or an early
+    // value must stop the service, never run a mode the code lacks.
     [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'completo' }, 'VARANDA_HODLE_MODE inválido'],
+    [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'Pix' }, 'VARANDA_HODLE_MODE inválido'],
     [{ VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'modo-sentinela' }, 'VARANDA_HODLE_MODE inválido']
   ]
   for (const limit of ['0', '-1', '1.5', 'abc', '100001', '007']) {
@@ -1540,6 +1562,104 @@ test('readEnv: Hodle on with its key, other variables ignored while off, values 
         if (value !== '') t.absent(err.message.includes(value), 'the value is not in the message')
       }
     }
+  }
+})
+
+test('readEnv: Hodle pix mode with cap, fees, treasury and webhook secrets; values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const KEY = 'hodle_test_chave-sentinela-hodle-88'
+  const pix = { ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'pix' }
+  const S1 = 'a1'.repeat(32)
+  const S2 = 'b2'.repeat(32)
+
+  const plain = readEnv(pix).hodle
+  t.is(plain.mode, 'pix')
+  t.is(plain.maxCents, 300000, 'default cap')
+  t.alike(plain.fees, NO_FEES, 'no fee by default')
+  t.is(plain.webhookSecrets, null, 'no sink by default')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_CENTS: '100' }).hodle.maxCents, 100, 'lowest cap')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_CENTS: ' 100000000 ' }).hodle.maxCents, 100000000, 'highest cap, trimmed')
+
+  const charged = readEnv({ ...pix, VARANDA_FEE_PAYOUT_CENTS: '50', VARANDA_FEE_PAYOUT_BPS: '100', VARANDA_FEE_TREASURY: 'sub:tesouro' }).hodle.fees
+  t.alike(charged.rates.payout, { cents: 50, bps: 100 })
+  t.alike(charged.treasury, { kind: 'sub', id: 'tesouro' })
+  const address = '0x' + 'AB'.repeat(20)
+  t.alike(readEnv({ ...pix, VARANDA_FEE_PAYOUT_BPS: '1', VARANDA_FEE_TREASURY: address }).hodle.fees.treasury, { kind: 'address', address: address.toLowerCase() })
+  t.alike(readEnv({ ...pix, VARANDA_FEE_TREASURY: 'sub:tesouro' }).hodle.fees.treasury, { kind: 'sub', id: 'tesouro' }, 'a treasury with no rate is accepted')
+
+  const secrets = readEnv({ ...pix, VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1 + ', KYC_APPROVED:registrar,WEBHOOK_TEST:' + S2 }).hodle.webhookSecrets
+  t.ok(secrets instanceof Map)
+  t.alike([...secrets], [['PAYOUT_SUCCESSFUL', S1], ['KYC_APPROVED', 'registrar'], ['WEBHOOK_TEST', S2]], 'kept as strings, never decoded')
+  t.alike([...readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_WEBHOOK_SECRETS: 'KYC_APPROVED:' + S1 }).hodle.webhookSecrets], [['KYC_APPROVED', S1]], 'cadastro may take the KYC sink')
+
+  // Off, the fee and webhook variables are ignored like the rest.
+  t.is(readEnv({ ...env, VARANDA_FEE_DEPOSIT_CENTS: '10', VARANDA_FEE_TREASURY: 'x', VARANDA_HODLE_MAX_CENTS: 'abc', VARANDA_HODLE_WEBHOOK_SECRETS: 'lixo' }).hodle, null)
+
+  const bad = [
+    [{ VARANDA_HODLE_MAX_CENTS: '99' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '100000001' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '0' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '-500' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '0300000' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '3000.5' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_CENTS: '1e6' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_FEE_PAYOUT_CENTS: '777777' }, 'VARANDA_FEE_PAYOUT_CENTS inválido'],
+    [{ VARANDA_FEE_PAYOUT_BPS: '50.5', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_PAYOUT_BPS inválido'],
+    [{ VARANDA_FEE_PAYOUT_CENTS: '50' }, 'VARANDA_FEE_TREASURY obrigatório com taxa'],
+    [{ VARANDA_FEE_PAYOUT_CENTS: '50', VARANDA_FEE_TREASURY: 'tesouro-sentinela' }, 'VARANDA_FEE_TREASURY inválido'],
+    [{ VARANDA_FEE_PAYOUT_CENTS: '50', VARANDA_FEE_TREASURY: '0x' + '0'.repeat(40) }, 'VARANDA_FEE_TREASURY inválido'],
+    // A deposit has no signed moment, so its fee refuses to start in any mode.
+    [{ VARANDA_FEE_DEPOSIT_CENTS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_DEPOSIT_* ainda não suportado'],
+    [{ VARANDA_FEE_DEPOSIT_BPS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_DEPOSIT_* ainda não suportado'],
+    // pix charges payouts only: any other rate would never be collected.
+    [{ VARANDA_FEE_TRANSFER_CENTS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_TRANSFER_CENTS não suportado no modo pix'],
+    [{ VARANDA_FEE_TRANSFER_BPS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_TRANSFER_BPS não suportado no modo pix'],
+    [{ VARANDA_FEE_CRYPTO_CENTS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_CRYPTO_CENTS não suportado no modo pix'],
+    [{ VARANDA_FEE_CRYPTO_BPS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_CRYPTO_BPS não suportado no modo pix'],
+    [{ VARANDA_FEE_SWAP_BPS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_SWAP_BPS não suportado no modo pix'],
+    [{ VARANDA_FEE_SWAP_CENTS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_SWAP_CENTS não suportado'],
+    // Below pix nothing is charged at all.
+    [{ VARANDA_HODLE_MODE: 'carteira', VARANDA_FEE_PAYOUT_CENTS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_PAYOUT_CENTS não suportado no modo carteira'],
+    [{ VARANDA_HODLE_MODE: 'cadastro', VARANDA_FEE_PAYOUT_BPS: '25', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_PAYOUT_BPS não suportado no modo cadastro'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1 + ',PAYOUT_SUCCESSFUL:' + S2 }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1.toUpperCase() }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1.slice(2) }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'payout_successful:' + S1 }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL' }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:segredo-sentinela' }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido'],
+    [{ VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1 + ',' }, 'VARANDA_HODLE_WEBHOOK_SECRETS inválido']
+  ]
+  for (const [vars, message] of bad) {
+    const label = message + ' ' + Object.keys(vars).join(',')
+    try {
+      readEnv({ ...pix, ...vars })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, message, label + ': message')
+      for (const [name, value] of Object.entries(vars)) {
+        if (name !== 'VARANDA_HODLE_MODE' && value.length > 3) t.absent(err.message.includes(value), 'the value is not in the message')
+      }
+      t.absent(err.message.includes(S1) || err.message.includes(S2) || err.message.includes('tesouro'), 'no secret or treasury in the message')
+    }
+  }
+})
+
+test('readEnv: a PIN variable refuses to start, on or off, without its value', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const KEY = 'hodle_test_chave-sentinela-hodle-99'
+  for (const name of ['VARANDA_FEE_TREASURY_PIN', 'VARANDA_HODLE_PIN']) {
+    for (const base of [env, { ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'pix' }]) {
+      try {
+        readEnv({ ...base, [name]: '864209' })
+        t.fail(name + ': accepted')
+      } catch (err) {
+        t.ok(err instanceof UsageError, name + ': usage error')
+        t.is(err.message, name + ' não é aceito')
+        t.absent(err.message.includes('864209'), 'the PIN is not in the message')
+      }
+    }
+    t.is(readEnv({ ...env, [name]: '' }).hodle, null, name + ' empty is unset')
   }
 })
 
@@ -1590,6 +1710,49 @@ test('account (serve): Hodle wiring by mode, the key never printed, an unreadabl
     t.is(create.status, 200, 'carteira: wallet-create starts')
   })
 
+  // pix adds the money routes, the cap, the fees and the webhook sink; the
+  // fee log names no value and the ledger is opened (written only on use).
+  const S1 = 'c3'.repeat(32)
+  const pixEnv = {
+    ...base,
+    VARANDA_HODLE_MODE: 'pix',
+    VARANDA_HODLE_MAX_CENTS: '200000',
+    VARANDA_FEE_PAYOUT_CENTS: '50',
+    VARANDA_FEE_PAYOUT_BPS: '100',
+    VARANDA_FEE_TREASURY: 'sub:tesouro-sentinela',
+    VARANDA_HODLE_WEBHOOK_SECRETS: 'PAYOUT_SUCCESSFUL:' + S1 + ',KYC_APPROVED:registrar'
+  }
+  const hook = (port, event, body) => fetch('http://127.0.0.1:' + port + '/account/wallet/webhook/' + event, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  await run(pixEnv, async (port, svc) => {
+    t.ok(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'taxa-ligada' })), 'fees on, by token')
+    const policy = await (await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')).json()
+    t.is(policy.mode, 'pix')
+    t.is(policy.maxCents, 200000, 'the cap reaches the routes')
+    t.is(policy.fees.payout, 'R$ 0,50 + 1%', 'the rate reaches the routes')
+    t.is((await startAction(port, 'payout')).status, 200, 'pix: payout starts')
+    t.is((await startAction(port, 'transfer')).status, 404, 'pix: no transfer')
+    const reg = await hook(port, 'KYC_APPROVED', { event: 'WEBHOOK_TEST', data: {} })
+    t.is(reg.status, 200, 'a registrar path answers the test event (C1)')
+    const other = await hook(port, 'KYC_APPROVED', { event: 'KYC_APPROVED', data: {} })
+    t.is(other.status, 401, 'and nothing else')
+    const unsigned = await hook(port, 'PAYOUT_SUCCESSFUL', { event: 'WEBHOOK_TEST', data: {} })
+    t.is(unsigned.status, 401, 'a configured secret verifies the test event too')
+    t.is((await hook(port, 'DEPOSIT_ASSET_COMPLETED', { event: 'WEBHOOK_TEST' })).status, 404, 'an unconfigured event is hidden')
+    t.absent(svc.stdout().includes('tesouro-sentinela'), 'the treasury is not printed')
+    t.absent(svc.stdout().includes(S1), 'nor the secret')
+  })
+  await run({ ...base, VARANDA_HODLE_MODE: 'pix' }, async (port, svc) => {
+    t.ok(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'taxa-desligada' })), 'fees off, by token')
+    const policy = await (await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')).json()
+    t.is(policy.maxCents, 300000, 'default cap')
+    t.is(policy.fees.payout, 'sem taxa')
+    t.is((await hook(port, 'KYC_APPROVED', { event: 'WEBHOOK_TEST' })).status, 404, 'no sink without secrets')
+  })
+
   // An unreadable wallet.json keeps the service up, logged by token only.
   const corrupt = async (port, svc) => {
     t.ok(svc.stdout().includes(JSON.stringify({ event: 'carteira', reason: 'indisponivel' })), 'logged at open')
@@ -1604,10 +1767,27 @@ test('account (serve): Hodle wiring by mode, the key never printed, an unreadabl
 
   // A bad mode stops the service before anything opens, without the values.
   const dir = path.join(tmpDir(t), 'account')
-  const r = varanda(dir, ['account'], { ...base, VARANDA_HODLE_MODE: 'pix' })
+  const r = varanda(dir, ['account'], { ...base, VARANDA_HODLE_MODE: 'completo' })
   t.is(r.code, 2)
   t.ok(r.stderr.includes('VARANDA_HODLE_MODE inválido'), r.stderr)
   t.absent(r.stderr.includes(KEY) || r.stdout.includes(KEY), 'the key is not printed')
+
+  // Fees the mode cannot charge, a deposit fee and a treasury PIN all stop
+  // the service before anything opens, naming only the variable.
+  const refusals = [
+    [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_SWAP_BPS: '30', VARANDA_FEE_TREASURY: 'sub:tesouro-sentinela' }, 'VARANDA_FEE_SWAP_BPS não suportado no modo pix'],
+    [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_TRANSFER_CENTS: '30', VARANDA_FEE_TREASURY: 'sub:tesouro-sentinela' }, 'VARANDA_FEE_TRANSFER_CENTS não suportado no modo pix'],
+    [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_DEPOSIT_BPS: '30', VARANDA_FEE_TREASURY: 'sub:tesouro-sentinela' }, 'VARANDA_FEE_DEPOSIT_* ainda não suportado'],
+    [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_TREASURY_PIN: '975310' }, 'VARANDA_FEE_TREASURY_PIN não é aceito']
+  ]
+  for (const [vars, message] of refusals) {
+    const d = path.join(tmpDir(t), 'account')
+    const out = varanda(d, ['account'], { ...base, ...vars })
+    t.is(out.code, 2, message)
+    t.ok(out.stderr.includes(message), out.stderr)
+    t.absent((out.stderr + out.stdout).includes('tesouro-sentinela') || (out.stderr + out.stdout).includes('975310'), 'no value printed')
+    t.absent(fs.existsSync(path.join(d, 'wallet-ops.json')), 'no ledger created')
+  }
 })
 
 test('account (serve): an invalid capacity variable exits 2 without printing it', (t) => {

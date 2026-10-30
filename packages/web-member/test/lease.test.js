@@ -46,7 +46,7 @@ function sleep (ms) {
 // the member advertised, so the link settles as soon as the hello is in.
 // spy may be a function (connection index) -> cores; `connections` keeps
 // the server side sockets, in order.
-async function fakeSeeder (t, { signer, spy = [] }) {
+async function fakeSeeder (t, { signer, spy = [], idleMs = 0 }) {
   const connections = []
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
@@ -62,6 +62,8 @@ async function fakeSeeder (t, { signer, spy = [] }) {
     const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
     noise.on('error', () => {})
     noise.once('connect', () => {
+      // As packages/core/lib/seeder.js does for an external socket.
+      if (idleMs > 0) noise.setTimeout(idleMs)
       Hypercore.createProtocolStream(noise)
       for (const core of cores) core.replicate(noise)
       attachAdmission(noise, {
@@ -344,6 +346,22 @@ test('with leaseHoldMs 0 (the default) a settled continuous run keeps running', 
   t.is(tap.sockets.length, 1, 'one socket')
   t.alike(await web.request('sync.stop', {}), { stopped: true })
   t.is((await stoppedOf(web.events, runId)).reason, 'stopped')
+  t.alike(internal, [])
+})
+
+test('with the lease off a settled link outlives the seeder idle timeout: the keepalive holds one socket', async (t) => {
+  t.timeout(40000)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, idleMs: 6000 })
+  const { web, tap, internal } = await member(t, { seederUrl: seeder.url, assoc, leaseHoldMs: 0 })
+  const { runId } = await web.request('sync.start', {})
+  t.ok(await until(() => web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && /^admitted /.test(e.data.line))), 'admitted by the seeder')
+  await sleep(13000)
+  t.is(tap.sockets.length, 1, 'one socket, the link never dropped')
+  t.is(seeder.connections.length, 1, 'the seeder saw one connection')
+  t.alike(stoppedEvents(web, runId), [], 'no stop')
+  t.alike(await web.request('sync.status', {}), { state: 'running', runId, once: false })
+  t.alike(await web.request('sync.stop', {}), { stopped: true })
   t.alike(internal, [])
 })
 
