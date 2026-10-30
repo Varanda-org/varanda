@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 7
+export const LEGAL_VERSION = 8
 export const LEGAL_DATE = '30/10/2026'
-export const REVIEW_NOTE = 'Versão 7, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 8, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -64,8 +64,9 @@ export const TERMS = {
       heading: 'Conta de pagamentos (opcional)',
       paragraphs: [
         'A conta de pagamentos é opcional e existe só na web hospedada. O Varanda funciona por inteiro sem ela. Para abri-la, você passa por uma verificação de identidade feita pela Hodle, uma empresa de software. Parceiros regulados movimentam o dinheiro. O BRLA é um real digital emitido pela Avenia. A associação que publica o Varanda não é banco nem instituição de pagamento. A conta de pagamentos é só para pessoas com 18 anos ou mais; a rede social continua a partir dos 16. Para abrir a conta, você declara ter 18 anos ou mais antes de qualquer coisa ser criada no parceiro, e a data de nascimento enviada na verificação precisa confirmar isso (a idade é contada pelo calendário de Brasília).',
-        'Hoje a conta só abre e confirma sua identidade. O Varanda só ativa a criação da carteira depois que o parceiro confirmar por escrito que o PIN é escolhido pela pessoa e só ela o conhece. Quando a carteira for liberada, você escolhe um PIN de 6 dígitos que o Varanda não guarda e não consegue recuperar, e três erros bloqueiam a carteira por 24 horas no parceiro. A subconta aberta na Hodle não pode ser apagada no parceiro. O saldo não tem remuneração.',
-        'Nesta versão a conta só pode ser aberta. Receber e enviar dinheiro chegam em versões seguintes, com novo aceite. Quando existirem, o Varanda poderá cobrar uma taxa própria, mostrada em reais antes de cada confirmação.'
+        'A carteira só é liberada quando o parceiro confirma que o PIN é escolhido pela pessoa e só ela o conhece. Você escolhe um PIN de 6 dígitos que o Varanda não guarda e não consegue recuperar, e três erros bloqueiam a carteira por 24 horas no parceiro. A subconta aberta na Hodle não pode ser apagada no parceiro. O saldo não tem remuneração.',
+        'Quando o operador liga o Pix, você pode ver o saldo, receber por Pix, sem PIN, e pagar por Pix, que você sempre confirma com o PIN, como qualquer envio de dinheiro. O Pix pode ser feito para o CPF de outra pessoa, e quem faz isso responde por conferir a chave e o valor. Quando o Pix é para outra pessoa ou vem de outra pessoa, o CPF dela vai para a Hodle só para essa operação, e o Varanda não o guarda. A Hodle cobra a taxa dela, que aparece na cotação como foi calculada, somada ao valor. O Varanda pode cobrar uma taxa própria, desligada até o operador definir. Antes de você confirmar, o app mostra em reais o valor, a taxa do parceiro, a taxa do Varanda e o total, e a taxa do Varanda consta no extrato. Nesta versão não há taxa do Varanda para receber.',
+        'A taxa do Varanda sobre um Pix enviado só é cobrada depois que a Hodle informa que esse Pix foi concluído. Como isso costuma levar de 30 a 90 segundos, ela normalmente é cobrada no seu próximo envio confirmado com o PIN, no máximo uma taxa antiga por envio. Se o Pix falhar ou voltar antes de ser concluído, a taxa dele nunca é cobrada. Nada é cobrado sozinho. Para enviar, o saldo precisa cobrir o valor, a taxa da Hodle, a nova taxa do Varanda e todas as taxas pendentes; esse dinheiro fica na sua carteira até um envio posterior cobrá-lo. Um Pix já concluído e depois devolvido pelo banco de quem recebeu não devolve automaticamente uma taxa do Varanda já cobrada.'
       ]
     },
     {
@@ -152,7 +153,7 @@ export const PRIVACY = {
         'Registro do aceite: a finalidade é registrar qual versão cada conta aceitou. A base legal é uma proposta, ainda sem parecer jurídico.',
         'Faixa de idade: a finalidade é cumprir a regra de idade mínima. A base legal proposta é obrigação legal (ECA Digital), a confirmar em parecer jurídico.',
         'Denúncias, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
-        'Conta de pagamentos: os identificadores da conta e da carteira e o estado da verificação servem para operar a conta. A proposta é execução de contrato, a confirmar. A foto do documento e a selfie com prova de vida são dados biométricos sensíveis, tratados pelo parceiro. A base do Art. 11 ainda aguarda parecer jurídico, como a selfie da Didit.',
+        'Conta de pagamentos: os identificadores da conta e da carteira e o estado da verificação servem para operar a conta. A proposta é execução de contrato, a confirmar. A foto do documento e a selfie com prova de vida são dados biométricos sensíveis, tratados pelo parceiro. A base do Art. 11 ainda aguarda parecer jurídico, como a selfie da Didit. As operações e taxas (tipo, estado, valor, taxas, identificador do parceiro, destino mascarado e marca de contestação) ficam no serviço de conta, sem a chave Pix inteira nem o CPF, e as finalizadas são apagadas depois de 90 dias, exceto enquanto uma taxa da Varanda ainda puder ser cobrada, uma contestação estiver aberta ou uma revisão de suporte estiver aberta. Um Pix de entrada que falhou e ainda está sendo devolvido não conta como finalizado. O registro guarda no máximo 20000 operações: acima disso, as finalizadas mais antigas são apagadas antes dos 90 dias, com as mesmas exceções. Quando o Pix é para outra pessoa ou vem de outra pessoa, o CPF dela vai para a Hodle só para essa operação, e o Varanda não o guarda.',
         'Registros de acesso, com IP, data e hora, ficam nos semeadores e serviços, se aplicável. A proposta é obrigação legal caso o Art. 15 do Marco Civil se aplique.'
       ]
     },

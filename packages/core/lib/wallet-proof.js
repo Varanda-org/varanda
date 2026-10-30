@@ -48,7 +48,10 @@ const OP_KEY_RE = /^[a-z][a-zA-Z0-9]{0,31}$/
 const OP_KEYS_MAX = 16
 const OP_STRING_MAX = 512
 // Secrets and personal data stay out of the signed operation even as a
-// hash: a hash of a PIN or a CPF is guessable from its small space.
+// hash: a hash of a PIN or a CPF is guessable from its small space. The
+// exception is payerCpf (deposit) and beneficiaryCpf (payout): they are
+// signed so the service can check them, removed from the op before anything
+// is stored or logged, and only an in-memory hash is kept for the quote check.
 const OP_FORBIDDEN = Object.freeze(['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf'])
 
 function isPlainObject (o) {

@@ -659,7 +659,7 @@ test('wallet error tokens map to fixed pt-BR messages', async (t) => {
     'limite-carteira': 'Muitas operações. Tente de novo mais tarde.',
     'valor-invalido': 'Valor inválido.',
     'destino-invalido': 'Destino inválido.',
-    'saldo-insuficiente': 'Saldo insuficiente.',
+    'saldo-insuficiente': 'Saldo insuficiente. O saldo precisa cobrir também as taxas pendentes.',
     'carteira-incerta': 'A criação da carteira ainda não foi confirmada.',
     'taxa-mudou': 'A taxa mudou. Confira de novo antes de confirmar.',
     'idade-minima': 'Por enquanto a conta de pagamentos só pode ser aberta por quem tem 18 anos ou mais.',
@@ -981,4 +981,364 @@ test('wallet bodies may reach 16 KiB; other calls keep the 4 KiB limit', async (
   await expectError(t, a.termsStart({ member: M, version: 1 }), 'indisponivel', false, 'non-wallet 10 KiB body refused')
   stub(t, json(200, { documentId: 'd1', uploadUrlFront: front, pad: 'x'.repeat(16 * 1024) }))
   await expectError(t, a.walletKycDocument({ member: M, nonce: NONCE, signature: SIG, op: { documentType: 'ID' } }), 'indisponivel', true, 'over 16 KiB')
+})
+
+// Money calls (PR2: balance, statement, deposit, payout-quote, preview, payout,
+// op-status).
+const EXT = 'var-' + 'c3'.repeat(16)
+const OP_ID = 'o'.repeat(22)
+const QR = '00020126580014br.gov.bcb.pix0136' + 'a'.repeat(40) + '6304ABCD'
+const PREVIEW = {
+  amountCents: 10000,
+  varandaFeeCents: 150,
+  hodleFeeCents: 90,
+  pendingFeeCents: 0,
+  pendingFeeRef: '',
+  totalDebitCents: 10240,
+  netReceivedCents: 10000,
+  ok: true,
+  reason: null
+}
+const ROW = {
+  kind: 'payout',
+  status: 'concluido',
+  cents: 10000,
+  hodleFeeCents: 90,
+  fee: { cents: 150, status: 'cobrada', asset: 'BRL', txHash: '0x' + 'e'.repeat(64) },
+  dispute: null,
+  at: '2026-10-30T12:00:00.000Z',
+  to: '***1234',
+  direction: 'saida',
+  externalId: EXT,
+  endToEndId: 'E1234567820261030'
+}
+const signed = (op) => ({ member: M, nonce: NONCE, signature: SIG, op })
+
+function spyTimeouts (t) {
+  const delays = []
+  const real = globalThis.setTimeout
+  globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return real(fn, ms, ...rest) }
+  t.teardown(() => { globalThis.setTimeout = real })
+  return delays
+}
+
+test('operacao-divergente maps to a fixed pt-BR message', async (t) => {
+  const { toError } = await load()
+  t.is(toError('operacao-divergente').code, 'operacao-divergente')
+  t.is(toError('operacao-divergente').message, 'Esta operação já foi pedida com outros valores. Comece de novo.')
+})
+
+test('walletPolicy: maxCents and fee texts when present, refused when malformed', async (t) => {
+  const a = await load()
+  const fees = { transfer: 'sem taxa', payout: 'R$ 1,00 + 1,5%', crypto: 'sem taxa', deposit: 'sem taxa', swap: '0,5%' }
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxCents: 300000, fees }))
+  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'pix', maxCents: 300000, fees })
+  for (const extra of [{ maxCents: 1.5 }, { maxCents: -1 }, { maxCents: '300000' }, { fees: [] }, { fees: { payout: 5 } },
+    { fees: { payout: 'x'.repeat(65) } }, { fees: { payout: 'a\nb' } }, { fees: { 'Pay out': 'sem taxa' } }]) {
+    stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', ...extra }))
+    t.is(await a.walletPolicy(), null, JSON.stringify(extra))
+  }
+})
+
+test('money calls: path, action, the exact signed op; reads 20 s, debits and deposits 100 s (C2)', async (t) => {
+  const a = await load()
+  const cases = [
+    ['balance', a.walletBalance, {}, {}, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 0 }, 20000],
+    ['statement', a.walletStatement, { cursor: 'c1' }, {}, { items: [], cursor: null }, 20000],
+    ['deposit', a.walletDeposit, { opId: OP_ID, cents: 5000 }, {}, { qrCode: QR, expiresAt: '2026-10-30T13:00:00.000Z', externalId: EXT }, 100000],
+    ['payout-quote', a.walletPayoutQuote, { cents: 10000, pixKey: 'ana@example.com', pixKeyType: 'EMAIL' }, {},
+      { quoteId: 'q1', ownerName: 'Ana', taxIdMasked: '***.456.789-**', bankName: 'Banco', feeCents: 90, expiresAt: null }, 20000],
+    ['preview', a.walletPreview, { kind: 'payout', cents: 10000, quoteId: 'q1' }, {}, PREVIEW, 20000],
+    ['payout', a.walletPayout, { opId: OP_ID, cents: 10000, quoteId: 'q1', feeCents: 150, pendingFeeCents: 0, pendingFeeRef: '', totalDebitCents: 10240 },
+      { pin: '135790' }, { externalId: EXT, status: 'pendente', fee: { cents: 150, status: 'cobrada' } }, 100000],
+    ['op-status', a.walletOpStatus, { externalId: EXT }, {}, ROW, 60000]
+  ]
+  for (const [action, fn, op, extra, answer, timeout] of cases) {
+    const calls = stub(t, json(200, answer))
+    const delays = spyTimeouts(t)
+    await fn({ ...signed(op), ...extra })
+    t.is(calls.length, 1, action)
+    t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/wallet/' + action)
+    t.is(calls[0].init.credentials, 'same-origin')
+    t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: NONCE, action, op, signature: SIG, ...extra }, action)
+    t.ok(delays.includes(timeout), action + ' timeout ' + timeout)
+  }
+  const delays = spyTimeouts(t)
+  stub(t, json(200, { nonce: 'n1' }))
+  await a.termsStart({ member: M, version: 1 })
+  t.ok(delays.includes(8000) && !delays.includes(20000) && !delays.includes(60000) && !delays.includes(100000), 'other calls keep 8 s')
+})
+
+test('walletBalance: integers and the address, anything else refused', async (t) => {
+  const a = await load()
+  stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, extra: 'x' }))
+  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150 })
+  for (const body of [{ cents: 1.5, pendingFeeCents: 0 }, { cents: -1, pendingFeeCents: 0 }, { cents: '5000', pendingFeeCents: 0 },
+    { cents: 5000 }, { cents: 5000, pendingFeeCents: 0, address: 'x' }, { cents: 5000, pendingFeeCents: 0, network: 'Poly' }]) {
+    stub(t, json(200, body))
+    await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, JSON.stringify(body))
+  }
+  stub(t, json(403, { error: 'carteira-pendente' }))
+  await expectError(t, a.walletBalance(signed({})), 'carteira-pendente', false)
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, 'a read is never uncertain')
+})
+
+test('walletStatement: rows shape-checked and reduced to known keys; a bad row refuses the page', async (t) => {
+  const a = await load()
+  stub(t, json(200, { items: [ROW, { kind: 'deposit', status: 'incerto', cents: 5000 }], cursor: 'next-1' }))
+  const out = await a.walletStatement(signed({}))
+  t.is(out.cursor, 'next-1')
+  t.alike(out.items[0], {
+    kind: 'payout',
+    status: 'concluido',
+    cents: 10000,
+    hodleFeeCents: 90,
+    fee: { cents: 150, status: 'cobrada' },
+    dispute: null,
+    at: '2026-10-30T12:00:00.000Z',
+    to: '***1234',
+    direction: 'saida',
+    externalId: EXT,
+    endToEndId: 'E1234567820261030'
+  }, 'txHash and asset dropped')
+  t.alike(out.items[1], { kind: 'deposit', status: 'incerto', cents: 5000, hodleFeeCents: null, fee: null, dispute: null, at: null, to: null, direction: null, externalId: null })
+  const bad = [
+    { ...ROW, kind: 'emprestimo' }, { ...ROW, status: 'feito' }, { ...ROW, cents: 1.5 }, { ...ROW, cents: -5 },
+    { ...ROW, fee: { cents: 1, status: 'paga' } }, { ...ROW, fee: { cents: -1, status: 'cobrada' } },
+    { ...ROW, dispute: 'sim' }, { ...ROW, at: 'ontem' }, { ...ROW, to: 'a\u0000b' }, { ...ROW, to: 'x'.repeat(65) },
+    { ...ROW, externalId: 'var-xyz' }, { ...ROW, endToEndId: 'E-1' }, { ...ROW, hodleFeeCents: '90' }, null, []
+  ]
+  for (const row of bad) {
+    stub(t, json(200, { items: [ROW, row], cursor: null }))
+    await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, JSON.stringify(row))
+  }
+  stub(t, json(200, { items: new Array(101).fill(ROW), cursor: null }))
+  await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, 'too many rows')
+  stub(t, json(200, { items: {}, cursor: null }))
+  await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, 'items not a list')
+  stub(t, json(200, { items: [], cursor: 'a b' }))
+  await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, 'bad cursor')
+})
+
+test('walletStatement has its own 64 KiB reader; other wallet calls keep 16 KiB', async (t) => {
+  const a = await load()
+  const items = new Array(85).fill(ROW)
+  const size = JSON.stringify({ items, cursor: null }).length
+  t.ok(size > 28 * 1024 && size < 64 * 1024, 'about 30 KiB')
+  stub(t, json(200, { items, cursor: null }))
+  t.is((await a.walletStatement(signed({}))).items.length, 85)
+  stub(t, json(200, { items: [ROW], cursor: null, pad: 'x'.repeat(70 * 1024) }))
+  await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, '70 KiB refused')
+  stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 0, pad: 'x'.repeat(20 * 1024) }))
+  await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, 'balance keeps 16 KiB')
+})
+
+test('a 10 KiB statement fits the wallet reader; a 10 KiB /account/status body is still refused', async (t) => {
+  const a = await load()
+  const items = new Array(32).fill(ROW)
+  t.ok(JSON.stringify({ items, cursor: null }).length > 10 * 1024)
+  t.ok(JSON.stringify({ items, cursor: null }).length < 16 * 1024)
+  stub(t, json(200, { items, cursor: null }))
+  t.is((await a.walletStatement(signed({}))).items.length, 32)
+  stub(t, json(200, { member: M, username: 'ana', pad: 'x'.repeat(10 * 1024) }))
+  await expectError(t, a.accountStatus(M), 'indisponivel', false, '/account/status keeps 4 KiB')
+})
+
+test('walletDeposit: printable QR, ISO expiry, ledger externalId; unknown outcomes uncertain', async (t) => {
+  const a = await load()
+  const args = signed({ opId: OP_ID, cents: 5000 })
+  const ok = { qrCode: QR, expiresAt: '2026-10-30T13:00:00.000Z', externalId: EXT, hodleFeeCents: 50, payerCpf: '12345678901' }
+  stub(t, json(200, ok))
+  t.alike(await a.walletDeposit(args), { qrCode: QR, expiresAt: ok.expiresAt, externalId: EXT, hodleFeeCents: 50, netCents: null, status: null }, 'only known keys')
+  stub(t, json(200, { qrCode: QR, expiresAt: null, externalId: EXT }))
+  t.alike(await a.walletDeposit(args), { qrCode: QR, expiresAt: null, externalId: EXT, hodleFeeCents: null, netCents: null, status: null }, 'no expiry, no fee')
+  stub(t, json(200, { ...ok, status: 'pendente', netCents: 4950 }))
+  t.alike(await a.walletDeposit(args), { qrCode: QR, expiresAt: ok.expiresAt, externalId: EXT, hodleFeeCents: 50, netCents: 4950, status: 'pendente' }, 'status and net amount kept')
+  stub(t, json(200, { qrCode: QR, expiresAt: '2026-10-30T13:00:00-03:00', externalId: EXT }))
+  t.is((await a.walletDeposit(args)).expiresAt, '2026-10-30T13:00:00-03:00', 'provider offset kept')
+  for (const qrCode of [QR + '\n', 'a\u0007b', 'á' + QR, 'x'.repeat(1025), '', '   ', 5]) {
+    stub(t, json(200, { ...ok, qrCode }))
+    await expectError(t, a.walletDeposit(args), 'indisponivel', true, 'qrCode ' + JSON.stringify(qrCode))
+  }
+  for (const bad of [{ expiresAt: 'amanha' }, { expiresAt: 5 }, { externalId: 'abc' }, { externalId: undefined }, { hodleFeeCents: 1.2 },
+    { netCents: -1 }, { netCents: 1.5 }, { status: 'pago' }]) {
+    stub(t, json(200, { ...ok, ...bad }))
+    await expectError(t, a.walletDeposit(args), 'indisponivel', true, JSON.stringify(bad))
+  }
+})
+
+test('walletDeposit: a reconciled or final charge answers qrCode null with a ledger status, definite', async (t) => {
+  const a = await load()
+  const args = signed({ opId: OP_ID, cents: 5000 })
+  for (const status of ['pendente', 'concluido', 'expirado', 'devolvido', 'incerto']) {
+    stub(t, json(200, { externalId: EXT, status, qrCode: null, expiresAt: null, hodleFeeCents: 50 }))
+    t.alike(await a.walletDeposit(args), { qrCode: null, expiresAt: null, externalId: EXT, hodleFeeCents: 50, netCents: null, status }, status)
+  }
+  stub(t, json(200, { externalId: EXT, status: 'concluido', qrCode: null, expiresAt: null, hodleFeeCents: null }))
+  t.is((await a.walletDeposit(args)).hodleFeeCents, null, 'a stored row may lack the fee')
+  for (const bad of [{ externalId: EXT, qrCode: null }, { externalId: EXT, qrCode: null, status: 'pago' }, { qrCode: null, status: 'concluido' },
+    { externalId: 'var-x', qrCode: null, status: 'concluido' }]) {
+    stub(t, json(200, bad))
+    await expectError(t, a.walletDeposit(args), 'indisponivel', true, JSON.stringify(bad))
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  await expectError(t, a.walletDeposit(args), 'indisponivel', false, 'service 503 token is definite')
+  stub(t, json(502, null, 'text/html'))
+  await expectError(t, a.walletDeposit(args), 'indisponivel', true, 'proxy page')
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  await expectError(t, a.walletDeposit(args), 'indisponivel', true, 'resultado-incerto')
+  const sent = stub(t, () => { throw new Error('rede') })
+  await expectError(t, a.walletDeposit(args), 'indisponivel', true, 'no answer')
+  t.is(sent.length, 1, 'never retried')
+  stub(t, json(400, { error: 'valor-invalido' }))
+  await expectError(t, a.walletDeposit(args), 'valor-invalido', false)
+})
+
+test('walletPayoutQuote: bounded strings, integer fee', async (t) => {
+  const a = await load()
+  const args = signed({ cents: 10000, pixKey: 'ana@example.com', pixKeyType: 'EMAIL' })
+  const ok = { quoteId: 'q-1', ownerName: 'Ana Souza', taxIdMasked: '***.456.789-**', bankName: 'Banco X', feeCents: 90, expiresAt: '2026-10-30T12:05:00.000Z' }
+  stub(t, json(200, ok))
+  t.alike(await a.walletPayoutQuote(args), ok)
+  stub(t, json(200, { quoteId: 'q-1', feeCents: 0, ownerName: null }))
+  t.alike(await a.walletPayoutQuote(args), { quoteId: 'q-1', ownerName: '', taxIdMasked: '', bankName: '', feeCents: 0, expiresAt: null })
+  for (const bad of [{ quoteId: '..' }, { quoteId: 'q 1' }, { quoteId: 'q'.repeat(129) }, { feeCents: 1.5 }, { feeCents: -1 },
+    { ownerName: 'x'.repeat(129) }, { bankName: 'x'.repeat(65) }, { ownerName: 'a‮b\u0000' }, { bankName: 5 }, { taxIdMasked: 'x'.repeat(33) }, { expiresAt: 'logo' }]) {
+    stub(t, json(200, { ...ok, ...bad }))
+    await expectError(t, a.walletPayoutQuote(args), 'indisponivel', false, JSON.stringify(bad))
+  }
+  const longest = { ...ok, ownerName: 'n'.repeat(128), bankName: 'b'.repeat(64), taxIdMasked: 't'.repeat(32) }
+  stub(t, json(200, longest))
+  t.alike(await a.walletPayoutQuote(args), longest, 'the service caps (hodle.js) are accepted')
+  stub(t, json(400, { error: 'destino-invalido' }))
+  await expectError(t, a.walletPayoutQuote(args), 'destino-invalido', false)
+})
+
+test('walletPreview: non-negative integers that add up; pending fee ref only with a pending fee', async (t) => {
+  const a = await load()
+  const args = signed({ kind: 'payout', cents: 10000, quoteId: 'q1' })
+  stub(t, json(200, PREVIEW))
+  t.alike(await a.walletPreview(args), PREVIEW)
+  const pending = { ...PREVIEW, pendingFeeCents: 150, pendingFeeRef: 'var-' + 'd4'.repeat(16) + ':taxa', totalDebitCents: 10390 }
+  stub(t, json(200, pending))
+  t.alike(await a.walletPreview(args), pending)
+  for (const k of ['amountCents', 'varandaFeeCents', 'hodleFeeCents', 'pendingFeeCents', 'totalDebitCents', 'netReceivedCents']) {
+    for (const v of [1.5, -1, '10', null]) {
+      stub(t, json(200, { ...PREVIEW, [k]: v }))
+      await expectError(t, a.walletPreview(args), 'indisponivel', false, k + ' ' + JSON.stringify(v))
+    }
+  }
+  for (const bad of [{ totalDebitCents: 10000 }, { pendingFeeRef: 'var-x:taxa' }, { ...pending, pendingFeeRef: '' },
+    { ...pending, pendingFeeRef: 'a b' }, { ok: 'yes' }, { reason: 5 }]) {
+    stub(t, json(200, { ...PREVIEW, ...bad }))
+    await expectError(t, a.walletPreview(args), 'indisponivel', false, JSON.stringify(bad))
+  }
+  stub(t, json(200, { ...PREVIEW, reservedFeeCents: 300 }))
+  t.alike(await a.walletPreview(args), { ...PREVIEW, reservedFeeCents: 300 }, 'reserved fees are outside the total')
+  stub(t, json(200, { ...PREVIEW, reservedFeeCents: 0 }))
+  t.alike(await a.walletPreview(args), { ...PREVIEW, reservedFeeCents: 0 })
+  for (const v of [-1, 1.5, '300']) {
+    stub(t, json(200, { ...PREVIEW, reservedFeeCents: v }))
+    await expectError(t, a.walletPreview(args), 'indisponivel', false, 'reservedFeeCents ' + JSON.stringify(v))
+  }
+  stub(t, json(200, { ...PREVIEW, ok: false, reason: 'valor-invalido' }))
+  const refused = await a.walletPreview(args)
+  t.is(refused.ok, false)
+  t.is(refused.reason, 'valor-invalido')
+  for (const kind of ['payout', 'transfer', 'crypto']) {
+    stub(t, json(200, { ...PREVIEW, netReceivedCents: 9990 }))
+    await expectError(t, a.walletPreview(signed({ kind, cents: 10000 })), 'indisponivel', false, kind + ': recipient line differs from the amount')
+  }
+})
+
+test('debitTerms: the signed op binds the full debit the preview showed (C10)', async (t) => {
+  const a = await load()
+  const pending = { ...PREVIEW, pendingFeeCents: 150, pendingFeeRef: 'var-' + 'd4'.repeat(16) + ':taxa', totalDebitCents: 10390 }
+  t.alike(a.debitTerms(pending), { feeCents: 150, pendingFeeCents: 150, pendingFeeRef: pending.pendingFeeRef, totalDebitCents: 10390 })
+  t.alike(a.debitTerms(PREVIEW), { feeCents: 150, pendingFeeCents: 0, pendingFeeRef: '', totalDebitCents: 10240 })
+})
+
+test('walletPayout: opId and debit terms forwarded unchanged; principal and fee reported apart (C2, C10)', async (t) => {
+  const a = await load()
+  const op = { opId: OP_ID, cents: 10000, quoteId: 'q1', pixKey: 'ana@example.com', pixKeyType: 'EMAIL', ...a.debitTerms(PREVIEW) }
+  const args = { ...signed(op), pin: '135790' }
+  const calls = stub(t, json(200, { externalId: EXT, status: 'pendente', fee: { cents: 150, status: 'pendente' }, pendingFee: null }))
+  t.alike(await a.walletPayout(args), { externalId: EXT, status: 'pendente', fee: { cents: 150, status: 'pendente' }, pendingFee: null },
+    'a fee left pendente is a success with its own status')
+  const sent = JSON.parse(calls[0].init.body)
+  t.is(sent.op.opId, OP_ID)
+  t.is(sent.op.feeCents, 150)
+  t.is(sent.op.pendingFeeCents, 0)
+  t.is(sent.op.pendingFeeRef, '')
+  t.is(sent.op.totalDebitCents, 10240)
+  t.is(sent.pin, '135790')
+  stub(t, json(200, { principal: { externalId: EXT, status: 'concluido' }, fee: { cents: 150, status: 'cobrada' }, pendingFee: { cents: 90, status: 'incerta' } }))
+  t.alike(await a.walletPayout(args), { externalId: EXT, status: 'concluido', fee: { cents: 150, status: 'cobrada' }, pendingFee: { cents: 90, status: 'incerta' } },
+    'nested principal shape')
+  stub(t, json(200, { externalId: EXT, status: 'concluido' }))
+  t.alike(await a.walletPayout(args), { externalId: EXT, status: 'concluido', fee: null, pendingFee: null }, 'no fee leg')
+  for (const bad of [{ externalId: 'x', status: 'pendente' }, { externalId: EXT, status: 'pago' }, { externalId: EXT, status: 'pendente', fee: { status: 'paga' } },
+    { externalId: EXT, status: 'pendente', fee: { cents: -1, status: 'cobrada' } }, { externalId: EXT, status: 'pendente', pendingFee: 'sim' }]) {
+    stub(t, json(200, bad))
+    await expectError(t, a.walletPayout(args), 'indisponivel', true, 'unusable success: ' + JSON.stringify(bad))
+  }
+})
+
+test('walletPayout: 5xx without a token is uncertain; refusals are definite with their pt-BR text (C9, C10)', async (t) => {
+  const a = await load()
+  const args = { ...signed({ opId: OP_ID, cents: 10000, quoteId: 'q1', ...a.debitTerms(PREVIEW) }), pin: '135790' }
+  stub(t, json(500, null, 'text/html'))
+  await expectError(t, a.walletPayout(args), 'indisponivel', true, '5xx without token')
+  stub(t, json(502, { error: 'algo' }))
+  await expectError(t, a.walletPayout(args), 'indisponivel', true, 'unknown token')
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  await expectError(t, a.walletPayout(args), 'indisponivel', true, 'resultado-incerto')
+  const sent = stub(t, () => { throw new Error('rede') })
+  await expectError(t, a.walletPayout(args), 'indisponivel', true, 'no answer')
+  t.is(sent.length, 1, 'never retried')
+  stub(t, json(503, { error: 'indisponivel' }))
+  await expectError(t, a.walletPayout(args), 'indisponivel', false, 'service 503 token')
+  const texts = {
+    'pin-invalido': [400, 'PIN incorreto.'],
+    'pin-bloqueado': [429, 'PIN bloqueado por 24 horas após três erros.'],
+    'taxa-mudou': [409, 'A taxa mudou. Confira de novo antes de confirmar.'],
+    'operacao-pendente': [409, 'Uma operação anterior ainda não foi confirmada. Aguarde a confirmação antes de fazer outra.'],
+    'operacao-divergente': [409, 'Esta operação já foi pedida com outros valores. Comece de novo.'],
+    'saldo-insuficiente': [409, 'Saldo insuficiente. O saldo precisa cobrir também as taxas pendentes.'],
+    'valor-invalido': [400, 'Valor inválido.']
+  }
+  for (const [token, [status, message]] of Object.entries(texts)) {
+    stub(t, json(status, { error: token }))
+    const e = await expectError(t, a.walletPayout(args), token, false, token)
+    t.is(e.message, message, token)
+  }
+})
+
+test('walletPayout: the PIN is never kept in module state', async (t) => {
+  const a = await load()
+  const args = { ...signed({ opId: OP_ID, cents: 10000, quoteId: 'q1', ...a.debitTerms(PREVIEW) }), pin: '135790' }
+  stub(t, json(200, { externalId: EXT, status: 'pendente' }))
+  await a.walletPayout(args)
+  const calls = stub(t, json(200, ROW))
+  await a.walletOpStatus(signed({ externalId: EXT }))
+  t.absent(calls[0].init.body.includes('135790'), 'a later call carries no PIN')
+  t.absent(Object.keys(JSON.parse(calls[0].init.body)).includes('pin'))
+})
+
+test('walletOpStatus: one shape-checked row with its externalId', async (t) => {
+  const a = await load()
+  const args = signed({ externalId: EXT })
+  stub(t, json(200, ROW))
+  t.is((await a.walletOpStatus(args)).status, 'concluido')
+  stub(t, json(200, { operation: { ...ROW, status: 'incerto', fee: { cents: 150, status: 'incerta' } } }))
+  const wrapped = await a.walletOpStatus(args)
+  t.is(wrapped.status, 'incerto')
+  t.alike(wrapped.fee, { cents: 150, status: 'incerta' })
+  for (const bad of [{ ...ROW, externalId: null }, { ...ROW, status: 'x' }, {}]) {
+    stub(t, json(200, bad))
+    await expectError(t, a.walletOpStatus(args), 'indisponivel', false, JSON.stringify(bad))
+  }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  await expectError(t, a.walletOpStatus(args), 'indisponivel', false, 'money route off: 404 is definite')
 })

@@ -221,7 +221,7 @@ test('C14: a new attempt after recusado or expirado increments and resets', asyn
   c.t += 1000
   t.alike(await store.setKyc({ member: m, status: 'documentos', documentId: 'doc_2' }), { changed: true })
   t.alike(store.get(m).kyc, {
-    status: 'documentos', attempt: 2, attemptId: null, documentId: 'doc_2', selfieId: null, updatedAt: iso(T0 + 2000)
+    status: 'documentos', attempt: 2, attemptId: null, documentId: 'doc_2', selfieId: null, updatedAt: iso(T0 + 2000), previousAttemptIds: ['att_1']
   })
   t.alike(await store.setKyc({ member: m, status: 'recusado', attempt: 1 }), { changed: false }, 'old attempt ignored')
   t.alike(await store.setKyc({ member: m, status: 'pendente', attempt: 2, attemptId: 'att_2' }), { changed: true })
@@ -817,4 +817,66 @@ test('a reverted intent is not brought back by a stale holder; a newer intent be
   await a.setKyc({ member: m, status: 'pendente', attempt: 1 })
   t.is(await old.heal(), false)
   t.is(old.get(m).kyc.status, 'pendente', 'the newer intent wins')
+})
+
+test('previousAttemptIds: an old file without the key stays valid and is not rewritten', async (t) => {
+  const { open, file, c } = setup(t)
+  const m = memberKey()
+  const kyc = { status: 'pendente', attempt: 2, attemptId: null, documentId: 'doc_1', selfieId: 'self_1', updatedAt: iso(T0) }
+  fs.writeFileSync(file, JSON.stringify({ v: 1, members: { [m]: entry({ kyc }) } }))
+  const before = fs.readFileSync(file, 'utf8')
+  const store = open()
+  t.ok(store.available())
+  t.alike(store.get(m).kyc, kyc)
+  t.is(await store.heal(), false, 'no migration write')
+  t.is(fs.readFileSync(file, 'utf8'), before)
+  c.t += 1000
+  await store.setKyc({ member: m, status: 'pendente', attempt: 2, attemptId: 'att_2' })
+  t.absent('previousAttemptIds' in readFile(file).members[m].kyc, 'the key is written only when non-empty')
+})
+
+test('previousAttemptIds: recorded on a new attempt and on a replaced id, bounded to 5, validated', async (t) => {
+  const { store, open, file, c } = setup(t)
+  const m = memberKey()
+  await store.create({ member: m, subAccountId: 'sub_1', network: 'polygon' })
+  for (let i = 1; i <= 7; i++) {
+    await store.setKyc({ member: m, status: 'documentos', documentId: 'doc_' + i, selfieId: 'self_' + i })
+    await store.setKyc({ member: m, status: 'pendente', attemptId: 'att_' + i })
+    c.t += 1000
+    await store.setKyc({ member: m, status: 'recusado' })
+  }
+  await store.setKyc({ member: m, status: 'documentos' })
+  t.alike(store.get(m).kyc.previousAttemptIds, ['att_3', 'att_4', 'att_5', 'att_6', 'att_7'])
+  t.alike(open().get(m).kyc.previousAttemptIds, ['att_3', 'att_4', 'att_5', 'att_6', 'att_7'], 'persisted')
+
+  const n = memberKey()
+  await store.create({ member: n, subAccountId: 'sub_2', network: 'polygon' })
+  await store.setKyc({ member: n, status: 'pendente', attemptId: 'att_a' })
+  await store.setKyc({ member: n, status: 'pendente', attemptId: 'att_b' })
+  t.alike(store.get(n).kyc.previousAttemptIds, ['att_a'])
+  t.is(store.get(n).kyc.attemptId, 'att_b')
+
+  for (const bad of [['x', 'x'], ['a', 'b', 'c', 'd', 'e', 'f'], ['bad id'], 'att_a']) {
+    fs.writeFileSync(file, JSON.stringify({ v: 1, members: { [m]: entry({ kyc: { ...entry().kyc, previousAttemptIds: bad } }) } }))
+    t.absent(open().available(), JSON.stringify(bad))
+  }
+})
+
+test('previousAttemptIds: the merge keeps the union of both copies', async (t) => {
+  const { open, file, c } = setup(t)
+  const a = open()
+  const m = memberKey()
+  await a.create({ member: m, subAccountId: 'sub_1', network: 'polygon' })
+  await a.setKyc({ member: m, status: 'pendente', attemptId: 'att_1' })
+  const b = open()
+  await a.setKyc({ member: m, status: 'pendente', attemptId: 'att_2' })
+  // b never saw att_2; its own replacement must not drop att_1 or att_2.
+  c.t += 1000
+  await b.setKyc({ member: m, status: 'pendente', attemptId: 'att_3' })
+  const k = readFile(file).members[m].kyc
+  t.ok(k.previousAttemptIds.includes('att_1'))
+  t.is(k.attemptId === 'att_2' || k.attemptId === 'att_3', true)
+  const other = k.attemptId === 'att_2' ? 'att_3' : 'att_2'
+  t.ok(k.previousAttemptIds.includes(other), 'the replaced id of the other copy is kept')
+  t.absent(k.previousAttemptIds.includes(k.attemptId), 'the current id is never in the list')
 })
