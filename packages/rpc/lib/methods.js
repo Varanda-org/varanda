@@ -228,6 +228,18 @@ function isPushEndpoint (v) {
   }
 }
 
+// Host controls of the in-app web node (docs/rpc.md 5.35 to 5.41), IPC only.
+// The PRF output is the 32-byte root secret every member key derives from.
+const PRF_RE = /^[0-9a-f]{64}$/
+const CREDENTIAL_ID_RE = /^[\x21-\x7e]{1,1024}$/
+const MEDIA_PATH_MAX = 4096
+const MEDIA_SIDE_MAX = 16384
+
+const isPrf = (v) => typeof v === 'string' && PRF_RE.test(v)
+const isCredentialId = (v) => typeof v === 'string' && CREDENTIAL_ID_RE.test(v)
+const isUserId = (v) => v === '' || isKey(v)
+const isMediaMime = (v) => typeof v === 'string' && L.MEDIA_MIMES.includes(v)
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -453,7 +465,36 @@ const SPECS = {
   'sync.status': { fields: none },
   // IPC only: offered by the in-app worklet (apps/app/worklet/main.js), not
   // by the node session or varanda-serve (docs/rpc.md 5.17).
-  'node.close': { fields: none, mutating: true }
+  'node.close': { fields: none, mutating: true },
+  // IPC only: offered by the in-app web-node worklet, never by the node
+  // session, varanda-serve or the browser page (docs/rpc.md 5.35 to 5.41).
+  // `prf` never appears in a result, an event or a log.
+  'identity.install': {
+    fields: {
+      prf: req(isPrf),
+      credentialId: req(isCredentialId),
+      userId: req(isUserId),
+      rpId: req(str(1, 253)),
+      resumed: req(isBool)
+    },
+    mutating: true
+  },
+  'identity.clear': { fields: none, mutating: true },
+  'identity.status': { fields: none },
+  'identity.reset': { fields: none, mutating: true },
+  'identity.forget': { fields: none, mutating: true },
+  // Only after the host durably stored the session of a non-resumed install:
+  // it lifts the signedOut barrier, which the install itself never does.
+  'identity.sessionSaved': { fields: none, mutating: true },
+  'media.uploadFile': {
+    fields: {
+      path: req(str(1, MEDIA_PATH_MAX)),
+      mime: req(isMediaMime),
+      width: req(int(1, MEDIA_SIDE_MAX)),
+      height: req(int(1, MEDIA_SIDE_MAX))
+    },
+    mutating: true
+  }
 }
 
 const METHODS = Object.freeze(Object.keys(SPECS))
