@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Android 11+ package visibility: lets CustomTabsClient find a browser
+       with Custom Tabs and ask whether it supports Auth Tab. -->
+  <queries>
+    <intent>
+      <action android:name="android.support.customtabs.action.CustomTabsService" />
+    </intent>
+  </queries>
+</manifest>

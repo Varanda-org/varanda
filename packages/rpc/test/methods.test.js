@@ -694,16 +694,25 @@ test('identity.install', (t) => {
 })
 
 test('media.uploadFile', (t) => {
-  const base = { path: '/cache/a.jpg', mime: 'image/jpeg', width: 1, height: 16384 }
+  const base = { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 1, height: 16384 }
   ok(t, 'media.uploadFile', base, base)
   for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...base, mime })
-  ok(t, 'media.uploadFile', { ...base, path: 'p'.repeat(4096) })
+  ok(t, 'media.uploadFile', { ...base, name: 'f'.repeat(32) + '.bin' })
   for (const k of Object.keys(base)) {
     const p = { ...base }
     delete p[k]
     bad(t, 'media.uploadFile', p, 'missing ' + k)
   }
-  for (const path of ['', 'p'.repeat(4097), 1, null]) bad(t, 'media.uploadFile', { ...base, path }, 'bad path')
+  const hex = '0123456789abcdef0123456789abcdef'
+  const names = [
+    '', 1, null, '.bin', hex, hex + '.jpg', hex + '.BIN', hex.toUpperCase() + '.bin',
+    hex.slice(1) + '.bin', hex + '0.bin', '../' + hex.slice(3) + '.bin', '/' + hex.slice(1) + '.bin',
+    hex.slice(0, 16) + '/' + hex.slice(17) + '.bin', '..', hex + '.bin\n', hex + '.bin/', 'g' + hex.slice(1) + '.bin'
+  ]
+  for (const name of names) bad(t, 'media.uploadFile', { ...base, name }, 'bad name')
+  bad(t, 'media.uploadFile', { ...base, path: '/cache/' + base.name }, 'a path is refused')
+  const { name, ...rest } = base
+  bad(t, 'media.uploadFile', { ...rest, path: '/cache/' + name }, 'a path instead of a name is refused')
   for (const mime of ['image/svg+xml', 'IMAGE/JPEG', 'video/mp4', '', 1]) bad(t, 'media.uploadFile', { ...base, mime }, 'bad mime')
   for (const v of [0, 16385, 1.5, -1, '10', null]) {
     bad(t, 'media.uploadFile', { ...base, width: v }, 'bad width')

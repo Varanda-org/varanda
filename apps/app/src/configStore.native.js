@@ -239,9 +239,15 @@ export async function discoverConfig (options = {}) {
 }
 
 // As configStore.web.js fetchDiscovery: the headers classify first and only a
-// 2xx JSON body is read. React Native's fetch has no readable body stream, so
-// a declared length over the cap is refused unread, and the text that is read
-// is measured by hostedOutcome.
+// 2xx JSON body is read. React Native's fetch has no readable body stream and
+// res.text() buffers the whole body, so only a canonical Content-Length within
+// the cap is read; a missing, non-canonical or larger one is refused unread
+// (the installation's Caddy always sends Content-Length for this static
+// file). The text that is read is measured again by hostedOutcome.
+function declaredWithin (length) {
+  return typeof length === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(length) && Number(length) <= MAX_DISCOVERY_BYTES
+}
+
 async function fetchDiscovery (installation, signal) {
   const url = installation + '/varanda.json'
   let res
@@ -265,7 +271,7 @@ async function fetchDiscovery (installation, signal) {
   const result = { kind: 'response', status, contentType, text: '', redirected }
   if (redirected === true || status === 408 || status === 429 || (status >= 500 && status <= 599)) return result
   if (!(status >= 200 && status <= 299) || !/application\/json/i.test(contentType)) return result
-  if (typeof length === 'string' && /^[0-9]+$/.test(length) && Number(length) > MAX_DISCOVERY_BYTES) return { ...result, oversized: true }
+  if (!declaredWithin(length)) return { ...result, oversized: true }
   try {
     return { ...result, text: await res.text() }
   } catch {
