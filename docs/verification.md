@@ -1301,7 +1301,7 @@ None of these was performed for this change.
 
 ### Duty cycle; the Espiadinha keeps its own link (2026-10-27)
 
-Superseded on 2026-10-30 by section 49: the hosted web no longer ends the link when idle (lease off), so the 8 s hold and 45 s gap checks below no longer apply; the Espiadinha part stands.
+Superseded on 2026-10-30 by section 54: the hosted web no longer ends the link when idle (lease off), so the 8 s hold and 45 s gap checks below no longer apply; the Espiadinha part stands.
 
 Scope: the hosted web app with the node in the browser (`packages/web-member`, `apps/app`). The native app, `varanda-serve` and the CLI are unchanged.
 
@@ -2780,7 +2780,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 
 ## 48. Conta de pagamentos opcional: abertura e KYC (feat/hodle-account, 2026-10-30)
 
-As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para as seções 48 e 49.
+As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para a seção 53 e para a próxima etapa.
 
 ### O que mudou
 
@@ -2843,7 +2843,6 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Sem `VARANDA_HODLE_API_KEY`, ninguém vê o recurso.
 - Uma criação cuja resposta se perdeu fica parada até leitura adotável ou limpeza pelo operador.
 - Uma recusa definitiva da Hodle no envio do KYC (por exemplo, um campo que ela não aceita) encerra a tentativa como recusada, e a pessoa refaz documento e selfie.
-- Um envio de KYC da segunda tentativa em diante que perde a resposta e é recusado pela Hodle antes da consulta fica em andamento até o operador conferir na Hodle (registro `kyc-incerto`).
 - Se a gravação do `wallet.json` falhar logo depois de uma recusa da Hodle, a marca de incerteza pode ficar, e a pessoa fica parada até o operador limpar.
 - Dois processos gravando o mesmo `wallet.json` só acontecem depois de perder o lock; nesse caso a mesclagem pode trazer de volta um identificador apagado. O serviço deixa de gravar ao perder o lock.
 - 16 e 17 anos: a barreira é a declaração no opt-in e a data de nascimento conferida pela Hodle no documento.
@@ -3039,9 +3038,112 @@ Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instala�
 - O item no chaveiro dá a identidade a quem tiver o aparelho desbloqueado (ou código rodando dentro do app) até Sair ou 30 dias sem uso. Não vai para backups nem para o iCloud Keychain.
 - No iOS, se a plataforma não aplicar à entrada da PRF o mesmo prefixo "WebAuthn PRF" que o navegador aplica, a chave sai diferente da web: o primeiro passo da verificação humana existe para pegar isso antes de publicar.
 
-## 53. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
+## 52. Rolagem infinita em todas as listas (PR fix/infinite-scroll, 2026-10-30)
 
-As seções 1 a 48 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
+As seções 1 a 47 não mudam.
+
+### O que mudou
+
+- `apps/app/src/ui/RefreshableList.js` não tem mais o "mostrar mais" no estado normal. Uma só função confere o fim da lista (`endStep` em `apps/app/src/paging.js`) ao chegar ao fim, ao rolar, ao mudar o tamanho do conteúdo, ao medir a lista, quando `atEnd`, o carregador ou o erro mudam e quando termina um carregamento ou uma atualização (`spanEnd`). Uma lista mais curta que a tela (que não rola) e uma lista vazia com mais páginas carregam sozinhas.
+- Um pedido de fim que chega enquanto uma página carrega não é mais descartado quando o carregamento termina com os mesmos dados (por exemplo, a leitura silenciosa de A Rua): a lista confere de novo.
+- Uma página pedida pela lista que não mostra nada novo conta como seca. Depois de três seguidas (`AUTO_DRY_MAX`), a lista para e mostra "Nada novo nas últimas páginas." com o botão "carregar mais" (papel de botão, rótulo "carregar mais"), que carrega uma página e recomeça a contagem. Sair da região do fim zera a contagem e a pausa. Uma página que falha continua esperando a pessoa ("tentar de novo" ou sair do fim e voltar).
+- A Rua: a leitura silenciosa durante a sincronização usa `quietNewestPlan`. Uma página cheia que cortaria linhas mostradas não troca a lista e não tira mais a lista do fim (antes, `atEnd: false` fazia a leitura `before` voltar vazia e repetir em laço); ela marca `deep` e `probeOlder`, e a próxima leitura automática (`canSyncRead`, uma vez mesmo sem crescimento) é `loadOlder({ fromSync: true })`, que acrescenta no fim as linhas mais antigas que tiverem chegado. Uma lista cheia ou já paginada sempre lê abaixo da última linha (`syncReadKind`); as mais novas chegam só pela pílula "ver novidades". O espaçamento `FEED_REARM_MS`, o recuo depois de leituras vazias e a regra de nenhuma leitura automática depois de um erro (seção 36) continuam.
+- Diário: sai o limite de cinco páginas sem publicação seguidas e o efeito que as carregava; a lista conduz esses carregamentos, e um Diário vazio com mais páginas também chega ao botão da pausa.
+- Avisos: "ocupado" ao carregar a próxima página vira o erro visível "Os avisos ainda estão carregando. Tente de novo.", com "tentar de novo", em vez de sumir sem nada na tela.
+- A Rua e Avisos só passam o carregador quando ele de fato começaria uma página (fora da primeira carga e com cursor).
+
+### Testes automatizados
+
+- `apps/app/test/paging.test.js`: `nearListEnd` (lista curta está no fim, lista sem medida não), `endStep` (carrega perto do fim; parado no fim, sem carregador e depois de falha; espera ocupado; pausa em três páginas secas), `spanEnd` (fim de um carregamento que a lista não pediu confere de novo; página própria sem nada novo conta seca e a lista pede outra; página com linhas zera; falha não confere), `quietNewestPlan`, `syncReadKind` e `canSyncRead` (a sonda roda uma vez sem crescimento, nunca com erro nem fora do fim). Os testes novos falham com o `paging.js` anterior (as funções não existem; vários também codificam a regra antiga e mostram que ela falha no cenário).
+
+Não há executor de testes de interface no navegador. O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] Lista curta (menos linhas que a tela) com mais páginas, na web e no nativo: a próxima página vem sem rolar e sem botão (não realizada ainda)
+- [ ] Rede cortada no meio da rolagem: a página falha, aparece "tentar de novo" e nada é repetido sozinho até a pessoa tocar ou sair do fim e voltar (não realizada ainda)
+- [ ] Diário cheio de curtidas e outros registros técnicos: a rolagem passa por eles e, depois de três páginas sem publicação, aparece "Nada novo nas últimas páginas." com "carregar mais" (não realizada ainda)
+- [ ] A Rua durante a sincronização: publicações mais antigas que chegam aparecem no fim ao rolar, e as mais novas só pela pílula "ver novidades", sem a lista pular (não realizada ainda)
+- [ ] Espiadinha: as páginas continuam até o fim das rodadas, sem botão (não realizada ainda)
+- [ ] Leitor de tela (TalkBack e VoiceOver): rolar pela lista carrega as próximas páginas, e o botão "carregar mais" da pausa é anunciado como botão (não realizada ainda)
+
+### Limites
+
+- O fim da lista é conferido pelas medidas da própria lista: se a plataforma não informar o tamanho do conteúdo depois de novas linhas, a próxima conferência espera a pessoa rolar.
+- Um carregador que não começa nada quando chamado (sem conexão, uma primeira carga em andamento) é esquecido depois de 1,5 s e a lista confere o fim de novo.
+- A pausa depois de três páginas secas vale por lista: numa lista curta, que não rola, só o botão "carregar mais" ou uma atualização retomam.
+- Em A Rua, uma lista cheia não relê a página mais nova sozinha: as publicações mais novas que chegam dependem da pílula "ver novidades".
+- Um "carregar mais" tocado quando o carregador não começa nada já tira a pausa, então a rolagem automática volta a contar três páginas secas.
+- No Diário, uma página mais antiga cancelada por uma releitura (voltar à aba) conta como página seca; três seguidas pausam a lista.
+- A lista em si (RefreshableList) não tem teste automatizado: só as regras puras de `paging.js` têm. As verificações acima cobrem o componente.
+
+## 53. Conta de pagamentos: saldo, receber e pagar por Pix, taxa da Varanda (feat/hodle-pix, 2026-10-30)
+
+As seções 1 a 47 e 49 a 52 não mudam; a 48 perde o limite da verificação perdida. Esta seção documenta o PR2: saldo, Pix de entrada e de saída, taxa da Varanda, webhook e Termos versão 8.
+
+### O que mudou
+
+- Modos de `VARANDA_HODLE_MODE`, em ordem: `cadastro` (padrão) < `carteira` < `pix`; `completo` vem no próximo PR. A criação da carteira tem o próprio modo: em `cadastro` ela responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". O operador só define `carteira` depois que o Hodle confirmar por escrito que PINs escolhidos pelo membro funcionam em subcontas individuais.
+- Em `pix`: saldo, receber por Pix (inclusive de CPF de outra pessoa) e pagar por Pix. A consulta ao Hodle é a fonte de verdade. O webhook só acelera o estado e nunca cria movimento ou dinheiro. `DISPUTE_*` vira uma marca ao lado do estado.
+- Webhook (`VARANDA_HODLE_WEBHOOK_SECRETS`, lista `EVENTO:hex64`; vazia, a rota responde 404): com `EVENTO:registrar`, só um corpo cujo evento é exatamente `WEBHOOK_TEST` recebe 200 `{}`, sem verificar e sem tocar em armazenamento, e todo outro corpo recebe 401. Com `EVENTO:<hex64>`, toda entrega é verificada, `WEBHOOK_TEST` inclusive.
+- Taxa da Varanda: ordem principal, taxa nova (só quando a resposta da principal diz que o Pix foi concluído; senão fica pendente) e no máximo uma taxa pendente, só de um Pix já concluído (só se as pernas anteriores deram 2xx em menos de 45 s). Como o Pix de saída costuma levar de 30 a 90 s, a taxa em geral é cobrada no próximo envio confirmado com o PIN. Pix que falha ou volta antes de concluir nunca paga taxa. Reserva: para enviar, o saldo precisa cobrir valor, taxa do Hodle, taxa nova e todas as taxas pendentes; a conferência mostra o valor reservado. A troca de moeda não tem taxa da Varanda (`VARANDA_FEE_SWAP_*` diferente de zero recusa a partida); `CRYPTO` mantém a taxa configurável. Nenhuma taxa pendente sai antes da principal. Cada perna é gravada no `wallet-ops.json` antes de sair. Prazo de 30 s por perna. PIN errado ou bloqueado na primeira perna aborta as outras. Estados: `cobrada`, `pendente`, `incerta`. Um 409 de referência existente só conta como cobrada com estado `completed` ou `txHash`. A resposta mostra principal e taxa em separado. Chamadas de dinheiro do app têm prazo de 100 s. A taxa sobre o Pix de entrada está desligada.
+- `wallet-ops.json` (0600): tipo, estado, valor, taxas, id do parceiro, destino mascarado e marca de contestação. Nunca a chave Pix inteira nem o CPF. Linhas finais são apagadas depois de 90 dias, exceto enquanto uma taxa da Varanda ainda puder ser cobrada, uma contestação estiver aberta ou uma revisão de suporte estiver aberta; um Pix de entrada que falhou e ainda está sendo devolvido não conta como finalizado.
+- Corrigido neste PR: um envio de KYC da segunda tentativa em diante que perde a resposta não fica mais em andamento. A lista `previousAttemptIds` separa uma tentativa anterior da nova, e a nova é adotada mesmo já encerrada. `kyc-incerto` agora só aparece quando a consulta achou o id de uma tentativa anterior.
+- Variáveis: `VARANDA_HODLE_MAX_CENTS` (padrão 300000; de 100 a 100000000), `VARANDA_HODLE_WEBHOOK_SECRETS`, `VARANDA_FEE_{TRANSFER,PAYOUT,CRYPTO,DEPOSIT}_{CENTS,BPS}`, `VARANDA_FEE_SWAP_BPS` e `VARANDA_FEE_TREASURY`. `DEPOSIT` deve ficar em zero. Qualquer taxa exige a tesouraria. Taxas são recusadas na partida nos modos `cadastro` e `carteira`, e em `pix` as de transferência, `CRYPTO` e `SWAP`; só `PAYOUT` é aceita. `VARANDA_HODLE_PIN` e `VARANDA_FEE_TREASURY_PIN` com qualquer valor recusam a partida. Webhook: `EVENTO:hex64` ou `EVENTO:registrar`.
+- Termos de Uso e Política de Privacidade versão 8, com novo aceite: cobranças do Pix, CPF de terceiro, taxa do Hodle como cotada, taxa da Varanda (desligada até o operador definir, sempre em reais antes de confirmar, presente no extrato, nenhuma ao receber), taxa cobrada só depois que o Pix é concluído, em geral no próximo envio confirmado com o PIN, nunca cobrada se o Pix falhar ou voltar antes, reserva das taxas pendentes no saldo, Pix concluído e depois devolvido não devolve sozinho uma taxa já cobrada.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela no navegador nem o parecer.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/wallet-ops-store.test.js`
+- `node apps/cli/test/wallet-webhook.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js` (o teste 5 é o e2e de dinheiro e taxa)
+- `node apps/cli/test/account.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/cli/test/deploy.test.js` (variáveis só no serviço `account`)
+- `node apps/cli/test/caddyfile.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Pagar o próprio CPF com R$ 1,00 por Pix: o app mostra valor, taxa do parceiro, taxa da Varanda e total em reais antes do PIN, e o saldo cai pelo total (não realizada ainda).
+2. [ ] Depósito de terceiro: um Pix de outro CPF para a chave da conta chega ao saldo, com o Hodle habilitado para terceiros (não realizada ainda).
+3. [ ] Três PINs errados: o app mostra o bloqueio, nenhuma perna seguinte sai e a tentativa de PIN gasta é uma só por toque (não realizada ainda).
+4. [ ] Matar o serviço no meio de um saque e subir de novo: a operação fica `incerta`, nada é refeito sozinho e o Hodle mostra um único saque para o `externalId` `var-` (não realizada ainda).
+5. [ ] A perna da taxa aparece na tesouraria, com a referência terminada em `:taxa` (não realizada ainda).
+6. [ ] Uma taxa que respondeu `WALLET_BUSY` aparece como `pendente` e é cobrada no envio seguinte que a pessoa confirma com o PIN, nunca por relógio (não realizada ainda).
+7. [ ] Webhook: cadastrar com `EVENTO:registrar`, copiar o segredo, trocar por `EVENTO:<hex64>` e reiniciar. Um corpo que não é `WEBHOOK_TEST` recebe 401 antes da troca, e depois dela toda entrega é verificada (não realizada ainda).
+8. [ ] Sem `VARANDA_HODLE_WEBHOOK_SECRETS`, a rota de webhook responde 404 (não realizada ainda).
+9. [ ] Em `cadastro`, criar a carteira responde 404 e o app mostra que a carteira será liberada em breve (não realizada ainda).
+10. [ ] `wallet-ops.json` tem modo 0600 e não contém chave Pix inteira, CPF nem PIN (não realizada ainda).
+11. [ ] `VARANDA_FEE_DEPOSIT_CENTS` diferente de zero recusa a partida do serviço, e uma taxa sem `VARANDA_FEE_TREASURY` também (não realizada ainda).
+12. [ ] O aceite dos Termos e da Política versão 8 aparece de novo para quem aceitou a versão 7 (não realizada ainda).
+13. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
+14. [ ] Com taxa de `PAYOUT` ligada, pagar por Pix: a taxa nova fica `pendente` enquanto o Pix não for concluído e só é cobrada no envio seguinte confirmado com o PIN, depois do Pix concluído. Um Pix que falha ou volta antes de concluir nunca tem a taxa cobrada (não realizada ainda).
+15. [ ] Com uma taxa pendente, tentar enviar com saldo que cobre valor, taxa do Hodle e taxa nova mas não todas as pendentes: o serviço recusa com saldo insuficiente. Com saldo suficiente, a conferência mostra o valor reservado para taxas pendentes, e esse valor continua no saldo depois do envio (não realizada ainda).
+
+### Limites
+
+- Não há tela de contestação: `DISPUTE_*` só marca a operação.
+- A taxa sobre o Pix de entrada está desligada.
+- Um Pix devolvido não devolve sozinho uma taxa da Varanda já debitada.
+- O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
+- A ida ao ar depende do parecer jurídico, inclusive sobre o Código de Defesa do Consumidor.
+
+## 54. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
+
+As seções 1 a 53 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
 
 ### O que mudou
 

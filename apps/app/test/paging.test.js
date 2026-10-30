@@ -176,3 +176,109 @@ test('empty automatic reads back off with a capped delay', async (t) => {
     t.is(rearmDelay(invalid), FEED_REARM_MS, 'invalid streak uses the initial delay')
   }
 })
+
+test('a list shorter than its viewport is near its end; an unmeasured one is not', async (t) => {
+  const { nearListEnd } = await load()
+  t.is(nearListEnd({ offset: 0, content: 300, layout: 800 }, 0.6), true, 'a short list cannot scroll to reach its end')
+  t.is(nearListEnd({ offset: 0, content: 0, layout: 800 }, 0.6), true, 'an empty list loads too')
+  t.is(nearListEnd({ offset: 0, content: 300, layout: 0 }, 0.6), false, 'no layout yet')
+  t.is(nearListEnd({ offset: 0, content: 5000, layout: 800 }, 0.6), false, 'far from the end')
+  t.is(nearListEnd({ offset: 3800, content: 5000, layout: 800 }, 0.6), true, 'within 0.6 screens of the end')
+})
+
+test('endStep loads near the end and waits, idles or pauses otherwise', async (t) => {
+  const { AUTO_DRY_MAX, endStep } = await load()
+  const base = Object.freeze({ canLoad: true, atEnd: false, failed: false, busy: false, near: true, fired: false, dry: 0 })
+  t.is(AUTO_DRY_MAX, 3)
+  t.is(endStep(base), 'load')
+  t.is(endStep({ ...base, atEnd: true }), 'idle', 'at the end')
+  t.is(endStep({ ...base, canLoad: false }), 'idle', 'no loader')
+  t.is(endStep({ ...base, failed: true }), 'idle', 'a failed page waits for the person')
+  t.is(endStep({ ...base, failed: true, busy: true }), 'idle')
+  t.is(endStep({ ...base, busy: true }), 'wait')
+  t.is(endStep({ ...base, busy: true, fired: true, near: false }), 'wait')
+  t.is(endStep({ ...base, near: false }), 'idle')
+  t.is(endStep({ ...base, fired: true }), 'idle', 'once per end reach')
+  t.is(endStep({ ...base, dry: 2 }), 'load')
+  t.is(endStep({ ...base, dry: 3 }), 'paused', 'three dry pages')
+  t.is(endStep({ ...base, dry: 1, max: 1 }), 'paused')
+})
+
+test('an end reach during a span the list did not start is not dropped', async (t) => {
+  const { spanEnd } = await load()
+  // The old rule: a pending reach was dropped when a span ended on the same
+  // data without a refresh, so a caller's own reload swallowed it.
+  const oldServes = ({ refreshed, sameData }) => !(!refreshed && sameData)
+  t.is(oldServes({ refreshed: false, sameData: true }), false, 'the old rule dropped it')
+  t.alike(spanEnd({ dry: 0, startLen: 10, len: 10, failed: false, refreshed: false, own: false }), { dry: 0, check: 'now' })
+})
+
+test('an own page that shows nothing counts as dry and the list asks again', async (t) => {
+  const { endStep, spanEnd } = await load()
+  const r = spanEnd({ dry: 0, startLen: 10, len: 10, failed: false, refreshed: false, own: true })
+  t.alike(r, { dry: 1, check: 'now' })
+  // The span end re-arms the reach, so the end still in view loads the next page.
+  t.is(endStep({ canLoad: true, atEnd: false, failed: false, busy: false, near: true, fired: false, dry: r.dry }), 'load')
+  // The old list loaded only from FlatList's end reach, which does not come
+  // again for the same content height: nothing loaded.
+  const oldLoadsAgain = ({ contentChanged }) => contentChanged
+  t.is(oldLoadsAgain({ contentChanged: false }), false)
+})
+
+test('three dry pages pause, a page with rows resets, a failure stops checking', async (t) => {
+  const { endStep, spanEnd } = await load()
+  let dry = 0
+  for (let i = 0; i < 3; i++) dry = spanEnd({ dry, startLen: 5, len: 5, failed: false, refreshed: false, own: true }).dry
+  t.is(dry, 3)
+  t.is(endStep({ canLoad: true, atEnd: false, failed: false, busy: false, near: true, fired: false, dry }), 'paused')
+  t.alike(spanEnd({ dry: 2, startLen: 5, len: 9, failed: false, refreshed: false, own: true }), { dry: 0, check: 'layout' })
+  t.alike(spanEnd({ dry: 2, startLen: 5, len: 5, failed: false, refreshed: true, own: false }), { dry: 0, check: 'now' })
+  t.alike(spanEnd({ dry: 2, startLen: 5, len: 3, failed: false, refreshed: true, own: false }), { dry: 0, check: 'layout' })
+  t.alike(spanEnd({ dry: 2, startLen: 5, len: 5, failed: true, refreshed: false, own: true }), { dry: 2, check: 'none' })
+})
+
+test('a quiet newest page keeps the list at its end and probes below it when full', async (t) => {
+  const { quietNewestPlan } = await load()
+  const row = (seq) => ({ author: 'a'.repeat(64), seq })
+  const full = { items: Array.from({ length: 30 }, (_, i) => row(i + 1)) }
+  t.alike(quietNewestPlan(full, 30, [row(40)]), { replace: false, atEnd: true, probeOlder: true, deep: true },
+    'a full page that would cut a shown row')
+  // The old quiet path left the end here, and the before read that followed
+  // found nothing below the list and looped.
+  t.alike(quietNewestPlan({ items: [row(1)] }, 30, [row(9)]), { replace: true, atEnd: true, probeOlder: false, deep: false })
+  t.alike(quietNewestPlan(full, 30, [row(2), row(30)]), { replace: true, atEnd: true, probeOlder: true, deep: false },
+    'a full page holding every shown row replaces and probes')
+})
+
+test('sync reads re-read the newest page only for a short list', async (t) => {
+  const { syncReadKind } = await load()
+  t.is(syncReadKind({ deep: false, probeOlder: false, shown: 12, limit: 30 }), 'newest')
+  t.is(syncReadKind({ deep: false, probeOlder: false, shown: 30, limit: 30 }), 'older', 'the old rule re-read the newest page here')
+  t.is(syncReadKind({ deep: true, probeOlder: false, shown: 3, limit: 30 }), 'older')
+  t.is(syncReadKind({ deep: false, probeOlder: true, shown: 3, limit: 30 }), 'older')
+})
+
+test('a probe below the list runs once without growth, never after an error', async (t) => {
+  const { canSyncRead } = await load()
+  const feed = Object.freeze({
+    loadedAt: 1,
+    atEnd: true,
+    loading: false,
+    loadingMore: false,
+    refreshing: false,
+    loadError: '',
+    moreError: '',
+    syncBase: Object.freeze({ [KEY_A]: 3 }),
+    syncTruncated: 0,
+    probeOlder: true
+  })
+  const same = { [KEY_A]: 3 }
+  t.is(canSyncRead(feed, same, true), true, 'the probe needs no growth')
+  t.is(canSyncRead({ ...feed, probeOlder: false }, same, true), false, 'once done, growth is needed again')
+  t.is(canSyncRead({ ...feed, probeOlder: false }, { [KEY_A]: 4 }, true), true)
+  t.is(canSyncRead({ ...feed, moreError: 'falhou' }, same, true), false)
+  t.is(canSyncRead({ ...feed, loadError: 'falhou' }, same, true), false)
+  t.is(canSyncRead({ ...feed, atEnd: false }, same, true), false, 'never when not at the end')
+  t.is(canSyncRead(feed, same, false), false, 'not shown')
+  t.is(canSyncRead({ ...feed, loadingMore: true }, same, true), false)
+})
