@@ -106,9 +106,10 @@ function endpointOf (sub) {
   return json ? json.endpoint : null
 }
 
-// Read when the Ajustes sheet opens, so the click handler already holds the
-// registration: on Safari any await before subscribe() spends the user
-// activation the permission prompt needs. Never asks for permission.
+// Read when the hosted passkey is unlocked past setup and again when the
+// Ajustes sheet opens, so either tap already holds the registration: on
+// Safari any await before subscribe() spends the user activation the
+// permission prompt needs. Never asks for permission.
 export async function getPushState () {
   const support = pushSupportNow()
   if (support !== 'ok') return { support }
