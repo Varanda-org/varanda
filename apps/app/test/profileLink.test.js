@@ -348,8 +348,8 @@ test('resolveInvite', async (t) => {
 
 test('pt-BR copy', async (t) => {
   const m = await load()
-  t.is(m.inviteCardText(newRec()), '@ana convidou você — entre para seguir')
-  t.is(m.inviteCardText({ username: null, key: A }), 'Alguém convidou você — entre para seguir')
+  t.is(m.inviteCardText(newRec()), '@ana convidou você. Entre para seguir.')
+  t.is(m.inviteCardText({ username: null, key: A }), 'Alguém convidou você. Entre para seguir.')
   t.is(m.followedText({ username: 'ana', changed: true }), 'Agora você segue @ana.')
   t.is(m.followedText({ username: 'ana', changed: false }), 'Você já segue @ana.')
   t.is(m.followedText({ username: null, changed: true }), 'Agora você segue esta pessoa.')

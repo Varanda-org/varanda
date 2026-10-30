@@ -1,10 +1,14 @@
 // iOS/Android: the native app needs no install UI or browser bindings.
 
 const NONE = Object.freeze({ note: 'none', canPrompt: false })
-const INSTALL = Object.freeze({ ...NONE, promptInstall, dismissInstall })
+const INSTALL = Object.freeze({ ...NONE, card: 'none', promptInstall, dismissInstall })
 
 export function getInstall () {
   return NONE
+}
+
+export function getInstallCard () {
+  return 'none'
 }
 
 export function subscribeInstall () {

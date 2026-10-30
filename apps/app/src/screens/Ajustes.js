@@ -15,7 +15,7 @@
 // onTermsReset with the old key so the shell can drop its acceptance too.
 // Instalar o app shows an 'Instalar' button that opens the browser's install
 // dialog whenever the browser offers installation, above a short instruction
-// whose Saiba mais sheet holds the per-browser facts. The button never appears in Samsung Internet, because
+// whose info sheet holds the per-browser facts. The button never appears in Samsung Internet, because
 // Play Protect blocks the app that browser builds.
 // Avisos no aparelho (hosted web only, src/pushClient.web.js): the browser
 // state, the worker ping and the VAPID key are read through the shared store
@@ -38,7 +38,7 @@ import { LEGAL_VERSION } from '../legal'
 import { PUSH_LABEL, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushUiState } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
@@ -389,8 +389,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('instalar')}>
           <Page>
             {install.canPrompt ? <Btn label='Instalar' onPress={() => { install.promptInstall() }} /> : null}
-            <Soft>{SHORT.install}</Soft>
-            <HelpLink doc={HELP.instalar} />
+            <HelpNote doc={HELP.instalar}><Soft>{SHORT.install}</Soft></HelpNote>
           </Page>
         </View>
         <View style={shown('conexao')}>

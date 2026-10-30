@@ -10,7 +10,7 @@ import { Pressable, StyleSheet, Text } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
-import { HelpLink } from '../ui/Help'
+import { HelpNote } from '../ui/Help'
 import { Body, Btn, Card, Label, Page, Soft, Title, colors } from '../ui'
 
 const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
@@ -78,8 +78,7 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
       {!gate && acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
       {!gate && saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
       {!gate && syncLine ? <Soft>{syncLine}</Soft> : null}
-      {!gate && syncState === 'so-aparelho' ? <Soft>{SHORT.termsDeviceOnly}</Soft> : null}
-      {!gate && syncState === 'so-aparelho' ? <HelpLink doc={HELP.termosAparelho} /> : null}
+      {!gate && syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
       <Soft>{REVIEW_NOTE}</Soft>
       <Soft>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
       <LegalDoc doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />

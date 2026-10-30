@@ -2559,15 +2559,147 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Uma lápide de lápide desfaz a primeira na dobra, mas não traz de volta bytes já descartados: o seq aparece sem registro (`malformed`) e os blocos seguintes continuam visíveis.
 - No Hypercore 10 do navegador o `contiguousLength` não é durável depois de `clear`; o nó usa o comprimento presente calculado com `has(i)`, e um par do navegador pode anunciar um intervalo contíguo que cruza um buraco descartado: o pedido desse bloco só expira.
 
-## 43. Pedido para ligar os avisos no aparelho (web hospedada, 2026-10-30)
+## 43. Ajustes de UX: Espiadinha sem rótulos de rodada, ajuda só pelo botão de informação, compartilhar perfil, campo único em Seguindo, aviso abre o perfil, confirmação ao deixar de seguir, cartão de instalação (2026-10-30)
 
-As seções 1 a 42 não mudam.
+As seções 1 a 42 não mudam. Esta seção documenta uma rodada de sete ajustes de interface no app. Nenhum método do RPC, formato de registro ou rota mudou.
+
+### O que mudou
+
+- Espiadinha sem rótulos de rodada: as rodadas continuam (até três publicações por diário), mas a lista não mostra mais os títulos "Nª publicação de cada diário" (`apps/app/src/peek.js`, `apps/app/src/screens/Espiadinha.js`).
+- Ajuda só pelo botão de informação: o link "Saiba mais" deixou de existir; as linhas curtas terminam com um pequeno botão de informação que abre a mesma folha (`apps/app/src/ui/Help.js`, `apps/app/src/help.js` e as telas A Rua, Espiadinha, Seguindo, Avisos, Diário, Identidade, Ajustes, Denunciar, Termos e Busca).
+- Compartilhar perfil: no Diário, "Editar perfil" e "Compartilhar" ficam lado a lado embaixo dos dados do perfil (fora da faixa do topo); "Compartilhar" abre a folha "Compartilhar perfil" com o link, "copiar link" e "compartilhar" (`apps/app/src/screens/Diario.js`).
+- Campo único em Seguindo: "Encontrar pessoas" ("nome, @nome ou código") no lugar do campo "Buscar", da pílula "Buscar" e do campo de código; a classificação da entrada vive em `apps/app/src/followInput.js` (`apps/app/src/screens/Seguindo.js`).
+- Aviso abre o perfil: a linha "começou a seguir você" é um link para o perfil, sem a pílula "Seguir de volta"; o "Seguir" fica no perfil (`apps/app/src/screens/Avisos.js`, `apps/app/src/notices.js`).
+- Confirmação ao deixar de seguir: "Seguindo" abre a folha "Deixar de seguir <nome>?", e só o botão vermelho "Deixar de seguir" envia `follow.remove` (`apps/app/src/ui/FollowPill.js`, `apps/app/src/follow.js`; usado em Seguindo, na busca e em Membro).
+- Cartão de instalação: "Instale o Varanda" aparece uma vez depois do cadastro novo (`apps/app/src/ui/InstallCard.js`, `apps/app/src/install-offer.js`, `apps/app/src/install.web.js`, `apps/app/src/install.native.js`, `apps/app/App.js`).
+
+**Substitui.** As instruções de verificação humana que mandam procurar o link "Saiba mais" (seções 20, 22, 23, 26 e 33) passam a valer para o botão de informação ao fim da mesma linha. A pílula "Seguir de volta" da seção 20 deixa de existir: a linha abre o perfil. A pílula "Buscar" e o campo separado "@nome ou código" da seção 22 (e do acompanhamento da seção 26) viram o campo único "Encontrar pessoas". Os títulos de rodada da Espiadinha (seção 23) não aparecem mais. O "Seguindo" que deixava de seguir com um toque agora pede confirmação. A seção 39 (abertura do app antes do cadastro: splash e cartões de apresentação) continua valendo sem mudança; o cartão de instalação desta seção vem depois do cadastro e é outra coisa.
+
+### Testes automatizados
+
+- `node apps/app/test/peek.test.js`: os testes dos títulos de rodada foram removidos.
+- `node apps/app/test/notices.test.js`: o teste do rótulo "Seguir de volta" foi removido.
+- `node apps/app/test/follow.test.js` (novo): texto e rótulo da confirmação de deixar de seguir.
+- `node apps/app/test/followInput.test.js` (novo): classificação da entrada (nome, @nome, código, código incompleto).
+- `node apps/app/test/install-offer.test.js`: testes novos de `installCard`, de `getCard` e das exportações do módulo nativo.
+- `node apps/app/test/help.test.js`: não mudou.
+
+### Verificação humana (ainda não realizada)
+
+- [ ] A Espiadinha não mostra títulos entre as rodadas.
+- [ ] Cada ponto que tinha "Saiba mais" abre a folha certa pelo botão de informação ao fim da linha.
+- [ ] Diário, "Compartilhar": a folha "Compartilhar perfil" abre com e sem @nome, com a área de transferência recusada (o link fica selecionado) e a engrenagem continua tocável.
+- [ ] Seguindo, campo único: nome, @nome (com e sem resultado que bata, e sem internet), código completo, código incompleto e Enter.
+- [ ] Avisos: o aviso de quem seguiu abre o perfil, e "Seguir" ali tira o aviso na próxima leitura.
+- [ ] A confirmação "Deixar de seguir <nome>?" aparece na lista, na busca e em Membro, e "Cancelar" não envia nada.
+- [ ] O cartão "Instale o Varanda" aparece depois do cadastro no Chrome do Android, no Chrome do computador e no Safari do iPhone; nunca numa recarga, nem para conta existente, nem para conta que volta num aparelho novo.
+- [ ] "Agora não" também silencia a nota "Instalar o Varanda".
+
+### Limites
+
+- O cartão aparece só na carga de página que volta do Google depois do passo "vinculo", e vale também a chave de 30 dias; não há cartão no app nativo. Quem já é membro e vincula o Google em Ajustes › Conta e @nome não o recebe. "Instalar" abre o diálogo do navegador e fecha o cartão.
+- Na web, Escape ou Voltar com a folha de confirmação aberta em Membro também fecha a tela, e nada é enviado.
+
+## 44. Abertura do app: splash animado e espera mínima (feat/animated-splash, 2026-10-30)
+
+As seções 1 a 43 não mudam. Esta seção documenta o splash animado: a cadeira, as letras e "conectando…" cobrem o carregamento e a conexão com o semeador, e a tela Conectar deixa de piscar na web hospedada.
+
+### O que mudou
+
+- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s nas fases de carregamento e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o splash passa a cobrir a fase `connecting` (o tempo nos cartões e nos Termos não conta); depois disso, num nó configurável, a tela Conectar aparece. A busca da configuração (`loading`) não entra nessa conta: ela tem o próprio limite de 8 s. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
+- Coreografia (`apps/app/src/ui/Splash.js`): a cadeira sobe e assenta, as letras de "Varanda" entram uma a uma, e "conectando…" aparece e pulsa. Os números ficam em `apps/app/src/ui/splashMotion.js` (`ENTRANCE_MS = 1180`, `PULSE_MS = 1200`, entre outros). Com "reduzir movimento", tudo vai ao estado final de imediato.
+- Sobreposição na web (`apps/app/public/index.html`): um elemento fixo `#varanda-pre-splash`, desenhado só com CSS e um SVG inline (sem script), antes de o bundle do app carregar. O app o remove quando o splash sai. Uma regra CSS o esconde sozinho depois de 20 s, caso o app nunca monte. Sem JavaScript, ele fica oculto e aparece a frase do `<noscript>`.
+- Por que: na web hospedada `canConfigure` é verdadeiro, então a regra antiga do `App.js` mostrava Conectar enquanto o nó ainda conectava. Agora o splash cobre essa espera.
+
+### Testes automatizados
+
+- `apps/app/test/splashGate.test.js`: o piso de 1,5 s segura as fases de carregamento e, com `gateNext`, qualquer fase antes dos cartões ou dos Termos, a paciência de 10 s conta a partir de `connecting`, tempo que não é número finito conta como zero, depois que Conectar apareceu (`released`) o splash não volta, e os guardas da função pura e da integração no app.
+- `apps/app/test/splashMotion.test.js`: as constantes, a coreografia completa, o "reduzir movimento" que assenta de imediato, e que o módulo continua puro.
+- `apps/app/test/pwa.test.js`, "index.html paints the brand before the bundle runs": a marca e o estilo da sobreposição vêm no HTML antes do bundle do app.
+
+Esses testes cobrem o portão, os números e o HTML. Não cobrem a animação em aparelho real nem a ordem de pintura no navegador: essa parte está na lista abaixo.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] Web hospedada a frio: a cadeira e as letras aparecem antes do app, e nunca a chave nem o endereço do semeador (não realizada ainda).
+2. [ ] PWA instalada com cache quente: a animação termina e não aparece duas vezes (não realizada ainda).
+3. [ ] Rede lenta (3G no DevTools): a marca continua durante a busca da configuração (até 8 s) e depois até a conexão responder ou até 10 s, e só então aparece Conectar (não realizada ainda).
+4. [ ] Falha de descoberta: Conectar aparece na hora (não realizada ainda).
+5. [ ] Falha de conexão: Conectar aparece na hora, com "Detalhes técnicos" (não realizada ainda).
+6. [ ] Conexão presa por 10 s: Conectar aparece (não realizada ainda).
+7. [ ] "Tentar de novo": Conectar continua na tela durante a nova tentativa (não realizada ainda).
+8. [ ] Com o app bloqueado (bundle que não monta), a sobreposição some sozinha em 20 s (não realizada ainda).
+9. [ ] "Reduzir movimento" na web, no iOS e no Android: nada se move (não realizada ainda).
+10. [ ] Leitor de tela anuncia "Varanda, conectando" uma vez (não realizada ainda).
+11. [ ] Passagem da tela de abertura nativa para o splash no iOS e no Android, sem salto nem tela em branco (não realizada ainda).
+12. [ ] Ordem dos cartões e dos Termos da seção 39 inalterada (não realizada ainda).
+13. [ ] JavaScript desligado mostra "Ative o JavaScript para usar o Varanda." (não realizada ainda).
+14. [ ] No nativo com configuração salva, o splash cobre a conexão por até 10 s no lugar do formulário com "conectando…" (não realizada ainda).
+15. [ ] Primeira abertura lenta: com o nó ainda conectando, passar mais de 10 s nos cartões e nos Termos; depois deles volta o splash (com a entrada de novo), e Conectar só aparece se a conexão não responder em mais 10 s (não realizada ainda).
+
+### Limites
+
+- A sobreposição da web não conhece a fase real da conexão. Ela sai quando o app a remove, ou some sozinha em 20 s; se o app montar depois disso, o splash do app toca a entrada e passa a ser o anunciado para leitor de tela.
+- 1,5 s e 10 s são fixos, sem configuração.
+- No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
+- Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
+- No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
+- Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
+
+## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
+
+### O que mudou
+
+- Veio de um relato com print: num iPhone, depois de criar a passkey, o cartão mostrava três avisos seguidos, culpava só o navegador ("Use o Chrome ou o Edge, ou o Safari 18") e não tinha botão; só recarregar a página saía dele.
+- O cartão separa dois casos (`apps/app/src/screens/Identidade.js`, textos em `apps/app/src/passkeyTrouble.js`):
+  - o navegador diz antes de qualquer cerimônia que não consegue (sem WebAuthn, ou `getClientCapabilities` com `extension:prf` falso): "Este navegador não funciona com o Varanda. Use o Chrome, o Edge ou o Safari 18 ou mais novo.", sem botão, como antes;
+  - uma cerimônia devolveu NO_PRF (a passkey foi criada ou escolhida, mas o gerenciador de senhas não entrega o PRF): "Não deu para entrar com essa passkey.", passos numerados e o botão "tentar de novo", que volta ao cartão Entrar.
+- Passkey criada nesta página (Criar ou concluir): apagar a passkey "Varanda xxxxxx", tentar de novo e criar outra salvando nas Senhas da Apple ou no Gerenciador de Senhas do Google, ou abrir no Safari ou no Chrome.
+- O passo de apagar nomeia só passkeys criadas nesta página que falharam, todas, uma vez cada. Ele sobrevive ao "tentar de novo" e a uma falha seguinte em Entrar; depois de uma falha em Entrar o passo seguinte é escolher outra passkey, nunca criar outra.
+- Passkey escolhida em Entrar e não criada aqui: pode ser a passkey da conta, então nunca é nomeada para apagar (antes era). Os passos sugerem tentar de novo (escolhendo outra passkey quando o navegador não guarda nenhuma; com uma guardada, Entrar só oferece aquela e o passo é só "tentar de novo") ou abrir em outro navegador.
+- Criação em dois passos (o PRF só chega no "concluir"): se o "concluir" falha sem PRF, o cartão sai do estado "concluir", porque o nó descarta a criação pendente e "tentar de novo" levaria a um "concluir" que só falharia. Uma falha de "Criar passkey" (outra passkey) não mexe na criação pendente. Se a falha vem de uma passkey escolhida em Entrar, a criação pendente pode continuar viva (outra passkey) ou ter sido descartada (a mesma), e a tela não sabe qual: o cartão mantém "concluir" e mostra também "Criar passkey" (achados das revisões do codex e do grok).
+- Com convite, o passo de abrir em outro navegador sai, porque o convite já diz isso com o link.
+- O texto do convite perdeu o travessão: "@nome convidou você. Entre para seguir." (`apps/app/src/profileLink.js`).
+- A cerimônia, o nó e o que fica guardado não mudaram. O nó já deixava a passkey que falhou fora da próxima criação (`packages/web-member/web/node.js`, `noteUnusable`).
+
+### Testes automatizados
+
+- Novo: `apps/app/test/passkeyTrouble.test.js` (rótulo da passkey, uma ou várias passkeys nomeadas sem repetir, ids inválidos ignorados, numeração, passo omitido com convite, passkey escolhida nunca nomeada para apagar nem recriada, sem travessão e sem o id inteiro).
+- Atualizado: `apps/app/test/profileLink.test.js` (texto do convite).
+
+Resultados (2026-10-30, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em 219 arquivos de teste (já sobre a main com #234 e #235); `npm run demo` termina com "DEMO OK". `apps/app/test/passkeyTrouble.test.js`: 5 testes, 60 asserções. Numa rodada anterior, com auditorias rodando testes ao mesmo tempo, `packages/web-member/test/e2e-delete-purge.test.js` falhou uma vez ("every photo block is cleared on the seeder": `[false, true, true]` em vez de `[false, false, false]`); sozinho, passou duas vezes (34/34), e a rodada completa seguinte passou. Esse pacote não foi alterado. Não rodado no Node 20.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] iPhone com um gerenciador de senhas de terceiros ligado: criar a passkey salvando nele mostra "Não deu para entrar com essa passkey.", os passos e "tentar de novo" (não realizada ainda).
+- [ ] Na mesma página, "tentar de novo" e criar salvando nas Senhas da Apple entra; o cartão não volta (não realizada ainda).
+- [ ] Duas falhas seguidas nomeiam as duas passkeys no passo 1 (não realizada ainda).
+- [ ] Criação em dois passos que falha no "concluir": "tentar de novo" mostra "Criar passkey", não "concluir" (não realizada ainda).
+- [ ] Criação em dois passos pendente e outra passkey sem PRF escolhida em Entrar: "tentar de novo" mostra "concluir" e "Criar passkey", e "concluir" ainda entra (não realizada ainda).
+- [ ] Escolher em Entrar uma passkey sem PRF que não foi criada nesta página mostra os passos sem "Apague" (não realizada ainda).
+- [ ] Criar falha, "tentar de novo", Entrar com a mesma passkey falha: o passo "Apague" continua nomeando-a (não realizada ainda).
+- [ ] Navegador embutido (Instagram) com link de convite continua mostrando o caso do navegador, o convite e copiar/compartilhar (não realizada ainda).
+
+### Limites que sobram
+
+- A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
+- Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
+- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
+
+## 46. Pedido para ligar os avisos no aparelho (web hospedada, 2026-10-30)
+
+As seções 1 a 45 não mudam.
 
 ### O que mudou
 
 - A web hospedada mostra a nota "Receber avisos neste aparelho", com Ativar e fechar, sob a barra do topo, no mesmo lugar e com a mesma aparência de "Instalar o Varanda", abaixo de "Sem internet". Vale em todo navegador onde Web Push funciona, inclusive de mesa, só para um membro com a identidade desbloqueada e depois dos termos, da idade e da configuração inicial.
 - Ativar abre diretamente o pedido de permissão do navegador. Nada é aguardado antes de `pushManager.subscribe()`: `enablePush` começa de forma síncrona, antes de avisar qualquer listener. O estado mostrado vem de `pushStateAfter` aplicado sobre uma leitura nova depois do passo.
-- A nota fica escondida fora da web hospedada, sem suporte, sem chave VAPID, com permissão negada ou desconhecida, com os avisos já ligados, com estado desconhecido, com worker antigo ou sem registro do service worker. Também fica escondida quando foi fechada nos últimos 30 dias (`varanda-push-dismissed`) ou enquanto "Instalar o Varanda" ou "Nova versão disponível." aparece.
+- A nota fica escondida fora da web hospedada, sem suporte, sem chave VAPID, com permissão negada ou desconhecida, com os avisos já ligados, com estado desconhecido, com worker antigo ou sem registro do service worker. Também fica escondida quando foi fechada nos últimos 30 dias (`varanda-push-dismissed`) ou enquanto "Nova versão disponível.", o cartão de instalação depois do cadastro (seção 43) ou a nota "Instalar o Varanda" aparece, nessa ordem.
 - Ajustes e a nota dividem o mesmo estado em `apps/app/src/push-offer.js`, por meio de `apps/app/src/usePush.web.js`. Sair e Recomeçar continuam desligando os avisos primeiro, com o limite da troca em andamento descrito na seção 38.
 - O estado é lido de novo quando a conexão volta, e qualquer bloqueio da identidade apaga o que foi lido.
 - Uma troca de cada vez no navegador, mesmo depois de Sair e entrar de novo: a inscrição é do navegador, e duas trocas ao mesmo tempo poderiam desfazer uma à outra. Quando uma troca começada em outra sessão termina, o estado é lido de novo antes de liberar a linha e a nota.

@@ -1,3 +1,4 @@
+/* global document */
 // The app shell: before anything else the Termos de Uso and Política de
 // Privacidade gate (src/terms.js: per member, per version; nothing renders
 // behind it and autosync, the outbox and a profile invite wait for it; a
@@ -13,8 +14,8 @@
 // neste aparelho' note in the same slot (hosted web, every browser where Web
 // Push works, desktop included, src/usePush; one tap goes straight to the
 // browser's permission prompt; its close is remembered for 30 days; at most
-// one of the release note, the install note and the push note shows, in that
-// order, so the push note waits while an earlier one shows), the publish
+// one of the release note, the install card or note and the push note shows,
+// in that order, so the push note waits while an earlier one shows), the publish
 // button and the sheets (Publicar, Ajustes). Sync is automatic and silent: this shell
 // owns the intent (node.setAutoSync) and nothing else in the UI starts or
 // stops a run; its details live in Ajustes → Sincronização. Above the tabs a
@@ -34,8 +35,9 @@
 // /?aviso=... at load or as a worker message: held in memory only, it opens
 // Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
 // for the key it names; nothing is written, followed or retried.
-// A splash shows while the app loads; the intro cards (src/intro.js) follow
-// once per device, before the Termos.
+// A splash holds a short minimum while the app loads and, on the web, covers
+// the node's connection; the intro cards (src/intro.js) follow once per device,
+// before the Termos.
 // The age gate (hosted web only, src/age.js) holds every member, linked or
 // not, at 'Confirme sua idade' until the account service answers
 // 'verificado'; it fails closed while the policy or the result is unknown,
@@ -63,11 +65,13 @@ import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } fro
 import { useTerms } from './src/useTerms'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, coverConnecting, holdSplash } from './src/splashGate'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
+import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
@@ -188,6 +192,16 @@ function Member () {
   const { width } = useWindowDimensions()
   const install = useInstall()
   const push = usePush()
+  const bootAt = useRef(Date.now()).current
+  const connectingAt = useRef(null)
+  const released = useRef(false)
+  const [, bumpSplash] = useState(0)
+  // A timer can fire a few ms before Date.now() reaches the threshold; the
+  // slack makes the re-render see it passed, since nothing re-arms the timer.
+  useEffect(() => {
+    const t = setTimeout(() => bumpSplash((n) => n + 1), SPLASH_MIN_MS + 50)
+    return () => clearTimeout(t)
+  }, [])
   const [updateReady, setUpdateReady] = useState(false)
   const [updateDismissed, setUpdateDismissed] = useState(false)
   useEffect(() => {
@@ -703,6 +717,24 @@ function Member () {
   useEffect(() => { if (pushMember !== null && node.online !== false) readPush(pushMember) }, [pushMember, node.online])
   useEffect(() => { if (locked) readPush(null) }, [locked])
 
+  // Offered once, right after a signup on this page load. LINK_RETURN alone
+  // also covers an existing member linking Google from Ajustes > Conta, so the
+  // signup signal is 'vinculo' with a node.info that has been read and holds no
+  // certificate: while info is still null the step machine shows 'vinculo' for
+  // that member too. Dismissing also quiets the top-bar note for 30 days. The
+  // Ajustes > Conta sheet the linkReturnRef effect may open on this load can
+  // cover the card for a moment.
+  const signupRef = useRef(false)
+  const certMissing = info !== null && info.memberCert !== true
+  useEffect(() => { if (LINK_RETURN && step === 'vinculo' && certMissing) signupRef.current = true }, [step, certMissing])
+  const [installCardOpen, setInstallCardOpen] = useState(false)
+  useEffect(() => {
+    if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
+      signupRef.current = false
+      setInstallCardOpen(true)
+    }
+  }, [setupStep, step, install.card])
+
   // 'Um instante': the cache retries the own key while it is unknown, and
   // after SLOW_LOOKUP_MS the person may continue without a name.
   const loadingProfile = step === 'carregando'
@@ -1134,7 +1166,20 @@ function Member () {
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
+  const gateNext = (introState === 'show' && !LINK_RETURN && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  // The 10 s patience counts only while the splash is what covers the
+  // connect, never while the intro cards or the terms are on screen.
+  const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
+  useEffect(() => {
+    if (!coveringConnect) return
+    if (connectingAt.current === null) connectingAt.current = Date.now()
+    if (!node.canConfigure || released.current) return
+    const remaining = Math.max(0, CONNECT_PATIENCE_MS - (Date.now() - connectingAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [coveringConnect, node.canConfigure])
   if (decision === 'loading' || introState === 'loading') return splash
+  if (holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })) return splash
   if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {
     return (
@@ -1146,8 +1191,11 @@ function Member () {
   }
 
   if (!ready && !seen) {
-    // loading, connecting, the native Conectar form, or a web error.
-    if (node.phase === 'loading' || (node.phase === 'connecting' && !node.canConfigure)) return splash
+    // The splash covers loading and connecting, also on the hosted page.
+    // A failure or 10 s connecting on a configurable node reveals Conectar;
+    // later retries stay there so its local state survives.
+    if (coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })) return splash
+    released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
@@ -1291,9 +1339,11 @@ function Member () {
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed
           ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
-          : install.note !== 'none'
-            ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} />
-            : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false} /> : null}
+          : installCardOpen && install.card !== 'none'
+            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+            : install.note !== 'none'
+              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} />
+              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
@@ -1352,6 +1402,7 @@ function Member () {
               refresh={version + avisosReload}
               ownKey={ownKey}
               onOpenThread={openThread}
+              onOpenMember={openMember}
               scrollToTop={scrollSignal.avisos}
               onFollowsChanged={followsChanged}
               onToast={showToast}
@@ -1471,6 +1522,12 @@ function Member () {
 
 export default function App () {
   useEffect(() => { loadIcons().catch(() => {}) }, [])
+  // The gate build never mounts Splash, which is what normally removes the overlay.
+  useEffect(() => {
+    if (!GATE_URL || typeof document === 'undefined') return
+    const shell = document.getElementById('varanda-pre-splash')
+    if (shell) shell.remove()
+  }, [])
   if (GATE_URL) {
     const GateScreen = require('./src/gate/GateScreen').default
     return (
