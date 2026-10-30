@@ -1168,3 +1168,191 @@ test('connections: one at a time, protocol errors close, a closed session refuse
   t.is(closed.code, 'LOCKED')
   t.is(closed.message, 'sessão encerrada')
 })
+
+test('follow.list reads the kv area without preempting a continuous run', async (t) => {
+  await testnet(t)
+  const { web } = await certified(t, { syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const K = 'cd'.repeat(32)
+  await web.request('follow.add', { key: K })
+  const { runId } = await web.request('sync.start', {})
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  const from = web.events.length
+  t.alike(await web.request('follow.list', {}), { follows: [K], total: 1 })
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted'), 'the run was not preempted')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same run is live')
+  await web.request('sync.stop')
+})
+
+test('follow.list after a follow.add sent before it lists the new follow', async (t) => {
+  await testnet(t)
+  const { web } = await certified(t)
+  const K = 'ef'.repeat(32)
+  const [added, list] = await Promise.all([
+    web.request('follow.add', { key: K }),
+    web.request('follow.list', {})
+  ])
+  t.is(added.changed, true)
+  t.alike(list, { follows: [K], total: 1 }, 'the list ran after the add (arrival order)')
+})
+
+test('peek.read with the own key cached does not wait behind a gated write', async (t) => {
+  await testnet(t)
+  const { web } = await setup(t, { writeGate: true, writeGateTimeoutMs: 3000, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  await web.request('identity.create') // caches the own key
+  const order = []
+  const write = errorOf(web.request('post.create', { text: 'retida pelo portão' })).then((err) => { order.push('post.create'); return err })
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  const [writeErr, peekErr] = await Promise.all([write, peek])
+  t.is(peekErr && peekErr.message, 'sem conexão com o semeador', 'the peek failed on the dead port')
+  t.is(writeErr && writeErr.message, 'sincronize com o semeador antes de publicar')
+  t.alike(order, ['peek.read', 'post.create'], 'the peek settled while the write held the chain')
+})
+
+test('peek.read during a reset runs after it, never with the old identity', async (t) => {
+  await testnet(t)
+  let sockets = 0
+  const { node, web } = await certified(t, {
+    createSocket: (url) => {
+      sockets++
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+  const before = sockets
+  const order = []
+  const resetting = node.reset().then(() => { order.push('reset') })
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  const [, err] = await Promise.all([resetting, peek])
+  t.alike(order, ['reset', 'peek.read'])
+  t.is(err && err.code, 'NOT_FOUND')
+  t.is(err && err.message, 'identidade não encontrada')
+  t.is(sockets, before, 'no link was opened')
+})
+
+test('peek.read on a fresh session resolves the own key on the chain', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const { web } = await setup(t, { storage, assoc, keyPair })
+  const err = await errorOf(web.request('peek.read', {}))
+  t.is(err && err.code, 'USAGE', 'the lookup found the key and the read reached the dead port')
+  t.is(err && err.message, 'sem conexão com o semeador')
+})
+
+test('regression: a setKeyPair queued right behind a cold peek.read lookup does not fail it with NOT_FOUND', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const port = await deadPort()
+  const session = createBrowserSession({
+    storage,
+    association: assoc.hex,
+    seederUrl: 'ws://127.0.0.1:' + port + '/seeder',
+    createSocket: (url) => {
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+  t.teardown(() => session.close(), { force: true })
+  // Called on the session directly, so the lookup is queued (cold cache)
+  // before setKeyPair queues behind it and clears the key it cached.
+  const peek = errorOf(session.handlers['peek.read']({ limit: 10 }))
+  const unlocking = session.setKeyPair(keyPair)
+  const [err] = await Promise.all([peek, unlocking])
+  t.is(err && err.message, 'sem conexão com o semeador', 'the read reached the dead port')
+  t.is(err && err.code, 'USAGE')
+})
+
+test('regression: setKeyPair ends a peek.read already in flight at once, not behind the chain', async (t) => {
+  await testnet(t)
+  // Accepts TCP and never answers the upgrade: every link hangs.
+  const held = []
+  let connected = 0
+  let onConnection = null
+  const silent = net.createServer((sock) => {
+    held.push(sock)
+    connected++
+    if (onConnection !== null) onConnection()
+  })
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const sock of held) sock.destroy()
+    return new Promise((resolve) => silent.close(() => resolve()))
+  }, { force: true })
+  const connections = (n) => new Promise((resolve) => {
+    onConnection = () => { if (connected >= n) resolve() }
+    onConnection()
+  })
+  const { node, web, keyPair } = await setup(t, {
+    writeGate: true,
+    writeGateTimeoutMs: 3000,
+    seederUrl: 'ws://127.0.0.1:' + silent.address().port + '/seeder'
+  })
+  await web.request('identity.create') // caches the own key
+  const order = []
+  const peek = errorOf(web.request('peek.read', {})).then((err) => { order.push('peek.read'); return err })
+  await connections(1) // the peek's own link
+  const write = errorOf(web.request('post.create', { text: 'retida pelo portão' })).then((err) => { order.push('post.create'); return err })
+  await connections(2) // the write gate's run holds the chain
+  const unlocking = node.setKeyPair(keyPair)
+  const [peekErr] = await Promise.all([peek, write, unlocking])
+  t.ok(peekErr, 'the peek of the previous identity was ended')
+  t.alike(order, ['peek.read', 'post.create'], 'ended at the call, not after the gated write')
+})
+
+test('regression: a reset called in the same turn as a cached-key peek.read is not missed', async (t) => {
+  await testnet(t)
+  const held = []
+  let connected = 0
+  let onConnection = null
+  const silent = net.createServer((sock) => {
+    held.push(sock)
+    connected++
+    if (onConnection !== null) onConnection()
+  })
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const sock of held) sock.destroy()
+    return new Promise((resolve) => silent.close(() => resolve()))
+  }, { force: true })
+  const storage = memoryNodeStorage()
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const session = createBrowserSession({
+    storage,
+    association: assoc.hex,
+    seederUrl: 'ws://127.0.0.1:' + silent.address().port + '/seeder',
+    createSocket: (url) => {
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    },
+    writeGate: true,
+    writeGateTimeoutMs: 3000
+  })
+  t.teardown(() => session.close(), { force: true })
+  await session.setKeyPair(keyPair)
+  await session.handlers['identity.create']({}) // caches the own key
+  const write = errorOf(session.handlers['post.create']({ text: 'retida pelo portão' }))
+  await new Promise((resolve) => {
+    onConnection = () => { if (connected >= 1) resolve() }
+    onConnection()
+  }) // the write gate's run holds the chain
+  // Same turn: the reset is called while the peek's lookup has returned
+  // but its dispatch has not run yet.
+  const peek = errorOf(session.handlers['peek.read']({ limit: 10 }))
+  const resetting = session.reset()
+  const [err] = await Promise.all([peek, resetting, write])
+  t.is(err && err.message, 'identidade não encontrada', 'the peek ran after the reset')
+  t.is(connected, 1, 'no peek link was opened for the old identity')
+})

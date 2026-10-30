@@ -10,10 +10,15 @@
 // Rules (as lib/session.js):
 // - Handlers run strictly one at a time, in arrival order (one promise chain).
 // - Every member operation opens the own diary, and a running sync holds it
-//   open: before any operation that opens a core, a running sync is aborted
-//   and awaited; a continuous run is restarted afterwards with a new runId
-//   (sync.stopped 'preempted', then sync.started). Two Hypercore instances
-//   on the same storage would corrupt it, so this is not optional here either.
+//   open. Two Hypercore instances on the same storage would corrupt it, so
+//   a core is never opened twice: a read that opens cores (feed.read,
+//   log.read, profile.read, engagement.read, the notices own-diary read) is
+//   served from the live run's cores while a run exists (withCores, web
+//   only; the run keeps going, same runId), and opens and closes the storage
+//   itself when none does. Only writes, and reads the run cannot serve,
+//   preempt: a running sync is aborted and awaited first; a continuous run
+//   is restarted afterwards with a new runId (sync.stopped 'preempted',
+//   then sync.started).
 // - Configuration (association, seeder address) is fixed here and checked
 //   before anything touches the storage or the network. There is no DHT, so
 //   node.info reports publicDht false.
@@ -116,10 +121,11 @@
 // (./sync.js header: inventory complete and not timed out, no unmet goal,
 // no failing follow; mediaPending while an own media core with blocks is
 // not confirmed pushed). Once a user's continuous run has been settled for
-// leaseHoldMs, counted ACROSS the preemptions of member reads (a
-// profile.read per second must not keep the link up forever: the clock is
-// kept while a run ends 'preempted' and its successor settles again, and
-// reset by an unsettled report or by any other end), with every media
+// leaseHoldMs, counted ACROSS the preemptions of writes and fold restarts
+// (the clock is kept while a run ends 'preempted' and its successor
+// settles again, and reset by an unsettled report or by any other end; a
+// read served on the run's cores neither ends nor extends it, so a
+// profile.read per second does not keep the link up), with every media
 // core confirmed or leaseMediaMaxMs elapsed waiting for one, and while no
 // borrow holds it (borrow(fn): a counter for the readers of the live link,
 // today diary.peek; the hold waits for it, never past LEASE_BORROW_MAX_MS
@@ -179,12 +185,15 @@
 // sync link, which announced the member's diary and follows, would let the
 // seeder bind that browsing to the member (privacy over capacity). It
 // neither borrows nor holds the lease.
-// Unlike every other read it is NOT run inside withStore and does not
-// preempt a running sync: it opens no storage core (the preemption exists
-// only because two Hypercore instances on one storage corrupt it) and a page
+// Unlike the other reads it is NOT run inside withStore or withCores and
+// does not wait for a running sync: it opens no storage core (the
+// preemption exists only because two Hypercore instances on one storage
+// corrupt it) and a page
 // may take up to 25 s, which must not block the serial chain. Only the
-// own-key lookup runs on the chain. One peek at a time ('espiadinha já em
-// andamento'); detach, close, reset and setKeyPair abort a running one.
+// own-key lookup runs on the chain, and only while the key is not cached
+// or an identity change (reset, setKeyPair, clearKeyPair) is pending. One
+// peek at a time ('espiadinha já em andamento'); detach, close, reset and
+// setKeyPair abort a running one.
 //
 // Notices (web only, docs/rpc.md 5.28): notices.list is answered by
 // ./notices.js like peek.read (own short-lived link, memory cores, nothing
@@ -193,9 +202,9 @@
 // em andamento'), aborted with the peek. Against a seeder that speaks
 // 'varanda/notices/2' the read checks replies, quotes and mentions against
 // the own diary: one own-diary read per poll, on the serial chain inside
-// withStore (it may preempt a sync like any read), skipped while the diary
-// length is unchanged (noticeCtxCache, forgotten on lock, reset, setKeyPair
-// and close). The link itself still opens no storage core, and a v1 read
+// withCores (served on a live run's cores like the other reads), skipped
+// while the diary length is unchanged (noticeCtxCache, forgotten on lock,
+// reset, setKeyPair and close). The link itself still opens no storage core, and a v1 read
 // never reads the own diary.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -449,6 +458,11 @@ function createBrowserSession ({
   // append-only, so only `memberCert: true` is cached).
   let ownKey = null
   let certKnown = false
+  // Identity changes (reset, setKeyPair, clearKeyPair) called and not yet
+  // settled: counted synchronously on the call, before they queue, so a
+  // peek.read / notices.list arriving while one waits on the chain (ownKey
+  // still set) takes the chain too and runs after it.
+  let identityPending = 0
   let diaryInfo = null // { publicKey, legacy } once the stored diary was looked at
   // The identity key pair and this device's media key pair (session-owned
   // copies, zero-filled together when cleared).
@@ -518,13 +532,7 @@ function createBrowserSession ({
     association: cfg.association,
     seederUrl: cfg.seederUrl,
     createSocket,
-    // peek.read already resolved the key on the serial chain. A cache miss
-    // means setKeyPair/reset aborted it: reject without reopening storage
-    // through requireOwnKey/identity outside that chain.
-    ownKey: () => {
-      if (ownKey === null) throw new Error('identidade não encontrada')
-      return ownKey
-    },
+    ownKey: cachedOwnKey,
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
   })
@@ -536,7 +544,7 @@ function createBrowserSession ({
     association: cfg.association,
     seederUrl: cfg.seederUrl,
     createSocket,
-    ownKey: () => requireOwnKey(),
+    ownKey: cachedOwnKey,
     sign: (payload, own) => {
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
@@ -573,7 +581,16 @@ function createBrowserSession ({
     const { signal, abort } = createAbort()
     // leased: a user's continuous run under the lease; settled: its last
     // readiness report; leaseTimer: the hold.
-    const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null }
+    const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null, ready: null }
+    // The run's reader (withCores): `ready` settles with the api the run
+    // publishes, or null once it withdraws it or ends without publishing.
+    // Fresh per run, so a read never borrows a previous run's cores.
+    let publish
+    r.ready = new Promise((resolve) => { publish = resolve })
+    const reader = {
+      set (api) { publish(api) },
+      clear () { publish(null) }
+    }
     run = r
     send('sync.started', { runId, once }, epoch)
     if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
@@ -592,6 +609,7 @@ function createBrowserSession ({
           once,
           timeoutMs: once ? timeoutMs : undefined,
           peeker: diaryPeeker,
+          reader,
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -696,6 +714,9 @@ function createBrowserSession ({
         restartWhenIdle(0)
       }
     })()
+    // Settled once here, not raced per read: a race on r.done for every
+    // read would keep one callback per read alive until the run ends.
+    r.done.then(reader.clear, reader.clear)
     return r
   }
 
@@ -816,6 +837,30 @@ function createBrowserSession ({
   async function withStore (fn) {
     if (run !== null) await stopRun('preempted')
     return fn(ctx())
+  }
+
+  // A read that opens cores: while a run exists it is served on the run's
+  // own cores (ctx.cores, held so teardown waits for it), never a second
+  // instance and without stopping the run, the lease or its clocks; only a
+  // read the run cannot serve (member-ops NEEDS_EXCLUSIVE) falls back to
+  // withStore and preempts. The hold is released before that fallback:
+  // stopRun waits for every hold, ours included.
+  async function withCores (fn) {
+    const r = run
+    if (r === null) return withStore(fn)
+    const api = await r.ready
+    if (api === null || !api.hold()) {
+      await r.done
+      return withStore(fn)
+    }
+    try {
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica } })
+    } catch (err) {
+      if (!member.isNeedsExclusive(err)) throw err
+    } finally {
+      api.release()
+    }
+    return withStore(fn)
   }
 
   // ---- the write gate and the push ----
@@ -1039,6 +1084,43 @@ function createBrowserSession ({
     if (r.publicKey !== null) ownKey = r.publicKey
     if (r.memberCert) certKnown = true
     return r
+  }
+
+  // The own key for code running off the chain (the peeker, the noticer):
+  // peek.read / notices.list resolved it before starting them, so a miss
+  // means reset/setKeyPair intervened. Never identity()/withStore, which
+  // would open storage outside the chain.
+  function cachedOwnKey () {
+    if (ownKey === null) throw new Error('identidade não encontrada')
+    return ownKey
+  }
+
+  // The own-key lookup of peek.read / notices.list: the chain only while
+  // the key is not cached or an identity change is pending. Again after
+  // each pass: an identity change queued right behind a cold lookup clears
+  // the key it just cached. Every pass runs after the changes counted when
+  // it was queued, so this ends; a real NOT_FOUND propagates.
+  async function lookupOwnKey (params) {
+    while (lookupWanted()) await serial(async () => requireOwnKey())(params)
+  }
+
+  function lookupWanted () {
+    return !closed && (ownKey === null || identityPending > 0)
+  }
+
+  // An identity change counted in identityPending until it settles. With
+  // `abort`, a peek or notices read already past lookupOwnKey belongs to the
+  // previous identity and is ended now, as detach does: its own job may wait
+  // behind a busy chain while that read goes on off the chain.
+  function identityChange (p, { abort = false } = {}) {
+    identityPending++
+    if (abort) {
+      peeker.abort()
+      peeking = null
+      noticer.abort()
+      noticing = null
+    }
+    return p().finally(() => { identityPending-- })
   }
 
   async function requireOwnKey () {
@@ -1336,7 +1418,7 @@ function createBrowserSession ({
     // Which of the refs the own diary likes / reposts; local data only,
     // works locked (as profile.read).
     'engagement.read': serial(async ({ refs }) => {
-      const r = await withStore((c) => member.engagementRead(c, { refs }))
+      const r = await withCores((c) => member.engagementRead(c, { refs }))
       return { liked: r.liked, reposted: r.reposted }
     }),
 
@@ -1360,13 +1442,16 @@ function createBrowserSession ({
       return { changed: r.changed, followCount: r.follows.length }
     }),
 
+    // On the chain (an add/remove that arrived first is listed), but not in
+    // withStore: kv reads only, no core opened, so a run is not stopped; a
+    // concurrent fold write is one JSON write, read old or new.
     'follow.list': serial(async ({ offset, limit }) => {
-      const { follows } = await withStore((c) => member.followList(c))
+      const { follows } = await member.followList(ctx())
       return { follows: follows.slice(offset, offset + limit), total: follows.length }
     }),
 
     'log.read': serial(async ({ author, limit, before }) => {
-      const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
+      const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
       // The window ends at `before` (exclusive), clamped to the length.
       const end = before === undefined ? all.length : Math.min(before, all.length)
@@ -1386,7 +1471,7 @@ function createBrowserSession ({
     }),
 
     'feed.read': serial(async ({ limit, before }) => {
-      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
+      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
@@ -1403,7 +1488,7 @@ function createBrowserSession ({
 
     // Local data only, works locked (docs/rpc.md 5.21).
     'profile.read': serial(async ({ authors }) => {
-      const r = await withStore((c) => member.profileRead(c, { authors }))
+      const r = await withCores((c) => member.profileRead(c, { authors }))
       return { profiles: r.profiles, missing: r.missing }
     }),
 
@@ -1412,8 +1497,11 @@ function createBrowserSession ({
     // reads kv and fetches into memory cores over its own link), so it has
     // no reason to preempt a running sync, and a page may take up to 25 s,
     // which must not hold every other request on the chain. Only the
-    // own-key lookup runs serialized (NOT_FOUND 'identidade não encontrada'
-    // as the other reads; it may preempt once when the key is not cached).
+    // own-key lookup may run serialized (NOT_FOUND 'identidade não
+    // encontrada' as the other reads), and only while the key is not cached
+    // or an identity change is pending (lookupOwnKey): then it may preempt
+    // once and runs after that change. A cached key skips the chain, so a
+    // write waiting on its gate does not hold the Espiadinha.
     // One at a time: the check runs BEFORE anything starts and the promise
     // of a refused call is never tracked.
     // The connection epoch is captured on arrival: a client that detached
@@ -1424,7 +1512,10 @@ function createBrowserSession ({
       const epoch = connection
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       if (peeking !== null) throw rpcError('USAGE', PEEK_BUSY)
-      await serial(async () => requireOwnKey())(params)
+      // Checked again after the await, in the same turn as the dispatch: an
+      // identity change called meanwhile found no read to abort.
+      do await lookupOwnKey(params)
+      while (lookupWanted())
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
       if (peeking !== null) throw rpcError('USAGE', PEEK_BUSY)
@@ -1443,8 +1534,8 @@ function createBrowserSession ({
 
     // Notices (docs/rpc.md 5.28), works only unlocked (the link's proof is
     // signed by the identity key). Shaped like peek.read: not serial as a
-    // whole, its own slot; only the own-key lookup and, on a v2 read, the
-    // own-diary read run on the chain.
+    // whole, its own slot; only the own-key lookup (lookupOwnKey's rule)
+    // and, on a v2 read, the own-diary read run on the chain.
     'notices.list': async (params) => {
       const epoch = connection
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
@@ -1452,16 +1543,19 @@ function createBrowserSession ({
       // the pair), and again after the wait, which may have seen a lock.
       if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
       if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
-      await serial(async () => requireOwnKey())(params)
+      // Checked again after the await, in the same turn as the dispatch: an
+      // identity change called meanwhile found no read to abort.
+      do await lookupOwnKey(params)
+      while (lookupWanted())
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
       if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
       if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
       // Called by the noticer only on a v2 read: the own diary is read on
-      // the chain (withStore alone only preempts; serial is the exclusion).
+      // the chain (withCores alone does not exclude a write; serial does).
       const ownContext = () => serial(async () => {
         if (keyPair === null) throw new UsageError(store.LOCKED)
-        noticeCtxCache = await withStore((c) => member.ownNoticeContext(c, noticeCtxCache))
+        noticeCtxCache = await withCores((c) => member.ownNoticeContext(c, noticeCtxCache))
         return noticeCtxCache
       })(params)
       const p = noticer.read(params, ownContext)
@@ -1566,7 +1660,7 @@ function createBrowserSession ({
       zeroPair(copy)
       throw err
     }
-    return serial(async () => {
+    return identityChange(() => serial(async () => {
       // A peek in flight belongs to the previous identity.
       peeker.abort()
       peeking = null
@@ -1579,7 +1673,7 @@ function createBrowserSession ({
       ownKey = null
       certKnown = false
       followChanged()
-    })().catch((err) => {
+    })(), { abort: true }).catch((err) => {
       zeroPair(copy)
       zeroPair(mediaCopy)
       throw err
@@ -1640,7 +1734,7 @@ function createBrowserSession ({
   // Locks the identity: the pair is zero-filled. After close() it already is.
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
-    return serial(async () => { zeroKeyPair() })()
+    return identityChange(() => serial(async () => { zeroKeyPair() })())
   }
 
   // The follows kept from before `follow` records existed (member-ops
@@ -1688,7 +1782,7 @@ function createBrowserSession ({
   // with them), the pending follow changes and the per-device migration
   // marker, and locks both keys; 'config' and 'follows' stay. A sync in
   // progress is stopped and not restarted.
-  const reset = serial(async () => {
+  const resetChain = serial(async () => {
     peeker.abort()
     peeking = null
     noticer.abort()
@@ -1776,7 +1870,7 @@ function createBrowserSession ({
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,
     identityStatus: () => identityStatus({}),
-    reset: () => reset({}),
+    reset: () => identityChange(() => resetChain({}), { abort: true }),
     // 'open' | 'closed'
     get state () {
       return closed ? 'closed' : 'open'

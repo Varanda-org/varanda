@@ -765,6 +765,7 @@ module.exports = {
   diaryExists,
   diaryStatus,
   forgetLegacy,
+  isLegacy,
   openReplica,
   replicaExists,
   purgeReplica,
