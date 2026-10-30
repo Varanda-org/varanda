@@ -202,7 +202,7 @@ test('web-node host controls: INTERNAL without a handler, as node.close', async 
     ['identity.reset', {}],
     ['identity.forget', {}],
     ['identity.sessionSaved', {}],
-    ['media.uploadFile', { path: '/cache/a.jpg', mime: 'image/jpeg', width: 10, height: 10 }]
+    ['media.uploadFile', { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 10, height: 10 }]
   ]
   const plain = setup({ handlers: {} })
   plain.call('session.open')

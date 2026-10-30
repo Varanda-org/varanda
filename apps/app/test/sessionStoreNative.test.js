@@ -37,9 +37,21 @@ export function isAvailable () { return globalThis.__passkey ? globalThis.__pass
 export async function create (json) { return globalThis.__passkey.create(json) }
 export async function get (json) { return globalThis.__passkey.get(json) }
 `
+const fileSystem = `
+const files = globalThis.__stubFiles = globalThis.__stubFiles || new Map()
+export const Paths = { document: { uri: 'file:///stub/Documents/' } }
+export class File {
+  constructor (dir, name) { this.uri = dir.uri + name }
+  get exists () { return files.has(this.uri) }
+  create () { if (files.has(this.uri)) throw new Error('exists'); files.set(this.uri, '') }
+  write (text) { if (globalThis.__stubWriteFails) throw new Error('disk full'); files.set(this.uri, String(text)) }
+  delete () { files.delete(this.uri) }
+}
+`
 const hooks = `
 const stubs = {
   'expo-secure-store': 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(secureStore)}),
+  'expo-file-system': 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(fileSystem)}),
   '../modules/passkey-prf': 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(passkeyPrf)})
 }
 export async function resolve (specifier, context, next) {
@@ -62,8 +74,15 @@ const PRF_HEX = 'cd'.repeat(32)
 const CRED = 'Y3JlZA'
 
 const items = () => globalThis.__secureItems
-function resetStubs () {
+const files = () => globalThis.__stubFiles
+const EPOCH = 'file:///stub/Documents/varanda-keychain-epoch'
+// The marker of an app that already ran: tests opt into a fresh install.
+function resetStubs ({ fresh = false } = {}) {
   if (items()) items().clear()
+  if (files()) files().clear()
+  globalThis.__stubFiles = globalThis.__stubFiles || new Map()
+  if (!fresh) files().set(EPOCH, '1')
+  globalThis.__stubWriteFails = false
   globalThis.__secureGetFails = false
   globalThis.__secureSetFails = false
   globalThis.__secureSetFailsFor = null
@@ -199,7 +218,8 @@ function memoryStore ({ saveFails = false, clearFails = false } = {}) {
     log,
     save: async (rec) => { log.push(['save', rec]); if (saveFails) throw new Error('nope') },
     load: async () => null,
-    clear: async () => { log.push(['clear']); if (clearFails) throw new Error('nope') }
+    clear: async () => { log.push(['clear']); if (clearFails) throw new Error('nope') },
+    clearAll: async (opts) => { log.push(['clearAll', opts]); if (clearFails) throw new Error('nope') }
   }
 }
 
@@ -459,6 +479,9 @@ test('identity: resume skips and deletes on signedOut, refusal, or another key',
   const legacy = fakeClient({ status: { exists: true, publicKey: PK, legacy: true } })
   await createNativeIdentity({ request: legacy.request, rpId: () => RP, store }).resume()
   t.absent(legacy.methods().includes('identity.install'))
+  t.absent(items().has(itemKey(RP, PK)), 'a legacy diary leaves no stored session')
+
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
 
   const other = fakeClient({ status: { exists: true, publicKey: 'ef'.repeat(32) } })
   await createNativeIdentity({ request: other.request, rpId: () => RP, store }).resume()
@@ -563,4 +586,65 @@ test('identity: lock during the install relocks without saving', async (t) => {
   t.is((await unlocking).code, 'CANCELLED')
   t.is(store.log.length, 0)
   t.is(client.methods().filter((m) => m === 'identity.clear').length, 2, 'lock plus the relock')
+})
+
+test('session store: clearAll deletes the indexed session, of one rp.id when given', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  const store = createSessionStore({ now: () => 1000 * DAY })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  await store.clearAll({ rpId: 'other.example' })
+  t.ok(items().has(itemKey(RP, PK)), 'another rp.id is left alone')
+  await store.clearAll({ rpId: RP })
+  t.is(items().size, 0, 'any public key of this rp.id, and the index')
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  globalThis.__secureDeleteFails = true
+  await t.exception(store.clearAll())
+  globalThis.__secureDeleteFails = false
+  await store.clearAll()
+  t.is(items().size, 0)
+})
+
+test('identity: a fresh install deletes every stored session, then writes the marker', async (t) => {
+  resetStubs({ fresh: true })
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const store = createSessionStore({ now: () => 1000 * DAY })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  t.absent(files().has(EPOCH))
+  const client = fakeClient({ status: { exists: true, publicKey: PK, credentialId: CRED } })
+  await createNativeIdentity({ request: client.request, rpId: () => RP, store }).resume()
+  t.absent(items().has(itemKey(RP, PK)), 'the item of the deleted app is gone')
+  t.absent(client.methods().includes('identity.install'), 'nothing resumed from it')
+  t.ok(files().has(EPOCH), 'marker written')
+
+  // The next start (marker present) keeps and resumes a valid item.
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const next = fakeClient({ status: { exists: true, publicKey: PK, credentialId: CRED } })
+  await createNativeIdentity({ request: next.request, rpId: () => RP, store }).resume()
+  t.ok(items().has(itemKey(RP, PK)))
+  t.ok(next.methods().includes('identity.install'))
+})
+
+test('identity: a failed purge writes no marker and resumes nothing', async (t) => {
+  resetStubs({ fresh: true })
+  const { createNativeIdentity } = await loadIdentity()
+  const store = memoryStore({ clearFails: true })
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  await createNativeIdentity({ request: client.request, rpId: () => RP, store }).resume()
+  t.alike(store.log, [['clearAll', undefined]])
+  t.absent(files().has(EPOCH))
+  t.absent(client.methods().includes('identity.status'))
+})
+
+test('identity: a status with no diary deletes the stored session of this rp.id', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const store = createSessionStore({ now: () => 1000 * DAY })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const client = fakeClient({ status: { exists: false, publicKey: null } })
+  await createNativeIdentity({ request: client.request, rpId: () => RP, store }).resume()
+  t.absent(items().has(itemKey(RP, PK)))
+  t.absent(client.methods().includes('identity.install'))
 })

@@ -657,6 +657,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   const file = path.join(dataDir, FILE)
   const hwmFile = path.join(dataDir, HWM)
   const pending = new Map()
+  const subMacKey = crypto.randomBytes(32)
   let failed = readOnly
   let closed = false
   // onUnavailable fires only once the open finished (the open's own
@@ -738,7 +739,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     if (heldByOther(s, username, member)) return true
     sweep()
     for (const row of pending.values()) {
-      if (unproven(row) || row.username !== username) continue
+      if (!claimed(row) || row.username !== username) continue
       return row.member !== member
     }
     return false
@@ -1239,9 +1240,15 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   // start, while a Google answer costs an account that putGoogle() caps at
   // MAX_PER_SUB rows. Only unproven rows are ever evicted for room (oldest
   // first): a Google-claimed row lives out its TTL, and a table full of
-  // claimed rows refuses with 'lotado'.
+  // claimed rows refuses with 'lotado'. An app row Google answered
+  // (markAnswered) is not unproven either: its sub waits in the server for R,
+  // but the answer cost a Google account all the same.
   function unproven (row) {
-    return !Object.hasOwn(row, 'sub')
+    return !claimed(row) && !Object.hasOwn(row, 'answeredBy')
+  }
+
+  function claimed (row) {
+    return Object.hasOwn(row, 'sub')
   }
 
   // A bare row only went through start(): no key proof yet. Member keys are
@@ -1320,16 +1327,52 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     const row = liveRow(id)
     if (row === null) throw fail('expirado')
     sweep()
-    const same = []
-    for (const [otherId, other] of pending) {
-      if (otherId !== id && other.sub === sub) same.push(otherId)
-    }
-    while (same.length >= MAX_PER_SUB) pending.delete(same.shift())
+    capSub(id, sub)
     pending.delete(id)
+    delete row.answeredBy
     row.sub = sub
     row.email = email
     pending.set(id, row)
     return { ...row }
+  }
+
+  // The row's own subject, kept only as a keyed hash so an answered row
+  // never carries the sub itself; the key lives and dies with the process,
+  // like the pending table.
+  function subKey (sub) {
+    return crypto.createHmac('sha256', subMacKey).update(String(sub)).digest('base64url')
+  }
+
+  // Answered and claimed rows of one Google subject share the MAX_PER_SUB
+  // cap: drops the oldest others until a slot is free. -> the dropped ids.
+  function capSub (id, sub) {
+    const key = subKey(sub)
+    const same = []
+    for (const [otherId, other] of pending) {
+      if (otherId !== id && (other.sub === sub || other.answeredBy === key)) same.push(otherId)
+    }
+    const dropped = []
+    while (same.length >= MAX_PER_SUB) {
+      const otherId = same.shift()
+      pending.delete(otherId)
+      dropped.push(otherId)
+    }
+    return dropped
+  }
+
+  // An app row Google answered before R is redeemed: it no longer counts as
+  // unproven for eviction and holds no name. It carries only a keyed hash of
+  // the sub (the server binds the sub with putGoogle once R is redeemed,
+  // which drops the hash), and counts toward that subject's MAX_PER_SUB.
+  // -> the ids it evicted for the cap, or null when the row is gone.
+  function markAnswered (id, sub) {
+    if (typeof sub !== 'string' || sub.length === 0) throw new TypeError('sub must be a non-empty string')
+    const row = liveRow(id)
+    if (row === null) return null
+    sweep()
+    const dropped = capSub(id, sub)
+    row.answeredBy = subKey(sub)
+    return dropped
   }
 
   function get (id) {
@@ -1555,7 +1598,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {

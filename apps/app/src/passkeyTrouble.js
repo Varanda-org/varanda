@@ -30,17 +30,18 @@ export function deleteStep (userIds) {
 // caller never passes it. created: a passkey made here failed, so another can
 // be created. known: this browser keeps a passkey, and Entrar offers only that
 // one ('Criar passkey' is not shown). withLink: the card already tells the
-// person to open the invite link in another browser.
-export function unusableSteps ({ userIds = [], withLink = false, created = false, known = false } = {}) {
+// person to open the invite link in another browser. native: the installed
+// app, which has no browser to switch to and saves only to Google's manager.
+export function unusableSteps ({ userIds = [], withLink = false, created = false, known = false, native = false } = {}) {
   const retry = known
     ? 'Toque em ' + RETRY_LABEL + '.'
     : created
-      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha as Senhas da Apple (no iPhone) ou o Gerenciador de Senhas do Google.'
+      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha ' + (native ? 'o Gerenciador de Senhas do Google.' : 'as Senhas da Apple (no iPhone) ou o Gerenciador de Senhas do Google.')
       : 'Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'
   const steps = [
     deleteStep(userIds),
     retry,
-    withLink ? '' : 'Se não der certo, abra o Varanda no Safari ou no Chrome.'
+    withLink ? '' : native ? 'Se não der certo, entre pelo site da associação no Chrome.' : 'Se não der certo, abra o Varanda no Safari ou no Chrome.'
   ].filter(Boolean)
   return steps.map((s, i) => (i + 1) + '. ' + s)
 }
