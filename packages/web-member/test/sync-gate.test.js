@@ -17,6 +17,9 @@ const { createCert, createSeederCert, generateAssociationKeyPair } = require('@v
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createBrowserNode } = require('../lib/node')
+const { runSync, MAX_PARALLEL_OPENS } = require('../lib/sync')
+const store = require('../lib/node-store')
+const ops = require('../lib/member-ops')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
@@ -352,4 +355,158 @@ test('a write handler pushes while the seeder has not confirmed the local length
   const later = await runsSince(web, again)
   t.is(later.length, 1, 'confirmed: only the gate run this time')
   t.is(later[0].lines[0], 'sincronizando antes de publicar')
+})
+
+// A certified member on a fresh storage following `count` stored replicas
+// (block 0 and a post each), in kv order; the ones at `bad` carry a
+// certificate of another association.
+async function startupFixture (t, assoc, count, bad) {
+  const storage = memoryNodeStorage()
+  const keyPair = crypto.keyPair()
+  const ctx = { storage, association: assoc.hex, keyPair, mediaKeyPair: crypto.keyPair() }
+  await ops.idCreate(ctx)
+  const own = hex(keyPair.publicKey)
+  await ops.certAdd(ctx, createCert({ member: own }, assoc.kp))
+  const other = association()
+  const keys = []
+  const badKeys = []
+  for (let i = 0; i < count; i++) {
+    const signer = bad.includes(i) ? other.kp : assoc.kp
+    const source = await diary(t, [(k) => memberCertRecord(createCert({ member: k }, signer)), () => postRecord({ text: 'poste ' + i })])
+    const key = hex(source.key)
+    const replica = await store.openReplica(storage, key)
+    const a = source.replicate(true)
+    const b = replica.replicate(false)
+    a.pipe(b).pipe(a)
+    await replica.download({ start: 0, end: source.length }).done()
+    a.destroy()
+    b.destroy()
+    await replica.close()
+    keys.push(key)
+    if (bad.includes(i)) badKeys.push(key)
+  }
+  await store.writeFollows(storage, keys)
+  await store.writeFollowsMigrated(storage)
+  return { storage, own, badKeys, list: await store.readFollows(storage) }
+}
+
+// store.openReplica delayed so later keys in the list finish first; counts
+// the opens per key, the peak in flight and the closes of the opened cores.
+function slowOpens (t, list, { onOpen = () => {} } = {}) {
+  const original = store.openReplica
+  const n = { perKey: new Map(), inflight: 0, peak: 0, opens: 0, closes: 0 }
+  store.openReplica = async function (storage, key) {
+    n.opens++
+    n.perKey.set(key, (n.perKey.get(key) || 0) + 1)
+    n.peak = Math.max(n.peak, ++n.inflight)
+    onOpen(key)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 10 * (list.length - list.indexOf(key))))
+      const core = await original.call(this, storage, key)
+      const close = core.close.bind(core)
+      let counted = false
+      core.close = (...args) => {
+        if (!counted) n.closes++
+        counted = true
+        return close(...args)
+      }
+      return core
+    } finally {
+      n.inflight--
+    }
+  }
+  t.teardown(() => { store.openReplica = original }, { force: true })
+  return { counters: n, restore: () => { store.openReplica = original } }
+}
+
+// A seeder stand-in that only records the member's hello inventory, in order.
+async function inventorySeeder (t, signer) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seen = { have: null }
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', () => {})
+    noise.once('connect', () => {
+      Hypercore.createProtocolStream(noise)
+      attachAdmission(noise, {
+        role: 'seeder',
+        cert,
+        have: [],
+        onmessage: (msg, peer) => {
+          if (seen.have === null) seen.have = [...peer.remoteHave.keys()]
+          if (msg.type === 'announce') peer.send({ type: 'admitted', key: msg.key, length: peer.remoteHave.get(msg.key) || 0 })
+        }
+      })
+    })
+  })
+  return { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', seen }
+}
+
+test('stored follows open a few at a time at run start; states, skips and inventory stay in list order', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const { storage, own, badKeys: bad, list } = await startupFixture(t, assoc, 12, [3, 8])
+  const seeder = await inventorySeeder(t, assoc.kp)
+  const slow = slowOpens(t, list)
+  const events = []
+  const ac = new AbortController()
+  const run = runSync({
+    storage,
+    seederUrl: seeder.url,
+    createSocket: (u) => new WebSocket(u),
+    retryMinMs: 100,
+    retryMaxMs: 200,
+    signal: ac.signal,
+    onEvent: (ev) => events.push(ev)
+  })
+  const end = Date.now() + 15000
+  while (seeder.seen.have === null && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25))
+  ac.abort()
+  await run
+  slow.restore()
+  const n = slow.counters
+  t.ok(n.peak > 1, 'opens overlap (peak ' + n.peak + ')')
+  t.ok(n.peak <= MAX_PARALLEL_OPENS, 'at most ' + MAX_PARALLEL_OPENS + ' at once')
+  t.alike([...n.perKey.keys()].sort(), [...list].sort(), 'every stored follow was opened')
+  t.ok([...n.perKey.values()].every((times) => times === 1), 'each key once')
+  const skips = events.filter((e) => e.event === 'skipped')
+  t.alike(skips.map((e) => e.key), list.filter((k) => bad.includes(k)), 'skipped in list order')
+  t.ok(skips.every((e) => typeof e.reason === 'string' && e.reason === skips[0].reason), 'with the gate reason (' + (skips[0] && skips[0].reason) + ')')
+  t.alike(seeder.seen.have, [own, ...list.filter((k) => !bad.includes(k))], 'the inventory follows the list')
+  t.is(n.closes, n.opens, 'every opened core was closed')
+})
+
+test('a run aborted while the stored follows open closes every core it opened', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const { storage, list } = await startupFixture(t, assoc, 12, [])
+  const ac = new AbortController()
+  const slow = slowOpens(t, list, { onOpen: () => ac.abort() })
+  const result = await runSync({
+    storage,
+    seederUrl: 'ws://127.0.0.1:9/seeder',
+    createSocket: (u) => {
+      const ws = new WebSocket(u)
+      ws.on('error', () => {})
+      return ws
+    },
+    retryMinMs: 100,
+    retryMaxMs: 200,
+    socketCloseMs: 50,
+    signal: ac.signal
+  })
+  slow.restore()
+  t.ok(result.ok, 'a continuous run ended by its signal')
+  t.ok(slow.counters.opens >= 1, 'fixture: an open was in flight at the abort')
+  t.ok(slow.counters.opens < list.length, 'no new opens once ending')
+  t.is(slow.counters.closes, slow.counters.opens, 'opens equal closes')
 })

@@ -18,7 +18,7 @@ const { EventEmitter } = require('node:events')
 const { WebSocketServer, WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { MEDIA_BLOCK_BYTES, profileRecords } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, profileRecords, followRecord, postRecord } = require('@varanda/core/lib/records')
 const { presentLength, clearDeleted } = require('@varanda/core/lib/deletion')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { runSync, trackPresent, linearExcept, MAX_RANGES } = require('../lib/sync')
@@ -580,22 +580,22 @@ test('a follow record whose read fails once during the fold is folded by the nex
   await testnet(t)
   const m = await member()
   const followed = hex(crypto.keyPair().publicKey)
-  await ops.followChange(m.ctx, followed, true)
-  const { seq } = await ops.drainFollows(m.ctx)
-  t.ok(Number.isSafeInteger(seq), 'fixture: the follow record is in the diary')
-  // Only the diary knows the follow now.
   await store.writeFollows(m.storage, [])
   await store.writeFollowsMigrated(m.storage)
-  const copy = new Hypercore(memoryStorage(), m.keyPair.publicKey, { valueEncoding: 'binary' })
+  // The seeder's copy is writable (another device): it holds what this
+  // device holds and later gains the follow record, which this device
+  // only reads through the fold (the startup scan never saw it).
+  const copy = new Hypercore(memoryStorage(), { keyPair: m.keyPair, valueEncoding: 'binary' })
   await copy.ready()
   t.teardown(() => copy.close(), { force: true })
   const diary = await store.openDiary(m.storage)
-  await copyCore(diary, copy)
+  for (let i = 0; i < diary.length; i++) await copy.append(await diary.get(i, { raw: true }))
+  const seq = diary.length
   await diary.close()
   const seeder = await fakeSeeder(t, { signer: m.assocKp, cores: [copy] })
 
   // The fold's first read of the follow record throws; every other read of
-  // it (the present-length scan included) works.
+  // it works.
   const openDiary = store.openDiary
   t.teardown(() => { store.openDiary = openDiary }, { force: true })
   let thrown = false
@@ -615,13 +615,18 @@ test('a follow record whose read fails once during the fold is folded by the nex
   const events = []
   const ac = new AbortController()
   const run = sync(m.storage, seeder.url, events, { signal: ac.signal })
+  const synced = (length) => events.some((e) => e.event === 'own-synced' && e.length === length)
+  t.ok(await until(() => synced(seq), 5000), 'fixture: caught up before the follow record exists')
+  await copy.append(b4a.from(JSON.stringify(followRecord({ key: followed, on: true }))))
+  t.ok(await until(() => thrown, 5000), 'fixture: the fold of the new length failed on the follow record')
+  await copy.append(b4a.from(JSON.stringify(postRecord({ text: 'depois' }))))
   const changed = await until(() => events.some((e) => e.event === 'follows-changed'), 5000)
   ac.abort()
   await run
   store.openDiary = openDiary
-  t.ok(thrown, 'fixture: the first fold failed on the follow record')
-  t.ok(events.some((e) => e.event === 'own-synced'), 'fixture: a later fold ran on own-synced')
+  t.ok(synced(seq + 2), 'fixture: a later fold ran on own-synced')
   t.ok(changed, 'follows-changed arrived')
+  t.alike(events.filter((e) => e.event === 'follows-changed'), [{ event: 'follows-changed', count: 1, length: seq + 2 }])
   t.alike(await store.readFollows(m.storage), [followed], 'the follow is in the folded list')
 })
 

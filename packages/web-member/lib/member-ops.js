@@ -159,13 +159,16 @@ async function readBorrowed (core, read) {
 // carries `entries` (and `borrowed`, the core, on the borrowed path); an
 // empty replica is purged on the exclusive path only.
 async function withReplica (ctx, key, read) {
-  if (!(await store.replicaExists(ctx.storage, key))) return null
   const cores = borrowedCores(ctx)
   if (cores !== null) {
+    // A core the run holds always has bytes stored: the storage is only
+    // asked about the others.
     const core = cores.replica(key)
-    if (core === null) throw needsExclusive()
-    return { ...(await readBorrowed(core, read)), borrowed: core }
+    if (core !== null) return { ...(await readBorrowed(core, read)), borrowed: core }
+    if (!(await store.replicaExists(ctx.storage, key))) return null
+    throw needsExclusive()
   }
+  if (!(await store.replicaExists(ctx.storage, key))) return null
   const replica = await store.openReplica(ctx.storage, key)
   let value
   try {

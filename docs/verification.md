@@ -2775,3 +2775,45 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
 - Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
+
+
+## 50. Partida mais rápida da sincronização na web (PR perf/faster-sync-startup, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada (nó do navegador, `packages/web-member`), numa visita de volta, toda leitura de membro espera a rodada abrir o próprio diário e as réplicas seguidas (seção 46). Essa partida era sequencial: para cada seguido, uma checagem de existência, a abertura da réplica (leituras inteiras do IndexedDB), o teste de bifurcação, `has(0)` e a verificação do bloco 0 (ed25519 em JavaScript puro), um de cada vez. E o próprio diário era decodificado duas vezes: na varredura do comprimento presente e de novo na leitura dos registros `follow`, cujo cursor recomeçava em 1 a cada rodada.
+- `lib/sync.js`, réplicas seguidas: a partida tem três passos. Primeiro, na ordem da lista, valida, descarta repetidas e marca as bloqueadas, como antes. Depois abre e verifica até 8 réplicas ao mesmo tempo (`MAX_PARALLEL_OPENS`), cada resultado no seu lugar, sem tocar em estado compartilhado, e nenhuma abertura começa depois que a rodada está terminando. Por último, em série e na ordem da lista, aplica o mesmo de antes: estado do seguido, eventos `skipped`, ativação, limpeza das rejeitadas e parada numa limpeza que falhou. Num término, numa limpeza que falhou ou num erro, todo núcleo aberto e ainda não usado é fechado antes de seguir. Cada chave abre uma vez só; nada mais abre réplicas antes da primeira conexão.
+- `lib/sync.js`, registros `follow`: `trackPresent` ganha `onScan(state)`, chamado com o resultado da varredura inicial. O rastreador do próprio diário usa essa varredura para semear a leitura dos registros `follow` abaixo do comprimento presente (mesmas regras: `decodeBlock` e `validRecordCopy`, seq a partir de 1, a última operação por chave vale, a chave própria é ignorada, os apagados ficam de fora, com o conjunto de apagados do momento da leitura) e começa o cursor ali. A lista gravada e o `follows-changed` são os mesmos de antes para o mesmo diário.
+- `lib/member-ops.js`, leituras emprestadas: com os núcleos da rodada, a réplica que a rodada já tem é lida direto, sem perguntar ao armazenamento se ela existe. Só uma chave que a rodada não tem consulta o armazenamento (sem dados: nada, como antes; guardada mas fora da rodada: caminho exclusivo, como antes). As respostas não mudam.
+- A varredura de chaves bloqueadas continua consultando o armazenamento diretamente (`docs/protocol.md`, normativo). Nenhum documento normativo muda.
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: 12 seguidos (2 com certificado de outra associação) com aberturas atrasadas para inverter a ordem de chegada: pico de aberturas simultâneas acima de 1 e no máximo 8, cada chave aberta uma vez, `skipped` e o inventário enviado ao semeador na ordem da lista, aberturas iguais a fechamentos. Uma rodada interrompida durante as aberturas termina com aberturas iguais a fechamentos e sem abrir as demais. Sem a mudança, o pico fica em 1 e o teste falha.
+- `packages/web-member/test/sync-media.test.js`: cada bloco do próprio diário depois do certificado é lido uma vez na partida (antes, duas), com a mesma lista e o mesmo `follows-changed`.
+- `packages/web-member/test/read-while-sync.test.js`: `feed.read` e `profile.read` emprestados não consultam `hasCore('replica/' + chave)` para a réplica que a rodada tem (antes, 1 vez por leitura). O teste do caminho exclusivo continua cobrindo `NEEDS_EXCLUSIVE`.
+- `packages/web-member/test/delete-purge.test.js`: o teste de um registro `follow` cuja leitura falha uma vez dependia de a partida ler o registro pela leitura dos seguidos, o que não acontece mais. Agora o registro chega depois da partida: a cópia do semeador (gravável, como outro aparelho) recebe o registro depois do primeiro `own-synced`, a primeira leitura dele falha, e um bloco seguinte dispara a leitura que o aplica.
+- `packages/web-member/scripts/startup-bench.js` (fora da CI): mede, no Node, o tempo entre `runSync` e a publicação do leitor, com as checagens de existência, as aberturas de réplica (e o pico simultâneo) e as leituras de blocos do próprio diário. Os tempos no Node não valem para o navegador; as contagens é que comparam. Resultado nesta máquina:
+
+| Cenário | Antes | Depois |
+|---|---|---|
+| 50 seguidos x 20 blocos, diário 200, memória, 5 rodadas | mediana 22.2 ms; pico 1; 398 leituras | mediana 16.1 ms; pico 8; 199 leituras |
+| 50 seguidos x 20 blocos, diário 200, fake-indexeddb, 5 rodadas | mediana 78 ms; pico 1; 398 leituras | mediana 71.1 ms; pico 8; 199 leituras |
+| 200 seguidos x 10 blocos, diário 400, fake-indexeddb, 3 rodadas | mediana 466.1 ms; pico 1; 798 leituras | mediana 387.5 ms; pico 8; 399 leituras |
+
+Em todos os cenários, as checagens de existência e as aberturas ficam iguais ao número de seguidos.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Web hospedada, visita de volta com muitos seguidos: medir o tempo entre desbloquear e a primeira linha de A Rua, antes e depois desta PR (não realizada ainda).
+- [ ] Na mesma visita, as ferramentas de desenvolvedor mostram as aberturas das réplicas sobrepostas e nenhum `'preempted'` causado por uma leitura (não realizada ainda).
+- [ ] Um diário seguido bloqueado e um com certificado inválido continuam aparecendo como ignorados, na mesma ordem (não realizada ainda).
+- [ ] Seguir alguém em outro aparelho: a lista de seguidos deste navegador atualiza depois que o diário próprio fica em dia, como antes (não realizada ainda).
+
+### Limites
+
+- No navegador o ganho depende de quanto o IndexedDB e a verificação ed25519 se sobrepõem; o bench no Node com fake-indexeddb não mede isso.
+- Até 8 réplicas abertas ao mesmo tempo na partida aumentam o pico de memória dessa fase.
+- A varredura de bloqueados e a de emissores revogados continuam em série, depois das aberturas.

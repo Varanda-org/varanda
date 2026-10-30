@@ -129,8 +129,9 @@
 //
 // Follow fold: the own diary's valid `follow` records (decodeBlock +
 // validRecordCopy, seq >= 1, the last op per key wins, the own key ignored)
-// are replayed incrementally (a cursor from seq 1) at run start, before any
-// connection, and whenever the own diary is caught up (each own-synced, see
+// are replayed incrementally at run start, before any connection (seeded
+// from the own tracker's initial scan, so the blocks below its present
+// length are decoded once, then a cursor from there), and whenever the own diary is caught up (each own-synced, see
 // checkOwnSync), never per downloaded chunk while own-behind: the session
 // restarts the continuous run once per distinct follows-changed length, so
 // a fresh device's catch-up folds once at its end, and another device's
@@ -202,6 +203,8 @@ const GATE_MIN_TIMEOUT_MS = 250
 const GATE_RETRY_MS = 15000
 // Quarantine fetches in flight at once (a browser tab, not a server).
 const MAX_PARALLEL_GATES = 8
+// Stored follows opened (and gated locally) at once at run start.
+const MAX_PARALLEL_OPENS = 8
 // One deadline for the WebSocket, the Noise handshake and the seeder's hello.
 const CONNECT_TIMEOUT_MS = 15000
 const RETRY_MIN_MS = 1000
@@ -440,12 +443,13 @@ function foldTargets (tombs) {
 // meanwhile merge into it, so a burst of blocks costs a few steps, not one
 // fold and one present-length walk per block.
 // -> { ready, present (), deleted (), destroy (), steps () }, steps() being
-// the number of steps run (test-only). onReady(present) once
+// the number of steps run (test-only). onScan(state) with the initial
+// presentState result, before anything else uses it; onReady(present) once
 // the initial scan is done; onGrow(present) when the present length grows
 // after it; onDeleted(deleted) whenever the deleted set changed (and after
 // the initial scan when it is not empty); onError(err) once when the
 // initial scan fails (the tracker then stops, with present 0).
-function trackPresent (core, { noClear = false, download = true, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
+function trackPresent (core, { noClear = false, download = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
@@ -579,6 +583,7 @@ function trackPresent (core, { noClear = false, download = true, onReady = noop,
   core.on('append', onAppend)
   const ready = (async () => {
     const state = await presentState(core)
+    onScan(state)
     for (const entry of state.raw) {
       const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
       if (copy !== null && copy.type === 'delete') tombs.set(entry.seq, copy.seq)
@@ -754,7 +759,7 @@ async function syncRun ({
   const media = [] // own media cores: { key, core, pushed, stop, uploaded, revoked }
   let mediaRevoke = Promise.resolve() // the last revokeOwnMedia pass
   let mediaTimer = null
-  const fold = { cursor: 1, ops: new Map(), seen: false, running: false, again: false }
+  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
   let holds = 0 // reader holds outstanding
   let drained = Promise.resolve() // resolves when holds reaches 0
@@ -2201,6 +2206,15 @@ async function syncRun ({
   async function replayFollows () {
     const length = ownPresent()
     const deleted = ownTracker === null ? new Set() : ownTracker.deleted()
+    if (fold.seed !== null) {
+      for (const record of fold.seed) {
+        if (deleted.has(record.seq)) continue
+        fold.seen = true
+        if (record.key === ownHex) continue
+        fold.ops.set(record.key, record.on)
+      }
+      fold.seed = null
+    }
     // The cursor passes a seq only once it was handled: a throw leaves it
     // there, so the next fold retries it.
     for (let seq = fold.cursor; seq < length; seq = ++fold.cursor) {
@@ -2223,6 +2237,22 @@ async function syncRun ({
       const r = await store.writeFoldedFollows(storage, derived, ownHex)
       if (r && r.changed === true) emit({ event: 'follows-changed', count: r.follows.length, length })
     } while (fold.again)
+  }
+
+  // The follow records of the own tracker's initial scan below its present
+  // length, in seq order, kept until the first fold applies them with the
+  // deleted set of that moment (as reading them there would); the cursor
+  // starts past them.
+  function seedFold (state) {
+    const seed = []
+    for (const entry of state.raw) {
+      if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
+      const record = validRecordCopy(entry.record, entry.seq)
+      if (record === null || record.type !== 'follow') continue
+      seed.push({ seq: entry.seq, key: record.key, on: record.on })
+    }
+    fold.seed = seed
+    fold.cursor = Math.max(1, state.present)
   }
 
   function scheduleFold () {
@@ -2254,6 +2284,7 @@ async function syncRun ({
     // diary, onVerified), deleted blocks never.
     ownTracker = trackPresent(diary, {
       noClear,
+      onScan: seedFold,
       onGrow: (length) => {
         send({ type: 'have', key: ownHex, length })
         if (cert === null) recoverCert()
@@ -2280,62 +2311,120 @@ async function syncRun ({
       log('aviso: limite de diários seguidos excedido: só os primeiros ' + maxFollows + ' serão sincronizados')
       followList = followList.slice(0, maxFollows)
     }
+    // Pass 1, in list order: what is followed and what is blocked.
+    const items = []
+    const listed = new Set()
     for (const raw of followList) {
-      if (ending) break
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
-      if (!HEX64.test(key) || key === ownHex || follows.has(key)) {
+      if (!HEX64.test(key) || key === ownHex || listed.has(key)) {
         if (key !== ownHex) log('aviso: chave seguida inválida ignorada')
         continue
       }
-      const entry = {
-        key,
-        state: 'pending',
-        core: null,
-        range: null,
-        stopGrow: null,
-        stopFork: null,
-        stopQuota: null,
-        tracker: null, // trackPresent of the open core
-        retryTimer: null,
-        fetching: false,
-        fetch: null, // the quarantine fetch in flight (peeks wait for it)
-        gating: false,
-        advSeq: 0,
-        fetchedAdv: 0,
-        cutByDeadline: false,
-        discardedRegate: false
+      listed.add(key)
+      items.push({ key, blocked: isBlockedKey(key) })
+    }
+    // Pass 2: the stored follows are opened and gated locally, a few at a
+    // time (each key once, and nothing else opens a replica before the
+    // first connection). A slot touches no shared state; none starts once
+    // the run is ending.
+    const slots = new Array(items.length).fill(null)
+    const opened = items.map(() => {
+      let resolve
+      const p = new Promise((_resolve) => { resolve = _resolve })
+      return { p, resolve }
+    })
+    const openSlot = async ({ key, blocked }) => {
+      const slot = { core: null, reason: null, held0: false, error: null }
+      if (blocked) return slot
+      try {
+        if (ending || !(await store.replicaExists(storage, key)) || ending) return slot
+        slot.core = await store.openReplica(storage, key)
+        slot.held0 = slot.core.length > 0 && await slot.core.has(0)
+        if (slot.core.fork !== 0) slot.reason = 'fork'
+        else if (slot.held0) slot.reason = await localGate(slot.core, key, association, gateOpts())
+      } catch (err) {
+        slot.error = err
+        if (slot.core !== null) await slot.core.close().catch(noop)
+        slot.core = null
       }
-      follows.set(key, entry)
-      if (isBlockedKey(key)) {
-        // Never opened: the sweep below purges whatever is stored.
-        entry.state = 'failed'
-        skipped.push({ key, reason: 'blocked' })
-        emit({ event: 'skipped', key, reason: 'blocked' })
-        continue
+      return slot
+    }
+    let nextOpen = 0
+    const workers = []
+    for (let w = 0; w < Math.min(MAX_PARALLEL_OPENS, items.length); w++) {
+      workers.push((async () => {
+        while (nextOpen < items.length) {
+          const i = nextOpen++
+          slots[i] = await openSlot(items[i])
+          opened[i].resolve(slots[i])
+        }
+      })())
+    }
+    // Pass 3, serial and in list order: the follow states, skip events and
+    // purges as each slot is ready. A core opened but never taken (the run
+    // ending, a failed purge, an error) is closed before going on.
+    try {
+      for (let i = 0; i < items.length; i++) {
+        if (ending) break
+        const { key, blocked } = items[i]
+        const entry = {
+          key,
+          state: 'pending',
+          core: null,
+          range: null,
+          stopGrow: null,
+          stopFork: null,
+          stopQuota: null,
+          tracker: null, // trackPresent of the open core
+          retryTimer: null,
+          fetching: false,
+          fetch: null, // the quarantine fetch in flight (peeks wait for it)
+          gating: false,
+          advSeq: 0,
+          fetchedAdv: 0,
+          cutByDeadline: false,
+          discardedRegate: false
+        }
+        follows.set(key, entry)
+        if (blocked) {
+          // Never opened: the sweep below purges whatever is stored.
+          entry.state = 'failed'
+          skipped.push({ key, reason: 'blocked' })
+          emit({ event: 'skipped', key, reason: 'blocked' })
+          continue
+        }
+        const slot = await opened[i].p
+        if (slot.error !== null) throw slot.error
+        if (slot.core === null) continue
+        const core = slot.core
+        slot.core = null
+        const { reason, held0 } = slot
+        if (held0 && reason === null) {
+          activate(entry, core)
+          continue
+        }
+        let purged = true
+        await track((async () => {
+          await core.close()
+          await store.purgeReplica(storage, key)
+        })(), noop, () => {
+          purged = false
+          purgeFailed(key)
+        })
+        if (!purged) break
+        if (reason) {
+          entry.state = 'failed'
+          skipped.push({ key, reason })
+          emit({ event: 'skipped', key, reason })
+        }
       }
-      if (!(await store.replicaExists(storage, key))) continue
-      const core = await store.openReplica(storage, key)
-      let reason = null
-      const held0 = core.length > 0 && await core.has(0)
-      if (core.fork !== 0) reason = 'fork'
-      else if (held0) reason = await localGate(core, key, association, gateOpts())
-      if (held0 && reason === null) {
-        activate(entry, core)
-        continue
-      }
-      let purged = true
-      await track((async () => {
-        await core.close()
-        await store.purgeReplica(storage, key)
-      })(), noop, () => {
-        purged = false
-        purgeFailed(key)
-      })
-      if (!purged) break
-      if (reason) {
-        entry.state = 'failed'
-        skipped.push({ key, reason })
-        emit({ event: 'skipped', key, reason })
+    } finally {
+      await Promise.all(workers)
+      for (const slot of slots) {
+        if (slot === null || slot.core === null) continue
+        const core = slot.core
+        slot.core = null
+        await core.close().catch(noop)
       }
     }
 
@@ -2396,4 +2485,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, gateVerdict, trackPresent, linearExcept, MAX_RANGES, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, gateVerdict, trackPresent, linearExcept, MAX_RANGES, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
