@@ -136,9 +136,28 @@ function checkPrf (prf) {
 }
 
 // HKDF-SHA-256(ikm = prf, salt, info, 32 bytes) -> a fresh Uint8Array.
-async function hkdf (prf, salt, info) {
+// `derive`, when given, is an async (ikm, salt, info, length) -> bytes used
+// instead of WebCrypto (the Bare worklet has no HKDF there, see lib/hkdf.js);
+// same inputs, same output.
+async function hkdf (prf, salt, info, derive) {
   const ikm = new Uint8Array(prf)
   try {
+    if (typeof derive === 'function') {
+      // Copies: an injected function must never be able to alter the labels.
+      const saltCopy = new Uint8Array(salt)
+      const infoCopy = new Uint8Array(info)
+      try {
+        const out = await derive(ikm, saltCopy, infoCopy, 32)
+        if (!(out instanceof Uint8Array) || out.byteLength !== 32) throw new TypeError('resultado HKDF inválido')
+        const seed = new Uint8Array(out)
+        try {
+          out.fill(0)
+        } catch {}
+        return seed
+      } finally {
+        infoCopy.fill(0)
+      }
+    }
     const subtle = globalThis.crypto.subtle
     const key = await subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits'])
     const bits = await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, 256)
@@ -149,9 +168,9 @@ async function hkdf (prf, salt, info) {
 }
 
 // HKDF-SHA-256 of a 32-byte PRF output -> the 32-byte Ed25519 seed.
-async function seedFromPrf (prf) {
+async function seedFromPrf (prf, { hkdf: derive } = {}) {
   checkPrf(prf)
-  return hkdf(prf, HKDF_SALT, HKDF_INFO)
+  return hkdf(prf, HKDF_SALT, HKDF_INFO, derive)
 }
 
 // -> { publicKey: Uint8Array(32), secretKey: Uint8Array(64) } in fresh
@@ -169,20 +188,21 @@ function keyPairFromSeed (seed) {
 
 // -> { publicKey: Uint8Array(32), secretKey: Uint8Array(64) } in fresh buffers.
 // The seed and the key pair hypercore-crypto allocated are zeroed after.
-async function keyPairFromPrf (prf) {
-  return keyPairFromSeed(await seedFromPrf(prf))
+// opts.hkdf: see hkdf() above.
+async function keyPairFromPrf (prf, { hkdf: derive } = {}) {
+  return keyPairFromSeed(await seedFromPrf(prf, { hkdf: derive }))
 }
 
 // The device's media key pair: prf (32 bytes) and the device's nonce (32
 // bytes), neither kept nor changed. Same buffer discipline as keyPairFromPrf.
-async function mediaKeyPairFromPrf (prf, nonce) {
+async function mediaKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
   checkPrf(prf)
   if (!(nonce instanceof Uint8Array) || nonce.byteLength !== NONCE_BYTES) throw new TypeError('nonce inválido')
   const info = new Uint8Array(MEDIA_HKDF_INFO.byteLength + NONCE_BYTES)
   info.set(MEDIA_HKDF_INFO, 0)
   info.set(nonce, MEDIA_HKDF_INFO.byteLength)
   try {
-    return keyPairFromSeed(await hkdf(prf, MEDIA_HKDF_SALT, info))
+    return keyPairFromSeed(await hkdf(prf, MEDIA_HKDF_SALT, info, derive))
   } finally {
     info.fill(0)
   }

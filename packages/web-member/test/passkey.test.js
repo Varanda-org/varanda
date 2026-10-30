@@ -8,6 +8,7 @@ const crypto = require('node:crypto')
 const b4a = require('b4a')
 const hypercoreCrypto = require('hypercore-crypto')
 const passkey = require('../lib/passkey')
+const { hkdfSha256 } = require('../lib/hkdf')
 
 const {
   PRF_EVAL, HKDF_SALT, HKDF_INFO,
@@ -388,4 +389,68 @@ test('media key pair: per (PRF, nonce), unrelated to the identity, zeroed buffer
     t.is(await codeOf(() => mediaKeyPairFromPrf(prf, bad)), 'TypeError', 'bad nonce refused')
   }
   t.is(await codeOf(() => mediaKeyPairFromPrf(prf)), 'TypeError', 'a nonce is required')
+})
+
+// An injected HKDF (the Bare worklet's, over bare-crypto's HMAC) must give
+// the very same keys as the WebCrypto path.
+const injectedHkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, {
+  hmac: (k, d) => new Uint8Array(crypto.createHmac('sha256', k).update(d).digest())
+})
+
+test('injected hkdf: identity key pair byte-equal to WebCrypto', async (t) => {
+  const golden = await keyPairFromPrf(GOLDEN_PRF, { hkdf: injectedHkdf })
+  t.is(hex(golden.publicKey), GOLDEN_PUBLIC_KEY, 'golden public key')
+  t.is(hex(await seedFromPrf(GOLDEN_PRF, { hkdf: injectedHkdf })), GOLDEN_SEED, 'golden seed')
+  for (let i = 0; i < 5; i++) {
+    const prf = new Uint8Array(crypto.randomBytes(32))
+    const web = await keyPairFromPrf(prf)
+    const injected = await keyPairFromPrf(prf, { hkdf: injectedHkdf })
+    t.is(hex(injected.publicKey), hex(web.publicKey), 'public key ' + i)
+    t.is(hex(injected.secretKey), hex(web.secretKey), 'secret key ' + i)
+  }
+  t.alike(Array.from(GOLDEN_PRF), Array.from({ length: 32 }, (_, i) => i), 'caller PRF untouched')
+})
+
+test('injected hkdf: media key pair byte-equal to WebCrypto', async (t) => {
+  const { mediaKeyPairFromPrf } = passkey
+  for (let i = 0; i < 5; i++) {
+    const prf = new Uint8Array(crypto.randomBytes(32))
+    const nonce = new Uint8Array(crypto.randomBytes(32))
+    const nonceHex = hex(nonce)
+    const web = await mediaKeyPairFromPrf(prf, nonce)
+    const injected = await mediaKeyPairFromPrf(prf, nonce, { hkdf: injectedHkdf })
+    t.is(hex(injected.publicKey), hex(web.publicKey), 'public key ' + i)
+    t.is(hex(injected.secretKey), hex(web.secretKey), 'secret key ' + i)
+    t.is(hex(nonce), nonceHex, 'nonce untouched')
+  }
+})
+
+test('injected hkdf: receives copies of the labels and its output is checked', async (t) => {
+  const { MEDIA_HKDF_SALT, MEDIA_HKDF_INFO, mediaKeyPairFromPrf } = passkey
+  const saltHex = hex(HKDF_SALT)
+  const infoHex = hex(HKDF_INFO)
+  let seen = null
+  const vandal = async (ikm, salt, info, length) => {
+    seen = { salt: hex(salt), info: hex(info), length }
+    const out = await injectedHkdf(ikm, salt, info, length)
+    ikm.fill(0)
+    salt.fill(0)
+    info.fill(0)
+    return out
+  }
+  const kp = await keyPairFromPrf(GOLDEN_PRF, { hkdf: vandal })
+  t.is(hex(kp.publicKey), GOLDEN_PUBLIC_KEY)
+  t.alike(seen, { salt: saltHex, info: infoHex, length: 32 })
+  t.is(hex(HKDF_SALT), saltHex, 'module salt untouched')
+  t.is(hex(HKDF_INFO), infoHex, 'module info untouched')
+  t.alike(Array.from(GOLDEN_PRF), Array.from({ length: 32 }, (_, i) => i), 'caller PRF untouched')
+
+  const mediaSalt = hex(MEDIA_HKDF_SALT)
+  const mediaInfo = hex(MEDIA_HKDF_INFO)
+  await mediaKeyPairFromPrf(GOLDEN_PRF, new Uint8Array(32).fill(4), { hkdf: vandal })
+  t.is(hex(MEDIA_HKDF_SALT), mediaSalt, 'media salt untouched')
+  t.is(hex(MEDIA_HKDF_INFO), mediaInfo, 'media info untouched')
+
+  t.is(await codeOf(() => keyPairFromPrf(GOLDEN_PRF, { hkdf: async () => new Uint8Array(16) })), 'TypeError', 'short output refused')
+  t.is(await codeOf(() => keyPairFromPrf(GOLDEN_PRF, { hkdf: async () => 'x'.repeat(32) })), 'TypeError', 'non-bytes refused')
 })
