@@ -1,4 +1,6 @@
 PODS:
+  - AuthSession (0.1.0):
+    - ExpoModulesCore
   - EXConstants (55.0.17):
     - ExpoModulesCore
   - Expo (55.0.31):
@@ -2031,6 +2033,7 @@ PODS:
   - Yoga (0.0.0)
 
 DEPENDENCIES:
+  - AuthSession (from `../modules/auth-session/ios`)
   - EXConstants (from `../../../node_modules/expo-constants/ios`)
   - Expo (from `../../../node_modules/expo`)
   - ExpoAsset (from `../../../node_modules/expo-asset/ios`)
@@ -2132,6 +2135,8 @@ SPEC REPOS:
     - SDWebImageWebPCoder
 
 EXTERNAL SOURCES:
+  AuthSession:
+    :path: "../modules/auth-session/ios"
   EXConstants:
     :path: "../../../node_modules/expo-constants/ios"
   Expo:
@@ -2319,6 +2324,7 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/react-native/ReactCommon/yoga"
 
 SPEC CHECKSUMS:
+  AuthSession: 1db21e5e30edd88b1f8e6ca0396302bcc21aa855
   EXConstants: 49a092f564eb895b79ab416f53ba54f7e6935197
   Expo: f2da47e96f1185569920ff464ba6b2e1571c9831
   ExpoAsset: f3c42967e877b950418c217508ac1c6f32be4f99
