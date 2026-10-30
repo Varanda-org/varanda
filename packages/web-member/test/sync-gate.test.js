@@ -45,8 +45,9 @@ async function diary (t, records) {
 // A seeder stand-in: role 'seeder' with a certificate signed by `signer`,
 // replicating `cores` and advertising them; it answers an announce with
 // admitted at the length the member advertised. `spy` cores are replicated
-// but not advertised (to see what the member uploads).
-async function fakeSeeder (t, { signer, cores = [], spy = [] }) {
+// but not advertised (to see what the member uploads). seen(msg) gets
+// every admission message from the member.
+async function fakeSeeder (t, { signer, cores = [], spy = [], seen = () => {} }) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -67,6 +68,7 @@ async function fakeSeeder (t, { signer, cores = [], spy = [] }) {
         cert,
         have: cores.map((core) => ({ key: hex(core.key), length: core.length })),
         onmessage: (msg, peer) => {
+          seen(msg)
           if (msg.type !== 'announce') return
           announced.push(msg.key)
           peer.send({ type: 'admitted', key: msg.key, length: peer.remoteHave.get(msg.key) || 0 })
@@ -202,48 +204,65 @@ test('a followed diary is stored only when its block 0 verifies and it fits the 
   t.ok(warnings.includes('aviso: diário ' + hex(foreign.key).slice(0, 8) + ' ignorado (untrusted-association)'))
   t.ok(seeder.announced.includes(key), 'the own diary was announced to the verified seeder')
 
-  const feed = await web.request('feed.read', {})
+  const feed = await wholeFeed(web)
   t.ok(feed.items.some((i) => i.author === hex(good.key) && i.text === 'servido pelo semeador' && i.name === 'Dani'))
   t.absent(feed.items.some((i) => i.author === hex(foreign.key)), 'nothing from the foreign diary')
 })
 
-test('a followed diary downloads in block order so its prefix is readable', async (t) => {
-  t.timeout(60000)
-  await testnet(t)
-  const assoc = association()
-  const served = await diary(t, [
+// A followed diary served by `seeder`, 2 + `posts` blocks: block 0, a
+// profile, then posts one second apart.
+async function longDiary (t, assoc, posts = 298) {
+  return diary(t, [
     (key) => memberCertRecord(createCert({ member: key }, assoc.kp)),
     () => profileRecord({ name: 'Dani', bio: '' }),
-    ...Array.from({ length: 298 }, (_, i) => () => postRecord({
+    ...Array.from({ length: posts }, (_, i) => () => postRecord({
       text: 'post ' + i,
       at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
     }))
   ])
+}
+
+// Math.random within 0.4..0.6 until restored: a random-order range would
+// start near the middle of a diary. The values stay varied (HyperDHT draws
+// stream ids from Math.random and retries on a collision).
+function middleRandom (t) {
+  const random = Math.random
+  const restore = () => { Math.random = random }
+  t.teardown(restore, { force: true })
+  let seed = 1
+  Math.random = () => {
+    seed = (seed * 16807) % 2147483647
+    return 0.4 + 0.2 * (seed / 2147483647)
+  }
+  return restore
+}
+
+function range (start, end) {
+  return Array.from({ length: end - start }, (_, i) => start + i)
+}
+
+test('a followed diary downloads block 0, then its newest window, then the rest in block order', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await longDiary(t, assoc)
   const uploads = []
   served.on('upload', (index) => uploads.push(index))
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [served] })
   const { node, web, storage } = await webNode(t, assoc, seeder.url)
   await web.request('follow.add', { key: hex(served.key) })
 
-  const random = Math.random
-  t.teardown(() => { Math.random = random }, { force: true })
-  // A random-order range would start near the middle of this diary. The
-  // values stay varied (HyperDHT draws stream ids from Math.random and
-  // retries on a collision) but within 0.4..0.6.
-  let seed = 1
-  Math.random = () => {
-    seed = (seed * 16807) % 2147483647
-    return 0.4 + 0.2 * (seed / 2147483647)
-  }
+  const restore = middleRandom(t)
   const stopped = await onceRun(web)
-  Math.random = random
+  restore()
   t.is(stopped.reason, 'done')
-  t.ok(uploads.length > 0, 'the seeder uploaded blocks')
-  // Requests in flight complete out of order (0, 1, 2, 4, 8, ... observed),
-  // so only the window is checked: a random start would sit near block 150.
-  const first = [...new Set(uploads)].slice(0, 32)
-  t.ok(first.every((i) => i < 64), 'the first blocks come from the start of the diary')
-  t.ok([0, 1, 2, 3].every((i) => first.includes(i)), 'blocks 0 to 3 come first')
+  const order = [...new Set(uploads)]
+  t.is(order[0], 0, 'block 0 first')
+  t.alike(order.slice(0, 35).sort((a, b) => a - b), [0, 1, 2, ...range(268, 300)], 'then blocks 1 and 2 and the newest 32, nothing else')
+  const rest = order.slice(35)
+  t.alike([...rest].sort((a, b) => a - b), range(3, 268), 'then the history')
+  // Requests in flight complete out of order, so only the window is checked.
+  t.ok(rest.slice(0, 32).every((i) => i < 64), 'the history starts at block 3')
   t.is((await web.request('feed.read', { limit: 31 })).items.length, 31)
 
   await node.close()
@@ -252,6 +271,194 @@ test('a followed diary downloads in block order so its prefix is readable', asyn
   await replica.ready()
   t.is(replica.length, served.length, 'the stored replica has the full diary length')
   t.is(replica.contiguousLength, served.length, 'every block is stored locally')
+})
+
+// A seeder's copy of `from` holding only the blocks of `ranges` ([start,
+// end) pairs) at its full signed length; fill() fetches the rest.
+async function sparseCopy (t, from, ranges) {
+  const core = new Hypercore(memoryStorage(), from.key, { valueEncoding: 'json' })
+  await core.ready()
+  t.teardown(() => core.close(), { force: true })
+  const fetch = async (list) => {
+    const a = from.replicate(true)
+    const b = core.replicate(false)
+    a.pipe(b).pipe(a)
+    for (const [start, end] of list) await core.download({ start, end }).done()
+    a.destroy()
+    b.destroy()
+  }
+  await fetch(ranges)
+  return { core, fill: () => fetch([[0, from.length]]) }
+}
+
+async function until (fn, ms = 20000) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (await fn()) return true
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  return false
+}
+
+function postsOf (feed, key) {
+  return feed.items.filter((i) => i.author === key).map((i) => i.text)
+}
+
+// Every page of feed.read (at most 31 items each) -> { items, incomplete }
+// of the last page.
+async function wholeFeed (web) {
+  const items = []
+  let before = null
+  for (;;) {
+    const page = await web.request('feed.read', before === null ? { limit: 31 } : { limit: 31, before })
+    items.unshift(...page.items)
+    if (page.items.length < 31) return { items, incomplete: page.incomplete }
+    before = { at: page.items[0].at, author: page.items[0].author, seq: page.items[0].seq }
+  }
+}
+
+function posts (from, to) {
+  return range(from, to).map((i) => 'post ' + i)
+}
+
+test('a seeder missing the middle of a followed diary: the feed shows its newest posts, then the history when it arrives', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await longDiary(t, assoc)
+  const key = hex(served.key)
+  const partial = await sparseCopy(t, served, [[0, 3], [268, 300]])
+  t.is(partial.core.length, 300, 'fixture: the seeder knows the signed length')
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [partial.core] })
+  const { web } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key })
+  await web.request('sync.start', {})
+
+  // Blocks 268..299 hold posts 266..297; block 2 holds post 0.
+  const newest = ['post 0', ...posts(266, 298)].sort()
+  let feed = null
+  const shown = await until(async () => {
+    feed = await wholeFeed(web)
+    return postsOf(feed, key).length === newest.length
+  })
+  t.ok(shown, 'the newest posts were shown')
+  t.alike(postsOf(feed, key).sort(), newest, 'block 0\'s prefix and the newest run, nothing else')
+  t.alike(feed.incomplete, [key])
+  t.ok(feed.items.filter((i) => i.author === key).every((i) => i.name === 'Dani'), 'named by the profile at block 1')
+
+  await partial.fill()
+  const filled = await until(async () => {
+    feed = await wholeFeed(web)
+    return postsOf(feed, key).length === 298
+  })
+  t.ok(filled, 'the history arrived once the seeder had it')
+  t.alike(postsOf(feed, key).sort(), posts(0, 298).sort())
+  t.alike(feed.incomplete, [])
+  await web.request('sync.stop')
+})
+
+test('a returning visit downloads the newest window first and never advertises a length it does not hold', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await longDiary(t, assoc, 98)
+  const key = hex(served.key)
+  const uploads = []
+  const haves = []
+  served.on('upload', (index) => uploads.push(index))
+  const seeder = await fakeSeeder(t, {
+    signer: assoc.kp,
+    cores: [served],
+    seen: (msg) => {
+      if (msg.type === 'have' && msg.key === key) haves.push({ length: msg.length, uploaded: new Set(uploads) })
+    }
+  })
+  const { web } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key })
+  const first = await onceRun(web)
+  t.is(first.reason, 'done')
+  t.is(first.result.downloaded[key], 100, 'fixture: the first visit holds 100 blocks')
+
+  for (let i = 98; i < 298; i++) {
+    await served.append(postRecord({ text: 'post ' + i, at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }))
+  }
+  uploads.length = 0
+  haves.length = 0
+  const restore = middleRandom(t)
+  const again = await onceRun(web)
+  restore()
+  t.is(again.reason, 'done')
+  t.is(again.result.downloaded[key], 300)
+  const order = [...new Set(uploads)]
+  t.ok(order[0] >= 268 && order[0] < 300, 'the first upload is in the newest window (' + order[0] + ')')
+  t.alike(order.slice(0, 32).sort((a, b) => a - b), range(268, 300), 'the newest window comes first')
+  t.ok(haves.length > 0, 'fixture: the member advertised the key')
+  for (const { length, uploaded } of haves) {
+    t.ok(range(100, length).every((i) => uploaded.has(i)), 'have ' + length + ' covers only stored blocks')
+  }
+})
+
+test('a followed diary whose seeder withholds the newest blocks still downloads its history', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await longDiary(t, assoc)
+  const key = hex(served.key)
+  const partial = await sparseCopy(t, served, [[0, 268]])
+  t.is(partial.core.length, 300, 'fixture: the seeder knows the signed length')
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [partial.core] })
+  const { web } = await webNode(t, assoc, seeder.url, { headStallMs: 200 })
+  await web.request('follow.add', { key })
+  await web.request('sync.start', {})
+  let feed = null
+  const filled = await until(async () => {
+    feed = await wholeFeed(web)
+    return postsOf(feed, key).length === 266
+  })
+  t.ok(filled, 'the history arrived although the window never did')
+  t.alike(postsOf(feed, key).sort(), posts(0, 266).sort())
+  t.alike(feed.incomplete, [key])
+  await web.request('sync.stop')
+})
+
+test('the own diary still downloads in block order', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const writer = { storage: memoryNodeStorage(), association: assoc.hex, keyPair, mediaKeyPair: crypto.keyPair() }
+  const { publicKey } = await ops.idCreate(writer)
+  await ops.certAdd(writer, createCert({ member: publicKey }, assoc.kp))
+  for (let i = 0; i < 199; i++) await ops.postCreate(writer, { text: 'meu ' + i })
+  const source = await store.openDiary(writer.storage)
+  const held = new Hypercore(memoryStorage(), keyPair.publicKey)
+  await held.ready()
+  t.teardown(() => held.close(), { force: true })
+  const a = source.replicate(true)
+  const b = held.replicate(false)
+  a.pipe(b).pipe(a)
+  await held.download({ start: 0, end: source.length }).done()
+  a.destroy()
+  b.destroy()
+  await source.close()
+  const uploads = []
+  held.on('upload', (index) => uploads.push(index))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [held] })
+
+  // A fresh device of the same identity: an empty diary.
+  const fresh = { storage: memoryNodeStorage(), association: assoc.hex, keyPair, mediaKeyPair: crypto.keyPair() }
+  await ops.idCreate(fresh)
+  const restore = middleRandom(t)
+  const ac = new AbortController()
+  const run = runSync({ storage: fresh.storage, seederUrl: seeder.url, createSocket: (u) => new WebSocket(u), signal: ac.signal })
+  t.ok(await until(() => new Set(uploads).size === 200), 'the diary came back')
+  ac.abort()
+  await run
+  restore()
+  const order = [...new Set(uploads)]
+  t.is(order.length, 200, 'every block was uploaded')
+  t.is(order[0], 0, 'block 0 first')
+  t.ok(order.slice(0, 32).every((i) => i < 64), 'from the start of the diary, not its newest blocks')
 })
 
 test('an endpoint whose seeder certificate does not verify gets nothing', async (t) => {

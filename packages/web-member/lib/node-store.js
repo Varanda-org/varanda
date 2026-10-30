@@ -33,6 +33,7 @@ const b4a = require('b4a')
 const {
   decodeBlock,
   validateRecord,
+  validRecordCopy,
   isHex64,
   isCanonicalIso,
   MAX_BLOCK_BYTES,
@@ -336,6 +337,45 @@ async function readAll (core) {
   assertOpen(core)
   const { entries, present } = await presentState(core)
   return entries.slice(0, present)
+}
+
+// What a followed diary can show while it downloads newest-first (./sync.js
+// trackPresent): the readAll prefix plus the unbroken run of blocks that
+// ends at core.length, a hole in that run passed only when a stored
+// tombstone targets it (the presentState rule). -> { entries, present, tail }
+// with entries = the prefix, then the blocks of [tail, core.length);
+// tail === core.length when there is no such run (or none is needed). The
+// run needs block 0 (moderation reads it) and is never read past
+// MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
+// that can delete a block of the run lies inside the run: stored, and
+// applied to the whole result by the same fold.
+async function readVisible (core) {
+  assertOpen(core)
+  const length = core.length
+  const { raw, entries, present } = await presentState(core)
+  const prefix = entries.slice(0, present)
+  if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
+    return { entries: prefix, present, tail: length }
+  }
+  const targets = new Set()
+  for (const { seq, record } of raw) {
+    const copy = record === null ? null : validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'delete') targets.add(copy.seq)
+  }
+  let tail = length
+  while (tail > present) {
+    const seq = tail - 1
+    // Judged on the snapshot alone: a block that arrived after presentState
+    // (a tombstone, say) is not in `raw`, so asking the live core would bridge
+    // a gap with a deletion this read never applied. A stored block that does
+    // not decode stops the run too, which only shows less.
+    if (raw[seq].record === null && !targets.has(seq)) break
+    tail = seq
+  }
+  // Only a block that arrived after presentState can close the gap: the
+  // next read shows it.
+  if (tail <= present) return { entries: prefix, present, tail: length }
+  return { entries: prefix.concat(entries.slice(tail, length)), present, tail }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the
@@ -770,6 +810,7 @@ module.exports = {
   replicaExists,
   purgeReplica,
   readAll,
+  readVisible,
   readRaw,
   readBlock0,
   appendRecord,
