@@ -50,7 +50,7 @@ All workspaces, from the root:
 npm test
 ```
 
-This runs `npm test --workspaces --if-present`. Each workspace test script is `node ../../scripts/run-tests.js`, which runs every `test/*.test.js` of that workspace one per child process, in order, with a timeout per file (`VARANDA_TEST_TIMEOUT_MS`, default 180000).
+This runs `npm test --workspaces --if-present` (workspaces, one after another). Each workspace test script is `node ../../scripts/run-tests.js`, which runs the `test/*.test.js` files of that workspace in a pool of child processes, `VARANDA_TEST_CONCURRENCY` at a time, with a timeout per file (`VARANDA_TEST_TIMEOUT_MS`, default 180000). Unset, the pool is half the CPU cores, rounded down, and at most 4 (4 on a 12-core Mac, 2 on a 4-core machine), because several tests assert timing bounds under 100 ms that move under load; `VARANDA_TEST_CONCURRENCY=1` runs one file at a time and streams the output live. With more than one file at a time, each file's output is printed as one block when that file ends (completion order, never interleaved), and the summary lists `# falha: <arquivo>` for each failing file before `# N arquivo(s) de teste, M falha(s)`. `VARANDA_TEST_SHARD=I/N` runs only the files whose position i (0-based, in the sorted list or the order given on the command line) satisfies `i % N == I - 1`; a slice with no files exits with failure (`# nenhum arquivo neste fragmento`), and an invalid value does too. When a timing test fails, rerun it alone (`node <arquivo>`) or with `VARANDA_TEST_CONCURRENCY=1` before blaming your change.
 
 One workspace:
 

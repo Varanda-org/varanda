@@ -3,6 +3,21 @@
 # Installs from the lockfile, then runs the same commands a contributor runs
 # locally: lint, the test suites of every workspace, and the CLI demo. No
 # secrets and no network services beyond the npm registry.
+#
+# The checks are split into six parallel worker jobs per Node version (the
+# slow core and cli suites in two shards each, web-member alone, and
+# `others` for everything else plus lint and demo), then one gate job per
+# Node version. The main ruleset requires checks named exactly `test (20)`
+# and `test (24)`: only the gates carry those names.
+#
+# There is deliberately no matrix: a matrix leg cancelled because no runner
+# picked it up has been reported to leave the matrix job's needs result at
+# success, and a required check must never go green on a leg that did not
+# run. Each worker is its own job, and each gate checks every worker's own
+# result.
+#
+# The step list is written once (the &test-steps anchor on the first worker)
+# and reused by alias; per-job differences live only in the job env.
 name: ci
 
 on:
@@ -17,27 +32,201 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# VARANDA_TEST_CONCURRENCY is pinned to 1 in every worker: the jobs are the
+# CI parallelism, and some asserts are load sensitive on 4-vCPU runners, so
+# each file runs alone, as the timing asserts were calibrated for.
+#
+# `others` runs root `npm test` with a skip list of the workspaces the other
+# five workers cover, so a workspace added later runs there without editing
+# this file.
 jobs:
-  test:
-    name: test (${{ matrix.node }})
+  core-1-20:
+    name: core 1/2 (20)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [20, 24]
-    steps:
+    env:
+      NODE: '20'
+      SUITE: core-1
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: &test-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ env.NODE }}
           cache: npm
       # --ignore-scripts: no dependency install script runs in CI (supply
       # chain). onnxruntime-node's would only fetch CUDA artifacts; its CPU
       # binary, sharp's and esbuild's ship in their packages.
       - run: npm ci --ignore-scripts
-      - run: npm run lint
-      - run: npm test
-      - run: npm run demo
+      - if: env.SUITE == 'others'
+        run: npm run lint
+      - run: if [ -n "$WORKSPACE" ]; then npm test -w "$WORKSPACE"; else npm test; fi
+      - if: env.SUITE == 'others'
+        run: npm run demo
+
+  core-2-20:
+    name: core 2/2 (20)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '20'
+      SUITE: core-2
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-1-20:
+    name: cli 1/2 (20)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '20'
+      SUITE: cli-1
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-2-20:
+    name: cli 2/2 (20)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '20'
+      SUITE: cli-2
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-20:
+    name: web-member (20)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '20'
+      SUITE: web-member
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  others-20:
+    name: others (20)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '20'
+      SUITE: others
+      VARANDA_TEST_SKIP_WORKSPACES: packages/core,apps/cli,packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  core-1-24:
+    name: core 1/2 (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: core-1
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  core-2-24:
+    name: core 2/2 (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: core-2
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-1-24:
+    name: cli 1/2 (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-1
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-2-24:
+    name: cli 2/2 (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-2
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-24:
+    name: web-member (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  others-24:
+    name: others (24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: others
+      VARANDA_TEST_SKIP_WORKSPACES: packages/core,apps/cli,packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  # The gates carry the required check names. `if: always()` and never
+  # `!cancelled()` or `success()`: a skipped required check counts as passing
+  # on GitHub, so the gate must run and fail closed when any worker failed,
+  # was cancelled or was skipped. The count check stops a vacuous pass if
+  # needs were ever edited down or emptied.
+  test-20:
+    name: test (20)
+    if: always()
+    needs: [core-1-20, core-2-20, cli-1-20, cli-2-20, web-member-20, others-20]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          set -- $RESULTS
+          [ "$#" -eq 6 ] || exit 1
+          for r in "$@"; do [ "$r" = success ] || exit 1; done
+
+  test-24:
+    name: test (24)
+    if: always()
+    needs: [core-1-24, core-2-24, cli-1-24, cli-2-24, web-member-24, others-24]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          set -- $RESULTS
+          [ "$#" -eq 6 ] || exit 1
+          for r in "$@"; do [ "$r" = success ] || exit 1; done

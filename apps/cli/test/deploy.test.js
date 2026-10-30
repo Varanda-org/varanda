@@ -33,6 +33,10 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
+// The six test legs, each its own job (no matrix), gated by check.
+const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member', 'others']
+const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
+const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
 
 test('deploy.yml: actions pinned to the expected commits', (t) => {
   const pins = {
@@ -54,7 +58,13 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   const top = block(/^permissions:/, /^\S/)
   const topLines = top.split('\n').slice(1).filter((l) => l.trim() !== '').map((l) => l.trim())
   t.alike(topLines, ['contents: read'], 'top-level permissions are contents: read only')
-  t.ok(check && deploy, 'both jobs found')
+  t.ok(check && deploy, 'check and deploy found')
+  for (const id of WORKERS) t.ok(workers[id], id + ' job found')
+  const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the six legs, check and deploy')
+  t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
+  t.absent(/<<:/.test(code), 'no YAML merge keys')
+  t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
 
   t.ok(/^ {4}permissions:\s*\{\}\s*$/m.test(deploy), 'deploy job has permissions: {}')
   t.ok(/^ {4}needs:\s*check\s*$/m.test(deploy), 'deploy needs check')
@@ -63,6 +73,21 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {6}name:\s*producao\s*$/m.test(deploy), 'deploy uses the producao environment')
   t.absent(/\buses:/.test(deploy), 'deploy job has no uses: (no third-party action)')
   t.absent(/^ {4}environment:/m.test(check), 'check job has no environment')
+  t.absent(/\buses:/.test(check), 'check job has no uses: (no checkout)')
+  for (const id of WORKERS) {
+    const w = workers[id]
+    t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(w), id + ' runs-on ubuntu-24.04')
+    t.absent(/^ {4}environment:/m.test(w), id + ' has no environment')
+    t.ok(/^ {6}NODE:\s*'24'\s*$/m.test(w), id + ' sets NODE 24')
+    t.ok(/^ {6}VARANDA_TEST_CONCURRENCY:\s*'1'\s*$/m.test(w), id + ' sets VARANDA_TEST_CONCURRENCY 1')
+    t.ok(/^ {4}steps:\s*(&test-steps|\*test-steps)\s*$/m.test(w), id + ' uses the shared step list')
+  }
+  t.is((code.match(/&test-steps\b/g) || []).length, 1, 'one &test-steps anchor')
+  t.ok(/^ {4}steps:\s*&test-steps\s*$/m.test(workers[WORKERS[0]]), 'the first leg defines the anchor')
+  const wsOf = (id) => ((workers[id].match(/^ {6}WORKSPACE:\s*(\S+)\s*$/m) || [])[1])
+  const skip = (workers.others.match(/^ {6}VARANDA_TEST_SKIP_WORKSPACES:\s*(\S+)\s*$/m) || [])[1] || ''
+  t.absent(wsOf('others'), 'others has no WORKSPACE')
+  t.alike(skip.split(',').sort(), [...new Set(WORKERS.filter((id) => id !== 'others').map(wsOf))].sort(), 'others skips exactly the other legs\' workspaces')
 
   const on = block(/^on:/, /^\S/)
   t.ok(/^ {2}push:\s*$/m.test(on) && /branches:\s*\[main\]/.test(on), 'push trigger on main only')
@@ -73,10 +98,17 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {2}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(code), 'concurrency group is per ref (deploy-<ref>)')
 })
 
-test('deploy.yml: both jobs carry the repository, branch and variable guards', (t) => {
-  const guard = /^\s+if:\s*github\.repository == 'Varanda-org\/varanda' && github\.ref == 'refs\/heads\/main' && vars\.VARANDA_DEPLOY == 'true'\s*$/m
-  t.ok(guard.test(check), 'check job is guarded')
+test('deploy.yml: every job carries the repository, branch and variable guards', (t) => {
+  const guard = new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm')
+  for (const id of WORKERS) t.ok(guard.test(workers[id]), id + ' job is guarded')
   t.ok(guard.test(deploy), 'deploy job is guarded')
+  // The gate runs even when a leg failed, was cancelled or was skipped, and
+  // fails closed: a skipped check would read as passing.
+  t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
+  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the six legs')
+  t.ok(/^\s+RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}\s*$/m.test(check), 'check reads every leg result')
+  t.ok(/^\s+\[ "\$#" -eq 6 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly six results')
+  t.ok(/^\s+for r in "\$@"; do \[ "\$r" = success \] \|\| exit 1; done\s*$/m.test(check), 'check requires every result to be success')
 })
 
 test('deploy.yml: secrets and variables are only the expected ones, only in env: or if:', (t) => {
@@ -105,11 +137,27 @@ test('deploy.yml: forbidden constructs are absent', (t) => {
   t.absent(/ForwardAgent/.test(code), 'no agent forwarding')
 })
 
-test('deploy.yml: check job order and ssh hardening', (t) => {
-  const order = ['npm ci --ignore-scripts', 'npm run lint', 'npm test', 'npm run demo']
-  const idx = order.map((cmd) => check.split('\n').findIndex((l) => new RegExp('^\\s+- run:\\s*' + cmd + '\\s*$').test(l)))
-  t.ok(idx.every((i) => i !== -1), 'all four check commands present')
+test('deploy.yml: test step order and ssh hardening', (t) => {
+  const steps = workers[WORKERS[0]].split('\n')
+  const ci = steps.findIndex((l) => /^\s+- run:\s*npm ci --ignore-scripts\s*$/.test(l))
+  const lint = steps.findIndex((l) => /^\s+run:\s*npm run lint\s*$/.test(l))
+  const tst = steps.findIndex((l) => /^\s+- run:.*npm test -w "\$WORKSPACE"/.test(l) && /\bnpm test;/.test(l))
+  const demo = steps.findIndex((l) => /^\s+run:\s*npm run demo\s*$/.test(l))
+  const idx = [ci, lint, tst, demo]
+  t.ok(idx.every((i) => i !== -1), 'npm ci, lint, test and demo steps present in the anchored list')
   t.alike([...idx].sort((a, b) => a - b), idx, 'npm ci, lint, test, demo in that order')
+  const othersOnly = /^\s+- if:\s*env\.SUITE == 'others'\s*$/
+  t.ok(lint > 0 && othersOnly.test(steps[lint - 1]), 'lint runs only in the others leg')
+  t.ok(demo > 0 && othersOnly.test(steps[demo - 1]), 'demo runs only in the others leg')
+  // Includes the body of run: | blocks (lines indented deeper than the key).
+  let runIndent = -1
+  for (const l of lines) {
+    const indent = l.search(/\S/)
+    if (runIndent !== -1 && indent !== -1 && indent <= runIndent) runIndent = -1
+    const isRun = /^\s+(- )?run:/.test(l)
+    if (isRun || runIndent !== -1) t.absent(l.includes('${' + '{'), 'no expression in run: -> ' + l.trim())
+    if (isRun && /run:\s*\|\s*$/.test(l)) runIndent = indent
+  }
 
   t.ok(/\bssh -T\b/.test(deploy), 'ssh -T')
   t.ok(/-o BatchMode=yes/.test(deploy), 'BatchMode=yes')
