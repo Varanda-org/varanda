@@ -8,17 +8,19 @@
 // Everything stored is raw peer data and the SCREENS render it through
 // displayText, as plain text.
 //
-// profile.read is a member read, so it preempts a running sync (docs/rpc.md
-// 6.1) and the node restarts a continuous run after it: lookups are batched
-// (100 ms debounce, at most PROFILE_LIMIT_MAX keys per request, one request in
-// flight, at least 1 s between automatic batches) so bursts from several
-// screens coalesce. The own key and the keys a screen asks for (resolve,
-// resolveMany: what is on screen) go first. BACKGROUND batches (freshness
-// re-fetches and failure retries) wait until the current continuous run has
-// lasted 5 s or entered its idle gap (while no failure backoff is pending),
-// so every restart gets time to reach the seeder (#66). Lookups
-// never run while a ONCE run is active (it would end for good), while a
-// sync.start is in flight or while the provider reconciles an uncertain start.
+// profile.read is a member read. The native node's read preempts a running
+// sync (docs/rpc.md 6.1) and that node restarts a continuous run after it.
+// The browser node serves the read from the live run's cores. Lookups stay
+// batched (100 ms debounce, at most PROFILE_LIMIT_MAX keys per request, one
+// request in flight, at least 1 s between automatic batches) so bursts from
+// several screens coalesce: fewer requests, and fewer native preemptions.
+// The own key and the keys a screen asks for (resolve, resolveMany: what is
+// on screen) go first. BACKGROUND batches (freshness re-fetches and failure
+// retries) wait until the current continuous run has lasted 5 s or entered
+// its idle gap (while no failure backoff is pending), so a native restart
+// gets time to reach the seeder (#66). Lookups never run while a ONCE run
+// is active (a native read would end it for good), while a sync.start is in
+// flight or while the provider reconciles an uncertain start.
 // A failure (connection lost, timeout, no identity) keeps the keys for a retry
 // when the node is ready again, when a once run ends, or on a resolve() 5 s
 // later; an older node without profile.read ('método desconhecido') answers

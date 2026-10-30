@@ -250,15 +250,14 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   const ownSyncedOn = (runId, length) => b.web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (' + length + ')')
   const { runId: first } = await b.web.request('sync.start', {})
   await until(() => ownSyncedOn(first, 5), { name: 'B em dia na execução contínua', timeoutMs: 30000 })
-  // The read preempts the run (as every member operation does) and it
-  // restarts: the gate stands down only once the NEW run confirmed own-sync.
+  // The read is served on the run's own cores (no preemption): the gate
+  // stands down because this run confirmed own-sync.
   t.is((await b.web.request('log.read', {})).entries.length, 5, 'B received A\'s later post on the continuous run')
   const status = await b.web.request('sync.status')
   t.is(status.state, 'running')
   t.is(status.once, false)
   const continuous = status.runId
-  t.not(continuous, first, 'the read restarted the continuous run')
-  await until(() => ownSyncedOn(continuous, 5), { name: 'execução contínua reiniciada em dia', timeoutMs: 30000 })
+  t.is(continuous, first, 'the read did not restart the continuous run')
   const from = b.web.events.length
   t.alike(await b.web.request('post.create', { text: 'contínuo' }), { seq: 5, ref: keyHex + ':5' })
   const after = b.web.events.slice(from)
