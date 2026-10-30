@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 6
-export const LEGAL_DATE = '29/10/2026'
-export const REVIEW_NOTE = 'Versão 6, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const LEGAL_VERSION = 7
+export const LEGAL_DATE = '30/10/2026'
+export const REVIEW_NOTE = 'Versão 7, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -58,6 +58,14 @@ export const TERMS = {
         'Denúncias por conteúdo ilegal sempre são decididas por uma pessoa. Assédio, denúncias de conta e publicações com fotos também ficam para pessoas. A IA não vê imagens. Um descarte feito pela IA vale na hora. Um bloqueio pedido pela IA só chega à lista depois que o operador o revisa e confirma num terminal. A IA não assina a lista nem desbloqueia contas.',
         'Os nós atualizados que obedecem à lista apagam e recusam o diário bloqueado. A lista não alcança aparelhos que a ignoram nem nós antigos que não a aplicam. Apps modificados podem trocar o diário diretamente entre si. O app da própria pessoa bloqueada mantém o diário local e pode servi-lo a quem já conhece a chave pública desse diário.',
         'Na web instalada, sem rede, vale a lista que está guardada no aparelho. Uma lista mais nova chega pelo semeador. A lista contém chaves públicas, sequência e datas, sem motivo, nome, e-mail ou conta Google. Ordens judiciais de bloqueio são cumpridas pela mesma lista.'
+      ]
+    },
+    {
+      heading: 'Conta de pagamentos (opcional)',
+      paragraphs: [
+        'A conta de pagamentos é opcional e existe só na web hospedada. O Varanda funciona por inteiro sem ela. Para abri-la, você passa por uma verificação de identidade feita pela Hodle, uma empresa de software. Parceiros regulados movimentam o dinheiro. O BRLA é um real digital emitido pela Avenia. A associação que publica o Varanda não é banco nem instituição de pagamento. A conta de pagamentos é só para pessoas com 18 anos ou mais; a rede social continua a partir dos 16. Para abrir a conta, você declara ter 18 anos ou mais antes de qualquer coisa ser criada no parceiro, e a data de nascimento enviada na verificação precisa confirmar isso (a idade é contada pelo calendário de Brasília).',
+        'Hoje a conta só abre e confirma sua identidade. O Varanda só ativa a criação da carteira depois que o parceiro confirmar por escrito que o PIN é escolhido pela pessoa e só ela o conhece. Quando a carteira for liberada, você escolhe um PIN de 6 dígitos que o Varanda não guarda e não consegue recuperar, e três erros bloqueiam a carteira por 24 horas no parceiro. A subconta aberta na Hodle não pode ser apagada no parceiro. O saldo não tem remuneração.',
+        'Nesta versão a conta só pode ser aberta. Receber e enviar dinheiro chegam em versões seguintes, com novo aceite. Quando existirem, o Varanda poderá cobrar uma taxa própria, mostrada em reais antes de cada confirmação.'
       ]
     },
     {
@@ -144,13 +152,14 @@ export const PRIVACY = {
         'Registro do aceite: a finalidade é registrar qual versão cada conta aceitou. A base legal é uma proposta, ainda sem parecer jurídico.',
         'Faixa de idade: a finalidade é cumprir a regra de idade mínima. A base legal proposta é obrigação legal (ECA Digital), a confirmar em parecer jurídico.',
         'Denúncias, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
+        'Conta de pagamentos: os identificadores da conta e da carteira e o estado da verificação servem para operar a conta. A proposta é execução de contrato, a confirmar. A foto do documento e a selfie com prova de vida são dados biométricos sensíveis, tratados pelo parceiro. A base do Art. 11 ainda aguarda parecer jurídico, como a selfie da Didit.',
         'Registros de acesso, com IP, data e hora, ficam nos semeadores e serviços, se aplicável. A proposta é obrigação legal caso o Art. 15 do Marco Civil se aplique.'
       ]
     },
     {
       heading: 'Por quanto tempo',
       paragraphs: [
-        'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, as decisões e os precedentes de triagem. Denúncias e decisões não são apagadas automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite.',
+        'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, as decisões e os precedentes de triagem. Denúncias e decisões não são apagadas automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite. Os identificadores da conta de pagamentos ficam enquanto a conta existir (issue #38); a subconta no parceiro é permanente.',
         'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Apagar publicações e versões do perfil já está disponível: as cópias oficiais atualizadas deixam de mostrá-las e descartam os bytes, mas cópias antigas, apps modificados, caches de imagem e as citações guardadas pelo serviço de conta podem guardar o conteúdo. A retenção das cópias também depende dos limites da rede P2P. Tirar a foto do perfil só deixa de mostrá-la; a foto já enviada continua gravada na rede.',
         'As cópias da Espiadinha e o índice de nomes têm os limites de memória descritos acima. Esses limites não apagam as réplicas normais dos diários no semeador. Para registros de acesso, o prazo proposto é de 6 meses, se aplicável.'
       ]
@@ -158,8 +167,8 @@ export const PRIVACY = {
     {
       heading: 'Compartilhamento e cópias fora do Brasil',
       paragraphs: [
-        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação. A Didit é o serviço parceiro que faz a verificação de idade na web hospedada.',
-        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O tratamento da verificação de idade pela Didit também pode acontecer fora do Brasil. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
+        'A rede compartilha cópias dos diários com os aparelhos de quem segue você e com semeadores no Brasil. A Espiadinha permite a leitura de outros diários só em memória. O Google é usado no vínculo de entrada com a conta Google e no login dos moderadores no painel de moderação. A Didit é o serviço parceiro que faz a verificação de idade na web hospedada. A Hodle e os parceiros dela são outro caminho, separado da Didit: só entram se você abrir a conta de pagamentos. Nesse caso, nome completo, CPF, data de nascimento, e-mail, endereço, a imagem do documento e a selfie vão para a Hodle. As fotos saem do navegador direto para a Hodle. Os dados em texto (nome, CPF, data de nascimento, e-mail e endereço) passam pelo serviço de conta do Varanda nesse pedido, que os repassa à Hodle e não os guarda nem os registra. O Varanda guarda apenas, em wallet.json, os identificadores da conta e da carteira, o estado da verificação, os identificadores que o parceiro dá à tentativa de verificação, ao documento e à selfie enviados (são identificadores, não as imagens), o endereço público da carteira na rede (0x...) depois que ela existir e uma chave embrulhada que, quando a carteira for liberada, não a abre sem o PIN. Nunca guarda o PIN, o CPF, as fotos nem o endereço residencial.',
+        'Cópias podem sair do Brasil quando ficam nos celulares de membros que estejam no exterior. Esse é um limite do armazenamento distribuído em P2P. O serviço de push do navegador (Google, Mozilla, Apple ou Microsoft), que pode estar fora do Brasil, recebe apenas o endereço do aparelho e um texto cifrado que só esse aparelho pode ler. O serviço de conta da associação, no Brasil, guarda a inscrição (endereço e chaves, em push.json) até você desligar os avisos ou o serviço de push informar que a inscrição deixou de existir. O tratamento da verificação de idade pela Didit também pode acontecer fora do Brasil. A Hodle e os parceiros dela também podem tratar os dados e as fotos da verificação de identidade fora do Brasil. O mecanismo para essa transferência internacional, conforme a Resolução CD/ANPD nº 19/2024, ainda será confirmado por parecer jurídico.',
         'A associação pode atender pedidos legais com os dados que seus serviços guardam. Ela não tem como entregar conteúdo que só existe nos aparelhos dos membros. Mensagens diretas são planejadas e não fazem parte dos fluxos atuais descritos aqui.'
       ]
     },
