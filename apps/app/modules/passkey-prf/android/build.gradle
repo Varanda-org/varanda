@@ -1,0 +1,22 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.passkeyprf"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  implementation "androidx.credentials:credentials:1.5.0"
+  // Credential Manager reaches the Google Password Manager (and the
+  // passkeys the web created there) through Play services.
+  implementation "androidx.credentials:credentials-play-services-auth:1.5.0"
+}

@@ -74,6 +74,76 @@ test('overlapping writes of one key all succeed and the last one wins', async (t
   t.alike(await storage.readJson('config'), { v: 19 })
 })
 
+// lib/file-storage.js reaches node:fs through #fs, the same module object,
+// and looks each method up at call time: patching it here records the calls.
+function spyFs (t, { fsyncError = null } = {}) {
+  const saved = { open: fs.open, fsync: fs.fsync, rename: fs.rename }
+  const paths = new Map()
+  const calls = []
+  fs.open = (file, ...rest) => {
+    const cb = rest.pop()
+    saved.open.call(fs, file, ...rest, (err, fd) => {
+      if (!err) paths.set(fd, file)
+      cb(err, fd)
+    })
+  }
+  fs.fsync = (fd, cb) => {
+    const file = paths.get(fd)
+    calls.push(['fsync', file])
+    const err = fsyncError ? fsyncError(file) : null
+    if (err) return process.nextTick(cb, err)
+    saved.fsync.call(fs, fd, cb)
+  }
+  fs.rename = (from, to, cb) => {
+    calls.push(['rename', from, to])
+    saved.rename.call(fs, from, to, cb)
+  }
+  t.teardown(() => Object.assign(fs, saved), { force: true })
+  return calls
+}
+
+function codeError (code) {
+  const err = new Error(code)
+  err.code = code
+  return err
+}
+
+test('writeJson fsyncs the temp file before the rename and the directory after', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  const calls = spyFs(t)
+  await storage.writeJson('signedOut', true)
+  const kv = path.join(dir, 'kv')
+  const file = path.join(kv, b4a.toString(b4a.from('signedOut'), 'hex') + '.json')
+  t.alike(calls, [
+    ['fsync', file + '.tmp'],
+    ['rename', file + '.tmp', file],
+    ['fsync', kv]
+  ])
+  t.is(await storage.readJson('signedOut'), true)
+})
+
+test('writeJson ignores an unsupported directory fsync but never a failed file fsync', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  const kv = path.join(dir, 'kv')
+  let failing = kv
+  let code = 'EINVAL'
+  spyFs(t, { fsyncError: (file) => file === failing ? codeError(code) : null })
+  await storage.writeJson('k', 1)
+  t.is(await storage.readJson('k'), 1, 'an EINVAL directory fsync is ignored')
+
+  failing = path.join(kv, b4a.toString(b4a.from('k'), 'hex') + '.json.tmp')
+  await t.exception(storage.writeJson('k', 2), /EINVAL/, 'a failed file fsync rejects')
+  t.is(await storage.readJson('k'), 1, 'and the old value stays in place')
+
+  failing = kv
+  code = 'EIO'
+  await t.exception(storage.writeJson('k', 3), /EIO/, 'any other directory fsync error rejects')
+})
+
 test('bytes survive close and a fresh storage on the same directory', async (t) => {
   const dir = tmpDir(t)
   const first = fileNodeStorage(dir)

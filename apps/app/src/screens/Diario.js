@@ -18,7 +18,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -473,7 +473,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         scrollToTopSignal={scrollToTop}
         newItems={{
           label: 'ver novidades',
-          visible: Platform.OS === 'web' && !!(node.signals && node.signals.fresh && node.signals.fresh.own),
+          visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
           onPress: reload
         }}
       />

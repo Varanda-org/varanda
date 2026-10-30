@@ -124,7 +124,9 @@ async function readJson (res) {
   try { return JSON.parse(text) } catch { return null }
 }
 
-export function buildRequest (method, path, body) {
+// `extra` headers (the app's link proofs) apply to app requests only, so the
+// web's requests stay as they were.
+export function buildRequest (method, path, body, extra) {
   const init = { method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json'
@@ -135,7 +137,11 @@ export function buildRequest (method, path, body) {
   // method), and the service tells its writes apart by this header.
   if (isAppClient()) {
     init.credentials = 'omit'
+    // React Native's fetch (whatwg-fetch) appends '_=<timestamp>' to the URL
+    // for 'no-store'; one rule for every app request (see media/fetch.js).
+    delete init.cache
     if (method === 'POST') init.headers['x-varanda-client'] = 'app'
+    if (extra) Object.assign(init.headers, extra)
   }
   return { url: resolveUrl(path), init }
 }
@@ -143,8 +149,8 @@ export function buildRequest (method, path, body) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false } = {}) {
-  const { url, init } = buildRequest(method, path, body)
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, headers } = {}) {
+  const { url, init } = buildRequest(method, path, body, headers)
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
   const fail = (code, nextChangeAt, unknown) => {
@@ -177,19 +183,42 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
 
 export const accountStatus = (member) =>
   call('GET', '/account/status?member=' + encodeURIComponent(member))
+// The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
+// web's link cookie with V (linkSecret, kept in the app's memory) and R
+// (redeem, from the auth session's result). Both ride in headers, only from
+// the app, and only when well formed.
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
+const isToken = (v) => typeof v === 'string' && TOKEN_RE.test(v)
+function linkHeaders ({ linkSecret, redeem } = {}) {
+  if (!isAppClient()) return undefined
+  const h = {}
+  if (isToken(linkSecret)) h['x-varanda-link'] = linkSecret
+  if (isToken(redeem)) h['x-varanda-redeem'] = redeem
+  return h
+}
+// An app row past the Google step answers only to V and R together: without
+// both there is nothing to ask, so nothing is sent.
+const appMissingProofs = ({ linkSecret, redeem } = {}) => isAppClient() && !(isToken(linkSecret) && isToken(redeem))
+
 // The invite code goes in only when it is well formed: the service decides
-// whether it is still valid.
-export const startLink = ({ member, username, invite }) => {
+// whether it is still valid. From the app, appProof (the hash of a fresh V)
+// goes in the body, and a V already held (a restart) in the header.
+export const startLink = ({ member, username, invite, appProof, linkSecret }) => {
   const body = { member, username }
   if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
-  return call('POST', '/account/start', body)
+  if (isAppClient() && isToken(appProof)) body.appProof = appProof
+  return call('POST', '/account/start', body, { headers: linkHeaders({ linkSecret }) })
 }
-export const authorizeLink = ({ signature }) =>
-  call('POST', '/account/authorize', { signature })
-export const readPending = () =>
-  call('GET', '/account/pending', undefined, { allow404: true })
-export const finishLink = ({ signature }) =>
-  call('POST', '/account/finish', { signature })
+export const authorizeLink = ({ signature, linkSecret }) =>
+  call('POST', '/account/authorize', { signature }, { headers: linkHeaders({ linkSecret }) })
+export const readPending = (opts = {}) => {
+  if (appMissingProofs(opts)) return Promise.resolve(null)
+  return call('GET', '/account/pending', undefined, { allow404: true, headers: linkHeaders(opts) })
+}
+export const finishLink = ({ signature, linkSecret, redeem }) => {
+  if (appMissingProofs({ linkSecret, redeem })) return Promise.reject(toError('expirado'))
+  return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret, redeem }) })
+}
 export const lookupUsername = (name) =>
   call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true })
 export const renameStart = ({ member, username }) =>

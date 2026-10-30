@@ -54,7 +54,12 @@ test('.easignore keeps the build outputs and every secret out of the upload', (t
 test('the main manifest drops the overlay and write storage permissions', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.absent(manifest.includes('SYSTEM_ALERT_WINDOW'))
-  t.absent(manifest.includes('WRITE_EXTERNAL_STORAGE'))
+  // A library may merge storage or camera permissions; the main manifest only
+  // ever names them to remove them.
+  for (const name of ['WRITE_EXTERNAL_STORAGE', 'READ_EXTERNAL_STORAGE', 'CAMERA']) {
+    const lines = manifest.split('\n').filter((l) => l.includes('android.permission.' + name + '"'))
+    t.ok(lines.every((l) => l.includes('tools:node="remove"')), name + ' only as a removal')
+  }
   t.ok(manifest.includes('android.permission.INTERNET'))
 })
 

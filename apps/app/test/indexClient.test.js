@@ -166,6 +166,25 @@ test('no request is made for bad input', async (t) => {
   t.absent(called)
 })
 
+test('app client: index requests carry no cache option and the same URL', async (t) => {
+  const { fetchPost } = await load()
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => setAppClient(false))
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(postBody()))
+  }
+  setAppClient(true)
+  t.is((await fetchPost(REF, CURSOR, { fetch })).ok, true)
+  t.absent('cache' in calls[0].opts, 'no cache option')
+  t.is(calls[0].url, '/index/post/' + A + '/5/' + CURSOR, 'url unchanged')
+  t.is(calls[0].opts.redirect, 'error')
+  setAppClient(false)
+  t.is((await fetchPost(REF, null, { fetch })).ok, true)
+  t.is(calls[1].opts.cache, 'no-store', 'the web keeps no-store')
+})
+
 test('fetchPost: request options and the exact shape', async (t) => {
   const { fetchPost } = await load()
   const calls = []
