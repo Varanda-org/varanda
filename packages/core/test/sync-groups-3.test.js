@@ -8,6 +8,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
+const Hypercore = require('hypercore')
 const { testnet, until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 const { runSync } = require('../lib/sync')
@@ -390,7 +391,7 @@ async function deletedBinding (t, bootstrap, kp, group, { cleared }) {
   }
   if (cleared) await d.clear(1)
   items.push(...ws.map((w, i) => ({ key: hex(w.key), diary: dkey, length: 2, seq: 3 + i })).sort((a, b) => a.key < b.key ? -1 : 1))
-  return { dkey, wkeys: ws.map((w) => hex(w.key)) }
+  return { dkey, wkeys: ws.map((w) => hex(w.key)), fake, d, ws }
 }
 
 async function holdsBlock (ctx, key, seq) {
@@ -528,4 +529,46 @@ test('a member that left its last group keeps its former own writer and the stor
   t.ok(await stored(m, own), 'the former own writer stays')
   t.ok(await stored(m, wkey), 'the stored group writer stays')
   t.ok(await stored(m, dkey), 'the binding diary it names stays')
+})
+
+// The member holds every block of the stale copy, and the run start clears
+// block 1. The fold's walk misses the tombstone at seq 2, which "lands"
+// with its 'download' event while the walk runs, as a late answer to an
+// earlier read would. The range then fetches block 1 again from the stale
+// peer, and nothing grows the diary afterwards to rescan seq 2.
+test('a tombstone that lands while the binding diary is folded still clears its target', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { dkey, fake, d, ws } = await deletedBinding(t, bootstrap, kp, group, { cleared: false })
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d, ...ws])
+  const { has, clear } = Hypercore.prototype
+  const ours = (core) => !!core.key && hex(core.key) === dkey
+  let landedAt = 0
+  let cleared = false
+  Hypercore.prototype.has = function (index, ...rest) {
+    if (landedAt === 0 && index === 2 && ours(this) && /presentState[^]*watchGroupDiary/.test(new Error().stack)) {
+      landedAt = Date.now()
+      this.emit('download', 2, 0, null)
+      return Promise.resolve(false)
+    }
+    return has.call(this, index, ...rest)
+  }
+  Hypercore.prototype.clear = function (start, ...rest) {
+    if (landedAt > 0 && start === 1 && ours(this)) cleared = true
+    return clear.call(this, start, ...rest)
+  }
+  const restore = () => Object.assign(Hypercore.prototype, { has, clear })
+  t.teardown(restore)
+  // A once run ends as soon as the goals are met, before a refold could
+  // clear anything. The fix may clear block 1 before the range fetches it
+  // again (no clear call then), so a quiet spell also ends the run.
+  const deadline = Date.now() + 30000
+  await runUntil(m, bootstrap, () => cleared || (landedAt > 0 && Date.now() > landedAt + 3000) || Date.now() > deadline)
+  restore()
+  t.ok(landedAt > 0, 'the fold walked past the tombstone')
+  t.absent(await holdsBlock(m, dkey, 1), 'the deleted block is not held')
+  t.ok(await holdsBlock(m, dkey, 3), 'the join block is held')
 })

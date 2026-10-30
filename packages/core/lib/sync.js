@@ -1890,7 +1890,9 @@ async function runSync ({
       const active = e && e.state === 'active'
       const ours = active ? e.core.contiguousLength : 0
       const want = active ? Math.max(advertised, e.core.length) : advertised
-      if (!active || ours < want) unmet.push(key + ':' + ours + '/' + want)
+      // Until the main store's block 0 is compared with the gated one, ending
+      // the run would skip that comparison and the growth it reports.
+      if (!active || ours < want || e.expected !== null) unmet.push(key + ':' + ours + '/' + want)
       if (active) {
         const d = groupDiaries.get(e.diary)
         if (d && !d.failed && (d.present < d.want || d.expected !== null)) unmet.push(e.diary + ':' + d.present + '/' + d.want)
@@ -2970,12 +2972,27 @@ async function runSync ({
   // it; a deleted join block is withdrawn (withdrawDeletedJoins).
   async function watchGroupDiary (d, dcore, changed) {
     const live = () => !d.failed && !d.stopped && !ended
+    // Listening before the fold: a block that lands while presentState walks
+    // (a late answer to a read the gate issued) would otherwise be seen by
+    // neither the walk nor a listener, and watchPresent's first pass records
+    // the length without scanning it.
+    let early = []
+    const onDownload = (index) => {
+      if (!live() || d.tombs.has(index)) return
+      if (early !== null) early.push(index)
+      else track(scanArrived(d, dcore, index), noop, noop)
+    }
+    dcore.on('download', onDownload)
+    d.stopScan = () => dcore.off('download', onDownload)
     let s = null
     try {
       s = await presentState(dcore)
       if (clearing && live()) await clearDeleted(dcore, s.deleted)
     } catch {}
-    if (!live()) return
+    if (!live()) {
+      dcore.off('download', onDownload)
+      return
+    }
     if (s !== null) {
       for (const r of s.raw) {
         if (r.record === null || r.record.type !== 'delete') continue
@@ -2993,12 +3010,23 @@ async function runSync ({
       if (length > d.present) d.present = length
       changed()
     }
-    const onDownload = (index) => {
-      if (!live() || d.tombs.has(index)) return
-      track(scanArrived(d, dcore, index), noop, noop)
-    }
-    dcore.on('download', onDownload)
-    d.stopScan = () => dcore.off('download', onDownload)
+    // One sequential pass, so a large signed length never allocates a
+    // promise per index. The tail past the walk is scanned as well: a block
+    // can become local without a 'download' event on this session (the
+    // upgrade of an existing replica).
+    const pending = early
+    early = null
+    const tail = s !== null ? s.raw.length : 0
+    track((async () => {
+      for (const i of pending) {
+        if (!live()) return
+        if (!d.tombs.has(i)) await scanArrived(d, dcore, i)
+      }
+      for (let i = tail; i < Math.min(dcore.length, MAX_LOG_BLOCKS); i++) {
+        if (!live()) return
+        if (!d.tombs.has(i)) await scanArrived(d, dcore, i)
+      }
+    })(), noop, noop)
     d.range = clearing ? followRange(dcore, d.deleted) : dcore.download({ start: 0, end: -1, linear: true })
     let scanTo = d.present
     d.stopGrow = watchPresent(dcore, () => d.deleted, (length) => {
