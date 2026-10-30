@@ -2558,3 +2558,51 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Uma réplica nova ainda pode baixar o bloco de um par desatualizado antes de varrer a lápide; ela o descarta na varredura.
 - Uma lápide de lápide desfaz a primeira na dobra, mas não traz de volta bytes já descartados: o seq aparece sem registro (`malformed`) e os blocos seguintes continuam visíveis.
 - No Hypercore 10 do navegador o `contiguousLength` não é durável depois de `clear`; o nó usa o comprimento presente calculado com `has(i)`, e um par do navegador pode anunciar um intervalo contíguo que cruza um buraco descartado: o pedido desse bloco só expira.
+
+## 43. Pedido para ligar os avisos no aparelho (web hospedada, 2026-10-30)
+
+As seções 1 a 42 não mudam.
+
+### O que mudou
+
+- A web hospedada mostra a nota "Receber avisos neste aparelho", com Ativar e fechar, sob a barra do topo, no mesmo lugar e com a mesma aparência de "Instalar o Varanda", abaixo de "Sem internet". Vale em todo navegador onde Web Push funciona, inclusive de mesa, só para um membro com a identidade desbloqueada e depois dos termos, da idade e da configuração inicial.
+- Ativar abre diretamente o pedido de permissão do navegador. Nada é aguardado antes de `pushManager.subscribe()`: `enablePush` começa de forma síncrona, antes de avisar qualquer listener. O estado mostrado vem de `pushStateAfter` aplicado sobre uma leitura nova depois do passo.
+- A nota fica escondida fora da web hospedada, sem suporte, sem chave VAPID, com permissão negada ou desconhecida, com os avisos já ligados, com estado desconhecido, com worker antigo ou sem registro do service worker. Também fica escondida quando foi fechada nos últimos 30 dias (`varanda-push-dismissed`) ou enquanto "Instalar o Varanda" ou "Nova versão disponível." aparece.
+- Ajustes e a nota dividem o mesmo estado em `apps/app/src/push-offer.js`, por meio de `apps/app/src/usePush.web.js`. Sair e Recomeçar continuam desligando os avisos primeiro, com o limite da troca em andamento descrito na seção 38.
+- O estado é lido de novo quando a conexão volta, e qualquer bloqueio da identidade apaga o que foi lido.
+- Uma troca de cada vez no navegador, mesmo depois de Sair e entrar de novo: a inscrição é do navegador, e duas trocas ao mesmo tempo poderiam desfazer uma à outra. Quando uma troca começada em outra sessão termina, o estado é lido de novo antes de liberar a linha e a nota.
+
+### Testes automatizados
+
+- `apps/app/test/push-offer.test.js`: regras da nota, chamada síncrona de `enablePush` antes de qualquer listener, nenhuma segunda chamada enquanto há uma pendente, leitura nova depois do passo, resultados de permissão negada e de falha, leitura em espera, fechamento por 30 dias e `offHere`.
+- `apps/app/test/use-push-native.test.js`: contrato nativo inerte.
+- `apps/app/test/push-shell.test.js`: ordem e ligação da nota verificadas pela leitura do código-fonte.
+
+Não há executor de testes no navegador. O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui.
+
+### Verificação manual
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] No Chrome e no Firefox de mesa, depois de chegar às abas, a nota aparece e Ativar abre o pedido de permissão sem abrir Ajustes (não realizada ainda)
+- [ ] Aceitar a permissão faz a nota sair e Ajustes mostrar "Ligados" (não realizada ainda)
+- [ ] Cancelar o pedido de permissão não inicia os 30 dias de fechamento; um toque posterior em Ativar pede de novo (não realizada ainda)
+- [ ] Negar a permissão faz a nota sair e Ajustes mostrar o texto de permissão negada (não realizada ainda)
+- [ ] Fechar a nota persiste depois de recarregar e é independente de `varanda-install-dismissed` (não realizada ainda)
+- [ ] No Chrome do Android com a oferta de instalação, "Instalar o Varanda" aparece primeiro e a nota dos avisos só aparece depois de fechar a de instalação (não realizada ainda)
+- [ ] No iPhone ou iPad fora da Tela de Início, só a nota de instalação aparece (não realizada ainda)
+- [ ] No iPhone ou iPad pela Tela de Início, a nota aparece quando os avisos ainda não estão totalmente ligados e o primeiro `await` do toque é `pushManager.subscribe()` (não realizada ainda)
+- [ ] Com uma versão aguardando atualização, "Nova versão disponível." aparece primeiro (não realizada ainda)
+- [ ] Abrir Ajustes enquanto Ativar está em andamento mostra a linha pendente e o mesmo estado final da nota (não realizada ainda)
+- [ ] Tocar em Sair logo depois de Ativar ainda desliga os avisos (não realizada ainda)
+- [ ] Uma falha mostra o texto de falha na barra e nada é enviado de novo por conta própria (não realizada ainda)
+- [ ] No app nativo, a nota não aparece (não realizada ainda)
+
+### Limites
+
+- Fechar vale por perfil do navegador, não por conta; a nota volta depois de 30 dias. Sem armazenamento, volta na próxima carga.
+- Sair continua sem esperar uma troca dos avisos em andamento, como descrito na seção 38: um Sair no meio de um Ativar pode deixar este navegador inscrito até a próxima leitura. Depois de entrar de novo, a linha e a nota ficam pendentes até essa troca terminar; se o pedido de permissão ficar aberto, elas esperam a resposta, e se uma leitura do navegador travar, até recarregar a página.
+- Uma leitura sem conexão ao abrir Ajustes volta sem chave: a linha mostra o texto de indisponível e a nota some até a próxima leitura, como antes desta mudança. Se o service worker não fica pronto a tempo, a linha mostra o texto de recarregar, também como antes. Como fechar Ajustes não apaga mais o estado, ao reabrir a linha mostra o estado anterior até a leitura nova chegar.
+- Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
+- Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
+- Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
