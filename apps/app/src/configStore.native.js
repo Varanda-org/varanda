@@ -60,7 +60,8 @@ function replaceInstallationFile (text) {
   if (!installationFile().exists && installationFile('.bak').exists) {
     try { installationFile('.bak').move(installationFile()) } catch {}
   }
-  removeQuietly(installationFile('.bak'))
+  // A .bak that could not be put back is still the only good copy: keep it.
+  if (installationFile().exists) removeQuietly(installationFile('.bak'))
   const current = installationFile()
   const hadCurrent = current.exists
   try {
