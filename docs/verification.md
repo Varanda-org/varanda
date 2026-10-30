@@ -1301,6 +1301,8 @@ None of these was performed for this change.
 
 ### Duty cycle; the Espiadinha keeps its own link (2026-10-27)
 
+Superseded on 2026-10-30 by section 49: the hosted web no longer ends the link when idle (lease off), so the 8 s hold and 45 s gap checks below no longer apply; the Espiadinha part stands.
+
 Scope: the hosted web app with the node in the browser (`packages/web-member`, `apps/app`). The native app, `varanda-serve` and the CLI are unchanged.
 
 #### Summary
@@ -2775,3 +2777,31 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Se Sair ou Recomeçar falhar depois de desligar os avisos, a linha continua mostrando o estado anterior até a próxima leitura, como antes desta mudança.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
 - Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
+
+## 49. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
+
+As seções 1 a 48 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
+
+### O que mudou
+
+- `packages/web-member/web/node.js` passa `leaseHoldMs: 0`: a rodada contínua da web hospedada não termina mais com `'idle'` depois de 8 s nem espera 45 s sem discar. Uma aba visível mantém a conexão com o semeador (uma vaga externa por aba); a aba oculta continua parando a sincronização (`shouldStopForHidden`) e, ao voltar, começa uma rodada nova.
+- A lease continua no código como saída de emergência para capacidade. As esperas de 45 s do app só valiam depois de um `'idle'` e ficaram inalcançáveis; o app não mudou.
+- A conexão é mantida viva pelo keepalive do Hypercore (a cada 5 s); o semeador derruba um socket externo sem dados depois de 30 s. Uma conexão que cai disca de novo (1 s dobrando até 30 s); com o semeador cheio, a resposta 1013 vira "Semeador ocupado".
+
+### Testes automatizados
+
+- `packages/web-member/test/resume.test.js`: o nó que `web/node.js` cria recebe `leaseHoldMs` 0 (falha com 8000).
+- `packages/web-member/test/lease.test.js`: com a lease desligada e um semeador de mentira que usa `noise.setTimeout(6000)` como o real, um enlace estabelecido passa de 13 s com um só socket e sem parar (documenta o keepalive de que a decisão depende; passa antes e depois).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] Uma aba visível mantém um socket com o semeador por vários minutos e uma publicação nova de outro aparelho chega em poucos segundos (não realizada ainda)
+- [ ] Uma aba oculta para a sincronização e libera a vaga; ao voltar, reconecta (não realizada ainda)
+- [ ] Com o semeador no limite de `VARANDA_MAX_EXTERNAL`, a próxima aba é recusada com "Semeador ocupado" e tenta de novo (não realizada ainda)
+
+### Limites
+
+- Capacidade: cada aba visível segura uma vaga externa o tempo todo. Dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo mais folga para os links curtos da Espiadinha e dos Avisos; `apps/cli/scripts/load-ws.js` mede conexões seguradas.
+- Não há teste automatizado no navegador nem medição em semeador real.

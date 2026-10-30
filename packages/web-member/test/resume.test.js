@@ -159,6 +159,7 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   const uploads = []
   const realCreate = nodeModule.createBrowserNode
   nodeModule.createBrowserNode = (options) => {
+    t.is(options.leaseHoldMs, 0, 'the hosted page keeps its seeder link while visible (lease off)')
     const node = realCreate(options)
     const setKeyPair = node.setKeyPair
     node.setKeyPair = (pair, extra) => {

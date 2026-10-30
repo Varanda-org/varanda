@@ -116,7 +116,7 @@
 // follows it.
 //
 // The lease (web only, docs/rpc.md 6.1; off unless leaseHoldMs > 0, which
-// only the browser entry sets): a seeder link that has nothing left to do
+// no shipped entry sets today, the browser entry keeps it off): a seeder link that has nothing left to do
 // is not held open. The sync reports 'settled { settled, mediaPending }'
 // (./sync.js header: inventory complete and not timed out, no unmet goal,
 // no failing follow; mediaPending while an own media core with blocks is
