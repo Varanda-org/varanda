@@ -33,7 +33,6 @@ const b4a = require('b4a')
 const {
   decodeBlock,
   validateRecord,
-  validRecordCopy,
   isHex64,
   isCanonicalIso,
   MAX_BLOCK_BYTES,
@@ -341,8 +340,8 @@ async function readAll (core) {
 
 // What a followed diary can show while it downloads newest-first (./sync.js
 // trackPresent): the readAll prefix plus the unbroken run of blocks that
-// ends at core.length, a hole in that run passed only when a stored
-// tombstone targets it (the presentState rule). -> { entries, present, tail }
+// ends at core.length, a hole in that run passed only when the effective
+// deletion fold of the stored blocks deletes it. -> { entries, present, tail }
 // with entries = the prefix, then the blocks of [tail, core.length);
 // tail === core.length when there is no such run (or none is needed). The
 // run needs block 0 (moderation reads it) and is never read past
@@ -352,15 +351,10 @@ async function readAll (core) {
 async function readVisible (core) {
   assertOpen(core)
   const length = core.length
-  const { raw, entries, present } = await presentState(core)
+  const { raw, entries, deleted, present } = await presentState(core)
   const prefix = entries.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
     return { entries: prefix, present, tail: length }
-  }
-  const targets = new Set()
-  for (const { seq, record } of raw) {
-    const copy = record === null ? null : validRecordCopy(record, seq)
-    if (copy !== null && copy.type === 'delete') targets.add(copy.seq)
   }
   let tail = length
   while (tail > present) {
@@ -369,7 +363,10 @@ async function readVisible (core) {
     // (a tombstone, say) is not in `raw`, so asking the live core would bridge
     // a gap with a deletion this read never applied. A stored block that does
     // not decode stops the run too, which only shows less.
-    if (raw[seq].record === null && !targets.has(seq)) break
+    // A hole is passed only when the effective fold deletes it: a tombstone
+    // that a later one cancelled names a block that may itself be a live
+    // tombstone of a post below, which this read would then show.
+    if (raw[seq].record === null && !deleted.has(seq)) break
     tail = seq
   }
   // Only a block that arrived after presentState can close the gap: the

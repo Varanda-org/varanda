@@ -9,7 +9,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet } = require('./helpers/net')
 const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { validateRecord, postRecord } = require('@varanda/core/lib/records')
+const { validateRecord, postRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { createMember, APPEND_MODE } = require('../lib/member')
 const { memoryStorage } = require('../lib/storage')
@@ -739,4 +739,30 @@ test('newest-first: a tombstone that arrives after the scan never bridges the ru
   const feed = await ops.feedRead({ ...ctx, cores: held.cores })
   t.absent(textsOf(feed, W.key).includes('t37'), 'the deleted post is not shown')
   t.alike(textsOf(feed, W.key), ['t0', 'u1', 'u2'])
+})
+
+test('newest-first: a hole named only by a cancelled tombstone stops the run (the deletion below it stays applied)', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const W = await longAuthor(assoc)
+  const target = W.seqs[37]
+  // D1 deletes t37, D2 deletes D1, D3 deletes D2: D2 is cancelled, so D1
+  // stands and t37 is deleted on a full replica.
+  const diary = await store.openDiary(W.ctx.storage, W.ctx.keyPair)
+  await store.appendRecord(diary, deleteRecord({ seq: target }))
+  const D1 = diary.length - 1
+  await store.appendRecord(diary, deleteRecord({ seq: D1 }))
+  const D2 = diary.length - 1
+  for (let i = 0; i < 5; i++) await store.appendRecord(diary, postRecord({ text: 'v' + i }))
+  await store.appendRecord(diary, deleteRecord({ seq: D2 }))
+  const length = diary.length
+  await diary.close()
+  const me = await author(assoc, 'Eu', ['minha'])
+  // The follower holds the newest run except D1 itself.
+  t0ok(await windowed(me.ctx.storage, W, [[0, 3], [length - 12, D1], [D1 + 1, length]]) === length)
+  t.ok(length - 12 <= target, 'fixture: t37 sits in the downloaded window')
+  await store.writeFollows(me.ctx.storage, [W.key])
+  const feed = await ops.feedRead({ storage: me.ctx.storage, association: assoc.hex })
+  t.absent(textsOf(feed, W.key).includes('t37'), 'the deleted post is not shown')
+  t.alike(textsOf(feed, W.key), ['t0', 'v0', 'v1', 'v2', 'v3', 'v4'])
 })
