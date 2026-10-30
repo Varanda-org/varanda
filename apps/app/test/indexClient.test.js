@@ -166,6 +166,25 @@ test('no request is made for bad input', async (t) => {
   t.absent(called)
 })
 
+test('app client: index requests carry no cache option and the same URL', async (t) => {
+  const { fetchPost } = await load()
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => setAppClient(false))
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(postBody()))
+  }
+  setAppClient(true)
+  t.is((await fetchPost(REF, CURSOR, { fetch })).ok, true)
+  t.absent('cache' in calls[0].opts, 'no cache option')
+  t.is(calls[0].url, '/index/post/' + A + '/5/' + CURSOR, 'url unchanged')
+  t.is(calls[0].opts.redirect, 'error')
+  setAppClient(false)
+  t.is((await fetchPost(REF, null, { fetch })).ok, true)
+  t.is(calls[1].opts.cache, 'no-store', 'the web keeps no-store')
+})
+
 test('fetchPost: request options and the exact shape', async (t) => {
   const { fetchPost } = await load()
   const calls = []
@@ -859,4 +878,25 @@ test('fetchEngagers: request options, contract, a fresh copy and transport', asy
   const limited = await fetchEngagers('reposts', REF, null, { fetch: async () => response(text, { status: 429 }) })
   t.is(limited.reason, 'rate-limited')
   t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+})
+
+test('with an installation set, every index URL is absolute on that origin only', async (t) => {
+  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, fetchCounts } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  t.ok(setInstallation('https://example.test'))
+  const O = 'https://example.test'
+  t.is(postUrl(REF, CURSOR), O + '/index/post/' + A + '/5/' + CURSOR)
+  t.is(countsUrl([REF, B + ':1']), O + '/index/counts/' + REF + ',' + B + ':1')
+  t.is(memberUrl(A, 10), O + '/index/member/' + A + '/10')
+  t.is(topicUrl('ab+cd'), O + '/index/topic/ab+cd')
+  t.is(engagersUrl('likes', REF), O + '/index/likes/' + A + '/5')
+  t.is(searchUrl('ana-bia'), O + '/index/search/ana-bia')
+  t.is(postUrl('bad'), null, 'bad input still refused')
+  const urls = []
+  const good = { counts: {}, indexing: false, complete: true }
+  await fetchCounts([REF], { fetch: async (url) => { urls.push(url); return response(JSON.stringify(good)) } })
+  t.alike(urls, [O + '/index/counts/' + REF])
+  setInstallation(null)
+  t.is(postUrl(REF), '/index/post/' + A + '/5', 'relative again once cleared')
 })

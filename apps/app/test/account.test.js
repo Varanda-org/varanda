@@ -507,3 +507,117 @@ test('ageResult: known states only', async (t) => {
     t.absent(e.uncertain, 'a refusal is definite')
   }
 })
+
+test('app client: absolute URLs, header and no credentials only with the flag on', async (t) => {
+  const a = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => { setInstallation(null); setAppClient(false) })
+
+  const web = a.buildRequest('POST', '/account/start', { member: M })
+  t.is(web.url, '/account/start')
+  t.is(web.init.credentials, 'same-origin')
+  t.absent('x-varanda-client' in web.init.headers, 'the web sends no client header')
+  t.is(a.buildRequest('GET', '/account/pending?member=' + M).init.credentials, 'same-origin', 'web GETs unchanged')
+
+  t.ok(setInstallation('https://example.test'))
+  setAppClient(true)
+  const calls = stub(t, json(200, { ok: 1 }))
+  await a.accountStatus(M)
+  await a.startLink({ member: M, username: 'ana' })
+  await a.renameStart({ member: M, username: 'bia' })
+  t.is(calls[0].url, 'https://example.test/account/status?member=' + M)
+  t.is(calls[0].init.method, 'GET')
+  t.absent('x-varanda-client' in calls[0].init.headers, 'only POSTs carry the header')
+  t.is(calls[0].init.credentials, 'omit', 'a GET never carries cookies either')
+  t.is(calls.length, 3)
+  t.is(a.buildRequest('GET', '/account/pending?member=' + M).init.credentials, 'omit')
+  for (const c of calls) t.absent('cache' in c.init, 'no cache option in the app')
+  t.absent('cache' in a.buildRequest('GET', '/account/pending?member=' + M).init)
+  for (const c of calls.slice(1)) {
+    t.is(c.init.method, 'POST')
+    t.ok(c.url.startsWith('https://example.test/account/'), c.url)
+    t.is(c.init.credentials, 'omit')
+    t.is(c.init.headers['x-varanda-client'], 'app')
+    t.is(c.init.headers['content-type'], 'application/json')
+  }
+
+  setAppClient(false)
+  const off = a.buildRequest('POST', '/account/start', { member: M })
+  t.is(off.url, 'https://example.test/account/start', 'the URL follows the installation alone')
+  t.is(off.init.credentials, 'same-origin')
+  t.absent('x-varanda-client' in off.init.headers)
+  t.is(off.init.cache, 'no-store', 'the web keeps no-store')
+  t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
+})
+
+test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from the app', async (t) => {
+  const a = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => { setInstallation(null); setAppClient(false) })
+  const V = 'V'.repeat(42) + 'A'
+  const R = 'R'.repeat(42) + 'A'
+  const P = 'P'.repeat(42) + 'A'
+  const SIG = 'sig'
+
+  // The web: no proof ever goes out, even when the caller passes one.
+  let calls = stub(t, json(200, { ok: 1 }))
+  await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
+  await a.authorizeLink({ signature: SIG, linkSecret: V })
+  await a.readPending({ linkSecret: V, redeem: R })
+  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
+  await a.readPending()
+  await a.finishLink({ signature: SIG })
+  t.is(calls.length, 6)
+  t.alike(JSON.parse(calls[0].init.body), { member: M, username: 'ana' }, 'no appProof in the web body')
+  for (const c of calls) {
+    t.ok(c.url.startsWith('/account/'), 'relative URL ' + c.url)
+    t.alike(Object.keys(c.init.headers).filter((h) => h.startsWith('x-varanda')), [], 'no app header on the web')
+    t.is(c.init.credentials, 'same-origin')
+  }
+  t.alike(calls[2].init.headers, { accept: 'application/json' }, 'web pending headers unchanged')
+
+  // The app.
+  t.ok(setInstallation('https://example.test'))
+  setAppClient(true)
+  calls = stub(t, json(200, { ok: 1 }))
+  await a.startLink({ member: M, username: 'ana', appProof: P })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, username: 'ana', appProof: P })
+  t.absent('x-varanda-link' in calls[0].init.headers, 'a first start holds no V')
+  await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
+  t.is(calls[1].init.headers['x-varanda-link'], V, 'a restart presents the held V')
+  t.absent('x-varanda-redeem' in calls[1].init.headers)
+  await a.startLink({ member: M, username: 'ana', appProof: 'short', linkSecret: 'bad' })
+  t.alike(JSON.parse(calls[2].init.body), { member: M, username: 'ana' }, 'a malformed appProof is not sent')
+  t.absent('x-varanda-link' in calls[2].init.headers, 'a malformed V is not sent')
+  await a.authorizeLink({ signature: SIG, linkSecret: V })
+  t.is(calls[3].init.headers['x-varanda-link'], V)
+  t.alike(JSON.parse(calls[3].init.body), { signature: SIG })
+  await a.readPending({ linkSecret: V, redeem: R })
+  t.is(calls[4].init.method, 'GET')
+  t.is(calls[4].init.headers['x-varanda-link'], V)
+  t.is(calls[4].init.headers['x-varanda-redeem'], R)
+  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
+  t.is(calls[5].url, 'https://example.test/account/finish')
+  t.is(calls[5].init.headers['x-varanda-link'], V)
+  t.is(calls[5].init.headers['x-varanda-redeem'], R)
+  t.is(calls[5].init.headers['x-varanda-client'], 'app')
+  t.alike(JSON.parse(calls[5].init.body), { signature: SIG }, 'the proofs never go in the body')
+  t.is(calls.length, 6)
+
+  // Without both V and R nothing is asked or sent.
+  t.is(await a.readPending(), null)
+  t.is(await a.readPending({ linkSecret: V }), null)
+  t.is(await a.readPending({ redeem: R }), null)
+  for (const opts of [{}, { linkSecret: V }, { redeem: R }, { linkSecret: V, redeem: 'x' }]) {
+    try {
+      await a.finishLink({ signature: SIG, ...opts })
+      t.fail('sent without the proofs')
+    } catch (e) {
+      t.is(e.code, 'expirado')
+      t.absent(e.uncertain, 'nothing was sent, so nothing is uncertain')
+    }
+  }
+  t.is(calls.length, 6, 'a native finish or pending without V and R is never sent')
+})

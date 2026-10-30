@@ -25,7 +25,7 @@
 // packages/core/test/worklet-lock.test.js), never by sharing the store.
 
 import { Worklet } from 'react-native-bare-kit'
-import { Paths } from 'expo-file-system'
+import { Directory, Paths } from 'expo-file-system'
 import { createClient, encodeFrame, createFrameDecoder, MAX_REQUEST, MAX_MESSAGE, EVENTS } from '@varanda/rpc'
 import bundle from '../../assets/worklet/main.bundle.js'
 
@@ -43,7 +43,7 @@ function state () {
 }
 
 // file:///.../Documents/ -> /.../Documents (a plain path for Bare).
-function uriToPath (uri) {
+export function uriToPath (uri) {
   let s = String(uri)
   if (s.startsWith('file://')) s = s.slice('file://'.length)
   s = decodeURIComponent(s)
@@ -58,6 +58,20 @@ export function documentPath () {
 // The app's member data dir: <documents>/varanda.
 export function defaultDataDir () {
   return documentPath() + '/varanda'
+}
+
+const UPLOAD_DIR = 'varanda-upload'
+
+// The photo upload staging dir of the web kind, created if missing. The
+// worklet reads media.uploadFile paths only from inside it (docs/rpc.md 5.41).
+export function uploadDirectory () {
+  const dir = new Directory(Paths.cache, UPLOAD_DIR)
+  if (!dir.exists) dir.create({ intermediates: true, idempotent: true })
+  return dir
+}
+
+export function uploadPath () {
+  return uriToPath(Paths.cache.uri) + '/' + UPLOAD_DIR
 }
 
 // Starts a worklet with the node session and connects a client. Internal:
@@ -125,7 +139,20 @@ async function stop (node) {
   return clean
 }
 
+// A hosted config (src/config.js nativeHostedConfigOf) starts the web kind:
+// the browser node's session on file storage, no DHT and no recover (the
+// worklet's file storage lock has no takeover).
 function argsOf (config, recover) {
+  if (config.kind === 'hosted') {
+    uploadDirectory()
+    return {
+      kind: 'web',
+      dataDir: config.dataDir || defaultDataDir(),
+      cacheDir: uploadPath(),
+      association: config.association,
+      seederUrl: config.seederUrl
+    }
+  }
   return {
     dataDir: config.dataDir || defaultDataDir(),
     association: config.association,
@@ -166,7 +193,7 @@ export async function startNode (config, { onEvent, recover = true } = {}) {
     if (s.node === node) s.node = null
     throw err
   }
-  return { client: node.client, recovered: args.recover, dataDir: args.dataDir }
+  return { client: node.client, recovered: args.recover === true, dataDir: args.dataDir }
 }
 
 // The running node's client, or null.
