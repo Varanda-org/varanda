@@ -33,7 +33,7 @@ import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
-import { FEED_SYNCING_END, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, rearmDelay, replacesQuietly, resetWith, shouldReloadOnShow, syncAdvanced, syncBaseline, syncTruncated } from '../paging'
+import { FEED_SYNCING_END, canSyncRead, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, quietNewestPlan, rearmDelay, resetWith, shouldReloadOnShow, syncBaseline, syncReadKind, syncTruncated } from '../paging'
 import { freshKeys, hasFresh } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
@@ -721,14 +721,6 @@ export function SocialToast ({ text }) {
   )
 }
 
-// Never after a failed read: only a manual action clears the error.
-function canAutoReload (feed, lengths, active) {
-  return active && feed.loadedAt !== null && feed.atEnd && !feed.loading && !feed.loadingMore && !feed.refreshing &&
-    !feed.loadError && !feed.moreError &&
-    (Object.keys(feed.syncBase).length > 0 || feed.syncTruncated > 0) &&
-    syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)
-}
-
 const pageIncomplete = (page) => ({
   incomplete: Array.isArray(page.incomplete) ? page.incomplete : [],
   incompleteTruncated: Number.isSafeInteger(page.incompleteTruncated) ? page.incompleteTruncated : 0,
@@ -793,7 +785,8 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     syncTruncated: 0,
     syncBase: {},
     emptyStreak: 0,
-    deep: false
+    deep: false,
+    probeOlder: false
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
@@ -834,24 +827,25 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         const { skipped, skippedTruncated, future, futureTruncated } = page
         // A full page would cut rows off the end of the list being read: the
         // list stays and the unacknowledged 'ver novidades' pill shows the
-        // rest. The list is no longer the whole local feed, so it leaves its
-        // end: 'mostrar mais' pages on, and automatic reads stop. Each one
-        // preempts the sync on the native node. The browser node serves them
-        // from the live run's cores, so this batching still saves requests
-        // and native preemptions.
-        if (!replacesQuietly(page, FEED_LIMIT_DEFAULT, feedRef.current.items)) {
-          commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), atEnd: false, loadingMore: false })
+        // newer rows. It stays at its end too: a full newest page says nothing
+        // about rows older than the oldest shown, so the next automatic read
+        // probes below the list (loadOlder fromSync) instead of the person
+        // paging into a before read that comes back empty.
+        const plan = quietNewestPlan(page, FEED_LIMIT_DEFAULT, feedRef.current.items)
+        if (!plan.replace) {
+          commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), deep: true, probeOlder: true, loadingMore: false })
           return
         }
         commit({
           items: resetWith(page.items),
           cursor: cursorOf(page.items),
-          atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
+          atEnd: plan.atEnd,
           meta: { skipped, skippedTruncated, future, futureTruncated },
           ...pageIncomplete(page),
           syncBase: syncBaseline(page, base),
           emptyStreak: 0,
           deep: false,
+          probeOlder: plan.probeOlder,
           loadingMore: false
         })
         learnPage(page.items)
@@ -891,6 +885,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         syncBase: syncBaseline(page, base),
         emptyStreak: 0,
         deep: false,
+        probeOlder: false,
         loading: false,
         refreshing: false
       })
@@ -925,6 +920,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         syncBase: syncBaseline(page, base),
         emptyStreak: page.items.length > 0 ? 0 : fromSync ? prev.emptyStreak + 1 : prev.emptyStreak,
         deep: prev.deep || page.items.length > 0,
+        probeOlder: false,
         loadingMore: false
       })
       learnPage(page.items)
@@ -961,26 +957,29 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // On the native node every feed.read preempts the sync run and the
   // continuous run restarts after it (docs/rpc.md section 6.1). The browser
   // node serves the read from the live run's cores. The first growth past
-  // the baseline starts one timer (longer after empty older reads): later
-  // growth neither resets it nor adds another, and this effect has no
-  // cleanup, which would debounce it on every lengths change. That batching
-  // saves requests and native preemptions. With only the newest page
-  // loaded, re-reading it shows arrivals that sort inside the shown range;
-  // a before read would rarely return them.
+  // the baseline (or a pending probe below the list) starts one timer
+  // (longer after empty older reads): later growth neither resets it nor
+  // adds another, and this effect has no cleanup, which would debounce it on
+  // every lengths change. That batching saves requests and native
+  // preemptions. A short list re-reads the newest page, which shows arrivals
+  // that sort inside the shown range. A full or deep list reads below its
+  // oldest row: a diary that downloads newest first can add older rows
+  // there, while newer rows reach it only through the 'ver novidades' pill.
   const lengths = node.signals ? node.signals.lengths : undefined
   const loadersRef = useRef(null)
   loadersRef.current = { loadNewest, loadOlder }
   useEffect(() => {
-    if (rearmRef.current !== null || !canAutoReload(feedRef.current, lengths, active)) return
+    if (rearmRef.current !== null || !canSyncRead(feedRef.current, lengths, active)) return
+    const kindOf = (f) => syncReadKind({ deep: f.deep, probeOlder: f.probeOlder, shown: f.items.length, limit: FEED_LIMIT_DEFAULT })
     rearmRef.current = setTimeout(() => {
       rearmRef.current = null
       const current = feedRef.current
       const now = signalsRef.current ? signalsRef.current.lengths : undefined
-      if (!canAutoReload(current, now, activeRef.current)) return
-      if (current.deep) loadersRef.current.loadOlder({ fromSync: true })
+      if (!canSyncRead(current, now, activeRef.current)) return
+      if (kindOf(current) === 'older') loadersRef.current.loadOlder({ fromSync: true })
       else loadersRef.current.loadNewest({ quiet: true })
-    }, rearmDelay(feedRef.current.deep ? feedRef.current.emptyStreak : 0))
-  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak])
+    }, rearmDelay(kindOf(feedRef.current) === 'older' ? feedRef.current.emptyStreak : 0))
+  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak, feed.probeOlder])
 
   useEffect(() => {
     if (!active && rearmRef.current !== null) {
@@ -1117,7 +1116,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={loadNewest}
         refreshing={refreshing}
-        onLoadMore={active && !moreError ? loadOlder : undefined}
+        onLoadMore={active && !moreError && !loading && loadedAt !== null && !atEnd && feed.cursor !== null ? loadOlder : undefined}
         loadingMore={loadingMore}
         loadMoreError={!!moreError}
         atEnd={atEnd}

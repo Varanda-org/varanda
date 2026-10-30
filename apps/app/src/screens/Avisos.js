@@ -39,6 +39,8 @@ const isLockedError = (err) => Boolean(err && err.code === 'USAGE' && err.messag
 const BUSY_MESSAGE = 'avisos já em andamento'
 const BUSY_RETRY_MS = 1500
 const isBusyError = (err) => Boolean(err && err.code === 'USAGE' && err.message === BUSY_MESSAGE)
+// A busy node on a next page: shown with its retry, or the list would stall.
+const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
 
 // The seen ids of this identity (the node's `seen` tokens). A stored entry
 // that is not a v3 entry for this identity (none, corrupt, another
@@ -322,8 +324,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       })
       settle(merged)
     } catch (err) {
-      // Busy: the person reaches the end again or taps "mostrar mais".
-      if (mine === seqRef.current) commit({ loadingMore: false, moreError: isBusyError(err) ? '' : errorText(err) })
+      if (mine === seqRef.current) commit({ loadingMore: false, moreError: isBusyError(err) ? AVISOS_BUSY_MORE : errorText(err) })
     }
   }, [active, hosted, read, commit, settle])
 
@@ -525,7 +526,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       contentContainerStyle={{ paddingBottom: bottomPad }}
       onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
       refreshing={refreshing}
-      onLoadMore={active && hosted && !moreError ? loadMore : undefined}
+      onLoadMore={active && hosted && !moreError && !loading && state.next !== null ? loadMore : undefined}
       loadingMore={loadingMore}
       loadMoreError={!!moreError}
       atEnd={atEnd}

@@ -18,8 +18,11 @@
 //   loadingMore, refreshing or at the end; a failed page is retried only by
 //   the person (scrolling out of the end region and back, or the footer's
 //   'tentar de novo'), never by itself, so a failing node is not hammered;
-//   a quiet 'mostrar mais' in the footer loads the next page by hand, so
-//   pagination can never stall;
+// - pagination never stalls while the end is in view: every busy span and
+//   every layout checks the end again, a list shorter than the screen loads
+//   by itself, and AUTO_DRY_MAX pages in a row that the list asked for and
+//   that showed nothing new pause it behind a 'carregar mais' button, so
+//   hidden records never become a request loop;
 // - never call onRefresh while refreshing: one refresh at a time, whether it
 //   comes from the touch pull, the wheel pull, the hidden action or
 //   RefreshControl;
@@ -36,6 +39,7 @@
 import { createElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
+import { endStep, nearListEnd, spanEnd } from '../paging'
 import { useNode } from '../node'
 import { Spinner } from './index'
 import { Icon } from './Icon'
@@ -46,6 +50,12 @@ const web = Platform.OS === 'web'
 const INDICATOR = 36
 // onEndReachedThreshold, in visible lengths from the end.
 const END_THRESHOLD = 0.6
+// After a span that changed the row count, the end is checked again this
+// long after the commit if no onContentSizeChange came first.
+const LAYOUT_SETTLE_MS = 100
+// An onLoadMore call that started no load or refresh within this long is
+// treated as a no-op (see check()).
+const UNSTARTED_MS = 1500
 // WheelEvent.deltaMode: lines and pages are turned into pixels.
 const LINE_PX = 16
 
@@ -98,71 +108,150 @@ export function RefreshableList ({
     else if (listRef) listRef.current = node
   }, [listRef])
 
-  // Infinite scroll: one onLoadMore per end reach. FlatList sends
-  // onEndReached once per content length, also on content-size changes, and
-  // again only after the list has left the end region (VirtualizedList
-  // `_sentEndForContentLength`), so the guard mirrors that:
-  // - it is re-armed by a new page (data change), by the end of a refresh, or
-  //   by the person scrolling out of the end region; never by a content-size
-  //   change alone, so a failing page cannot retry in a loop (the footer
-  //   swaps between spinner and error; its 'tentar de novo' retries);
-  // - an end reach FlatList sends while a page loads or a refresh runs is
-  //   remembered and served once that span ends, if the page succeeded (data
-  //   changed) or it was a refresh, and the end is still in view;
-  // - whatever FlatList does, the footer's 'mostrar mais' loads the next page
-  //   by hand whenever one exists, so pagination can never stall.
-  const endFired = useRef(false)
-  const endPending = useRef(false)
-  const span = useRef(null) // { data, refreshed } while a load or refresh runs
+  // Infinite scroll. check() is the one place that starts a page (endStep):
+  // - `fired` allows one onLoadMore per end reach; it is re-armed when a busy
+  //   span ends without failing, when data changes outside a span, and when
+  //   the person scrolls out of the end region (which also clears `dry` and
+  //   the pause);
+  // - an end reach that comes while a page loads or a refresh runs is not
+  //   remembered: the end of that span checks again (spanEnd), right away or
+  //   after the new rows are laid out (onContentSizeChange);
+  // - `dry` counts the list's own pages in a row that showed no new row;
+  //   at AUTO_DRY_MAX the list pauses and the footer offers 'carregar mais';
+  // - a failed page (loadMoreError) is left to the caller's footer retry.
+  // Callers pass onLoadMore only while it would start a page: a call that
+  // starts nothing leaves `fired` set until the data changes or the person
+  // scrolls.
+  const fired = useRef(false)
+  const dry = useRef(0)
+  const span = useRef(null) // { len, refreshed, own, started } while a load or refresh runs
+  const layoutTimer = useRef(null)
+  const measured = useRef(false)
+  // Fresh content metrics arrived: the span end's layout wait is over.
+  const endLayoutWait = () => {
+    if (layoutTimer.current === null) return
+    clearTimeout(layoutTimer.current)
+    layoutTimer.current = null
+  }
+  const [paused, setPaused] = useState(false)
   const metrics = useRef({ offset: 0, content: 0, layout: 0 })
   const busyNow = !!loadingMore || !!refreshing || spinning
-  const nearEnd = useCallback(() => {
-    const m = metrics.current
-    return m.layout > 0 && m.content - (m.offset + m.layout) <= END_THRESHOLD * m.layout
+  const len = Array.isArray(data) ? data.length : 0
+  const hasLoader = typeof onLoadMore === 'function'
+  const ends = useRef(null)
+  ends.current = { onLoadMore, atEnd: !!atEnd, loadMoreError: !!loadMoreError, busyNow, len }
+  const checkRef = useRef(null)
+  const unstartedTimer = useRef(null)
+  const startPage = useCallback(() => {
+    const l = ends.current
+    fired.current = true
+    span.current = { len: l.len, refreshed: false, own: true, started: false, at: Date.now() }
+    l.onLoadMore()
+    // If that call started nothing, look again once it counts as a no-op,
+    // even if no render or scroll comes in between.
+    if (unstartedTimer.current) clearTimeout(unstartedTimer.current)
+    unstartedTimer.current = setTimeout(() => {
+      unstartedTimer.current = null
+      if (checkRef.current) checkRef.current()
+    }, UNSTARTED_MS + 50)
   }, [])
-  const servePending = useCallback(() => {
-    if (!endPending.current || busyNow || busy.current || typeof onLoadMore !== 'function') return
-    if (atEnd) {
-      endPending.current = false
-      return
+  const check = useCallback(() => {
+    // New rows not measured yet (the span end set the timer): any check now
+    // would read the old content height and ask for one page too many.
+    if (layoutTimer.current !== null) return
+    // Before the first content height a viewport alone looks like the end.
+    if (!measured.current) return
+    const l = ends.current
+    // A call that never started a span (the caller's own guard returned:
+    // offline, a first load still running) is forgotten after a while, so a
+    // later render can try again instead of leaving the end latched.
+    const s = span.current
+    if (fired.current && s !== null && s.own && !s.started && Date.now() - s.at >= UNSTARTED_MS) {
+      span.current = null
+      fired.current = false
     }
-    if (!nearEnd()) return
-    endPending.current = false
-    endFired.current = true
-    onLoadMore()
-  }, [busyNow, atEnd, onLoadMore, nearEnd])
-  useEffect(() => { endFired.current = false }, [data])
+    const step = endStep({
+      canLoad: typeof l.onLoadMore === 'function',
+      atEnd: l.atEnd,
+      failed: l.loadMoreError,
+      busy: l.busyNow || busy.current,
+      near: nearListEnd(metrics.current, END_THRESHOLD),
+      fired: fired.current,
+      dry: dry.current
+    })
+    if (step === 'paused') setPaused(true)
+    else if (step === 'load') startPage()
+  }, [startPage])
+  checkRef.current = check
+  // Loads one page by hand from the pause; its own count starts over.
+  const loadByHand = useCallback(() => {
+    const l = ends.current
+    if (l.busyNow || busy.current || l.atEnd || l.loadMoreError || typeof l.onLoadMore !== 'function') return
+    dry.current = 0
+    setPaused(false)
+    startPage()
+  }, [startPage])
+  // Data that changes outside a span (a first load the list does not see as
+  // busy, a deletion) re-arms the end reach; a page that never started is
+  // forgotten. It runs before the span end below, which may start the next
+  // page in the same commit.
+  const lastLen = useRef(len)
+  useEffect(() => {
+    const grew = len > lastLen.current
+    lastLen.current = len
+    if (ends.current.busyNow || busy.current) return
+    if (span.current !== null && !span.current.started) span.current = null
+    fired.current = false
+    // New rows from outside the list (a reload): the dry count starts over.
+    if (grew) {
+      dry.current = 0
+      setPaused(false)
+    }
+  }, [data])
   useEffect(() => {
     if (busyNow) {
-      if (span.current === null) span.current = { data, refreshed: false }
+      if (span.current === null) span.current = { len, refreshed: false, own: false, started: true }
+      else span.current.started = true
       if (refreshing || spinning) span.current.refreshed = true
       return
     }
     const s = span.current
+    if (s === null || !s.started) return
     span.current = null
-    if (s === null) return
-    if (s.refreshed) endFired.current = false
-    // A page that failed (data unchanged, no refresh) is not retried here.
-    if (!s.refreshed && s.data === data) endPending.current = false
-    servePending()
-  }, [busyNow, refreshing, spinning, data, servePending])
-  const onEndReached = useCallback(() => {
-    if (atEnd || typeof onLoadMore !== 'function') return
-    if (busyNow || busy.current) {
-      endPending.current = true
+    const r = spanEnd({ dry: dry.current, startLen: s.len, len, failed: !!loadMoreError, refreshed: s.refreshed, own: s.own })
+    dry.current = r.dry
+    if (r.dry === 0) setPaused(false)
+    if (r.check === 'none') return
+    fired.current = false
+    if (r.check === 'now') {
+      check()
       return
     }
-    if (endFired.current) return
-    endFired.current = true
-    onLoadMore()
-  }, [busyNow, atEnd, onLoadMore])
-  const loadMoreByHand = useCallback(() => {
-    if (busyNow || busy.current || atEnd || typeof onLoadMore !== 'function') return
-    endFired.current = true
-    onLoadMore()
-  }, [busyNow, atEnd, onLoadMore])
-  const showMore = !atEnd && !busyNow && !loadMoreError && typeof onLoadMore === 'function' &&
-    Array.isArray(data) && data.length > 0
+    // The new rows may already be laid out (a refresh whose rows rendered
+    // while the indicator still spun): no onContentSizeChange will come, so
+    // check once more after it would have; `fired` makes a second call a no-op.
+    if (layoutTimer.current) clearTimeout(layoutTimer.current)
+    layoutTimer.current = setTimeout(() => {
+      layoutTimer.current = null
+      check()
+    }, LAYOUT_SETTLE_MS)
+  }, [busyNow, refreshing, spinning, len, loadMoreError, check])
+  const prevAtEnd = useRef(!!atEnd)
+  useEffect(() => {
+    // More pages again (a refresh, a sync): the list starts counting afresh.
+    if (prevAtEnd.current && !atEnd) {
+      fired.current = false
+      dry.current = 0
+      setPaused(false)
+    }
+    prevAtEnd.current = !!atEnd
+    check()
+  }, [atEnd, hasLoader, loadMoreError, check])
+  // Every commit checks the end too: conditions a caller guards on (being
+  // online, a first load) change without a scroll or a layout. check() is
+  // pure until it starts a page, so this costs nothing at rest.
+  useEffect(() => { check() })
+  const showPaused = paused && !atEnd && !busyNow && !loadMoreError && hasLoader
 
   // Scroll to the top whenever the signal changes (not on mount).
   const lastSignal = useRef(scrollToTopSignal)
@@ -195,6 +284,10 @@ export function RefreshableList ({
       if (timer.current) clearTimeout(timer.current)
       if (wheelTimer.current) clearTimeout(wheelTimer.current)
       wheelTimer.current = null
+      if (layoutTimer.current) clearTimeout(layoutTimer.current)
+      layoutTimer.current = null
+      if (unstartedTimer.current) clearTimeout(unstartedTimer.current)
+      unstartedTimer.current = null
       if (anim.current) anim.current.stop()
     }
   }, [])
@@ -296,15 +389,26 @@ export function RefreshableList ({
     const ne = e.nativeEvent
     atTop.current = ne.contentOffset.y <= 0
     metrics.current = { offset: ne.contentOffset.y, content: ne.contentSize.height, layout: ne.layoutMeasurement.height }
-    // Leaving the end region re-arms the end reach, as FlatList does.
-    if (!nearEnd()) endFired.current = false
-  }, [nearEnd])
+    measured.current = true
+    if (nearListEnd(metrics.current, END_THRESHOLD)) check()
+    else if (fired.current || dry.current > 0 || paused) {
+      // Leaving the end region re-arms the end reach, as FlatList does.
+      fired.current = false
+      dry.current = 0
+      setPaused(false)
+    }
+  }, [check, paused])
+  // Short lists never scroll: their end reach comes from laying them out.
   const onContentSizeChange = useCallback((w, h) => {
     metrics.current = { ...metrics.current, content: h }
-    // New rows are laid out: a remembered end reach may be served now.
-    servePending()
-  }, [servePending])
-  const onLayout = useCallback((e) => { metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height } }, [])
+    measured.current = true
+    endLayoutWait()
+    check()
+  }, [check])
+  const onLayout = useCallback((e) => {
+    metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
+    check()
+  }, [check])
 
   // The indicator is never left visible without an active pull or a running
   // refresh: every path that abandons a tracked gesture (a second finger, a
@@ -374,22 +478,23 @@ export function RefreshableList ({
     if (!busy.current) hide()
   }, [hide])
 
-  // The caller's footer (spinner, end text, error with retry), then the
-  // by-hand 'mostrar mais' when another page exists and nothing is loading.
+  // The caller's footer (spinner, end text, error with retry), then, only
+  // while paused after dry pages, a note and the by-hand 'carregar mais'.
   const footer = (
     <>
       {renderSlot(ListFooterComponent)}
-      {showMore
+      {showPaused
         ? (
           <View style={styles.moreBar}>
+            <Text style={styles.pausedText}>Nada novo nas últimas páginas.</Text>
             <Pressable
               accessibilityRole='button'
-              accessibilityLabel='mostrar mais'
-              onPress={loadMoreByHand}
+              accessibilityLabel='carregar mais'
+              onPress={loadByHand}
               hitSlop={4}
               style={({ pressed }) => [styles.moreAction, pressed && styles.pressed]}
             >
-              <Text style={styles.moreText}>mostrar mais</Text>
+              <Text style={styles.moreText}>carregar mais</Text>
             </Pressable>
           </View>
           )
@@ -435,7 +540,7 @@ export function RefreshableList ({
         ListFooterComponent={footer}
         ListEmptyComponent={ListEmptyComponent}
         contentContainerStyle={contentContainerStyle}
-        onEndReached={onEndReached}
+        onEndReached={check}
         onEndReachedThreshold={END_THRESHOLD}
         keyboardShouldPersistTaps='handled'
         onScroll={onScroll}
@@ -506,6 +611,7 @@ const styles = StyleSheet.create({
   moreBar: { alignItems: 'center', paddingBottom: 12 },
   moreAction: { minHeight: 44, minWidth: 44, justifyContent: 'center', paddingHorizontal: 12 },
   moreText: { ...type.postMeta, color: colors.accent, fontWeight: '600' },
+  pausedText: { ...type.postMeta, color: colors.soft },
   pressed: { opacity: 0.6 },
   indicator: {
     position: 'absolute',
