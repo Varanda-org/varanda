@@ -20,7 +20,7 @@ test('method list and mutating set', (t) => {
     'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
     'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start',
-    'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
@@ -156,6 +156,54 @@ test('age.sign', (t) => {
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'age.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
+})
+
+test('wallet.sign', (t) => {
+  const base = { action: 'optin', nonce: 'n'.repeat(43), op: {} }
+  t.absent(isMutating('wallet.sign'))
+  ok(t, 'wallet.sign', base, base)
+  for (const action of ['kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap']) {
+    ok(t, 'wallet.sign', { ...base, action })
+  }
+  ok(t, 'wallet.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'wallet.sign', { action: 'swap', nonce: base.nonce, op: { quoteId: 'q-1', from: 'USDC', to: 'BRLA', amount: 2500000 } })
+  ok(t, 'wallet.sign', { ...base, op: { s: 'x'.repeat(512), n: Number.MAX_SAFE_INTEGER, z: 0, e: '', u: 'ção 😀' } })
+  const max = {}
+  for (let i = 0; i < 16; i++) max['k' + i] = i
+  ok(t, 'wallet.sign', { ...base, op: max })
+  const nullProto = Object.create(null)
+  nullProto.amount = 1
+  ok(t, 'wallet.sign', { ...base, op: nullProto })
+  bad(t, 'wallet.sign', {})
+  for (const k of ['action', 'nonce', 'op']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'wallet.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association, the hash or the
+  // bytes, and never hands the PIN to the node.
+  for (const k of ['member', 'association', 'opHash', 'payload', 'bytes', 'key', 'pin', 'walletPin']) {
+    bad(t, 'wallet.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['OPTIN', 'session', 'swap ', '', null, 1]) bad(t, 'wallet.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'wallet.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']) {
+    bad(t, 'wallet.sign', { ...base, op: { amount: 1, [key]: '1234' } }, 'op key ' + key)
+  }
+  const tooMany = {}
+  for (let i = 0; i < 17; i++) tooMany['k' + i] = i
+  const ops = [
+    null, [], 'x', 1, new Map(), tooMany,
+    { Amount: 1 }, { a_b: 1 }, { '': 1 }, { ['a' + 'b'.repeat(32)]: 1 }, { [Symbol('s')]: 1 },
+    { s: 'x'.repeat(513) }, { s: 'a\nb' }, { s: '\u007f' }, { s: '\u0085' }, { s: '\ud800' }, { s: 'a\udc00' },
+    { n: -1 }, { n: 1.5 }, { n: 2 ** 53 }, { n: true }, { n: null }, { n: {} }, { n: [] }
+  ]
+  for (const op of ops) bad(t, 'wallet.sign', { ...base, op }, 'op ' + typeof op)
+  const getter = {}
+  Object.defineProperty(getter, 'amount', { enumerable: true, get () { return 1 } })
+  bad(t, 'wallet.sign', { ...base, op: getter }, 'op accessor')
 })
 
 test('push.sign', (t) => {

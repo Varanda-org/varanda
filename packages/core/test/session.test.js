@@ -396,6 +396,19 @@ test('age.sign is refused by the node session (USAGE, not INTERNAL)', async (t) 
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('wallet.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { action: 'optin', nonce: 'n'.repeat(43), op: {} }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('wallet.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('wallet.sign', params)), NO, 'after identity.create')
+  t.alike(await failure(m.call('wallet.sign', { ...params, action: 'swap', op: { quoteId: 'q-1', amount: 1 } })), NO, 'a swap too')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('peek.read is refused by the node session (USAGE), nothing opened or written', async (t) => {
   const NO = { code: 'USAGE', message: 'Espiadinha disponível só no navegador' }
   const fresh = await member(t)
