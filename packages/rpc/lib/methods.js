@@ -195,6 +195,53 @@ const AGE_ACTIONS = ['session', 'result']
 
 const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
 
+// wallet.sign (docs/rpc.md 5.35). Duplicated from @varanda/core
+// lib/wallet-proof.js (ACTIONS and the operation rules) because this package
+// has no dependencies.
+const WALLET_ACTIONS = [
+  'optin', 'kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit',
+  'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap'
+]
+const WALLET_OP_KEY_RE = /^[a-z][a-zA-Z0-9]{0,31}$/
+const WALLET_OP_KEYS_MAX = 16
+const WALLET_OP_STRING_MAX = 512
+const WALLET_OP_FORBIDDEN = ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']
+
+const isWalletAction = (v) => typeof v === 'string' && WALLET_ACTIONS.includes(v)
+
+// No control character and no lone surrogate (UTF-8 would turn it into
+// U+FFFD, so two operations would share one hash).
+function isWalletOpString (s) {
+  if (s.length > WALLET_OP_STRING_MAX) return false
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) return false
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
+// The PIN, a CPF and the symmetric key never ride in a signed operation.
+function isWalletOp (v) {
+  if (!isPlainObject(v)) return false
+  const keys = Reflect.ownKeys(v)
+  if (keys.length > WALLET_OP_KEYS_MAX) return false
+  for (const key of keys) {
+    if (typeof key !== 'string' || !WALLET_OP_KEY_RE.test(key) || WALLET_OP_FORBIDDEN.includes(key)) return false
+    const d = Object.getOwnPropertyDescriptor(v, key)
+    if (d === undefined || !('value' in d) || !d.enumerable) return false
+    const x = d.value
+    if (typeof x === 'string' ? !isWalletOpString(x) : !(Number.isSafeInteger(x) && x >= 0)) return false
+  }
+  return true
+}
+
 // push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
 // lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
 // characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
@@ -322,6 +369,16 @@ const SPECS = {
     fields: {
       action: req(isAgeAction),
       nonce: req(isNonce)
+    }
+  },
+  // Signs the wallet statement with the identity key; the node fills in
+  // member and association itself and hashes the operation into the
+  // payload, so a caller never chooses the bytes.
+  'wallet.sign': {
+    fields: {
+      action: req(isWalletAction),
+      nonce: req(isNonce),
+      op: req(isWalletOp)
     }
   },
   // Signs the push opt-in statement with the identity key; the node fills

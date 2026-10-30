@@ -112,7 +112,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign`, `push.sign` and `age.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30, 5.31 and 5.32).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`. All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign`, `push.sign`, `age.sign` and `wallet.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30, 5.31, 5.32 and 5.35).
 
 Params have an exact key set: every key not listed for the method -> `USAGE` `'parâmetro desconhecido'`; a missing required key -> `'parâmetro obrigatório: <name>'`; a wrong type or bound -> `'parâmetro inválido: <name>'`. Defaults listed below are filled in by `validateRequest` / `validateParams(method, params)` before the handler runs; the client sends the params exactly as given.
 
@@ -453,6 +453,31 @@ Who started following the caller and whom the caller does not follow yet ("follo
 - The tombstone and its `media` are as in 5.33.
 - Browser node and core node: as in 5.33.
 
+### 5.35 `wallet.sign`
+
+- Params: `{ action, nonce, op }`, all required, nothing else: `action` is one of `'optin'`, `'kyc-document'`, `'kyc-submit'`, `'status'`, `'wallet-create'`, `'balance'`, `'statement'`, `'deposit'`, `'payout-quote'`, `'preview'`, `'payout'`, `'op-status'`, `'transfer'`, `'send-crypto'`, `'swap-quote'`, `'swap'` (the payments-account operations of the account service; the first five are the onboarding ones, `'swap-quote'` and `'swap'` convert received USDC to BRLA after the member confirms the quote); `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce); `op` is a plain object (the operation's own parameters) of 0..16 own enumerable data keys, each matching `/^[a-z][a-zA-Z0-9]{0,31}$/`, each value a string of 0..512 UTF-16 units with no control character (U+0000-U+001F, U+007F-U+009F) and no lone surrogate, or a safe integer 0..2^53-1 (amounts travel as integers in the smallest unit). The keys `pin`, `walletPin`, `protectedSymmetricKey`, `taxId`, `taxIdNumber` and `cpf` are refused (`'parâmetro inválido: op'`): the wallet PIN, a CPF and the symmetric key never enter a signed operation, not even hashed. Not mutating.
+
+  ```json
+  { "v": 1, "id": 9, "method": "wallet.sign", "params": { "action": "swap", "nonce": "<base64url>", "op": { "quoteId": "q-1", "amount": 2500000 } } }
+  { "v": 1, "id": 9, "ok": true, "result": { "signature": "<hex128>" } }
+  ```
+
+- The caller never passes the member, the association, the operation hash or any bytes: the node fills in `member` = its own diary key, `association` = its configured association and `opHash` = the lowercase hex64 BLAKE2b-256 hash (`hypercore-crypto` `hash`) of the UTF-8 bytes of `canonicalOp(op)`, the JSON of `op` with its keys sorted ascending and no whitespace (`JSON.stringify` of the sorted copy; each key is read once), and signs exactly the UTF-8 bytes of these six lines joined by LF (`0x0a`), no trailing LF (`walletPayload`, `packages/core/lib/wallet-proof.js`):
+
+  ```
+  varanda-wallet-v1
+  <action>
+  <nonce>
+  <member hex64>
+  <association hex64>
+  <opHash>       (hex64 hash of the canonical operation)
+  ```
+
+  The hash keeps the operation out of the framing: the account service recomputes it from the operation it receives, so two orders of the same keys give one hash. The prefix separates this statement from every other signature of the protocol (certificates, account links, terms acceptances, signup invites, push subscriptions, age requests, reports, moderation requests, Hypercore blocks).
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload, the operation or a key. The account service checks it with `verifyWallet(fields, signature)`, using `member` as the public key. It proves that this diary key asks the account service to run this operation for this association, bound to a single-use nonce (`docs/protocol.md`). It carries no PIN, no CPF, no name and no amount in clear: only the hash of the operation. The HTTP call that runs the operation is separate from this RPC and is never retried by the client.
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `age.sign`: not a diary write, no append, no network. Not mutating.
+- Errors: the core node (`packages/core/lib/session.js`), `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'` (with or without an identity, and nothing is opened); no identity on the browser node -> `NOT_FOUND` `'identidade não encontrada'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; a pair for another diary -> `USAGE` `'passkey não corresponde ao diário guardado'`; an operation the statement refuses although the params passed (`packages/core/lib/wallet-proof.js`) -> `USAGE` `'operação de pagamento inválida'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -590,6 +615,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 - `diary.peek` exists only on the browser node and only while a verified seeder link is live (5.27); the core node reads local data only.
 - `push.sign` is browser-only (5.31): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
 - `age.sign` is browser-only (5.32): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. Native and `varanda-serve` members keep the operator certificate path (`assoc certify`).
+- `wallet.sign` is browser-only (5.35): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
 - `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are 31 items and 36 blocks (lowered from 35 and 42 when posts gained media). `follow.list` pages with `offset` and `limit`.
 - The app treats a missing `incomplete` field as not syncing (an older node), and `incomplete` is relative to the length the node knows locally: a diary nobody serves is not reported.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit, 4 maximal descriptors per post). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

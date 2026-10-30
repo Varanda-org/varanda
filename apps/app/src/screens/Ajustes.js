@@ -26,7 +26,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
-import { invitePolicy, pushCheck, pushKey } from '../account'
+import { invitePolicy, pushCheck, pushKey, walletPolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
@@ -41,6 +41,7 @@ import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
 import Conexao from './Conexao'
+import Carteira from './Carteira'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Perfil from './Perfil'
@@ -56,7 +57,8 @@ const TITLES = {
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
-  convites: 'Convidar pessoas'
+  convites: 'Convidar pessoas',
+  carteira: 'Conta de pagamentos'
 }
 
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
@@ -219,6 +221,17 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p) }, () => {})
   }, [sheetOpen, hosted])
 
+  // The payments account policy, read once per opening like the invites one
+  // (null: off or unreadable, so the row hides).
+  const [wallet, setWallet] = useState(null)
+  const walletSeq = useRef(0)
+  useEffect(() => {
+    const mine = ++walletSeq.current
+    setWallet(null)
+    if (!sheetOpen || !hosted) return
+    walletPolicy().then((p) => { if (mine === walletSeq.current) setWallet(p) }, () => {})
+  }, [sheetOpen, hosted])
+
   useEffect(() => {
     if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
     let alive = true
@@ -311,6 +324,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // A state that could not be confirmed is never labelled "Desligados".
   const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
   const inviting = account && policy !== null && policy.required === true
+  const paying = account && wallet !== null && wallet.available === true
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -327,6 +341,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
+              {paying ? <Item icon='credit-card' label='Conta de pagamentos' onPress={() => onNavigate('carteira')} /> : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               {pushRow
                 ? (
@@ -446,6 +461,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 perWeek={policy.perWeek}
                 keyFailed={ownFailed}
                 onRetryKey={() => setInfoTick((n) => n + 1)}
+              />
+            </View>
+            )
+          : null}
+        {paying
+          ? (
+            <View style={shown('carteira')}>
+              <Carteira
+                open={screen === 'carteira'}
+                active={ready && screen === 'carteira'}
+                member={member}
+                node={node}
+                onBack={() => onNavigate('lista')}
               />
             </View>
             )
