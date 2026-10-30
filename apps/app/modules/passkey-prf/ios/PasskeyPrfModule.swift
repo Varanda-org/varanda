@@ -9,23 +9,30 @@ import UIKit
 // clientExtensionResults.prf), so JS reads both platforms alike. Below iOS 18
 // there is no PRF API: isAvailable is false and every ceremony is
 // UNSUPPORTED. Without the associated domain (webcredentials:<host>, see
-// ios/Varanda/Varanda.entitlements) the system refuses the rp.id: UNSUPPORTED
-// too. Native error text never reaches JS.
+// ios/Varanda/Varanda.entitlements) the system refuses the rp.id, and its error
+// text is localized, so the build says it outright: Info.plist
+// VarandaWebCredentials is false until the entitlement is added, and while it
+// is false the module reports itself unavailable. Native error text never
+// reaches JS.
 public class PasskeyPrfModule: Module {
   private var ceremony: AnyObject?
+
+  private static var webCredentials: Bool {
+    return Bundle.main.object(forInfoDictionaryKey: "VarandaWebCredentials") as? Bool == true
+  }
 
   public func definition() -> ModuleDefinition {
     Name("PasskeyPrf")
 
     Function("isAvailable") { () -> Bool in
       if #available(iOS 18.0, *) {
-        return true
+        return PasskeyPrfModule.webCredentials
       }
       return false
     }
 
     AsyncFunction("create") { (requestJson: String, promise: Promise) in
-      guard #available(iOS 18.0, *) else {
+      guard #available(iOS 18.0, *), PasskeyPrfModule.webCredentials else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
@@ -33,7 +40,7 @@ public class PasskeyPrfModule: Module {
     }.runOnQueue(.main)
 
     AsyncFunction("get") { (requestJson: String, promise: Promise) in
-      guard #available(iOS 18.0, *) else {
+      guard #available(iOS 18.0, *), PasskeyPrfModule.webCredentials else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }

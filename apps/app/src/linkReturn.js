@@ -3,10 +3,12 @@
 // Native's URL lacks most getters), so every rule is a plain string test.
 //
 // Two families, both untrusted (any app or page can open varanda://):
-//   - the fixed returns the account service sends the system browser to
-//     (apps/cli/lib/account/app-return.js): varanda://conta?conta=<outcome>
-//     [&codigo=<R>] and varanda://idade?volta=1. Only a hint: the outcome is
-//     always asked of the service again;
+//   - the age return of the account service (apps/cli/lib/account/
+//     app-return.js): varanda://idade?volta=1. Only a hint: the outcome is
+//     always asked of the service again. varanda://conta is no longer a
+//     return (any app can claim or forge it): the one-time code R arrives
+//     only in the result of the auth session the app opened,
+//     https://<installation>/account/app/conta (parseSessionReturn);
 //   - invite and profile links, either varanda:///<path> (empty host, so the
 //     path is the web path) or an https link of this installation.
 // A link is never consent to follow: the profile store records 'new' only.
@@ -16,9 +18,9 @@ import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
 
 const MAX_URL = 400
-const ACCOUNT_PREFIX = 'varanda://conta?'
 const AGE_PREFIX = 'varanda://idade?'
 const LINK_PREFIX = 'varanda://'
+const SESSION_PATH = '/account/app/conta?'
 export const RETURN_OUTCOMES = Object.freeze(['ok', 'erro', 'cancelado', 'lista-de-espera', 'convite-invalido'])
 // Exactly the base64url (no padding) of 32 bytes, in its one canonical
 // spelling (the last character carries 2 zero bits), as isToken on the
@@ -62,20 +64,34 @@ function queryOf (url, prefix) {
   return readQuery(hash === -1 ? rest : rest.slice(0, hash))
 }
 
-// -> { kind: 'conta', outcome, code? } | { kind: 'idade' } | null. Strict on
-// the scheme and the host; other parameters are ignored. The code rides only
-// on 'ok' and only in the shape the service mints.
+// The code rides only on 'ok' and only in the shape the service mints.
+function accountReturn (url, prefix) {
+  const q = queryOf(url, prefix)
+  if (q === null) return null
+  const outcome = q.get('conta')
+  if (!RETURN_OUTCOMES.includes(outcome)) return null
+  const code = q.get('codigo')
+  if (outcome === 'ok' && isRedeemCode(code)) return { kind: 'conta', outcome, code }
+  return { kind: 'conta', outcome }
+}
+
+// The URL an auth session the app opened captured -> { kind: 'conta',
+// outcome, code? } | null. Only https://<this installation>/account/app/conta
+// with a query, by exact prefix, so another host, a userinfo trick or a
+// longer path never matches.
+export function parseSessionReturn (url) {
+  if (!clean(url)) return null
+  const origin = installationOrigin()
+  if (typeof origin !== 'string' || !origin.startsWith('https://')) return null
+  const prefix = origin + SESSION_PATH
+  if (!url.startsWith(prefix)) return null
+  return accountReturn(url, prefix)
+}
+
+// -> { kind: 'idade' } | null. Strict on the scheme and the host; other
+// parameters are ignored.
 export function parseAppReturn (url) {
   if (!clean(url)) return null
-  if (url.startsWith(ACCOUNT_PREFIX)) {
-    const q = queryOf(url, ACCOUNT_PREFIX)
-    if (q === null) return null
-    const outcome = q.get('conta')
-    if (!RETURN_OUTCOMES.includes(outcome)) return null
-    const code = q.get('codigo')
-    if (outcome === 'ok' && isRedeemCode(code)) return { kind: 'conta', outcome, code }
-    return { kind: 'conta', outcome }
-  }
   if (url.startsWith(AGE_PREFIX)) {
     const q = queryOf(url, AGE_PREFIX)
     return q !== null && q.get('volta') === '1' ? { kind: 'idade' } : null

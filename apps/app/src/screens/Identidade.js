@@ -29,7 +29,7 @@
 // Ajustes Sheet when the card renders there.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Linking, Platform, StyleSheet, Text, TextInput } from 'react-native'
+import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
@@ -43,7 +43,9 @@ import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } 
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
-import { dropsHeldInvite } from '../linkReturn'
+import { hostOf, installationOrigin } from '../installation'
+import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
+import * as AuthSession from '../authSession'
 import { InvitePaste } from './Idade'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
@@ -214,31 +216,48 @@ function takeReturnWaitlist () {
 
 // The native sign-in (apps/cli/lib/account/app-return.js). V is held in this
 // process's memory only, never in storage or a log, for the member that
-// started; R is the one-time code of the last varanda://conta?conta=ok.
+// started: appLink = { member, secret, redeem }. R comes only from the result
+// of the auth session the app opened (its https return reaches this app
+// only); varanda://conta is no longer a return, since any app can claim or
+// forge it. Each start clears R.
 // A restarted app holds no V, so its return cannot be redeemed ('expirado').
 let appLink = null
-let appRedeem = null
 let appExpired = false
+// An auth session that ended 'failed' (Auth Tab verification failed or timed
+// out, e.g. no assetlinks): later starts send the person to the site.
+let authSessionBroken = false
 const returnListeners = new Set()
+const SESSION_RETURN_PATH = '/account/app/conta'
 
-// App.js hands every parsed varanda://conta return here (src/linkReturn.js).
-// It only sets what the card shows; the card then asks the service again.
-export function receiveAccountReturn (ret) {
-  if (!ret || ret.kind !== 'conta') return
-  const search = '?conta=' + ret.outcome
-  appRedeem = ret.outcome === 'ok' && typeof ret.code === 'string' ? ret.code : null
-  appExpired = ret.outcome === 'ok' && (appRedeem === null || appLink === null)
-  returnNotice = appExpired ? null : parseReturn(search)
+function siteHost () {
+  try {
+    return hostOf(installationOrigin())
+  } catch {
+    return null
+  }
+}
+// No auth session on this device: the link is done on the site, with the
+// same passkey (the same diary key, so the same account).
+function noSessionText () {
+  const host = siteHost()
+  const where = host ? 'pelo site ' + host : 'pelo site da instalação'
+  return 'Este aparelho não consegue abrir o login do Google dentro do app. Ligue a conta Google ' + where + ' no navegador, entrando com a mesma passkey: é a mesma conta.'
+}
+
+function noteAccountReturn (outcome) {
+  const search = '?conta=' + outcome
+  returnNotice = parseReturn(search)
   returnWaitlist = parseReturnWaitlist(search)
   returnInvite = parseReturnInvite(search)
-  if (returnInvite !== '') dropSignupInvite()
+}
+function notifyReturn () {
   for (const fn of returnListeners) fn()
 }
 
 // The proofs for this key's app row, or {} (the web, or nothing held).
 function appProofs (member) {
   if (appLink === null || appLink.member !== member) return {}
-  return { linkSecret: appLink.secret, redeem: appRedeem }
+  return { linkSecret: appLink.secret, redeem: appLink.redeem }
 }
 function takeReturnInvite () {
   takeReturnNotice()
@@ -324,7 +343,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
   useEffect(() => { if (active) load() }, [active, load])
 
-  // A varanda://conta return while this card is mounted (the app was not
+  // An auth session's return while this card is mounted (the app was not
   // reloaded, unlike the web page): the same states as a page load, then the
   // service is asked again.
   useEffect(() => {
@@ -450,12 +469,15 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         // still held for this key proves the old row, so a restart may
         // replace it. V is kept only once the service took its proof.
         const app = isAppClient()
+        // Checked before start, so no row is created for a link that cannot
+        // come back.
+        if (app && (authSessionBroken || !AuthSession.isAvailable())) throw new Error(noSessionText())
         const link = app ? newLinkSecret(deviceRandomBytes) : null
         const held = app ? appProofs(publicKey).linkSecret : undefined
         const { nonce } = await startLink({ member: publicKey, username, invite: loadSignupInvite()?.code, appProof: link?.proof, linkSecret: held })
-        if (link !== null) {
-          appLink = { member: publicKey, secret: link.secret }
-          appRedeem = null
+        const current = link === null ? null : { member: publicKey, secret: link.secret, redeem: null }
+        if (current !== null) {
+          appLink = current
           appExpired = false
         }
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
@@ -464,9 +486,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         setWaitlist('')
         setInviteNote('')
         setNote(RELOAD_TEXT)
-        // The system browser shares nothing with the app; it comes back
-        // through varanda://conta (App.js).
-        if (app) await Linking.openURL(authorizeUrl)
+        // The auth session hands its https return to this app only.
+        if (app) await linkInSession(current, authorizeUrl)
         else globalThis.location.assign(authorizeUrl)
       } catch (err) {
         // Full cap: a calm notice. The name stays; nothing retries on its own.
@@ -490,6 +511,33 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     })
   }
 
+  const linkInSession = async (current, authorizeUrl) => {
+    let res
+    try {
+      res = await AuthSession.open(authorizeUrl, hostOf(installationOrigin()), SESSION_RETURN_PATH)
+    } catch (err) {
+      if (appLink !== current) return
+      // INVALID: an installation the session cannot name (a port, or not
+      // https). Nothing else ever opens the link.
+      if (err && err.code === 'BUSY') throw new Error(LINK_FAILED)
+      throw new Error(noSessionText())
+    }
+    if (appLink !== current || !res) return
+    if (res.type === 'failed') {
+      // The browser may have loaded the return as a page and kept R in its
+      // history: without V, which goes here, nobody can redeem it.
+      appLink = null
+      authSessionBroken = true
+      throw new Error(noSessionText())
+    }
+    if (res.type !== 'ok') return
+    const ret = parseSessionReturn(res.url)
+    if (ret === null) return
+    noteAccountReturn(ret.outcome)
+    if (ret.code) current.redeem = ret.code
+    notifyReturn()
+  }
+
   const doConfirm = () => run(async () => {
     const row = cur === null ? null : cur.pending
     // Never sign for a pending link of another key.
@@ -505,7 +553,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     try {
       const { signature } = await node.request('account.sign', { phase: 'finish', nonce: row.nonce, username: row.username, sub: row.sub })
       // R is spent by this finish whatever its answer.
-      if (isAppClient()) appRedeem = null
+      if (isAppClient() && appLink !== null) appLink.redeem = null
       const done = await finishLink({ signature, ...proofs })
       if (isAppClient()) appLink = null
       const kept = await apply(done.cert, done.usernameRecord)
@@ -997,7 +1045,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // A passkey was created or chosen but its password manager gives no
       // PRF. The node keeps a created one out of the next creation, so
       // another try can save the new one elsewhere.
-      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true })
+      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true, native: NATIVE })
       entrar = (
         <Card>
           <Notice>{UNUSABLE_TITLE}</Notice>

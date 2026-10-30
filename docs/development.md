@@ -158,7 +158,8 @@ eas credentials -p android
 - Se a assinatura injetada não funcionar, o plano B é `credentialsSource: local` no perfil, com um `credentials.json` fora do git (ele está no `.gitignore` do app e no `.easignore`).
 - `ios/` e `android/` continuam mantidos à mão: nunca rode `expo prebuild`.
 - O `.easignore` substitui o `.gitignore` no envio, por isso repete as saídas de build e todos os padrões de segredo, e deixa de fora até o `debug.keystore` (o perfil `preview` compila release).
-- iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`.
+- iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`. Para entrar com passkey no iOS: adicione `webcredentials:<domínio>` em `ios/Varanda/Varanda.entitlements`, defina `VARANDA_IOS_APP_ID` no `.env` do deploy e troque `VarandaWebCredentials` para `true` em `ios/Varanda/Info.plist`.
+- O módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
 - A CI continua sem compilar nada nativo.
 
 ## Browser member spike (packages/web-member)

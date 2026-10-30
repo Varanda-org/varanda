@@ -206,7 +206,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const mediaReady = hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
   const busy = action.pending || checking || uploading
   const self = me || { publicKey: null, name: null }
-  const canQueue = outbox.available && typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
+  // Natively only the installation's node needs the queue: the manual (core)
+  // node writes its own diary offline.
+  const canQueue = outbox.available && (Platform.OS === 'web' || node.hosted === true) &&
+    typeof self.publicKey === 'string' && /^[0-9a-f]{64}$/.test(self.publicKey) &&
     !!(node.config && node.config.association)
   // Quotes are never queued: offline they wait for the network.
   const offlineQueue = canQueue && node.online === false && !quote

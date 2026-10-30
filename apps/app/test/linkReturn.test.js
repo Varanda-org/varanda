@@ -1,6 +1,7 @@
 'use strict'
 
-// The varanda:// URLs the native app is opened with (src/linkReturn.js).
+// The varanda:// URLs the native app is opened with and the auth session
+// return (src/linkReturn.js).
 const test = require('brittle')
 const crypto = require('node:crypto')
 
@@ -15,28 +16,18 @@ async function withOrigin (t, origin) {
   t.teardown(() => setInstallation(null))
 }
 
-test('parseAppReturn: the fixed account returns', async (t) => {
+test('parseAppReturn: varanda://conta is not a return in any shape', async (t) => {
   const { parseAppReturn } = await load()
-  t.alike(parseAppReturn('varanda://conta?conta=ok&codigo=' + R), { kind: 'conta', outcome: 'ok', code: R })
-  for (const outcome of ['erro', 'cancelado', 'lista-de-espera', 'convite-invalido']) {
-    t.alike(parseAppReturn('varanda://conta?conta=' + outcome), { kind: 'conta', outcome }, outcome)
+  for (const outcome of ['ok', 'erro', 'cancelado', 'lista-de-espera', 'convite-invalido']) {
+    t.is(parseAppReturn('varanda://conta?conta=' + outcome), null, outcome)
+    t.is(parseAppReturn('varanda://conta?conta=' + outcome + '&codigo=' + R), null, outcome + ' with a code')
   }
-  t.alike(parseAppReturn('varanda://conta?conta=ok'), { kind: 'conta', outcome: 'ok' }, 'ok without a code')
-  t.alike(parseAppReturn('varanda://conta?x=1&conta=erro&y'), { kind: 'conta', outcome: 'erro' }, 'other params ignored')
-  t.alike(parseAppReturn('varanda://conta?conta=ok&codigo=' + R + '#frag'), { kind: 'conta', outcome: 'ok', code: R })
-})
-
-test('parseAppReturn: the code only with ok and only in the minted shape', async (t) => {
-  const { parseAppReturn } = await load()
-  for (const outcome of ['erro', 'cancelado', 'lista-de-espera', 'convite-invalido']) {
-    t.alike(parseAppReturn('varanda://conta?conta=' + outcome + '&codigo=' + R), { kind: 'conta', outcome }, outcome)
+  for (const url of [
+    'varanda://conta?conta=ok&codigo=' + R + '#frag', 'varanda://conta?x=1&conta=erro&y',
+    'varanda://conta?conta=ok&codigo=' + R + '&codigo=' + R, 'varanda://conta?codigo=' + R, 'varanda://conta?'
+  ]) {
+    t.is(parseAppReturn(url), null, url)
   }
-  const nonCanonical = R.slice(0, 42) + 'B'
-  for (const bad of [R.slice(1), R + 'A', nonCanonical, R.slice(0, 42) + '%', '']) {
-    t.alike(parseAppReturn('varanda://conta?conta=ok&codigo=' + bad), { kind: 'conta', outcome: 'ok' }, bad)
-  }
-  t.is(parseAppReturn('varanda://conta?conta=ok&codigo=' + R + '&codigo=' + R), null, 'repeated codigo')
-  t.is(parseAppReturn('varanda://conta?conta=ok&conta=erro'), null, 'repeated conta')
 })
 
 test('parseAppReturn: the age return', async (t) => {
@@ -161,4 +152,41 @@ test('native store: a convite-invalido answer drops the held code so the field s
   if (dropsHeldInvite(err, true)) n.dropSignupInvite()
   t.is(n.loadSignupInvite(), null)
   t.ok(invitePasteShown({ native: true, required: true, held: n.loadSignupInvite() !== null, refused: true }))
+})
+
+test('parseSessionReturn: only the installation return page, by exact prefix', async (t) => {
+  const { parseSessionReturn } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  const base = 'https://varanda.example/account/app/conta?'
+  t.alike(parseSessionReturn(base + 'conta=ok&codigo=' + R), { kind: 'conta', outcome: 'ok', code: R })
+  t.alike(parseSessionReturn(base + 'conta=cancelado'), { kind: 'conta', outcome: 'cancelado' })
+  t.alike(parseSessionReturn(base + 'conta=erro&codigo=' + R), { kind: 'conta', outcome: 'erro' }, 'a code rides only on ok')
+  t.alike(parseSessionReturn(base + 'conta=ok&codigo=' + R.slice(0, 42) + 'B'), { kind: 'conta', outcome: 'ok' }, 'non-canonical code')
+  for (const bad of [
+    'https://evil.example/account/app/conta?conta=ok&codigo=' + R,
+    'https://varanda.example.evil/account/app/conta?conta=ok&codigo=' + R,
+    'http://varanda.example/account/app/conta?conta=ok&codigo=' + R,
+    'https://varanda.example@evil.example/account/app/conta?conta=ok&codigo=' + R,
+    'https://evil.example/https://varanda.example/account/app/conta?conta=ok&codigo=' + R,
+    'https://varanda.example/account/app/conta/x?conta=ok&codigo=' + R,
+    'https://varanda.example/account/app/contax?conta=ok&codigo=' + R,
+    'https://varanda.example/account/app/conta#?conta=ok&codigo=' + R,
+    'https://varanda.example/account/app/conta',
+    'https://varanda.example:8443/account/app/conta?conta=ok&codigo=' + R,
+    base + 'conta=ok&codigo=' + R + '&codigo=' + R,
+    base + 'conta=ok&conta=erro',
+    base + 'conta=talvez',
+    base + 'conta=ok\n',
+    'varanda://conta?conta=ok&codigo=' + R,
+    null
+  ]) {
+    t.is(parseSessionReturn(bad), null, String(bad))
+  }
+})
+
+test('parseSessionReturn: nothing without an https installation', async (t) => {
+  const { parseSessionReturn } = await load()
+  t.is(parseSessionReturn('https://varanda.example/account/app/conta?conta=ok&codigo=' + R), null, 'no installation set')
+  await withOrigin(t, 'http://127.0.0.1:8790')
+  t.is(parseSessionReturn('http://127.0.0.1:8790/account/app/conta?conta=ok&codigo=' + R), null, 'loopback http')
 })

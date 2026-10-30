@@ -26,7 +26,7 @@ const { duplexSocket } = require('@varanda/web-member/lib/duplex-socket')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const { MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { createIdentityHost } = require('./identity-install')
-const { readAll, createLifecycle, uploadMedia } = require('./web-node-parts')
+const { readMediaFile, createLifecycle, uploadMedia } = require('./web-node-parts')
 
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 // The browser entry's lease values (packages/web-member/web/node.js).
@@ -35,7 +35,6 @@ const LEASE_GAP_MS = 45000
 const DATA_DIR_IN_USE = 'diretório de dados em uso'
 const LOCK_UNAVAILABLE = 'trava do diretório indisponível'
 const BAD_MEDIA_FILE = 'arquivo de mídia inválido'
-const BAD_MEDIA = 'mídia inválida'
 
 function hmac (key, data) {
   return crypto.createHmac('sha256', key).update(data).digest()
@@ -54,52 +53,6 @@ function lockRefusal (err) {
   if (code === 'LOCKED') return new RpcError('LOCKED', DATA_DIR_IN_USE)
   if (code === 'LOCK_UNAVAILABLE') return new RpcError('LOCKED', LOCK_UNAVAILABLE)
   return new RpcError('INTERNAL', 'erro interno')
-}
-
-// True when `real` is `root` itself or below it; both are realpath results.
-function inside (root, real) {
-  const rel = path.relative(root, real)
-  return rel !== '' && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..'
-}
-
-// The jailed read of media.uploadFile -> { real, bytes }. Every refusal is
-// USAGE BAD_MEDIA_FILE and names nothing: an fs error message carries the
-// path, so none is passed on.
-async function readMediaFile (cacheDir, requested) {
-  let root
-  let real
-  try {
-    root = await fs.promises.realpath(cacheDir)
-    real = await fs.promises.realpath(requested)
-  } catch {
-    throw new RpcError('USAGE', BAD_MEDIA_FILE)
-  }
-  if (!inside(root, real)) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-  let handle = null
-  try {
-    // bare-fs has no O_NOFOLLOW: the path is checked with lstat (a regular
-    // file, not a link) and the opened descriptor must be that same file
-    // (dev and ino), so a swap between the two calls is refused.
-    let before
-    try {
-      before = await fs.promises.lstat(real)
-      if (!before.isFile()) throw new Error('not a regular file')
-      handle = await fs.promises.open(real, fs.constants.O_RDONLY)
-    } catch {
-      throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    }
-    const st = await handle.stat()
-    if (!st.isFile() || st.dev !== before.dev || st.ino !== before.ino) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    if (st.size < 1 || st.size > MAX_MEDIA_ITEM_BYTES) throw new RpcError('USAGE', BAD_MEDIA)
-    const bytes = await readAll(handle, st.size, MAX_MEDIA_ITEM_BYTES)
-    if (bytes === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return { real, bytes }
-  } catch (err) {
-    if (err instanceof RpcError) throw err
-    throw new RpcError('USAGE', BAD_MEDIA_FILE)
-  } finally {
-    if (handle !== null) await handle.close().catch(() => {})
-  }
 }
 
 // args: the worklet's start argument ({ dataDir, cacheDir, association,
@@ -126,12 +79,19 @@ function createWebNode (args, { onInternalError } = {}) {
 
   const lifecycle = createLifecycle({ session, storage, locking })
 
-  function uploadFile ({ path: requested, mime, width, height }) {
+  function uploadFile ({ name, mime, width, height }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
     return uploadMedia({
-      read: () => readMediaFile(cacheDir, requested),
+      read: () => readMediaFile({
+        fs: fs.promises,
+        join: path.join,
+        cacheDir,
+        name,
+        max: MAX_MEDIA_ITEM_BYTES,
+        flags: fs.constants.O_RDONLY
+      }),
       session,
-      unlink: (real) => fs.promises.unlink(real),
+      unlink: (file) => fs.promises.unlink(file),
       isClosing: lifecycle.isClosing
     }, { mime, width, height })
   }
@@ -173,4 +133,4 @@ function createWebNode (args, { onInternalError } = {}) {
   }
 }
 
-module.exports = { createWebNode, inside }
+module.exports = { createWebNode }

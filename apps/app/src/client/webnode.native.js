@@ -15,7 +15,7 @@
 import { File } from 'expo-file-system'
 import { rpIdOf, installationOrigin } from '../installation'
 import { createNativeIdentity } from '../identity'
-import { uploadDirectory, uriToPath } from './native'
+import { uploadDirectory } from './native'
 
 function rpIdOrNull () {
   try {
@@ -56,17 +56,19 @@ export function webNodeHandle (request) {
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped
-  // at 64 KiB (docs/rpc.md 5.41). The worklet deletes the file after a
+  // at 64 KiB (docs/rpc.md 5.41). Only its name crosses the IPC; the worklet
+  // finds it under the cacheDir it was started with. The worklet deletes the file after a
   // successful upload; on any failure it is deleted here.
   const media = {
     upload: async ({ bytes, mime, width, height, onProgress } = {}) => {
       if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new TypeError('mídia inválida')
-      const file = new File(uploadDirectory(), randomName())
+      const name = randomName()
+      const file = new File(uploadDirectory(), name)
       try {
         file.create()
         file.write(bytes)
         progress(onProgress, 0.25)
-        const descriptor = await request('media.uploadFile', { path: uriToPath(file.uri), mime, width, height })
+        const descriptor = await request('media.uploadFile', { name, mime, width, height })
         progress(onProgress, 1)
         return descriptor
       } catch (err) {

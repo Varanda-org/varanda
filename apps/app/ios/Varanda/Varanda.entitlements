@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Later human step (needs the Apple Developer Program): add
      com.apple.developer.associated-domains with webcredentials:<installation host>
-     (and publish apple-app-site-association there) so the passkey-prf module can use
-     the installation's passkeys; until then iOS answers UNSUPPORTED. -->
+     (and publish apple-app-site-association there), then set VarandaWebCredentials
+     to true in Info.plist so the passkey-prf module offers the installation's
+     passkeys; until both are done iOS reports passkeys as unavailable. -->
 <plist version="1.0">
   <dict/>
 </plist>
