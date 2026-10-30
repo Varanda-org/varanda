@@ -20,6 +20,7 @@
 // the four image types) and a blob: URL, which the UI shows as an image and
 // nothing else. Every function takes injectable dependencies for tests.
 
+import { resolveUrl } from '../installation.js'
 import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, toHex } from './plan.js'
 
 // Same value as packages/core/lib/records.js.
@@ -54,12 +55,12 @@ function authorOf (author) {
   return HEX64.test(lower) ? lower : null
 }
 
-// The same-origin path of an item, or null when the author or the
-// descriptor is not valid.
+// The URL of an item on the installation (a same-origin path on the web), or
+// null when the author or the descriptor is not valid.
 export function mediaUrl (author, d) {
   const a = authorOf(author)
   if (a === null || !validDescriptor(d)) return null
-  return '/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks
+  return resolveUrl('/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks)
 }
 
 function fail (message) {

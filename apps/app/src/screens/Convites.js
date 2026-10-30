@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { accountStatus, invitesFinish, invitesStart } from '../account'
 import { HELP } from '../help'
+import { installationOrigin } from '../installation'
 import { useNode } from '../node'
 import { INVITE_VALID_TEXT, WEEK_RESET_TEXT, allowanceText, buildSignupInviteUrl, inviteCountText } from '../signupInvite'
 import { Body, Btn, ErrorText, Page, Soft, errorText } from '../ui'
@@ -92,7 +93,7 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
       // Once finish is sent the service decides; closing now cannot undo it.
       finishing = true
       const done = await invitesFinish({ member: ownKey, nonce, signature })
-      const link = buildSignupInviteUrl({ origin: globalThis.location?.origin, code: done.code })
+      const link = buildSignupInviteUrl({ origin: installationOrigin() || globalThis.location?.origin || null, code: done.code })
       // The previous link (still valid, already counted) stays until a new
       // one replaces it.
       if (link === null) setError(UNAVAILABLE_TEXT)

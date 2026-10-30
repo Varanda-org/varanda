@@ -165,3 +165,15 @@ test('fetchMedia: request options, status and sha checks', async (t) => {
   t.is(url, 'blob:x')
   t.is(made[0].opts.type, 'image/png', 'blob typed with the descriptor mime')
 })
+
+test('mediaUrl is absolute on the installation when one is set', async (t) => {
+  const { mediaUrl } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  const d = descriptor(new Uint8Array(40000).fill(7))
+  t.ok(setInstallation('https://example.test'))
+  t.is(mediaUrl(AUTHOR, d), 'https://example.test/media/' + AUTHOR + '/' + d.core + '/1/2')
+  t.is(mediaUrl('ab', d), null)
+  setInstallation(null)
+  t.is(mediaUrl(AUTHOR, d), '/media/' + AUTHOR + '/' + d.core + '/1/2')
+})

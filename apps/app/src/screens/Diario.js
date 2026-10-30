@@ -30,6 +30,7 @@ import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
+import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -268,7 +269,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
-  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey }) : null
+  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
 

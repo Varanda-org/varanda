@@ -1,3 +1,6 @@
+// First, so crypto.getRandomValues exists before any other module loads.
+import './src/cryptoPolyfill'
+
 import { registerRootComponent } from 'expo'
 
 import App from './App'

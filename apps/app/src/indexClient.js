@@ -1,5 +1,7 @@
 /* global fetch, AbortController, TextDecoder */
 
+import { resolveUrl } from './installation.js'
+
 // Client for the seeder index (hosted web only; same origin, served by the
 // seeder under /index/*). The index only says where to look (refs, seq hints)
 // and how many (counts): every post, name or bio shown is still fetched and
@@ -146,13 +148,13 @@ export function postUrl (ref, cursor = null) {
   if (r === null) return null
   if (cursor !== null && !isCursor(cursor)) return null
   const [author, seq] = r.split(':')
-  return '/index/post/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor)
+  return resolveUrl('/index/post/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
 // Duplicates are dropped (first occurrence kept); 1..31 distinct refs.
 export function countsUrl (refs) {
   const list = countsInput(refs)
-  return list === null ? null : '/index/counts/' + list.join(',')
+  return list === null ? null : resolveUrl('/index/counts/' + list.join(','))
 }
 
 function countsInput (refs) {
@@ -170,7 +172,7 @@ export function memberUrl (author, before = null) {
   const a = inputAuthor(author)
   if (a === null) return null
   if (before !== null && !isSeq(before)) return null
-  return '/index/member/' + a + (before === null ? '' : '/' + before)
+  return resolveUrl('/index/member/' + a + (before === null ? '' : '/' + before))
 }
 
 // `path`: tokens already folded and joined by topics.js searchPath. Checked
@@ -179,7 +181,7 @@ export function memberUrl (author, before = null) {
 export function topicUrl (path, cursor = null) {
   if (typeof path !== 'string' || !QUERY.test(path)) return null
   if (cursor !== null && !isCursor(cursor)) return null
-  return '/index/topic/' + path + (cursor === null ? '' : '/' + cursor)
+  return resolveUrl('/index/topic/' + path + (cursor === null ? '' : '/' + cursor))
 }
 
 // `kind` is taken as is (never lowercased or trimmed). The seq is capped at
@@ -191,14 +193,14 @@ export function engagersUrl (kind, ref, cursor = null) {
   const [author, seq] = r.split(':')
   if (seq.length > 15) return null
   if (cursor !== null && !isCursor(cursor)) return null
-  return '/index/' + kind + '/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor)
+  return resolveUrl('/index/' + kind + '/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
 export function searchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
-  return '/index/search/' + segment
+  return resolveUrl('/index/search/' + segment)
 }
 
 // --- transport ---
@@ -679,7 +681,7 @@ export function fetchPost (ref, cursor = null, deps = {}) {
 
 export function fetchCounts (refs, deps = {}) {
   const asked = countsInput(refs)
-  const url = asked === null ? null : '/index/counts/' + asked.join(',')
+  const url = asked === null ? null : resolveUrl('/index/counts/' + asked.join(','))
   return run(url, (body) => validCounts(body, asked), deps)
 }
 

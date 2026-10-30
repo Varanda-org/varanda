@@ -6,6 +6,8 @@
 
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
+import { resolveUrl } from './installation.js'
+import { isAppClient } from './appClient.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -128,7 +130,14 @@ export function buildRequest (method, path, body) {
     init.headers['content-type'] = 'application/json'
     init.body = JSON.stringify(body)
   }
-  return { url: path, init }
+  // The app is not the page's origin: it never sends ambient cookies (React
+  // Native's fetch attaches stored cookies unless told 'omit', whatever the
+  // method), and the service tells its writes apart by this header.
+  if (isAppClient()) {
+    init.credentials = 'omit'
+    if (method === 'POST') init.headers['x-varanda-client'] = 'app'
+  }
+  return { url: resolveUrl(path), init }
 }
 
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a

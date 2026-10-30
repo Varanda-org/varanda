@@ -50,6 +50,7 @@ import { BackHandler, Platform, Pressable, StyleSheet, Text, View, useWindowDime
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
+import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
 import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
 import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
@@ -1249,7 +1250,7 @@ function Member () {
       const inviteProp = action === 'card'
         ? {
             text: inviteCardText(invite),
-            link: buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: invite.username, publicKey: invite.key }),
+            link: buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: invite.username, publicKey: invite.key }),
             onDismiss: forgetInvite
           }
         : null

@@ -162,3 +162,29 @@ test('failures never expose the body', async (t) => {
   stub(t, json(200, { nonce: 5 }))
   await t.exception(reportStart({ member: M }), /serviço indisponível/)
 })
+
+test('app client: absolute URLs, header and no credentials only with the flag on', async (t) => {
+  const { buildReportStart, buildReportSend } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => { setInstallation(null); setAppClient(false) })
+  const fields = { member: M, nonce: NONCE, target: T, seq: 4, reason: 'assedio', text: 'x', quote: 'post', signature: SIG }
+
+  t.ok(setInstallation('https://example.test'))
+  setAppClient(true)
+  const start = buildReportStart({ member: M })
+  const send = buildReportSend(fields)
+  t.is(start.url, 'https://example.test/account/report/start')
+  t.is(send.url, 'https://example.test/account/report')
+  for (const r of [start, send]) {
+    t.is(r.init.credentials, 'omit')
+    t.alike(r.init.headers, { accept: 'application/json', 'content-type': 'application/json', 'x-varanda-client': 'app' })
+  }
+
+  setAppClient(false)
+  setInstallation(null)
+  const web = buildReportStart({ member: M })
+  t.is(web.url, '/account/report/start')
+  t.is(web.init.credentials, 'same-origin')
+  t.alike(web.init.headers, { accept: 'application/json', 'content-type': 'application/json' })
+})

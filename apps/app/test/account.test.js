@@ -507,3 +507,43 @@ test('ageResult: known states only', async (t) => {
     t.absent(e.uncertain, 'a refusal is definite')
   }
 })
+
+test('app client: absolute URLs, header and no credentials only with the flag on', async (t) => {
+  const a = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => { setInstallation(null); setAppClient(false) })
+
+  const web = a.buildRequest('POST', '/account/start', { member: M })
+  t.is(web.url, '/account/start')
+  t.is(web.init.credentials, 'same-origin')
+  t.absent('x-varanda-client' in web.init.headers, 'the web sends no client header')
+  t.is(a.buildRequest('GET', '/account/pending?member=' + M).init.credentials, 'same-origin', 'web GETs unchanged')
+
+  t.ok(setInstallation('https://example.test'))
+  setAppClient(true)
+  const calls = stub(t, json(200, { ok: 1 }))
+  await a.accountStatus(M)
+  await a.startLink({ member: M, username: 'ana' })
+  await a.renameStart({ member: M, username: 'bia' })
+  t.is(calls[0].url, 'https://example.test/account/status?member=' + M)
+  t.is(calls[0].init.method, 'GET')
+  t.absent('x-varanda-client' in calls[0].init.headers, 'only POSTs carry the header')
+  t.is(calls[0].init.credentials, 'omit', 'a GET never carries cookies either')
+  t.is(calls.length, 3)
+  t.is(a.buildRequest('GET', '/account/pending?member=' + M).init.credentials, 'omit')
+  for (const c of calls.slice(1)) {
+    t.is(c.init.method, 'POST')
+    t.ok(c.url.startsWith('https://example.test/account/'), c.url)
+    t.is(c.init.credentials, 'omit')
+    t.is(c.init.headers['x-varanda-client'], 'app')
+    t.is(c.init.headers['content-type'], 'application/json')
+  }
+
+  setAppClient(false)
+  const off = a.buildRequest('POST', '/account/start', { member: M })
+  t.is(off.url, 'https://example.test/account/start', 'the URL follows the installation alone')
+  t.is(off.init.credentials, 'same-origin')
+  t.absent('x-varanda-client' in off.init.headers)
+  t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
+})
