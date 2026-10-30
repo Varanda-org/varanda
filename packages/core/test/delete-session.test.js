@@ -51,6 +51,19 @@ function descriptor (core, start, blocks = 1) {
   return { core, mime: 'image/webp', start, blocks, bytes: (blocks - 1) * 32768 + 1000, sha256: 'e'.repeat(64), width: 512, height: 512 }
 }
 
+// Judging a target as written needs its bytes: VARANDA_NO_CLEAR=1 keeps
+// them -> restore().
+function noClear (t) {
+  const before = process.env.VARANDA_NO_CLEAR
+  process.env.VARANDA_NO_CLEAR = '1'
+  const restore = () => {
+    if (before === undefined) delete process.env.VARANDA_NO_CLEAR
+    else process.env.VARANDA_NO_CLEAR = before
+  }
+  t.teardown(restore, { force: true })
+  return restore
+}
+
 function itemSeqs (feed) {
   return feed.items.filter((i) => i.kind === 'post').map((i) => i.seq).sort((a, b) => a - b)
 }
@@ -136,12 +149,30 @@ test('profile.delete deletes a compatibility pair as one version in one append',
   const [first, second] = log.entries.slice(-2).map((e) => e.record)
   t.alike(first, { type: 'delete', seq: n, at: first.at }, 'the plain block frees no media')
   t.alike(second, { type: 'delete', seq: last, at: second.at, media: [{ core: CORE, start: 1, blocks: 2 }] })
+  t.is(first.at, second.at, 'both tombstones of the pair carry one at')
   t.alike(await m.call('profile.delete', { to: m.publicKey + ':' + last }), { seq: r.seq, ref: r.ref, changed: false, deleted: [n, last] })
   t.alike(await m.call('profile.delete', { to: m.publicKey + ':' + n }), { seq: r.seq, ref: r.ref, changed: false, deleted: [n, last] })
   t.is((await m.call('log.read')).entries.length, log.entries.length, 'nothing appended')
 })
 
+test('two separate deletions of adjacent profiles answer apart once cleared', async (t) => {
+  const m = await member(t)
+  const p1 = await appendDirect(m.dataDir, [profileRecord({ name: 'Ana', at: AT })])
+  const p2 = await appendDirect(m.dataDir, [profileRecord({ name: 'Bia', at: AT })])
+  const ref = (seq) => m.publicKey + ':' + seq
+  const r1 = await m.call('profile.delete', { to: ref(p1) })
+  t.alike(r1, { seq: p2 + 1, ref: ref(p2 + 1), changed: true, deleted: [p1] })
+  // A separate delete never shares the first one's `at`.
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const r2 = await m.call('profile.delete', { to: ref(p2) })
+  t.alike(r2, { seq: p2 + 2, ref: ref(p2 + 2), changed: true, deleted: [p2] })
+  t.alike(await m.call('profile.delete', { to: ref(p1) }), { ...r1, changed: false })
+  t.alike(await m.call('profile.delete', { to: ref(p2) }), { ...r2, changed: false })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
 test('a half-deleted compatibility pair writes only the missing tombstone', async (t) => {
+  noClear(t)
   const m = await member(t)
   await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
   const a = profileRecords({ name: 'Ana', avatar: descriptor(CORE, 1), at: AT })
@@ -165,15 +196,22 @@ test('a half-deleted compatibility pair writes only the missing tombstone', asyn
 })
 
 test('kind is checked before the already-deleted short-circuit', async (t) => {
+  const restore = noClear(t)
   const m = await member(t)
   const p = await m.call('profile.set', { name: 'Ana' })
   const post = await m.call('post.create', { text: 'oi' })
   const ref = (seq) => m.publicKey + ':' + seq
-  await m.call('post.delete', { to: post.ref })
-  await m.call('profile.delete', { to: ref(p.seq) })
+  const dPost = await m.call('post.delete', { to: post.ref })
+  const dProfile = await m.call('profile.delete', { to: ref(p.seq) })
   const before = await m.call('log.read')
   t.alike(await failure(m.call('profile.delete', { to: post.ref })), NOT_A_PROFILE, 'a deleted post is still a post')
   t.alike(await failure(m.call('post.delete', { to: ref(p.seq) })), NOT_A_POST, 'a deleted profile is still a profile')
+  t.alike(await m.call('log.read'), before, 'nothing appended')
+  // Once cleared, the kind can no longer be read: the tombstone answers.
+  restore()
+  t.alike(await m.call('log.read'), before)
+  t.alike(await m.call('profile.delete', { to: post.ref }), { ...dPost, changed: false })
+  t.alike(await m.call('post.delete', { to: ref(p.seq) }), { ...dProfile, changed: false })
   t.alike(await m.call('log.read'), before, 'nothing appended')
 })
 

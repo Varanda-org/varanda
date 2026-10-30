@@ -182,6 +182,29 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.alike(m.session.internal, [], 'no internal error')
 })
 
+test('post.delete clears the block; node.info and log.read keep working', async (t) => {
+  const m = await member(t, { cert: true })
+  const post = await m.call('post.create', { text: 'apagar' })
+  await m.call('post.create', { text: 'fica' })
+  const d = await m.call('post.delete', { to: post.ref })
+  t.alike(d, { seq: 3, ref: m.publicKey + ':3', changed: true, deleted: [post.seq] })
+  t.alike(await m.call('post.delete', { to: post.ref }), { ...d, changed: false })
+  t.alike((await m.call('node.info')).memberCert, true)
+  const log = await m.call('log.read')
+  t.alike(log.entries.map((e) => e.seq), [0, 2, 3])
+  t.alike(log.invalid, [{ seq: post.seq, reason: 'deleted' }])
+  await m.session.close()
+  const s = await store.openStore(m.dataDir)
+  try {
+    const diary = await store.openDiary(s)
+    t.absent(await diary.has(post.seq), 'the deleted block is cleared')
+    t.ok(await diary.has(0))
+    t.is(diary.fork, 0)
+  } finally {
+    await s.close()
+  }
+})
+
 test('feed.read caps the incomplete list at FEED_INCOMPLETE_MAX', async (t) => {
   const m = await member(t, { cert: true })
   const total = FEED_INCOMPLETE_MAX + 1

@@ -400,7 +400,8 @@ function redactLogLine (text) {
 // never passes it). writeGateTimeoutMs: their deadline (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
-// its gap and its media wait.
+// its gap and its media wait. noClear: keep the bytes of deleted blocks
+// (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 function createBrowserSession ({
   storage,
   association,
@@ -414,7 +415,8 @@ function createBrowserSession ({
   peekTimeoutMs = PEEK_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
-  leaseMediaMaxMs = LEASE_MEDIA_MAX_MS
+  leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
+  noClear = false
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -422,7 +424,7 @@ function createBrowserSession ({
   }
 
   function ctx () {
-    return { storage, association: cfg.association, keyPair, mediaKeyPair, limits }
+    return { storage, association: cfg.association, keyPair, mediaKeyPair, limits, noClear: noClear === true }
   }
 
   let emitter = null
@@ -582,6 +584,7 @@ function createBrowserSession ({
       try {
         result = await runSync({
           ...syncOptions,
+          noClear: noClear === true,
           storage,
           associationKey: cfg.association,
           seederUrl: cfg.seederUrl,

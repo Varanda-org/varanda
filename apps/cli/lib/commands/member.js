@@ -106,7 +106,10 @@ async function deleteRun (flags) {
     const entry = entries.find((entry) => entry.seq === flags.to.seq)
     return entry ? validRecordCopy(entry.record, entry.seq) : null
   })
-  const remove = record && record.type === 'profile' ? member.profileDelete : member.postDelete
+  // A cleared target has no type left: the profile path answers it from its
+  // tombstones and still recognises a compatibility pair, while a cleared
+  // post (a single tombstone) gets the same answer as from the post path.
+  const remove = !record || record.type === 'profile' ? member.profileDelete : member.postDelete
   const result = await remove(ctx, { to: flags.to })
   print(flags, result, result.changed ? 'apagado #' + flags.to.seq : 'já apagado')
 }

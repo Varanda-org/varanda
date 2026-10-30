@@ -27,10 +27,11 @@ const {
   validRecordCopy,
   validateRecord,
   formatRef,
-  latestProfile
+  latestProfile,
+  nowIso
 } = require('./records')
 const { followSet, latestMediaCores } = require('./media')
-const { deletedSeqs, applyDeletes, liveMediaRefs, overlaps } = require('./deletion')
+const { deletedSeqs, applyDeletes, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -107,12 +108,51 @@ function trustRoot (ctx) {
   return config.association
 }
 
+// Rollout kill switch: VARANDA_NO_CLEAR=1 keeps the bytes of deleted blocks
+// (only the tombstone is written).
+function clearingOff (ctx) {
+  return ctx.noClear === true || (process.env || {}).VARANDA_NO_CLEAR === '1'
+}
+
+// Data dirs whose own diary was reconciled by this process.
+const reconciled = new Set()
+
+// Clears the own blocks the fold hides but this store still holds: a clear
+// interrupted after its tombstone was appended, or a tombstone that arrived
+// from elsewhere. Once per data dir and process; a failed clear is retried
+// at the next open.
+async function reconcileOwn (ctx, diary) {
+  const dir = path.resolve(ctx.dataDir)
+  if (reconciled.has(dir) || clearingOff(ctx)) return
+  try {
+    const { deleted } = await presentState(diary)
+    if (await clearedAll(diary, deleted)) reconciled.add(dir)
+  } catch {}
+}
+
+// clearDeleted skips a block it cannot read without throwing, so success is
+// read back: true only when every deleted seq is gone, block 0 or a tombstone
+// (both never cleared).
+async function clearedAll (diary, deleted) {
+  try {
+    await clearDeleted(diary, deleted)
+    for (const seq of deleted) {
+      if (seq < 1 || seq >= diary.length || !(await diary.has(seq))) continue
+      if (!(await tombstoneAt(diary, seq))) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Opens the store and the diary, runs fn and always closes the store.
 async function withIdentity (ctx, fn) {
   const association = trustRoot(ctx)
   const store = await openStore(ctx)
   try {
     const diary = await openDiary(store)
+    await reconcileOwn(ctx, diary)
     return await fn({ store, diary, ownHex: hex(diary.key), association })
   } finally {
     await store.close()
@@ -336,6 +376,26 @@ function targetedSeqs (raw, seq, copy) {
   return [seq]
 }
 
+// The version of a cleared profile block, read from its tombstones: the pair
+// writer appends both tombstones in one append, in seq order and with one
+// `at`, so only consecutive tombstones of seq n then n + 1 carrying the same
+// `at` are taken as one pair. Two separate deletions of adjacent versions
+// stay apart.
+function clearedVersion (raw, deleted, seq) {
+  const t = tombstoneOf(raw, deleted, [seq])
+  if (t === null) return [seq]
+  const tomb = (i) => {
+    const copy = deleted.has(i) ? null : recordAt(raw, i)
+    return copy !== null && copy.type === 'delete' ? copy : null
+  }
+  const own = tomb(t)
+  const next = tomb(t + 1)
+  if (next !== null && next.seq === seq + 1 && next.at === own.at) return [seq, seq + 1]
+  const prev = tomb(t - 1)
+  if (prev !== null && prev.seq === seq - 1 && prev.at === own.at) return [seq - 1, seq]
+  return [seq]
+}
+
 // The highest effective tombstone that targets one of `seqs`, or null.
 function tombstoneOf (raw, deleted, seqs) {
   for (let i = raw.length - 1; i >= 1; i--) {
@@ -370,6 +430,13 @@ async function recordDelete (ctx, { to, kind }) {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= diary.length) throw new UsageError(BAD_REF)
     const raw = await readRaw(diary)
+    const deleted = deletedSeqs(raw)
+    // A cleared target can no longer be judged; its tombstone answers.
+    if (to.seq < raw.length && deleted.has(to.seq) && !(await diary.has(to.seq))) {
+      const seqs = kind === 'profile' ? clearedVersion(raw, deleted, to.seq) : [to.seq]
+      const seq = tombstoneOf(raw, deleted, seqs)
+      return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
+    }
     const copy = recordAt(raw, to.seq)
     if (copy === null) throw new UsageError(BAD_REF)
     if (copy.type !== kind) {
@@ -378,7 +445,6 @@ async function recordDelete (ctx, { to, kind }) {
       throw new UsageError(NOT_DELETABLE)
     }
     const seqs = targetedSeqs(raw, to.seq, copy)
-    const deleted = deletedSeqs(raw)
     const pending = seqs.filter((seq) => !deleted.has(seq))
     if (pending.length === 0) {
       const seq = tombstoneOf(raw, deleted, seqs)
@@ -386,11 +452,17 @@ async function recordDelete (ctx, { to, kind }) {
     }
     const cores = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
     const live = liveMediaRefs(raw, seqs)
+    // One `at` for the whole append marks the tombstones of a pair as one.
+    const at = nowIso()
     const records = pending.map((seq) => {
       const media = freedRanges(recordAt(raw, seq), cores, live)
-      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, media } : { seq }))
+      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
     const seq = await appendRecords(diary, records)
+    // The tombstones are written, so the delete succeeded whatever the clear
+    // does; a clear that is skipped or fails is finished by the next open.
+    const cleared = !clearingOff(ctx) && await clearedAll(diary, new Set(seqs))
+    if (!cleared) reconciled.delete(path.resolve(ctx.dataDir))
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
   })
 }
@@ -636,8 +708,9 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
       // purged, so an empty forked replica is still reported 'fork'.
       const reason = skipReason(replica, entries, key, association, blocked, revokedIssuers)
       // Shown diaries with holes are reported so the app can keep syncing
-      // them; read while the core is open (a closed one reports 0).
-      if (reason === null && replica.length > replica.contiguousLength) incomplete.push(key)
+      // them. readAll ends at the first hole no tombstone covers, so a
+      // cleared deleted block is not one (contiguousLength would count it).
+      if (reason === null && replica.length > entries.length) incomplete.push(key)
       // An empty core must not linger in the main store.
       if (replica.contiguousLength === 0) await purgeReplica(store, key)
       if (reason === null) {

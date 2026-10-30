@@ -433,7 +433,9 @@ function createSession ({
     return withStore((c) => member.withIdentity(c, async ({ diary, ownHex, association: assoc }) => {
       ownKey = ownHex
       let ok = false
-      if (diary.contiguousLength > 0) {
+      // has(0), not contiguousLength: the own diary may hold cleared deleted
+      // blocks, and block 0 is never cleared.
+      if (diary.length > 0 && await diary.has(0)) {
         const block0 = decodeBlock(await diary.get(0, { wait: false, raw: true }))
         const cert = genesisCert([{ seq: 0, record: block0 }])
         ok = cert !== null && certForKey(cert, ownHex, assoc).ok

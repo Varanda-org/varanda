@@ -26,6 +26,7 @@ import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
 import { deletePostRows } from '../deletion'
+import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
@@ -417,6 +418,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         setData(dataRef.current)
       }
       if (typeof onDeletedPost === 'function') onDeletedPost()
+      // The row is gone. The tombstone's ranges leave the image cache too,
+      // so a photo still mounted (the header avatar, another tile) loses
+      // its blob URL. A range a surviving post or profile shows stays.
+      if (t !== null && typeof t === 'object' && Number.isSafeInteger(t.seq)) {
+        await revokeDeletedMedia(request, [t.seq], LOG_LIMIT_MAX)
+      }
     }
   })
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onDelete: del.offered ? del.ask : undefined }

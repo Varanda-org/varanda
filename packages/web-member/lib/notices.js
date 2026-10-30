@@ -395,8 +395,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       run.incomplete = true
       return DROPPED
     }
-    // -> raw block | PENDING | DROPPED (missing or oversized).
-    const get = async (seq) => {
+    // -> raw block | PENDING | DROPPED (missing or oversized) | ABSENT
+    // (missing, when the caller allows it: a head block).
+    const ABSENT = { state: 'absent' }
+    const get = async (seq, allowAbsent = false) => {
       if (ctx.cut()) return PENDING
       const t = timeout()
       let raw = null
@@ -407,6 +409,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         // Ended by the budget cut, a lost link, an abort or the read
         // deadline (a timeout shorter than the block timeout): no verdict.
         if (cutLink(run, link) || t < L.blockTimeoutMs) return PENDING
+        if (allowAbsent) return ABSENT
         return failed()
       }
       if (!charge(run, raw)) return failed()
@@ -448,12 +451,32 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       for (let s = length - 1; s >= Math.max(1, length - PEEK_TAIL_BLOCKS); s--) wanted.add(s)
       for (let s = 1; s <= 2 && s < length; s++) wanted.add(s)
       const rest = [...wanted].filter((s) => !seqs.has(s)).sort((a, b) => b - a).slice(0, Math.max(0, L.maxBlocksPerRow - seqs.size))
+      // Read highest first, so a tombstone comes before its target: a block
+      // it deleted is never asked for (seeders clear it) and counts as
+      // fetched, absent. A head block that did not arrive is not known to
+      // be deleted (it may be a live profile or the tombstone of the block
+      // below it): it is never counted as fetched, nothing below it is
+      // read, the row stands without it, the read is incomplete and the
+      // evidence is not cached, so a later read asks again.
+      const gone = new Set()
+      let partial = false
       for (const seq of rest) {
-        const raw = await get(seq)
+        if (gone.has(seq)) {
+          seqs.add(seq)
+          continue
+        }
+        const raw = await get(seq, seq <= 2)
+        if (raw === ABSENT) {
+          run.incomplete = true
+          partial = true
+          break
+        }
         if (!(raw instanceof Uint8Array)) return raw
         seqs.add(seq)
         const record = decodeBlock(raw)
         entries.push({ seq, record })
+        const del = validRecordCopy(record, seq)
+        if (del !== null && del.type === 'delete' && del.seq >= 1 && del.seq < length) gone.add(del.seq)
         if (facts.type === 'follow' && seq > item.seq) {
           const copy = validRecordCopy(record, seq)
           // A later signed unfollow of this node: the seeder's edge is stale.
@@ -464,6 +487,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (q.fork !== 0 || overQuota(q)) return DROPPED
       return {
         state: 'ok',
+        partial,
         evidence: { cachedAt: Date.now(), target: ctx.own, length, seqs, records: retainRecords(entries), at: signed.at, facts }
       }
     } catch {
@@ -500,7 +524,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       const r = await fetchEvidence(run, item, ctx)
       if (r.state !== 'ok') return r
       evidence = r.evidence
-      cacheSet(ck, evidence)
+      if (!r.partial) cacheSet(ck, evidence)
     }
     if (evidence.at !== item.at) return DROPPED
     let kind

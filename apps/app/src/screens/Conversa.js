@@ -28,6 +28,7 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { revokeDeletedMedia } from '../media/cache'
 import { colors, type } from '../ui/theme'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
@@ -605,6 +606,8 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       // Drops the result of a load started before the delete: it would bring the row back.
       genRef.current += 1
       if (typeof onDeletedPost === 'function') onDeletedPost()
+      // Cached photos of the deleted post go too, wherever they were shown.
+      revokeDeletedMedia(request, [t.seq])
       if (t.ref === focal) {
         onBack()
         return

@@ -166,7 +166,11 @@ test('a tombstone removes the post from counts, timeline, topic search, thread p
   t.is(seeder.indexPost(A.key, 1), null, 'no thread page')
   t.is(await seeder.postBlock(A.key, 1), null, 'postBlock refuses the deleted seq')
   t.ok(await seeder.postBlock(A.key, 2), 'the other post is still served')
-  t.is(seeder._served.get(A.key).core.contiguousLength, 4, 'raw replication keeps every block')
+  const entryA = seeder._served.get(A.key)
+  await until(async () => !(await entryA.core.has(1)), { name: 'bloco apagado' })
+  t.absent(await entryA.core.has(1), 'the deleted block is cleared')
+  t.ok(await entryA.core.has(3), 'the tombstone is kept')
+  t.is(entryA.present, 4, 'the present length skips the deleted hole')
 
   // An engagement arriving after the tombstone is not indexed either.
   await append(B, [likeRecord({ to: { author: A.key, seq: 1 }, on: false, at: at(4) }), likeRecord({ to: { author: A.key, seq: 1 }, on: true, at: at(5) })])
@@ -412,7 +416,11 @@ test('mediaRead refuses a range listed by a tombstone unless a surviving post sh
   t.ok(await seeder.mediaRead(A.key, K, 4, 1), 'a block a surviving post shows stays served')
   t.is(await seeder.mediaRead(A.key, K, 3, 1), null, 'a listed block no survivor shows is refused')
   t.is(await seeder.mediaRead(A.key, K, 3, 2), null)
-  t.is(seeder._mediaServed.get(K).core.contiguousLength, 5, 'the bytes are still replicated in PR1')
+  const mcore = seeder._mediaServed.get(K).core
+  await until(async () => !(await mcore.has(1)) && !(await mcore.has(2)) && !(await mcore.has(3)), { name: 'mídia apagada' })
+  t.ok(await mcore.has(4), 'a block a survivor shows keeps its bytes')
+  t.ok(await mcore.has(0), 'the header is never cleared')
+  t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'a cleared block is not served')
 })
 
 test('deleting the block the engagement cursor paused on resumes the cursor past it', async (t) => {
@@ -575,7 +583,9 @@ test('a tombstone deleted by a later tombstone no longer hides its target from p
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
   const { dataDir } = prepareSeederDir(t, assoc)
-  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  // Hide only (the kill switch): with byte deletion the revived post's bytes
+  // are already gone (the next test).
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
 
   const A = await member(t, bootstrap, assoc, {
     media: 1,
@@ -612,6 +622,104 @@ test('a tombstone deleted by a later tombstone no longer hides its target from p
   await settled(seeder, A)
   t.is(await seeder.postBlock(A.key, 2), null, 'hidden again, as readers fold it')
   t.ok(await seeder.postBlock(A.key, 3), 'the first tombstone is shown again')
+  const core = seeder._served.get(A.key).core
+  t.ok(await core.has(2), 'the kill switch keeps the bytes of the deleted post')
+  t.ok(await seeder._mediaServed.get(K).core.has(1), 'and of its media')
+})
+
+test('a post a later tombstone gives back stays absent once cleared and is never fetched again', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const A = await member(t, bootstrap, assoc, { records: () => [postRecord({ text: 'volta', at: at(0) })] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const core = seeder._served.get(A.key).core
+  await append(A, [deleteRecord({ seq: 1, at: at(1) })])
+  await settled(seeder, A)
+  await until(async () => !(await core.has(1)), { name: 'post apagado' })
+
+  // Self-only residual: the fold shows the post again, its bytes are gone.
+  await append(A, [deleteRecord({ seq: 2, at: at(2) }), postRecord({ text: 'depois', at: at(3) })])
+  await settled(seeder, A)
+  await until(() => core.has(4), { name: 'bloco seguinte' })
+  t.ok(await core.has(2), 'the deleted tombstone is kept')
+  t.absent(await core.has(1), 'the revived post is not downloaded again')
+  t.is(await seeder.postBlock(A.key, 1), null, 'nothing to serve for it')
+  t.ok(await seeder.postBlock(A.key, 4), 'later blocks are served')
+})
+
+test('the clear does not wait for an index pass paused at the cap', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, indexPerAuthorMax: 1 })
+
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [postRecord({ text: 'um', at: at(0) }), postRecord({ text: 'dois', at: at(1) }), postRecord({ text: 'tres', at: at(2) })]
+  })
+  await admit(A, assoc)
+  await settled(seeder, A, { paused: true })
+  const entry = seeder._served.get(A.key)
+  // Hold the index paused even after the tombstone frees room.
+  entry.indexPaused = true
+  const indexDiary = seeder._indexDiary.bind(seeder)
+  seeder._indexDiary = () => {}
+  await append(A, [deleteRecord({ seq: 3, at: at(3) })])
+  await until(() => entry.scanned >= A.diary.length, { name: 'varredura' })
+  await until(async () => !(await entry.core.has(3)), { name: 'bloco apagado' })
+  t.ok(entry.indexed <= 2, 'the index cursor is still behind (' + entry.indexed + ')')
+  t.absent(await entry.core.has(3), 'the deleted block is cleared anyway')
+  seeder._indexDiary = indexDiary
+})
+
+test('a restart clears what the stored tombstones delete before anything is fetched and keeps the holes', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  // First run with the kill switch: the bytes stay stored.
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+  const A = await member(t, bootstrap, assoc, {
+    media: 2,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }),
+      postRecord({ text: 'foto', media: [descriptor(K, 1, 1)], at: at(1) }),
+      postRecord({ text: 'fica', media: [descriptor(K, 2, 1)], at: at(2) }),
+      deleteRecord({ seq: 2, at: at(3), media: [{ core: K, start: 1, blocks: 1 }] })
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await until(() => first.events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => first.seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await settled(first.seeder, A)
+  t.ok(await first.seeder._served.get(A.key).core.has(2), 'kept under the kill switch')
+  await first.seeder.close()
+
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const entry = second.seeder._served.get(A.key)
+  const media = second.seeder._mediaServed.get(K)
+  t.absent(await entry.core.has(2), 'the deleted post is cleared when start() resolves')
+  t.absent(await media.core.has(1), 'and its media range')
+  t.ok(await media.core.has(2), 'a live range keeps its bytes')
+  t.is(entry.present, 5, 'the present length skips the hole')
+
+  // The member (a stale peer still holding block 2 and media block 1) keeps
+  // writing: later blocks flow, the holes are never fetched back.
+  await append(A, [postRecord({ text: 'nova', at: at(4) })])
+  await settled(second.seeder, A)
+  await until(() => entry.core.has(5), { name: 'bloco novo' })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.absent(await entry.core.has(2), 'the deleted post is not fetched again')
+  t.absent(await media.core.has(1), 'nor its media')
+  t.is(await second.seeder.mediaRead(A.key, K, 1, 1), null)
+  t.ok(await second.seeder.mediaRead(A.key, K, 2, 1), 'the live photo is served')
+  t.ok(await second.seeder.postBlock(A.key, 5))
 })
 
 test('mediaRead of one block stays fast with thousands of tombstones and media posts', async (t) => {
@@ -694,7 +802,7 @@ test('media deletion state is kept for a bounded number of cores per diary, and 
   const K = A.mediaKey
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
-  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
   await settled(seeder, A)
   const entry = seeder._served.get(A.key)
   await until(() => !entry.mediaRecounting, { name: 'recontagem' })
@@ -736,7 +844,7 @@ test('a media core used before its declaration closes the media of the diary', a
   const K = A.mediaKey
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
-  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
   await settled(seeder, A)
   t.ok(seeder._served.get(A.key).mediaIrregular, 'the diary is irregular for media')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'the range readers treat as deleted is refused')
@@ -766,11 +874,69 @@ test('nested tombstones close the media of the diary', async (t) => {
   const K = A.mediaKey
   await admit(A, assoc)
   await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
-  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+  await until(async () => (await seeder._mediaServed.get(K)?.core.has(2)) === true, { name: 'mídia baixada' })
   await settled(seeder, A)
   t.is(await seeder.postBlock(A.key, 2), null, 'postBlock follows the readers fold')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'the media of the deleted post is refused')
   t.is(await seeder.mediaRead(A.key, K, 2, 1), null, 'every range of the irregular diary is refused')
+  const mcore = seeder._mediaServed.get(K).core
+  await until(async () => !(await mcore.has(1)), { name: 'mídia do tombstone efetivo apagada' })
+  t.absent(await mcore.has(1), 'the range of the effective tombstone is cleared')
+  t.ok(await mcore.has(2), 'a range no effective tombstone lists keeps its bytes')
+  t.absent(await seeder._served.get(A.key).core.has(2), 'the post the fold deletes is cleared')
+  t.ok(await seeder._served.get(A.key).core.has(4), 'a deleted tombstone is never cleared')
+})
+
+test('an irregular diary does not read its tombstones back on a pass that changes nothing', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const A = await member(t, bootstrap, assoc, {
+    media: 3,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }),
+      postRecord({ text: 'foto', media: [descriptor(K, 1, 1)], at: at(1) }),
+      deleteRecord({ seq: 2, at: at(2), media: [{ core: K, start: 1, blocks: 1 }] }),
+      deleteRecord({ seq: 3, at: at(3) }),
+      deleteRecord({ seq: 4, at: at(4) }),
+      postRecord({ text: 'viva', media: [descriptor(K, 2, 1)], at: at(5) })
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(async () => (await seeder._mediaServed.get(K)?.core.has(3)) === true, { name: 'mídia baixada' })
+  await settled(seeder, A)
+  const entry = seeder._served.get(A.key)
+  t.ok(entry.mediaIrregular, 'the diary is irregular for media')
+  const mcore = seeder._mediaServed.get(K).core
+  await until(async () => !(await mcore.has(1)), { name: 'mídia do tombstone efetivo apagada' })
+  await until(() => entry.clearing === null, { name: 'limpeza parada' })
+
+  const tombs = new Set([3, 4, 5])
+  let tombReads = 0
+  const get = entry.core.get.bind(entry.core)
+  entry.core.get = (i, opts) => {
+    if (tombs.has(i)) tombReads++
+    return get(i, opts)
+  }
+  t.teardown(() => { delete entry.core.get })
+  await append(A, [postRecord({ text: 'mais uma', at: at(6) })])
+  await settled(seeder, A)
+  await until(() => entry.clearing === null, { name: 'limpeza parada' })
+  t.is(tombReads, 0, 'no tombstone is read again')
+  t.is(await seeder.mediaRead(A.key, K, 2, 1), null, 'the irregular media is still refused')
+  t.ok(await mcore.has(2), 'a range no effective tombstone lists keeps its bytes')
+
+  await append(A, [deleteRecord({ seq: 6, at: at(7), media: [{ core: K, start: 2, blocks: 1 }] })])
+  await settled(seeder, A)
+  await until(async () => !(await mcore.has(2)), { name: 'mídia do novo tombstone apagada' })
+  t.absent(await mcore.has(2), 'a new tombstone still clears its range')
+  t.ok(await mcore.has(3), 'an unlisted range keeps its bytes')
+  t.is(tombReads, 0, 'still without reading the tombstones back')
 })
 
 test('an honest diary with two media cores serves live ranges and refuses deleted ones', async (t) => {
@@ -796,7 +962,7 @@ test('an honest diary with two media cores serves live ranges and refuses delete
   await admit(A, assoc)
   for (const k of [K, L]) {
     await until(() => events.find((e) => e.event === 'media-admitted' && e.key === k), { name: 'mídia admitida', timeoutMs: 30000 })
-    await until(() => seeder._mediaServed.get(k)?.core.contiguousLength === 3, { name: 'mídia baixada' })
+    await until(async () => { const c = seeder._mediaServed.get(k)?.core; return !!c && await c.has(2) && (k !== K || await c.has(1)) }, { name: 'mídia baixada' })
   }
   await settled(seeder, A)
   t.is(seeder._served.get(A.key).media.size, 2)
@@ -882,12 +1048,16 @@ test('mediaRead and postBlock answer nothing while a block below the signed leng
   t.ok(await seeder.postBlock(A.key, 2))
   t.ok(await seeder.mediaRead(A.key, K, 1, 1))
 
-  // Block 3 stays "missing" for the scan (it stops at contiguousLength),
+  // Block 3 stays "missing" (an unknown hole: no tombstone names it),
   // while the tombstone above it at 4 is stored.
   const entry = seeder._served.get(A.key)
   const core = entry.core
   const gap = core.length
-  Object.defineProperty(core, 'contiguousLength', { configurable: true, get: () => gap })
+  const has = core.has.bind(core)
+  const get = core.get.bind(core)
+  let hidden = true
+  core.has = async (i) => (hidden && i === gap) ? false : has(i)
+  core.get = async (i, opts) => (hidden && i === gap) ? null : get(i, opts)
   await A.diary.append([
     postRecord({ text: 'lacuna', at: at(2) }),
     deleteRecord({ seq: 2, at: at(3), media: [{ core: K, start: 1, blocks: 1 }] })
@@ -902,11 +1072,96 @@ test('mediaRead and postBlock answer nothing while a block below the signed leng
   t.is(await seeder.postBlock(A.key, 2), null, 'a post deleted above the gap is not served')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'nor its media')
   t.is(await seeder.postBlock(A.key, gap + 1), null, 'a block above the scan cursor is not served')
+  await until(async () => !(await core.has(2)), { name: 'post apagado acima da lacuna' })
+  t.absent(await core.has(2), 'the tombstone above the unknown hole is applied: its target is cleared')
+  t.ok(entry.deleted.has(2), 'and it left the indexes')
 
-  delete core.contiguousLength
+  hidden = false
   seeder._onGrow(A.key, entry, core.length)
   await settled(seeder, A)
   t.is(await seeder.postBlock(A.key, 2), null, 'still refused once the tombstone is scanned')
   t.is(await seeder.mediaRead(A.key, K, 1, 1), null)
   t.ok(await seeder.postBlock(A.key, gap), 'the block of the filled gap is served')
+  await until(async () => !(await seeder._mediaServed.get(K).core.has(1)), { name: 'mídia apagada' })
+  t.pass('the media range is cleared once the scan caught up')
+})
+
+test('a fresh seeder gets past a deleted block every peer already cleared', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, onPush: () => {} })
+
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [
+      postRecord({ text: 'um', at: at(1) }),
+      postRecord({ text: 'dois', at: at(2) }),
+      postRecord({ text: 'tres', at: at(3) }),
+      deleteRecord({ seq: 2, at: at(4) }),
+      postRecord({ text: 'cinco', at: at(5) })
+    ]
+  })
+  // Cleared before the seeder ever sees the diary: no peer serves block 2.
+  await A.diary.clear(2, 3)
+  t.absent(await A.diary.has(2))
+  await admit(A, assoc)
+  const entry = seeder._served.get(A.key)
+  t.is(entry.present, 6, 'the present length passes the targeted hole')
+  await settled(seeder, A)
+  await until(() => entry.pushNext >= 6, { name: 'cursor de push' })
+  t.ok(entry.gone.has(2), 'the tombstone above the hole was learned')
+  t.ok(entry.deleted.has(2), 'and its target left the indexes')
+  t.ok(await seeder.postBlock(A.key, 5), 'the post after the hole is served')
+  t.is(await seeder.postBlock(A.key, 2), null, 'the deleted post is not')
+})
+
+test('a restart prepares a bounded number of diaries at once, each cleared before its download', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  // First run with the kill switch: every deleted block stays stored.
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+  const members = []
+  for (let n = 0; n < 5; n++) {
+    const m = await member(t, bootstrap, assoc, {
+      records: () => [
+        postRecord({ text: 'apaga', at: at(1) }),
+        postRecord({ text: 'fica', at: at(2) }),
+        deleteRecord({ seq: 2, at: at(3) })
+      ]
+    })
+    await admit(m, assoc)
+    await settled(first.seeder, m)
+    t.ok(await first.seeder._served.get(m.key).core.has(2))
+    members.push(m)
+  }
+  await first.seeder.close()
+
+  const second = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const s = second.seeder
+  let active = 0
+  let peak = 0
+  const prepare = s._prepareDiary.bind(s)
+  s._prepareDiary = async (...args) => {
+    active++
+    peak = Math.max(peak, active)
+    try {
+      return await prepare(...args)
+    } finally {
+      active--
+    }
+  }
+  const atDownload = []
+  const downloader = s._downloader.bind(s)
+  s._downloader = (core, deleted) => {
+    atDownload.push(core.has(2))
+    return downloader(core, deleted)
+  }
+  await s.start()
+  t.ok(peak >= 1 && peak <= 2, 'at most 2 diaries prepared at once (peak ' + peak + ')')
+  t.is(atDownload.length, members.length, 'every stored diary was prepared')
+  t.alike(await Promise.all(atDownload), members.map(() => false), 'each deleted block was cleared before its download began')
+  for (const m of members) t.is(s._served.get(m.key).present, 4, 'the present length skips the hole')
 })

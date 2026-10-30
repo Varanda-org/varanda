@@ -28,6 +28,7 @@ import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { pickImage } from '../media/attach'
 import { openImage } from '../media/avatarEncode'
 import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
+import { revokeDeletedMedia } from '../media/cache'
 import { confirmSaved, planSave } from '../profileSave'
 import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Avatar, primeAvatar } from '../ui/Avatar'
@@ -125,6 +126,15 @@ function ProfileVersions ({ node, ownKey, shown }) {
     const key = await keyOf()
     if (typeof key !== 'string') return
     const r = await action.run(() => node.request('profile.delete', { to: key + ':' + version.seq }))
+    if (r.ok) {
+      const seqs = r.value && Array.isArray(r.value.deleted) && r.value.deleted.length > 0
+        ? r.value.deleted
+        : version.seqs
+      // Confirmed: drop cached blobs for the tombstone's effective ranges
+      // only. A range the current profile or a post still shows stays, so
+      // that photo does not disappear.
+      await revokeDeletedMedia((method, params) => node.request(method, params), seqs, LOG_LIMIT_MAX)
+    }
     if (!aliveRef.current) return
     if (r.ok) {
       setConfirm(null)

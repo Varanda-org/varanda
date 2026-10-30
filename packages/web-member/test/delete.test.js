@@ -148,6 +148,7 @@ test('post.delete and profile.delete refusals: nothing is written', async (t) =>
   const key = p.key
   await web.request('post.create', { text: 'oi' })
   t.alike((await web.request('post.delete', { to: key + ':4' })).deleted, [4])
+  t.is((await web.request('post.create', { text: 'fica' })).seq, 6)
   const length = (await web.request('log.read', {})).entries.length + (await web.request('log.read', {})).invalid.length
 
   for (const method of ['post.delete', 'profile.delete']) {
@@ -161,7 +162,10 @@ test('post.delete and profile.delete refusals: nothing is written', async (t) =>
     t.is(zero && zero.code, 'USAGE', method + ': block 0')
   }
   t.alike(await errorPair(web.request('post.delete', { to: key + ':1' })), ['USAGE', NOT_POST], 'a profile to post.delete')
-  t.alike(await errorPair(web.request('profile.delete', { to: key + ':4' })), ['USAGE', NOT_PROFILE], 'a post to profile.delete')
+  t.alike(await errorPair(web.request('profile.delete', { to: key + ':6' })), ['USAGE', NOT_PROFILE], 'a post to profile.delete')
+  // Block 4's bytes are cleared, so its type is unknown: the existing
+  // tombstone answers, as for any already-deleted target, and writes nothing.
+  t.alike(await web.request('profile.delete', { to: key + ':4' }), { seq: 5, ref: key + ':5', changed: false, deleted: [4] }, 'a deleted and cleared post to profile.delete')
   const log = await web.request('log.read', {})
   t.is(log.entries.length + log.invalid.length, length, 'nothing appended')
 })
@@ -261,12 +265,16 @@ test('post.delete and profile.delete: locked refused, a failed catch-up appends 
 
 test('readAll folds tombstones and keeps every index', async (t) => {
   await testnet(t)
-  const p = await prepared(() => [profileRecord({ name: 'Bia', bio: '' })])
-  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
-  await member.postCreate(ctx, { text: 'um' })
-  await member.postDelete(ctx, { to: { author: p.key, seq: 2 } })
-  const folded = await member.withIdentity(ctx, async ({ diary }) => ({ all: await store.readAll(diary), raw: await store.readRaw(diary) }))
-  t.alike(folded.all.map((e) => e.seq), [0, 1, 2, 3])
-  t.alike(folded.all[2], { seq: 2, record: null, deleted: true })
-  t.is(folded.raw[2].record.text, 'um', 'readRaw leaves the block as written')
+  for (const noClear of [false, true]) {
+    const p = await prepared(() => [profileRecord({ name: 'Bia', bio: '' })])
+    const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair, noClear }
+    await member.postCreate(ctx, { text: 'um' })
+    await member.postDelete(ctx, { to: { author: p.key, seq: 2 } })
+    const folded = await member.withIdentity(ctx, async ({ diary }) => ({ all: await store.readAll(diary), raw: await store.readRaw(diary) }))
+    t.alike(folded.all.map((e) => e.seq), [0, 1, 2, 3])
+    t.alike(folded.all[2], { seq: 2, record: null, deleted: true })
+    if (noClear) t.is(folded.raw[2].record.text, 'um', 'with noClear readRaw leaves the block as written')
+    else t.alike(folded.raw[2], { seq: 2, record: null }, 'by default the deleted bytes are cleared, so readRaw has no record')
+    t.is(folded.raw[3].record.type, 'delete', 'the tombstone is kept')
+  }
 })

@@ -95,7 +95,8 @@ async function admit (seeder, m, assoc) {
   await m.message((x) => x.type === 'have' && x.key === m.key && x.length === m.diary.length, 'have ' + m.diary.length)
   await until(() => {
     const entry = seeder._served.get(m.key)
-    return entry && entry.gated && entry.core.contiguousLength === m.diary.length
+    // The present length: a cleared deleted block keeps contiguousLength at the hole.
+    return entry && entry.gated && entry.present === m.diary.length
   }, { name: 'diário local e aprovado' })
 }
 

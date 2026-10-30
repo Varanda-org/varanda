@@ -41,6 +41,7 @@ import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
 import { DeletePrompt, isBusy, isDiaryGone, isSeederDown, useDelete } from './Conversa'
 import { canDelete } from '../deletion'
+import { revokeDeletedMedia } from '../media/cache'
 import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { HelpLink } from '../ui/Help'
@@ -1052,6 +1053,8 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       const cur = feedRef.current
       commit({ items: cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
       if (typeof onDeletedPost === 'function') onDeletedPost()
+      // Cached photos of the deleted post go too, wherever they were shown.
+      await revokeDeletedMedia(request, [t.seq])
     }
   })
   // Reply names re-render when the cache changes; relative dates on each tick.

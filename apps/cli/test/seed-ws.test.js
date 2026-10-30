@@ -13,8 +13,9 @@ const { WebSocket, createWebSocketStream } = require('ws')
 const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('./helpers/net')
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
-const { attachAdmission, generateNoiseKeyPair } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
+const { attachAdmission, generateNoiseKeyPair, createSwarm, joinAndFlush, topicFor } = require('@varanda/core/lib/net')
+const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { mediaHeader } = require('@varanda/core/lib/media')
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
   INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY
@@ -1907,4 +1908,64 @@ test('startSeedWs /index/likes|reposts: shares the /index token bucket and in-fl
   t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
   release()
   t.alike((await Promise.all(held)).map((r) => r.status), [200, 200])
+})
+
+test('startSeedWs /media with the real Seeder: a deleted range and every overlapping subrange are 404, an adjacent live photo 200', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), associationKey: assoc.hex, log: (e) => events.push(e) })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  // A member whose diary declares media core M: a photo at M[1,2] and an
+  // adjacent one at M[3,1].
+  const store = new Corestore(tmpDir(t, 'varanda-client-'))
+  await store.ready()
+  t.teardown(() => store.close(), { force: true })
+  const diary = store.get({ name: 'diary', valueEncoding: 'json' })
+  await diary.ready()
+  const DK = hex(diary.key)
+  const media = store.get({ name: 'media' })
+  await media.ready()
+  await media.append(b4a.from(JSON.stringify(mediaHeader({ diary: DK }))))
+  for (let i = 0; i < 3; i++) await media.append(b4a.alloc(MEDIA_BLOCK_BYTES, i + 1))
+  const MK = hex(media.key)
+  const photo = (start, blocks) => ({ core: MK, mime: 'image/jpeg', start, blocks, bytes: blocks * MEDIA_BLOCK_BYTES, sha256: 'ab'.repeat(32), width: 100, height: 100 })
+  const at = (i) => new Date(Date.parse('2026-03-01T12:00:00.000Z') + i * 1000).toISOString()
+  await diary.append(memberCertRecord(createCert({ member: DK }, assoc.kp)))
+  await diary.append(mediaCoreRecord({ key: MK, at: at(0) }))
+  await diary.append(postRecord({ text: 'apagada', media: [photo(1, 2)], at: at(1) }))
+  await diary.append(postRecord({ text: 'vizinha', media: [photo(3, 1)], at: at(2) }))
+
+  const swarm = createSwarm(localSwarmOptions(bootstrap))
+  t.teardown(() => swarm.destroy(), { force: true })
+  const peers = []
+  swarm.on('connection', (socket) => {
+    socket.on('error', () => {})
+    store.replicate(socket)
+    peers.push(attachAdmission(socket, { role: 'member', have: [{ key: DK, length: diary.length }], onmessage: () => {} }))
+  })
+  await joinAndFlush(swarm, [topicFor(assoc.hex)])
+  const peer = await until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador' })
+  peer.send({ type: 'announce', key: DK, cert: createCert({ member: DK }, assoc.kp) })
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === MK), { name: 'mídia admitida', timeoutMs: 30000 })
+  const url = (start, blocks) => '/media/' + DK + '/' + MK + '/' + start + '/' + blocks
+  await until(async () => (await mediaRequest(server.port, url(1, 3))).status === 200, { name: 'mídia servida', timeoutMs: 30000 })
+
+  await diary.append(deleteRecord({ seq: 2, at: at(3), media: [{ core: MK, start: 1, blocks: 2 }] }))
+  const core = await until(() => seeder._mediaServed.get(MK)?.core, { name: 'núcleo de mídia' })
+  await until(async () => !(await core.has(1)) && !(await core.has(2)), { name: 'mídia apagada', timeoutMs: 30000 })
+  for (const [start, blocks] of [[1, 2], [1, 1], [2, 1], [2, 2], [1, 3]]) {
+    t.is((await mediaRequest(server.port, url(start, blocks))).status, 404, 'GET ' + start + '/' + blocks + ' is 404')
+    t.is((await mediaRequest(server.port, url(start, blocks), { method: 'HEAD' })).status, 404, 'HEAD ' + start + '/' + blocks + ' is 404')
+  }
+  const live = await mediaRequest(server.port, url(3, 1))
+  t.is(live.status, 200, 'the adjacent live photo is served')
+  t.alike(live.body, b4a.alloc(MEDIA_BLOCK_BYTES, 3))
+  t.is((await mediaRequest(server.port, url(3, 1), { method: 'HEAD' })).status, 200)
 })

@@ -183,10 +183,11 @@ test('the deadline and an abort interrupt a stalled network startup', async (t) 
   const stalled = () => new Promise(() => {}) // a join that never settles
   let swarmSeen = null
 
-  // --once: the deadline resolves the run with the timeout result.
+  // --once: the deadline resolves the run with the timeout result. The
+  // deadline leaves room for the startup sweeps, so it hits during the join.
   const a = await makeMember(t, kp, { posts: 0 })
   const started = Date.now()
-  const r = await runSync({ ...localSwarmOptions(bootstrap), dataDir: a.dir, once: true, timeoutMs: 20, joinHook: (swarm) => { swarmSeen = swarm; return stalled() } })
+  const r = await runSync({ ...localSwarmOptions(bootstrap), dataDir: a.dir, once: true, timeoutMs: 500, joinHook: (swarm) => { swarmSeen = swarm; return stalled() } })
   const ms = Date.now() - started
   t.ok(ms < 5000, 'resolved while the join was still stalled (' + ms + ' ms)')
   t.is(r.ok, false)
