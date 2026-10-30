@@ -109,6 +109,65 @@ export function replacesQuietly (page, limit, shown = []) {
   return shown.every((item) => keys.has(feedKey(item)))
 }
 
+// Infinite scroll in RefreshableList. A page the list asked for that shows
+// nothing new (a diary page of likes, a feed read that only met known rows)
+// counts as dry; after AUTO_DRY_MAX dry pages in a row the list stops
+// loading by itself and offers a 'carregar mais' button, so a long run of
+// hidden records never turns into a request loop.
+export const AUTO_DRY_MAX = 3
+
+// A list shorter than its viewport is always near its end: it cannot scroll,
+// so no end reach would ever come from scrolling.
+export function nearListEnd ({ offset, content, layout }, threshold) {
+  return layout > 0 && content - (offset + layout) <= threshold * layout
+}
+
+// A failed page waits for the person (the footer's 'tentar de novo'), so a
+// failing node is never hammered.
+export function endStep ({ canLoad, atEnd, failed, busy, near, fired, dry, max = AUTO_DRY_MAX }) {
+  if (!canLoad || atEnd || failed) return 'idle'
+  if (busy) return 'wait'
+  if (!near || fired) return 'idle'
+  if (dry >= max) return 'paused'
+  return 'load'
+}
+
+// The end of a busy span (a page, a refresh or a caller's own reload). An end
+// reach that came while it ran is never dropped: the list checks again, right
+// away when nothing new was laid out, else after the new content size.
+export function spanEnd ({ dry, startLen, len, failed, refreshed, own }) {
+  if (failed) return { dry, check: 'none' }
+  if (refreshed || len > startLen) return { dry: 0, check: len !== startLen ? 'layout' : 'now' }
+  if (own) return { dry: dry + 1, check: 'now' }
+  return { dry, check: 'now' }
+}
+
+// A quiet newest read of A Rua. A full page says nothing about rows older
+// than the oldest one it holds, so the list stays at its end (a full page that
+// would cut shown rows keeps them) and the next automatic read probes below
+// the list instead of the person paging into a before read that keeps coming
+// back empty.
+export function quietNewestPlan (page, limit, shown) {
+  const replace = replacesQuietly(page, limit, shown)
+  const full = Array.isArray(page.items) && page.items.length >= limit
+  return { replace, atEnd: true, probeOlder: full, deep: !replace }
+}
+
+// Below a full list only a before read can find rows; re-reading the newest
+// page would just meet the shown ones again (newer rows reach a full list
+// through the 'ver novidades' pill).
+export function syncReadKind ({ deep, probeOlder, shown, limit }) {
+  return deep || probeOlder || shown >= limit ? 'older' : 'newest'
+}
+
+// Never after a failed read: only a manual action clears the error.
+export function canSyncRead (feed, lengths, active) {
+  return !!active && feed.loadedAt !== null && feed.atEnd && !feed.loading && !feed.loadingMore && !feed.refreshing &&
+    !feed.loadError && !feed.moreError &&
+    (feed.probeOlder === true || ((Object.keys(feed.syncBase).length > 0 || feed.syncTruncated > 0) &&
+      syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)))
+}
+
 // The baseline is the lengths map taken before the request, so growth that
 // lands while the read runs still triggers the next pass. A key with no local
 // length yet starts at -1 so its first downloaded block counts. A follow with
