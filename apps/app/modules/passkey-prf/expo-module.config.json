@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["PasskeyPrfModule"]
+  },
+  "android": {
+    "modules": ["app.varanda.passkeyprf.PasskeyPrfModule"]
+  }
+}

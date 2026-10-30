@@ -254,7 +254,9 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
   const pathname = url.pathname
-  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith(ACCOUNT_PREFIX) ||
+  // /.well-known/ holds the native app association files: a missing one must
+  // stay a real 404, never the cached shell.
+  if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith('/.well-known/') || pathname.startsWith(ACCOUNT_PREFIX) ||
     pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(INDEX_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))

@@ -73,6 +73,16 @@ test('unusableSteps for a passkey chosen at Entrar: no create step, only passkey
   t.alike(unusableSteps(), unusableSteps({ userIds: [] }))
 })
 
+test('unusableSteps on the installed app names no browser and only the Google manager', async (t) => {
+  const { unusableSteps, RETRY_LABEL } = await load()
+  const steps = unusableSteps({ userIds: [ID], created: true, native: true })
+  t.is(steps.length, 3)
+  t.ok(steps[1].startsWith('2. Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez.'))
+  t.ok(steps[1].includes('Gerenciador de Senhas do Google') && !steps[1].includes('Apple'))
+  t.is(steps[2], '3. Se não der certo, entre pelo site da associação no Chrome.')
+  t.alike(unusableSteps({ native: true, withLink: true }), ['1. Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'])
+})
+
 test('texts carry no em dash and never the full user id', async (t) => {
   const m = await load()
   const texts = [m.BROWSER_TEXT, m.UNUSABLE_TITLE, m.RETRY_LABEL, ...m.unusableSteps({ userIds: [ID, ID2], created: true }), ...m.unusableSteps({ userIds: [ID] })]

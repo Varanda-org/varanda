@@ -78,8 +78,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /seeder, /account/*, /media/* and /index/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/* and /index/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -96,8 +96,8 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/account/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /seeder, /account/*, /media/* and /index/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/index/*', '/media/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/* and /index/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -201,7 +201,32 @@ test('Caddyfile: no access log, and the rate_limit logger (client IP) is exclude
 test('Caddyfile: SPA only for paths without an extension, real 404s otherwise', (t) => {
   t.ok(block('@semExtensao {').some((l) => l.trim() === 'not path *.*'), '@semExtensao is not path *.*')
   t.ok(lines.some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'rewrite @semExtensao /index.html')
-  t.is(count('file_server'), 1, 'exactly one file_server')
-  t.ok(lines.some((l) => l.trim() === 'root * /srv/web'), 'root * /srv/web')
+  t.is(count('file_server'), 2, 'two file_server: the SPA and /.well-known/*')
+  const spa = block('handle {')
+  t.ok(spa.some((l) => l.trim() === 'root * /srv/web'), 'SPA root * /srv/web')
+  t.ok(spa.some((l) => l.trim() === 'file_server'), 'SPA file_server')
   t.absent(fs.readFileSync(CADDYFILE, 'utf8').includes('try_files'), 'no try_files anywhere')
+})
+
+// Native passkeys (rpId = this host): Android reads assetlinks.json and iOS
+// the extensionless apple-app-site-association. Both come from the same web
+// root through their own file_server, before the SPA catch-all, so a missing
+// file is a real 404 and never index.html.
+test('Caddyfile: /.well-known/* is served as JSON, no-store, before the SPA handle', (t) => {
+  const wk = block('handle /.well-known/* {')
+  t.ok(wk.length > 0, 'handle /.well-known/*')
+  t.is(count('handle /.well-known/* {'), 1, 'exactly one /.well-known/* handle')
+  const text = wk.map((l) => l.trim())
+  t.ok(text.includes('root * /srv/web'), 'same web root as the SPA')
+  t.ok(text.includes('header Cache-Control "no-store"'), 'no-store')
+  t.ok(text.includes('header >Content-Type "application/json"'), 'JSON type, applied after file_server')
+  t.ok(text.includes('file_server'), 'own file_server')
+  t.absent(text.some((l) => l.startsWith('rewrite') || l.startsWith('try_files')), 'no SPA fallback inside')
+  const start = lines.findIndex((l) => l.trim() === 'handle /.well-known/* {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(start !== -1 && spa > start, 'handle /.well-known/* comes before the catch-all handle')
+  const json = lines.findIndex((l) => l.trim() === 'handle /varanda.json {')
+  t.ok(json !== -1 && start > json, 'next to the /varanda.json handle')
+  t.ok(lines.filter((l) => /^\s*Strict-Transport-Security\s/.test(l)).length === 1, 'security headers kept')
+  t.ok(lines.some((l) => l.trim() === 'X-Content-Type-Options "nosniff"'), 'nosniff kept')
 })
