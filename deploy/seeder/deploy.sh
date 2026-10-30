@@ -62,6 +62,10 @@ root=''
 www=''
 domain=''
 assoc=''
+# As associações do app nativo (passkeys com rpId = o domínio), conferidas em
+# conferir_antes e gravadas em www por publicar_web. Vazio: arquivo ausente.
+android_cert=''
+ios_app_id=''
 expected=''
 target=''
 previous=''
@@ -371,6 +375,11 @@ conferir_antes() {
       exit 1
     fi
   done
+  # Associações do app nativo: opcionais, com as regras de well-known.sh
+  # (as mesmas do build-web.sh). Conferidas aqui, antes de qualquer mudança.
+  if ! ler_associacoes "$env_file"; then
+    exit 1
+  fi
 }
 
 # A versão no ar é a última implantada por este script. Um git pull manual
@@ -678,7 +687,14 @@ publicar_web() {
   www_trocado=1
   find "$www" -mindepth 1 -delete
   cp -R "$base/src/apps/app/dist/." "$www/"
+  publicar_associacoes
   rm -rf "$base"
+}
+
+# Os arquivos de associação do app nativo, em www/.well-known, com os valores
+# que conferir_antes já validou (well-known.sh).
+publicar_associacoes() {
+  gravar_associacoes "$www"
 }
 
 # O sudoers dá root a este arquivo, que fica dentro do checkout: se alguém
@@ -689,7 +705,7 @@ conferir_dono() {
   # O .git também: root roda git aqui, e quem escreve .git/config (um
   # core.fsmonitor, por exemplo) roda código como root.
   for p in "$root" "$root/deploy" "$root/deploy/seeder" "$root/deploy/seeder/deploy.sh" \
-    "$root/.git" "$root/.git/config"; do
+    "$root/deploy/seeder/well-known.sh" "$root/.git" "$root/.git/config"; do
     if [ "$(stat -c '%u' "$p")" != 0 ] || [ -n "$(find "$p" -maxdepth 0 -perm /022)" ]; then
       morrer_cedo 1 "$p precisa ser de root e sem escrita para grupo ou outros"
     fi
@@ -813,6 +829,11 @@ main() {
   cd "$root"
   www="$root/deploy/seeder/www"
   conferir_dono
+  # Carregado só depois de conferir o dono: root roda o que estiver nele. E
+  # antes da troca de commit: a implantação usa as regras já conferidas, como
+  # faz com o resto deste script.
+  # shellcheck source=deploy/seeder/well-known.sh
+  . "$root/deploy/seeder/well-known.sh"
 
   preparar_estado
   pegar_lock
@@ -831,7 +852,15 @@ main() {
   if [ "$sem_registro" = 0 ] && [ "$previous" = "$target" ] \
     && [ "$(git rev-parse HEAD)" = "$target" ]; then
     if verificar_saude; then
-      log "já implantado $target e saudável; nada a fazer"
+      # Uma troca de certificado ou de equipe (ou o desligamento) em .env vale
+      # sem um commit novo: só os arquivos de associação mudam, nada é
+      # reconstruído nem reiniciado. Uma falha não troca nada (gravar_associacoes
+      # é tudo ou nada) e não passa pelo erro_antes, que diria outra coisa.
+      if ! publicar_associacoes; then
+        log "já implantado $target e saudável, mas as associações do app nativo não foram atualizadas"
+        exit 1
+      fi
+      log "já implantado $target e saudável; associações do app nativo atualizadas"
       exit 0
     fi
     log "já implantado $target, mas sem saúde: implantando de novo"
