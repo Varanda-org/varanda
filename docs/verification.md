@@ -2647,3 +2647,46 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
 - No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
+
+## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
+
+### O que mudou
+
+- Veio de um relato com print: num iPhone, depois de criar a passkey, o cartão mostrava três avisos seguidos, culpava só o navegador ("Use o Chrome ou o Edge, ou o Safari 18") e não tinha botão; só recarregar a página saía dele.
+- O cartão separa dois casos (`apps/app/src/screens/Identidade.js`, textos em `apps/app/src/passkeyTrouble.js`):
+  - o navegador diz antes de qualquer cerimônia que não consegue (sem WebAuthn, ou `getClientCapabilities` com `extension:prf` falso): "Este navegador não funciona com o Varanda. Use o Chrome, o Edge ou o Safari 18 ou mais novo.", sem botão, como antes;
+  - uma cerimônia devolveu NO_PRF (a passkey foi criada ou escolhida, mas o gerenciador de senhas não entrega o PRF): "Não deu para entrar com essa passkey.", passos numerados e o botão "tentar de novo", que volta ao cartão Entrar.
+- Passkey criada nesta página (Criar ou concluir): apagar a passkey "Varanda xxxxxx", tentar de novo e criar outra salvando nas Senhas da Apple ou no Gerenciador de Senhas do Google, ou abrir no Safari ou no Chrome.
+- O passo de apagar nomeia só passkeys criadas nesta página que falharam, todas, uma vez cada. Ele sobrevive ao "tentar de novo" e a uma falha seguinte em Entrar; depois de uma falha em Entrar o passo seguinte é escolher outra passkey, nunca criar outra.
+- Passkey escolhida em Entrar e não criada aqui: pode ser a passkey da conta, então nunca é nomeada para apagar (antes era). Os passos sugerem tentar de novo (escolhendo outra passkey quando o navegador não guarda nenhuma; com uma guardada, Entrar só oferece aquela e o passo é só "tentar de novo") ou abrir em outro navegador.
+- Criação em dois passos (o PRF só chega no "concluir"): se o "concluir" falha sem PRF, o cartão sai do estado "concluir", porque o nó descarta a criação pendente e "tentar de novo" levaria a um "concluir" que só falharia. Uma falha de "Criar passkey" (outra passkey) não mexe na criação pendente. Se a falha vem de uma passkey escolhida em Entrar, a criação pendente pode continuar viva (outra passkey) ou ter sido descartada (a mesma), e a tela não sabe qual: o cartão mantém "concluir" e mostra também "Criar passkey" (achados das revisões do codex e do grok).
+- Com convite, o passo de abrir em outro navegador sai, porque o convite já diz isso com o link.
+- O texto do convite perdeu o travessão: "@nome convidou você. Entre para seguir." (`apps/app/src/profileLink.js`).
+- A cerimônia, o nó e o que fica guardado não mudaram. O nó já deixava a passkey que falhou fora da próxima criação (`packages/web-member/web/node.js`, `noteUnusable`).
+
+### Testes automatizados
+
+- Novo: `apps/app/test/passkeyTrouble.test.js` (rótulo da passkey, uma ou várias passkeys nomeadas sem repetir, ids inválidos ignorados, numeração, passo omitido com convite, passkey escolhida nunca nomeada para apagar nem recriada, sem travessão e sem o id inteiro).
+- Atualizado: `apps/app/test/profileLink.test.js` (texto do convite).
+
+Resultados (2026-10-30, Node 24.22.1, macOS): `npm run lint` sem erros; `npm test` com 0 falhas em 219 arquivos de teste (já sobre a main com #234 e #235); `npm run demo` termina com "DEMO OK". `apps/app/test/passkeyTrouble.test.js`: 5 testes, 60 asserções. Numa rodada anterior, com auditorias rodando testes ao mesmo tempo, `packages/web-member/test/e2e-delete-purge.test.js` falhou uma vez ("every photo block is cleared on the seeder": `[false, true, true]` em vez de `[false, false, false]`); sozinho, passou duas vezes (34/34), e a rodada completa seguinte passou. Esse pacote não foi alterado. Não rodado no Node 20.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] iPhone com um gerenciador de senhas de terceiros ligado: criar a passkey salvando nele mostra "Não deu para entrar com essa passkey.", os passos e "tentar de novo" (não realizada ainda).
+- [ ] Na mesma página, "tentar de novo" e criar salvando nas Senhas da Apple entra; o cartão não volta (não realizada ainda).
+- [ ] Duas falhas seguidas nomeiam as duas passkeys no passo 1 (não realizada ainda).
+- [ ] Criação em dois passos que falha no "concluir": "tentar de novo" mostra "Criar passkey", não "concluir" (não realizada ainda).
+- [ ] Criação em dois passos pendente e outra passkey sem PRF escolhida em Entrar: "tentar de novo" mostra "concluir" e "Criar passkey", e "concluir" ainda entra (não realizada ainda).
+- [ ] Escolher em Entrar uma passkey sem PRF que não foi criada nesta página mostra os passos sem "Apague" (não realizada ainda).
+- [ ] Criar falha, "tentar de novo", Entrar com a mesma passkey falha: o passo "Apague" continua nomeando-a (não realizada ainda).
+- [ ] Navegador embutido (Instagram) com link de convite continua mostrando o caso do navegador, o convite e copiar/compartilhar (não realizada ainda).
+
+### Limites que sobram
+
+- A lista de passkeys que falharam fica só na memória da página: depois de recarregar, o nó pode oferecer de novo uma passkey que já falhou, e o cartão só a nomeia quando ela falhar outra vez.
+- Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
+- Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
+- Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.

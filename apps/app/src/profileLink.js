@@ -224,7 +224,7 @@ export async function resolveInvite (rec, lookup) {
 // pt-BR copy; never shows the key or the raw path.
 export function inviteCardText (rec) {
   const name = rec && isUsername(rec.username)
-  return (name ? '@' + name + ' convidou você' : 'Alguém convidou você') + ' — entre para seguir'
+  return (name ? '@' + name + ' convidou você' : 'Alguém convidou você') + '. Entre para seguir.'
 }
 
 export function followedText ({ username, changed } = {}) {
