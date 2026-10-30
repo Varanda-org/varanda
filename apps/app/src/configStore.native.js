@@ -1,10 +1,13 @@
 // The non-secret node configuration, as JSON in the app's document dir
 // (next to, not inside, the node's own data dir "varanda").
 
+/* global fetch, AbortController */
+
 import { File, Paths } from 'expo-file-system'
 import { revive } from './config'
 import { installationOrigin, setInstallation } from './installation'
 import { setAppClient } from './appClient'
+import { hostedOutcome, redirectedAway, rememberedHosted, MAX_DISCOVERY_BYTES } from './discoverHosted'
 
 function file () {
   return new File(Paths.document, 'varanda-config.json')
@@ -123,8 +126,14 @@ export async function saveInstallation (origin) {
   }
   const previous = installationOrigin()
   if (!setInstallation(origin)) return false
+  // The remembered /varanda.json of the same installation stays, so
+  // applying the same address again keeps the offline fallback.
+  const current = await readInstallationValue()
+  const next = { v: 1, origin: installationOrigin() }
+  const discovered = current !== null ? current.discovered : undefined
+  if (discovered !== null && typeof discovered === 'object' && discovered.origin === next.origin) next.discovered = discovered
   try {
-    replaceInstallationFile(JSON.stringify({ v: 1, origin: installationOrigin() }))
+    replaceInstallationFile(JSON.stringify(next))
   } catch (err) {
     setInstallation(previous)
     throw err
@@ -135,11 +144,137 @@ export async function saveInstallation (origin) {
 
 export const canConfigure = true
 
-// No hosted installation on native: the person configures the node.
-export async function discoverConfig () {
+async function readInstallationValue () {
+  try {
+    let f = installationFile()
+    if (!f.exists) f = installationFile('.bak')
+    if (!f.exists) return null
+    const value = JSON.parse(await f.text())
+    return value !== null && typeof value === 'object' && value.v === 1 ? value : null
+  } catch {
+    return null
+  }
+}
+
+// The last valid /varanda.json of the current installation is kept inside
+// varanda-installation.json under its own key, next to the saved choice. A
+// build-time installation is not written as a saved one: without a saved
+// origin the file carries only the remembered answer, which
+// savedInstallation ignores. Never the core config file.
+async function writeDiscovered (discovered) {
+  const value = await readInstallationValue()
+  const next = { v: 1 }
+  if (value !== null && typeof value.origin === 'string') next.origin = value.origin
+  if (discovered !== null) next.discovered = discovered
+  if (next.origin === undefined && next.discovered === undefined) {
+    removeQuietly(installationFile())
+    removeQuietly(installationFile('.bak'))
+    removeQuietly(installationFile('.tmp'))
+    return
+  }
+  replaceInstallationFile(JSON.stringify(next))
+}
+
+async function rememberDiscovered (origin, config) {
+  try {
+    await writeDiscovered({ v: 1, origin, association: config.association })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function loadDiscovered (origin) {
+  const value = await readInstallationValue()
+  return value === null ? null : rememberedHosted(value.discovered, { installation: origin })
+}
+
+async function forgetDiscovered () {
+  const value = await readInstallationValue()
+  if (value === null || value.discovered === undefined) return
+  try { await writeDiscovered(null) } catch {}
+}
+
+// The chosen installation's /varanda.json, with the rules of the hosted web
+// page (configStore.web.js): null when no installation is set or on any
+// failure, never throws. A live answer is remembered; the remembered one is
+// used only when the installation does not answer (offline, network error,
+// 408/429/5xx, redirect). An answer that is not a valid configuration
+// forgets it. options: { onStatus, onLine }; onStatus({ source, persisted? })
+// is called at most once, source: 'live' | 'remembered' | 'none' | 'invalid'.
+export async function discoverConfig (options = {}) {
+  const origin = installationOrigin()
+  if (origin === null) return null
+  const { onStatus, onLine } = options || {}
+  const report = (status) => {
+    if (typeof onStatus !== 'function') return
+    try { onStatus(status) } catch {}
+  }
+  const fromMemory = async () => {
+    const remembered = await loadDiscovered(origin)
+    report({ source: remembered ? 'remembered' : 'none' })
+    return remembered
+  }
+  if (onLine === false) return fromMemory()
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), 8000)
+  let outcome
+  try {
+    outcome = hostedOutcome(await fetchDiscovery(origin, abort.signal), { installation: origin })
+  } catch {
+    outcome = { verdict: 'transport' }
+  } finally {
+    clearTimeout(timer)
+  }
+  // Another installation was chosen meanwhile: this answer is not its own.
+  if (installationOrigin() !== origin) return null
+  if (outcome.verdict === 'live') {
+    report({ source: 'live', persisted: await rememberDiscovered(origin, outcome.config) })
+    return outcome.config
+  }
+  if (outcome.verdict === 'transport') return fromMemory()
+  await forgetDiscovered()
+  report({ source: 'invalid' })
   return null
 }
 
-export async function clearConfig () {}
+// As configStore.web.js fetchDiscovery: the headers classify first and only a
+// 2xx JSON body is read. React Native's fetch has no readable body stream, so
+// a declared length over the cap is refused unread, and the text that is read
+// is measured by hostedOutcome.
+async function fetchDiscovery (installation, signal) {
+  const url = installation + '/varanda.json'
+  let res
+  try {
+    res = await fetch(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', signal })
+  } catch {
+    return { kind: 'threw' }
+  }
+  const { status } = res
+  let redirected = true
+  try { redirected = redirectedAway({ redirected: res.redirected, url: res.url }, { installation }) } catch {}
+  let contentType = ''
+  let length = null
+  try {
+    contentType = res.headers.get('content-type') || ''
+    length = res.headers.get('content-length')
+  } catch {}
+  const result = { kind: 'response', status, contentType, text: '', redirected }
+  if (redirected === true || status === 408 || status === 429 || (status >= 500 && status <= 599)) return result
+  if (!(status >= 200 && status <= 299) || !/application\/json/i.test(contentType)) return result
+  if (typeof length === 'string' && /^[0-9]+$/.test(length) && Number(length) > MAX_DISCOVERY_BYTES) return { ...result, oversized: true }
+  try {
+    return { ...result, text: await res.text() }
+  } catch {
+    return { kind: 'threw' }
+  }
+}
 
+// Drops the saved manual (core) configuration: the installation applies again.
+export async function clearConfig () {
+  removeQuietly(file())
+}
+
+// A web-only notion (a page served by the installation): on native the
+// connected configuration's kind ('hosted') says it instead.
 export const hostedPage = false

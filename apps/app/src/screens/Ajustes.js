@@ -27,7 +27,7 @@
 // the key can still sign; a failure there never stops them.
 
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
@@ -269,10 +269,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   />
                   )
                 : null}
-              {hasPasskey
+              {hasPasskey && Platform.OS === 'web'
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
-              {hasPasskey ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
+              {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
             </View>
             {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
             {pushRow ? <ErrorText>{pushError}</ErrorText> : null}

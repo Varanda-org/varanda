@@ -206,13 +206,113 @@ test('saving null forgets the choice and falls back to the build-time value', as
   await reset()
 })
 
-test('discovery on native stays off', async (t) => {
+// Discovery reads <installation>/varanda.json through a stubbed fetch: the
+// tests never reach a network.
+test('discovery on native asks the installation, never the network in tests', async (t) => {
   const { store } = await load()
-  await reset()
-  await store.saveInstallation('https://example.test')
-  t.is(await store.discoverConfig(), null)
-  t.is(store.hostedPage, false)
-  await reset()
+  const realFetch = globalThis.fetch
+  const asked = []
+  try {
+    await reset()
+    t.is(await store.discoverConfig(), null, 'no installation, no discovery')
+
+    await store.saveInstallation('https://example.test')
+    globalThis.fetch = async (url, init) => {
+      asked.push({ url, credentials: init && init.credentials })
+      throw new Error('offline')
+    }
+    const statuses = []
+    t.is(await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) }), null)
+    t.alike(asked, [{ url: 'https://example.test/varanda.json', credentials: 'omit' }])
+    t.alike(statuses, ['none'])
+    t.is(store.hostedPage, false)
+
+    const association = 'ab'.repeat(32)
+    globalThis.fetch = async () => ({
+      status: 200,
+      redirected: false,
+      headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) },
+      text: async () => JSON.stringify({ v: 1, association })
+    })
+    const config = await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) })
+    t.is(config && config.kind, 'hosted')
+    t.is(config && config.association, association)
+    t.is(config && config.seederUrl, 'wss://example.test/seeder')
+    t.is(statuses[statuses.length - 1], 'live')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+const ASSOC_A = 'ab'.repeat(32)
+const ASSOC_B = 'cd'.repeat(32)
+const jsonAnswer = (association, url) => async () => ({
+  status: 200,
+  redirected: false,
+  url,
+  headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) },
+  text: async () => JSON.stringify({ v: 1, association })
+})
+const stored = () => JSON.parse(files().get(INSTALLATION))
+
+test('discovery: a redirect is never remembered and keeps the remembered answer', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await store.saveInstallation('https://example.test')
+    globalThis.fetch = jsonAnswer(ASSOC_A, 'https://example.test/varanda.json')
+    t.is((await store.discoverConfig()).association, ASSOC_A, 'same-origin url accepted')
+    t.is(stored().discovered.association, ASSOC_A)
+
+    for (const url of ['https://evil.test/varanda.json', 'https://example.test/other.json', 'not a url']) {
+      globalThis.fetch = jsonAnswer(ASSOC_B, url)
+      const statuses = []
+      const config = await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) })
+      t.is(config && config.association, ASSOC_A, url + ': the remembered answer stands in')
+      t.alike(statuses, ['remembered'], url)
+      t.is(stored().discovered.association, ASSOC_A, url + ': not remembered')
+    }
+
+    // A redirect to HTML is a redirect too: the remembered answer is kept.
+    globalThis.fetch = async () => ({
+      status: 200,
+      redirected: false,
+      url: 'https://example.test/index.html',
+      headers: { get: (name) => (name === 'content-type' ? 'text/html' : null) },
+      text: async () => '<html></html>'
+    })
+    t.is((await store.discoverConfig()).association, ASSOC_A)
+    t.is(stored().discovered.association, ASSOC_A)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('saving the same installation keeps its remembered answer; another drops it', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await store.saveInstallation('https://a.test')
+    globalThis.fetch = jsonAnswer(ASSOC_A, 'https://a.test/varanda.json')
+    await store.discoverConfig()
+    t.is(stored().discovered.association, ASSOC_A)
+
+    t.is(await store.saveInstallation('https://a.test'), true)
+    t.is(stored().discovered.association, ASSOC_A, 'same origin: kept')
+    globalThis.fetch = async () => { throw new Error('offline') }
+    t.is((await store.discoverConfig()).association, ASSOC_A, 'still usable offline')
+
+    t.is(await store.saveInstallation('https://b.test'), true)
+    t.alike(stored(), { v: 1, origin: 'https://b.test' }, 'another origin: dropped')
+    t.is(await store.discoverConfig(), null)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
 })
 
 test('crypto polyfill: installs only when missing, Web Crypto contract', async (t) => {

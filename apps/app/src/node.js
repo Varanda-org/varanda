@@ -6,8 +6,8 @@
 // `sync.starting` is true while a sync.start request is in flight) and hands
 // the screens one `request` function.
 //
-// `passkey` (web, browser node only; null for the native node and
-// varanda-serve): the in-page node's passkey identity. `status` is the last
+// `passkey` (the browser node and the native web kind, src/client/webnode;
+// null for the native core kind and varanda-serve): the node's passkey identity. `status` is the last
 // identity.status() (read before the phase becomes 'ready' and after every
 // unlock, complete, lock and reset; null until read), `error` the text of a
 // failed read, `generation` is bumped when the unlocked identity may have
@@ -85,7 +85,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText } from '@varanda/rpc'
 import { connectNode } from './client/connect'
-import { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } from './configStore'
+import * as configStore from './configStore'
+import { installationOrigin } from './installation'
 import { isOnline, subscribeOnline } from './online'
 import { isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
@@ -94,6 +95,11 @@ import { blockingRecovery } from './recoveryPolicy'
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
 import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
+
+const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
+// Native only (configStore.native.js): reads the saved or build-time
+// installation and sets installationOrigin().
+const loadInstallation = typeof configStore.loadInstallation === 'function' ? configStore.loadInstallation : null
 
 const MAX_SYNC_LINES = 200
 const RECOVERY_TIMEOUT_MS = 30000
@@ -149,6 +155,7 @@ export function NodeProvider ({ children }) {
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
   const startedRef = useRef(false)
+  const installationLoadedRef = useRef(false)
   const busyRef = useRef(false)
   // The connect in flight (settles, never rejects), or null.
   const inflightRef = useRef(null)
@@ -362,6 +369,9 @@ export function NodeProvider ({ children }) {
   }, [setWait, setBackoff, resetSignals])
 
   const connectNow = useCallback(async (cfg, { save = false } = {}) => {
+    // Native, the installation's own configuration (the web kind): hosted
+    // only once that connection is ready; a failure is the retry screen.
+    const nativeHosted = cfg !== null && typeof cfg === 'object' && cfg.kind === 'hosted'
     setPhase('connecting')
     setError('')
     setSync({ active: null, lines: [], stopped: null })
@@ -409,13 +419,14 @@ export function NodeProvider ({ children }) {
       setPkError(pkErr)
       bumpGeneration()
       setConfig(cfg)
+      if (nativeHosted) setHosted(true)
       setPhase('ready')
     } catch (err) {
       connRef.current = null
       if (holder.conn) { try { await holder.conn.close() } catch {} }
       if (cfg) setConfig(cfg) // the form keeps what was tried
       setError(errorText(err))
-      setPhase(canConfigure ? 'config' : 'error')
+      setPhase(nativeHosted ? 'config-error' : canConfigure ? 'config' : 'error')
     } finally {
       busyRef.current = false
     }
@@ -435,8 +446,14 @@ export function NodeProvider ({ children }) {
   // explicit manual choice), then the installation's own (not saved, so a
   // changed key in the deployment propagates on reload), then the form. On a
   // hosted page a missing installation configuration is an error to retry,
-  // never the form.
+  // never the form. Native: the saved core configuration wins until it is
+  // cleared; then the chosen installation's /varanda.json starts the web
+  // kind, and with no installation the form is shown.
   const begin = useCallback(async () => {
+    if (loadInstallation !== null && !installationLoadedRef.current) {
+      installationLoadedRef.current = true
+      try { await loadInstallation() } catch {}
+    }
     const saved = await loadConfig()
     setConfig(saved)
     if (!canConfigure) return connect(null)
@@ -445,6 +462,17 @@ export function NodeProvider ({ children }) {
       return connect(saved)
     }
     setPhase('loading')
+    if (loadInstallation !== null && installationOrigin() !== null) {
+      setHosted(false)
+      const found = await discoverConfig({
+        onLine: isOnline(),
+        onStatus: (s) => setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
+      })
+      if (found !== null) return connect(found)
+      setError('não foi possível carregar a configuração desta instalação')
+      setPhase('config-error')
+      return
+    }
     const found = await discoverConfig({
       onLine: isOnline(),
       onStatus: (s) => setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
