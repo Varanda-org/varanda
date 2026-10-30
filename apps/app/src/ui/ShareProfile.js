@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { canShare, copyText, shareUrl, visibleUrl } from '../share'
+import { shareNav } from '../shareNav'
 import { Mono, Row, Soft } from './index'
 import { Pill } from './Pill'
 import { colors, fonts } from './theme'
@@ -40,7 +41,7 @@ export function ShareProfile ({ url, labels, showUrl = false }) {
 
   if (typeof url !== 'string') return null
 
-  const nav = globalThis.navigator
+  const nav = shareNav()
   const shown = showUrl ? url : visibleUrl(url)
   const copyOrSelect = async () => {
     if (await copyText(nav, url)) {

@@ -105,14 +105,16 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
   }
 
   // Validated by the dispatcher (5.35); checked again since prf is the root
-  // secret. -> a fresh 32-byte buffer the caller zeroes.
+  // secret. -> a fresh 32-byte buffer the caller zeroes. Decoded by hand:
+  // b4a.from would leave a copy in the shared buffer pool that nothing zeroes.
   function prfBytes (hex) {
     if (typeof hex !== 'string' || !PRF_RE.test(hex)) throw usage('pedido inválido')
-    return new Uint8Array(b4a.from(hex, 'hex'))
+    const out = new Uint8Array(hex.length / 2)
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+    return out
   }
 
   const install = serial(async ({ prf: prfHex, credentialId, userId, rpId, resumed } = {}) => {
-    current = null
     let prf = null
     let kp = null
     let media = null
@@ -127,6 +129,9 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       nonce = await mediaNonce()
       media = await keys.mediaKeyPairFromPrf(prf, nonce, { hkdf })
       const publicKey = b4a.toString(kp.publicKey, 'hex')
+      // Forgotten only now: a refused or failed attempt before the new pairs
+      // go in leaves the previous install (and its sessionSaved) as it was.
+      current = null
       // setKeyPair copies both pairs synchronously: the local copies are zeroed below.
       const setting = session.setKeyPair(kp, { media })
       zeroPair(kp)

@@ -4,24 +4,18 @@
 // src/node.js treats both alike. The host controls cross the IPC as the
 // IPC-only methods of docs/rpc.md 5.35 to 5.41.
 //
-// The passkey ceremony is not wired yet: status reports no WebAuthn, and
-// unlock / complete refuse with UNSUPPORTED. The handle exists as soon as the
-// connection is up, so node.passkey is non-null while locked, as on the web.
+// The identity API is src/identity.native.js (the passkey ceremony on the
+// device, the PRF output handed over by identity.install). The handle exists
+// as soon as the connection is up, so node.passkey is non-null while locked,
+// as on the web; the stored session is resumed right then, and status()
+// waits for that attempt so the first read already reports it.
 
 /* global crypto */
 
 import { File } from 'expo-file-system'
 import { rpIdOf, installationOrigin } from '../installation'
-import { uploadDirectory, uriToPath } from './native'
-
-// packages/web-member/lib/passkey.js MESSAGES.UNSUPPORTED.
-const UNSUPPORTED_MESSAGE = 'este endereço não pode usar passkeys'
-
-function unsupported () {
-  const err = new Error(UNSUPPORTED_MESSAGE)
-  err.code = 'UNSUPPORTED'
-  return Promise.reject(err)
-}
+import { createNativeIdentity } from '../identity'
+import { uploadDirectory } from './native'
 
 function rpIdOrNull () {
   try {
@@ -50,33 +44,31 @@ function progress (onProgress, value) {
 
 // request(method, params): the connection's request (connect.native.js).
 export function webNodeHandle (request) {
+  const native = createNativeIdentity({ request, rpId: rpIdOrNull })
+  native.resume()
   const identity = {
-    status: async () => {
-      const st = await request('identity.status')
-      return { ...st, webauthn: false, prf: 'unknown', rpId: rpIdOrNull() }
-    },
-    unlock: () => unsupported(),
-    complete: () => unsupported(),
-    lock: () => request('identity.clear'),
-    signOut: async () => {
-      await request('identity.forget')
-      return request('identity.clear')
-    },
-    reset: () => request('identity.reset')
+    status: native.status,
+    unlock: native.unlock,
+    complete: native.complete,
+    lock: native.lock,
+    signOut: native.signOut,
+    reset: native.reset
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped
-  // at 64 KiB (docs/rpc.md 5.41). The worklet deletes the file after a
+  // at 64 KiB (docs/rpc.md 5.41). Only its name crosses the IPC; the worklet
+  // finds it under the cacheDir it was started with. The worklet deletes the file after a
   // successful upload; on any failure it is deleted here.
   const media = {
     upload: async ({ bytes, mime, width, height, onProgress } = {}) => {
       if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new TypeError('mídia inválida')
-      const file = new File(uploadDirectory(), randomName())
+      const name = randomName()
+      const file = new File(uploadDirectory(), name)
       try {
         file.create()
         file.write(bytes)
         progress(onProgress, 0.25)
-        const descriptor = await request('media.uploadFile', { path: uriToPath(file.uri), mime, width, height })
+        const descriptor = await request('media.uploadFile', { name, mime, width, height })
         progress(onProgress, 1)
         return descriptor
       } catch (err) {

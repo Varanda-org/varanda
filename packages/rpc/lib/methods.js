@@ -232,9 +232,11 @@ function isPushEndpoint (v) {
 // The PRF output is the 32-byte root secret every member key derives from.
 const PRF_RE = /^[0-9a-f]{64}$/
 const CREDENTIAL_ID_RE = /^[\x21-\x7e]{1,1024}$/
-const MEDIA_PATH_MAX = 4096
+// What the host names in its cache directory: no separator or dot segment.
+const MEDIA_NAME_RE = /^[0-9a-f]{32}\.bin$/
 const MEDIA_SIDE_MAX = 16384
 
+const isMediaName = (v) => typeof v === 'string' && MEDIA_NAME_RE.test(v)
 const isPrf = (v) => typeof v === 'string' && PRF_RE.test(v)
 const isCredentialId = (v) => typeof v === 'string' && CREDENTIAL_ID_RE.test(v)
 const isUserId = (v) => v === '' || isKey(v)
@@ -488,7 +490,7 @@ const SPECS = {
   'identity.sessionSaved': { fields: none, mutating: true },
   'media.uploadFile': {
     fields: {
-      path: req(str(1, MEDIA_PATH_MAX)),
+      name: req(isMediaName),
       mime: req(isMediaMime),
       width: req(int(1, MEDIA_SIDE_MAX)),
       height: req(int(1, MEDIA_SIDE_MAX))
