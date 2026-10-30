@@ -11,9 +11,13 @@
 // but its items are removed from its owner's page; it stays visible in
 // everyone else's. Anyone can recompute it from hello inventory and diaries.
 // Known limit: `at` is untrusted presentation data; a date up to 24 hours ahead
-// sorts first in its round, just as in A Rua.
+// sorts first in its round, just as in A Rua. A tombstone below the floor is
+// never seen (the gap between the head and the tail is not fetched), so it
+// cannot hide a post this page fetched. A tombstone in the fetched window
+// hides its target.
 
 const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
+const { applyDeletes } = require('./deletion')
 const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
@@ -71,9 +75,10 @@ function peekWindow (length, fetched) {
   return seqs.sort((a, b) => b - a).slice(0, room)
 }
 
-// Only these copied records survive between pages. Invalid records still
-// count as fetched: contiguity must always come from the separate seq set.
-// Hostile entries, getters and iterators cannot escape this reader.
+// Only these copied records survive between pages, tombstones included, so
+// the next page can fold them again. Invalid records still count as fetched:
+// contiguity must always come from the separate seq set. Hostile entries,
+// getters and iterators cannot escape this reader.
 function retainRecords (entries) {
   const kept = []
   try {
@@ -84,7 +89,7 @@ function retainRecords (entries) {
         const copy = validRecordCopy(record, seq)
         if (copy === null) continue
         if (seq === 0 || copy.type === 'profile' || copy.type === 'username' ||
-          copy.type === 'post' || copy.type === 'repost') {
+          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete') {
           kept.push({ seq, record: copy })
         }
       } catch {}
@@ -104,8 +109,10 @@ function diaryPeek (input) {
     // blocks count too, so a missing head block never reads as scanned.
     result.scanned = floor === 0
     result.capped = !result.scanned && fetched.size >= PEEK_MAX_BLOCKS_PER_DIARY
-    const copies = retainRecords(entries)
-    const first = copies.find((entry) => entry.seq === 0)
+    // Before the name and the tail. A tombstone that was not fetched (below
+    // the floor, outside the head) is not in `entries`, so it is never seen.
+    const copies = applyDeletes(retainRecords(entries))
+    const first = copies.find((entry) => entry.seq === 0 && entry.record)
     if (first) {
       const verdict = certForKey(first.record.cert, key, association, { revokedIssuers })
       result.reason = verdict.ok ? null : verdict.reason
@@ -116,7 +123,9 @@ function diaryPeek (input) {
     result.username = latestUsername(copies, key, association, { revokedIssuers })
     const tail = copies.filter(({ seq }) => seq >= floor && seq < length)
     for (const { seq, record: post } of tail) {
-      if (post.type !== 'post') continue
+      // A deleted block is { record: null }. Reading post.type would throw
+      // and the catch would drop every later publication in the tail.
+      if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         result.future++
         continue

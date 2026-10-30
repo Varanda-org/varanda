@@ -345,6 +345,9 @@ const SPECS = {
     },
     mutating: true
   },
+  // Tombstones the caller's own profile version, or the compatibility pair
+  // it belongs to (docs/rpc.md 5.34).
+  'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'post.create': {
     fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
     mutating: true,
@@ -359,6 +362,8 @@ const SPECS = {
     fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList) },
     mutating: true
   },
+  // Tombstones the caller's own publication (docs/rpc.md 5.33).
+  'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },

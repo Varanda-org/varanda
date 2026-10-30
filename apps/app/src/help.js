@@ -44,7 +44,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'O Diário é o seu perfil e as suas publicações.',
       'O número ao lado de seguindo é quantas pessoas você segue. Não há lista de quem segue você.',
-      'Uma publicação que ainda aguarda envio leva a data do momento em que sai.'
+      'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
+      'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
     ])
   }),
   entrar: Object.freeze({

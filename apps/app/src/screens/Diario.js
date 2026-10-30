@@ -25,6 +25,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { UNCERTAIN_MESSAGE } from '../outbox'
+import { deletePostRows } from '../deletion'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
@@ -43,6 +44,7 @@ import { HELP } from '../help'
 import { fonts, type } from '../ui/theme'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
+import { DeletePrompt, useDelete } from './Conversa'
 
 const BAND = 96
 const MAX_EMPTY_PAGES = 5
@@ -126,7 +128,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -196,24 +198,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     try {
       const log = await request('log.read', { limit: LOG_LIMIT_MAX, before: oldestSeq(current.rows) })
       // The cursor came from `current`: a newest page that replaced it
-      // meanwhile (a reload from activation or a refresh bump) would leave a
-      // gap between the two, so this page is dropped (that reload reset the
-      // paging state).
+      // meanwhile would leave a gap between the two. A deletion also replaces
+      // it, so a stale page must not restore the deleted content.
       if (mine !== seqRef.current || dataRef.current !== current) return
       const base = dataRef.current
       setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log) })
-      setLoadingMore(false)
-      olderBusy.current = false
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
       if (typeof base.info.publicKey === 'string') ingest(rowNeeds(logRows(log), base.info.publicKey))
     } catch (err) {
-      if (mine !== seqRef.current) return
+      if (mine !== seqRef.current || dataRef.current !== current) return
       setOlderError(errorText(err))
-      setLoadingMore(false)
-      olderBusy.current = false
+    } finally {
+      if (mine === seqRef.current) {
+        setLoadingMore(false)
+        olderBusy.current = false
+      }
     }
   }, [request, resolve, ingest])
 
@@ -402,7 +404,22 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         )
   }
 
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote }
+  const del = useDelete({
+    request,
+    onToast,
+    recheck: () => loadNewest(false),
+    // The slot stays (as the node reports it) so the paging cursor holds.
+    onDeleted: async (t) => {
+      social.deleteOriginal(t.ref)
+      const cur = dataRef.current
+      if (cur !== null) {
+        dataRef.current = { ...cur, rows: deletePostRows(cur.rows, t.ref, cur.info.publicKey) }
+        setData(dataRef.current)
+      }
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+    }
+  })
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {
@@ -420,10 +437,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   // Rows re-render when a name is learned, the clock ticks or the originals,
   // counts or own state change.
-  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social }), [profileOf, now, profile, social.social])
+  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered }), [profileOf, now, profile, social.social, del.offered])
 
   return (
     <View style={styles.list}>
+      <DeletePrompt del={del} />
       <RefreshableList
         data={posts}
         keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}

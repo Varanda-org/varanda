@@ -260,6 +260,11 @@ function isOurs (entry, item) {
 
 // A whole log.read result: { entries, invalid, entriesTruncated }, where
 // entriesTruncated is the smallest seq of the returned window.
+function deletedAbove (entry, floorSeq) {
+  return entry !== null && typeof entry === 'object' && entry.reason === 'deleted' &&
+    Number.isInteger(entry.seq) && entry.seq > floorSeq
+}
+
 function validPage (page) {
   return page !== null && typeof page === 'object' && !Array.isArray(page) &&
     Array.isArray(page.entries) &&
@@ -295,6 +300,8 @@ export function reconcile (items, author, association, page, now) {
     }
   }
   if (candidates.length > 0) return unknown
+  // A deleted slot hides what was there: it may be our append, so never requeue.
+  if ((page.invalid || []).some((entry) => deletedAbove(entry, sending.floorSeq))) return unknown
   const covered = page.entriesTruncated <= sending.floorSeq + 1
   if (covered) {
     return {

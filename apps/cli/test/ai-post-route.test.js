@@ -18,7 +18,7 @@ const { createCert, createSeederCert, createModeratorCert, generateAssociationKe
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, profileRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, profileRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { startSeedWs, POST_RE } = require('../lib/seed-ws')
 
 const TOKEN = 'c3'.repeat(32)
@@ -238,6 +238,43 @@ test('GET /moderation-post: raw local blocks with the token, the generic 404 oth
   t.is(await seeder.postBlock(A.key, 0), null)
   t.is(await seeder.postBlock(A.key, 1.5), null)
   t.is(await seeder.postBlock(A.key, '1'), null)
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('GET /moderation-post and /index: a post its author deleted is the generic 404 and leaves the index', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const ws = await startSeedWs({ port: 0, seeder, triageToken: TOKEN, post: { rate: 1000, burst: 1000 } })
+  t.teardown(() => ws.close(), { force: true })
+  const get = (url, headers = auth()) => request(ws.port, 'GET', url, headers)
+
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [
+      postRecord({ text: 'apagado', at: '2026-03-01T12:00:00.000Z' }),
+      postRecord({ text: 'mantido', at: '2026-03-01T12:00:01.000Z' }),
+      deleteRecord({ seq: 1, at: '2026-03-01T12:00:02.000Z' })
+    ]
+  })
+  await admit(seeder, A, assoc)
+  await until(() => {
+    const entry = seeder._served.get(A.key)
+    return entry.scanned === 4 && entry.indexed === 4
+  }, { name: 'diário varrido e indexado' })
+
+  notFound(t, await get('/moderation-post/' + A.key + '/1'), 'deleted post')
+  t.is((await get('/moderation-post/' + A.key + '/2')).status, 200, 'the surviving post is served')
+  t.is(await seeder.postBlock(A.key, 1), null)
+
+  notFound(t, await get('/index/post/' + A.key + '/1', {}), 'no thread page for the deleted post')
+  t.is((await get('/index/post/' + A.key + '/2', {})).status, 200)
+  const timeline = await get('/index/member/' + A.key, {})
+  t.is(timeline.status, 200)
+  t.alike(JSON.parse(timeline.body).posts, [2], 'the timeline omits the deleted post')
+  const counts = JSON.parse((await get('/index/counts/' + A.key + ':1,' + A.key + ':2', {})).body).counts
+  t.alike(Object.keys(counts), [A.key + ':2'], 'counts omit the deleted post')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 

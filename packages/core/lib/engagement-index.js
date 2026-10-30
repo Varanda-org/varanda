@@ -15,12 +15,14 @@
 // caller at that seq, never skipping; complete stays false until it resumes.
 // Quotas count all indexed operations, including off toggles and hints.
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
-// engager and touched entries) plus 500 bytes/target (key, target object,
-// map slots and the first used collection): about 500 MB at both defaults,
-// plus small per-diary overhead bounded by the seeder's served-diary limit.
-// These are conservative retained-heap estimates, not a V8/RSS guarantee;
-// collection capacity, string representation and GC headroom vary by runtime.
-// The likers and reposters lists add one edge object per like or repost
+// engager and touched entries, the engagements map, and the profileSeqs,
+// usernameSeqs and copiedSeqs arrays) plus 500 bytes/target (key, target
+// object, map slots and the first used collection): about 500 MB at both
+// defaults, plus small per-diary overhead bounded by the seeder's
+// served-diary limit. The deleted set is held until removeDiary. These are
+// conservative retained-heap estimates, not a V8/RSS guarantee; collection
+// capacity, string representation and GC headroom vary by runtime. The
+// likers and reposters lists add one edge object per like or repost
 // currently on, plus one array per target and kind with 2 or more engagers.
 //
 // Engager pages (engagers): who currently likes or reposts a post, newest
@@ -213,13 +215,17 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // author -> { count, timeline: [seq] asc (posts and reposts currently on),
   // posts: Map<seq, { replyTo, quote }>, reposts: Map<ref, seq> (the on
   // record per target), touched: Map<ref, active edge count>,
-  // profileSeq, usernameSeq }
+  // profileSeqs, usernameSeqs, copiedSeqs: [seq] asc,
+  // engagements: Map<seq, { type, to }> }
   const authors = new Map()
+  // A slower cursor must not resurrect a removed block or its incoming edges.
+  const deleted = new Map()
+  const deletedRefs = new Set()
 
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeq: null, usernameSeq: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map() }
       authors.set(author, entry)
     }
     return entry
@@ -321,14 +327,24 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function add (author, seq, record) {
     try {
       if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return false
+      if (deleted.get(author)?.has(seq)) return true
       if (record === null || typeof record !== 'object') return false
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username') return false
-      const existing = authors.get(author)
-      if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
-      const replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
-      const quote = type === 'post' && record.quote ? formatRef(record.quote) : null
+      let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
+      let quote = type === 'post' && record.quote ? formatRef(record.quote) : null
       const to = type === 'like' || type === 'repost' ? formatRef(record.to) : null
+      // A like or repost of a deleted post is not an engagement. A reply or
+      // quote is the author's own post: a deleted parent is stored as none,
+      // so the post stays on the timeline and touches no target.
+      if (to !== null && deletedRefs.has(to)) return true
+      if (replyTo !== null && deletedRefs.has(replyTo)) replyTo = null
+      if (quote !== null && deletedRefs.has(quote)) quote = null
+      const existing = authors.get(author)
+      if (existing && (existing.posts.has(seq) || existing.engagements.has(seq) ||
+          indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
+          indexOfSeq(existing.copiedSeqs, seq) !== -1)) return true
+      if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
       needed.delete(null)
@@ -377,14 +393,127 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           dropTargetIfEmpty(to, target)
         }
       } else if (type === 'profile') {
-        if (entry.profileSeq === null || seq > entry.profileSeq) entry.profileSeq = seq
+        entry.profileSeqs.splice(lowerBoundSeq(entry.profileSeqs, seq), 0, seq)
       } else if (record.member === author) {
-        if (entry.usernameSeq === null || seq > entry.usernameSeq) entry.usernameSeq = seq
+        entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
+      } else {
+        // A copy (member !== author) is not a username hint, but it holds a
+        // record slot. Track the seq so a re-add cannot double count and
+        // removeRecord can release it.
+        entry.copiedSeqs.splice(lowerBoundSeq(entry.copiedSeqs, seq), 0, seq)
       }
+      if (type === 'like' || type === 'repost') entry.engagements.set(seq, { type, to })
       entry.count++
       if (entry.count === authorCap) fullAuthors++
       records++
       if (targets.size < targetsBefore) freed()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function markDeleted (author, seq) {
+    if (!deleted.has(author)) deleted.set(author, new Set())
+    deleted.get(author).add(seq)
+  }
+
+  function releaseRecord (entry) {
+    if (entry.count === authorCap) fullAuthors--
+    entry.count--
+    records--
+  }
+
+  function removePost (author, seq) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return false
+      const ref = author + ':' + seq
+      markDeleted(author, seq)
+      deletedRefs.add(ref)
+      const entry = authors.get(author)
+      const info = entry?.posts.get(seq)
+      if (info === undefined && !targets.has(ref)) return false
+      if (info !== undefined) {
+        for (const [type, parent] of [['replies', info.replyTo], ['quotes', info.quote]]) {
+          const other = targets.get(parent)
+          if (other === undefined || other[type] === null) continue
+          const at = other[type].findIndex((e) => e.author === author && e.seq === seq)
+          if (at === -1) continue
+          other[type].splice(at, 1)
+          other[type + 'Total']--
+          if (other[type].length === 0) other[type] = null
+          touch(entry, parent, -1)
+          dropTargetIfEmpty(parent, other)
+        }
+        entry.posts.delete(seq)
+        removeTimeline(entry, seq)
+        releaseRecord(entry)
+      }
+      const target = targets.get(ref)
+      if (target !== undefined) {
+        for (const type of ['replies', 'quotes']) {
+          for (const edge of target[type] || EMPTY_LIST) authors.get(edge.author).touched.delete(ref)
+        }
+        for (const type of ['likes', 'reposts']) {
+          if (target[type] === null) continue
+          for (const engager of target[type].keys()) {
+            const other = authors.get(engager)
+            other.touched.delete(ref)
+            if (type === 'reposts') {
+              removeTimeline(other, other.reposts.get(ref))
+              other.reposts.delete(ref)
+            }
+          }
+        }
+        deleteTarget(ref)
+      }
+      freed()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function removeRecord (author, seq) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return false
+      const entry = authors.get(author)
+      // A tombstone can name a seq this cursor has not indexed yet (paused
+      // at the cap, or a target that exists only because someone else
+      // engaged it). That still has to guard the ref, same as removePost.
+      if (entry === undefined) return removePost(author, seq)
+      if (entry.posts.has(seq)) return removePost(author, seq)
+      let found = false
+      for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs]) {
+        const at = indexOfSeq(list, seq)
+        if (at === -1) continue
+        list.splice(at, 1)
+        found = true
+        break
+      }
+      const engagement = entry.engagements.get(seq)
+      if (engagement !== undefined) {
+        const { type, to } = engagement
+        const kind = type === 'like' ? 'likes' : 'reposts'
+        const target = targets.get(to)
+        const edge = target?.[kind]?.get(author)
+        if (edge !== undefined && edge.seq === seq) {
+          unengage(target, kind, author, edge)
+          target[kind + 'Total']--
+          touch(entry, to, -1)
+          if (type === 'repost') {
+            removeTimeline(entry, seq)
+            entry.reposts.delete(to)
+          }
+          dropTargetIfEmpty(to, target)
+        }
+        entry.engagements.delete(seq)
+        found = true
+      }
+      if (!found) return removePost(author, seq)
+      markDeleted(author, seq)
+      releaseRecord(entry)
+      freed()
       return true
     } catch {
       return false
@@ -396,9 +525,14 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // Quotas still count all accepted operations of every remaining diary.
   function removeDiary (author, onIncomingRemoved = null) {
     try {
+      const removed = deleted.get(author)
+      if (removed !== undefined) {
+        for (const seq of removed) deletedRefs.delete(author + ':' + seq)
+        deleted.delete(author)
+      }
       const entry = authors.get(author)
       const owned = authorTargets.get(author)
-      if (entry === undefined && owned === undefined) return false
+      if (entry === undefined && owned === undefined) return removed !== undefined
       const targetsBefore = targets.size
       const recordsBefore = records
       let incomingRemoved = false
@@ -464,7 +598,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function hints (author) {
     const entry = authors.get(author)
     if (entry === undefined) return { profileSeq: null, usernameSeq: null }
-    return { profileSeq: entry.profileSeq, usernameSeq: entry.usernameSeq }
+    return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
   }
 
   // Totals exclude dropped diaries by construction: removeDiary runs
@@ -491,7 +625,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const hint = (author) => { if (!(author in authorHints)) authorHints[author] = hints(author) }
       hint(parsed.author)
       let parent = null
-      if (info.replyTo !== null) {
+      if (info.replyTo !== null && !deletedRefs.has(info.replyTo)) {
         const p = parseRef(info.replyTo)
         if (p !== null && visible(p.author)) {
           parent = info.replyTo
@@ -633,7 +767,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const end = before === null || before === undefined ? entry.timeline.length : lowerBoundSeq(entry.timeline, before)
       const posts = []
       for (let i = end - 1; i >= 0 && posts.length < MEMBER_PAGE; i--) posts.push(entry.timeline[i])
-      return { profileSeq: entry.profileSeq, usernameSeq: entry.usernameSeq, posts, postsTotal: entry.timeline.length }
+      return { ...hints(author), posts, postsTotal: entry.timeline.length }
     } catch {
       return null
     }
@@ -647,11 +781,13 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     targets.clear()
     authorTargets.clear()
     authors.clear()
+    deleted.clear()
+    deletedRefs.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removeDiary, post, counts, engagers, member, hints, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, stats, clear }
 }
 
 module.exports = {

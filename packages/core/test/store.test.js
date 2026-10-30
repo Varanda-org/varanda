@@ -6,7 +6,7 @@ const { spawn, spawnSync } = require('node:child_process')
 const test = require('brittle')
 const b4a = require('b4a')
 const store = require('../lib/store')
-const { memberCertRecord, profileRecord, postRecord } = require('../lib/records')
+const { memberCertRecord, profileRecord, postRecord, deleteRecord } = require('../lib/records')
 const { testnet } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 
@@ -482,6 +482,66 @@ test('appendRecord waits for ready before computing the seq', async (t) => {
   t.is(notReady.length, 2)
 })
 
+test('readAll reports a deleted block as record null with deleted true', async (t) => {
+  await testnet(t)
+  const s = await open(t, tmpDir(t))
+  const diary = await store.openDiary(s)
+  const hex = b4a.toString(diary.key, 'hex')
+  await store.appendRecord(diary, memberCertRecord(certFixture(hex)))
+  await store.appendRecord(diary, postRecord({ text: 'some', at: AT }))
+  await store.appendRecord(diary, postRecord({ text: 'fica', at: AT }))
+  await store.appendRecord(diary, deleteRecord({ seq: 1, at: AT }))
+
+  const entries = await store.readAll(diary)
+  t.is(entries.length, 4)
+  t.alike(entries[1], { seq: 1, record: null, deleted: true })
+  t.is(entries[2].record.text, 'fica')
+  t.alike(entries[3].record, { type: 'delete', seq: 1, at: AT })
+  const raw = await store.readRaw(diary)
+  t.is(raw.length, 4)
+  t.alike(raw[1], { seq: 1, record: postRecord({ text: 'some', at: AT }) }, 'readRaw leaves the deleted block as written')
+})
+
+test('appendRecords appends 1..8 records in one atomic append', async (t) => {
+  await testnet(t)
+  const s = await open(t, tmpDir(t))
+  const diary = await store.openDiary(s)
+  const hex = b4a.toString(diary.key, 'hex')
+  await store.appendRecord(diary, memberCertRecord(certFixture(hex)))
+  const post = postRecord({ text: 'oi', at: AT })
+
+  t.is(await store.appendRecords(diary, [post, post]), 2)
+  t.is(diary.length, 3)
+  // Each record is validated at its own seq: a tombstone of seq 4 is valid
+  // only as block 5 or later.
+  t.is(await store.appendRecords(diary, [post, post, deleteRecord({ seq: 4, at: AT })]), 5)
+
+  await t.exception(() => store.appendRecords(diary, [post, deleteRecord({ seq: 7, at: AT })]), /registro inválido/)
+  await t.exception(() => store.appendRecords(diary, [post, memberCertRecord(certFixture(hex))]), /cert-not-first/)
+  await t.exception(() => store.appendRecords(diary, []), /malformed/)
+  await t.exception(() => store.appendRecords(diary, new Array(9).fill(post)), /malformed/)
+  await t.exception(() => store.appendRecords(diary, undefined), /malformed/)
+  t.is(diary.length, 6, 'a refused batch writes nothing')
+  t.is(await store.appendRecords(diary, new Array(8).fill(post)), 13)
+})
+
+test('appendRecords refuses a batch over the diary limits as a whole', async (t) => {
+  await testnet(t)
+  const s = await open(t, tmpDir(t))
+  const diary = await store.openDiary(s)
+  const hex = b4a.toString(diary.key, 'hex')
+  await store.appendRecord(diary, memberCertRecord(certFixture(hex)))
+  const post = postRecord({ text: 'x'.repeat(200), at: AT })
+  const postBytes = b4a.byteLength(JSON.stringify(post))
+
+  await t.exception(() => store.appendRecords(diary, [post, post], { maxLogBlocks: 2 }), /limite do diário atingido/)
+  await t.exception(() => store.appendRecords(diary, [post, post], { maxBlockBytes: postBytes - 1 }), /limite do diário atingido/)
+  const bytes = diary.byteLength
+  await t.exception(() => store.appendRecords(diary, [post, post], { maxLogBytes: bytes + 2 * postBytes - 1 }), /limite do diário atingido/)
+  t.is(diary.length, 1, 'nothing written')
+  t.is(await store.appendRecords(diary, [post, post], { maxLogBlocks: 3, maxLogBytes: bytes + 2 * postBytes }), 2)
+})
+
 test('readAll on a closed core rejects', async (t) => {
   await testnet(t)
   const s = await open(t, tmpDir(t))
@@ -490,6 +550,7 @@ test('readAll on a closed core rejects', async (t) => {
   await store.appendRecord(diary, memberCertRecord(certFixture(hex)))
   await diary.close()
   await t.exception(() => store.readAll(diary), /SESSION_CLOSED/)
+  await t.exception(() => store.readRaw(diary), /SESSION_CLOSED/)
 })
 
 test('openReplica of the own diary key is never writable', async (t) => {

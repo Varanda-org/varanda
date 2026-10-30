@@ -489,3 +489,174 @@ test('memory: a stored token never retains the post text', (t) => {
   t.ok(out.perPost < 2000, 'retained heap per crafted post under 2,000 B: ' + out.perPost.toFixed(0))
   t.comment('crafted posts retain ' + out.perPost.toFixed(0) + ' B/post after gc')
 })
+
+test('removePost restores pages, postings and terms without sorting dirty lists', (t) => {
+  const ix = createTopicIndex()
+  const baseline = createTopicIndex()
+  for (let seq = 1; seq <= 70; seq++) {
+    const record = post('ceu azul', 100 - seq)
+    ix.add(K1, seq, record)
+    if (seq !== 35) baseline.add(K1, seq, record)
+  }
+  ix.add(K2, 1, post('ceu mar', 200))
+  baseline.add(K2, 1, post('ceu mar', 200))
+  t.ok(ix.removePost(K1, 35))
+  t.alike(ix.stats(), baseline.stats())
+  let cursor = null
+  do {
+    const expected = baseline.search(['ceu', 'azul'], cursor, undefined, NOW)
+    t.alike(ix.search(['ceu', 'azul'], cursor, undefined, NOW), expected)
+    cursor = expected.next
+  } while (cursor !== null)
+  t.is(ix.removePost(K1, 35), false)
+  t.ok(ix.add(K1, 35, post('ceu azul')))
+  t.alike(ix.stats(), baseline.stats())
+  t.ok(ix.removePost(K2, 1))
+  t.alike(ix.search(['mar'], null, undefined, NOW), { items: [], next: null })
+  t.is(ix.stats().terms, 2)
+  t.ok(ix.removeDiary(K1))
+  t.is(ix.stats().posts, 0)
+  t.is(ix.stats().terms, 0)
+  t.is(ix.stats().postings, 0)
+})
+
+test('removePost frees every capacity budget and notifies only once', (t) => {
+  for (const limits of [{ maxPosts: 1 }, { perAuthorMax: 1 }, { maxTerms: 2 }, { maxPostings: 2 }, { perAuthorPostingsMax: 2 }, { perAuthorTermsMax: 2 }]) {
+    let freed = 0
+    const ix = createTopicIndex({ ...limits, onFreed: () => freed++ })
+    const empty = ix.stats()
+    t.ok(ix.add(K1, 1, post('ceu azul')))
+    t.is(ix.add(K1, 2, post('mar sol')), false)
+    t.ok(ix.removePost(K1, 1))
+    t.is(freed, 1)
+    t.alike(ix.stats(), empty)
+    t.is(ix.removePost(K1, 1), false)
+    t.is(freed, 1)
+    t.ok(ix.add(K1, 2, post('mar sol')))
+    const full = ix.stats()
+    t.ok(ix.add(K1, 1, post('ceu azul')), 'deleted seq advances at capacity')
+    t.alike(ix.stats(), full)
+  }
+})
+
+test('removePost keeps a shared term charged and still frees the removed postings', (t) => {
+  const ix = createTopicIndex({ perAuthorTermsMax: 2 })
+  ix.add(K1, 1, post('ceu azul'))
+  ix.add(K1, 2, post('ceu'))
+  ix.add(K2, 1, post('azul'))
+  t.is(ix.add(K1, 3, post('mar sol')), false)
+  t.ok(ix.removePost(K1, 1))
+  t.is(ix.add(K1, 3, post('mar sol')), false, 'shared terms stay charged to their creator')
+  t.alike(ix.search(['ceu'], null, undefined, NOW).items, [K1 + ':2'])
+  t.alike(ix.search(['azul'], null, undefined, NOW).items, [K2 + ':1'])
+  t.is(ix.stats().postings, 2)
+  t.is(ix.stats().terms, 2)
+})
+
+test('removePost refunds a term only when its posting list disappears', (t) => {
+  for (const second of [K1, K2]) {
+    const ix = createTopicIndex({ perAuthorTermsMax: 1, maxTerms: 10 })
+    t.ok(ix.add(K1, 1, post('aa')))
+    t.ok(ix.add(second, second === K1 ? 2 : 1, post('aa')))
+    t.ok(ix.removePost(K1, 1))
+    t.is(ix.add(K1, 3, post('bb')), false, 'a term another post still uses stays charged')
+    t.is(ix.search(['aa'], null, undefined, NOW).items.length, 1)
+    t.is(ix.stats().terms, 1)
+  }
+
+  const ix = createTopicIndex({ perAuthorTermsMax: 1, maxTerms: 10 })
+  t.ok(ix.add(K1, 1, post('aa')))
+  t.ok(ix.add(K2, 1, post('aa')))
+  t.ok(ix.removePost(K1, 1))
+  for (const [seq, word] of [[2, 'bb'], [3, 'cc'], [4, 'dd'], [5, 'ee']]) {
+    t.is(ix.add(K1, seq, post(word)), false)
+    t.is(ix.stats().terms, 1, 'add/remove cannot grow the term table past the share')
+  }
+  t.ok(ix.removePost(K2, 1))
+  t.is(ix.stats().terms, 0)
+  t.ok(ix.add(K1, 2, post('bb')), 'the charge drops once the list disappears')
+  t.is(ix.add(K1, 3, post('cc')), false)
+  t.is(ix.stats().terms, 1)
+
+  const partial = createTopicIndex({ perAuthorTermsMax: 2 })
+  t.ok(partial.add(K1, 1, post('aa bb')))
+  t.ok(partial.add(K2, 1, post('aa')))
+  t.ok(partial.removePost(K1, 1))
+  t.is(partial.stats().postings, 1)
+  t.is(partial.add(K1, 2, post('cc dd')), false, 'only the vanished term was refunded')
+  t.ok(partial.add(K1, 2, post('cc')))
+  t.is(partial.stats().terms, 2)
+  t.alike(partial.search(['aa'], null, undefined, NOW).items, [K2 + ':1'])
+  t.alike(partial.search(['bb'], null, undefined, NOW), { items: [], next: null })
+})
+
+test('removePost guards unread blocks until their own diary is removed or cleared', (t) => {
+  const ix = createTopicIndex()
+  const empty = ix.stats()
+  t.is(ix.removePost(K1, 1), false)
+  t.ok(ix.add(K1, 1, post('ceu')))
+  t.alike(ix.stats(), empty)
+  ix.add(K2, 1, post('ceu'))
+  ix.removeDiary(K2)
+  t.ok(ix.add(K1, 1, post('ceu')))
+  t.alike(ix.stats(), empty)
+  t.ok(ix.removeDiary(K1))
+  t.ok(ix.add(K1, 1, post('ceu')))
+  t.is(ix.stats().posts, 1)
+  t.ok(ix.removePost(K1, 1))
+  ix.clear()
+  t.ok(ix.add(K1, 1, post('ceu')))
+  t.is(ix.stats().posts, 1)
+  for (const value of [null, undefined, {}, 0, -1, 1.5, NaN, '1', Infinity]) {
+    t.is(ix.removePost(K1, value), false)
+    t.is(ix.removePost(value, 1), false)
+  }
+})
+
+test('removePost finds a recent post near the end of a long shared posting list', (t) => {
+  const ix = createTopicIndex()
+  for (let i = 0; i < 5000; i++) ix.add(key(i + 1), 1, post('ceu', i))
+  t.is(ix.stats().posts, 5000)
+  // Counts the slots each search of a posting list walks.
+  let walked = 0
+  const indexOf = Array.prototype.indexOf
+  const lastIndexOf = Array.prototype.lastIndexOf
+  /* eslint-disable no-extend-native */
+  Array.prototype.indexOf = function (...args) {
+    const i = indexOf.apply(this, args)
+    walked += i === -1 ? this.length : i + 1
+    return i
+  }
+  Array.prototype.lastIndexOf = function (...args) {
+    const i = lastIndexOf.apply(this, args)
+    walked += i === -1 ? this.length : this.length - i
+    return i
+  }
+  let removed
+  try {
+    removed = ix.removePost(key(5000), 1)
+  } finally {
+    Array.prototype.indexOf = indexOf
+    Array.prototype.lastIndexOf = lastIndexOf
+  }
+  /* eslint-enable no-extend-native */
+  t.ok(removed)
+  t.ok(walked < 10, 'walked ' + walked + ' slots')
+  t.is(ix.stats().posts, 4999)
+  t.alike(ix.search(['ceu'], null, undefined, NOW).items[0], key(4999) + ':1')
+})
+
+test('removeDiary drops the creator of a term its remaining posts no longer reference', (t) => {
+  const ix = createTopicIndex({ perAuthorTermsMax: 2, maxTerms: 10 })
+  t.ok(ix.add(K1, 1, post('aa')))
+  t.ok(ix.add(K2, 1, post('aa')))
+  t.ok(ix.add(K1, 2, post('bb')))
+  t.ok(ix.removePost(K1, 1))
+  t.ok(ix.removeDiary(K1))
+  t.ok(ix.add(K1, 3, post('cc')))
+  t.ok(ix.add(K1, 4, post('dd')))
+  t.is(ix.add(K1, 5, post('ee')), false)
+  t.ok(ix.removePost(K2, 1))
+  t.is(ix.add(K1, 5, post('ee')), false, 'the old charge is not refunded to the new usage row')
+  t.is(ix.stats().terms, 2)
+})

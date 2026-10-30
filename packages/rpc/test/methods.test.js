@@ -18,12 +18,13 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.sign', 'cert.add', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove', 'identity.create',
-    'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.quote', 'post.reply', 'profile.read',
-    'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'identity.show', 'invite.sign', 'like.set', 'log.read', 'node.close', 'node.info', 'notices.list', 'peek.read', 'post.create', 'post.delete',
+    'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set', 'session.open', 'sync.start',
+    'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.quote', 'post.reply',
-    'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
+    'cert.add', 'follow.add', 'follow.remove', 'identity.create', 'like.set', 'node.close', 'post.create', 'post.delete', 'post.quote', 'post.reply',
+    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
 })
 
@@ -418,6 +419,19 @@ test('post.quote requires nonempty text even with media', (t) => {
   // record builder; it only checks the text's type and code-point length.
   for (const text of ['\u0000', '\t', '\r', '\u007f', '\u0085', '\u2028', '\u202e', '\u2066']) {
     t.alike(validateParams('post.quote', { to, text }), { ...validateParams('post.create', { text }), value: { to, text } })
+  }
+})
+
+test('post.delete and profile.delete take one canonical ref and nothing else', (t) => {
+  for (const method of ['post.delete', 'profile.delete']) {
+    t.ok(isMutating(method))
+    ok(t, method, { to: KEY + ':1' }, { to: KEY + ':1' })
+    ok(t, method, { to: KEY + ':' + Number.MAX_SAFE_INTEGER }, { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+    t.is(validateParams(method, {}).message, 'parâmetro obrigatório: to')
+    t.is(validateParams(method, { to: KEY + ':1', on: true }).message, 'parâmetro desconhecido')
+    for (const to of [null, 1, {}, { author: KEY, seq: 1 }, KEY, KEY + ':0', KEY + ':01', KEY + ':-1', KEY + ':1.5', KEY.toUpperCase() + ':1', KEY + ':9007199254740992']) {
+      t.is(validateParams(method, { to }).message, 'parâmetro inválido: to')
+    }
   }
 })
 

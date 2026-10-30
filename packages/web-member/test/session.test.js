@@ -442,7 +442,7 @@ test('locked: reads work, writes and creation need the key pair', async (t) => {
   t.is(info.memberCert, true)
   t.is((await locked.web.request('log.read', {})).entries[1].record.text, 'com a chave')
   t.alike(await locked.web.request('identity.create'), { publicKey, association: assoc.hex }, 'opening an existing diary needs no key')
-  for (const [method, params] of [['cert.add', { cert: createCert({ member: publicKey }, assoc.kp) }], ['profile.set', { name: 'B' }], ['post.create', { text: 'x' }], ['post.reply', { to: publicKey + ':1', text: 'x' }]]) {
+  for (const [method, params] of [['cert.add', { cert: createCert({ member: publicKey }, assoc.kp) }], ['profile.set', { name: 'B' }], ['post.create', { text: 'x' }], ['post.reply', { to: publicKey + ':1', text: 'x' }], ['post.delete', { to: publicKey + ':1' }], ['profile.delete', { to: publicKey + ':1' }]]) {
     const err = await errorOf(locked.web.request(method, params))
     t.is(err && err.code, 'USAGE', method)
     t.is(err && err.message, LOCKED, method)

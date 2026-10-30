@@ -8,6 +8,7 @@ const { safe, cpWidth, displayWidth } = require('./safe')
 const { validRecordCopy, latestProfile, formatRef, parseRef } = require('./records')
 const { latestUsername } = require('./username')
 const { engagementState } = require('./engagement')
+const { applyDeletes, deletedSeqs } = require('./deletion')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -46,10 +47,18 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   const items = []
   const future = []
   const usernameOpts = { revokedIssuers }
+  // One pass over `logs`: a getter must not change a diary between the
+  // deleted-ref set and the items. Tombstones are folded here, not only in
+  // readAll, because the web node and tests pass partial entries.
+  const deletedRefs = new Set()
+  const prepared = []
   for (const { key, entries } of logs) {
-    // Snapshot peer data once so all three readers see the same values,
-    // even when the input has getters.
-    const copied = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const snapshot = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const copied = applyDeletes(snapshot)
+    for (const seq of deletedSeqs(copied)) deletedRefs.add(formatRef({ author: key, seq }))
+    prepared.push({ key, copied })
+  }
+  for (const { key, copied } of prepared) {
     const name = (latestProfile(copied) || {}).name || null
     const username = latestUsername(copied, key, association, usernameOpts)
     for (const { seq, record: post } of copied) {
@@ -68,6 +77,9 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
         future.push({ author: key, seq })
         continue
       }
+      // A tombstone counts only in the target's own diary. A repost of a log
+      // this call did not receive stays. A reply or a quote is its own post.
+      if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
       items.push({ kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null })
     }

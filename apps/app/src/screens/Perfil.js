@@ -19,15 +19,17 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
-import { MAX_BIO, MAX_NAME } from '@varanda/rpc'
+import { LOG_LIMIT_MAX, MAX_BIO, MAX_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
-import { countChars } from '../format'
+import { useNames } from '../names'
+import { profileVersions } from '../deletion'
+import { countChars, relativeTime } from '../format'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { pickImage } from '../media/attach'
 import { openImage } from '../media/avatarEncode'
 import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
 import { confirmSaved, planSave } from '../profileSave'
-import { ErrorText, Field, Page, Row, Soft, colors, errorText, useAction } from '../ui'
+import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
@@ -57,6 +59,121 @@ const releaseHandle = (h) => {
   if (h) {
     try { h.release() } catch {}
   }
+}
+
+// Pages of the whole own log are read to list the versions; a diary longer
+// than this many pages shows only the newest ones.
+const VERSION_PAGES = 10
+
+// The own profile versions, newest first, each with 'Apagar versão'
+// (profile.delete once; the node deletes a compat pair as one version). After
+// an uncertain failure the list is re-read before the button is offered again.
+function ProfileVersions ({ node, ownKey, shown }) {
+  const names = useNames()
+  const action = useAction()
+  const [versions, setVersions] = useState(null)
+  const [loadError, setLoadError] = useState('')
+  const [partial, setPartial] = useState(false)
+  const [confirm, setConfirm] = useState(null)
+  const [done, setDone] = useState(false)
+  const aliveRef = useRef(true)
+  const genRef = useRef(0)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
+
+  const keyOf = async () => typeof ownKey === 'string' ? ownKey.toLowerCase() : (await node.request('node.info', {})).publicKey
+  const load = async () => {
+    const mine = ++genRef.current
+    setVersions(null)
+    setLoadError('')
+    try {
+      const entries = []
+      let before
+      let truncated = 0
+      for (let i = 0; i < VERSION_PAGES; i++) {
+        const params = before === undefined ? { limit: LOG_LIMIT_MAX } : { limit: LOG_LIMIT_MAX, before }
+        const log = await node.request('log.read', params)
+        entries.push(...log.entries)
+        truncated = log.entriesTruncated
+        if (truncated === 0) break
+        const seqs = log.entries.map((e) => e.seq).concat((log.invalid || []).map((e) => e.seq))
+        if (seqs.length === 0) break
+        before = Math.min(...seqs)
+      }
+      if (!aliveRef.current || mine !== genRef.current) return
+      setVersions(profileVersions(entries))
+      setPartial(truncated !== 0)
+    } catch (err) {
+      if (aliveRef.current && mine === genRef.current) setLoadError(errorText(err))
+    }
+  }
+
+  useEffect(() => {
+    if (shown) {
+      setConfirm(null)
+      setDone(false)
+      action.clearError()
+      load()
+    } else {
+      genRef.current += 1
+    }
+  }, [shown])
+
+  const remove = async (version) => {
+    const key = await keyOf()
+    if (typeof key !== 'string') return
+    const r = await action.run(() => node.request('profile.delete', { to: key + ':' + version.seq }))
+    if (!aliveRef.current) return
+    if (r.ok) {
+      setConfirm(null)
+      setDone(true)
+      // A seed never overwrites a known name with null: ask the node again.
+      names.invalidate([key])
+      await load()
+    } else if (r.uncertain) {
+      setConfirm(null)
+      await load()
+    }
+  }
+
+  if (loadError) {
+    return (
+      <View style={styles.versions}>
+        <SectionHeader>Versões do perfil</SectionHeader>
+        <ErrorText>{loadError}</ErrorText>
+        <Pill label='Tentar de novo' onPress={load} />
+      </View>
+    )
+  }
+  if (versions === null) return null
+  if (versions.length === 0 && !done) return null
+  return (
+    <View style={styles.versions}>
+      <SectionHeader>Versões do perfil</SectionHeader>
+      {done ? <Soft>versão apagada</Soft> : null}
+      {versions.map((v, i) => (
+        <View key={v.seq} style={styles.version}>
+          <Text style={styles.versionName}>{displayText(v.name)}</Text>
+          <Soft>{(i === 0 ? 'atual · ' : '') + (relativeTime(v.at) ?? displayText(String(v.at))) + (v.avatar ? ' · com foto' : '')}</Soft>
+          {confirm === v.seq
+            ? (
+              <View style={styles.versionConfirm}>
+                <Soft>Apagar esta versão do perfil? Ela some do seu diário e dos feeds de quem te segue. A cópia da foto enviada continua na rede.</Soft>
+                <Row>
+                  <Btn label='Apagar versão' danger onPress={() => remove(v)} pending={action.pending} />
+                  <Btn label='Cancelar' secondary onPress={() => { action.clearError(); setConfirm(null) }} disabled={action.pending} />
+                </Row>
+              </View>
+              )
+            : <Pill label='Apagar versão' danger onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
+        </View>
+      ))}
+      {partial ? <Soft>Mostrando só as versões mais recentes.</Soft> : null}
+      <ErrorText>{action.error}</ErrorText>
+    </View>
+  )
 }
 
 export default function Perfil ({ open, current, onClose, onSaved, ownKey, page = false, embedded = false, index, total, onSkip }) {
@@ -401,6 +518,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
           {fields}
           <Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid || locked} />
           <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
+          {editor === null ? <ProfileVersions node={node} ownKey={ownKey} shown={shown} /> : null}
         </Page>
       </KeyboardAvoidingView>
     )
@@ -441,6 +559,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
         <Page>
           {fields}
           <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
+          {editor === null ? <ProfileVersions node={node} ownKey={ownKey} shown={shown} /> : null}
         </Page>
       </KeyboardAvoidingView>
     </Sheet>
@@ -450,6 +569,10 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   photo: { gap: 12, alignItems: 'flex-start' },
+  versions: { gap: 8, marginTop: 8 },
+  version: { gap: 4, paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.line },
+  versionName: { fontSize: 16, fontWeight: '600', color: colors.ink },
+  versionConfirm: { gap: 8 },
   skip: { alignSelf: 'flex-start', paddingVertical: 10, paddingHorizontal: 4, minHeight: 44, justifyContent: 'center' },
   skipText: { fontSize: 15, fontWeight: '600', color: colors.accent }
 })

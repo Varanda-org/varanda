@@ -24,7 +24,10 @@
 // Bounds: maxAuthors (4096) entries, about 2 KB per author (tokens, the
 // pending candidate copy, map slot). note() refuses (false, nothing stored)
 // only a NEW author that would need an entry when the map is full; existing
-// authors always update. Entries leave only via remove/clear. search keeps
+// authors always update. Entries leave only via remove/clear. Forgotten seqs
+// are kept apart from the entries and take no maxAuthors slot: the seeder
+// forgets only tombstone targets of diaries it serves and calls remove when
+// it stops serving one, so they are bounded like its own deleted sets. search keeps
 // the best RESULTS_MAX by (rank, author) with bounded insertion, never
 // sorting all matches.
 //
@@ -99,6 +102,10 @@ function better (a, b) {
 function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
   const cap = Number.isSafeInteger(maxAuthors) && maxAuthors >= 0 ? maxAuthors : DEFAULT_MAX_AUTHORS
   const entries = new Map()
+  // author -> every seq forget() was called with, current profile or not and
+  // whether or not the author holds an entry. A rescan of the raw diary must
+  // not restore a deleted name; an older seq can still be the newest one left.
+  const forgottenProfiles = new Map()
 
   function note (author, seq, record) {
     try {
@@ -119,6 +126,10 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
       } else {
         return true
       }
+      // The tombstone outranks recency (this seq was the newest profile when
+      // it was forgotten, so it must not replace an older survivor) and is
+      // checked before an entry is allocated, so it never costs a slot.
+      if (profileName !== null && forgottenProfiles.get(author)?.has(seq)) return true
       let entry = entries.get(author)
       if (entry === undefined) {
         if (entries.size >= cap) return false
@@ -166,8 +177,30 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
     } catch {}
   }
 
+  function forget (author, seq) {
+    try {
+      if (!isHex64(author) || !Number.isSafeInteger(seq) || seq < 1) return false
+      // Tombstoned even when it is not the current name: once the newer
+      // profile is forgotten too, a rescan must not bring this one back.
+      let seqs = forgottenProfiles.get(author)
+      if (seqs === undefined) {
+        seqs = new Set()
+        forgottenProfiles.set(author, seqs)
+      }
+      seqs.add(seq)
+      const entry = entries.get(author)
+      if (entry === undefined || entry.profileSeq !== seq) return false
+      entry.profileSeq = null
+      entry.nameTokens = []
+      return true
+    } catch {
+      return false
+    }
+  }
+
   function remove (author) {
     try {
+      if (typeof author === 'string') forgottenProfiles.delete(author)
       return typeof author === 'string' && entries.delete(author)
     } catch {
       return false
@@ -176,6 +209,7 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
 
   function clear () {
     entries.clear()
+    forgottenProfiles.clear()
   }
 
   function usable (usableIssuer, issuer) {
@@ -232,7 +266,7 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
     return { authors: entries.size, maxAuthors: cap }
   }
 
-  return { note, settle, remove, clear, search, stats }
+  return { note, settle, forget, remove, clear, search, stats }
 }
 
 module.exports = {

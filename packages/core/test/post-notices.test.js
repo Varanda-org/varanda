@@ -79,6 +79,19 @@ test('reply and quote rows; reply plus mention is one reply row', (t) => {
   t.is(p.incomplete, false)
 })
 
+test('removePost drops every row of a deleted post and it never folds again', (t) => {
+  const idx = index()
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.settle(A)
+  idx.foldPost(B, 1, post('oi', D(1), { replyTo: { author: A, seq: 1 } }))
+  idx.foldPost(B, 2, post('@ana olha', D(2), { quote: { author: A, seq: 1 } }))
+  idx.removePost(B, 2)
+  idx.removePost(B, 9)
+  idx.foldPost(B, 2, post('@ana olha', D(2), { quote: { author: A, seq: 1 } }))
+  t.alike(page(idx).items, [{ key: B, seq: 1, at: D(1), kind: 'reply' }])
+  t.alike(page(idx, { target: C }).items, [])
+})
+
 test('a mention folded before the username record resolves after settle; a rename keeps the old name', (t) => {
   const idx = index()
   idx.foldPost(B, 1, post('oi @ana', D(1)))
@@ -266,7 +279,7 @@ test('a page carries no count, total, size or length', (t) => {
   idx.foldPost(B, 2, post('x', D(2), { replyTo: { author: A, seq: 1 } }))
   const keys = allKeys(page(idx, { limit: 1 }))
   for (const bad of ['count', 'total', 'size', 'length']) t.absent(keys.includes(bad), bad)
-  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'removeAuthor', 'settle'])
+  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'removeAuthor', 'removePost', 'settle'])
 })
 
 test('per-pair rotation keeps working for an unresolved name already admitted', (t) => {

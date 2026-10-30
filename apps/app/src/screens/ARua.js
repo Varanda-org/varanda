@@ -39,7 +39,8 @@ import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
-import { isBusy, isDiaryGone, isSeederDown } from './Conversa'
+import { DeletePrompt, isBusy, isDiaryGone, isSeederDown, useDelete } from './Conversa'
+import { canDelete } from '../deletion'
 import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { HelpLink } from '../ui/Help'
@@ -134,10 +135,21 @@ export function useSocial ({ ownKey, onToast }) {
   const epochRef = useRef(0)
   // The refs asked for since the last refresh, to re-resolve after a drop.
   const seenRef = useRef({ need: new Set(), local: new Map() })
+  const deletedRef = useRef(new Set())
   const change = useCallback((update) => {
-    socialRef.current = { ...socialRef.current, ...update(socialRef.current) }
+    const patch = update(socialRef.current)
+    // Queued pages and pending original reads must not restore deleted content.
+    if (patch.originals) {
+      for (const ref of deletedRef.current) patch.originals.set(ref, null)
+    }
+    socialRef.current = { ...socialRef.current, ...patch }
     setSocial(socialRef.current)
   }, [])
+  const deleteOriginal = useCallback((ref) => {
+    deletedRef.current.add(ref)
+    seenRef.current.local.delete(ref)
+    change((prev) => ({ originals: new Map(prev.originals) }))
+  }, [change])
   // Keys known to be own or followed: rebuilt on every refresh from the
   // page's authors and follow.list.
   const knownRef = useRef(new Set())
@@ -396,7 +408,9 @@ export function useSocial ({ ownKey, onToast }) {
     const needed = need.filter((r) => typeof r === 'string')
     const strangers = asked.filter((r) => !isKnown(authorOfRef(r)))
     for (const r of needed.concat(strangers)) seenRef.current.need.add(r)
-    for (const [ref, item] of local) seenRef.current.local.set(ref, item)
+    for (const [ref, item] of local) {
+      if (!deletedRef.current.has(ref)) seenRef.current.local.set(ref, item)
+    }
     change((prev) => {
       // A refresh starts from an empty cache: every original (and each
       // unavailable one) passes diary.peek again, which refuses authors the
@@ -547,11 +561,11 @@ export function useSocial ({ ownKey, onToast }) {
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast }
+  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport } (each
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } (each
 // optional; onOpenMention(username, { author, username }) gets the row author's verified
 // name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
@@ -628,6 +642,10 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     onLike: () => social.toggle('like', ref),
     onRepost: () => social.toggle('repost', ref),
     // Until the own key is known, no post can safely offer a report action.
+    // Only the own post itself, never the original of a repost by someone else.
+    onDelete: typeof h.onDelete === 'function' && canDelete(post, own) && repostedBy === null
+      ? () => h.onDelete({ ref, seq: post.seq })
+      : undefined,
     onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
       ? () => h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text })
       : undefined
@@ -746,7 +764,7 @@ function pageNeeds (pageItems) {
   return { local, shown, need, parents: [...parents], authors }
 }
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast }) {
+export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -1025,10 +1043,22 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     )
   }
 
+  const del = useDelete({
+    request,
+    onToast,
+    recheck: loadNewest,
+    onDeleted: async (t) => {
+      social.deleteOriginal(t.ref)
+      const cur = feedRef.current
+      commit({ items: cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+    }
+  })
   // Reply names re-render when the cache changes; relative dates on each tick.
-  // Originals, counts and the own state re-render the rows too.
-  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social }), [names.profileOf, now, social.social])
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  // Originals, counts, the own state and whether deleting is offered re-render
+  // the rows too.
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   const renderItem = ({ item }) => {
@@ -1054,6 +1084,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
 
   return (
     <View style={styles.flex}>
+      <DeletePrompt del={del} />
       <RefreshableList
         listRef={listRef}
         data={items}

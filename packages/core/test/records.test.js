@@ -950,3 +950,67 @@ test('latestProfile: avatar from the newest valid profile', async (t) => {
   const bad = [...entries, { seq: 3, record: { ...pair[1], avatar: { ...AVATAR, width: 640, height: 640 } } }]
   t.alike(latestProfile(bad).avatar, AVATAR)
 })
+
+test('validateRecord: delete records', async (t) => {
+  await testnet(t)
+  const { deleteRecord, DELETE_RANGE_KEYS } = records
+  const del = { type: 'delete', seq: 3, at: AT }
+  const RANGE = { core: K2, start: 1, blocks: 2 }
+  t.is(validateRecord(del, 7), null)
+  t.is(validateRecord(del, 4), null, 'the block right after the target')
+  t.is(validateRecord({ ...del, media: [RANGE] }, 7), null)
+  t.is(validateRecord({ ...del, media: [RANGE, RANGE, RANGE, RANGE] }, 7), null)
+  t.is(validateRecord(del, 0), 'genesis-required')
+  t.is(validateRecord({ ...del, seq: 7 }, 7), 'delete-invalid', 'self target')
+  t.is(validateRecord({ ...del, seq: 8 }, 7), 'delete-invalid', 'forward target')
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateRecord({ ...del, seq }, 7), 'delete-invalid', 'seq ' + String(seq))
+  }
+  t.is(validateRecord({ ...del, seq: 1 }, 1), 'delete-invalid', 'a tombstone at block 1 has no target')
+  t.is(validateRecord(del, undefined), 'delete-invalid', 'no block index')
+  t.is(validateRecord({ ...del, extra: 1 }, 7), 'malformed')
+  t.is(validateRecord({ ...del, author: K1 }, 7), 'malformed', 'no author field')
+  t.is(validateRecord({ ...del, v: 1 }, 7), 'malformed', 'no version field')
+  t.is(validateRecord({ ...del, kind: 'post' }, 7), 'malformed', 'no kind field')
+  const noAt = { ...del }
+  delete noAt.at
+  t.is(validateRecord(noAt, 7), 'malformed')
+  t.is(validateRecord({ ...del, at: '2026-01-01' }, 7), 'date-invalid')
+  t.is(validateRecord({ ...del, at: null }, 7), 'date-invalid')
+  const badMedia = [
+    null, [], {}, [RANGE, RANGE, RANGE, RANGE, RANGE], [null], [{ ...RANGE, extra: 1 }],
+    [{ core: K2, start: 1 }], [{ ...RANGE, core: 'A'.repeat(64) }], [{ ...RANGE, start: 0 }],
+    [{ ...RANGE, start: MAX_MEDIA_BLOCKS }], [{ ...RANGE, blocks: 0 }],
+    [{ ...RANGE, blocks: MAX_MEDIA_ITEM_BLOCKS + 1 }], [{ ...RANGE, start: 1.5 }],
+    [{ ...RANGE, start: MAX_MEDIA_BLOCKS - 1, blocks: 2 }]
+  ]
+  for (const media of badMedia) t.is(validateRecord({ ...del, media }, 7), 'media-invalid', 'media ' + JSON.stringify(media))
+  const sparse = [RANGE, RANGE]
+  sparse.length = 3
+  t.is(validateRecord({ ...del, media: sparse }, 7), 'media-invalid', 'sparse media')
+  t.is(validateRecord({ ...del, media: [{ ...RANGE, start: MAX_MEDIA_BLOCKS - 2, blocks: 2 }] }, 7), null, 'last block of the core')
+
+  t.alike(DELETE_RANGE_KEYS, ['core', 'start', 'blocks'])
+  t.alike(deleteRecord({ seq: 3, at: AT }), del)
+  t.alike(Object.keys(deleteRecord({ seq: 3, at: AT })), ['type', 'seq', 'at'], 'no media key when absent')
+  t.alike(deleteRecord({ seq: 3, at: AT, media: [{ ...RANGE, extra: 1 }] }), { ...del, media: [RANGE] }, 'only the range keys are copied')
+  t.ok(isCanonicalIso(deleteRecord({ seq: 1 }).at))
+  await t.exception.all(async () => deleteRecord({ seq: 0, at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: '3', at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ at: AT }), /delete-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: [] }), /media-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: AT, media: null }), /media-invalid/)
+  await t.exception.all(async () => deleteRecord({ seq: 3, at: 'x' }), /date-invalid/)
+
+  // Hostile getters and proxies never throw.
+  const hostileSeq = { type: 'delete', at: AT }
+  Object.defineProperty(hostileSeq, 'seq', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostileSeq, 7), 'malformed')
+  const hostileRange = { core: K2, start: 1 }
+  Object.defineProperty(hostileRange, 'blocks', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord({ ...del, media: [hostileRange] }, 7), 'malformed')
+  const trap = new Proxy({ ...del }, { ownKeys () { throw new Error('boom') } })
+  t.is(validateRecord(trap, 7), 'malformed')
+  t.is(records.validRecordCopy(hostileSeq, 7), null)
+  t.alike(records.validRecordCopy(del, 7), del)
+})

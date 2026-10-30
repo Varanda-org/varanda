@@ -565,7 +565,10 @@ test('toRpcError: the error table, row by row', (t) => {
     'limite de diários seguidos atingido',
     'limite do diário atingido',
     'diretório não é de um membro',
-    'associação diferente da configurada'
+    'associação diferente da configurada',
+    'o registro não é uma publicação',
+    'o registro não é um perfil',
+    'não é possível apagar este registro'
   ]
   for (const message of usage) t.alike(map(plain(message)), { code: 'USAGE', message }, message)
   t.alike(map(plain('registro inválido: genesis-required', 'INVALID_RECORD')), { code: 'USAGE', message: 'registro inválido: genesis-required' })

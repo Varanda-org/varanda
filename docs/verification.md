@@ -1875,7 +1875,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - [ ] Depois do vínculo Google, o aceite chega ao servidor: `account status` mostra `aceites dos termos: 1` e `account export` traz o `terms` do membro (parar o serviço antes do export).
 - [ ] Membro sem vínculo: Ajustes › Termos e privacidade diz "só neste aparelho"; depois do vínculo vira "registrado".
 - [ ] Armazenamento recusado (janela privada que bloqueia `localStorage`): o portão aparece a cada carga.
-- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (4, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
+- [ ] Subir `LEGAL_VERSION` e `TERMS_VERSION` para a próxima versão (6, hoje) num teste local: o portão volta para todos e o registro do aparelho é substituído.
 - [ ] Recomeçar tira o membro do registro; Sair não.
 - [ ] No nativo (`Conectar`): o portão antes de Conectar e, em Ajustes › Termos e privacidade, a data do aceite (sem linha de sincronização: no nativo o aceite fica só no aparelho).
 
@@ -2467,3 +2467,53 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Uma faixa fica guardada para uma chave que fez a verificação e não concluiu o vínculo.
 - A verificação prova a idade de quem terminou a página da Didit, não de quem tem a passkey: o endereço da sessão pode ser repassado, e um adulto pode fazer a selfie no lugar de um menor (no mesmo aparelho ou em outro). Prender a sessão ao aparelho não fecha isso; é uma questão de produto e de parecer (#39, #82).
 - Um membro que já tinha certificado é bloqueado pelo app e pelo serviço de conta, mas um cliente modificado ainda publica e sincroniza, porque os semeadores não conferem a faixa (#68).
+
+## 41. Apagar publicações e versões do perfil (PR feat/delete-posts, 2026-10-29)
+
+### O que mudou
+
+- Registro novo `delete` (lápide) no próprio diário: `{ type: 'delete', seq, at }`, com `media: [{ core, start, blocks }]` opcional, `1 <= seq <` o seq da própria lápide (`docs/protocol.md`). O efeito é determinístico e genérico: as entradas são lidas do seq mais alto para o mais baixo, uma lápide válida vale se ela mesma ainda não foi apagada, e o bloco apagado não conta em nenhuma dobra (`packages/core/lib/deletion.js`, `applyDeletes`).
+- Os escritores (`packages/core/lib/member.js`, `packages/web-member/lib/member-ops.js`) só apagam publicação própria (inclusive resposta e citação) ou versão do perfil; recusam o bloco 0, lápides e qualquer outro tipo. O par de compatibilidade do perfil sai como uma versão só, em um append atômico (duas lápides). A faixa de mídia vai na lápide só quando nenhuma publicação ou perfil sobrevivente a usa.
+- RPC `post.delete` e `profile.delete` (`docs/rpc.md`); `log.read` mostra o bloco apagado como `invalid: { seq, reason: 'deleted' }`.
+- Semeador: o alvo sai dos índices de engajamento, tema e nome; curtidas, republicações, respostas e citações de um alvo apagado não contam; `postBlock` responde null e `mediaRead` recusa a faixa listada na lápide, então `/media` e `/moderation-post` dão o 404 genérico.
+- CLI: `varanda delete --to <chave>:<seq>`; `log` mostra `#<seq> apagado`.
+- App: ação de lixeira nas publicações próprias em Diário, A Rua e Conversa, com confirmação em folha (`DeletePrompt`); Perfil lista as versões com "Apagar versão".
+
+### Testes automatizados
+
+Cobertura no repositório, por ponto:
+
+- Dobra, validação e efeito determinístico (inclusive a lápide de lápide): `packages/core/test/deletion.test.js`, `records.test.js`, `records-clone.test.js`.
+- Escritor do nó do núcleo, recusas, par de compatibilidade, faixas de mídia, `log.read` paginado: `packages/core/test/delete-session.test.js`, `member.test.js`, `session.test.js`, `store.test.js`.
+- Escritor do nó do navegador: `packages/web-member/test/delete.test.js`, `session.test.js`.
+- Semeador (índices, `postBlock`, `mediaRead`, reconstrução, cursor pausado): `packages/core/test/seeder-delete.test.js`, `engagement-index-delete.test.js`, `topic-index.test.js`, `name-index.test.js`; `apps/cli/test/seeder-index.test.js`, `ai-post-route.test.js`.
+- Feed e Espiadinha: `packages/core/test/feed.test.js`, `peek.test.js`.
+- CLI `delete` e `log`: `apps/cli/test/commands.test.js`, `cli.test.js`.
+- App (quem pode apagar, linhas escondidas, versões do perfil): `apps/app/test/deletion.test.js`, `outbox.test.js`.
+- Ponta a ponta, novo: `packages/core/test/delete-e2e.test.js` (sessões do nó na DHT local): quem segue sincroniza pelo semeador e deixa de ver a publicação, a resposta e a citação apagadas (`feed.read`, `log.read` com `deleted`); a lápide de outro diário com o seq do autor só esconde o bloco do próprio diário dela; o escritor recusa outro autor e recusa apagar uma lápide; uma lápide de lápide gravada à mão faz a publicação voltar no nó do autor e no de quem segue; um diário truncado continua aparecendo como `fork` para quem segue; o worklet do app usa o mesmo despachante da sessão, sem handler próprio.
+- Ponta a ponta, novo: `packages/web-member/test/e2e-delete.test.js` (nó do navegador e semeador real pelo WebSocket): depois de apagar uma publicação com foto, `/index/counts` e `/index/member` a omitem, `/media` e `/moderation-post` dão 404, `postBlock` é null e a Espiadinha de outro nó não a mostra mais.
+
+Resultados (2026-10-29, macOS): `node packages/core/test/delete-e2e.test.js` com 3 testes e 44 asserções, todos passam, no Node 24.22.1 e no 20.20.2; `node packages/web-member/test/e2e-delete.test.js` com 1 teste e 20 asserções, passa no Node 24.22.1 e no 20.20.2. Na árvore final, já sobre a main 184b7d2: `npm ci --ignore-scripts` ok; `npm run lint` sem erros; `npm test` com 0 falhas em todos os workspaces (50, 10, 35, 51, 54 e 2 arquivos de teste) no Node 20.20.2 e no 24.22.1; `npm run demo` termina com "DEMO OK" nas duas versões.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Diário: a lixeira aparece só nas publicações próprias; tocar abre a folha "Apagar publicação"; Cancelar, o toque no fundo, Escape e o Voltar do Android fecham sem gravar nada (não realizada ainda).
+- [ ] Diário: confirmar apaga, a publicação some da lista e o diário mostra uma lápide a mais em Ajustes › Avançado (não realizada ainda).
+- [ ] A Rua e Conversa: a mesma ação numa publicação, numa resposta e numa citação próprias; a republicação de um post de outra pessoa nunca oferece a lixeira (não realizada ainda).
+- [ ] Falha incerta (semeador derrubado durante o pedido): aparece a mensagem de incerteza, o app relê o diário antes de oferecer o botão de novo e nunca reenvia o pedido sozinho (não realizada ainda).
+- [ ] Perfil: com três versões, "Apagar versão" na mais nova faz valer a anterior (nome e bio); confirmar e cancelar se comportam como no Diário (não realizada ainda).
+- [ ] Perfil: uma versão com foto (par de compatibilidade) aparece como uma versão só e some inteira com um toque; a foto deixa de carregar em `/media` (não realizada ainda).
+- [ ] Perfil: apagar a última versão deixa a conta sem nome nem bio; quem segue vê as iniciais (não realizada ainda).
+- [ ] CLI: `varanda delete --to <chave>:<seq>` imprime `apagado #<seq>`; repetir imprime `já apagado` sem gravar; outro autor, o bloco 0, uma curtida e uma lápide são recusados com a mensagem em pt-BR (não realizada ainda).
+- [ ] CLI: `varanda log` mostra `#<seq> apagado` no lugar do texto, e `--json` traz `record: null, deleted: true` (não realizada ainda).
+- [ ] Semeador de produção: depois da sincronização, `/index/counts/<ref>` e `/index/member/<chave>` não trazem a publicação, `/media/...` da foto dá 404 e `/moderation-post/<chave>/<seq>` com o token dá 404 (não realizada ainda).
+- [ ] Um segundo aparelho que segue o autor deixa de ver a publicação em A Rua depois de sincronizar, e uma pessoa que não segue deixa de vê-la na Espiadinha (não realizada ainda).
+- [ ] O aceite dos Termos versão 5 aparece de novo para quem aceitou a versão 4 (não realizada ainda).
+
+### Limites
+
+- Apagar não remove os bytes: quem já tem cópia do diário, ou da foto, continua com ela; a lápide só diz aos clientes e ao semeador que o bloco não vale mais.
+- Uma lápide que aponta para outra lápide desfaz a primeira. O escritor nunca grava isso; só o próprio autor, escrevendo à mão, consegue, e o efeito vale só para o diário dele.
+- O semeador não aplica nesta etapa lápides que apontam para `follow` ou para a declaração de núcleo de mídia (os escritores nunca as gravam).

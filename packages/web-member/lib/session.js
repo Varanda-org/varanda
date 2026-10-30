@@ -1061,6 +1061,19 @@ function createBrowserSession ({
     return { seq: r.seq, on: r.on, changed: r.changed }
   }
 
+  // post.delete / profile.delete: the post.reply path around member-ops'
+  // tombstone writer (a target already deleted writes nothing).
+  async function recordDelete (remove, { to }, epoch) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    await requireUnlocked()
+    await ensureCaughtUp(epoch)
+    const r = await withStore((c) => remove(c, { to: ref }))
+    if (r.changed) wrote(r.seq)
+    await pushAfterWrite()
+    return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
+  }
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -1307,6 +1320,10 @@ function createBrowserSession ({
       return { seq: r.seq }
     }),
 
+    'post.delete': serial(async ({ to }, epoch) => recordDelete(member.postDelete, { to }, epoch)),
+
+    'profile.delete': serial(async ({ to }, epoch) => recordDelete(member.profileDelete, { to }, epoch)),
+
     // Idempotent toggles on the post.reply path: a state already held
     // writes nothing (changed: false) and only pushes an outstanding length.
     'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
@@ -1353,9 +1370,9 @@ function createBrowserSession ({
       const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
       const invalid = []
-      for (const { seq, record } of window) {
+      for (const { seq, record, deleted } of window) {
         if (record === null) {
-          invalid.push({ seq, reason: 'malformed' })
+          invalid.push({ seq, reason: deleted === true ? 'deleted' : 'malformed' })
           continue
         }
         const copy = validRecordCopy(record, seq)

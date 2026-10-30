@@ -32,7 +32,11 @@ const PLAIN = {
   'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
   'o nó do navegador não carregou': 'Não foi possível carregar o app. Recarregue a página.',
   'não foi possível carregar o nó do navegador': 'Não foi possível carregar o app. Recarregue a página.',
-  'nó local indisponível na web': 'Não foi possível carregar o app. Recarregue a página.'
+  'nó local indisponível na web': 'Não foi possível carregar o app. Recarregue a página.',
+  'referência inválida': 'Não encontramos essa publicação.',
+  'não é possível apagar este registro': 'Este registro não pode ser apagado.',
+  'o registro não é uma publicação': 'Este registro não é uma publicação.',
+  'o registro não é um perfil': 'Este registro não é um perfil.'
 }
 
 // The plain words for a message, or the message itself.
