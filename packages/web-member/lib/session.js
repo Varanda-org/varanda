@@ -717,6 +717,9 @@ function createBrowserSession ({
                 certKnown = true
                 event('certificado recuperado do semeador')
                 return
+              case 'newest':
+                event('newest ' + safe(String(ev.key)) + ' ' + safe(String(ev.length)))
+                return
               case 'have':
               case 'admitted':
                 if (ev.key === ownKey && localLength !== null && ev.length >= localLength) unpushed = false
@@ -1634,9 +1637,15 @@ function createBrowserSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
-      // The window ends at `before` (exclusive), clamped to the length.
-      const end = before === undefined ? all.length : Math.min(before, all.length)
-      const window = all.slice(Math.max(0, end - limit), end)
+      // The window ends at `before` (exclusive), by seq: a followed diary's
+      // entries skip the blocks not stored, the own diary's are dense (seq
+      // = position), so there this is the slice clamped to the length.
+      let end = all.length
+      if (before !== undefined) {
+        while (end > 0 && all[end - 1].seq >= before) end--
+      }
+      const start = Math.max(0, end - limit)
+      const window = all.slice(start, end)
       const entries = []
       const invalid = []
       for (const { seq, record, deleted } of window) {
@@ -1648,7 +1657,7 @@ function createBrowserSession ({
         if (copy !== null) entries.push({ seq, record: copy })
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
-      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
+      return { key: r.key, entries, invalid, entriesTruncated: start }
     }),
 
     'feed.read': serial(async ({ limit, before }) => {
