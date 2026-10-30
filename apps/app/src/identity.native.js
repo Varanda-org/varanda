@@ -4,15 +4,15 @@
 // iOS AuthenticationServices) with the same rp.id (the installation hostname)
 // and PRF input as the web (src/passkeyOptions.js), so the credential manager
 // offers the passkey the web created and the worklet derives the same diary
-// key. Only the 32-byte PRF output crosses the IPC (identity.install, 5.35),
+// key. Only the 32-byte PRF output crosses the IPC (identity.install, 5.36),
 // once per ceremony or resume; it never goes to a log, an event or a result.
 //
 // Staying signed in mirrors the browser node: after a successful non-resumed
 // install the PRF output is stored (src/sessionStore.native.js) and only a
-// successful save calls identity.sessionSaved (5.40), which lifts the sign-out
+// successful save calls identity.sessionSaved (5.41), which lifts the sign-out
 // barrier; a failed save still unlocks, with sessionSaved: false. resume()
 // reopens the stored session at start with no ceremony. 'Sair' writes the
-// worklet's signedOut marker first (identity.forget, 5.39), then deletes the
+// worklet's signedOut marker first (identity.forget, 5.40), then deletes the
 // stored item; when that delete fails it rejects SIGNOUT_INCOMPLETE with the
 // node locked.
 
@@ -35,7 +35,7 @@ import {
 // key for another diary.
 const MISMATCH_TEXT = 'passkey não corresponde ao diário guardado'
 // apps/app/worklet/identity-install.js SIGNED_OUT, its refusal of a resumed
-// install after 'Sair' (docs/rpc.md 5.35).
+// install after 'Sair' (docs/rpc.md 5.36).
 const SIGNED_OUT_TEXT = 'sessão encerrada neste aparelho: entre com a passkey'
 const SIGNOUT_INCOMPLETE_TEXT = 'não foi possível sair por completo neste aparelho: tente de novo'
 const KNOWN_CODES = ['CANCELLED', 'EXISTS', 'UNSUPPORTED', 'NO_PRF', 'WEBAUTHN']
@@ -333,7 +333,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     } catch (err) {
       failure = err
     }
-    // Deleted whatever the answer (docs/rpc.md 5.38).
+    // Deleted whatever the answer (docs/rpc.md 5.39).
     try {
       await store.clear({ rpId: rpIdOf(), publicKey: st ? st.publicKey : null })
     } catch {
