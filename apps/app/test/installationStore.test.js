@@ -218,12 +218,13 @@ test('discovery on native asks the installation, never the network in tests', as
 
     await store.saveInstallation('https://example.test')
     globalThis.fetch = async (url, init) => {
-      asked.push({ url, credentials: init && init.credentials })
+      asked.push({ url, credentials: init && init.credentials, cache: init && init.cache })
       throw new Error('offline')
     }
     const statuses = []
     t.is(await store.discoverConfig({ onStatus: (s) => statuses.push(s.source) }), null)
-    t.alike(asked, [{ url: 'https://example.test/varanda.json', credentials: 'omit' }])
+    // No cache mode: React Native's fetch would append ?_=<time> for no-store.
+    t.alike(asked, [{ url: 'https://example.test/varanda.json', credentials: 'omit', cache: undefined }])
     t.alike(statuses, ['none'])
     t.is(store.hostedPage, false)
 

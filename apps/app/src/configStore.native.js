@@ -246,7 +246,10 @@ async function fetchDiscovery (installation, signal) {
   const url = installation + '/varanda.json'
   let res
   try {
-    res = await fetch(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', signal })
+    // No cache option: React Native's fetch (whatwg-fetch) turns 'no-store' and
+    // 'no-cache' into a ?_=<time> query, and redirectedAway refuses an answer
+    // whose URL carries a query.
+    res = await fetch(url, { credentials: 'omit', redirect: 'error', signal })
   } catch {
     return { kind: 'threw' }
   }
