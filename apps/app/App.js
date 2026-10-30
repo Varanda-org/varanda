@@ -194,13 +194,6 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), SPLASH_MIN_MS + 50)
     return () => clearTimeout(t)
   }, [])
-  if (node.phase === 'connecting' && connectingAt.current === null) connectingAt.current = Date.now()
-  useEffect(() => {
-    if (node.phase !== 'connecting' || !node.canConfigure || released.current) return
-    const remaining = Math.max(0, CONNECT_PATIENCE_MS - (Date.now() - connectingAt.current))
-    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
-    return () => clearTimeout(t)
-  }, [node.phase, node.canConfigure])
   const [updateReady, setUpdateReady] = useState(false)
   const [updateDismissed, setUpdateDismissed] = useState(false)
   useEffect(() => {
@@ -1157,8 +1150,19 @@ function Member () {
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  if (decision === 'loading' || introState === 'loading') return splash
   const gateNext = (introState === 'show' && !LINK_RETURN && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  // The 10 s patience counts only while the splash is what covers the
+  // connect, never while the intro cards or the terms are on screen.
+  const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
+  useEffect(() => {
+    if (!coveringConnect) return
+    if (connectingAt.current === null) connectingAt.current = Date.now()
+    if (!node.canConfigure || released.current) return
+    const remaining = Math.max(0, CONNECT_PATIENCE_MS - (Date.now() - connectingAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [coveringConnect, node.canConfigure])
+  if (decision === 'loading' || introState === 'loading') return splash
   if (holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })) return splash
   if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (decision === 'needed' || decision === 'updated' || decision === 'account') {

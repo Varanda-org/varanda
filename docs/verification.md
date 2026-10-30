@@ -2606,7 +2606,7 @@ As seções 1 a 43 não mudam. Esta seção documenta o splash animado: a cadeir
 
 ### O que mudou
 
-- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s nas fases de carregamento e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o nó entra em `connecting`; depois disso, num nó configurável, a tela Conectar aparece. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
+- Portão (`apps/app/src/splashGate.js`): `SPLASH_MIN_MS = 1500`, o splash fica pelo menos 1,5 s nas fases de carregamento e também, em qualquer fase, quando a próxima tela seria os cartões ou os Termos (`gateNext`, caso da primeira abertura). `CONNECT_PATIENCE_MS = 10000`, contado a partir de quando o splash passa a cobrir a fase `connecting` (o tempo nos cartões e nos Termos não conta); depois disso, num nó configurável, a tela Conectar aparece. A busca da configuração (`loading`) não entra nessa conta: ela tem o próprio limite de 8 s. Depois que aparece, Conectar fica no lugar durante uma nova tentativa ("tentar de novo"). Falhas (`config`, `config-error`, `error`) só esperam o piso quando os cartões ou os Termos vêm antes; quando a próxima tela é Conectar, ela aparece na hora.
 - Coreografia (`apps/app/src/ui/Splash.js`): a cadeira sobe e assenta, as letras de "Varanda" entram uma a uma, e "conectando…" aparece e pulsa. Os números ficam em `apps/app/src/ui/splashMotion.js` (`ENTRANCE_MS = 1180`, `PULSE_MS = 1200`, entre outros). Com "reduzir movimento", tudo vai ao estado final de imediato.
 - Sobreposição na web (`apps/app/public/index.html`): um elemento fixo `#varanda-pre-splash`, desenhado só com CSS e um SVG inline (sem script), antes de o bundle do app carregar. O app o remove quando o splash sai. Uma regra CSS o esconde sozinho depois de 20 s, caso o app nunca monte. Sem JavaScript, ele fica oculto e aparece a frase do `<noscript>`.
 - Por que: na web hospedada `canConfigure` é verdadeiro, então a regra antiga do `App.js` mostrava Conectar enquanto o nó ainda conectava. Agora o splash cobre essa espera.
@@ -2625,7 +2625,7 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 
 1. [ ] Web hospedada a frio: a cadeira e as letras aparecem antes do app, e nunca a chave nem o endereço do semeador (não realizada ainda).
 2. [ ] PWA instalada com cache quente: a animação termina e não aparece duas vezes (não realizada ainda).
-3. [ ] Rede lenta (3G no DevTools): a marca continua até a conexão responder ou até 10 s, e só então aparece Conectar (não realizada ainda).
+3. [ ] Rede lenta (3G no DevTools): a marca continua durante a busca da configuração (até 8 s) e depois até a conexão responder ou até 10 s, e só então aparece Conectar (não realizada ainda).
 4. [ ] Falha de descoberta: Conectar aparece na hora (não realizada ainda).
 5. [ ] Falha de conexão: Conectar aparece na hora, com "Detalhes técnicos" (não realizada ainda).
 6. [ ] Conexão presa por 10 s: Conectar aparece (não realizada ainda).
@@ -2637,6 +2637,7 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 12. [ ] Ordem dos cartões e dos Termos da seção 39 inalterada (não realizada ainda).
 13. [ ] JavaScript desligado mostra "Ative o JavaScript para usar o Varanda." (não realizada ainda).
 14. [ ] No nativo com configuração salva, o splash cobre a conexão por até 10 s no lugar do formulário com "conectando…" (não realizada ainda).
+15. [ ] Primeira abertura lenta: com o nó ainda conectando, passar mais de 10 s nos cartões e nos Termos; depois deles volta o splash (com a entrada de novo), e Conectar só aparece se a conexão não responder em mais 10 s (não realizada ainda).
 
 ### Limites
 
@@ -2644,3 +2645,5 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - 1,5 s e 10 s são fixos, sem configuração.
 - No nativo não há desenho animado em SVG, porque o app não tem biblioteca SVG. A cadeira é o PNG de 128 px, mostrado no máximo a 96 px.
 - Na primeira abertura, se o nó ainda estiver conectando depois dos cartões, o splash do app toca a entrada de novo (a sobreposição web já saiu).
+- No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
+- Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
