@@ -34,6 +34,9 @@ import {
 // packages/web-member/lib/node-store.js MISMATCH, the worklet's refusal of a
 // key for another diary.
 const MISMATCH_TEXT = 'passkey não corresponde ao diário guardado'
+// apps/app/worklet/identity-install.js SIGNED_OUT, its refusal of a resumed
+// install after 'Sair' (docs/rpc.md 5.35).
+const SIGNED_OUT_TEXT = 'sessão encerrada neste aparelho: entre com a passkey'
 const SIGNOUT_INCOMPLETE_TEXT = 'não foi possível sair por completo neste aparelho: tente de novo'
 const KNOWN_CODES = ['CANCELLED', 'EXISTS', 'UNSUPPORTED', 'NO_PRF', 'WEBAUTHN']
 
@@ -193,11 +196,15 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return rpId
   }
 
-  async function signIn (gen, rpId, allowCredentialIds, created) {
+  // knownUserId: the pending creation's user id (complete), else null: the
+  // assertion's user handle is used only when it is a 32-byte one (the
+  // worklet takes hex64 or ''; status does not expose a bound userId).
+  async function signIn (gen, rpId, allowCredentialIds, created, knownUserId = null) {
     const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds }))
     if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
-    const userId = userHandleOf(response)
+    const handle = userHandleOf(response)
+    const userId = typeof knownUserId === 'string' ? knownUserId : (/^[0-9a-f]{64}$/.test(handle) ? handle : '')
     let bytes
     try {
       bytes = parsePrf(response)
@@ -225,12 +232,24 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return track(install(gen, { prfBytes: bytes, credentialId, userId, rpId, created: true, resumed: false }))
   }
 
+  // As the web's signIn: a passkey already bound to this diary is the only
+  // one offered, so another Varanda passkey cannot be picked by mistake
+  // (MISMATCH, then 'recomeçar' would delete the diary).
+  async function boundCredentials (rpId) {
+    let st = null
+    try {
+      st = await request('identity.status')
+    } catch {}
+    if (st && typeof st.credentialId === 'string' && st.credentialId !== '' && st.rpId === rpId) return [st.credentialId]
+    return []
+  }
+
   async function unlock ({ register: create = false } = {}) {
     await resuming
     const rpId = begin()
     const gen = generation
     try {
-      return create ? await register(gen, rpId) : await signIn(gen, rpId, [], false)
+      return create ? await register(gen, rpId) : await signIn(gen, rpId, await boundCredentials(rpId), false)
     } finally {
       busy = false
     }
@@ -244,7 +263,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     const rpId = begin()
     const gen = generation
     try {
-      const out = await signIn(gen, rpId, [target.credentialId], true)
+      const out = await signIn(gen, rpId, [target.credentialId], true, target.userId)
       pendingReg = null
       return out
     } catch (err) {
@@ -281,17 +300,22 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     // A post-ceremony part in flight may still save: let it settle first.
     await finishing
     const st = await request('identity.status').catch(() => null)
+    let forgotten = true
     try {
       await request('identity.forget')
-    } catch (err) {
+    } catch {
+      forgotten = false
       await request('identity.clear').catch(noop)
-      throw err
     }
+    // Without the marker the item is the only thing a restart could resume
+    // from: it goes either way.
+    let cleared = true
     try {
       await store.clear({ rpId: rpIdOf(), publicKey: st ? st.publicKey : null })
     } catch {
-      throw codedError('SIGNOUT_INCOMPLETE', SIGNOUT_INCOMPLETE_TEXT)
+      cleared = false
     }
+    if (!forgotten || !cleared) throw codedError('SIGNOUT_INCOMPLETE', SIGNOUT_INCOMPLETE_TEXT)
     return {}
   }
 
@@ -344,9 +368,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     try {
       await install(gen, { prfHex: record.prfHex, credentialId: record.credentialId, userId: '', rpId, created: false, resumed: true })
     } catch (err) {
-      // A refusal (signedOut, another diary) ends the stored session; a lost
-      // connection or a lock meanwhile keeps it for the next start.
-      if (err && err.code === 'USAGE') {
+      // Only the refusals that make the record useless (signed out, another
+      // diary) end it; anything else (a lost connection, too many pending
+      // requests, a lock meanwhile) keeps it for the next start.
+      if (err && err.code === 'USAGE' && (err.message === SIGNED_OUT_TEXT || err.message === MISMATCH_TEXT)) {
         try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}
       }
     }

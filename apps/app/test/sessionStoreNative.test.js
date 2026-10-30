@@ -23,7 +23,7 @@ export async function getItemAsync (key, options) {
 export async function setItemAsync (key, value, options) {
   check(options)
   if (!/^[\\w.-]+$/.test(key)) throw new Error('bad key')
-  if (globalThis.__secureSetFails) throw new Error('set failed')
+  if (globalThis.__secureSetFails || (globalThis.__secureSetFailsFor && globalThis.__secureSetFailsFor(key))) throw new Error('set failed')
   items.set(key, value)
 }
 export async function deleteItemAsync (key, options) {
@@ -66,6 +66,7 @@ function resetStubs () {
   if (items()) items().clear()
   globalThis.__secureGetFails = false
   globalThis.__secureSetFails = false
+  globalThis.__secureSetFailsFor = null
   globalThis.__secureDeleteFails = false
   globalThis.__passkey = null
 }
@@ -220,7 +221,7 @@ test('identity: unlock installs with resumed false, then saves, then sessionSave
   const install = client.calls.find((c) => c.method === 'identity.install')
   t.alike(install.params, { prf: PRF_HEX, credentialId: CRED, userId: '01'.repeat(32), rpId: RP, resumed: false })
   t.alike(store.log[0], ['save', { rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX }])
-  t.alike(client.methods(), ['identity.install', 'identity.sessionSaved'])
+  t.alike(client.methods(), ['identity.status', 'identity.install', 'identity.sessionSaved'])
 })
 
 test('identity: a failed save unlocks with sessionSaved false and never calls sessionSaved', async (t) => {
@@ -327,8 +328,85 @@ test('identity: signOut forgets first, then deletes; a failed delete is SIGNOUT_
   const forgetFails = fakeClient({ answers: { 'identity.forget': () => { throw new Error('boom') } } })
   const s2 = memoryStore()
   const id2 = createNativeIdentity({ request: forgetFails.request, rpId: () => RP, store: s2 })
-  await t.exception(id2.signOut())
-  t.is(s2.log.length, 0, 'no delete before the marker is written')
+  const forgetErr = await id2.signOut().catch((e) => e)
+  t.is(forgetErr.code, 'SIGNOUT_INCOMPLETE')
+  t.alike(s2.log, [['clear']], 'the item goes even when the marker could not be written')
+  const fm = forgetFails.methods()
+  t.ok(fm.indexOf('identity.clear') > fm.indexOf('identity.forget'), 'relocked')
+})
+
+test('identity: a plain sign-in offers only the bound passkey', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const seen = fakePasskey({ get: () => prfResponse({ results: { first: PRF_B64 } }) })
+  const bound = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED, rpId: RP } })
+  await createNativeIdentity({ request: bound.request, rpId: () => RP, store: memoryStore(), random: deterministicRandom }).unlock({})
+  t.alike(seen[0].options.allowCredentials, [{ type: 'public-key', id: CRED }])
+
+  const elsewhere = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED, rpId: 'other.example' } })
+  await createNativeIdentity({ request: elsewhere.request, rpId: () => RP, store: memoryStore(), random: deterministicRandom }).unlock({})
+  t.absent(seen[1].options.allowCredentials)
+})
+
+test('identity: user ids come from the pending creation, or a 32-byte handle only', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let handle = null
+  const assertion = () => JSON.stringify({
+    id: CRED,
+    rawId: CRED,
+    response: handle === null ? {} : { userHandle: handle },
+    clientExtensionResults: { prf: { results: { first: PRF_B64 } } }
+  })
+  fakePasskey({ create: () => prfResponse({ enabled: true }), get: assertion })
+  const client = fakeClient()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  handle = Buffer.from(new Uint8Array(16).fill(9)).toString('base64url')
+  await id.complete()
+  const installs = () => client.calls.filter((c) => c.method === 'identity.install')
+  t.is(installs()[0].params.userId, '03'.repeat(32), 'the pending creation user id')
+
+  await id.unlock({})
+  t.is(installs()[1].params.userId, '', 'a handle that is not 32 bytes is dropped')
+  handle = null
+  await id.unlock({})
+  t.is(installs()[2].params.userId, '')
+})
+
+test('identity: resume keeps the item on a transient refusal', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const store = createSessionStore({ now: () => 1000 * DAY })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const busy = () => { const e = new Error('pedidos demais em andamento'); e.code = 'USAGE'; throw e }
+  const client = fakeClient({ status: { exists: true, publicKey: PK }, answers: { 'identity.install': busy } })
+  await createNativeIdentity({ request: client.request, rpId: () => RP, store }).resume()
+  t.ok(items().has(itemKey(RP, PK)))
+
+  const mismatch = () => { const e = new Error('passkey não corresponde ao diário guardado'); e.code = 'USAGE'; throw e }
+  const other = fakeClient({ status: { exists: true, publicKey: PK }, answers: { 'identity.install': mismatch } })
+  await createNativeIdentity({ request: other.request, rpId: () => RP, store }).resume()
+  t.absent(items().has(itemKey(RP, PK)))
+})
+
+test('session store: a failed index write keeps the previous record of the same key', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  let now = 1000 * DAY
+  const store = createSessionStore({ now: () => now })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  now += DAY
+  globalThis.__secureSetFailsFor = (key) => key === 'varanda-session.index'
+  await t.exception(store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: 'ef'.repeat(32) }))
+  globalThis.__secureSetFailsFor = null
+  t.alike(await store.load({ rpId: RP, publicKey: PK }), { credentialId: CRED, prfHex: PRF_HEX })
+
+  globalThis.__secureSetFailsFor = (key) => key === 'varanda-session.index'
+  await t.exception(store.save({ rpId: RP, credentialId: CRED, publicKey: 'ef'.repeat(32), prfHex: PRF_HEX }))
+  globalThis.__secureSetFailsFor = null
+  t.absent(items().has(itemKey(RP, 'ef'.repeat(32))), 'a new key is removed')
 })
 
 test('identity: reset deletes the stored session whatever the answer', async (t) => {
@@ -371,7 +449,7 @@ test('identity: resume skips and deletes on signedOut, refusal, or another key',
   t.absent(items().has(itemKey(RP, PK)))
 
   await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
-  const refuse = () => { const e = new Error('sessão encerrada neste aparelho'); e.code = 'USAGE'; throw e }
+  const refuse = () => { const e = new Error('sessão encerrada neste aparelho: entre com a passkey'); e.code = 'USAGE'; throw e }
   const refused = fakeClient({ status: { exists: true, publicKey: PK }, answers: { 'identity.install': refuse } })
   await createNativeIdentity({ request: refused.request, rpId: () => RP, store }).resume()
   t.ok(refused.methods().includes('identity.install'))

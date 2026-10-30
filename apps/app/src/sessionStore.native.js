@@ -76,11 +76,23 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     const record = { v: VERSION, rpId, credentialId, publicKey, prfHex, usedAt: clock() }
     let previous = null
     try { previous = await secureStore.getItemAsync(INDEX_KEY, options) } catch {}
+    // The record already under this key (same rp.id and identity): a failed
+    // save puts it back instead of deleting a session that still works.
+    let older = null
+    try { older = await secureStore.getItemAsync(key, options) } catch {}
+    let wrote = false
     try {
       await secureStore.setItemAsync(key, JSON.stringify(record), options)
+      wrote = true
       await secureStore.setItemAsync(INDEX_KEY, key, options)
     } catch (err) {
-      await removeQuietly(key)
+      if (typeof older === 'string') {
+        if (wrote) {
+          try { await secureStore.setItemAsync(key, older, options) } catch {}
+        }
+      } else {
+        await removeQuietly(key)
+      }
       throw err
     }
     // One stored session per device, as on the web.
