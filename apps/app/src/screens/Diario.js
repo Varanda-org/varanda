@@ -18,7 +18,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -30,6 +30,7 @@ import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
 import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
+import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -258,7 +259,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profile = publicKey ? profileOf(publicKey) : undefined
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
-  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: globalThis.location ? globalThis.location.origin : null, username: profile ? profile.username : null, publicKey }) : null
+  const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
 
@@ -462,7 +463,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         scrollToTopSignal={scrollToTop}
         newItems={{
           label: 'ver novidades',
-          visible: Platform.OS === 'web' && !!(node.signals && node.signals.fresh && node.signals.fresh.own),
+          visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
           onPress: reload
         }}
       />

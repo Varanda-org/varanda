@@ -22,6 +22,15 @@ if [ "$#" -gt 0 ]; then
 else
   user="$(id -u):$(id -g)"
 fi
+# Publicando em www (sem argumento), as associações do app nativo vêm de
+# deploy/seeder/.env com as mesmas regras do deploy.sh (well-known.sh), e um
+# valor malformado para tudo antes do build.
+if [ "$#" -eq 0 ]; then
+  log() { printf '%s\n' "$*" >&2; }
+  # shellcheck source=deploy/seeder/well-known.sh
+  . "$root/deploy/seeder/well-known.sh"
+  ler_associacoes "$root/deploy/seeder/.env"
+fi
 # A mesma imagem Node, fixada por digest, do Dockerfile do semeador.
 image="node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205"
 
@@ -53,5 +62,6 @@ www="$root/deploy/seeder/www"
 mkdir -p "$www"
 find "$www" -mindepth 1 -delete
 cp -R "$root/apps/app/dist/." "$www/"
+gravar_associacoes "$www"
 test -f "$www/index.html"
 echo "app web publicado em deploy/seeder/www"

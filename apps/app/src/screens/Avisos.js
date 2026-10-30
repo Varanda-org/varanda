@@ -5,33 +5,33 @@
 // mention has no pill and opens that post. Private and quiet: no counts, a plain dot never
 // a number, and no push. Nothing is persisted except the notices already
 // seen, as the node's opaque `seen` tokens (keyed by the identity secret,
-// never a follower key or anything derivable from one; web only,
-// localStorage). Hosted web only: on native and varanda-serve the tab says
-// so and never calls notices.list. The screen stays mounted, so it polls
+// never a follower key or anything derivable from one; seenStore.*: browser
+// localStorage, or a file in the app's document dir on native). Hosted only:
+// on a manually configured node and varanda-serve the tab says so and never
+// calls notices.list. The screen stays mounted, so it polls
 // while the page is visible and online (that is how the dot lights up).
 // Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
-  NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, SEEN_MAX, SEEN_STORAGE_KEY,
+  NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, SEEN_MAX,
   compareNotices, hasNew, isLastNoticesPage, isWebOnlyError, markSeenPadded, mergePage, noticeId, noticeKind, noticeLine, noticeRef, noticesNotice,
   padSeen, parseSeen, readNotices, serializeSeen, shouldPoll
 } from '../notices'
 import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
+import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
 import { whoOf } from '../who'
 import { Soft, colors, errorText, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
-
-const web = Platform.OS === 'web'
 
 const isLockedError = (err) => Boolean(err && err.code === 'USAGE' && err.message === LOCKED_MESSAGE)
 // The node reads one page at a time: a load that meets a read in flight (a
@@ -50,14 +50,13 @@ const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
 function loadSeen (ownKey) {
   let ids = []
   try {
-    ids = parseSeen(globalThis.localStorage.getItem(SEEN_STORAGE_KEY), ownKey)
+    ids = parseSeen(loadSeenText(), ownKey)
   } catch {}
-  if (!web) return { ids }
   if (randomBytes === null) {
     // Nothing is written without a random source; an entry this browser
     // cannot pad (old format, another identity) goes.
     if (ids.length === 0) {
-      try { globalThis.localStorage.removeItem(SEEN_STORAGE_KEY) } catch {}
+      clearSeenText()
     }
     return { ids }
   }
@@ -82,9 +81,9 @@ const randomBytes = typeof globalThis.crypto?.getRandomValues === 'function'
 
 // Only ever writes the padded list: exactly SEEN_MAX 32-hex entries.
 function writeSeen (ownKey, ids) {
-  if (!web || randomBytes === null || ids.length !== SEEN_MAX) return
+  if (randomBytes === null || ids.length !== SEEN_MAX) return
   try {
-    globalThis.localStorage.setItem(SEEN_STORAGE_KEY, serializeSeen(ownKey, ids))
+    saveSeenText(serializeSeen(ownKey, ids))
   } catch {}
 }
 
@@ -209,12 +208,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }, [])
 
   // The dot follows what is unseen; with the tab open (mark) everything
-  // loaded is seen at once (web only: native never stores anything).
+  // loaded is seen at once.
   const settle = useCallback((list, mark = activeRef.current) => {
-    if (!web) {
-      badge(false)
-      return
-    }
     // Before the identity is known nothing is read or written: an entry
     // stored for `own: null` would replace the real one.
     if (typeof ownKey !== 'string' || ownKey.length === 0) {
@@ -244,7 +239,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // stored entry of an old format (v1 follower keys, v2 salted digests) is
   // removed on the first load, not only at the first settle.
   useEffect(() => {
-    seenRef.current = web && hosted && typeof ownKey === 'string' && ownKey.length > 0 ? loadSeen(ownKey) : null
+    seenRef.current = hosted && typeof ownKey === 'string' && ownKey.length > 0 ? loadSeen(ownKey) : null
   }, [ownKey, hosted])
 
   const loadFirst = useCallback(async () => {

@@ -99,6 +99,16 @@ test('installation help keeps browser instructions and local storage limits', as
   }
 })
 
+test('espiadinha and avisos hold for the site and the app tied to the installation', async (t) => {
+  const { HELP } = await load()
+  for (const key of ['espiadinha', 'avisos']) {
+    const text = HELP[key].paragraphs.join(' ')
+    t.ok(text.includes('app ligado à instalação da associação'), key)
+    t.absent(text.includes('só funciona'), key + ' is no longer web only')
+  }
+  t.ok(HELP.seguindo.paragraphs[0].includes('app ligado à instalação'))
+})
+
 test('help and short texts avoid jargon and em dashes', async (t) => {
   const { HELP, SHORT } = await load()
   const jargon = new Set([

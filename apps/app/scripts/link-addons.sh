@@ -7,7 +7,9 @@
 # in node_modules: run this again after every npm install / npm ci (then
 # pod install, which picks up the frameworks).
 # Fails unless each platform linked rocksdb-native, udx-native, sodium-native
-# and bare-fs (bare-link issue #49 links zero addons in some monorepos).
+# and bare-fs (bare-link issue #49 links zero addons in some monorepos), and
+# the addons the web node kind cannot run without: fs-native-extensions (its
+# data-dir lock fails closed without it), bare-crypto and bare-tls (wss).
 # Run from anywhere: npm run link:addons -w apps/app [-- ios|android|all]
 # With `check` first, only verifies what is already linked (npm run ios and
 # npm run android do, so a build never starts without the addons):
@@ -25,7 +27,7 @@ which="${1:-all}"
 entry="worklet/main.js"
 bare_link="../../node_modules/.bin/bare-link"
 kit="$(node -p "require('path').dirname(require.resolve('react-native-bare-kit/package.json'))")"
-required=(rocksdb-native udx-native sodium-native bare-fs)
+required=(rocksdb-native udx-native sodium-native bare-fs fs-native-extensions bare-crypto bare-tls)
 
 check () {
   local platform="$1" dir="$2" pattern="$3"

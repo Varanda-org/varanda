@@ -47,3 +47,21 @@ test('visibleUrl only paints named profile URLs', async (t) => {
   t.is(visibleUrl('not a URL'), null)
   t.is(visibleUrl(42), null)
 })
+
+test('native share shape shares, cancels, fails, and cannot copy', async (t) => {
+  const { canShare, copyText, shareUrl } = await load()
+  let next = () => Promise.resolve()
+  const fake = { share: () => next() }
+
+  t.ok(canShare(fake))
+  t.is(await copyText(fake, 'x'), false)
+  t.is(await shareUrl(fake, { url: 'https://varanda.example/@ana', title: 'Varanda' }), 'shared')
+
+  const abort = new Error('closed')
+  abort.name = 'AbortError'
+  next = () => Promise.reject(abort)
+  t.is(await shareUrl(fake, { url: 'u', title: 't' }), 'cancelled')
+
+  next = () => Promise.reject(new Error('broken'))
+  t.is(await shareUrl(fake, { url: 'u', title: 't' }), 'failed')
+})

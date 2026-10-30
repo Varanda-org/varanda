@@ -194,6 +194,25 @@ test('node.close: answered only where a handler is registered (IPC worklet)', as
   t.is(ipc.byId(c).error.code, 'USAGE', 'params must be {}')
 })
 
+test('web-node host controls: INTERNAL without a handler, as node.close', async (t) => {
+  const calls = [
+    ['identity.install', { prf: 'cd'.repeat(32), credentialId: 'abc', userId: '', rpId: 'varanda.org', resumed: false }],
+    ['identity.clear', {}],
+    ['identity.status', {}],
+    ['identity.reset', {}],
+    ['identity.forget', {}],
+    ['identity.sessionSaved', {}],
+    ['media.uploadFile', { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 10, height: 10 }]
+  ]
+  const plain = setup({ handlers: {} })
+  plain.call('session.open')
+  const ids = calls.map(([m, p]) => plain.call(m, p))
+  await flush()
+  for (let i = 0; i < ids.length; i++) {
+    t.alike(plain.byId(ids[i]).error, { code: 'INTERNAL', message: 'erro interno' }, calls[i][0] + ' without a handler -> INTERNAL')
+  }
+})
+
 test('a result whose traps throw becomes INTERNAL', async (t) => {
   const hostile = new Proxy({}, { getPrototypeOf () { throw new Error('trap') } })
   const s = setup({ handlers: { 'node.info': async () => hostile } })
