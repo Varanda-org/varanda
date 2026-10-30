@@ -49,12 +49,13 @@
 	# revalida; com no-cache ele ganha outro ETag quando a cópia termina e
 	# se cura na carga seguinte. O service worker já serve os arquivos com
 	# hash do seu próprio cache conferido (instala com cache: 'reload'),
-	# então um cache HTTP longo renderia pouco. /varanda.json tem o seu
-	# próprio no-store, /seeder fica como está, /account/* vem do serviço
-	# de conta com o no-store dele, /media/* vem do semeador com o cache
-	# longo dele e /index/* vem do semeador com o no-store dele.
+	# então um cache HTTP longo renderia pouco. /varanda.json e
+	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
+	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
+	# semeador com o cache longo dele e /index/* vem do semeador com o
+	# no-store dele.
 	@mutavel {
-		not path /varanda.json /seeder /account/* /media/* /index/*
+		not path /varanda.json /.well-known/* /seeder /account/* /media/* /index/*
 	}
 	header @mutavel Cache-Control "no-cache"
 
@@ -71,7 +72,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /seeder /account/* /media/* /index/*
+		not path /.well-known/* /seeder /account/* /media/* /index/*
 		not file /index.html {
 			root /srv/web
 		}
@@ -109,6 +110,22 @@
 		header Content-Type "application/json"
 		header Cache-Control "no-store"
 		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
+	}
+
+	# As associações do app nativo (passkeys com rpId = este domínio): o
+	# Android lê /.well-known/assetlinks.json e o iOS
+	# /.well-known/apple-app-site-association, que não tem extensão. O
+	# deploy.sh grava os dois em www a partir de deploy/seeder/.env, ou os
+	# apaga. Antes do handle abaixo, e com um file_server próprio: um arquivo
+	# ausente é um 404 de verdade, nunca o index.html. no-store para que uma
+	# troca de certificado ou de equipe valha já na verificação seguinte. O
+	# '>' adia o tipo para depois do file_server (como no manifesto acima): o
+	# iOS exige application/json num arquivo sem extensão.
+	handle /.well-known/* {
+		root * /srv/web
+		header >Content-Type "application/json"
+		header Cache-Control "no-store"
+		file_server
 	}
 
 	# O serviço de conta (vínculo com o Google e @nome), em 127.0.0.1. Como o

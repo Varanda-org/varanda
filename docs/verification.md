@@ -2778,7 +2778,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 
 ## 48. Conta de pagamentos opcional: abertura e KYC (feat/hodle-account, 2026-10-30)
 
-As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para a seção 49 e para a próxima etapa.
+As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para a seção 52 e para a próxima etapa.
 
 ### O que mudou
 
@@ -2845,10 +2845,200 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Dois processos gravando o mesmo `wallet.json` só acontecem depois de perder o lock; nesse caso a mesclagem pode trazer de volta um identificador apagado. O serviço deixa de gravar ao perder o lock.
 - 16 e 17 anos: a barreira é a declaração no opt-in e a data de nascimento conferida pela Hodle no documento.
 
+## 49. Grupos públicos (PR feat/groups-public, 2026-10-28)
 
-## 49. Conta de pagamentos: saldo, receber e pagar por Pix, taxa da Varanda (feat/hodle-pix, 2026-10-30)
+Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.36 a 5.49. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
 
-As seções 1 a 47 não mudam; a 48 perde o limite da verificação perdida. Esta seção documenta o PR2: saldo, Pix de entrada e de saída, taxa da Varanda, webhook e Termos versão 8.
+### Como verificar
+
+Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `npm test`.
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/group.test.js` | formas exatas dos registros e do cabeçalho (inclusive `seen` em todo registro), construtores, `groupJoins` e `groupJoinHistory`, a dobra: ordem causal e desempate, referência pendente ignorada, ciclo forjado, cortes como comprimento observado, autoridade (só a raiz nomeia e rebaixa; proteção lida do estado final; admissão positiva nunca protegida; raiz sem vínculo sem autoridade), banimento que domina, `lifts`, saída e `rejoin`, teto de 512 escritores, pulo de 24 h |
+| `packages/core/test/group-member.test.js` | operações do nó (`member.js`): criar, entrar, sair, postar, ler, listar, moderar, estado `pending`, saída repetida, banido que não entra nem sai, entrada recusada no teto de escritores, `groups.json` e a regra de nunca despejar um grupo criado |
+| `packages/core/test/group-index.test.js` | índice em memória do semeador: um grupo por linha, vivos primeiro, busca só por nome público, tetos |
+| `packages/core/test/groups-net.test.js` | canal `varanda/groups/1`: mensagens, limites, mensagens ruins, taxa, tempo esgotado, semeador antigo |
+| `packages/core/test/seeder-groups.test.js` | admissão de escritor e de raiz, quarentena, gravação antes de abrir, bloqueio da lista retido, derrubadas (diário, raiz, fork, cota; nunca por saída), suporte da raiz e adiamento na partida, `admitted.json`, flags de completude |
+| `packages/core/test/seeder-groups-waits.test.js` | semeador: esperas e novas tentativas de admissão (inclusive depois de uma purga), orçamento de parada da varredura por diário e sua memória entre derrubada e nova oferta (as funções de apoio de ambos os arquivos ficam em `test/helpers/seeder-groups.js`; dividido para caber no limite de 180 s por arquivo) |
+| `packages/core/test/seeder-groups-3.test.js` | semeador: a guarda das purgas contra replicação (o gancho do corestore fixado ainda existe; pedido de um par durante a purga não anexa e nada lança; a purga espera a abertura já em andamento) e a espera de uma entrada que ninguém serve (mesmos apoios em `test/helpers/seeder-groups.js`) |
+| `packages/core/test/sync-groups.test.js` | sincronização do nó: portões, diários de vínculo, metas de execução única, ritmo dos pedidos, purgas só de escritor aceito, eventos |
+| `packages/core/test/sync-groups-2.test.js` | continuação da sincronização do nó: tetos por diário, memórias de dicas, purgas na partida, erros leves agregados e portão do próprio diário (dividido para caber no limite de 180 s por arquivo; apoio em `test/helpers/sync-groups.js`) |
+| `packages/core/test/sync-groups-3.test.js` | continuação: diários de vínculo divergentes e o modelo de exclusão nos diários de vínculo (blocos apagados limpos e nunca pedidos de novo, entrada apagada retirada sem purga, núcleos próprios mantidos na limpeza da partida) |
+| `packages/core/test/session-groups.test.js` e `session-group-events.test.js` | métodos `group.*` na sessão do nó, `groups.changed` por escrita e por crescimento da sincronização |
+| `packages/web-member/test/group-ops.test.js` | os mesmos métodos no nó do navegador (`member-ops.js`), `node-store.js` (`groupWriters`, `groupReplicas`, `groupDiaries`) |
+| `packages/web-member/test/sync-groups.test.js` | sincronização do navegador: portões, confirmação do envio pelo comprimento do semeador, ritmo de 1 pedido por segundo, purgas, `groups-changed` agrupado |
+| `packages/web-member/test/sync-groups-2.test.js` | continuação da sincronização do navegador: tetos e dicas hostis, criador atrasado, aparelho atrás do semeador, semeador sem grupos e o modelo de exclusão nos diários de vínculo (inclusive `diary.peek`) (dividido para caber no limite de 180 s por arquivo; apoio em `test/helpers/sync-groups.js`) |
+| `packages/web-member/test/session-groups.test.js` | sessão do navegador: `group.*`, `node.info` com `groups: true`, `report.sign` v2 |
+| `packages/web-member/test/groups-e2e.test.js` | ponta a ponta em loopback: semeador real atrás de WebSocket e na DHT local, nó do núcleo (criador, `runSync`) e nó do navegador. O criador faz um grupo com aprovação; o navegador entra pela chave antes de ter a raiz, é admitido, posta, é banido e desbanido, vê uma ocultação e sai; o semeador reinicia e refaz o índice; um instantâneo de moderação bloqueando a raiz chega ao semeador e aos dois nós |
+| `apps/cli/test/group-commands.test.js` | comandos `group ...` da CLI e saída `--json` |
+| `packages/core/test/records.test.js`, `report.test.js`, `store.test.js`, `browser-safe.test.js` | `group-join`, declaração `varanda-report-v2` (11 linhas na ordem), `admitted.json` com `groups`, módulos puros seguros para o navegador |
+| `packages/rpc/test/methods.test.js`, `envelope.test.js`, `sizes.test.js` | validação dos parâmetros `group.*`, evento `groups.changed`, tamanho do pior caso de `group.read` e `group.members` |
+| `apps/cli/test/seed-ws.test.js`, `seeder-index.test.js`, `seed-ops.test.js` | rotas `/index/group`, `/index/groups/<D>`, `/index/group-search`, `seed list` com os núcleos de grupo |
+| `apps/cli/test/moderation-store.test.js`, `account-mod.test.js`, `group-check.test.js`, `ai-worker.test.js`, `panel.test.js` | `moderation.json` v2, denúncia de grupo, chave de deduplicação com escritor, alvo `diario`/`grupo`, a IA que nunca lê denúncia de grupo, painel |
+
+Resultado nesta rodada: os arquivos de teste de grupos listados acima passam; a contagem de testes e a CI completa (lint, test e demo) ficam registradas na execução da CI da PR.
+
+### Não verificado / limites conhecidos
+
+- Renomear o grupo (`group-meta`) não aparece na busca do semeador: ela lê só o nome do cabeçalho da raiz.
+- `seed list` não mostra a raiz cujo diário criador não foi admitido naquele semeador.
+- O diário não consegue cortar o escritor de um aparelho perdido (`group-join on:false` só atualiza índices).
+- Sair e voltar offline antes de o semeador buscar as saídas do escritor antigo deixa o escritor novo sem verificação para os pares: o semeador só admite entradas vivas.
+- O nó do núcleo guarda os diários de vínculo inteiros (custo de escala).
+- A sincronização do núcleo pode perder um fork de diário de vínculo entre a checagem do portão e a instalação do vigia; um núcleo em execução única pode aceitar um diário de vínculo que cresceu depois da admissão sem esperar os blocos novos; no nó do núcleo, a vaga liberada por um fork ou por uma falha de cota só é usada na próxima passada de páginas.
+- No navegador, um núcleo de grupo já baixado que uma interrupção deixou fora da lista `groupReplicas` pode ficar preso na reconferência (`regate`) até crescer de novo; numa execução única ele estoura o prazo e é descartado. As três leituras do portão de um núcleo alheio usam cada uma o prazo inteiro, não o que resta, então um portão lento pode levar até cerca de três vezes o tempo pedido antes de a execução única terminar.
+- O navegador continua paginando um grupo do qual o próprio diário saiu e pagina itens de diários banidos na dobra local (baixo, adiado).
+- A contagem por diário do semeador na partida, para vínculos gravados em disco, segue a ordem de iteração e não a entrada mais antiga (uma retaguarda para dados escritos antes do teto de 8 escritores por diário).
+- O semeador conta os núcleos de grupo com varreduras lineares (adiado).
+- A varredura de revogação do navegador para um instantâneo adotado no meio de uma execução não tem teste.
+- O ritmo dos pedidos de página deixa as sincronizações com muitos grupos mais lentas (cerca de 1 s por pedido).
+- Grupos privados e comunidades vêm em PRs seguintes; não há interface nativa (só web e CLI).
+- A memória por entrada do semeador (por diário, chave e posição da entrada) vale para a cota: depois de mudar a cota, só uma nova entrada faz o semeador buscar o núcleo de novo. Uma raiz que nomeia um diário bloqueado não é mais lembrada por entrada: desbloquear basta.
+- No navegador, uma raiz pedida antes de entrar mas ainda não indexada pelo semeador sai da lista depois de uma passada de páginas completa sem ela.
+- As varreduras do próprio diário do semeador e a adoção da lista de bloqueio reconciliam fora da fila justa de admissões.
+- A correção do teto por diário no navegador é coberta por testes de unidade, sem um teste de ponta a ponta com 9 escritores do mesmo diário.
+- Cada início de execução do navegador lê uma vez cada diário de vínculo guardado dos escritores guardados.
+- A restauração da cobrança das raízes na partida do semeador (a partir de `admitted.json`) não tem teste.
+- Raízes de `admitted.json` gravadas antes do campo `by` não são cobradas de ninguém.
+- Núcleos de grupo do navegador criados por versões anteriores desta branch não estão em `groupCores` e a redefinição de identidade não os apaga.
+- O nó do núcleo dobra todos os escritores de um grupo por inteiro a cada comando de grupo (sem cache incremental da dobra; adiado).
+- O navegador abre o bloco 0 de todo núcleo de grupo guardado a cada operação (adiado).
+- Uma retirada de admissão (`on:false`) cujos cortes não observaram uma saída vale só para a geração anterior.
+- Numa execução única do núcleo, com 8 escritores de um mesmo diário não guardados localmente no portão ao mesmo tempo, o download do diário de vínculo chegou a travar até o prazo (visto num teste; causa não confirmada).
+- Uma saída retira os registros dos outros aparelhos da pessoa e das gerações anteriores (decisão do produto, por desenho): quem saiu por um aparelho perde o que os outros escreveram no grupo, mesmo antes da saída.
+- A recusa `saia pelo aparelho que criou o grupo` é praticamente inalcançável num grupo carregado.
+- Uma entrada que deu `timeout` no semeador só deixa de reter as respostas (páginas, busca, lista de grupos do diário) depois que a nova tentativa após a primeira espera também falha; uma entrada recusada por `group-full` (capacidade do semeador) mantém as respostas incompletas, e uma recusa de `group-full` antes da busca espera o recuo, então uma escritora recusada pode esperar até o recuo depois que abre vaga.
+- Limite conhecido do criador: ele pode listar, numa saída por outro escritor, um corte da raiz além do comprimento atual dela e depois acrescentar registros à raiz abaixo desse corte com `at` retroativo; eles continuam valendo (não se distinguem de registros honestos da raiz ainda não vistos, e o criador não ganha nada que não recuperaria ao voltar).
+- A corrida da reserva de vaga no portão do navegador e as funções `capExcess` e `refineJoinSeq` só têm teste de unidade, sem teste de ponta a ponta.
+- Item aberto desde a terceira rodada: o download que travou com muitos escritores de um mesmo diário não guardado (acima).
+- Item aberto desde a terceira rodada: no nó core, enquanto a portaria de uma chave está em andamento, outra listagem da mesma chave sob outro grupo é descartada; depois de uma dica refutada a nova varredura olha só o grupo daquela dica, então a listagem honesta sob o outro grupo espera a próxima passada (e pode se perder num `--once`).
+- A parte da correção do laço da sexta rodada que pula o semeador na nova varredura não tem teste de regressão que falhe sem ela (a parte da memória cheia tem).
+- Núcleo: a comparação do bloco 0 guardado com o bloco 0 do portão antes da cota (sétima rodada) não tem teste que falhe sem ela, porque a detecção de fork pega o caso primeiro.
+- Núcleo: pular o semeador suspenso pelo resto da passada não tem teste determinístico.
+- Núcleo (oitava rodada): o teste da comparação do diário de vínculo guardado com os blocos do portão passa sem a correção, porque a detecção de fork pega o caso primeiro; o caminho do portão para um núcleo já guardado não tem teste separado.
+- Navegador (oitava rodada): o teste do cache do histórico de entradas por execução não foi mostrado falhando sem a correção.
+- Navegador: a posição da reconferência do certificado de vínculo no portão (antes de guardar e antes de ativar) só tem teste de unidade.
+- Raízes vinculadas antes desta versão só ganham `bound` (e `issuer`) em `admitted.json` depois da próxima varredura do criador; até lá o semeador não as derruba por criador bloqueado ou de emissor revogado.
+- Núcleo (nona rodada): o teste da recusa de um diário de vínculo divergente passa sem a correção, porque uma reescrita sempre chega ao membro como fork.
+- Navegador (nona rodada): o teste de ponta a ponta do portão de escrita não falha de forma confiável sem a correção; o teste de unidade de `ownGroupVerdict` a protege.
+- Manutenção (nona rodada): o reanexo da réplica do diário de vínculo no núcleo depende de `opened()` do protomux, do Protomux do fluxo em `socket.userData` e de `Hypercore#replicate(mux)` (hypercore 11.39.0, corestore 7.15.0, protomux 3.13.0): reconferir a cada atualização dessas dependências.
+- Semeador (décima rodada): o ramo de negação além de 8192 entradas (`denials-full` com uma negação sem espaço) não tem teste.
+- Núcleo (décima rodada): o refino pela entrada `on:true` mais antiga não vale para os portões só de quarentena.
+- Dobra (décima rodada): os testes do desbanimento conferem o corte gravado, não o que fica oculto depois que os blocos chegam.
+- Uma negação que não coube (além de 8192 entradas) se perde ao reiniciar o semeador; enquanto os mapas seguirem cheios, as raízes continuam recusadas (`denials-full`).
+- Núcleo (décima segunda rodada): o teto de 32 textos em `errorsSoft` para as outras mensagens (31 mais a linha agregada de núcleos de grupo) não tem teste direto.
+- Núcleo e navegador ainda diferem no teto por diário: os dois despejam o escritor guardado que cede a vaga a uma entrada comprovada mais antiga, mas o núcleo purga os blocos dele (`group-skipped` `quota`) e o navegador os mantém (`evictionPurges`).
+- Limitação aceita pela decisão do produto: um navegador que divide a chave de escritor de um grupo com outra instância do mesmo perfil (outra aba, ou um aparelho restaurado de um armazenamento mais antigo) confia no comprimento que seu único semeador informa. Um semeador malicioso que esconde blocos desse escritor que ele tem pode fazer o aparelho gravar num comprimento defasado e bifurcar o próprio escritor ou a própria raiz. Nenhuma prova distingue um semeador que esconde blocos de um que nunca os recebeu, e o navegador não tem outro par. Um semeador honesto que só está atrasado é coberto por `group-behind`.
+- Núcleo (décima terceira rodada): o caminho real da divergência de bloco 0 em escritores de grupo não tem asserção de ponta a ponta da linha agregada `bloco 0 divergente em escritores de grupo: <n> (<chaves>)` (só um teste com gancho).
+- Núcleo (diário de vínculo): entre a saída de um escritor parado por cota da tabela de admissão e a leitura que o registra como guardado, o diário de vínculo dele pode ser liberado e purgado se nenhum outro escritor o nomear naquele instante; o diário volta a ser buscado quando um escritor dele passa de novo pelo portão. Sem perda dos blocos do escritor.
+- Navegador: as leituras de grupo (`group.read`, `group.list`, `group.info`, `group.members`, `group.requests`) ainda pausam a sincronização em andamento em vez de ler junto com ela.
+- Quando a pessoa autora apaga um bloco `group-join`, a varredura do semeador o ignora, mas o estado de entrada dobrado antes da exclusão permanece.
+- Núcleo: nenhum teste falha sem a mudança da varredura de entradas para uma entrada depois de um buraco limpo (só o refino do teto por diário a usa).
+- Núcleo: a execução única que ficava esperando um escritor cujo bloco `group-join` a pessoa autora apagou depois do portão não foi reproduzida em teste (a retirada `withdrawn` tem teste; a espera exata foi conferida lendo o código), e a regra que impede a limpeza da partida de apagar um núcleo de grupo que o próprio nó grava não tem teste que falhe sem ela. Um portão que já esperava o bloco `group-join` quando chega a exclusão dele só termina no próprio prazo (`timeout`, sem contar contra o diário).
+- Núcleo: a exclusão que chega enquanto o diário de vínculo é dobrado pela primeira vez tem teste que falha sem a correção; a parte que varre os blocos locais além da dobra, sem evento, só foi conferida lendo o código. A regra que mantém a execução única aberta até o bloco 0 de um escritor recém-admitido ser comparado não tem teste que falhe sem ela (com ela, 8 execuções seguidas do arquivo sem falha, contra 3 falhas em 11 antes). A varredura feita logo depois da primeira dobra espera cada recomposição em vez de juntá-las: com muitas exclusões já locais nesse trecho, o custo cresce com o quadrado delas (limitado pela cota do diário; baixo, adiado).
+- Navegador: nenhum teste cobre um bloco apagado que o semeador ainda guarda ser recusado enquanto está em oferta.
+- Verificações humanas, em aparelho real, ainda devidas: ver um grupo criado na CLI aparecer no navegador e o inverso, num semeador de verdade.
+
+### Verificações novas do ciclo de segurança (a fazer; a pessoa que modera ou opera confere)
+
+- **Aparelho restaurado atrás do semeador.** Restaure um aparelho de membro (backup antigo) de modo que um núcleo de escritor seu fique mais curto que o do semeador, abra um grupo e tente postar: o navegador recusa (`group-behind`) até sincronizar com o semeador, e depois que alcança o post sai normalmente, sem bifurcar o escritor.
+- **Teto por diário.** Com uma conta, vincule 9 escritores ao mesmo grupo (9 aparelhos ou o mesmo diário com 9 `group-join` para o mesmo grupo). Só os 8 de entrada mais antiga contam na leitura e no semeador (`/index/group/<chave>` lista 8 dessa conta); o 9º recebe `limite do grupo atingido` ao entrar pelo app e nunca é admitido nem indexado no semeador. Sair não libera a vaga.
+- **Efeito da saída.** Saia de um grupo e confira que a admissão ou a ocultação de administração que o diário fez depois da saída deixou de valer, que as mensagens do próprio aparelho que saiu anteriores à saída continuam como estavam, que a pessoa que saiu ainda consegue ocultar uma mensagem sua e que o criador mantém nome e administradores (a raiz segue a regra dos cortes). Volte (novo escritor com `rejoin`) e confira que o que foi escrito depois da volta vale.
+- **Cortes da nomeação.** Nomeie um administrador, depois entre com um aparelho novo dele: o aparelho novo não ganha autoridade até uma nova nomeação, e o que o administrador escreveu antes da promoção não passa a valer como ato de administração.
+- **Bloqueio de grupo verificado no painel.** Abra uma denúncia de mensagem de grupo: o painel mostra a chave inteira do grupo, o escritor e a posição, e rotula as chaves bloqueadas ou pendentes como `conta` ou `grupo`. Com o semeador no ar e a chave servida, `Bloquear conta` e `Bloquear grupo` ficam ativos; enquanto o grupo não é confirmado, os dois botões ficam desabilitados com a explicação, e `Descartar` sempre funciona (com o semeador parado, ou com uma chave que ele não serve, a denúncia só pode ser descartada). Forçar `bloquear` por fora do painel numa denúncia de grupo responde 409 `grupo-nao-confirmado` e nada é decidido. Uma denúncia v2 com o grupo igual ao alvo, ou o escritor igual ao alvo, é recusada na entrada. Uma denúncia de mensagem do criador (escritor igual à chave do grupo) pode ser confirmada e decidida. Uma denúncia que nomeia o diário da própria pessoa que modera como grupo aparece para ela e pode ser descartada; só `Bloquear grupo` nela é recusado (404 `nao-encontrado`).
+- **Denúncia com posição além do escritor.** Denuncie uma mensagem de grupo cuja posição passa do comprimento do escritor no semeador: o painel mostra a explicação nova (o semeador confirma a pessoa, mas não tem a mensagem), `Bloquear conta` e `Bloquear grupo` ficam desabilitados e `Descartar` funciona; forçar `bloquear` por fora responde 409 `grupo-nao-confirmado`, e depois da recusa o painel pergunta de novo na carga seguinte.
+- **Sair por um segundo aparelho.** Com a mesma conta em dois aparelhos que postaram no mesmo grupo, saia pelo segundo: a saída é imediata (sem `aguarde a sincronização do grupo para sair`) e as mensagens do primeiro aparelho deixam de aparecer no grupo, inclusive as anteriores à saída. Volte e confira que só o que for escrito depois da volta vale.
+- **Criador saindo por um aparelho secundário.** Crie um grupo com nome e administradores no aparelho A, entre com a mesma conta no aparelho B, deixe os dois sincronizarem e saia pelo B: o grupo mantém nome e administradores (a saída lista a raiz nos cortes). Se a raiz não estiver entre os cortes, a saída é recusada com `saia pelo aparelho que criou o grupo` (num grupo carregado isso quase nunca acontece).
+- **Painel e alvo sem conta vinculada.** Abra uma denúncia sem grupo cujo alvo não tem conta vinculada, com o semeador no ar e servindo o diário: o painel mostra `conferindo a chave no semeador…` e depois libera `Bloquear`. Com um diário que o semeador não serve (ou sem semeador), `Bloquear` fica desabilitado com `O semeador não confirmou que esta chave é um diário servido; só é possível descartar.`; forçar `bloquear` por fora responde 409 `alvo-nao-confirmado`. Com o semeador parado no meio, o painel mostra `O semeador não respondeu agora; a confirmação será tentada de novo.` e pergunta de novo na carga seguinte; `Descartar` sempre funciona.
+- **Bloqueio de conta vinculada sem semeador.** Pare o semeador e abra uma denúncia sem grupo cujo alvo tem conta vinculada: `Bloquear` fica desabilitado, forçar `bloquear` por fora responde 409 `alvo-nao-confirmado` e só `Descartar` funciona. Suba o semeador de novo e, com ele servindo o diário, `Bloquear` volta.
+- **Reinício de identidade no navegador.** Participe de um grupo (criado e entrado) no navegador, redefina a identidade e abra o app de novo com outra conta no mesmo aparelho: o IndexedDB não guarda nenhum núcleo de grupo, escritor ou réplica, e as listas `groupWriters`, `groupReplicas`, `groupDiaries` e `groupCores` estão vazias (núcleos criados por versões anteriores desta branch não estão em `groupCores`).
+- **Semeador e criador bloqueado.** Bloqueie o diário que criou um grupo e confira no registro do semeador `group-rejected ... blocked` para a raiz (também logo depois de reiniciar o semeador) e `/index/group/<chave>` respondendo 404 para a raiz; os escritores dos outros membros seguem as regras de sempre. Uma raiz cujo cabeçalho nomeia um diário que nunca registrou a entrada responde `creator: null`.
+- **Denúncia de grupo com texto conferido.** Abra uma denúncia de mensagem de grupo com o semeador no ar e `VARANDA_TRIAGE_TOKEN` igual nos dois serviços: o painel mostra `Texto conferido no semeador:` com o texto assinado e libera `Bloquear conta` e `Bloquear grupo`. Se o semeador não devolve a mensagem (token diferente, posição inexistente, grupo ou diário diferente da denúncia), os dois botões ficam desabilitados e `Descartar` funciona.
+- **Conta sem `VARANDA_TRIAGE_TOKEN`.** Suba o serviço de conta sem o token (IA desligada): a denúncia de grupo não pode ser bloqueada por nenhum dos dois botões, e forçar `bloquear` por fora é recusado; `Descartar` funciona. Um token malformado impede a partida mesmo com a IA desligada.
+- **Raiz que nomeia um diário bloqueado sem tê-la vinculado.** Bloqueie um diário D que nunca registrou a entrada com `writer` igual a G, mas que é o diário do cabeçalho da raiz G: a raiz continua servida enquanto membros a sustentam (`/index/group/<G>` responde `creator: null`). Bloqueie um criador que vinculou a raiz: ela sai, e continua recusada depois de reiniciar o semeador até a lista levantar o bloqueio.
+- **Denúncia de um escritor cuja raiz o semeador já não serve (décima terceira rodada).** No painel da conta, abra uma denúncia de mensagem de um escritor de um grupo cuja raiz o semeador não serve mais (purgada ou recusada, com algum escritor do grupo ainda servido): `Bloquear conta` fica ativo, `Bloquear grupo` não aparece e o painel explica que só a conta pode ser bloqueada; forçar `bloquear` com alvo `grupo` por fora responde 409 `grupo-nao-confirmado`.
+- **Aparelho novo depois da admissão.** Num grupo por aprovação, admita um membro e depois adicione um aparelho novo dele ao grupo: o aparelho novo continua oculto, e o pedido reaparece na lista dos administradores, até um administrador admitir de novo.
+- **Desbanimento que não viu um aparelho.** Bana um membro, crie um aparelho novo dele e desbana sem que o desbanimento liste esse aparelho: o aparelho continua oculto até um novo desbanimento, e o membro ainda consegue sair do grupo.
+
+## 50. Vínculo de conta pelo app nativo: segredo V e código de resgate R (PR feat/account-app-clients, 2026-10-30)
+
+### O que mudou
+
+- O serviço `account` aceita clientes nativos no padrão RFC 8252 (`apps/cli/lib/account/server.js`, regras puras em `apps/cli/lib/account/app-return.js`). Todos os caminhos da web ficam como estavam: cookie `__Host-varanda-link`, `Origin` exato e volta para `/?conta=`.
+- Um `POST` sem `Origin` só passa com `x-varanda-client: app` e corpo JSON. Um `Origin` presente (inclusive `null`) tem de ser a origem exata.
+- `POST /account/start` do app traz `appProof` (base64url do SHA-256 de um segredo V de 32 bytes, 43 caracteres, forma canônica) e não recebe cookie. `authorize`, `pending` e `finish` acham a linha por V (`x-varanda-link`), comparando em tempo constante.
+- A volta do Google de uma linha do app é achada só pelo `state` de uso único. Com sucesso, o serviço sorteia R, guarda só o hash de R, aceita R por 3 minutos (`APP_REDEEM_TTL_MS`) e redireciona para `https://<domínio>/account/app/conta?conta=ok&codigo=<R>` (a origem do próprio serviço); recusas vão para `https://<domínio>/account/app/conta?conta=<resultado>` sem código. R chega ao app só pelo Auth Tab (Android) ou pelo `ASWebAuthenticationSession` (iOS) abertos pelo app, que capturam essa volta; não há entrega por `varanda://conta` nem botão no navegador. Se um navegador carregar a volta, `GET /account/app/conta` responde a página estática "Volte ao app Varanda" (sem script, sem link, CSP `default-src 'none'`, `no-store`, `no-referrer`, sem exigir emissor configurado, sem janela própria, sem ler nem registrar a consulta), que manda voltar ao app ou ligar a conta pelo site com a mesma passkey. Aparelho sem navegador com Auth Tab liga a conta Google pelo site.
+- `deploy/seeder/well-known.sh`: o `assetlinks.json` passa a declarar também `delegate_permission/common.handle_all_urls`, exigido pelo Auth Tab para entregar a volta https ao app. O app não declara intent-filter https.
+- `pending` exige V e R (`x-varanda-redeem`); `finish` exige V e R e gasta R na primeira tentativa, qualquer que seja o resultado.
+- Escritas da volta do Google: a resposta do Google (`sub`, e-mail) de uma linha do app fica guardada só na memória ao lado da linha e só é associada a ela (`putGoogle`, que segura o @nome e conta no limite por conta Google) quando R é apresentado. A lista de espera e o convite recusados na volta só apagam a linha pendente e a reserva do convite, que não dependem da conta Google; nada é gravado em disco antes da conclusão.
+- Recomeçar um vínculo com convite já assinado ou já no Google aceita V como prova de dono, como o cookie na web. Um início do app que apresenta V abandona a linha anterior desse V: ela é apagada e o `state` dela morre, então a página do Google aberta para ela não troca código nenhum. Um `state` que já pertenceu a uma linha do app (abandonada, tomada, vencida ou usada) volta sempre para a volta do app com `conta=erro`, nunca para o site e nunca com código (registro em memória, até 10 minutos depois do vencimento da linha, no máximo 10000).
+- Idade: `POST /account/age/session` com o cabeçalho do app pede ao Didit a volta em `/account/age/app-return`, que ignora parâmetros e responde 302 para `varanda://idade?volta=1`, sem janela própria (só o balde global), para nunca trocar a volta por uma página de erro 429. A sessão aberta é reaproveitada só pelo mesmo tipo de cliente (web ou app), e cada cliente lê o resultado da sua sessão; a chamada que registra a aprovação apaga no Didit as duas sessões do membro.
+- O serviço não guarda resposta do Google de linha que não existe mais: se a linha do app vence ou é despejada durante a troca do código, a volta é a do app com `conta=erro`, sem código, e a resposta é descartada; a cada pedido (no máximo uma vez por segundo) o serviço descarta as entradas do app, e o `sub` e o e-mail guardados nelas, cuja linha venceu ou foi despejada.
+
+### Testes automatizados
+
+- Novo: `apps/cli/test/app-return.test.js` (forma do `appProof`, hash de V, comparação em tempo constante, forma e hash de R, lista de resultados, URL https fixa de volta na origem do serviço, página estática sem link, sem `intent:`, sem `codigo` e sem script).
+- `apps/cli/test/account.test.js`: `POST` sem `Origin` com e sem o cabeçalho, `Origin` `null` e diferente; `appProof` malformado e sem cookie; fluxo completo do app; ataque com V sem R; R repetido, R vencido 3 minutos depois da volta (pendente e conclusão), V errado com R certo, R gasto depois de conclusão recusada; a volta com R começa por `<origem>/account/app/conta?conta=ok&codigo=`; recusas da volta para `<origem>/account/app/conta`; `GET /account/app/conta` sem emissor configurado, com cabeçalhos `no-store`, `no-referrer`, `nosniff` e CSP, a página nunca mostra o código, mesmo válido na consulta, é a mesma com ou sem consulta, e a consulta fica fora dos registros; recomeço com o mesmo V (a primeira página do Google volta com `erro` sem troca de código, a nova linha conclui); recomeço com V num servidor com convites (o `state` da linha tomada volta com `erro`); linha despejada durante a troca ou vencida antes da volta dá `erro` sem código e some com a resposta do Google; entrada vencida some no pedido seguinte de qualquer rota; registros sem V, `appProof`, R, `state`, `sub`, e-mail e nonce.
+- `apps/cli/test/account-age.test.js`: volta do Didit do app só com o cabeçalho; `/account/age/app-return` ignora parâmetros e responde 302 a 1300 pedidos seguidos; sessão reaproveitada só pelo mesmo tipo de cliente, nos dois sentidos, e criações simultâneas da web e do app não se misturam; a primeira chamada que aprova apaga as duas sessões no Didit.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Num servidor de teste, `curl -si -X POST https://<domínio>/account/start -H 'content-type: application/json' -d '{}'` (sem `Origin`) responde 403; com `-H 'x-varanda-client: app'` responde 400 `pedido-invalido` (corpo inválido, não 403) (não realizada ainda).
+- [ ] O mesmo com `-H 'Origin: null' -H 'x-varanda-client: app'` responde 403 (não realizada ainda).
+- [ ] (a) Android com Chrome 137 ou mais novo: o vínculo termina dentro do app (Auth Tab) (não realizada ainda).
+- [ ] (b) Samsung Internet como navegador padrão, com o Chrome instalado: o vínculo ainda termina dentro do app, pelo Auth Tab do Chrome (não realizada ainda).
+- [ ] (c) Sem navegador com Auth Tab (por exemplo, Chrome desativado): o app pede para ligar a conta pelo site e, depois de ligar pelo site com a mesma passkey, o app mostra a conta como ligada (não realizada ainda).
+- [ ] (d) `curl -s https://<domínio>/.well-known/assetlinks.json` lista `get_login_creds` e `handle_all_urls` (não realizada ainda).
+- [ ] (e) `adb shell am start -a android.intent.action.VIEW -d 'varanda://conta?conta=ok&codigo=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'` não muda nada no app (não realizada ainda).
+- [ ] (f) Copiar o link do Google para outro aparelho continua sem concluir o vínculo (não realizada ainda).
+- [ ] Cancelar no Google volta ao app com `conta=cancelado` e sem `codigo` (não realizada ainda).
+- [ ] Verificação de idade pelo app: o Didit volta por `/account/age/app-return` para `varanda://idade?volta=1` e o app lê o resultado (não realizada ainda).
+- [ ] `docker compose ... logs account` depois desses passos não mostra `codigo`, `state`, e-mail, `sub` nem os valores dos cabeçalhos `x-varanda-*` (não realizada ainda).
+- [ ] A web segue igual: vínculo pelo navegador volta para `https://<domínio>/?conta=ok` com o cookie (não realizada ainda).
+
+### Limites que sobram
+
+- Outro app no mesmo aparelho pode registrar o esquema `varanda://`, mas R não passa mais por ele (volta https capturada só pela sessão de autenticação do app). Mesmo com R, sem V, que só existe na memória do app, ele não lê o pendente nem conclui.
+- R é gasto na primeira conclusão, mesmo recusada (assinatura inválida, 429 ou falha passageira): o app recomeça o vínculo.
+- Entre a volta do Google e o resgate de R, a linha do app ainda não conta como respondida pelo Google, então uma enxurrada de inícios pode despejá-la para dar lugar a outras (o app recebe `expirado` e recomeça).
+- Quem verifica a idade pela web e pelo app na mesma hora abre duas sessões pagas do Didit (uma por tipo de cliente), porque a URL de volta é fixada na criação da sessão. As duas contam no limite de 3 sessões por membro em 24 h.
+- `/account/age/app-return` não tem janela própria: uma enxurrada nele gasta só o balde global, como qualquer rota.
+
+## 51. Identidade por passkey no app nativo (PRF) e sessão guardada no aparelho (PR feat/native-passkey-identity, 2026-10-30)
+
+O app nativo (nó web dentro do worklet) roda a cerimônia da passkey no próprio aparelho pelo módulo local `apps/app/modules/passkey-prf` (Android: Credential Manager do `androidx.credentials`; iOS 18 ou mais novo: `ASAuthorizationPlatformPublicKeyCredentialProvider` com a extensão PRF), com o mesmo rp.id (o domínio da instalação) e a mesma entrada da PRF da web (`utf8('varanda/member-identity/prf/v1')`). Só a saída de 32 bytes da PRF cruza o IPC, em `identity.install` (docs/rpc.md 5.50). Depois de uma instalação não retomada que deu certo, a saída da PRF fica no chaveiro do aparelho (`expo-secure-store`, `WHEN_UNLOCKED_THIS_DEVICE_ONLY`), ligada ao rp.id e à chave pública, e vence com 30 dias sem uso; só um salvamento que deu certo chama `identity.sessionSaved`. Sair grava a marca `signedOut` no worklet (`identity.forget`) e então apaga o item; se o item não sair, a resposta é `SIGNOUT_INCOMPLETE` com o nó bloqueado.
+
+### Testes automatizados
+
+- Novo: `apps/app/test/passkeyOptions.test.js` (opções de criação e de entrada iguais às de `packages/web-member/lib/passkey.js`, entrada da PRF byte a byte igual a `PRF_EVAL`, base64url, `parsePrf` e `NO_PRF`, mensagens iguais às da web).
+- Novo: `apps/app/test/sessionStoreNative.test.js` (sessão guardada: ligação ao rp.id e à chave, 30 dias, data mais de 1 dia no futuro, `usedAt` ausente, apagamento; identidade: `identity.install` com `resumed: false`, `identity.sessionSaved` só depois de um salvamento que deu certo, `NO_PRF` nunca instala, ordem de Sair e `SIGNOUT_INCOMPLETE`, Recomeçar apaga a sessão qualquer que seja a resposta, retomada sem cerimônia e recusas).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda: a compilação nativa (Kotlin e Swift) só acontece no build do EAS, e os passos abaixo pedem aparelhos de verdade. Marcar só o que for de fato executado, com a saída.
+
+Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instalação para o pacote do app (`delegate_permission/common.get_login_creds`); iOS 18 ou mais novo com `com.apple.developer.associated-domains` contendo `webcredentials:<domínio>` (precisa do Apple Developer Program), o `apple-app-site-association` no domínio e `VarandaWebCredentials` como `true` no `Info.plist` (fica `false` até o domínio associado existir, porque o erro do iOS sem ele vem traduzido e não dá para reconhecê-lo com segurança). Sem isso, o iOS responde `UNSUPPORTED` e o app mostra o aviso do aparelho. Uma passkey sem PRF não trava o app: lança o mesmo `NO_PRF` da web e o cartão "Não deu para entrar com essa passkey" aparece, com "tentar de novo".
+
+- [ ] Mesma chave do diário que a web, ANTES de publicar qualquer coisa: entrar na web com a passkey e anotar a chave pública (Ajustes, Identidade técnica); no app, entrar com a mesma passkey (o gerenciador de senhas oferece a passkey criada na web) e conferir que a chave pública é a mesma. Se for diferente, não publicar nada e relatar (não realizada ainda).
+- [ ] Criar passkey pelo app numa instalação de teste: o app entra, e a mesma passkey abre a mesma conta na web (não realizada ainda).
+- [ ] Retomada a frio: depois de entrar, encerrar o app à força e abrir de novo; ele abre já desbloqueado, sem pedir a passkey (não realizada ainda).
+- [ ] Sair pede de novo: Ajustes, Sair; encerrar e abrir o app; ele pede a passkey (não retoma a sessão) (não realizada ainda).
+- [ ] Aparelho ou gerenciador sem PRF: o app mostra o cartão "Não deu para entrar com essa passkey", com os passos e "tentar de novo"; nada é derivado, nenhuma chave aparece em Identidade técnica e tocar "tentar de novo" abre a cerimônia outra vez (não realizada ainda).
+- [ ] Os logs do app (`adb logcat`, console do Xcode) durante entrar, retomar e Sair não mostram a saída da PRF nem o `prfHex` (não realizada ainda).
+
+### Limites que sobram
+
+- A saída da PRF passa pela ponte JS como texto hexadecimal (uma string não pode ser zerada); os bytes locais são zerados depois do `identity.install`.
+- Criar a passkey pelo app ainda envia `excludeCredentials: []`: a web guarda em memória os ids das passkeys inutilizáveis e os exclui, o app não, então uma passkey rejeitada pode ser oferecida de novo.
+- O item no chaveiro dá a identidade a quem tiver o aparelho desbloqueado (ou código rodando dentro do app) até Sair ou 30 dias sem uso. Não vai para backups nem para o iCloud Keychain.
+- No iOS, se a plataforma não aplicar à entrada da PRF o mesmo prefixo "WebAuthn PRF" que o navegador aplica, a chave sai diferente da web: o primeiro passo da verificação humana existe para pegar isso antes de publicar.
+
+## 52. Conta de pagamentos: saldo, receber e pagar por Pix, taxa da Varanda (feat/hodle-pix, 2026-10-30)
+
+As seções 1 a 47 e 49 a 51 não mudam; a 48 perde o limite da verificação perdida. Esta seção documenta o PR2: saldo, Pix de entrada e de saída, taxa da Varanda, webhook e Termos versão 8.
 
 ### O que mudou
 

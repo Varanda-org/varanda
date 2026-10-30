@@ -1,6 +1,7 @@
 // Espiadinha: up to three publications (posts, replies, quotes, reposts) of
 // each diary the person does not follow, one round at a time, newest first.
-// No algorithm. Hosted web only: on native and varanda-serve the tab explains
+// No algorithm. Hosted nodes only (the hosted web app and the native app on an
+// installation): on varanda-serve or a manual configuration the tab explains
 // that and never calls peek.read. The rows live in memory only; nothing is
 // persisted (their photos are fetched no-store: these authors are not
 // followed). Names come from the item (PostRow) or from a verified post the
@@ -394,8 +395,12 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   )
 
   let empty
-  if (notice === 'web-only') {
+  if (notice === 'web-only' && node.hosted !== true) {
     empty = <EmptyState icon='olho' title='Só na versão web' body={PEEK_WEB_ONLY_MESSAGE} />
+  } else if (notice === 'web-only') {
+    // A hosted node without a passkey identity, or a seeder without peek:
+    // telling a native person to use the web would be wrong.
+    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body='A Espiadinha não está disponível nesta conexão.' />
   } else if (notice === 'offline') {
     empty = <EmptyState icon='olho' title='Sem conexão' body={PEEK_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
   } else if (loadError) {

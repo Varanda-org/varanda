@@ -1,0 +1,7 @@
+{
+  "name": "auth-session",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser auth session with an https return for the Varanda app",
+  "main": "index.js"
+}

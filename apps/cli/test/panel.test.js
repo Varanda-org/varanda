@@ -127,8 +127,11 @@ function fakeFetch (routes) {
     calls.push({ url, opts })
     const key = opts.method + ' ' + url
     const route = routes[key]
+    // Every report without a group asks /alvo; a test that is not about it
+    // gets a served diary.
+    if (!route && opts.method === 'GET' && url.endsWith('/alvo')) return response(200, { confirmed: true })
     if (!route) return response(404, { error: 'nao-encontrado' })
-    const [status, body] = route(opts)
+    const [status, body] = await route(opts)
     return response(status, body)
   }
   return { fetch, calls }
@@ -335,6 +338,227 @@ test('decide POSTs JSON with credentials after confirm, then refetches', async (
   t.ok(asked[0].includes('O bloqueio vale para a conta inteira'))
   t.ok(doc.main.textContent.includes('Decisão registrada. Ela vale quando a operação assinar e publicar.'))
   t.is(calls.filter((c) => c.url === '/account/mod/api/me').length, 2, 'the queue is refetched')
+})
+
+test('a group message shows its label beside the unverified quote and offers both blocks', async (t) => {
+  const doc = fakeDocument()
+  const W = 'a1'.repeat(32)
+  const G = 'b2'.repeat(32)
+  const routes = signedIn([report({ writer: W, group: G, quote: 'mensagem' }), report({ id: 'r2abcdefghijklmnopqrst', writer: null, group: null })])
+  routes['GET /account/mod/api/reports/r1abcdefghijklmnopqrst/grupo'] = () => [200, { confirmed: true, name: 'Horta <b>', creator: B, texto: 'mensagem <i>lida' }]
+  const bodies = []
+  routes['POST /account/mod/api/reports/r1abcdefghijklmnopqrst/decide'] = (opts) => {
+    bodies.push(JSON.parse(opts.body))
+    return [200, { ok: true }]
+  }
+  const { fetch } = fakeFetch(routes)
+  const asked = []
+  const p = panel.createPanel(env(doc, fetch, { confirm: (q) => { asked.push(q); return true } }))
+  await p.start()
+  const diaryCard = cardsOf(doc)[1]
+  const labels = (card) => walk(card).filter((n) => n.className === 'label').map((n) => n.textContent)
+  await p.settled()
+  const card = cardsOf(doc)[0]
+  t.alike(labels(card), ['mensagem de grupo', 'Grupo conferido no semeador', panel.TEXT.groupVerifiedText, 'Texto enviado por quem denunciou, não conferido.'])
+  t.ok(walk(card).some((n) => n.className === 'untrusted' && n.textContent === 'mensagem <i>lida'), 'the verified message is peer text')
+  const keyLines = walk(card).filter((n) => n.className === 'key').map((n) => n.textContent)
+  t.alike(keyLines, ['chave do grupo: ' + G, 'chave de escrita do autor no grupo: ' + W, 'chave da conta denunciada: ' + A, 'criado pela conta: ' + B], 'full keys, each labelled with its kind')
+  t.ok(card.textContent.includes('mensagem nº 4'))
+  t.ok(walk(card).some((n) => n.className === 'untrusted' && n.textContent === 'Horta <b>'), 'the group name is peer text')
+  t.absent(labels(diaryCard).includes('mensagem de grupo'), 'a diary report has no group label')
+  t.is(buttons(doc, 'Bloquear').length, 1, 'the diary card keeps one Bloquear')
+  t.is(buttons(doc, 'Bloquear conta').length, 1)
+  t.is(buttons(doc, 'Bloquear grupo').length, 1)
+  buttons(doc, 'Bloquear grupo')[0].click()
+  await p.settled()
+  t.alike(bodies[0], { decision: 'bloquear', note: '', block: 'grupo' })
+  t.ok(asked[0].includes(panel.TEXT.groupBlockWarning))
+  t.ok(asked[0].includes('grupo') && asked[0].includes(G), 'the confirm names the group and its full key')
+  buttons(doc, 'Bloquear conta')[0].click()
+  await p.settled()
+  t.alike(bodies[1], { decision: 'bloquear', note: '', block: 'diario' })
+  t.ok(asked[1].includes('O bloqueio vale para a conta inteira'))
+})
+
+test('a confirmed author without the group root header offers Bloquear conta only, with an explanation', async (t) => {
+  const doc = fakeDocument()
+  const W = 'a1'.repeat(32)
+  const G = 'b2'.repeat(32)
+  const routes = signedIn([report({ writer: W, group: G })])
+  routes['GET /account/mod/api/reports/r1abcdefghijklmnopqrst/grupo'] = () => [200, { confirmed: true, root: false, name: null, creator: null, texto: 'lida' }]
+  const bodies = []
+  routes['POST /account/mod/api/reports/r1abcdefghijklmnopqrst/decide'] = (opts) => {
+    bodies.push(JSON.parse(opts.body))
+    return [200, { ok: true }]
+  }
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch, { confirm: () => true }))
+  await p.start()
+  await p.settled()
+  t.is(buttons(doc, 'Bloquear grupo').length, 0, 'no group block offered')
+  t.ok(doc.main.textContent.includes(panel.TEXT.groupRootUnconfirmed))
+  t.absent(buttons(doc, 'Bloquear conta')[0].disabled)
+  t.absent(buttons(doc, 'Descartar')[0].disabled)
+  buttons(doc, 'Bloquear conta')[0].click()
+  await p.settled()
+  t.alike(bodies, [{ decision: 'bloquear', note: '', block: 'diario' }])
+})
+
+test('an unconfirmed group disables both blocks with an explanation; Descartar stays', async (t) => {
+  const doc = fakeDocument()
+  const W = 'a1'.repeat(32)
+  const G = 'b2'.repeat(32)
+  const routes = signedIn([report({ writer: W, group: G })])
+  routes['GET /account/mod/api/reports/r1abcdefghijklmnopqrst/grupo'] = () => [200, { confirmed: false, reason: 'ausente' }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.ok(buttons(doc, 'Bloquear conta')[0].disabled, 'disabled while the seeder is asked')
+  await p.settled()
+  t.ok(buttons(doc, 'Bloquear grupo')[0].disabled, 'disabled once refused')
+  t.ok(buttons(doc, 'Bloquear conta')[0].disabled, 'the account block waits for the same confirmation')
+  t.absent(buttons(doc, 'Descartar')[0].disabled)
+  t.ok(doc.main.textContent.includes(panel.TEXT.groupUnconfirmed))
+  t.ok(doc.main.textContent.includes('chave do grupo: ' + G))
+  buttons(doc, 'Bloquear grupo')[0].click()
+  buttons(doc, 'Bloquear conta')[0].click()
+  await p.settled()
+  t.absent(calls.some((c) => c.opts.method === 'POST'), 'nothing sent')
+  t.is(calls.filter((c) => c.url.endsWith('/grupo')).length, 1, 'asked once')
+})
+
+test('a report without a group waits for /alvo before Bloquear, linked target or not', async (t) => {
+  const doc = fakeDocument()
+  const ids = ['r1abcdefghijklmnopqrst', 'r2abcdefghijklmnopqrst', 'r3abcdefghijklmnopqrst']
+  const routes = signedIn([
+    report({ id: ids[0], writer: null, group: null, reported: { member: A, username: '', linked: false } }),
+    report({ id: ids[1], writer: null, group: null, reported: { member: C, username: '', linked: false } }),
+    report({ id: ids[2], writer: null, group: null })
+  ])
+  routes['GET /account/mod/api/reports/' + ids[0] + '/alvo'] = () => [200, { confirmed: false, reason: 'ausente' }]
+  routes['GET /account/mod/api/reports/' + ids[2] + '/alvo'] = () => [200, { confirmed: false, reason: 'ausente' }]
+  let up = false
+  routes['GET /account/mod/api/reports/' + ids[1] + '/alvo'] = () => up ? [200, { confirmed: true }] : [200, { confirmed: false, reason: 'timeout' }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.ok(cardsOf(doc)[0].textContent.includes(panel.TEXT.targetChecking))
+  await p.settled()
+  const bloquear = () => buttons(doc, 'Bloquear')
+  t.ok(bloquear()[0].disabled, 'not a served diary')
+  t.ok(cardsOf(doc)[0].textContent.includes(panel.TEXT.targetUnconfirmed))
+  t.ok(bloquear()[1].disabled, 'a transient failure')
+  t.ok(cardsOf(doc)[1].textContent.includes(panel.TEXT.groupRetry))
+  t.ok(bloquear()[2].disabled, 'a linked account the seeder does not serve as a diary (a linked root key)')
+  t.ok(cardsOf(doc)[2].textContent.includes(panel.TEXT.targetUnconfirmed))
+  t.absent(buttons(doc, 'Descartar')[2].disabled)
+  up = true
+  await p.start()
+  await p.settled()
+  t.absent(bloquear()[1].disabled, 'confirmed on the next load')
+  const asked = calls.filter((c) => c.url.endsWith('/alvo') || c.url.endsWith('/grupo')).map((c) => c.url.split('/')[5])
+  t.alike(asked, [ids[0], ids[1], ids[2], ids[1]], 'the linked report is asked too; only the transient one again')
+})
+
+test('a /grupo confirmation without the message text keeps both blocks disabled', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([report({ writer: 'a1'.repeat(32), group: 'b2'.repeat(32) })])
+  routes['GET /account/mod/api/reports/r1abcdefghijklmnopqrst/grupo'] = () => [200, { confirmed: true, name: 'Horta', creator: null }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  await p.settled()
+  t.ok(buttons(doc, 'Bloquear conta')[0].disabled)
+  t.ok(buttons(doc, 'Bloquear grupo')[0].disabled)
+  t.ok(doc.main.textContent.includes(panel.TEXT.groupUnconfirmed))
+  t.absent(doc.main.textContent.includes(panel.TEXT.groupVerifiedText))
+})
+
+test('a transient /grupo reason is asked again on the next load; a definite one is not', async (t) => {
+  const doc = fakeDocument()
+  const ids = ['r1abcdefghijklmnopqrst', 'r2abcdefghijklmnopqrst']
+  const routes = signedIn(ids.map((id) => report({ id, writer: 'a1'.repeat(32), group: 'b2'.repeat(32) })))
+  routes['GET /account/mod/api/reports/' + ids[0] + '/grupo'] = () => [200, { confirmed: false, reason: 'recusado' }]
+  routes['GET /account/mod/api/reports/' + ids[1] + '/grupo'] = () => [200, { confirmed: false, reason: 'nao-membro' }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  await p.settled()
+  t.ok(cardsOf(doc)[0].textContent.includes(panel.TEXT.groupRetry), 'the transient case says it will try again')
+  t.ok(cardsOf(doc)[1].textContent.includes(panel.TEXT.groupUnconfirmed))
+  await p.start()
+  await p.settled()
+  const asked = calls.filter((c) => c.url.endsWith('/grupo')).map((c) => c.url.split('/')[5])
+  t.alike(asked, [ids[0], ids[1], ids[0]], 'only the recusado one is asked again')
+})
+
+test('a refused group block is asked again on the next load; sem-mensagem says why', async (t) => {
+  const doc = fakeDocument()
+  const ids = ['r1abcdefghijklmnopqrst', 'r2abcdefghijklmnopqrst']
+  const routes = signedIn(ids.map((id) => report({ id, writer: 'a1'.repeat(32), group: 'b2'.repeat(32) })))
+  routes['GET /account/mod/api/reports/' + ids[0] + '/grupo'] = () => [200, { confirmed: true, name: null, creator: null, texto: 'lida' }]
+  routes['GET /account/mod/api/reports/' + ids[1] + '/grupo'] = () => [200, { confirmed: false, reason: 'sem-mensagem' }]
+  routes['POST /account/mod/api/reports/' + ids[0] + '/decide'] = () => [409, { error: 'grupo-nao-confirmado' }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  await p.settled()
+  t.ok(doc.main.textContent.includes(panel.TEXT.groupNoMessage), 'the missing message is named')
+  buttons(doc, 'Bloquear conta')[0].click()
+  await p.settled()
+  t.ok(buttons(doc, 'Bloquear conta')[0].disabled, 'unconfirmed after the 409')
+  await p.start()
+  await p.settled()
+  const asked = calls.filter((c) => c.url.endsWith('/grupo')).map((c) => c.url.split('/')[5])
+  t.alike(asked, [ids[0], ids[1], ids[0]], 'only the refused one is asked again')
+})
+
+test('group lookups run one at a time, and a failed one is asked again on the next load', async (t) => {
+  const doc = fakeDocument()
+  const G = 'b2'.repeat(32)
+  const ids = ['r1abcdefghijklmnopqrst', 'r2abcdefghijklmnopqrst', 'r3abcdefghijklmnopqrst']
+  const routes = signedIn(ids.map((id) => report({ id, writer: 'a1'.repeat(32), group: G })))
+  let active = 0
+  let most = 0
+  for (const id of ids) {
+    routes['GET /account/mod/api/reports/' + id + '/grupo'] = async () => {
+      active++
+      most = Math.max(most, active)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      active--
+      return id === ids[2] ? [429, { error: 'pedido-invalido' }] : [200, { confirmed: true, name: null, creator: null, texto: 'lida' }]
+    }
+  }
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  await p.settled()
+  t.is(most, 1, 'never two lookups at once')
+  t.is(calls.filter((c) => c.url.endsWith('/grupo')).length, 3)
+  t.is(buttons(doc, 'Bloquear conta').filter((b) => !b.disabled).length, 2, 'only the confirmed ones')
+  await p.start()
+  await p.settled()
+  const asked = calls.filter((c) => c.url.endsWith('/grupo')).map((c) => c.url.split('/')[5])
+  t.alike(asked.slice(3), [ids[2]], 'only the failed lookup is asked again')
+})
+
+test('blocked and pending tabs label each key as conta or grupo', async (t) => {
+  const doc = fakeDocument()
+  const G = 'b2'.repeat(32)
+  const routes = signedIn([], {
+    published: { seq: 3, at: '2026-10-20T10:00:00.000Z' },
+    blocked: [{ member: A, username: 'bia', reportIds: [], kind: 'conta' }, { member: G, username: null, reportIds: [], kind: 'grupo' }],
+    pending: [{ id: 'c1abcdefghijklmnopqrst', op: 'block', member: B, username: '', at: '2026-10-21T12:00:00.000Z', reportIds: [], claimedAt: null, byAi: false, kind: 'grupo' }]
+  })
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Bloqueadas')[0].click()
+  const heads = walk(doc.main).filter((n) => n.tagName === 'H2').map((n) => n.textContent)
+  t.alike(heads, ['@bia · conta', panel.shortKey(G) + ' · grupo'])
+  t.ok(doc.main.textContent.includes('chave do grupo: ' + G))
+  buttons(doc, 'Pendentes')[0].click()
+  t.alike(walk(doc.main).filter((n) => n.tagName === 'H2').map((n) => n.textContent), [panel.shortKey(B) + ' · grupo'])
 })
 
 test('a declined confirm sends nothing', async (t) => {
@@ -828,7 +1052,7 @@ test('stats: no tab and no api/stats call without me.stats', async (t) => {
   t.is(p.state.stats, false, 'only a boolean true counts')
   t.is(buttons(doc, 'Estatísticas').length, 0)
   t.is(statsCalls(calls), 0)
-  t.is(calls.length, 4, 'load() is api/me plus the three lists')
+  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 4, 'load() is api/me plus the three lists (and the per-report seeder lookups)')
 
   const doc2 = fakeDocument()
   const plain = fakeFetch(signedIn([report()]))
@@ -844,7 +1068,7 @@ test('stats: lazy fetch on click, text figures, meters, Atualizar, no refetch on
   const { fetch, calls } = fakeFetch(routes)
   const p = panel.createPanel(env(doc, fetch))
   await p.start()
-  t.is(calls.length, 4, 'load() is unchanged')
+  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 4, 'load() is unchanged')
   t.is(statsCalls(calls), 0, 'nothing fetched before the click')
   t.is(buttons(doc, 'Estatísticas').length, 1)
 

@@ -7,6 +7,9 @@ const { spawnSync } = require('node:child_process')
 const repoRoot = path.resolve(__dirname, '../../..')
 const WORKFLOW = path.join(repoRoot, '.github/workflows/deploy.yml')
 const SCRIPT = path.join(repoRoot, 'deploy/seeder/deploy.sh')
+// The native app association rules, sourced by deploy.sh and build-web.sh.
+const WELL_KNOWN = path.join(repoRoot, 'deploy/seeder/well-known.sh')
+const SOURCE_WELL_KNOWN = '. ' + JSON.stringify(WELL_KNOWN) + '\n'
 
 // Optional seeder limits passed through compose.web.yaml (read by apps/cli/lib/cli.js).
 const SEEDER_LIMITS = [
@@ -244,6 +247,13 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_ACCOUNT_MAX_PENDING',
     'VARANDA_INVITES_PER_WEEK',
     '/account/mod/api/me',
+    // The optional native app associations (rules in well-known.sh) are
+    // validated before anything changes and written into www after the copy.
+    'ler_associacoes "$env_file"',
+    'gravar_associacoes "$www"',
+    'publicar_associacoes',
+    // The helper is sourced only after its owner was checked (root runs it).
+    '"$root/deploy/seeder/well-known.sh" "$root/.git"',
     // The optional seeder limits are validated by shape before anything changes.
     ...SEEDER_LIMITS
   ]
@@ -509,7 +519,7 @@ test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and a
     fs.writeFileSync(envFile, base + extra)
     // git is stubbed: only the .env checks run, nothing touches a repository.
     const script = 'set -u\nroot=' + JSON.stringify(dir) + '\ntarget=x\n' + res.join('\n') + '\n' +
-      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + fn[0] + 'conferir_antes\n'
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + 'conferir_antes\n'
     return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
   }
   const ok = run('')
@@ -565,7 +575,7 @@ test('deploy.sh: conferir_antes checks VARANDA_STATS_EMAILS against the moderato
     fs.writeFileSync(envFile, base + extra)
     // git is stubbed: only the .env checks run, nothing touches a repository.
     const script = 'set -u\nroot=' + JSON.stringify(dir) + '\ntarget=x\n' + res.join('\n') + '\n' +
-      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + fn[0] + 'conferir_antes\n'
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + 'conferir_antes\n'
     return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
   }
   const none = run('')
@@ -605,6 +615,246 @@ test('deploy.sh: conferir_antes checks VARANDA_STATS_EMAILS against the moderato
     'spaces around = do not hide a remote health URL')
   t.is(run('VARANDA_STATS_EMAILS=mod@x.test\nVARANDA_SEEDER_HEALTH="http://127.0.0.1:8788"\n').status, 1,
     'a quoted health URL is refused')
+})
+
+// Native passkeys: the OS only offers the domain's passkey to the app the
+// domain declares under /.well-known. Values are fake on purpose.
+const FAKE_CERT = Array(32).fill('0A').join(':')
+const FAKE_IOS = 'ABCDE12345.app.varanda'
+
+function hasBash (t) {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
+  if (probe.error || probe.status !== 0) {
+    t.comment('bash not found: skipping the behavioural check')
+    return false
+  }
+  return true
+}
+
+const ASSOC_BASE_ENV = 'VARANDA_DOMAIN=app.exemplo.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) +
+  '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=segredo-ultra\n'
+
+const ASSOC_BAD = [
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.toLowerCase()],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.slice(3)],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.replace(/:/g, '')],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + '"],"x":["'],
+  ['VARANDA_IOS_APP_ID', 'abcde12345.app.varanda'],
+  ['VARANDA_IOS_APP_ID', 'ABCDE1234.app.varanda'],
+  ['VARANDA_IOS_APP_ID', 'ABCDE12345.app.varanda.debug'],
+  ['VARANDA_IOS_APP_ID', 'ABCDE12345xapp.varanda']
+]
+
+function checkAssocShapes (t, wk) {
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8')), [{
+    relation: ['delegate_permission/common.get_login_creds', 'delegate_permission/common.handle_all_urls'],
+    target: { namespace: 'android_app', package_name: 'app.varanda', sha256_cert_fingerprints: [FAKE_CERT] }
+  }], 'assetlinks.json shape (handle_all_urls for the Auth Tab return)')
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
+    { webcredentials: { apps: [FAKE_IOS] } }, 'apple-app-site-association shape')
+}
+
+// A temporary root with deploy/seeder/.env and a www holding the SPA.
+function assocFixture (t) {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  const www = path.join(dir, 'www')
+  fs.mkdirSync(www, { recursive: true })
+  fs.writeFileSync(path.join(www, 'index.html'), 'app')
+  return { dir, www, wk: path.join(www, '.well-known'), envFile: path.join(dir, 'deploy/seeder/.env') }
+}
+
+test('deploy.sh: native app associations are validated and rendered into www', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const pub = src.match(/^publicar_associacoes\(\) \{\n[\s\S]*?^\}\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && pub && res && res.length === 5, 'functions and patterns located')
+  const { dir, www, wk, envFile } = assocFixture(t)
+  const run = (extra) => {
+    fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
+    const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
+      '\ntarget=x\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'conferir_antes\npublicar_associacoes\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const exists = (name) => fs.existsSync(path.join(wk, name))
+
+  const none = run('')
+  t.is(none.status, 0, 'an .env without the lines passes: ' + none.stderr)
+  t.absent(fs.existsSync(wk), 'no association file and no empty .well-known')
+  t.ok(fs.existsSync(path.join(www, 'index.html')), 'the SPA is untouched')
+  t.ok(none.stderr.includes('aviso: VARANDA_ANDROID_CERT_SHA256 vazio'), 'warns that Android sign-in is off')
+  t.ok(none.stderr.includes('aviso: VARANDA_IOS_APP_ID vazio'), 'warns that iOS sign-in is off')
+
+  const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(both.status, 0, 'well-formed values pass: ' + both.stderr)
+  checkAssocShapes(t, wk)
+  t.absent(both.stderr.includes('aviso'), 'no warning with both set')
+  t.alike(fs.readdirSync(wk).sort(), ['apple-app-site-association', 'assetlinks.json'], 'no temporary file left')
+
+  // A file left by an earlier deploy goes away when its variable is emptied.
+  const androidOnly = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=\n')
+  t.is(androidOnly.status, 0, 'Android only passes: ' + androidOnly.stderr)
+  t.ok(exists('assetlinks.json'), 'assetlinks.json kept')
+  t.absent(exists('apple-app-site-association'), 'apple-app-site-association removed')
+  t.ok(androidOnly.stderr.includes('aviso: VARANDA_IOS_APP_ID vazio'), 'warns that iOS sign-in is off')
+  t.is(run('').status, 0, 'emptying both passes')
+  t.absent(fs.existsSync(wk), 'both files removed')
+
+  for (const [name, value] of ASSOC_BAD) {
+    const r = run(name + '=' + value + '\n')
+    t.is(r.status, 1, name + ' malformed is refused: ' + value)
+    t.ok(r.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says which variable')
+  }
+})
+
+// A config-only change (certificate rotation, or switching a platform off)
+// must take effect on a rerun of the same commit, which skips the rebuild.
+test('deploy.sh: the already-deployed path refreshes the association files', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const pub = src.match(/^publicar_associacoes\(\) \{\n[\s\S]*?^\}\n/m)
+  const early = src.match(/^ {2}if \[ "\$sem_registro" = 0 \] && \[ "\$previous" = "\$target" \][\s\S]*?^ {2}fi\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && pub && early && res && res.length === 5, 'functions, early-exit block and patterns located')
+  const mainFn = src.slice(src.indexOf('\nmain() {'))
+  t.ok(mainFn.indexOf('\n  conferir_antes\n') !== -1 && mainFn.indexOf('\n  conferir_antes\n') < mainFn.indexOf(early[0]),
+    'conferir_antes runs before the early exit')
+  t.ok(early[0].indexOf('publicar_associacoes') < early[0].indexOf('exit 0'), 'refreshed before the early exit 0')
+  const { dir, www, wk, envFile } = assocFixture(t)
+  const run = (extra) => {
+    fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
+    const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
+      '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\n' +
+      'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
+      'verificar_saude() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'conferir_antes\n' + early[0] + 'echo "fell through" >&2\nexit 9\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const set = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(set.status, 0, 'already deployed and healthy exits 0: ' + set.stderr)
+  checkAssocShapes(t, wk)
+  const bad = run('VARANDA_ANDROID_CERT_SHA256=00\nVARANDA_IOS_APP_ID=\n')
+  t.is(bad.status, 1, 'a malformed value refuses the rerun')
+  t.ok(fs.existsSync(path.join(wk, 'apple-app-site-association')), 'a refused run leaves the files alone')
+  const off = run('')
+  t.is(off.status, 0, 'clearing both on the same commit exits 0: ' + off.stderr)
+  t.absent(fs.existsSync(wk), 'both files removed without a new commit')
+})
+
+// The update is all-or-nothing: a failing second write (disk full, say) must
+// leave the published files byte-identical, clean its temporaries and fail
+// with a message that does not claim nothing was attempted.
+test('deploy.sh: a failing association write leaves the published files untouched', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const pub = src.match(/^publicar_associacoes\(\) \{\n[\s\S]*?^\}\n/m)
+  const early = src.match(/^ {2}if \[ "\$sem_registro" = 0 \] && \[ "\$previous" = "\$target" \][\s\S]*?^ {2}fi\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && pub && early && res && res.length === 5, 'functions, early-exit block and patterns located')
+  const { dir, www, wk, envFile } = assocFixture(t)
+  const OLD_CERT = Array(32).fill('0B').join(':')
+  const OLD_IOS = 'ZZZZZ99999.app.varanda'
+  const run = (extra) => {
+    fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
+    const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
+      '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\n' +
+      'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
+      'verificar_saude() { return 0; }\n' +
+      'erro_antes() { echo "nada foi alterado" >&2; exit 1; }\ntrap erro_antes ERR\n' +
+      SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'conferir_antes\n' + early[0] + 'echo "fell through" >&2\nexit 9\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const first = run('VARANDA_ANDROID_CERT_SHA256=' + OLD_CERT + '\nVARANDA_IOS_APP_ID=' + OLD_IOS + '\n')
+  t.is(first.status, 0, 'the previous files are published: ' + first.stderr)
+  const before = {
+    android: fs.readFileSync(path.join(wk, 'assetlinks.json')),
+    ios: fs.readFileSync(path.join(wk, 'apple-app-site-association'))
+  }
+  // A directory in place of the second temporary file makes that write fail
+  // after the first one succeeded.
+  const blocker = path.join(wk, 'apple-app-site-association.tmp')
+  fs.mkdirSync(blocker)
+  for (const [label, extra] of [
+    ['both changed', 'VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n'],
+    ['iOS changed, Android cleared', 'VARANDA_ANDROID_CERT_SHA256=\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n']
+  ]) {
+    const r = run(extra)
+    t.is(r.status, 1, label + ': the run fails')
+    t.ok(r.stderr.includes('as anteriores ficaram como estavam'), label + ': says the previous files were kept')
+    t.ok(r.stderr.includes('associações do app nativo não foram atualizadas'), label + ': the deploy says so')
+    t.absent(r.stderr.includes('nada foi alterado') || r.stderr.includes('fell through'), label + ': no misleading message')
+    t.alike(fs.readFileSync(path.join(wk, 'assetlinks.json')), before.android, label + ': assetlinks.json byte-identical')
+    t.alike(fs.readFileSync(path.join(wk, 'apple-app-site-association')), before.ios, label + ': apple-app-site-association byte-identical')
+    t.absent(fs.existsSync(path.join(wk, 'assetlinks.json.tmp')), label + ': no temporary file left')
+  }
+  fs.rmdirSync(blocker)
+  const ok = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(ok.status, 0, 'once writable again the update goes through: ' + ok.stderr)
+  checkAssocShapes(t, wk)
+})
+
+// The manual publication (README) replaces www too: it must render the same
+// files from the same rules, and refuse a malformed value before building.
+test('build-web.sh: writes the association files and refuses malformed values', (t) => {
+  if (!hasBash(t)) return
+  const BUILD = path.join(repoRoot, 'deploy/seeder/build-web.sh')
+  t.ok(fs.readFileSync(BUILD, 'utf8').includes('. "$root/deploy/seeder/well-known.sh"'), 'build-web.sh sources well-known.sh')
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'varanda-build-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  fs.copyFileSync(BUILD, path.join(dir, 'deploy/seeder/build-web.sh'))
+  fs.copyFileSync(WELL_KNOWN, path.join(dir, 'deploy/seeder/well-known.sh'))
+  const dist = path.join(dir, 'apps/app/dist')
+  fs.mkdirSync(dist, { recursive: true })
+  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(dist, f), f)
+  // docker is stubbed: it only records that the build ran.
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const marker = path.join(dir, 'docker-ran')
+  fs.writeFileSync(path.join(bin, 'docker'), '#!/bin/sh\ntouch ' + JSON.stringify(marker) + '\n', { mode: 0o755 })
+  const www = path.join(dir, 'deploy/seeder/www')
+  const wk = path.join(www, '.well-known')
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  const run = (env) => {
+    fs.rmSync(marker, { force: true })
+    fs.writeFileSync(envFile, env)
+    return spawnSync('bash', [path.join(dir, 'deploy/seeder/build-web.sh')], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+    })
+  }
+  const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(both.status, 0, 'publishes with both set: ' + both.stderr)
+  t.ok(fs.existsSync(path.join(www, 'index.html')), 'the app is published')
+  checkAssocShapes(t, wk)
+  const off = run('')
+  t.is(off.status, 0, 'publishes with both empty: ' + off.stderr)
+  t.absent(fs.existsSync(wk), 'no association file with both empty')
+  t.ok(off.stderr.includes('aviso: VARANDA_IOS_APP_ID vazio'), 'warns that iOS sign-in is off')
+  fs.writeFileSync(path.join(www, 'index.html'), 'previous')
+  for (const [name, value] of ASSOC_BAD) {
+    const r = run(name + '=' + value + '\n')
+    t.not(r.status, 0, name + ' malformed is refused: ' + value)
+    t.ok(r.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says which variable')
+    t.absent(fs.existsSync(marker), 'refused before the build')
+  }
+  t.is(fs.readFileSync(path.join(www, 'index.html'), 'utf8'), 'previous', 'www untouched by a refused run')
+})
+
+test('.env.example: native app association variables are documented and empty', (t) => {
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
+  t.ok(example.includes('VARANDA_ANDROID_CERT_SHA256='), 'empty VARANDA_ANDROID_CERT_SHA256= line')
+  t.ok(example.includes('VARANDA_IOS_APP_ID='), 'empty VARANDA_IOS_APP_ID= line')
 })
 
 test('deploy.sh: the seeder limit ranges match apps/cli/lib/cli.js', (t) => {
@@ -722,6 +972,7 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
       "limite_re='^[1-9][0-9]{0,7}$'",
       shText.match(/^limites_conta='[^'\n]*'$/m)[0],
       'root=' + JSON.stringify(dir),
+      SOURCE_WELL_KNOWN,
       shText.slice(shText.indexOf('\nconferir_antes() {') + 1, shText.indexOf('\n}\n', shText.indexOf('\nconferir_antes() {')) + 3),
       'conferir_antes'
     ].join('\n')

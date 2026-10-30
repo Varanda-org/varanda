@@ -1,6 +1,9 @@
 /* global URL */
 
-// A small LRU of blob: URLs for verified media, pure (no React, no fetch).
+// A small LRU of displayable URLs for verified media (blob: on the web, cache
+// file:// natively), pure (no React, no fetch). Callers pass revoke: the
+// revokeUrl of ../media/display, which revokes a blob: URL or deletes the
+// file; the default only revokes blob: URLs.
 // Post keys are 'core:start:blocks:sha256'; profile photos use avatarKey
 // (author plus the descriptor fields). A key has at most one load in flight
 // (callers share its promise), at most `concurrency` loads run at once (the
@@ -13,8 +16,8 @@
 // both persisting and transient (persist: false, authors the device does not
 // follow) loads: both produce the same verified bytes and only the network
 // fetch mode differs (the caller's load passes persist to fetchMedia). This
-// in-memory LRU is not persistent storage: its blob: URLs die with the page
-// and are revoked on eviction.
+// in-memory LRU is not persistent storage: its blob: URLs die with the page,
+// its files are swept on the next start, and both are released on eviction.
 
 import { avatarKeyRange } from './avatar.js'
 

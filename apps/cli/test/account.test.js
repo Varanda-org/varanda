@@ -19,6 +19,7 @@ const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
+const { openInvitesStore } = require('../lib/account/invites-store')
 const { openWalletStore } = require('../lib/account/wallet-store')
 const { openWalletOpsStore } = require('../lib/account/wallet-ops-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
@@ -28,6 +29,7 @@ const { tmpDir, until } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const ORIGIN = 'https://varanda.test'
+const APP_RETURN = ORIGIN + '/account/app/conta'
 const CLIENT_ID = 'client-123.apps.googleusercontent.com'
 const CLIENT_SECRET = 'segredo-de-teste'
 // A 22-digit subject: any leak shows as a 16-hex run in a log line.
@@ -66,7 +68,8 @@ function json (res, code, obj) {
 }
 
 // Fake provider on 127.0.0.1; `account.sub` / `account.email` are what the
-// next exchange answers; `seen` records every request.
+// next exchange answers; `seen` records every request; `account.onToken`,
+// when set, runs before the token answer (something that happens mid-exchange).
 async function fakeGoogle (t) {
   const seen = []
   const account = { sub: SUB, email: EMAIL, tokenStatus: 200 }
@@ -78,6 +81,7 @@ async function fakeGoogle (t) {
       const pathname = new URL(req.url, 'http://127.0.0.1').pathname
       seen.push({ method: req.method, path: pathname, headers: req.headers, body })
       if (pathname === '/token') {
+        if (account.onToken) account.onToken()
         if (account.tokenStatus !== 200) return json(res, account.tokenStatus, { error: 'invalid_grant' })
         return json(res, 200, { access_token: ACCESS, token_type: 'Bearer', expires_in: 3599, id_token: idToken(account.sub) })
       }
@@ -157,7 +161,7 @@ async function setup (t, { configured = true, storeOpts = {}, serverOpts = {} } 
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
 
-  return { dir, c, iss, fake, store, logs, api, base, port: listener.port, listener }
+  return { dir, c, iss, fake, store, logs, api, base, port: listener.port, listener, server }
 }
 
 function cookieOf (res) {
@@ -1798,4 +1802,421 @@ test('account (serve): an invalid capacity variable exits 2 without printing it'
   t.is(r.code, 2)
   t.ok(r.stderr.includes('VARANDA_MAX_MEMBERS inválido'), r.stderr)
   t.absent(r.stderr.includes('zz9zz') || r.stdout.includes('zz9zz'), 'the value is not printed')
+})
+
+// --- native app clients (apps/cli/lib/account/app-return.js) ----------------
+
+const APP = { 'x-varanda-client': 'app' }
+
+// The app's in-memory secret V and the appProof it sends at start.
+function appSecret () {
+  const v = nodeCrypto.randomBytes(32).toString('base64url')
+  return { v, proof: nodeCrypto.createHash('sha256').update(Buffer.from(v, 'base64url')).digest('base64url') }
+}
+
+function appHeaders (secret, redeem) {
+  const headers = { ...APP }
+  if (secret) headers['x-varanda-link'] = secret.v
+  if (redeem) headers['x-varanda-redeem'] = redeem
+  return headers
+}
+
+function appApi (s, method, pathname, { secret, redeem, body } = {}) {
+  return s.api(method, pathname, { origin: null, headers: appHeaders(secret, redeem), body })
+}
+
+// App start (no cookie) -> reserve signature -> authorize with V. `link`:
+// the earlier V the start presents (starting over).
+async function appAuthorize (s, m, username, { secret = appSecret(), invite, link = null } = {}) {
+  const body = { member: m.hex, username, appProof: secret.proof }
+  if (invite !== undefined) body.invite = invite
+  const started = await s.api('POST', '/account/start', { origin: null, headers: appHeaders(link), body })
+  if (started.status !== 200) return { secret, started }
+  const nonce = started.body.nonce
+  const auth = await appApi(s, 'POST', '/account/authorize', { secret, body: { signature: sign(s, m, 'reserve', nonce, username) } })
+  if (auth.status !== 200) return { secret, started, nonce, auth }
+  const url = new URL(auth.body.authorizeUrl)
+  return { secret, started, nonce, auth, state: url.searchParams.get('state') }
+}
+
+// The redeem code of an <origin>/account/app/conta?conta=ok&codigo=R
+// redirect, or null.
+function redeemOf (location) {
+  const prefix = APP_RETURN + '?conta=ok&codigo='
+  if (typeof location !== 'string' || !location.startsWith(prefix)) return null
+  const code = location.slice(prefix.length)
+  return TOKEN_RE.test(code) ? code : null
+}
+
+test('app return page: static, strict headers, never echoes the query', async (t) => {
+  // No issuer: the page holds no secret of the server.
+  const s = await setup(t, { configured: false })
+  const R = appSecret().v
+  const ok = await s.api('GET', '/account/app/conta?conta=ok&codigo=' + R)
+  t.is(ok.status, 200)
+  t.is(ok.headers.get('content-type'), 'text/html; charset=utf-8')
+  t.is(ok.headers.get('cache-control'), 'no-store')
+  t.is(ok.headers.get('referrer-policy'), 'no-referrer')
+  t.is(ok.headers.get('x-content-type-options'), 'nosniff')
+  t.is(ok.headers.get('content-security-policy'), "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+  t.is(ok.headers.get('access-control-allow-origin'), null)
+  t.ok(ok.text.includes('Volte ao app Varanda'))
+  t.absent(ok.text.includes(R), 'a valid code in the query is never rendered')
+  t.absent(ok.text.includes('intent:'), 'no intent')
+  t.absent(ok.text.includes('codigo'), 'no code parameter')
+  t.absent(/<script/i.test(ok.text))
+
+  const bare = await s.api('GET', '/account/app/conta')
+  t.is(bare.status, 200)
+  t.is(bare.text, ok.text, 'the same page with or without a query')
+  t.absent(s.logs.join('\n').includes(R), 'the query is never logged')
+})
+
+test('app clients: an Origin-less POST needs the app header and JSON; a present Origin must still match', async (t) => {
+  const s = await setup(t)
+  const body = (m) => ({ member: m.hex, username: 'ana', appProof: appSecret().proof })
+
+  const bare = await s.api('POST', '/account/start', { origin: null, body: body(member()) })
+  t.is(bare.status, 403, 'no Origin and no app header')
+  const wrongHeader = await s.api('POST', '/account/start', { origin: null, headers: { 'x-varanda-client': 'App' }, body: body(member()) })
+  t.is(wrongHeader.status, 403, 'the header value is exact')
+  const nullOrigin = await s.api('POST', '/account/start', { origin: 'null', headers: APP, body: body(member()) })
+  t.is(nullOrigin.status, 403, 'Origin null stays refused')
+  const foreign = await s.api('POST', '/account/start', { origin: 'https://evil.test', headers: APP, body: body(member()) })
+  t.is(foreign.status, 403, 'a mismatched Origin with the app header')
+  const text = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'content-type': 'text/plain' }, body: body(member()) })
+  t.is(text.status, 400, 'the app header does not lift the JSON rule')
+  const ok = await s.api('POST', '/account/start', { origin: null, headers: APP, body: body(member()) })
+  t.is(ok.status, 200, 'app header + JSON is accepted: ' + ok.text)
+})
+
+test('app start: appProof is required in its exact shape, the answer is { nonce } with no cookie', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const good = appSecret().proof
+  // The last character of 32 bytes carries 4 data bits and two zero bits
+  // (one of AEIMQUYcgkosw048); the next character sets a stray bit, a
+  // non-canonical spelling of the same bytes.
+  const nonCanonical = good.slice(0, 42) + String.fromCharCode(good.charCodeAt(42) + 1)
+  for (const appProof of [undefined, '', good.slice(0, 42), good + 'A', good.slice(0, 42) + '=', good.slice(0, 42) + '+', 42, nonCanonical]) {
+    const r = await s.api('POST', '/account/start', { origin: null, headers: APP, body: { member: m.hex, username: 'ana', appProof } })
+    t.is(r.status, 400, 'refused: ' + JSON.stringify(appProof))
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const r = await s.api('POST', '/account/start', { origin: null, headers: APP, body: { member: m.hex, username: 'ana', appProof: good } })
+  t.is(r.status, 200)
+  t.alike(Object.keys(r.body), ['nonce'])
+  t.ok(TOKEN_RE.test(r.body.nonce))
+  t.is(r.headers.get('set-cookie'), null, 'no cookie for an app row')
+
+  const reused = await s.api('POST', '/account/start', { origin: null, headers: APP, body: { member: member().hex, username: 'bia', appProof: good } })
+  t.is(reused.status, 400, 'a live appProof is not taken by a start without its V')
+})
+
+test('app flow: start, authorize with V, callback by state alone, redeem code, pending and finish with V and R', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  t.ok(TOKEN_RE.test(a.state))
+
+  const early = await appApi(s, 'GET', '/account/pending', { secret: a.secret })
+  t.is(early.status, 404, 'no pending answer before the redeem code exists')
+
+  const cb = await callback(s, null, a.state)
+  t.is(cb.status, 302)
+  const loc = cb.headers.get('location')
+  const R = redeemOf(loc)
+  t.ok(loc.startsWith(APP_RETURN + '?conta=ok&codigo='), 'the https app return, on the service origin: ' + loc)
+  t.ok(R !== null, 'conta=ok&codigo=R: ' + loc)
+  t.is(cb.headers.get('set-cookie'), null)
+  t.is(s.fake.tokenCalls(), 1)
+
+  const noRedeem = await appApi(s, 'GET', '/account/pending', { secret: a.secret })
+  t.is(noRedeem.status, 404, 'V alone is not enough after the callback')
+  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(pending.status, 200, pending.text)
+  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana', sub: SUB })
+
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(finish.status, 200, finish.text)
+  t.alike(certForKey(finish.body.cert, m.hex, s.iss.association), { ok: true })
+  t.is(finish.headers.get('set-cookie'), null, 'no cookie to clear for an app row')
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
+
+  const replay = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(replay.status, 404, 'R and the row are spent')
+
+  const all = s.logs.join('\n')
+  for (const [label, secret] of [['V', a.secret.v], ['appProof', a.secret.proof], ['R', R], ['state', a.state], ['sub', SUB], ['e-mail', EMAIL], ['nonce', a.nonce]]) {
+    t.absent(all.includes(secret), 'no ' + label + ' in the logs')
+  }
+  t.ok(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'ok' })))
+})
+
+test('app flow attack: whoever holds V but not R (a shared authorizeUrl) can neither read nor finish; nothing is linked', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  // The victim completes the attacker's authorizeUrl in their own browser:
+  // no cookie, and the redirect carrying R lands on the victim's device.
+  const cb = await callback(s, null, a.state)
+  const R = redeemOf(cb.headers.get('location'))
+  t.ok(R !== null)
+
+  const wrongR = nodeCrypto.randomBytes(32).toString('base64url')
+  for (const redeem of [undefined, wrongR, 'x'.repeat(43), R.slice(0, 42)]) {
+    const p = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem })
+    t.is(p.status, 404, 'pending refused')
+    t.absent(p.text.includes(SUB), 'the victim\'s subject never reaches the attacker')
+    const f = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+    t.is(f.status, 404, 'finish refused')
+    t.alike(f.body, { error: 'expirado' })
+  }
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, false, 'nothing linked')
+  t.is(s.store.memberForSub(SUB), null, 'the subject is bound to nobody')
+})
+
+test('app flow: a wrong V with the right R fails; the right pair still works', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  const wrongV = await appApi(s, 'POST', '/account/finish', { secret: appSecret(), redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(wrongV.status, 404)
+  const badV = await s.api('GET', '/account/pending', { origin: null, headers: { ...APP, 'x-varanda-link': 'not-a-secret', 'x-varanda-redeem': R } })
+  t.is(badV.status, 404)
+  const ok = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(ok.status, 200, ok.text)
+})
+
+test('app flow: a spent R cannot be retried after a refused finish', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  const bad = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, member(), 'finish', a.nonce, 'ana', SUB) } })
+  t.is(bad.status, 400, 'a bad signature')
+  const again = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(again.status, 404, 'R was spent by the first finish')
+  t.alike(again.body, { error: 'expirado' })
+})
+
+test('app flow: R stops working three minutes after the callback, for pending and finish alike', async (t) => {
+  const redeemTtl = 180 * 1000 // APP_REDEEM_TTL_MS in server.js
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  s.c.offset += redeemTtl - 1000
+  const inTime = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(inTime.status, 200, 'still redeemable just before the limit: ' + inTime.text)
+  s.c.offset += 1000
+  const late = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(late.status, 404, 'pending refused at the limit')
+  t.alike(late.body, { error: 'expirado' })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(finish.status, 404, 'finish refused too')
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, false, 'nothing linked')
+})
+
+test('app flow: every refused callback returns to the https app return with no code; a cookie never names an app row', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 1 } })
+  const denied = await appAuthorize(s, member(), 'ana')
+  // A stray cookie changes nothing: the state names an app row.
+  const cancel = await callback(s, 'A'.repeat(43), denied.state, 'error=access_denied')
+  t.is(cancel.headers.get('location'), APP_RETURN + '?conta=cancelado')
+  const bad = await appAuthorize(s, member(), 'bia')
+  s.fake.account.tokenStatus = 400
+  t.is((await callback(s, null, bad.state, 'code=codigo-ruim')).headers.get('location'), APP_RETURN + '?conta=erro')
+  s.fake.account.tokenStatus = 200
+  const late = await appAuthorize(s, member(), 'caio')
+  await link(s, member(), 'dani')
+  const full = await callback(s, null, late.state)
+  t.is(full.headers.get('location'), APP_RETURN + '?conta=lista-de-espera')
+  t.is(full.headers.get('set-cookie'), null)
+  const unknown = await callback(s, null, 'A'.repeat(43))
+  t.is(unknown.headers.get('location'), ORIGIN + '/?conta=erro', 'an unknown state names no row and keeps the web answer')
+})
+
+test('app restart with the same V: the first Google page is dead and returns to the app with erro', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  const b = await appAuthorize(s, m, 'ana', { secret: a.secret, link: a.secret })
+  t.is(b.auth.status, 200, 'the holder of V starts over with the same appProof: ' + (b.auth && b.auth.text))
+  t.not(b.state, a.state)
+
+  const stale = await callback(s, null, a.state)
+  t.is(stale.status, 302)
+  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'never the website, never a code')
+  t.is(s.fake.tokenCalls(), 0, 'the old page exchanges nothing')
+  t.is(s.store.memberForSub(SUB), null)
+
+  const R = redeemOf((await callback(s, null, b.state)).headers.get('location'))
+  t.ok(R !== null, 'the new row completes')
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', b.nonce, 'ana', SUB) } })
+  t.is(finish.status, 200, finish.text)
+  const spent = await callback(s, null, b.state)
+  t.is(spent.headers.get('location'), APP_RETURN + '?conta=erro', 'a spent app state also returns to the app')
+})
+
+test('app restart on an invite-only server: V is the bearer proof, an outsider is refused', async (t) => {
+  const holder = {}
+  const invites = openInvitesStore(tmpDir(t), { perWeek: 2, isUsed: (id) => holder.store.inviteUsed(id) })
+  const s = await setup(t, { serverOpts: { invites } })
+  holder.store = s.store
+  const { code } = await invites.issue(member().hex)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana', { invite: code })
+  t.is(a.auth.status, 200, a.auth.text)
+
+  const outsider = await s.api('POST', '/account/start', { origin: null, headers: APP, body: { member: m.hex, username: 'ana', invite: code, appProof: appSecret().proof } })
+  t.is(outsider.status, 404, 'no V: the row past reserve is not replaced')
+  t.alike(outsider.body, { error: 'convite-invalido' })
+  const webOutsider = await s.api('POST', '/account/start', { body: { member: m.hex, username: 'ana', invite: code } })
+  t.alike(webOutsider.body, { error: 'convite-invalido' }, 'nor by a web start without the cookie')
+  const wrongV = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'x-varanda-link': appSecret().v }, body: { member: m.hex, username: 'ana', invite: code, appProof: appSecret().proof } })
+  t.alike(wrongV.body, { error: 'convite-invalido' }, 'nor with another V')
+
+  const fresh = appSecret()
+  const restart = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'x-varanda-link': a.secret.v }, body: { member: m.hex, username: 'ana', invite: code, appProof: fresh.proof } })
+  t.is(restart.status, 200, 'the holder of V starts over: ' + restart.text)
+  const gone = await appApi(s, 'POST', '/account/authorize', { secret: a.secret, body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } })
+  t.is(gone.status, 404, 'the old row is gone with its V')
+  const stale = await callback(s, null, a.state)
+  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'the taken-over row\'s Google page returns to the app')
+  t.is(s.fake.tokenCalls(), 0, 'and exchanges nothing')
+  const auth = await appApi(s, 'POST', '/account/authorize', { secret: fresh, body: { signature: sign(s, m, 'reserve', restart.body.nonce, 'ana') } })
+  t.is(auth.status, 200, auth.text)
+  const R = redeemOf((await callback(s, null, new URL(auth.body.authorizeUrl).searchParams.get('state'))).headers.get('location'))
+  t.ok(R !== null)
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: fresh, redeem: R, body: { signature: sign(s, m, 'finish', restart.body.nonce, 'ana', SUB) } })
+  t.is(finish.status, 200, finish.text)
+})
+
+test('app callback: a row evicted during the exchange gets erro, no code, and its Google answer is not kept', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 1 } })
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  // A flood start evicts the unproven app row while Google answers.
+  s.fake.account.onToken = () => s.store.start({ member: member().hex, username: 'bia' })
+  const cb = await callback(s, null, a.state)
+  t.is(s.fake.tokenCalls(), 1, 'the exchange ran')
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro', 'no unredeemable code')
+  t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'the entry and the Google answer are gone')
+})
+
+test('app flood: a row Google answered survives a start flood and still finishes with V and R', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 2 } })
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  t.ok(R !== null)
+  // The answer holds no name before R: another member may still start 'ana'.
+  t.ok(s.store.start({ member: member().hex, username: 'ana' }).id)
+  for (let i = 0; i < 5; i++) s.store.start({ member: member().hex, username: 'flood' + i })
+  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(pending.status, 200, pending.text)
+  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana', sub: SUB })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(finish.status, 200, finish.text)
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
+})
+
+test('app flood: an answered row counts against maxPending, so a full table answers lotado', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 1 } })
+  const a = await appAuthorize(s, member(), 'ana')
+  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
+  t.exception(() => s.store.start({ member: member().hex, username: 'bia' }), /lotado/)
+  const started = await s.api('POST', '/account/start', { origin: null, headers: appHeaders(null), body: { member: member().hex, username: 'bia', appProof: appSecret().proof } })
+  t.is(started.status, 503, started.text)
+})
+
+test('app flood: a row Google has not answered is still evicted by a start flood', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 1 } })
+  const a = await appAuthorize(s, member(), 'ana')
+  t.is(a.auth.status, 200, a.auth.text)
+  s.store.start({ member: member().hex, username: 'bia' })
+  const cb = await callback(s, null, a.state)
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
+  t.is(s.fake.tokenCalls(), 0, 'the evicted row exchanges nothing')
+})
+
+test('app flood: one Google subject keeps at most MAX_PER_SUB answered rows; the table never fills and the newest still finishes', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 3 } })
+  const flows = []
+  for (let i = 0; i < 5; i++) {
+    const m = member()
+    const a = await appAuthorize(s, m, 'ana' + i)
+    t.is(a.started.status, 200, 'start ' + i + ' is never lotado: ' + a.started.text)
+    if (a.started.status !== 200) return
+    t.is(a.auth.status, 200, a.auth.text)
+    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+    t.ok(R !== null, 'callback ' + i)
+    flows.push({ m, a, R })
+  }
+  t.is(s.server.appStats().google, 2, 'only the newest two answers are held')
+  t.ok(s.store.start({ member: member().hex, username: 'bia' }).id, 'an unrelated start is not lotado')
+  const old = flows[0]
+  t.is((await appApi(s, 'GET', '/account/pending', { secret: old.a.secret, redeem: old.R })).status, 404, 'the oldest answer was dropped')
+  const { m, a, R } = flows[4]
+  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(pending.status, 200, pending.text)
+  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana4', sub: SUB })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana4', SUB) } })
+  t.is(finish.status, 200, finish.text)
+})
+
+test('app flood: answered rows of different Google subjects do not evict each other', async (t) => {
+  const s = await setup(t, { storeOpts: { maxPending: 5 } })
+  const flows = []
+  for (const sub of ['2098765432109876543210', '2098765432109876543210', '3098765432109876543210', '3098765432109876543210']) {
+    s.fake.account.sub = sub
+    const m = member()
+    const a = await appAuthorize(s, m, 'u' + flows.length + 'x')
+    t.is(a.auth.status, 200, a.auth.text)
+    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+    t.ok(R !== null)
+    flows.push({ a, R, sub })
+  }
+  t.is(s.server.appStats().google, 4)
+  for (const { a, R, sub } of flows) {
+    const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+    t.is(pending.status, 200, pending.text)
+    t.is(pending.body.sub, sub)
+  }
+})
+
+test('app callback: a row expired before the callback gets erro and its entry goes', async (t) => {
+  const s = await setup(t)
+  const a = await appAuthorize(s, member(), 'ana')
+  s.c.offset += PENDING_TTL_MS + 1000
+  const cb = await callback(s, null, a.state)
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
+  t.is(s.fake.tokenCalls(), 0)
+  t.is(s.server.appStats().rows, 0)
+})
+
+test('app rows: an expired row and the Google answer it holds are dropped on the next request of any kind', async (t) => {
+  const s = await setup(t)
+  const a = await appAuthorize(s, member(), 'ana')
+  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
+  t.alike(s.server.appStats(), { rows: 1, google: 1 }, 'held until R is redeemed')
+  s.c.offset += PENDING_TTL_MS + 1000
+  t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
+  t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'dropped without a later app start')
+})
+
+test('app rows: the Google answer behind an expired R leaves memory on the next request of any kind', async (t) => {
+  const s = await setup(t)
+  const a = await appAuthorize(s, member(), 'ana')
+  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
+  t.alike(s.server.appStats(), { rows: 1, google: 1 })
+  s.c.offset += 180 * 1000 // APP_REDEEM_TTL_MS in server.js; the row itself lives on
+  t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
+  t.alike(s.server.appStats(), { rows: 1, google: 0 }, 'the row stays, its Google answer is gone')
 })

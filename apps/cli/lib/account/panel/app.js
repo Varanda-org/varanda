@@ -42,6 +42,8 @@ const API_ERRORS = {
   'ja-revertido': 'Essa decisão já foi desfeita por outra mais recente.',
   expirado: 'a sessão expirou, entre de novo',
   defasado: 'a lista mudou, recarregue o painel e tente de novo',
+  'grupo-nao-confirmado': 'o semeador não confirmou o grupo e a autoria: só é possível descartar',
+  'alvo-nao-confirmado': 'o semeador não confirmou que esta chave é um diário: só é possível descartar',
   // api/stats for a moderator who is not a stats admin (api/me hides the
   // tab then, so this is a stale page or a revoked grant).
   'nao-autorizado': 'sem acesso às estatísticas'
@@ -95,6 +97,21 @@ const TEXT = {
   login: 'Entrar com Google',
   logout: 'Sair',
   quoteLabel: 'Texto enviado por quem denunciou, não conferido.',
+  groupMessage: 'mensagem de grupo',
+  groupBlockWarning: 'O bloqueio do grupo vale para todas as mensagens dele, de todos os membros.',
+  groupKeyLabel: 'chave do grupo: ',
+  writerKeyLabel: 'chave de escrita do autor no grupo: ',
+  reportedKeyLabel: 'chave da conta denunciada: ',
+  groupChecking: 'conferindo o grupo no semeador…',
+  groupConfirmed: 'Grupo conferido no semeador',
+  groupCreator: 'criado pela conta: ',
+  groupUnconfirmed: 'O semeador não confirmou que esta chave é de um grupo com esta pessoa como autora. Bloquear conta e Bloquear grupo ficam indisponíveis: nada nesta denúncia foi conferido.',
+  groupVerifiedText: 'Texto conferido no semeador:',
+  groupRootUnconfirmed: 'O semeador conferiu a autoria, mas não confirmou a chave do grupo. Só é possível bloquear a conta.',
+  targetChecking: 'conferindo a chave no semeador…',
+  targetUnconfirmed: 'O semeador não confirmou que esta chave é um diário servido; só é possível descartar.',
+  groupNoMessage: 'O semeador confirma que esta pessoa escreve no grupo, mas não tem a mensagem com este número. Bloquear conta e Bloquear grupo ficam indisponíveis.',
+  groupRetry: 'O semeador não respondeu agora; a confirmação será tentada de novo. Bloquear conta e Bloquear grupo ficam indisponíveis até lá.',
   verifiedLabel: 'Publicação lida no semeador',
   verifiedMedia: 'A publicação tem fotos; a IA não vê imagens.',
   verifiedQuote: 'A publicação cita outra; confira no app.',
@@ -268,11 +285,15 @@ function person (p) {
 function reportRow (r) {
   if (!has(r, 'id') || typeof r.id !== 'string' || !ID_RE.test(r.id)) return null
   const reported = person(r.reported)
+  // A group message names both keys; anything else is a diary report.
+  const grouped = has(r, 'writer') && has(r, 'group') && HEX64.test(str(r.writer)) && HEX64.test(str(r.group))
   return {
     id: r.id,
     at: str(r.at),
     kind: r.kind === 'account' ? 'account' : 'post',
     seq: Number.isInteger(r.seq) ? r.seq : null,
+    writer: grouped ? r.writer : null,
+    group: grouped ? r.group : null,
     quote: str(r.quote),
     reason: str(r.reason),
     text: str(r.text),
@@ -413,6 +434,38 @@ function formatMonth (month) {
 // -> one view model. Pending changes are an ordered intent log (plan D6):
 // a member's net state is the published membership after its pending
 // changes in order.
+// A key in the blocked or pending lists is an account unless the server
+// says it is a group root.
+function keyKind (v) {
+  return v === 'grupo' ? 'grupo' : 'conta'
+}
+
+// The /grupo reasons group-check.js caches as definite.
+const GROUP_DEFINITE = ['ausente', 'nao-membro', 'sem-mensagem']
+
+// The api/reports/<id>/grupo answer -> { confirmed, name, creator }.
+function groupInfoOf (json) {
+  if (!has(json, 'confirmed') || json.confirmed !== true) {
+    const reason = has(json, 'reason') ? json.reason : null
+    // Only a definite refusal stays put; a seeder that was slow or down is
+    // asked again on the next load instead of pinning both blocks off.
+    return { confirmed: false, name: null, creator: null, noMessage: reason === 'sem-mensagem', failed: !GROUP_DEFINITE.includes(reason) }
+  }
+  // A /grupo confirmation without the message text the seeder read is not
+  // one: both blocks rest on that text, never on the reporter's quote.
+  // (/alvo answers carry no text and confirm a diary only.)
+  return {
+    confirmed: true,
+    name: typeof json.name === 'string' && json.name !== '' ? json.name : null,
+    creator: has(json, 'creator') && HEX64.test(str(json.creator)) ? json.creator : null,
+    texto: has(json, 'texto') && typeof json.texto === 'string' ? json.texto : null,
+    // The writer row confirms the author without the root header: then the
+    // key may not be a group at all, so no group block is offered. An older
+    // service sends no `root` and confirms only with the header.
+    root: !(has(json, 'root') && json.root === false)
+  }
+}
+
 function buildState ({ me, open, decided, blocked } = {}) {
   const blockedRows = has(blocked, 'blocked') && Array.isArray(blocked.blocked) ? blocked.blocked : []
   const pendingRows = has(blocked, 'pending') && Array.isArray(blocked.pending) ? blocked.pending : []
@@ -421,7 +474,7 @@ function buildState ({ me, open, decided, blocked } = {}) {
   const list = []
   for (const b of blockedRows) {
     if (!has(b, 'member') || !HEX64.test(str(b.member))) continue
-    list.push({ member: b.member, username: str(b.username) })
+    list.push({ member: b.member, username: str(b.username), kind: keyKind(b.kind) })
   }
   const pending = []
   for (const c of pendingRows) {
@@ -435,16 +488,18 @@ function buildState ({ me, open, decided, blocked } = {}) {
       username: str(c.username),
       at: str(c.at),
       claimed: has(c, 'claimedAt') && typeof c.claimedAt === 'string' && c.claimedAt !== '',
-      byAi: has(c, 'byAi') && c.byAi === true
+      byAi: has(c, 'byAi') && c.byAi === true,
+      kind: keyKind(c.kind)
     })
   }
   const listed = new Set(list.map((b) => b.member))
   // member -> { listed, blocked (net), changes } for members with pending changes
   const net = new Map()
   for (const c of pending) {
-    if (!net.has(c.member)) net.set(c.member, { member: c.member, username: c.username, listed: listed.has(c.member), blocked: listed.has(c.member), changes: [] })
+    if (!net.has(c.member)) net.set(c.member, { member: c.member, username: c.username, listed: listed.has(c.member), blocked: listed.has(c.member), changes: [], kind: 'conta' })
     const n = net.get(c.member)
     n.blocked = c.op === 'block'
+    if (c.kind === 'grupo') n.kind = 'grupo'
     n.changes.push(c)
   }
   return {
@@ -484,6 +539,12 @@ function createPanel (env) {
   // decision's error line.
   let statsError = ''
   let statsLast = Promise.resolve()
+  // report id -> { confirmed, name, creator } once api/reports/<id>/grupo
+  // answered, 'loading' while it is in flight. Asked once per group report
+  // and session, beside the run() queue like the stats GET; a hint for the
+  // 'Bloquear grupo' button only, the server checks again on decide.
+  const groupInfo = new Map()
+  let groupsLast = Promise.resolve()
   let session = 0
   let gen = 0
   let last = Promise.resolve()
@@ -604,6 +665,7 @@ function createPanel (env) {
     state = null
     session++
     statsData = null
+    groupInfo.clear()
     statsLoading = false
     statsError = ''
     notice = ''
@@ -638,11 +700,54 @@ function createPanel (env) {
     const openIds = new Set(state.open.reports.map((r) => r.id))
     for (const id of drafts.keys()) if (!openIds.has(id)) drafts.delete(id)
     render()
+    loadGroups()
+  }
+
+  // Every open report: a group report through /grupo, any other through
+  // /alvo, linked target or not (a linked account can be a group root key).
+  function needsLookup (r) {
+    return r !== null && typeof r === 'object'
+  }
+
+  // One lookup at a time, never the whole queue at once: each is charged to
+  // this session's group budget on the server and can read several pages of
+  // the seeder's public index, so a burst of group reports must exhaust
+  // neither. A lookup that failed (429 included) is asked again on the next
+  // load. The same queue asks /alvo for every report without a group.
+  function loadGroups () {
+    const mine = session
+    const asks = []
+    for (const r of state.open.reports) {
+      if (!needsLookup(r)) continue
+      const known = groupInfo.get(r.id)
+      if (known !== undefined && (known === 'loading' || !known.failed)) continue
+      groupInfo.set(r.id, 'loading')
+      asks.push({ id: r.id, path: r.group !== null ? '/grupo' : '/alvo' })
+    }
+    if (asks.length === 0) return
+    groupsLast = groupsLast.then(async () => {
+      for (const { id, path } of asks) {
+        if (mine !== session) return
+        let info = { confirmed: false, name: null, creator: null, failed: true }
+        try {
+          info = groupInfoOf(await call('GET', API + 'reports/' + encodeURIComponent(id) + path))
+        } catch (err) {
+          if (mine !== session) return
+          if (err instanceof LoginRequired) {
+            toLogin('')
+            return
+          }
+        }
+        if (mine !== session) return
+        groupInfo.set(id, info)
+        if (state && tab === 'abertas') render()
+      }
+    })
   }
 
   // A mutation: confirm, POST, then refetch everything (the server is the
   // only source of truth; decisions by other moderators show up too).
-  function mutate (question, url, body, done, onSent) {
+  function mutate (question, url, body, done, onSent, onRefused) {
     if (busy) return last
     if (question && !env.confirm(question)) return last
     busy = true
@@ -652,7 +757,12 @@ function createPanel (env) {
     return run(async () => {
       const mine = session
       try {
-        await call('POST', url, body)
+        try {
+          await call('POST', url, body)
+        } catch (err) {
+          if (onRefused) onRefused(err)
+          throw err
+        }
         // Logged out meanwhile (a 401 on the stats GET): do not reload the
         // queue behind the login screen.
         if (mine !== session) return
@@ -816,6 +926,30 @@ function createPanel (env) {
     )
   }
 
+  // The keys of a group report, in full and each named, and what the
+  // seeder confirmed (`info` null while it is being asked).
+  function groupBlock (r, info) {
+    let seen
+    if (info === null) seen = h('p', { className: 'meta', text: TEXT.groupChecking })
+    else if (!info.confirmed || info.texto === null) seen = h('p', { className: 'warning', text: info.noMessage ? TEXT.groupNoMessage : info.failed ? TEXT.groupRetry : TEXT.groupUnconfirmed })
+    else {
+      seen = h('div', { className: 'verified' },
+        h('p', { className: 'label', text: TEXT.groupConfirmed }),
+        info.name !== null ? untrusted('p', info.name) : null,
+        info.creator !== null ? h('p', { className: 'key', text: TEXT.groupCreator + info.creator }) : null,
+        h('p', { className: 'label', text: TEXT.groupVerifiedText }),
+        untrusted('p', info.texto)
+      )
+    }
+    return h('div', { className: 'group' },
+      h('p', { className: 'key', text: TEXT.groupKeyLabel + r.group }),
+      h('p', { className: 'key', text: TEXT.writerKeyLabel + r.writer }),
+      h('p', { className: 'key', text: TEXT.reportedKeyLabel + r.reported.member }),
+      r.seq !== null ? h('p', { className: 'meta', text: 'mensagem nº ' + r.seq }) : null,
+      seen
+    )
+  }
+
   function waitingBlock (member) {
     const n = state.net.get(member)
     return n !== undefined && n.blocked && n.changes[n.changes.length - 1].op === 'block'
@@ -832,16 +966,37 @@ function createPanel (env) {
       })
       const waiting = waitingBlock(r.reported.member)
       const target = who(r.reported.member, r.reported.username) + (r.reported.linked ? '' : ' (sem conta vinculada)')
-      const decide = (decision) => {
+      const grouped = r.group !== null
+      const groupWaiting = grouped && waitingBlock(r.group)
+      const lookup = needsLookup(r)
+      const info = lookup ? groupInfo.get(r.id) : undefined
+      const groupChecked = info !== undefined && info !== 'loading'
+      const groupOk = groupChecked && info.confirmed && (!grouped || info.texto !== null)
+      const rootMissing = grouped && groupOk && info.root === false
+      // Any key could be a group root: 'Bloquear'
+      // waits for the seeder to confirm a served diary.
+      const targetOk = grouped || !lookup || groupOk
+      let targetLine = null
+      if (!grouped && lookup) {
+        targetLine = !groupChecked
+          ? h('p', { className: 'meta', text: TEXT.targetChecking })
+          : groupOk ? null : h('p', { className: 'warning', text: info.failed ? TEXT.groupRetry : TEXT.targetUnconfirmed })
+      }
+      const decide = (decision, block) => {
         drafts.set(r.id, str(note.value).slice(0, NOTE_MAX))
+        const body = { decision, note: str(note.value).slice(0, NOTE_MAX) }
+        if (block !== undefined) body.block = block
         return mutate(
-          decision === 'bloquear'
-            ? 'Bloquear ' + target + '? ' + TEXT.blockWarning
-            : 'Descartar esta denúncia?',
+          decision !== 'bloquear'
+            ? 'Descartar esta denúncia?'
+            : block === 'grupo'
+              ? 'Bloquear o grupo de chave ' + r.group + '? ' + TEXT.groupBlockWarning
+              : 'Bloquear ' + target + '? ' + TEXT.blockWarning,
           API + 'reports/' + encodeURIComponent(r.id) + '/decide',
-          { decision, note: str(note.value).slice(0, NOTE_MAX) },
+          body,
           decision === 'bloquear' ? TEXT.decided : TEXT.discarded,
-          () => { drafts.delete(r.id) }
+          () => { drafts.delete(r.id) },
+          (err) => { if (err && (err.token === 'grupo-nao-confirmado' || err.token === 'alvo-nao-confirmado')) groupInfo.set(r.id, { confirmed: false, name: null, creator: null, failed: true }) }
         )
       }
       return h('div', { className: 'card' },
@@ -850,6 +1005,8 @@ function createPanel (env) {
         h('p', { text: 'denunciada: ' + target }),
         r.ai !== null ? h('p', { className: 'ai', text: aiLine(r.ai) }) : null,
         verifiedBlock(r.verified),
+        grouped ? h('p', { className: 'label', text: TEXT.groupMessage }) : null,
+        grouped ? groupBlock(r, groupChecked ? info : null) : null,
         r.quote !== '' ? h('p', { className: 'label', text: TEXT.quoteLabel }) : null,
         r.quote !== '' ? untrusted('blockquote', r.quote) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
@@ -858,7 +1015,14 @@ function createPanel (env) {
         h('label', { text: TEXT.noteLabel }, note),
         h('p', { className: 'warning', text: TEXT.blockWarning }),
         waiting ? h('p', { className: 'waiting', text: TEXT.waiting }) : null,
-        button('Bloquear', () => decide('bloquear'), { className: 'danger', disabled: busy || waiting }),
+        targetLine,
+        rootMissing ? h('p', { className: 'warning', text: TEXT.groupRootUnconfirmed }) : null,
+        grouped ? null : button('Bloquear', () => decide('bloquear'), { className: 'danger', disabled: busy || waiting || !targetOk }),
+        // Neither block on a group report until the seeder confirms the
+        // writer belongs to the reported diary: the quote is the reporter's
+        // word only, with no AI read behind it (decide checks again).
+        grouped ? button('Bloquear conta', () => decide('bloquear', 'diario'), { className: 'danger', disabled: busy || waiting || !groupOk }) : null,
+        grouped && !rootMissing ? button('Bloquear grupo', () => decide('bloquear', 'grupo'), { className: 'danger', disabled: busy || groupWaiting || !groupOk }) : null,
         button('Descartar', () => decide('descartar'), { disabled: busy })
       )
     })
@@ -885,7 +1049,8 @@ function createPanel (env) {
         ), { disabled: busy })
       ))
       cards.push(h('div', { className: 'card' },
-        h('h2', { text: who(n.member, n.username) }),
+        h('h2', { text: who(n.member, n.username) + ' · ' + n.kind }),
+        h('p', { className: 'key', text: (n.kind === 'grupo' ? TEXT.groupKeyLabel : 'chave da conta: ') + n.member }),
         h('p', { text: effect }),
         ...changes
       ))
@@ -903,7 +1068,8 @@ function createPanel (env) {
       const leaving = n !== undefined && !n.blocked
       const name = who(b.member, b.username)
       return h('div', { className: 'card' },
-        h('h2', { text: name }),
+        h('h2', { text: name + ' · ' + b.kind }),
+        h('p', { className: 'key', text: (b.kind === 'grupo' ? TEXT.groupKeyLabel : 'chave da conta: ') + b.member }),
         leaving ? h('p', { className: 'waiting', text: 'desbloqueio ' + TEXT.waiting }) : null,
         button('Desbloquear', () => mutate(
           'Desbloquear ' + name + '?',
@@ -991,10 +1157,11 @@ function createPanel (env) {
 
   return {
     start,
-    // Both queues: the run() chain and the stats GET beside it.
+    // Every queue: the run() chain and the stats and group GETs beside it.
     settled: async () => {
       await last
       await statsLast
+      await groupsLast
       await last
     },
     get state () { return state }

@@ -1,5 +1,3 @@
-/* global Blob, URL */
-
 // Profile photos (avatars) for the hosted web app. An avatar is a media
 // descriptor with stricter rules (a still 512x512 JPEG or WebP of at most 8
 // blocks), fetched and SHA-256 checked like a post photo (./fetch.js) and
@@ -7,7 +5,7 @@
 // exactly the descriptor's width and height, so an animated or mislabelled
 // file is never drawn as someone's face. Pure: no React, no Node built-ins.
 
-import { fetchMedia, validDescriptor } from './fetch.js'
+import { displayUrl, fetchMedia, validDescriptor } from './fetch.js'
 
 // Same values as packages/core/lib/records.js and still-image.js; pinned by
 // apps/app/test/avatarParity.test.js.
@@ -43,7 +41,7 @@ export function sameAvatar (a, b) {
 }
 
 // The author is part of the key: the same bytes are trusted per author, and
-// the mime is part of it because the Blob is typed with it.
+// the mime is part of it because the displayed URL is typed with it.
 export function avatarKey (author, d) {
   return String(author).toLowerCase() + ':' + FIELDS.map((k) => d[k]).join(':')
 }
@@ -179,14 +177,13 @@ export function pickAvatar (cached, row) {
   return cached && cached.avatar !== undefined ? avatarOf(cached.avatar) : avatarOf(row ? row.avatar : null)
 }
 
-// -> a blob: URL of the verified avatar bytes. A bad descriptor or bad bytes
+// -> a displayable URL of the verified avatar bytes (deps.urlFromBytes, as in
+// loadMediaUrl). A bad descriptor or bad bytes
 // is 'foto inválida' and never retryable; fetchMedia's own errors (a 404 or a
 // network error is retryable) pass through unchanged.
 export async function loadAvatarUrl (author, d, deps = {}) {
   if (!validAvatar(d)) throw new Error('foto inválida')
   const bytes = await fetchMedia(author, d, deps)
   if (!checkAvatarBytes(bytes, d)) throw new Error('foto inválida')
-  const MakeBlob = deps.Blob || Blob
-  const create = deps.createObjectURL || ((blob) => URL.createObjectURL(blob))
-  return create(new MakeBlob([bytes], { type: d.mime }))
+  return displayUrl(bytes, d.mime, deps)
 }

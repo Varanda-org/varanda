@@ -38,6 +38,21 @@ test('mediaKey joins core, start, blocks and sha256', async (t) => {
   t.is(mediaKey({ core: 'a', start: 1, blocks: 2, sha256: 'b' }), 'a:1:2:b')
 })
 
+test('the injected revokeUrl releases file: URLs on eviction, drop and clear', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const revokeUrl = (url) => revoked.push(url)
+  const cache = createMediaCache({ max: 1, revoke: revokeUrl })
+  await cache.get(hex('a') + ':1:1:' + hex('e'), async () => 'file:///c/varanda-media/1.jpg')
+  await cache.get(hex('b') + ':1:1:' + hex('e'), async () => 'file:///c/varanda-media/2.jpg')
+  t.alike(revoked, ['file:///c/varanda-media/1.jpg'], 'evicted')
+  cache.revoke([{ core: hex('b'), start: 1, blocks: 1 }])
+  t.alike(revoked, ['file:///c/varanda-media/1.jpg', 'file:///c/varanda-media/2.jpg'], 'dropped by range')
+  await cache.get(hex('c') + ':1:1:' + hex('e'), async () => 'file:///c/varanda-media/3.jpg')
+  cache.clear()
+  t.is(revoked.length, 3, 'cleared')
+})
+
 test('LRU eviction revokes the least recently used URL', async (t) => {
   const { createMediaCache } = await load()
   const revoked = []
