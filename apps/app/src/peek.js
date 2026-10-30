@@ -44,6 +44,19 @@ export function withoutAuthor (items, author) {
   return items.filter((item) => item.author !== author)
 }
 
+// `followed` maps a lowercase author to the stamp of the latest follow.
+export function withoutFollowed (items, followed) {
+  if (followed.size === 0) return items
+  return items.filter((item) => typeof item.author !== 'string' || !followed.has(item.author.toLowerCase()))
+}
+
+// Both ways to follow (the row and the search) go through here, so a page
+// read before the follow never brings the author back.
+export function recordFollow (followed, stamp, items, author) {
+  followed.set(author.toLowerCase(), stamp)
+  return withoutAuthor(items, author)
+}
+
 // The notice shown in place of the list, or null. Web-only wins over offline.
 export function peekNotice ({ supported, hosted, online, loadedAt }) {
   if (hosted !== true || supported === false) return 'web-only'
