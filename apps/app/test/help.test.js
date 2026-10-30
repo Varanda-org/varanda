@@ -9,7 +9,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites'
+    'instalar', 'denuncia', 'termosAparelho', 'convites', 'carteira'
   ].sort())
 })
 

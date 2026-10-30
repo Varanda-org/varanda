@@ -7,7 +7,7 @@ const { RpcError } = require('@varanda/rpc')
 const CLOSED_MESSAGE = 'sessão encerrada'
 const BAD_MEDIA = 'mídia inválida'
 const BAD_MEDIA_FILE = 'arquivo de mídia inválido'
-// The only file names media.uploadFile accepts (docs/rpc.md 5.41): what the
+// The only file names media.uploadFile accepts (docs/rpc.md 5.42): what the
 // host generates in its cache directory, so no separator, dot segment or
 // link target can be named.
 const MEDIA_NAME_RE = /^[0-9a-f]{32}\.bin$/

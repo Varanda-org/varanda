@@ -5,7 +5,7 @@
 // <dataDir>/web-node, syncing with the installation's seeder over
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
-// 5.35 to 5.41 (./identity-install.js and media.uploadFile below).
+// 5.36 to 5.42 (./identity-install.js and media.uploadFile below).
 //
 // The storage's exclusive LOCK (fileNodeStorage lock(), fs-native-extensions)
 // is taken before anything is opened, and every handler waits for it: a
