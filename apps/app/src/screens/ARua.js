@@ -33,8 +33,8 @@ import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
-import { FEED_SYNCING_END, canSyncRead, cursorMoved, cursorOf, feedKey, feedStillSyncing, isLastFeedPage, mergeOlder, quietNewestPlan, rearmDelay, rearmTimer, resetWith, shouldReloadOnShow, syncBaseline, syncReadKind, syncTruncated } from '../paging'
-import { freshKeys, hasFresh } from '../syncSignals'
+import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
+import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
@@ -786,7 +786,10 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     syncBase: {},
     emptyStreak: 0,
     deep: false,
-    probeOlder: false
+    probeOlder: false,
+    rangeFrom: null,
+    seqBase: null,
+    newer: 0
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
@@ -820,21 +823,37 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       if (!activeRef.current || current.loading || current.refreshing || current.loadingMore) return
       const mine = ++seqRef.current
       const seen = signalsRef.current
-      const base = seen && seen.lengths ? seen.lengths : {}
+      const base = syncLengths(seen) || {}
       commit({ loadingMore: true, moreError: '' })
       try {
         const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
         if (mine !== seqRef.current) return
         const { skipped, skippedTruncated, future, futureTruncated } = page
-        // A full page would cut rows off the end of the list being read: the
-        // list stays and the unacknowledged 'ver novidades' pill shows the
-        // newer rows. It stays at its end too: a full newest page says nothing
-        // about rows older than the oldest shown, so the next automatic read
-        // probes below the list (loadOlder fromSync) instead of the person
-        // paging into a before read that comes back empty.
+        // A full page would cut rows off the end of the list being read, so it
+        // is the first page of a range read instead: rows inside the shown
+        // range are inserted in place, newer ones wait for the 'ver
+        // novidades' pill, and the next automatic read continues down to the
+        // list's cursor (or probes below it once there).
         const plan = quietNewestPlan(page, FEED_LIMIT_DEFAULT, feedRef.current.items)
         if (!plan.replace) {
-          commit({ ...pageIncomplete(page), syncBase: syncBaseline(page, base), deep: true, probeOlder: true, loadingMore: false })
+          const prev = feedRef.current
+          const step = rangeStep({ page, limit: FEED_LIMIT_DEFAULT, until: prev.cursor, pages: 1, cap: 1 })
+          const merged = mergeRange(prev.items, page.items)
+          const end = rangeEnd({ step, cursor: prev.cursor, page, atEnd: prev.atEnd })
+          const seq = sequenceBase(null, base, end.rangeFrom !== null)
+          commit({
+            items: merged.items,
+            ...end,
+            ...pageIncomplete(page),
+            syncBase: syncBaseline(page, seq.start),
+            seqBase: seq.seqBase,
+            emptyStreak: merged.added > 0 ? 0 : prev.emptyStreak + 1,
+            deep: true,
+            newer: Math.max(prev.newer, merged.newer.length),
+            loadingMore: false
+          })
+          learnPage(page.items)
+          ingest(pageNeeds(page.items))
           return
         }
         commit({
@@ -847,6 +866,8 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
           emptyStreak: 0,
           deep: false,
           probeOlder: plan.probeOlder,
+          rangeFrom: null,
+          seqBase: null,
           loadingMore: false
         })
         learnPage(page.items)
@@ -872,7 +893,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       moreError: ''
     })
     // Taken before the read so growth during it stays visible to the next pass.
-    const base = seen && seen.lengths ? seen.lengths : {}
+    const base = syncLengths(seen) || {}
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
@@ -888,6 +909,9 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         emptyStreak: 0,
         deep: false,
         probeOlder: false,
+        rangeFrom: null,
+        seqBase: null,
+        newer: 0,
         loading: false,
         refreshing: false
       })
@@ -906,24 +930,13 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (!fromSync) rearmRef.current.cancel()
     const mine = ++seqRef.current
     const before = current.cursor
-    const seen = signalsRef.current
-    const base = seen && seen.lengths ? seen.lengths : {}
     commit({ loadingMore: true, moreError: '' })
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before })
       if (mine !== seqRef.current) return
-      const cursor = cursorOf(page.items)
-      const prev = feedRef.current
       commit({
-        items: mergeOlder(prev.items, page.items).items,
-        // An empty page keeps the cursor so a later sync pass can ask again.
-        cursor: cursor === null ? before : cursor,
-        atEnd: isLastFeedPage(page, FEED_LIMIT_MAX) || !cursorMoved(before, cursor),
+        ...olderPagePatch(feedRef.current, page, { before, fromSync, limit: FEED_LIMIT_MAX }),
         ...pageIncomplete(page),
-        syncBase: syncBaseline(page, base),
-        emptyStreak: page.items.length > 0 ? 0 : fromSync ? prev.emptyStreak + 1 : prev.emptyStreak,
-        deep: prev.deep || page.items.length > 0,
-        probeOlder: false,
         loadingMore: false
       })
       learnPage(page.items)
@@ -932,6 +945,54 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'older' })
     }
   }, [active, request, commit, learnPage, ingest])
+
+  // The automatic re-read of the shown range while followed diaries download
+  // (syncReadKind): pages from below the newest shown row (or from where a
+  // capped read stopped) down to the list's cursor, merged in place.
+  const loadRange = useCallback(async () => {
+    const current = feedRef.current
+    if (!activeRef.current || current.loading || current.refreshing || current.loadingMore || current.cursor === null) return
+    const mine = ++seqRef.current
+    const until = current.cursor
+    const cap = rangePageCap(current.items.length, FEED_LIMIT_MAX)
+    const seen = signalsRef.current
+    const base = syncLengths(seen) || {}
+    commit({ loadingMore: true, moreError: '' })
+    try {
+      let before = rangeStart(current.items, current.rangeFrom)
+      let pages = 0
+      let step = 'more'
+      let page = null
+      const rows = []
+      while (step === 'more') {
+        page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before } : { limit: FEED_LIMIT_MAX })
+        if (mine !== seqRef.current) return
+        pages++
+        rows.push(...page.items)
+        step = rangeStep({ page, limit: FEED_LIMIT_MAX, until, pages, cap })
+        before = cursorOf(page.items)
+      }
+      const prev = feedRef.current
+      const merged = mergeRange(prev.items, rows)
+      const end = rangeEnd({ step, cursor: prev.cursor, page, atEnd: prev.atEnd })
+      const seq = sequenceBase(current.seqBase, base, end.rangeFrom !== null)
+      commit({
+        items: merged.items,
+        ...end,
+        ...pageIncomplete(page),
+        syncBase: syncBaseline(page, seq.start),
+        seqBase: seq.seqBase,
+        emptyStreak: merged.added > 0 ? 0 : prev.emptyStreak + 1,
+        deep: true,
+        newer: Math.max(prev.newer, merged.newer.length),
+        loadingMore: false
+      })
+      learnPage(rows)
+      ingest(pageNeeds(rows))
+    } catch (err) {
+      if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'range' })
+    }
+  }, [request, commit, learnPage, ingest])
 
   // Own posts published on another device: A Rua compares the own diary's
   // synced length (signals.ownLength, never acknowledged, unlike fresh.own,
@@ -942,7 +1003,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
     if (ownSeenRef.current === null && ownLength !== null) ownSeenRef.current = ownLength
   }, [ownLength])
   const ownNew = ownLength !== null && ownSeenRef.current !== null && ownLength > ownSeenRef.current
-  const fresh = hasFresh(node.signals, { except: ownKey }) || ownNew
+  const fresh = hasFresh(node.signals, { except: ownKey }) || ownNew || feed.newer > 0
   const previous = useRef({ active: false, refresh, scrollToTop })
   useEffect(() => {
     const prev = previous.current
@@ -960,28 +1021,31 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   // On the native node every feed.read preempts the sync run and the
   // continuous run restarts after it (docs/rpc.md section 6.1). The browser
   // node serves the read from the live run's cores. The first growth past
-  // the baseline (or a pending probe below the list) starts one timer
-  // (longer after empty older reads): later growth neither resets it nor
-  // adds another, and this effect has no cleanup, which would debounce it on
-  // every lengths change. That batching saves requests and native
-  // preemptions. A short list re-reads the newest page, which shows arrivals
-  // that sort inside the shown range. A full or deep list reads below its
-  // oldest row: a diary that downloads newest first can add older rows
-  // there, while newer rows reach it only through the 'ver novidades' pill.
-  const lengths = node.signals ? node.signals.lengths : undefined
+  // the baseline (or a pending probe below the list, or a capped range read)
+  // starts one timer (longer after empty range or older reads): later growth
+  // neither resets it nor adds another, and this effect has no cleanup, which
+  // would debounce it on every lengths change. That batching saves requests
+  // and native preemptions. A short list re-reads the newest page; a full or
+  // deep list re-reads the range it shows (planSyncRead).
+  const presentLengths = node.signals ? node.signals.lengths : undefined
+  const newestLengths = node.signals ? node.signals.newest : undefined
+  const lengths = useMemo(() => syncLengths({ lengths: presentLengths, newest: newestLengths }), [presentLengths, newestLengths])
   const loadersRef = useRef(null)
-  loadersRef.current = { loadNewest, loadOlder }
+  loadersRef.current = { loadNewest, loadOlder, loadRange }
   useEffect(() => {
-    if (rearmRef.current.armed || !canSyncRead(feedRef.current, lengths, active)) return
-    const kindOf = (f) => syncReadKind({ deep: f.deep, probeOlder: f.probeOlder, shown: f.items.length, limit: FEED_LIMIT_DEFAULT })
+    if (rearmRef.current.armed) return
+    const plan = planSyncRead(feedRef.current, lengths, active, FEED_LIMIT_DEFAULT)
+    if (plan === null) return
     rearmRef.current.arm(() => {
       const current = feedRef.current
-      const now = signalsRef.current ? signalsRef.current.lengths : undefined
-      if (!canSyncRead(current, now, activeRef.current)) return
-      if (kindOf(current) === 'older') loadersRef.current.loadOlder({ fromSync: true })
+      const now = syncLengths(signalsRef.current)
+      const next = planSyncRead(current, now, activeRef.current, FEED_LIMIT_DEFAULT)
+      if (next === null) return
+      if (next.kind === 'older') loadersRef.current.loadOlder({ fromSync: true })
+      else if (next.kind === 'range') loadersRef.current.loadRange()
       else loadersRef.current.loadNewest({ quiet: true })
-    }, rearmDelay(kindOf(feedRef.current) === 'older' ? feedRef.current.emptyStreak : 0))
-  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak, feed.probeOlder])
+    }, plan.delay)
+  }, [active, lengths, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, feed.syncBase, feed.incomplete, feed.syncTruncated, feed.emptyStreak, feed.probeOlder, feed.rangeFrom])
 
   useEffect(() => {
     if (!active) rearmRef.current.cancel()
@@ -1005,7 +1069,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   const blocked = meta.skipped.filter((s) => MODERATION_REASONS.includes(s.reason)).length
   // A failed manual read never commits atEnd, so an older error with atEnd
   // true came from an automatic read and its retry must bypass the end guard.
-  const stillSyncing = feedStillSyncing(feed)
+  const stillSyncing = feedSyncing(feed, lengths)
   const footer = (
     <View>
       <ListFooter
@@ -1013,7 +1077,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         atEnd={loadedAt !== null && atEnd && items.length > 0}
         endText={stillSyncing ? FEED_SYNCING_END : 'Isso é tudo por enquanto.'}
         error={moreError}
-        onRetry={() => feedRef.current.retryKind === 'newest' ? loadNewest({ quiet: true }) : loadOlder({ fromSync: feedRef.current.atEnd })}
+        onRetry={() => feedRef.current.retryKind === 'newest' ? loadNewest({ quiet: true }) : feedRef.current.retryKind === 'range' ? loadRange() : loadOlder({ fromSync: feedRef.current.atEnd })}
         pending={loadingMore || refreshing}
       />
       {blocked > 0
@@ -1118,6 +1182,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         atEnd={atEnd}
         scrollToTopSignal={scrollToTop}
         newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null, onPress: showNewItems }}
+        keepVisiblePosition
       />
       <SocialToast text={social.toast} />
     </View>
