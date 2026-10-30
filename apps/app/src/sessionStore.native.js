@@ -1,7 +1,7 @@
 // The persistent sign-in of the in-app web node: the native counterpart of
 // packages/web-member/lib/session-store.js ("stay signed in on this device
 // until 'Sair'"). After a successful non-resumed identity.install (docs/rpc.md
-// 5.35), and only then, the passkey's 32-byte PRF output (the root every
+// 5.36), and only then, the passkey's 32-byte PRF output (the root every
 // member key derives from) is kept in the platform keychain (iOS Keychain,
 // Android Keystore-backed storage through expo-secure-store) so a cold start
 // resumes the session without a new ceremony.
