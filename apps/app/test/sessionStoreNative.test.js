@@ -233,9 +233,10 @@ test('identity: a failed save unlocks with sessionSaved false and never calls se
   t.absent(client.methods().includes('identity.sessionSaved'))
 })
 
-test('identity: NO_PRF never installs and reports prf no', async (t) => {
+test('identity: NO_PRF never installs, keeps prf unknown and allows a retry', async (t) => {
   resetStubs()
   const { createNativeIdentity } = await loadIdentity()
+  const { MESSAGES } = await import('../src/passkeyOptions.js')
   fakePasskey({ get: () => prfResponse(null), create: () => prfResponse({ enabled: false }) })
   const client = fakeClient()
   const store = memoryStore()
@@ -248,7 +249,8 @@ test('identity: NO_PRF never installs and reports prf no', async (t) => {
   t.is(created.userId, '03'.repeat(32))
   t.absent(client.methods().includes('identity.install'))
   t.is(store.log.length, 0)
-  t.is((await id.status()).prf, 'no')
+  t.is((await id.status()).prf, 'unknown', 'one passkey without PRF does not block the next try')
+  t.is(err.message, MESSAGES.NO_PRF)
 })
 
 test('identity: a creation without the output goes pending, then complete gets it', async (t) => {
@@ -267,7 +269,7 @@ test('identity: a creation without the output goes pending, then complete gets i
   t.alike(seen[1].options.allowCredentials, [{ type: 'public-key', id: CRED }])
   const install = client.calls.find((c) => c.method === 'identity.install')
   t.is(install.params.resumed, false)
-  t.is((await id.complete().catch((e) => e)).code, 'WEBAUTHN', 'nothing pending any more')
+  t.is((await id.complete().catch((e) => e)).code, 'CANCELLED', 'nothing pending any more')
 })
 
 test('identity: ceremony errors keep the web codes and texts', async (t) => {
@@ -388,4 +390,99 @@ test('identity: resume skips and deletes on signedOut, refusal, or another key',
   await createNativeIdentity({ request: otherCred.request, rpId: () => RP, store }).resume()
   t.absent(otherCred.methods().includes('identity.install'))
   t.absent(items().has(itemKey(RP, PK)))
+})
+
+function deferred () {
+  let settle
+  const promise = new Promise((resolve) => { settle = resolve })
+  return { promise, resolve: settle }
+}
+
+test('identity: a retry after NO_PRF can still unlock', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let withPrf = false
+  fakePasskey({ get: () => prfResponse(withPrf ? { results: { first: PRF_B64 } } : null) })
+  const client = fakeClient()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), random: deterministicRandom })
+  t.is((await id.unlock({}).catch((e) => e)).code, 'NO_PRF')
+  withPrf = true
+  t.alike(await id.unlock({}), { publicKey: PK, created: false })
+})
+
+test('identity: signOut during the ceremony installs and saves nothing', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore } = await loadStore()
+  const gate = deferred()
+  fakePasskey({ get: async () => { await gate.promise; return prfResponse({ results: { first: PRF_B64 } }) } })
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  const store = createSessionStore({ now: () => 1000 * DAY })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, random: deterministicRandom })
+  const unlocking = id.unlock({}).catch((e) => e)
+  await new Promise((resolve) => setImmediate(resolve))
+  await id.signOut()
+  gate.resolve()
+  const err = await unlocking
+  t.is(err.code, 'CANCELLED')
+  t.is(err.message, 'entrada com a passkey cancelada')
+  t.absent(client.methods().includes('identity.install'))
+  t.absent(client.methods().includes('identity.sessionSaved'))
+  t.is(items().size, 0, 'nothing stored')
+})
+
+test('identity: signOut during the save relocks and deletes the item afterwards', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore } = await loadStore()
+  fakePasskey({ get: () => prfResponse({ results: { first: PRF_B64 } }) })
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  const real = createSessionStore({ now: () => 1000 * DAY })
+  const saving = deferred()
+  const release = deferred()
+  const order = []
+  const store = {
+    load: real.load,
+    save: async (rec) => { saving.resolve(); await release.promise; await real.save(rec); order.push('saved') },
+    clear: async (args) => { await real.clear(args); order.push('cleared') }
+  }
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, random: deterministicRandom })
+  const unlocking = id.unlock({}).catch((e) => e)
+  await saving.promise
+  const signingOut = id.signOut()
+  release.resolve()
+  await signingOut
+  const err = await unlocking
+  t.is(err.code, 'CANCELLED')
+  t.alike(order, ['saved', 'cleared'], 'the item is deleted after the save settled')
+  t.is(items().size, 0)
+  t.absent(client.methods().includes('identity.sessionSaved'))
+  const methods = client.methods()
+  const install = methods.indexOf('identity.install')
+  const relock = methods.indexOf('identity.clear')
+  const forget = methods.indexOf('identity.forget')
+  t.ok(install !== -1 && relock > install, 'relocked after the install')
+  t.ok(forget > relock, 'Sair writes the barrier after the save settled')
+})
+
+test('identity: lock during the install relocks without saving', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  fakePasskey({ get: () => prfResponse({ results: { first: PRF_B64 } }) })
+  const installing = deferred()
+  const release = deferred()
+  const client = fakeClient({
+    answers: {
+      'identity.install': async (p) => { installing.resolve(); await release.promise; return { publicKey: PK, resumed: p.resumed } }
+    }
+  })
+  const store = memoryStore()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, random: deterministicRandom })
+  const unlocking = id.unlock({}).catch((e) => e)
+  await installing.promise
+  await id.lock()
+  release.resolve()
+  t.is((await unlocking).code, 'CANCELLED')
+  t.is(store.log.length, 0)
+  t.is(client.methods().filter((m) => m === 'identity.clear').length, 2, 'lock plus the relock')
 })

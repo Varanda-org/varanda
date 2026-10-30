@@ -55,19 +55,44 @@ function mapCeremonyError (err) {
   return passkeyError(KNOWN_CODES.includes(code) ? code : 'WEBAUTHN')
 }
 
+function noop () {}
+
 // passkey: { isAvailable, create, get } (modules/passkey-prf).
 // request(method, params): the connection's request.
 // rpId(): the installation's rp.id or null.
 // store: { save, load, clear } (src/sessionStore.native.js).
+//
+// As in packages/web-member/web/node.js: lock, signOut and reset bump
+// `generation`; a ceremony or resume that sees it changed after any await
+// stops (no install, no save, no sessionSaved; relocks if it already
+// installed) and rejects CANCELLED. signOut and reset wait for the
+// post-ceremony part in flight (`finishing`) before they delete the stored
+// session, so a save racing 'Sair' is deleted after it.
 export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, random = randomBytes } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
   let busy = false
-  let prf = 'unknown'
+  let generation = 0
+  // The post-ceremony part (install, save, sessionSaved) or the resume in
+  // flight; never the ceremony itself, which may wait on the person.
+  let finishing = Promise.resolve()
   // { credentialId, userId } of a creation whose PRF output needs complete().
   let pendingReg = null
   let resuming = Promise.resolve()
+
+  function invalidate () {
+    generation++
+  }
+
+  function cancelled () {
+    return passkeyError('CANCELLED')
+  }
+
+  function track (promise) {
+    finishing = promise.then(noop, noop)
+    return promise
+  }
 
   function available () {
     try {
@@ -88,8 +113,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return response
   }
 
+  // The web handle's NO_PRF (passkey.js register/signIn plus node.js
+  // noteUnusable): code, text and the passkey it names. status().prf is not
+  // touched: one manager without PRF says nothing about the next try.
   function noPrf (credentialId, userId) {
-    prf = 'no'
     const err = passkeyError('NO_PRF')
     err.credentialId = credentialId
     if (userId !== '') err.userId = userId
@@ -105,35 +132,56 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return err
   }
 
-  // A finished ceremony's PRF output -> the unlocked node. Zeroes prfBytes.
-  async function install (prfBytes, { credentialId, userId, rpId, created }) {
-    let result
-    const prfHex = toHex(prfBytes)
+  // A PRF output -> the unlocked node, for a finished ceremony (resumed
+  // false: saves the session, then sessionSaved) and for the stored session
+  // (resumed true, prfHex from the store). Any stop after the install
+  // relocks. Zeroes prfBytes.
+  async function install (gen, { prfBytes = null, prfHex, credentialId, userId, rpId, created, resumed }) {
+    let installed = false
+    let done = false
+    const hex = prfBytes !== null ? toHex(prfBytes) : prfHex
     try {
-      result = await request('identity.install', { prf: prfHex, credentialId, userId, rpId, resumed: false })
-    } catch (err) {
-      if (err && err.message === MISMATCH_TEXT) throw await mismatchError()
-      throw err
-    } finally {
-      prfBytes.fill(0)
-    }
-    let sessionSaved = false
-    try {
-      await store.save({ rpId, credentialId, publicKey: result.publicKey, prfHex })
-      sessionSaved = true
-    } catch {}
-    if (sessionSaved) {
+      if (gen !== generation) throw cancelled()
+      let result
       try {
-        await request('identity.sessionSaved')
-      } catch {
-        // The barrier stays: the next start refuses the saved record and
-        // deletes it, so the person is asked for the passkey once more.
-        sessionSaved = false
+        result = await request('identity.install', { prf: hex, credentialId, userId, rpId, resumed })
+      } catch (err) {
+        if (!resumed && err && err.message === MISMATCH_TEXT) throw await mismatchError()
+        throw err
       }
+      installed = true
+      if (prfBytes !== null) prfBytes.fill(0)
+      if (gen !== generation) throw cancelled()
+      if (resumed) {
+        done = true
+        return { publicKey: result.publicKey, created }
+      }
+      let sessionSaved = false
+      try {
+        await store.save({ rpId, credentialId, publicKey: result.publicKey, prfHex: hex })
+        sessionSaved = true
+      } catch {}
+      // A lock/signOut/reset during the save: relocked, barrier kept
+      // (signOut and reset delete the item once this settles).
+      if (gen !== generation) throw cancelled()
+      if (sessionSaved) {
+        try {
+          await request('identity.sessionSaved')
+        } catch {
+          // The barrier stays: the next start refuses the saved record and
+          // deletes it, so the person is asked for the passkey once more.
+          sessionSaved = false
+        }
+      }
+      if (gen !== generation) throw cancelled()
+      done = true
+      const out = { publicKey: result.publicKey, created }
+      if (!sessionSaved) out.sessionSaved = false
+      return out
+    } finally {
+      if (prfBytes !== null) prfBytes.fill(0)
+      if (installed && !done) await request('identity.clear').catch(noop)
     }
-    const out = { publicKey: result.publicKey, created }
-    if (!sessionSaved) out.sessionSaved = false
-    return out
   }
 
   function begin () {
@@ -141,11 +189,13 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     const rpId = rpIdOf()
     if (typeof rpId !== 'string' || rpId === '' || !available()) throw passkeyError('UNSUPPORTED')
     busy = true
+    invalidate()
     return rpId
   }
 
-  async function signIn (rpId, allowCredentialIds, created) {
+  async function signIn (gen, rpId, allowCredentialIds, created) {
     const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds }))
+    if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
     const userId = userHandleOf(response)
     let bytes
@@ -154,14 +204,15 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     } catch {
       throw noPrf(credentialId, userId)
     }
-    return install(bytes, { credentialId, userId, rpId, created })
+    return track(install(gen, { prfBytes: bytes, credentialId, userId, rpId, created, resumed: false }))
   }
 
-  async function register (rpId) {
+  async function register (gen, rpId) {
     pendingReg = null
     const userIdBytes = random(USER_ID_BYTES)
     const userId = toHex(userIdBytes)
     const response = await ceremony('create', buildCreateOptions({ rpId, userId: userIdBytes, challenge: random(CHALLENGE_BYTES) }))
+    if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
     let bytes
     try {
@@ -171,14 +222,15 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       pendingReg = { credentialId, userId }
       return { pending: true }
     }
-    return install(bytes, { credentialId, userId, rpId, created: true })
+    return track(install(gen, { prfBytes: bytes, credentialId, userId, rpId, created: true, resumed: false }))
   }
 
   async function unlock ({ register: create = false } = {}) {
     await resuming
     const rpId = begin()
+    const gen = generation
     try {
-      return create ? await register(rpId) : await signIn(rpId, [], false)
+      return create ? await register(gen, rpId) : await signIn(gen, rpId, [], false)
     } finally {
       busy = false
     }
@@ -187,37 +239,54 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // The second gesture of a pending creation: a get() restricted to it.
   async function complete () {
     await resuming
-    if (pendingReg === null) throw passkeyError('WEBAUTHN')
-    const rpId = begin()
+    if (pendingReg === null) throw codedError('CANCELLED', 'nenhuma criação de passkey pendente')
     const target = pendingReg
+    const rpId = begin()
+    const gen = generation
     try {
-      const out = await signIn(rpId, [target.credentialId], true)
+      const out = await signIn(gen, rpId, [target.credentialId], true)
       pendingReg = null
       return out
     } catch (err) {
-      if (err && err.code === 'NO_PRF') pendingReg = null
+      if (err && err.code === 'NO_PRF') {
+        pendingReg = null
+        err.credentialId = target.credentialId
+        err.userId = target.userId
+      }
       throw err
     } finally {
       busy = false
     }
   }
 
+  // prf stays 'unknown': the platforms offer no capability probe, so only a
+  // ceremony can tell (NO_PRF, with the retry path of src/passkeyTrouble.js).
   async function status () {
     await resuming
     const st = await request('identity.status')
     const rpId = rpIdOf()
-    return { ...st, webauthn: available() && typeof rpId === 'string', prf, rpId: typeof rpId === 'string' ? rpId : null }
+    return { ...st, webauthn: available() && typeof rpId === 'string', prf: 'unknown', rpId: typeof rpId === 'string' ? rpId : null }
   }
 
+  // Memory only: the stored session survives it (the next start resumes).
   function lock () {
+    invalidate()
     return request('identity.clear')
   }
 
   async function signOut () {
-    await resuming
+    invalidate()
     pendingReg = null
+    await resuming
+    // A post-ceremony part in flight may still save: let it settle first.
+    await finishing
     const st = await request('identity.status').catch(() => null)
-    await request('identity.forget')
+    try {
+      await request('identity.forget')
+    } catch (err) {
+      await request('identity.clear').catch(noop)
+      throw err
+    }
     try {
       await store.clear({ rpId: rpIdOf(), publicKey: st ? st.publicKey : null })
     } catch {
@@ -227,8 +296,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   }
 
   async function reset () {
-    await resuming
+    invalidate()
     pendingReg = null
+    await resuming
+    await finishing
     const st = await request('identity.status').catch(() => null)
     let failure = null
     try {
@@ -249,7 +320,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // At start: the stored session reopens the node with no ceremony when the
   // stored diary exists, is not legacy, is for the same public key and 'Sair'
   // did not happen since. Fails closed and never throws.
-  async function resumeOnce () {
+  async function resumeOnce (gen) {
     const rpId = rpIdOf()
     if (typeof rpId !== 'string' || rpId === '') return
     let st
@@ -258,23 +329,23 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     } catch {
       return
     }
-    if (!st || st.unlocked === true) return
+    if (!st || st.unlocked === true || gen !== generation) return
     if (st.signedOut === true) {
       try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}
       return
     }
     if (st.exists !== true || st.legacy === true || typeof st.publicKey !== 'string') return
     const record = await store.load({ rpId, publicKey: st.publicKey }).catch(() => null)
-    if (record === null) return
+    if (record === null || gen !== generation) return
     if (typeof st.credentialId === 'string' && st.credentialId !== record.credentialId) {
       try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}
       return
     }
     try {
-      await request('identity.install', { prf: record.prfHex, credentialId: record.credentialId, userId: '', rpId, resumed: true })
+      await install(gen, { prfHex: record.prfHex, credentialId: record.credentialId, userId: '', rpId, created: false, resumed: true })
     } catch (err) {
       // A refusal (signedOut, another diary) ends the stored session; a lost
-      // connection keeps it for the next start.
+      // connection or a lock meanwhile keeps it for the next start.
       if (err && err.code === 'USAGE') {
         try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}
       }
@@ -282,7 +353,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   }
 
   function resume () {
-    resuming = resumeOnce().catch(() => {})
+    resuming = track(resumeOnce(generation).catch(noop))
     return resuming
   }
 
