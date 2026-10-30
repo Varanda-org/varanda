@@ -533,6 +533,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the appeal statement (docs/rpc.md 5.57).
+    'appeal.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // And for the terms-acceptance statement (docs/rpc.md 5.29).
     'terms.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')

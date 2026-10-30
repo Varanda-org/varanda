@@ -18,7 +18,9 @@ const {
   MAX_PER_REPORTER_DAY,
   MAX_BLOCKED,
   NOTE_MAX,
-  AI_ACTOR
+  AI_ACTOR,
+  MAX_APPEALS,
+  APPEAL_WINDOW_MS
 } = require('../lib/account/moderation-store')
 const { tmpDir } = require('./helpers/net')
 
@@ -85,10 +87,11 @@ test('a missing file is created empty, 0o600 in a 0o700 dir', async (t) => {
   t.is(fs.statSync(dir).mode & 0o777, 0o700)
   t.is(fs.statSync(path.join(dir, FILE)).mode & 0o777, 0o600)
   const disk = onDisk(dir)
-  t.is(disk.v, 2)
+  t.is(disk.v, 3)
+  t.alike(disk.appeals, {})
   t.alike(disk.pending, [])
   t.alike(disk.published, { snapshot: null, at: null, moderatorDate: '' })
-  t.alike(store.stats(), { open: 0, pending: 0, blocked: 0, publishedSeq: null })
+  t.alike(store.stats(), { open: 0, appeals: 0, pending: 0, blocked: 0, publishedSeq: null })
   t.is(store.newestModeratorDate(), '')
 })
 
@@ -332,7 +335,8 @@ test('an old v1 file is read with writer null and rewritten as v2', async (t) =>
   t.is(again.duplicate, true, 'an old diary row still dedupes')
   await store.decide(id, { decision: 'descartar', by: MOD })
   const disk = onDisk(dir)
-  t.is(disk.v, 2)
+  t.is(disk.v, 3)
+  t.alike(disk.appeals, {})
   t.is(disk.reports[id].writer, null)
   t.is(disk.reports[id].group, null)
   t.is(disk.reports[id].blocked, null)
@@ -475,7 +479,7 @@ test('a good ack clears the ids and stores the snapshot and moderatorDate; same 
   t.alike(store.pending().published.snapshot, snap)
   t.is(store.pending().published.at, new Date(T0 + HOUR).toISOString())
   t.is(store.newestModeratorDate(), m.cert.date)
-  t.alike(store.stats(), { open: 0, pending: 0, blocked: 1, publishedSeq: 1 })
+  t.alike(store.stats(), { open: 0, appeals: 0, pending: 0, blocked: 1, publishedSeq: 1 })
   t.alike(onDisk(dir).published.snapshot, snap)
   const same = await store.ack({ changeIds: [], snapshot: snap, moderatorCert: m.cert })
   t.is(same.ok, true)
@@ -830,4 +834,210 @@ test('exportRows filters by member; events hold no signature, reporter or note',
   t.absent(text.includes(NONCE), 'no nonce')
   for (const e of events) t.ok(e.by === MOD || e.by === 'operador', 'by is the moderator or the operator')
   t.alike(events.map((e) => e.action), ['bloquear', 'pedido', 'enviado', 'aplicado', 'pedido'])
+})
+
+function appeal (member, extra = {}) {
+  return { member, text: 'foi um engano', signature: SIG, nonce: NONCE, ...extra }
+}
+
+// A member blocked by MOD, the block still pending.
+async function blockedMember (store, by = MOD) {
+  const target = key()
+  const r = (await store.add(report(target))).report
+  await store.decide(r.id, { decision: 'bloquear', by })
+  return target
+}
+
+test('appeal: only a blocked member appeals; a retry of the open one answers the same row', async (t) => {
+  const { store, dir, open } = setup(t)
+  const free = key()
+  await rejects(t, store.addAppeal(appeal(free)), 'nao-bloqueado', 'not blocked')
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  t.is(a.duplicate, false)
+  t.is(a.appeal.status, 'aberta')
+  t.is(a.appeal.member, target)
+  t.is(a.appeal.text, 'foi um engano')
+  const again = await store.addAppeal(appeal(target, { text: 'outro texto', nonce: 'm'.repeat(43) }))
+  t.is(again.duplicate, true)
+  t.is(again.appeal.id, a.appeal.id)
+  t.is(again.appeal.text, 'foi um engano', 'the first words stay')
+  t.is(store.stats().appeals, 1)
+  t.is(onDisk(dir).v, 3)
+  t.alike(open().getAppeal(a.appeal.id), a.appeal, 'survives a reopen')
+  t.is(store.getAppeal('nope'), null)
+})
+
+test('appeal: shape checks', async (t) => {
+  const { store } = setup(t)
+  const target = await blockedMember(store)
+  const bad = [
+    { member: 'zz' },
+    { text: 'x'.repeat(1001) },
+    { text: 'a\u0000b' },
+    { text: 'lone \ud800' },
+    { signature: 'zz' },
+    { nonce: 'curto' }
+  ]
+  for (const extra of bad) await rejects(t, store.addAppeal(appeal(target, extra)), 'pedido-invalido', JSON.stringify(extra).slice(0, 30))
+  t.is(store.stats().appeals, 0)
+  const ok = await store.addAppeal(appeal(target, { text: '' }))
+  t.is(ok.appeal.text, '', 'empty words are allowed')
+})
+
+test('appeal: one per member per 30 days, open or decided', async (t) => {
+  const { store, c } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  await store.decideAppeal(a.appeal.id, { decision: 'negar', by: 'outro@example.test' })
+  await rejects(t, store.addAppeal(appeal(target)), 'limite-recursos', 'same day')
+  c.t += APPEAL_WINDOW_MS - HOUR
+  await rejects(t, store.addAppeal(appeal(target)), 'limite-recursos', 'just inside the window')
+  c.t += 2 * HOUR
+  const next = await store.addAppeal(appeal(target))
+  t.is(next.duplicate, false)
+  t.not(next.appeal.id, a.appeal.id)
+})
+
+test('appeal: the desk is bounded', async (t) => {
+  const { store, dir, m } = setup(t)
+  const target = await blockedMember(store)
+  const disk = onDisk(dir)
+  for (let i = 0; i < MAX_APPEALS; i++) {
+    const id = String(i).padStart(22, 'a')
+    disk.appeals[id] = { id, at: new Date(T0).toISOString(), member: key(), text: '', nonce: NONCE, signature: SIG, status: 'aberta', decidedBy: null, decidedAt: null, note: '' }
+  }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const full = openModerationStore(dir, { now: () => T0, association: m.association })
+  t.is(full.stats().appeals, MAX_APPEALS)
+  await rejects(t, full.addAppeal(appeal(target)), 'limite', 'full')
+})
+
+test('appeal: aceitar of a pending block cancels it; of a published block appends an unblock', async (t) => {
+  const { store, m } = setup(t)
+  const pendingBlock = await blockedMember(store)
+  const a = await store.addAppeal(appeal(pendingBlock))
+  const accepted = await store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: 'outro@example.test', note: 'conferi' })
+  t.is(accepted.appeal.status, 'aceito')
+  t.is(accepted.appeal.decidedBy, 'outro@example.test')
+  t.is(accepted.appeal.note, 'conferi')
+  t.is(accepted.change, null, 'net zero: the unclaimed block is dropped')
+  t.is(store.pending().changes.length, 0)
+
+  const listed = key()
+  await store.ack({ changeIds: [], snapshot: m.snap(1, [listed]), moderatorCert: m.cert })
+  const b = await store.addAppeal(appeal(listed))
+  const res = await store.decideAppeal(b.appeal.id, { decision: 'aceitar', by: 'outro@example.test' })
+  t.is(res.change.op, 'unblock')
+  t.is(res.change.member, listed)
+  t.alike(store.pending().changes.map((x) => [x.op, x.member]), [['unblock', listed]])
+  t.is(store.stats().appeals, 0)
+})
+
+test('appeal: negar only closes the case', async (t) => {
+  const { store } = setup(t)
+  const target = await blockedMember(store)
+  const pendingBefore = store.pending().changes
+  const a = await store.addAppeal(appeal(target))
+  const res = await store.decideAppeal(a.appeal.id, { decision: 'negar', by: 'outro@example.test', note: 'mantido' })
+  t.is(res.appeal.status, 'negado')
+  t.is(res.change, null)
+  t.alike(store.pending().changes, pendingBefore)
+  await rejects(t, store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: MOD }), 'nao-encontrado', 'already decided')
+  await rejects(t, store.decideAppeal('nope', { decision: 'aceitar', by: MOD }), 'nao-encontrado', 'unknown id')
+})
+
+test('appeal: decision shape checks change nothing', async (t) => {
+  const { store, dir } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  const before = JSON.stringify(onDisk(dir))
+  await rejects(t, store.decideAppeal(a.appeal.id, { decision: 'bloquear', by: MOD }), 'pedido-invalido', 'report decision')
+  await rejects(t, store.decideAppeal(a.appeal.id, { decision: 'negar', by: '' }), 'pedido-invalido', 'empty by')
+  await rejects(t, store.decideAppeal(a.appeal.id, { decision: 'negar', by: MOD, note: 'x'.repeat(NOTE_MAX + 1) }), 'pedido-invalido', 'long note')
+  t.is(JSON.stringify(onDisk(dir)), before)
+})
+
+test('appeal: listAppeals orders, pages and hides the cases a moderator may not see', async (t) => {
+  const { store, c } = setup(t)
+  const mine = key()
+  const first = await blockedMember(store, 'um@example.test')
+  c.t += HOUR
+  const second = await blockedMember(store, 'dois@example.test')
+  c.t += HOUR
+  const third = await blockedMember(store, 'um@example.test')
+  const ids = []
+  for (const member of [first, second, third]) {
+    ids.push((await store.addAppeal(appeal(member))).appeal.id)
+    c.t += HOUR
+  }
+  t.alike(store.listAppeals().appeals.map((a) => a.id), ids, 'open: oldest first')
+  t.alike(store.listAppeals({ limit: 2 }).appeals.map((a) => a.id), ids.slice(0, 2))
+  t.is(store.listAppeals({ limit: 2 }).truncated, true)
+  t.alike(store.listAppeals({ exclude: second }).appeals.map((a) => a.id), [ids[0], ids[2]], 'own case')
+  t.alike(store.listAppeals({ excludeBy: 'um@example.test' }).appeals.map((a) => a.id), [ids[1]], 'the blocker')
+  t.alike(store.blockedBy(first), ['um@example.test'])
+  t.alike(store.blockedBy(mine), [])
+  t.is(store.listAppeals({ excludeBy: 'um@example.test', limit: 1 }).truncated, false, 'truncated counts only what is visible')
+  await store.decideAppeal(ids[1], { decision: 'negar', by: 'um@example.test' })
+  c.t += HOUR
+  await store.decideAppeal(ids[0], { decision: 'negar', by: 'dois@example.test' })
+  t.alike(store.listAppeals({ status: 'decidida' }).appeals.map((a) => a.id), [ids[0], ids[1]], 'decided: newest first')
+  t.alike(store.listAppeals().appeals.map((a) => a.id), [ids[2]])
+  throwsCode(t, () => store.listAppeals({ status: 'x' }), 'pedido-invalido', 'status')
+  throwsCode(t, () => store.listAppeals({ limit: 0 }), 'pedido-invalido', 'limit')
+})
+
+test('appeal: the AI is not a person who blocked, and an accepted appeal counts as a human reversal', async (t) => {
+  const { store } = setup(t)
+  const target = await blockedMember(store, AI_ACTOR)
+  t.alike(store.blockedBy(target), [], 'ai blocks name nobody')
+  const a = await store.addAppeal(appeal(target))
+  t.is(store.humanReversed(target), false)
+  await store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: MOD })
+  t.is(store.humanReversed(target), true, 'the AI never re-blocks it')
+})
+
+test('appeal: events carry the appeal id, never its words, signature or nonce', async (t) => {
+  const { store, dir } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target, { text: 'palavras privadas' }))
+  await store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: 'outro@example.test', note: 'nota privada' })
+  const events = onDisk(dir).events
+  t.alike(events.map((e) => e.action), ['bloquear', 'pedido', 'recurso-aceito', 'cancelado'])
+  const text = JSON.stringify(events)
+  t.ok(text.includes(a.appeal.id))
+  for (const secret of ['palavras privadas', 'nota privada', SIG, NONCE]) t.absent(text.includes(secret), 'no ' + secret.slice(0, 8))
+})
+
+test('appeal: v2 files read with no appeals; a malformed appeal row makes the store indisponivel', async (t) => {
+  const { dir, m } = setup(t)
+  const v2 = { v: 2, reports: {}, pending: [], published: { snapshot: null, at: null, moderatorDate: '' }, events: [] }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(v2), { mode: 0o600 })
+  const store = openModerationStore(dir, { now: () => T0, association: m.association })
+  t.alike(store.listAppeals(), { appeals: [], truncated: false })
+  const target = await blockedMember(store)
+  await store.addAppeal(appeal(target))
+  const disk = onDisk(dir)
+  t.is(disk.v, 3)
+
+  const [id, row] = Object.entries(disk.appeals)[0]
+  const broken = [
+    { ...row, status: 'ok' },
+    { ...row, note: 'x' },
+    { ...row, signature: 'zz' },
+    { ...row, extra: 1 },
+    { ...row, member: 'zz' },
+    { ...row, id: 'x'.repeat(22) }
+  ]
+  for (const bad of broken) {
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, appeals: { [id]: bad } }), { mode: 0o600 })
+    const reopened = openModerationStore(dir, { now: () => T0, association: m.association })
+    throwsCode(t, () => reopened.listAppeals(), 'indisponivel', JSON.stringify(Object.keys(bad)))
+  }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, appeals: [] }), { mode: 0o600 })
+  throwsCode(t, () => openModerationStore(dir, { now: () => T0, association: m.association }).listAppeals(), 'indisponivel', 'appeals not an object')
+  const { appeals, ...noAppeals } = disk
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(noAppeals), { mode: 0o600 })
+  throwsCode(t, () => openModerationStore(dir, { now: () => T0, association: m.association }).listAppeals(), 'indisponivel', 'v3 without appeals')
 })

@@ -118,7 +118,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`, and the IPC-only host controls `identity.install`, `identity.clear`, `identity.reset`, `identity.forget`, `identity.sessionSaved` and `media.uploadFile` (5.50 to 5.56). All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign`, `push.sign`, `age.sign` and `wallet.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30, 5.31, 5.32 and 5.35).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`, and the IPC-only host controls `identity.install`, `identity.clear`, `identity.reset`, `identity.forget`, `identity.sessionSaved` and `media.uploadFile` (5.50 to 5.56). All others are reads (`account.sign`, `report.sign`, `appeal.sign`, `terms.sign`, `invite.sign`, `push.sign`, `age.sign` and `wallet.sign` sign but write nothing, 5.18, 5.20, 5.57, 5.29, 5.30, 5.31, 5.32 and 5.35).
 
 The IPC-only host controls of the in-app web node (5.50 to 5.56) carry what the browser handle does in-page (section 11). The in-app web node never offers the legacy-follows confirmation (the handle's `follows` API, section 11): its storage is created fresh and therefore has no unsigned follow list, so its host handle reports no legacy follows.
 
@@ -590,6 +590,22 @@ Who started following the caller and whom the caller does not follow yet ("follo
 - IPC only, offered only by the in-app web-node worklet (the `web` node kind: `packages/web-member` running inside the Bare worklet), next to its session's handlers; the node session (`session.handlers`), the browser node's own session, `varanda-serve` and the browser page do not register it, so elsewhere it reaches no handler and the dispatcher answers `INTERNAL` `'erro interno'` (section 8, step 6), as 5.17.
 - Why a name and not a path: one request is capped at `MAX_REQUEST` (64 KiB) and an item may be 8 MiB, so the host writes the prepared photo to its cache directory and names the file. The worklet joins `name` to the cache directory passed at worklet start and resolves no caller-supplied path: deciding on the real path of a requested path and then opening that path string again would leave a window in which a writer swapping a parent directory for a symbolic link gets a file outside the cache read, published and deleted. The name rule leaves no separator, dot segment or other directory to name. The worklet refuses (`USAGE`) a final component that is a symbolic link or not a regular file (`lstat` before the open) and requires the opened descriptor to be that same regular file (`fstat`: same device and inode); anything else is refused and nothing is read. The bytes then follow the `media.upload` rules (size, the unlocked identity with a media key, block 0, the first upload's `media-core` declaration). That same file is deleted after a successful upload. Neither the name nor anything about the bytes appears in a result, an error message or a log.
 
+### 5.57 `appeal.sign`
+
+- Params: `{ nonce, text? }`, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/appeal/start`); `text` the appellant's own words, `0..MAX_TEXT` (1000) code points (default `''`).
+- The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF (`appealPayload`, `packages/core/lib/appeal.js`):
+
+  ```
+  varanda-appeal-v1
+  <nonce>
+  <member hex64>
+  <association hex64>
+  <digest(text)>   (lowercase hex of the BLAKE2b-256 hash of the UTF-8 text; '' hashes too)
+  ```
+
+- Result: `{ signature }`, lowercase hex128, never the payload or a key. A control character or a lone surrogate in `text` -> `USAGE` `'recurso inválido'`. The statement names no target: an appeal is always about the signer's own key, and the account service refuses it unless that key is blocked (`nao-bloqueado`).
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `report.sign`: not a diary write, no append, no network. Not mutating.
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -731,6 +747,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 - `push.sign` is browser-only (5.31): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
 - `age.sign` is browser-only (5.32): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. Native and `varanda-serve` members keep the operator certificate path (`assoc certify`).
 - `wallet.sign` is browser-only (5.35): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
+- `appeal.sign` is browser-only (5.57): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. An appeal from the CLI waits for a CLI client of the account service (issue #142).
 - `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are 31 items and 36 blocks (lowered from 35 and 42 when posts gained media). `follow.list` pages with `offset` and `limit`.
 - The app treats a missing `incomplete` field as not syncing (an older node), and `incomplete` is relative to the length the node knows locally: a diary nobody serves is not reported.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit, 4 maximal descriptors per post). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

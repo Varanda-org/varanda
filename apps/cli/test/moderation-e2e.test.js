@@ -538,7 +538,7 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
   t.ok(panel.jar.has('__Host-varanda-mod'), 'with a session cookie')
   const me = await panel.get('/account/mod/api/me')
   t.is(me.status, 200)
-  t.alike(me.body, { email: MODERATOR.email, published: null, open: 2, pending: 0 })
+  t.alike(me.body, { email: MODERATOR.email, published: null, open: 2, appeals: 0, pending: 0 })
 
   // A report the moderator files from their own diary: never in their list,
   // never theirs to decide (accuser and judge at once).

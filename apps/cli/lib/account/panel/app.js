@@ -125,6 +125,18 @@ const TEXT = {
   decided: 'Decisão registrada. Ela vale quando a operação assinar e publicar.',
   discarded: 'Denúncia descartada.',
   noOpen: 'Nenhuma denúncia aberta.',
+  noAppeals: 'Nenhum recurso aberto.',
+  appealWords: 'Palavras de quem recorreu, não conferidas.',
+  appealBlocks: 'Bloqueio decidido por denúncia de motivo: ',
+  appealBlocksNone: 'Esta chave foi bloqueada fora do painel.',
+  appealAccept: 'Aceitar',
+  appealDeny: 'Negar',
+  appealAccepted: 'Recurso aceito. O desbloqueio só vale quando a operação rodar `varanda mod apply` e publicar a lista.',
+  appealDenied: 'Recurso negado.',
+  appealDecidedTitle: 'Recursos decididos',
+  appealAcceptWarning: 'Aceitar pede o desbloqueio da conta inteira.',
+  appealDenyWarning: 'Negar mantém o bloqueio. A pessoa só pode recorrer de novo em 30 dias.',
+  appealNote: 'Só quem não decidiu o bloqueio vê este recurso.',
   moreOpen: 'Há mais denúncias depois destas.',
   moreDecided: 'Há mais decisões antes destas.',
   showMore: 'mostrar mais',
@@ -170,6 +182,7 @@ const TEXT = {
 
 const TABS = [
   { id: 'abertas', label: 'Abertas' },
+  { id: 'recursos', label: 'Recursos' },
   { id: 'pendentes', label: 'Pendentes' },
   { id: 'bloqueadas', label: 'Bloqueadas' },
   { id: 'historico', label: 'Histórico' }
@@ -306,6 +319,27 @@ function reportRow (r) {
     ai: has(r, 'ia') ? aiOf(r.ia) : null,
     verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null
   }
+}
+
+function appealRow (a) {
+  if (!has(a, 'id') || typeof a.id !== 'string' || !ID_RE.test(a.id)) return null
+  const blocks = has(a, 'bloqueios') && Array.isArray(a.bloqueios) ? a.bloqueios : []
+  return {
+    id: a.id,
+    at: str(a.at),
+    member: str(a.member),
+    username: str(a.username),
+    text: str(a.text),
+    blocks: blocks.filter((b) => has(b, 'reason')).map((b) => ({ reason: str(b.reason), at: str(b.at) })),
+    status: str(a.status),
+    decidedAt: str(a.decidedAt),
+    note: str(a.note)
+  }
+}
+
+function appealList (json) {
+  const rows = has(json, 'appeals') && Array.isArray(json.appeals) ? json.appeals : []
+  return { appeals: rows.map(appealRow).filter((a) => a !== null), truncated: has(json, 'truncated') && json.truncated === true }
 }
 
 function reportList (json) {
@@ -466,7 +500,7 @@ function groupInfoOf (json) {
   }
 }
 
-function buildState ({ me, open, decided, blocked } = {}) {
+function buildState ({ me, open, decided, blocked, appeals, appealsDecided } = {}) {
   const blockedRows = has(blocked, 'blocked') && Array.isArray(blocked.blocked) ? blocked.blocked : []
   const pendingRows = has(blocked, 'pending') && Array.isArray(blocked.pending) ? blocked.pending : []
   const published = publishedOf(has(blocked, 'published') ? blocked.published : null) ||
@@ -509,6 +543,8 @@ function buildState ({ me, open, decided, blocked } = {}) {
     published,
     open: reportList(open),
     decided: reportList(decided),
+    appeals: appealList(appeals),
+    appealsDecided: appealList(appealsDecided),
     blocked: list,
     pending,
     net
@@ -635,6 +671,17 @@ function createPanel (env) {
     return json
   }
 
+  // The appeals lists of a server from before they existed answer 404: the
+  // rest of the panel must still load. A lost session still goes to login.
+  async function optional (fn) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof LoginRequired) throw err
+      return null
+    }
+  }
+
   // Every async step goes through here: a 401 anywhere drops the state and
   // shows the login view; other errors are shown as a fixed message.
   function run (fn) {
@@ -690,14 +737,16 @@ function createPanel (env) {
   async function load () {
     const mine = ++gen
     const me = await call('GET', API + 'me')
-    const [open, decided, blocked] = await Promise.all([
+    const [open, decided, blocked, appeals, appealsDecided] = await Promise.all([
       call('GET', API + 'reports?estado=aberta'),
       call('GET', API + 'reports?estado=decidida'),
-      call('GET', API + 'blocked')
+      call('GET', API + 'blocked'),
+      optional(() => call('GET', API + 'appeals?estado=aberta')),
+      optional(() => call('GET', API + 'appeals?estado=decidida'))
     ])
     if (mine !== gen) return
-    state = buildState({ me, open, decided, blocked })
-    const openIds = new Set(state.open.reports.map((r) => r.id))
+    state = buildState({ me, open, decided, blocked, appeals, appealsDecided })
+    const openIds = new Set([...state.open.reports, ...state.appeals.appeals].map((r) => r.id))
     for (const id of drafts.keys()) if (!openIds.has(id)) drafts.delete(id)
     render()
     loadGroups()
@@ -839,11 +888,13 @@ function createPanel (env) {
       error ? h('p', { className: 'error', text: error }) : null,
       tab === 'abertas'
         ? renderOpen()
-        : tab === 'pendentes'
-          ? renderPending()
-          : tab === 'bloqueadas'
-            ? renderBlocked()
-            : tab === STATS_TAB.id ? renderStats() : renderHistory()
+        : tab === 'recursos'
+          ? renderAppeals()
+          : tab === 'pendentes'
+            ? renderPending()
+            : tab === 'bloqueadas'
+              ? renderBlocked()
+              : tab === STATS_TAB.id ? renderStats() : renderHistory()
     )
   }
 
@@ -1027,6 +1078,59 @@ function createPanel (env) {
       )
     })
     return h('div', { className: 'list' }, ...cards, truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null)
+  }
+
+  function renderAppeals () {
+    const { appeals } = state.appeals
+    const cards = appeals.map((a) => {
+      const note = h('textarea', {
+        maxLength: NOTE_MAX,
+        value: drafts.has(a.id) ? drafts.get(a.id) : '',
+        onInput: () => { drafts.set(a.id, str(note.value).slice(0, NOTE_MAX)) }
+      })
+      const name = who(a.member, a.username)
+      const decide = (decision) => {
+        drafts.set(a.id, str(note.value).slice(0, NOTE_MAX))
+        return mutate(
+          decision === 'aceitar'
+            ? 'Aceitar o recurso de ' + name + '? ' + TEXT.appealAcceptWarning
+            : 'Negar o recurso de ' + name + '? ' + TEXT.appealDenyWarning,
+          API + 'appeals/' + encodeURIComponent(a.id) + '/decide',
+          { decision, note: str(note.value).slice(0, NOTE_MAX) },
+          decision === 'aceitar' ? TEXT.appealAccepted : TEXT.appealDenied,
+          () => { drafts.delete(a.id) }
+        )
+      }
+      return h('div', { className: 'card' },
+        h('h2', { text: name }),
+        h('p', { className: 'meta', text: formatDate(a.at) }),
+        h('p', { className: 'key', text: 'chave da conta: ' + a.member }),
+        a.blocks.length === 0
+          ? h('p', { className: 'meta', text: TEXT.appealBlocksNone })
+          : h('div', null, ...a.blocks.map((b) => h('p', { className: 'meta', text: TEXT.appealBlocks + reasonLabel(b.reason) + ' · ' + formatDate(b.at) }))),
+        a.text !== '' ? h('p', { className: 'label', text: TEXT.appealWords }) : null,
+        a.text !== '' ? untrusted('blockquote', a.text) : null,
+        h('label', { text: TEXT.noteLabel }, note),
+        h('p', { className: 'warning', text: TEXT.appealAcceptWarning }),
+        button(TEXT.appealAccept, () => decide('aceitar'), { className: 'danger', disabled: busy }),
+        button(TEXT.appealDeny, () => decide('negar'), { disabled: busy })
+      )
+    })
+    const decided = state.appealsDecided.appeals.map((a) => h('div', { className: 'card' },
+      h('h2', { text: (a.status === 'aceito' ? 'aceito' : a.status === 'negado' ? 'negado' : '?') + ' · ' + who(a.member, a.username) }),
+      h('p', { className: 'meta', text: formatDate(a.decidedAt) }),
+      a.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
+      a.note !== '' ? untrusted('p', a.note) : null
+    ))
+    return h('div', { className: 'list' },
+      h('p', { className: 'meta', text: TEXT.appealNote }),
+      appeals.length === 0 ? h('p', { text: TEXT.noAppeals }) : null,
+      ...cards,
+      state.appeals.truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null,
+      decided.length > 0 ? h('h2', { text: TEXT.appealDecidedTitle }) : null,
+      ...decided,
+      state.appealsDecided.truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null
+    )
   }
 
   function renderPending () {
