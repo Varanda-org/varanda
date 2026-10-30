@@ -186,13 +186,15 @@ test('sessionSaved without a non-resumed install is refused', async (t) => {
   t.is(err.code, 'USAGE', 'after a lock')
   t.is((await host.status()).signedOut, true)
 
-  // Nor a later failed install.
+  // A resumed install refused by the barrier (a startup resume racing the
+  // ceremony) changes nothing: the ceremony's save can still lift it.
   const third = setup()
   await third.host.forget()
   await third.host.install(params())
-  await third.host.install(params({ resumed: true })).catch(() => {})
-  err = await third.host.sessionSaved().catch((e) => e)
-  t.is(err.code, 'USAGE', 'after a refused install')
+  err = await third.host.install(params({ resumed: true })).catch((e) => e)
+  t.is(err.code, 'USAGE', 'the resumed install is refused')
+  t.alike(await third.host.sessionSaved(), {}, 'sessionSaved still lifts the barrier')
+  t.is((await third.host.status()).signedOut, false)
 })
 
 test('a resumed install is refused while signed out', async (t) => {
