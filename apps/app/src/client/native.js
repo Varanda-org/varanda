@@ -63,7 +63,7 @@ export function defaultDataDir () {
 const UPLOAD_DIR = 'varanda-upload'
 
 // The photo upload staging dir of the web kind, created if missing. The
-// worklet reads media.uploadFile paths only from inside it (docs/rpc.md 5.42).
+// worklet reads media.uploadFile paths only from inside it (docs/rpc.md 5.56).
 export function uploadDirectory () {
   const dir = new Directory(Paths.cache, UPLOAD_DIR)
   if (!dir.exists) dir.create({ intermediates: true, idempotent: true })

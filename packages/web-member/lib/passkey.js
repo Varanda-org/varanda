@@ -19,7 +19,14 @@
 //                       info = utf8('varanda/member-media/ed25519/v1') || nonce, 32)
 //   mediaKeyPair = hypercore-crypto.keyPair(seed)
 // Other labels than the identity's, so the two keys are unrelated; the
-// identity derivation above is unchanged by it. The labels are raw UTF-8 bytes, not hashes, so every option is built
+// identity derivation above is unchanged by it.
+//
+// A group core's key pair (each own group root or writer core), version 1,
+// from the same PRF output and the core's own random 32-byte nonce, kept
+// with the core in kv 'groupWriters' (./node-store.js):
+//   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-group/hkdf/v1'),
+//                       info = utf8('varanda/member-group/ed25519/v1') || nonce, 32)
+//   groupKeyPair = hypercore-crypto.keyPair(seed) The labels are raw UTF-8 bytes, not hashes, so every option is built
 // synchronously and the WebAuthn call stays inside the user's click.
 //
 // Browser-bundleable: no Node builtin, only globalThis.crypto (subtle and
@@ -38,6 +45,8 @@ const HKDF_SALT = b4a.from('varanda/member-identity/hkdf/v1', 'utf8')
 const HKDF_INFO = b4a.from('varanda/member-identity/ed25519/v1', 'utf8')
 const MEDIA_HKDF_SALT = b4a.from('varanda/member-media/hkdf/v1', 'utf8')
 const MEDIA_HKDF_INFO = b4a.from('varanda/member-media/ed25519/v1', 'utf8')
+const GROUP_HKDF_SALT = b4a.from('varanda/member-group/hkdf/v1', 'utf8')
+const GROUP_HKDF_INFO = b4a.from('varanda/member-group/ed25519/v1', 'utf8')
 
 const PRF_BYTES = 32
 const NONCE_BYTES = 32
@@ -196,13 +205,24 @@ async function keyPairFromPrf (prf, { hkdf: derive } = {}) {
 // The device's media key pair: prf (32 bytes) and the device's nonce (32
 // bytes), neither kept nor changed. Same buffer discipline as keyPairFromPrf.
 async function mediaKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
+  return nonceKeyPair(prf, nonce, MEDIA_HKDF_SALT, MEDIA_HKDF_INFO, derive)
+}
+
+// A group core's key pair: prf (32 bytes) and that core's nonce (32 bytes),
+// neither kept nor changed. Same buffer discipline as keyPairFromPrf.
+async function groupKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
+  return nonceKeyPair(prf, nonce, GROUP_HKDF_SALT, GROUP_HKDF_INFO, derive)
+}
+
+// info = label || nonce. derive: see hkdf() above.
+async function nonceKeyPair (prf, nonce, salt, label, derive) {
   checkPrf(prf)
   if (!(nonce instanceof Uint8Array) || nonce.byteLength !== NONCE_BYTES) throw new TypeError('nonce inválido')
-  const info = new Uint8Array(MEDIA_HKDF_INFO.byteLength + NONCE_BYTES)
-  info.set(MEDIA_HKDF_INFO, 0)
-  info.set(nonce, MEDIA_HKDF_INFO.byteLength)
+  const info = new Uint8Array(label.byteLength + NONCE_BYTES)
+  info.set(label, 0)
+  info.set(nonce, label.byteLength)
   try {
-    return keyPairFromSeed(await hkdf(prf, MEDIA_HKDF_SALT, info, derive))
+    return keyPairFromSeed(await hkdf(prf, salt, info, derive))
   } finally {
     info.fill(0)
   }
@@ -378,10 +398,13 @@ module.exports = {
   HKDF_INFO,
   MEDIA_HKDF_SALT,
   MEDIA_HKDF_INFO,
+  GROUP_HKDF_SALT,
+  GROUP_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
   mediaKeyPairFromPrf,
+  groupKeyPairFromPrf,
   rpIdFor,
   supportStatus,
   createOptions,

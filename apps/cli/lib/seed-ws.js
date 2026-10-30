@@ -83,6 +83,21 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   the submitted words DO reach the seeder here; they are never logged nor
 //   echoed by the seeder; Caddy's error log can still record the URI when
 //   proxying fails (docs/protocol.md).
+// - /index/group/<G>[/<after>] -> Seeder#indexGroup: `{ kind, visibility,
+//   join, name, creator, rootServed, writers: [{ key, diary, length,
+//   signed, seq, left }] (at most 64), next, indexing, complete }` (`length`
+//   is the downloaded prefix, `signed` the signed length); the header fields
+//   are null until the seeder has verified the root's header (they stay
+//   while a writer of G is served after the root was purged or refused, with
+//   rootServed false and creator null), `name` stays null for a private root.
+//   /index/groups/<D> -> indexGroups: `{ groups: [{ group, writer, seq,
+//   left }] (one per group, at most 64), indexing, complete }`.
+//   /index/group-search/<segment> (the segment as in /index/search) ->
+//   indexGroupSearch: `{ groups: [{ group, name, writerCount }], more,
+//   indexing, complete }` (at most 20), public groups only. Names are the
+//   root header's peer text, returned as data (clients render them through
+//   displayText). Like the topic words, the segment reaches the seeder and
+//   is never logged or echoed.
 // - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
 //   (at most 20 like/repost record refs, newest first by the engager's at).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
@@ -128,6 +143,15 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // per second (burst POST_BURST), else 503 'ocupado'; a response still open
 // after POST_DEADLINE_MS is destroyed. The token, the path, the keys and
 // the body are never logged.
+//
+// With the same token, GET /moderation-group-post/<W>/<seq> answers the
+// account service's check of a GROUP report: Seeder#groupPostBlock reads
+// block <seq> of served group core W (a member's writer or the root, header
+// checked locally) and answers 200 JSON { group, diary, seq, texto,
+// resposta } only when it validates as a group-post, so a group block is
+// decided on the record the member signed, not on the reporter's quote.
+// Same token check, budget, deadline, 404 and silence as /moderation-post,
+// and likewise never proxied by Caddy.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -165,6 +189,11 @@ const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
 // optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
 const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// Groups: the root key with an optional exclusive writer-key cursor, a
+// diary key, and a search segment shaped as in INDEX_SEARCH_RE.
+const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
+const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
+const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
@@ -184,6 +213,9 @@ const POST_RATE = 4
 const POST_BURST = 8
 const POST_DEADLINE_MS = 5000
 const POST_MAX_BODY = 65536
+const GROUP_POST_PREFIX = '/moderation-group-post'
+const HEX64_RE = /^[0-9a-f]{64}$/
+const GROUP_POST_RE = /^\/moderation-group-post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
 const TRIAGE_TOKEN_RE = /^[0-9a-f]{64}$/
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
@@ -446,7 +478,40 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexSearch', [m[1]]]
     m = INDEX_TOPIC_RE.exec(url)
     if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
+    m = INDEX_GROUP_RE.exec(url)
+    if (m) return ['indexGroup', [m[1], m[2] === undefined ? null : m[2]], groupBody]
+    m = INDEX_GROUPS_RE.exec(url)
+    if (m) return ['indexGroups', [m[1]]]
+    m = INDEX_GROUP_SEARCH_RE.exec(url)
+    if (m) return ['indexGroupSearch', [m[1]], searchBody]
     return null
+  }
+
+  // The seeder's group answers flattened into the wire shape. The root
+  // header is null until the root is served.
+  function groupBody ({ header, rootServed, writers, next, indexing, complete }) {
+    const h = header || {}
+    return {
+      kind: h.kind ?? null,
+      visibility: h.visibility ?? null,
+      join: h.join ?? null,
+      name: h.name ?? null,
+      creator: h.diary ?? null,
+      rootServed: rootServed === true,
+      writers,
+      next,
+      indexing,
+      complete
+    }
+  }
+
+  function searchBody ({ groups, more, indexing, complete }) {
+    return {
+      groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
+      more,
+      indexing,
+      complete
+    }
   }
 
   // A null or non-object answer, a missing method, a throw or a rejection,
@@ -456,15 +521,26 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // that stops draining cannot let later requests past the cap; a response
   // still open after indexDeadlineMs is destroyed.
   async function serveIndex (req, res, call) {
-    if (!takeIndexToken() || indexInFlight >= indexMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
-    indexInFlight++
+    // The account service's group checks (Bearer triage token, verified as
+    // for the moderation routes) use the moderation budget, so a public
+    // flood of /index cannot starve them; a missing or wrong token is just a
+    // public request. Same answer either way.
+    const triage = tokenHash !== null && (call[0] === 'indexGroup' || call[0] === 'indexGroups') && triageAuthorized(req)
+    if (triage) {
+      if (!takePostToken() || postInFlight >= postMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      postInFlight++
+    } else {
+      if (!takeIndexToken() || indexInFlight >= indexMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      indexInFlight++
+    }
     let resClosed = false
     let pending = true
     let released = false
     const release = () => {
       if (released || !resClosed || pending) return
       released = true
-      indexInFlight--
+      if (triage) postInFlight--
+      else indexInFlight--
     }
     const timer = setTimeout(() => res.destroy(), indexDeadlineMs)
     timer.unref()
@@ -480,7 +556,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     let body = null
     try {
-      const [name, args] = call
+      const [name, args, shape] = call
       if (typeof seeder[name] === 'function') {
         // The slot follows the call's OWN settlement, not the race below: a
         // response destroyed at the deadline frees nothing while the seeder
@@ -489,7 +565,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         work.then(settled, settled)
         const answer = await Promise.race([work, closed])
         if (answer !== CLOSED && answer !== null && typeof answer === 'object' && !Array.isArray(answer)) {
-          const text = JSON.stringify(answer) + '\n'
+          const text = JSON.stringify(shape ? await shape(answer) : answer) + '\n'
           if (Buffer.byteLength(text) <= INDEX_MAX_BODY) body = text
         }
       } else {
@@ -534,11 +610,32 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return Buffer.byteLength(text) <= POST_MAX_BODY ? text : null
   }
 
+  // The answer of groupPostBlock as the response body, or null (-> 404) when
+  // it is not exactly { group, diary, seq, texto, resposta } or would exceed
+  // POST_MAX_BODY. JSON escapes the text; the account service renders it.
+  function groupPostBody (answer) {
+    if (answer === null || typeof answer !== 'object') return null
+    const { group, diary, seq, texto, resposta } = answer
+    if (typeof group !== 'string' || !HEX64_RE.test(group) || typeof diary !== 'string' || !HEX64_RE.test(diary)) return null
+    if (!Number.isSafeInteger(seq) || seq < 1 || typeof texto !== 'string') return null
+    let reply = null
+    if (resposta !== null) {
+      if (typeof resposta !== 'object' || typeof resposta.writer !== 'string' || !HEX64_RE.test(resposta.writer) ||
+        !Number.isSafeInteger(resposta.seq) || resposta.seq < 0) return null
+      reply = { writer: resposta.writer, seq: resposta.seq }
+    }
+    if (Buffer.byteLength(texto) > POST_MAX_BODY) return null
+    const text = JSON.stringify({ group, diary, seq, texto, resposta: reply }) + '\n'
+    return Buffer.byteLength(text) <= POST_MAX_BODY ? text : null
+  }
+
   // Authentication runs before the budget, so callers without the token
   // cannot drain the account service's slots or tokens. The in-flight slot
   // is held until the response is closed AND postBlock has settled, as for
   // /index; a response still open after postDeadlineMs is destroyed.
-  async function servePost (req, res, match) {
+  // `method` names the seeder call (postBlock or groupPostBlock), `toBody`
+  // shapes its answer; both routes share the token, the budget and the 404.
+  async function servePost (req, res, method, match, toBody) {
     if (!triageAuthorized(req)) return send(res, 404, NOT_FOUND)
     if (!takePostToken() || postInFlight >= postMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
     postInFlight++
@@ -564,11 +661,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     let body = null
     try {
-      if (typeof seeder.postBlock === 'function') {
-        const work = Promise.resolve().then(() => seeder.postBlock(match[1], Number(match[2])))
+      if (typeof seeder[method] === 'function') {
+        const work = Promise.resolve().then(() => seeder[method](match[1], Number(match[2])))
         work.then(settled, settled)
         const answer = await Promise.race([work, closed])
-        if (answer !== CLOSED) body = postBody(answer)
+        if (answer !== CLOSED) body = toBody(answer)
       } else {
         settled()
       }
@@ -667,7 +764,13 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
       const match = POST_RE.exec(req.url)
       if (!match) return send(res, 404, NOT_FOUND)
-      return servePost(req, res, match).catch(() => res.destroy())
+      return servePost(req, res, 'postBlock', match, postBody).catch(() => res.destroy())
+    }
+    if (tokenHash !== null && (pathname === GROUP_POST_PREFIX || pathname.startsWith(GROUP_POST_PREFIX + '/'))) {
+      if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
+      const match = GROUP_POST_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      return servePost(req, res, 'groupPostBlock', match, groupPostBody).catch(() => res.destroy())
     }
     send(res, 404, NOT_FOUND)
   })
@@ -777,6 +880,9 @@ module.exports = {
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
+  INDEX_GROUP_RE,
+  INDEX_GROUPS_RE,
+  INDEX_GROUP_SEARCH_RE,
   INDEX_ENGAGERS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
@@ -789,5 +895,6 @@ module.exports = {
   POST_RATE,
   POST_BURST,
   POST_DEADLINE_MS,
-  POST_MAX_BODY
+  POST_MAX_BODY,
+  GROUP_POST_RE
 }

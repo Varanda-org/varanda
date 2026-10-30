@@ -51,6 +51,9 @@ test('Caddyfile: existing blocks kept', (t) => {
 test('Caddyfile: the triage route is not exposed', (t) => {
   t.absent(lines.some((l) => /^\s*handle\s+\/moderation-post/.test(l)), 'no handle /moderation-post')
   t.is(count('moderation-post'), 0, 'moderation-post never mentioned outside comments')
+  t.absent(lines.some((l) => /^\s*handle\s+\/moderation-group-post/.test(l)), 'no handle /moderation-group-post')
+  t.is(count('moderation-group-post'), 0, 'moderation-group-post never mentioned outside comments')
+  t.absent(lines.some((l) => /^\s*handle\s+\/moderation/.test(l)), 'no handle for any /moderation route')
 })
 
 // The push relay route on the account service is loopback-only (the seeder

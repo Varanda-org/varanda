@@ -160,7 +160,7 @@ Com a instalação da associação (tipo `web`), o app para iOS e Android roda o
 - **Telas.** Espiadinha, busca por assunto e por pessoas, Conversa e Membro completos, Curtidas, menções, contagens, Avisos (só a lista no app), denúncias, registro dos termos, compartilhar e a nota "Sem internet".
 - **Fotos.** Mostradas depois de conferidas por tamanho e SHA-256 e guardadas como arquivos no cache do app (varrido na abertura). Publicadas a partir da biblioteca de fotos, reencodadas para JPEG sem EXIF nem GPS; GIFs vão como estão. Escolher a foto do perfil também funciona.
 - **Fila de saída.** Publicações sem rede esperam na fila de saída do aparelho e saem quando a conexão volta, como na web; fotos e citações não entram na fila.
-- **Serviço de conta.** O app se identifica com o cabeçalho `x-varanda-client: app` e usa um segredo do app e um código de resgate (README, "Vínculo pelo app nativo"; [verification.md](verification.md), seção 49).
+- **Serviço de conta.** O app se identifica com o cabeçalho `x-varanda-client: app` e usa um segredo do app e um código de resgate (README, "Vínculo pelo app nativo"; [verification.md](verification.md), seção 50).
 
 Limites: não há aviso do sistema (push, APNs/FCM, issues #30 e #47), nem publicação nas lojas (#46); links https não abrem o app (nem App Links nem Universal Links); a entrada com passkey no iOS espera a conta Apple Developer.
 

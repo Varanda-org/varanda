@@ -109,6 +109,24 @@ function isNoticesCursor (v) {
   return isCanonicalIso(v.at) && isKey(v.key) && Number.isSafeInteger(v.seq) && v.seq >= 1
 }
 
+// group.read `before` (docs/rpc.md 5.40): exactly { at, writer, seq }, the
+// group-order position of the oldest item the caller holds.
+function isGroupCursor (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 3) return false
+  if (!hasOwn(v, 'at') || !hasOwn(v, 'writer') || !hasOwn(v, 'seq')) return false
+  return isCanonicalIso(v.at) && isKey(v.writer) && Number.isSafeInteger(v.seq) && v.seq >= 1
+}
+
+// group.post `replyTo`: exactly { writer, seq }.
+function isGroupRef (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
+  if (!hasOwn(v, 'writer') || !hasOwn(v, 'seq')) return false
+  return isKey(v.writer) && Number.isSafeInteger(v.seq) && v.seq >= 1
+}
+
+const GROUP_JOINS = ['open', 'approval']
+const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
+
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
@@ -275,7 +293,7 @@ function isPushEndpoint (v) {
   }
 }
 
-// Host controls of the in-app web node (docs/rpc.md 5.36 to 5.42), IPC only.
+// Host controls of the in-app web node (docs/rpc.md 5.50 to 5.56), IPC only.
 // The PRF output is the 32-byte root secret every member key derives from.
 const PRF_RE = /^[0-9a-f]{64}$/
 const CREDENTIAL_ID_RE = /^[\x21-\x7e]{1,1024}$/
@@ -351,12 +369,17 @@ const SPECS = {
       nonce: req(isNonce),
       target: req(isKey),
       seq: opt(int(1, REPORT_SEQ_MAX)),
+      writer: opt(isKey),
+      group: opt(isKey),
       reason: req(isReason),
       text: opt(str(0, REPORT_TEXT_MAX), ''),
       quote: opt(str(0, L.MAX_TEXT), '')
     },
     cross (given, value) {
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
+      // A group post is addressed by its writer core inside the group.
+      if (hasOwn(value, 'writer') && (!hasOwn(value, 'seq') || !hasOwn(value, 'group'))) return 'writer só com seq e group'
+      if (hasOwn(value, 'group') && !hasOwn(value, 'writer')) return 'group só com writer'
       return null
     }
   },
@@ -508,6 +531,56 @@ const SPECS = {
       after: opt(isNoticesCursor)
     }
   },
+  // Public groups (docs/rpc.md 5.36 to 5.49). Every method names the group by
+  // its root key; the node fills in everything else.
+  'group.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
+  'group.join': { fields: { group: req(isKey) }, mutating: true },
+  'group.leave': { fields: { group: req(isKey) }, mutating: true },
+  'group.post': {
+    fields: { group: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isGroupRef) },
+    mutating: true
+  },
+  'group.read': {
+    fields: {
+      group: req(isKey),
+      limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT),
+      // Exclusive group-order cursor; absent = the newest page.
+      before: opt(isGroupCursor)
+    }
+  },
+  'group.list': {
+    fields: {
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT)
+    }
+  },
+  'group.info': { fields: { group: req(isKey) } },
+  'group.members': {
+    fields: {
+      group: req(isKey),
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_MEMBERS_LIMIT_MAX), L.GROUP_MEMBERS_LIMIT_MAX)
+    }
+  },
+  'group.requests': {
+    fields: {
+      group: req(isKey),
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_MEMBERS_LIMIT_MAX), L.GROUP_MEMBERS_LIMIT_MAX)
+    }
+  },
+  'group.admit': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'group.ban': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'group.admin': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
+  'group.meta': {
+    fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
+    mutating: true,
+    cross (given, value) {
+      if (!hasOwn(value, 'name') && !hasOwn(value, 'join')) return 'nada a alterar'
+      return null
+    }
+  },
   'sync.start': {
     fields: {
       once: opt(isBool, false),
@@ -526,7 +599,7 @@ const SPECS = {
   // by the node session or varanda-serve (docs/rpc.md 5.17).
   'node.close': { fields: none, mutating: true },
   // IPC only: offered by the in-app web-node worklet, never by the node
-  // session, varanda-serve or the browser page (docs/rpc.md 5.36 to 5.42).
+  // session, varanda-serve or the browser page (docs/rpc.md 5.50 to 5.56).
   // `prf` never appears in a result, an event or a log.
   'identity.install': {
     fields: {

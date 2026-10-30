@@ -27,6 +27,8 @@ function formatEvent (ev) {
       return 'have ' + safe(ev.key) + ' ' + safe(ev.length)
     case 'downloaded':
       return 'downloaded ' + safe(ev.key) + ' ' + safe(ev.length)
+    case 'group-downloaded':
+      return 'grupo ' + key8(ev.key) + ' ' + safe(ev.length)
     default:
       return null
   }
