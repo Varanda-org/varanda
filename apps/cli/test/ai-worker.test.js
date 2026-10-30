@@ -563,6 +563,51 @@ test('reconcile learns a human decision whose hook never ran and drops reads of 
   cleanLogs(t, env.logs)
 })
 
+test('a group message report is never read, triaged or learned while a diary report still is', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const diary = env.report({}, { text: SPAM + ' diario' })
+  // Its diary holds a post at the same seq: reading it would triage the
+  // wrong block.
+  const group = env.report({ writer: hex(), group: hex() }, { text: SPAM + ' grupo' })
+  env.worker.onReport(diary)
+  env.worker.onReport(group)
+  await env.worker.idle()
+  await env.worker.runOnce()
+  await env.worker.idle()
+  const read = (row) => env.readPost.calls.some((c) => c.diaryKey === row.target)
+  t.ok(read(diary), 'the diary report is read')
+  t.absent(read(group), 'the group report is never read')
+  t.is(env.ledger.get(group.id), null, 'nor marked')
+  t.is(env.moderation.decideCalls.some((d) => d.id === group.id), false, 'nor decided')
+  t.is(env.moderation.get(group.id).status, 'aberta')
+  t.is(env.moderation.decideCalls.some((d) => d.id === diary.id), true, 'the diary report is triaged')
+
+  // A human decides it. Even a cached read of the group row (planted
+  // here) never becomes an exemplar, through the hook or the reconcile.
+  env.ledger.putRead(group.id, {
+    target: group.target,
+    seq: group.seq,
+    contentHash: hashOf(SPAM + ' grupo'),
+    text: SPAM + ' grupo',
+    hasMedia: false,
+    hasQuote: false,
+    textCp: Array.from(SPAM + ' grupo').length,
+    truncated: false,
+    embedding: quantize(fakeEmbed(SPAM + ' grupo'))
+  })
+  const before = env.exemplars.size()
+  env.worker.onHumanDecision(env.moderation.human(group.id, 'bloquear'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), before, 'the hook learns nothing from a group row')
+  await env.worker.runOnce()
+  await env.worker.idle()
+  t.absent(env.exemplars.list().some((e) => e.reportId === group.id), 'the reconcile learns nothing from it')
+  t.is(env.ledger.read(group.id), null, 'and drops its read')
+  t.absent(read(group), 'still never read')
+  cleanLogs(t, env.logs)
+})
+
 test('the appeal set is rebuilt after a restart from exportRows, and ja-decidida stops a report decided meanwhile', async (t) => {
   const env = setup(t, { mode: 'auto' })
   const old = env.moderation.addReport({ status: 'bloquear', decidedBy: AI_ACTOR, decidedAt: iso(T0 - 48 * 3600 * 1000), note: NOTE_BLOCK })

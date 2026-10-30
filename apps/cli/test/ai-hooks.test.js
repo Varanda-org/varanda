@@ -137,6 +137,9 @@ async function setup (t, { triage = null } = {}) {
     googleMod,
     modEmails: [EMAIL_MOD],
     triage,
+    // Every diary is a served diary here: the seeder check is covered in
+    // account-mod.test.js, not in these hooks.
+    groupCheck: { check: async () => ({ ok: false, code: 'config' }), checkDiary: async () => ({ ok: true }) },
     panelDir
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })

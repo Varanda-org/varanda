@@ -52,6 +52,10 @@
 // (the seeder purges a blocked diary) and would not be what the human saw.
 // onCancel / onUnblock withdraw precedents a human reversed.
 //
+// Group messages (rows with a writer, report v2) are human-only: no scan,
+// onReport, reconcile or learning step touches them, because readPost would
+// read the author's diary at the writer core's seq, another block entirely.
+//
 // Logging: log({ event: 'triage', reason: <token> }) only. No text, quote,
 // embedding, key, token or e-mail ever reaches the logger or an error.
 
@@ -108,6 +112,10 @@ function sleep (ms) {
 
 function dayOf (iso) {
   return typeof iso === 'string' ? iso.slice(0, 10) : ''
+}
+
+function isGroupRow (row) {
+  return row.writer !== undefined && row.writer !== null
 }
 
 function postKey (row) {
@@ -297,7 +305,7 @@ function createWorker ({
   // Read from moderation.json itself, so nothing is lost across restarts.
   function decidedBefore (row) {
     for (const r of moderation.exportRows({ member: row.target })) {
-      if (r.id !== row.id && r.target === row.target && r.kind === 'post' && r.seq === row.seq && r.status !== 'aberta') return true
+      if (r.id !== row.id && r.target === row.target && r.kind === 'post' && !isGroupRow(r) && r.seq === row.seq && r.status !== 'aberta') return true
     }
     return false
   }
@@ -392,6 +400,7 @@ function createWorker ({
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
     }
+    if (isGroupRow(row)) return
     if (row.kind !== 'post') return markAbstain(id, 'conta')
     if (decidedPosts.has(postKey(row)) || decidedBefore(row)) return markAbstain(id, 'recurso')
 
@@ -524,7 +533,7 @@ function createWorker ({
   // Returns true when an exemplar was written.
   function learn (row) {
     if (disabled || row === null || typeof row !== 'object') return false
-    if (row.kind !== 'post' || row.status === 'aberta' || row.decidedBy === AI_ACTOR) return false
+    if (row.kind !== 'post' || isGroupRow(row) || row.status === 'aberta' || row.decidedBy === AI_ACTOR) return false
     if (!ACTIONABLE_REASONS.includes(row.reason)) return false
     const read = ledger.read(row.id)
     if (read === null) return false
@@ -598,7 +607,7 @@ function createWorker ({
         continue
       }
       if (row.status === 'aberta') continue
-      if (row.decidedBy === AI_ACTOR) {
+      if (row.decidedBy === AI_ACTOR || isGroupRow(row)) {
         ledger.dropRead(id)
         continue
       }
@@ -670,7 +679,7 @@ function createWorker ({
     let last = null
     for (let k = 0; k < open.length && picked < SCAN_LIMIT; k++) {
       const r = open[(start + k) % open.length]
-      if (!due(r.id, size, nowIso)) continue
+      if (isGroupRow(r) || !due(r.id, size, nowIso)) continue
       enqueueReport(r.id)
       picked++
       last = { at: r.at, id: r.id }
@@ -688,7 +697,7 @@ function createWorker ({
     counts.descartar = 0
     for (const r of rows) {
       if (r.decidedBy !== AI_ACTOR) continue
-      if (r.kind === 'post' && r.seq !== null) decidedPosts.add(postKey(r))
+      if (r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
       if (dayOf(r.decidedAt) === day && (r.status === 'bloquear' || r.status === 'descartar')) counts[r.status]++
     }
   }
@@ -697,13 +706,13 @@ function createWorker ({
 
   function onReport (report) {
     try {
-      if (report && typeof report.id === 'string') enqueueReport(report.id)
+      if (report && typeof report.id === 'string' && !isGroupRow(report)) enqueueReport(report.id)
     } catch {}
   }
 
   function onHumanDecision (report) {
     try {
-      if (!report || report.decidedBy === AI_ACTOR) return
+      if (!report || report.decidedBy === AI_ACTOR || isGroupRow(report)) return
       enqueue(() => humanDecisionJob(report))
     } catch {}
   }
