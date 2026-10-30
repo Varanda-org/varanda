@@ -27,6 +27,7 @@ const { tmpDir, until } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const ORIGIN = 'https://varanda.test'
+const APP_RETURN = ORIGIN + '/account/app/conta'
 const CLIENT_ID = 'client-123.apps.googleusercontent.com'
 const CLIENT_SECRET = 'segredo-de-teste'
 // A 22-digit subject: any leak shows as a 16-hex run in a log line.
@@ -1522,11 +1523,38 @@ async function appAuthorize (s, m, username, { secret = appSecret(), invite, lin
   return { secret, started, nonce, auth, state: url.searchParams.get('state') }
 }
 
-// The redeem code of a varanda://conta?conta=ok&codigo=R redirect, or null.
+// The redeem code of an <origin>/account/app/conta?conta=ok&codigo=R
+// redirect, or null.
 function redeemOf (location) {
-  const m = /^varanda:\/\/conta\?conta=ok&codigo=([A-Za-z0-9_-]{43})$/.exec(location || '')
-  return m ? m[1] : null
+  const prefix = APP_RETURN + '?conta=ok&codigo='
+  if (typeof location !== 'string' || !location.startsWith(prefix)) return null
+  const code = location.slice(prefix.length)
+  return TOKEN_RE.test(code) ? code : null
 }
+
+test('app return page: static, strict headers, never echoes the query', async (t) => {
+  // No issuer: the page holds no secret of the server.
+  const s = await setup(t, { configured: false })
+  const R = appSecret().v
+  const ok = await s.api('GET', '/account/app/conta?conta=ok&codigo=' + R)
+  t.is(ok.status, 200)
+  t.is(ok.headers.get('content-type'), 'text/html; charset=utf-8')
+  t.is(ok.headers.get('cache-control'), 'no-store')
+  t.is(ok.headers.get('referrer-policy'), 'no-referrer')
+  t.is(ok.headers.get('x-content-type-options'), 'nosniff')
+  t.is(ok.headers.get('content-security-policy'), "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+  t.is(ok.headers.get('access-control-allow-origin'), null)
+  t.ok(ok.text.includes('Volte ao app Varanda'))
+  t.absent(ok.text.includes(R), 'a valid code in the query is never rendered')
+  t.absent(ok.text.includes('intent:'), 'no intent')
+  t.absent(ok.text.includes('codigo'), 'no code parameter')
+  t.absent(/<script/i.test(ok.text))
+
+  const bare = await s.api('GET', '/account/app/conta')
+  t.is(bare.status, 200)
+  t.is(bare.text, ok.text, 'the same page with or without a query')
+  t.absent(s.logs.join('\n').includes(R), 'the query is never logged')
+})
 
 test('app clients: an Origin-less POST needs the app header and JSON; a present Origin must still match', async (t) => {
   const s = await setup(t)
@@ -1583,7 +1611,8 @@ test('app flow: start, authorize with V, callback by state alone, redeem code, p
   t.is(cb.status, 302)
   const loc = cb.headers.get('location')
   const R = redeemOf(loc)
-  t.ok(R !== null, 'varanda://conta?conta=ok&codigo=R: ' + loc)
+  t.ok(loc.startsWith(APP_RETURN + '?conta=ok&codigo='), 'the https app return, on the service origin: ' + loc)
+  t.ok(R !== null, 'conta=ok&codigo=R: ' + loc)
   t.is(cb.headers.get('set-cookie'), null)
   t.is(s.fake.tokenCalls(), 1)
 
@@ -1657,20 +1686,38 @@ test('app flow: a spent R cannot be retried after a refused finish', async (t) =
   t.alike(again.body, { error: 'expirado' })
 })
 
-test('app flow: every refused callback returns to varanda://conta with no code; a cookie never names an app row', async (t) => {
+test('app flow: R stops working three minutes after the callback, for pending and finish alike', async (t) => {
+  const redeemTtl = 180 * 1000 // APP_REDEEM_TTL_MS in server.js
+  const s = await setup(t)
+  const m = member()
+  const a = await appAuthorize(s, m, 'ana')
+  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
+  s.c.offset += redeemTtl - 1000
+  const inTime = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(inTime.status, 200, 'still redeemable just before the limit: ' + inTime.text)
+  s.c.offset += 1000
+  const late = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
+  t.is(late.status, 404, 'pending refused at the limit')
+  t.alike(late.body, { error: 'expirado' })
+  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.is(finish.status, 404, 'finish refused too')
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, false, 'nothing linked')
+})
+
+test('app flow: every refused callback returns to the https app return with no code; a cookie never names an app row', async (t) => {
   const s = await setup(t, { storeOpts: { maxMembers: 1 } })
   const denied = await appAuthorize(s, member(), 'ana')
   // A stray cookie changes nothing: the state names an app row.
   const cancel = await callback(s, 'A'.repeat(43), denied.state, 'error=access_denied')
-  t.is(cancel.headers.get('location'), 'varanda://conta?conta=cancelado')
+  t.is(cancel.headers.get('location'), APP_RETURN + '?conta=cancelado')
   const bad = await appAuthorize(s, member(), 'bia')
   s.fake.account.tokenStatus = 400
-  t.is((await callback(s, null, bad.state, 'code=codigo-ruim')).headers.get('location'), 'varanda://conta?conta=erro')
+  t.is((await callback(s, null, bad.state, 'code=codigo-ruim')).headers.get('location'), APP_RETURN + '?conta=erro')
   s.fake.account.tokenStatus = 200
   const late = await appAuthorize(s, member(), 'caio')
   await link(s, member(), 'dani')
   const full = await callback(s, null, late.state)
-  t.is(full.headers.get('location'), 'varanda://conta?conta=lista-de-espera')
+  t.is(full.headers.get('location'), APP_RETURN + '?conta=lista-de-espera')
   t.is(full.headers.get('set-cookie'), null)
   const unknown = await callback(s, null, 'A'.repeat(43))
   t.is(unknown.headers.get('location'), ORIGIN + '/?conta=erro', 'an unknown state names no row and keeps the web answer')
@@ -1687,7 +1734,7 @@ test('app restart with the same V: the first Google page is dead and returns to 
 
   const stale = await callback(s, null, a.state)
   t.is(stale.status, 302)
-  t.is(stale.headers.get('location'), 'varanda://conta?conta=erro', 'never the website, never a code')
+  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'never the website, never a code')
   t.is(s.fake.tokenCalls(), 0, 'the old page exchanges nothing')
   t.is(s.store.memberForSub(SUB), null)
 
@@ -1696,7 +1743,7 @@ test('app restart with the same V: the first Google page is dead and returns to 
   const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', b.nonce, 'ana', SUB) } })
   t.is(finish.status, 200, finish.text)
   const spent = await callback(s, null, b.state)
-  t.is(spent.headers.get('location'), 'varanda://conta?conta=erro', 'a spent app state also returns to the app')
+  t.is(spent.headers.get('location'), APP_RETURN + '?conta=erro', 'a spent app state also returns to the app')
 })
 
 test('app restart on an invite-only server: V is the bearer proof, an outsider is refused', async (t) => {
@@ -1723,7 +1770,7 @@ test('app restart on an invite-only server: V is the bearer proof, an outsider i
   const gone = await appApi(s, 'POST', '/account/authorize', { secret: a.secret, body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } })
   t.is(gone.status, 404, 'the old row is gone with its V')
   const stale = await callback(s, null, a.state)
-  t.is(stale.headers.get('location'), 'varanda://conta?conta=erro', 'the taken-over row\'s Google page returns to the app')
+  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'the taken-over row\'s Google page returns to the app')
   t.is(s.fake.tokenCalls(), 0, 'and exchanges nothing')
   const auth = await appApi(s, 'POST', '/account/authorize', { secret: fresh, body: { signature: sign(s, m, 'reserve', restart.body.nonce, 'ana') } })
   t.is(auth.status, 200, auth.text)
@@ -1742,7 +1789,7 @@ test('app callback: a row evicted during the exchange gets erro, no code, and it
   s.fake.account.onToken = () => s.store.start({ member: member().hex, username: 'bia' })
   const cb = await callback(s, null, a.state)
   t.is(s.fake.tokenCalls(), 1, 'the exchange ran')
-  t.is(cb.headers.get('location'), 'varanda://conta?conta=erro', 'no unredeemable code')
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro', 'no unredeemable code')
   t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'the entry and the Google answer are gone')
 })
 
@@ -1779,7 +1826,7 @@ test('app flood: a row Google has not answered is still evicted by a start flood
   t.is(a.auth.status, 200, a.auth.text)
   s.store.start({ member: member().hex, username: 'bia' })
   const cb = await callback(s, null, a.state)
-  t.is(cb.headers.get('location'), 'varanda://conta?conta=erro')
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
   t.is(s.fake.tokenCalls(), 0, 'the evicted row exchanges nothing')
 })
 
@@ -1833,7 +1880,7 @@ test('app callback: a row expired before the callback gets erro and its entry go
   const a = await appAuthorize(s, member(), 'ana')
   s.c.offset += PENDING_TTL_MS + 1000
   const cb = await callback(s, null, a.state)
-  t.is(cb.headers.get('location'), 'varanda://conta?conta=erro')
+  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
   t.is(s.fake.tokenCalls(), 0)
   t.is(s.server.appStats().rows, 0)
 })
@@ -1846,4 +1893,14 @@ test('app rows: an expired row and the Google answer it holds are dropped on the
   s.c.offset += PENDING_TTL_MS + 1000
   t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
   t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'dropped without a later app start')
+})
+
+test('app rows: the Google answer behind an expired R leaves memory on the next request of any kind', async (t) => {
+  const s = await setup(t)
+  const a = await appAuthorize(s, member(), 'ana')
+  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
+  t.alike(s.server.appStats(), { rows: 1, google: 1 })
+  s.c.offset += 180 * 1000 // APP_REDEEM_TTL_MS in server.js; the row itself lives on
+  t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
+  t.alike(s.server.appStats(), { rows: 1, google: 0 }, 'the row stays, its Google answer is gone')
 })
