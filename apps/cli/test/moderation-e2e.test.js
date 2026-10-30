@@ -409,7 +409,17 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
   const google = await fakeGoogle(t)
   const logs = []
   const googleFor = (redirectPath) => createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + redirectPath, endpoints: google.endpoints, fetch: google.fetch })
+  // Alice, Carol and Dan stand for diaries the seeder serves: every block
+  // of a report without a group needs that confirmation, linked account or
+  // not (the group check is not under test here, account-mod.test.js
+  // covers it).
+  const servedTargets = new Set()
+  const groupCheck = {
+    check: async () => ({ ok: false, code: 'config' }),
+    checkDiary: async ({ diary }) => servedTargets.has(diary) ? { ok: true } : { ok: false, code: 'ausente' }
+  }
   const server = createAccountServer({
+    groupCheck,
     association,
     origin: ORIGIN,
     google: googleFor('/account/callback'),
@@ -471,6 +481,8 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
   // ---- Alice and Bob: browser sessions linked to Google ----
   const alice = await device(t, { association, seederUrl })
   const bob = await device(t, { association, seederUrl })
+  // Linked or not, every 'Bloquear' asks the seeder for a served diary.
+  servedTargets.add(alice.key)
   const aliceLink = await link(t, ORIGIN, google, alice, 'ana', ALICE)
   await link(t, ORIGIN, google, bob, 'bia', BOB)
   // The moderator's own diary, linked to their Google account (the panel's
@@ -613,6 +625,7 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
 
   // ---- D6: a dismissed report and a cancelled unclaimed decision are never signed ----
   const carol = hex(crypto.keyPair().publicKey)
+  servedTargets.add(carol)
   const r3 = await report(ORIGIN, bob, { target: carol, reason: 'outro', text: 'perfil estranho' })
   const dismissed = await panel.post('/account/mod/api/reports/' + r3.body.id + '/decide', { decision: 'descartar', note: 'sem violação' })
   t.is(dismissed.status, 200)
@@ -632,6 +645,7 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
 
   // ---- D6: a cancel after the operator pulled is compensated ----
   const dan = hex(crypto.keyPair().publicKey)
+  servedTargets.add(dan)
   const r5 = await report(ORIGIN, alice, { target: dan, reason: 'spam', text: 'robô' })
   const r5d = await panel.post('/account/mod/api/reports/' + r5.body.id + '/decide', { decision: 'bloquear', note: '' })
   t.is(r5d.body.change.op, 'block')

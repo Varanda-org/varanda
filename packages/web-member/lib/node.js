@@ -1,3 +1,5 @@
+'use strict'
+
 // The browser node: a ./session.js session over a storage, served to ONE
 // client at a time through @varanda/rpc's createServerDispatcher, in memory.
 // There is no network RPC: the page's UI (apps/app, src/client/browser.js)
@@ -14,8 +16,10 @@
 //
 // The identity key (./session.js host controls, all serialized with the
 // RPC handlers; none is reachable over the channel):
-//   await node.setKeyPair({ publicKey, secretKey }, { media })  // unlock, in memory only;
+//   await node.setKeyPair({ publicKey, secretKey }, { media, prf })  // unlock, in memory only;
 //                                // media: this device's media core pair (optional)
+//                                // prf: passkey PRF bytes for group keys (optional)
+//                                // copied on unlock, zero-filled on lock
 //   await node.clearKeyPair()    // lock (both pairs zero-filled)
 //   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
 //   await node.reset()           // delete the diary, the media cores and the pending

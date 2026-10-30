@@ -173,6 +173,13 @@ function scanFixture (options = {}) {
     _admitted: new Map(),
     _dropping: new Map(),
     _mediaServed: new Map(),
+    // _drop also leaves the group index and its group writers (seeder.js).
+    _groupServed: new Map(),
+    _groupIndex: { removeDiary () {} },
+    _groupRootStartup: null,
+    // The scan also reconciles group joins (none in these records).
+    _groups: new Map(),
+    _groupBackoff: new Map(),
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),
@@ -319,7 +326,7 @@ test('re-admission rebuild: restores incoming engagements and repost timelines w
 function scannable (seeder, entry) {
   seeder._media = new Map()
   seeder._topics.removePost = () => false
-  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false, gone: new Set(), excluded: new Set(), arrived: new Set(), mediaStart: new Map(), tombMedia: new Map(), tombMax: -1, tombNew: [], irrDirty: true, irrMemo: null, clearedEffective: null })
+  Object.assign(entry, { scanned: 1, scanRetry: null, scanRetries: 0, decls: new Map(), latest: [], refused: new Map(), deleted: new Set(), tombstones: new Map(), effective: null, media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false, mediaRecounts: 0, mediaRecounting: false, gone: new Set(), excluded: new Set(), arrived: new Set(), mediaStart: new Map(), tombMedia: new Map(), tombMax: -1, tombNew: [], irrDirty: true, irrMemo: null, clearedEffective: null, groupDecls: new Map(), groupBound: new Map(), groupFirst: new Map(), groupLive: new Map(), groupRefused: new Map() })
   return entry
 }
 
