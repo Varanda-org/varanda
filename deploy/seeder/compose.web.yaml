@@ -139,7 +139,8 @@ services:
       # (VARANDA_WS_PORT acima); a conta, também na rede do host, o alcança
       # ali para ler o post denunciado. Só loopback.
       VARANDA_SEEDER_HTTP: "${VARANDA_SEEDER_HTTP:-http://127.0.0.1:8789}"
-      # O mesmo segredo do serviço seeder; vazio desliga a leitura.
+      # O mesmo segredo do serviço seeder, também sem a triagem por IA; vazio
+      # desliga as leituras (denúncias de grupo só podem ser descartadas).
       VARANDA_TRIAGE_TOKEN: "${VARANDA_TRIAGE_TOKEN:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.

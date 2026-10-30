@@ -799,3 +799,32 @@ test('old readers: unknown types stay malformed', async (t) => {
   Object.defineProperty(hostileQuote, 'quote', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostileQuote, 1), 'malformed')
 })
+
+test('group-join records', async (t) => {
+  await testnet(t)
+  const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join'], 'TYPES parity')
+  t.ok(Object.isFrozen(TYPES))
+  t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
+  const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
+  t.is(validateRecord(gj, 1), null)
+  t.is(validateRecord({ ...gj, writer: K1 }, 1), null, 'the creator binds the root itself')
+  t.is(validateRecord({ ...gj, on: false }, 3), null)
+  t.is(validateRecord(gj, 0), 'genesis-required')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...gj, group: k }, 1), 'malformed', 'group ' + k)
+    t.is(validateRecord({ ...gj, writer: k }, 1), 'malformed', 'writer ' + k)
+  }
+  for (const on of [1, 'true', null, undefined]) t.is(validateRecord({ ...gj, on }, 1), 'malformed', 'on ' + on)
+  t.is(validateRecord({ ...gj, extra: 1 }, 1), 'malformed')
+  const noWriter = { ...gj }
+  delete noWriter.writer
+  t.is(validateRecord(noWriter, 1), 'malformed')
+  t.is(validateRecord({ ...gj, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupJoinRecord({ group: K1, writer: K2, on: true, at: AT }), gj)
+  t.alike(Object.keys(groupJoinRecord({ group: K1, writer: K2, on: false })), ['type', 'group', 'writer', 'on', 'at'])
+  await t.exception.all(async () => groupJoinRecord({ group: K1, writer: 'x', on: true, at: AT }), /malformed/)
+  const hostile = { type: 'group-join', group: K1, on: true, at: AT }
+  Object.defineProperty(hostile, 'writer', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 1), 'malformed')
+})

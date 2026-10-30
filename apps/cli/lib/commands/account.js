@@ -17,6 +17,7 @@ const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
 const { createUsageStats } = require('../account/usage-stats')
 const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
+const { createGroupCheck } = require('../account/group-check')
 const { localDay } = require('@varanda/core/lib/activity')
 const {
   DEFAULT_HOST,
@@ -303,22 +304,30 @@ function statusLines (s) {
 // the Bearer token of the seeder's loopback post route: the seeder service
 // reads the SAME variable (deploy/seeder/*.env), so both must be given the
 // same 64-hex value.
+// The seeder's loopback HTTP listener (default DEFAULT_SEEDER_HTTP), without
+// a trailing slash. Read even with the AI off: a group block is confirmed
+// against its public /index/group route (../account/group-check.js).
+function readSeederHttp (env) {
+  const seederHttp = env.VARANDA_SEEDER_HTTP === undefined || env.VARANDA_SEEDER_HTTP === '' ? DEFAULT_SEEDER_HTTP : env.VARANDA_SEEDER_HTTP
+  const m = typeof seederHttp === 'string' ? SEEDER_HTTP_RE.exec(seederHttp) : null
+  const port = m === null ? 0 : Number(m[2])
+  if (port < 1 || port > 65535) throw new UsageError('VARANDA_SEEDER_HTTP inválido')
+  return seederHttp.replace(/\/$/, '')
+}
+
 function readTriageEnv (env, dataDir) {
   const ai = env.VARANDA_AI
   if (ai === undefined || ai === '') return null
   if (typeof ai !== 'string' || !Object.hasOwn(AI_MODES, ai)) throw new UsageError('VARANDA_AI inválido')
   const token = env.VARANDA_TRIAGE_TOKEN
   if (typeof token !== 'string' || !HEX64_RE.test(token)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
-  const seederHttp = env.VARANDA_SEEDER_HTTP === undefined || env.VARANDA_SEEDER_HTTP === '' ? DEFAULT_SEEDER_HTTP : env.VARANDA_SEEDER_HTTP
-  const m = typeof seederHttp === 'string' ? SEEDER_HTTP_RE.exec(seederHttp) : null
-  const port = m === null ? 0 : Number(m[2])
-  if (port < 1 || port > 65535) throw new UsageError('VARANDA_SEEDER_HTTP inválido')
+  const seederHttp = readSeederHttp(env)
   let modelDir = env.VARANDA_AI_MODEL_DIR
   if (modelDir === undefined || modelDir === '') {
     modelDir = typeof dataDir === 'string' ? path.join(dataDir, AI_MODEL_DIR) : null
   }
   if (modelDir !== null && typeof modelDir !== 'string') throw new UsageError('VARANDA_AI_MODEL_DIR inválido')
-  return { mode: AI_MODES[ai], token, seederHttp: seederHttp.replace(/\/$/, ''), modelDir }
+  return { mode: AI_MODES[ai], token, seederHttp, modelDir }
 }
 
 // Read once, validated by shape only; no value is ever printed.
@@ -339,15 +348,25 @@ function readEnv (env, dataDir) {
   // above, an error exit 1 that never carries the value.
   const statsEmails = parseModEmails(env.VARANDA_STATS_EMAILS)
   if (statsEmails === null || statsEmails.some((e) => !modEmails.includes(e))) throw new Error('VARANDA_STATS_EMAILS inválido')
-  // Ignored while stats are off (as VARANDA_SEEDER_HTTP with VARANDA_AI
-  // off), so a leftover value never stops a service that does not use it.
+  // Ignored while stats are off, so a leftover value never stops a service
+  // that does not use it.
   let seederHealth = null
   if (statsEmails.length > 0) {
     seederHealth = parseSeederHealthUrl(env.VARANDA_SEEDER_HEALTH)
     if (seederHealth === null) throw new UsageError('VARANDA_SEEDER_HEALTH inválido')
   }
   const triage = readTriageEnv(env, dataDir)
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits: readLimits(env), triage }
+  const seederHttp = readSeederHttp(env)
+  // Read even with the AI off: a block of a group report needs the reported
+  // message, read through the seeder's token-gated loopback route
+  // (../account/group-check.js). Unset or '' leaves group blocks refused.
+  const tokenEnv = env.VARANDA_TRIAGE_TOKEN
+  let groupToken = null
+  if (tokenEnv !== undefined && tokenEnv !== '') {
+    if (typeof tokenEnv !== 'string' || !HEX64_RE.test(tokenEnv)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
+    groupToken = tokenEnv
+  }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage }
 }
 
 // Builds and returns the triage worker, or null when it cannot run: a
@@ -447,7 +466,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig } = readEnv(env, flags.dataDir)
   const { maxMembers = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -535,7 +554,8 @@ async function serve (flags, env) {
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, terms, maxConnections, ratePerSecond, burst })
+      const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {

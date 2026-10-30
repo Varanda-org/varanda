@@ -25,6 +25,7 @@ const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore } = require('../lib/account/moderation-store')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { SESSION_COOKIE, LOGIN_COOKIE, PANEL_CSP, parseModEmails } = require('../lib/account/mod-routes')
+const { createGroupCheck } = require('../lib/account/group-check')
 const { tmpDir } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -113,7 +114,60 @@ async function linkDirect (accounts, iss, m, username, sub, email) {
 // Two linked members (ana, bia), carol linked to the moderator's Google
 // account, and the service with the panel enabled for EMAIL_MOD unless
 // `emails` says otherwise.
-async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEmails = [], usage = null } = {}) {
+// A stand-in for the seeder's public /index/group/<G> route on 127.0.0.1:
+// `groups` maps a group key to its writers ({ key, diary }, `signed`
+// defaulting to `length`); any other key
+// answers the not-served body (kind null).
+// The token-gated /moderation-group-post/<W>/<seq> route hands out a
+// group-post for any listed writer below its length ('mensagem conferida'),
+// unless `state.unread` holds the writer; message reads go to `posts`.
+// A group in `state.rootless` lists its writers without any root header
+// (kind null); one in `state.unserved` keeps the verified header with
+// rootServed false and creator null (root purged or withheld).
+async function fakeSeeder (t, groups = {}) {
+  const requests = []
+  const posts = []
+  // Served diaries for /index/groups/<D>; `down` answers 503 there.
+  const state = { diaries: new Set(), down: false, unread: new Set(), rootless: new Set(), unserved: new Set() }
+  const server = http.createServer((req, res) => {
+    const p = /^\/moderation-group-post\/([0-9a-f]{64})\/([0-9]{1,15})$/.exec(req.url)
+    if (p !== null) {
+      posts.push(req.url)
+      const seq = Number(p[2])
+      let found = null
+      for (const [g, ws] of Object.entries(groups)) {
+        for (const w of ws) if (w.key === p[1] && seq < (w.length ?? 10)) found = { group: g, diary: w.diary }
+      }
+      if (req.headers.authorization !== 'Bearer ' + SEEDER_TOKEN || found === null || state.unread.has(p[1])) return res.writeHead(404).end()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ ...found, seq, texto: 'mensagem conferida', resposta: null }))
+    }
+    requests.push(req.url)
+    const d = /^\/index\/groups\/([0-9a-f]{64})$/.exec(req.url)
+    if (d !== null) {
+      if (state.down) return res.writeHead(503).end()
+      if (!state.diaries.has(d[1])) return res.writeHead(404).end()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ groups: [], indexing: false, complete: true }))
+    }
+    const m = /^\/index\/group\/([0-9a-f]{64})$/.exec(req.url)
+    if (m === null) return res.writeHead(404).end()
+    const writers = Object.hasOwn(groups, m[1]) ? groups[m[1]].map((w) => ({ length: 10, signed: w.length ?? 10, ...w, seq: 1, left: false })) : []
+    const header = Object.hasOwn(groups, m[1]) && !state.rootless.has(m[1])
+    const served = header && !state.unserved.has(m[1])
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ kind: header ? 'grupo' : null, visibility: null, join: null, name: header ? 'Horta' : null, creator: served ? writers[0].diary : null, rootServed: served, writers, next: null, indexing: false, complete: true }))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => new Promise((resolve) => {
+    server.closeAllConnections()
+    server.close(resolve)
+  }))
+  return { requests, posts, groups, state, port: server.address().port, groupCheck: createGroupCheck({ baseUrl: 'http://127.0.0.1:' + server.address().port, token: SEEDER_TOKEN }) }
+}
+const SEEDER_TOKEN = 'e5'.repeat(32)
+
+async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEmails = [], usage = null, triage = null, groupCheck } = {}) {
   const root = tmpDir(t)
   const dir = path.join(root, 'account')
   const c = { offset: 0 }
@@ -125,6 +179,16 @@ async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEm
   const ana = keys()
   const bia = keys()
   const carol = keys()
+  // Without a seeder under test: the three linked diaries are served, no
+  // group is (every 'Bloquear' asks the seeder, linked target or not).
+  // `groupCheck: null` leaves the service without any check.
+  if (groupCheck === undefined) {
+    const served = new Set([ana.hex, bia.hex, carol.hex])
+    groupCheck = {
+      check: async () => ({ ok: false, code: 'config' }),
+      checkDiary: async ({ diary }) => served.has(diary) ? { ok: true } : { ok: false, code: 'ausente' }
+    }
+  }
   await linkDirect(accounts, iss, ana, 'ana', SUB_A, EMAIL_A)
   await linkDirect(accounts, iss, bia, 'bia', SUB_B, EMAIL_B)
   await linkDirect(accounts, iss, carol, 'carol', SUB_C, EMAIL_MOD)
@@ -148,6 +212,8 @@ async function setup (t, { emails = [EMAIL_MOD.toLowerCase()], panelDir, statsEm
     modEmails: emails,
     statsEmails,
     usage,
+    triage,
+    groupCheck,
     panelDir
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
@@ -180,13 +246,15 @@ function noLeak (t, s) {
 }
 
 // start + signed report; -> the /account/report response.
-async function sendReport (s, reporter, target, { seq = null, reason = 'spam', text = 'texto da denúncia', quote = '', signTarget } = {}) {
+async function sendReport (s, reporter, target, { seq = null, reason = 'spam', text = 'texto da denúncia', quote = '', signTarget, writer, group } = {}) {
   const started = await s.api('POST', '/account/report/start', { body: { member: reporter.hex } })
   if (started.status !== 200) return started
   const nonce = started.body.nonce
   const fields = { nonce, member: reporter.hex, association: s.iss.association, target: signTarget || target, seq, reason, text, quote }
+  if (writer !== undefined) Object.assign(fields, { writer, group })
   const signature = signReport(fields, reporter.kp)
-  return s.api('POST', '/account/report', { body: { member: reporter.hex, nonce, target, seq, reason, text, quote, signature } })
+  const extra = writer === undefined ? {} : { writer, group }
+  return s.api('POST', '/account/report', { body: { member: reporter.hex, nonce, target, seq, ...extra, reason, text, quote, signature } })
 }
 
 function cookieFrom (res, name) {
@@ -282,6 +350,377 @@ test('reports: linked start and signed report; unlinked, replay, wrong target, o
   const getReport = await s.api('GET', '/account/report')
   t.is(getReport.status, 404, 'no GET of a report')
   noLeak(t, s)
+})
+
+test('reports: a group message report is stored with writer and group, listed, never handed to the triage, and can block the group', async (t) => {
+  const calls = []
+  const triage = {
+    onReport: (r) => calls.push(['onReport', r.id]),
+    onHumanDecision: (r) => calls.push(['onHumanDecision', r.id]),
+    onCancel: () => {},
+    onUnblock: () => {},
+    suggestionOf: () => null,
+    verifiedOf: () => null
+  }
+  const writer = keys().hex
+  const group = keys().hex
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { triage, groupCheck: seeder.groupCheck })
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, quote: 'mensagem', writer, group })
+  t.is(r.status, 200, r.text)
+  t.is(r.body.duplicate, false)
+  const row = s.moderation.get(r.body.id)
+  t.is(row.writer, writer)
+  t.is(row.group, group)
+  t.is(row.target, s.bia.hex, 'the target stays the author diary')
+  // A diary post at the same seq is another report.
+  const diary = await sendReport(s, s.ana, s.bia.hex, { seq: 1, quote: 'mensagem' })
+  t.is(diary.body.duplicate, false)
+  t.not(diary.body.id, r.body.id)
+  for (let i = 0; i < 100 && calls.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10))
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.alike(calls, [['onReport', diary.body.id]], 'only the diary report reached the triage')
+
+  // A v1 signature never passes for a group report.
+  const v1 = await sendReport(s, s.ana, s.bia.hex, { seq: 2, writer, group })
+  t.is(v1.status, 200)
+  const started = await s.api('POST', '/account/report/start', { body: { member: s.ana.hex } })
+  const fields = { nonce: started.body.nonce, member: s.ana.hex, association: s.iss.association, target: s.bia.hex, seq: 3, reason: 'spam', text: '', quote: '' }
+  const crossed = await s.api('POST', '/account/report', { body: { ...fields, writer, group, signature: signReport(fields, s.ana.kp) } })
+  t.is(crossed.status, 400)
+  t.alike(crossed.body, { error: 'assinatura-invalida' })
+
+  for (const [label, extra] of [
+    ['writer without seq', { seq: null, writer, group }],
+    ['writer without group', { seq: 4, writer }],
+    ['group without writer', { seq: 4, group }],
+    ['upper-case writer', { seq: 4, writer: writer.toUpperCase(), group }],
+    ['group is the target diary', { seq: 4, writer, group: s.bia.hex }],
+    ['writer is the target diary', { seq: 4, writer: s.bia.hex, group }]
+  ]) {
+    const st = await s.api('POST', '/account/report/start', { body: { member: s.ana.hex } })
+    const body = { member: s.ana.hex, nonce: st.body.nonce, target: s.bia.hex, reason: 'spam', text: '', quote: '', signature: 'ab'.repeat(64), ...extra }
+    const res = await s.api('POST', '/account/report', { body })
+    t.is(res.status, 400, label)
+    t.alike(res.body, { error: 'pedido-invalido' }, label)
+  }
+
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const list = await s.api('GET', '/account/mod/api/reports?estado=aberta', { cookie })
+  const listed = list.body.reports.find((x) => x.id === r.body.id)
+  t.is(listed.writer, writer)
+  t.is(listed.group, group)
+  t.is(list.body.reports.find((x) => x.id === diary.body.id).writer, null)
+
+  const badTarget = await s.api('POST', '/account/mod/api/reports/' + diary.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })
+  t.alike(badTarget.body, { error: 'pedido-invalido' }, 'grupo only for a group report')
+  const decided = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })
+  t.is(decided.status, 200, decided.text)
+  t.is(decided.body.change.member, group, 'the pending change blocks the group root key')
+  noLeak(t, s)
+})
+
+test('group block: refused unless the seeder confirms the group and its writer, Bloquear conta too', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const decide = (id, block) => s.api('POST', '/account/mod/api/reports/' + id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+
+  // A diary key passed off as a group (not a served root).
+  const fake = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer, group: keys().hex })
+  t.is(fake.status, 200, fake.text)
+  const info = await s.api('GET', '/account/mod/api/reports/' + fake.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: false, reason: 'ausente' })
+  const refused = await decide(fake.body.id, 'grupo')
+  t.is(refused.status, 409)
+  t.alike(refused.body, { error: 'grupo-nao-confirmado' })
+  t.is(s.moderation.get(fake.body.id).status, 'aberta', 'nothing decided')
+  t.is(s.moderation.pending().changes.length, 0, 'nothing queued')
+
+  // A served group whose writer belongs to someone else.
+  seeder.groups[group] = [{ key: writer, diary: s.ana.hex }]
+  const other = await sendReport(s, s.ana, s.bia.hex, { seq: 2, writer, group })
+  t.alike((await decide(other.body.id, 'grupo')).body, { error: 'grupo-nao-confirmado' })
+  // The quote names bia, but nothing ties the writer to her diary: an
+  // account block is refused as well (a group report has no verified read).
+  const asAccount = await decide(other.body.id, 'diario')
+  t.is(asAccount.status, 409, asAccount.text)
+  t.alike(asAccount.body, { error: 'grupo-nao-confirmado' })
+  t.alike((await decide(fake.body.id, 'diario')).body, { error: 'grupo-nao-confirmado' }, 'nor for a key that is not a group')
+  t.is(s.moderation.pending().changes.length, 0, 'still nothing queued')
+  const dropped = await s.api('POST', '/account/mod/api/reports/' + fake.body.id + '/decide', { cookie, body: { decision: 'descartar' } })
+  t.is(dropped.status, 200, 'Descartar always works')
+
+  // Confirmed: the writer is listed with the reported diary.
+  const w2 = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.ana.hex }, { key: w2, diary: s.bia.hex }]
+  const real = await sendReport(s, s.ana, s.bia.hex, { seq: 3, writer: w2, group })
+  const ok = await s.api('GET', '/account/mod/api/reports/' + real.body.id + '/grupo', { cookie })
+  t.alike(ok.body, { confirmed: true, root: true, name: 'Horta', creator: s.ana.hex, texto: 'mensagem conferida' })
+  const done = await decide(real.body.id, 'grupo')
+  t.is(done.status, 200, done.text)
+  t.is(done.body.change.member, group)
+  t.is(done.body.change.kind, 'grupo')
+  const real2 = await sendReport(s, s.ana, s.bia.hex, { seq: 4, writer: w2, group })
+  const account = await decide(real2.body.id, 'diario')
+  t.is(account.status, 200, account.text)
+  t.is(account.body.change.member, s.bia.hex)
+  t.is(account.body.change.kind, 'conta')
+  const listed = await s.api('GET', '/account/mod/api/blocked', { cookie })
+  t.alike(listed.body.pending.map((c) => [c.member, c.kind]), [[group, 'grupo'], [s.bia.hex, 'conta']])
+  t.ok(seeder.requests.every((u) => /^\/index\/group\/[0-9a-f]{64}$/.test(u)), 'only the public group index was read')
+  noLeak(t, s)
+})
+
+test('group block: a missing root header still confirms the diary block from the writer row, never the group block', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+  seeder.state.rootless.add(group)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const decide = (id, block) => s.api('POST', '/account/mod/api/reports/' + id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+  const a = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer, group })
+  const info = await s.api('GET', '/account/mod/api/reports/' + a.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: true, root: false, name: null, creator: null, texto: 'mensagem conferida' })
+  const asGroup = await decide(a.body.id, 'grupo')
+  t.is(asGroup.status, 409, asGroup.text)
+  t.alike(asGroup.body, { error: 'grupo-nao-confirmado' })
+  t.is(s.moderation.get(a.body.id).status, 'aberta', 'nothing decided')
+  t.is(s.moderation.pending().changes.length, 0, 'nothing queued')
+  const asAccount = await decide(a.body.id, 'diario')
+  t.is(asAccount.status, 200, asAccount.text)
+  t.is(asAccount.body.change.member, s.bia.hex)
+  t.is(asAccount.body.change.kind, 'conta')
+
+  // The verified header kept for a root no longer served: both blocks.
+  const w2 = keys().hex
+  const g2 = keys().hex
+  seeder.groups[g2] = [{ key: w2, diary: s.ana.hex }]
+  seeder.state.unserved.add(g2)
+  const b = await sendReport(s, s.bia, s.ana.hex, { seq: 1, writer: w2, group: g2 })
+  t.alike((await s.api('GET', '/account/mod/api/reports/' + b.body.id + '/grupo', { cookie })).body, { confirmed: true, root: true, name: 'Horta', creator: null, texto: 'mensagem conferida' })
+  const g2Block = await decide(b.body.id, 'grupo')
+  t.is(g2Block.status, 200, g2Block.text)
+  t.is(g2Block.body.change.member, g2)
+  t.is(g2Block.body.change.kind, 'grupo')
+  const c = await sendReport(s, s.bia, s.ana.hex, { seq: 2, writer: w2, group: g2 })
+  const cBlock = await decide(c.body.id, 'diario')
+  t.is(cBlock.status, 200, cBlock.text)
+  t.is(cBlock.body.change.member, s.ana.hex)
+  noLeak(t, s)
+})
+
+test('group block: without a group check configured it is refused', async (t) => {
+  const s = await setup(t)
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer: keys().hex, group: keys().hex })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  for (const block of ['grupo', 'diario']) {
+    const res = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+    t.alike(res.body, { error: 'grupo-nao-confirmado' }, block)
+  }
+  const info = await s.api('GET', '/account/mod/api/reports/' + r.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: false, reason: 'config' })
+  t.is(s.moderation.get(r.body.id).status, 'aberta')
+})
+
+test('group block: the reported seq must exist on the writer, or both blocks are refused', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex, length: 3 }]
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const invented = await sendReport(s, s.ana, s.bia.hex, { seq: 3, writer, group })
+  const info = await s.api('GET', '/account/mod/api/reports/' + invented.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: false, reason: 'sem-mensagem' })
+  for (const block of ['grupo', 'diario']) {
+    const res = await s.api('POST', '/account/mod/api/reports/' + invented.body.id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+    t.is(res.status, 409, block)
+    t.alike(res.body, { error: 'grupo-nao-confirmado' }, block)
+  }
+  const real = await sendReport(s, s.ana, s.bia.hex, { seq: 2, writer, group })
+  const ok = await s.api('POST', '/account/mod/api/reports/' + real.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'diario' } })
+  t.is(ok.status, 200, ok.text)
+})
+
+test('a report without a group: the target must be a served diary before Bloquear, linked or not', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const block = (id) => s.api('POST', '/account/mod/api/reports/' + id + '/decide', { cookie, body: { decision: 'bloquear' } })
+  const ask = (id) => s.api('GET', '/account/mod/api/reports/' + id + '/alvo', { cookie })
+
+  // A group root key named as a diary: the seeder answers 404.
+  const root = keys().hex
+  seeder.groups[root] = [{ key: keys().hex, diary: s.bia.hex }]
+  const asRoot = await sendReport(s, s.ana, root, { seq: 1 })
+  t.alike((await ask(asRoot.body.id)).body, { confirmed: false, reason: 'ausente' })
+  const refused = await block(asRoot.body.id)
+  t.alike(refused.body, { error: 'alvo-nao-confirmado' })
+  t.is(s.moderation.get(asRoot.body.id).status, 'aberta')
+  t.is(s.moderation.pending().changes.length, 0, 'nothing queued')
+
+  // A transient failure refuses too, is not cached and is asked again.
+  const diary = keys().hex
+  seeder.state.diaries.add(diary)
+  seeder.state.down = true
+  const served = await sendReport(s, s.ana, diary, { seq: 1 })
+  t.alike((await ask(served.body.id)).body, { confirmed: false, reason: 'recusado' })
+  t.alike((await block(served.body.id)).body, { error: 'alvo-nao-confirmado' })
+  seeder.state.down = false
+  t.alike((await ask(served.body.id)).body, { confirmed: true })
+  const ok = await block(served.body.id)
+  t.is(ok.status, 200, ok.text)
+  t.is(ok.body.change.member, diary)
+
+  // A linked account proves nothing (a creator can link the root key as an
+  // account): the seeder is asked all the same.
+  const linked = await sendReport(s, s.bia, s.ana.hex, { seq: 1 })
+  const before = seeder.requests.length
+  t.alike((await block(linked.body.id)).body, { error: 'alvo-nao-confirmado' }, 'a linked key the seeder does not serve as a diary')
+  t.is(seeder.requests.length, before + 1, 'the seeder was asked for a linked target')
+  t.is(s.moderation.pending().changes.length, 1, 'only the served diary is queued')
+  seeder.state.diaries.add(s.bia.hex)
+  seeder.state.down = true
+  const linked2 = await sendReport(s, s.ana, s.bia.hex, { seq: 2 })
+  t.alike((await block(linked2.body.id)).body, { error: 'alvo-nao-confirmado' }, 'seeder down refuses a linked target too')
+  seeder.state.down = false
+  const linkedOk = await block(linked2.body.id)
+  t.is(linkedOk.status, 200, linkedOk.text)
+  t.is(linkedOk.body.change.member, s.bia.hex, 'a linked served diary is confirmed and blocked')
+  const dropped = await s.api('POST', '/account/mod/api/reports/' + asRoot.body.id + '/decide', { cookie, body: { decision: 'descartar' } })
+  t.is(dropped.status, 200, 'Descartar always works')
+})
+
+test('group block: both blocks rest on the message the seeder hands out, never on the index row and the quote alone', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+  seeder.state.unread.add(writer)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, quote: 'citação inventada', writer, group })
+  const decide = (block) => s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+  t.alike((await s.api('GET', '/account/mod/api/reports/' + r.body.id + '/grupo', { cookie })).body, { confirmed: false, reason: 'nao-lida' })
+  for (const block of ['grupo', 'diario']) t.alike((await decide(block)).body, { error: 'grupo-nao-confirmado' }, block + ': listed writer, message not read')
+  t.is(s.moderation.pending().changes.length, 0)
+  t.ok(seeder.posts.length > 0, 'the message route was asked')
+
+  // Not cached: once the seeder hands it out, the block goes through.
+  seeder.state.unread.delete(writer)
+  t.alike((await s.api('GET', '/account/mod/api/reports/' + r.body.id + '/grupo', { cookie })).body, { confirmed: true, root: true, name: 'Horta', creator: s.bia.hex, texto: 'mensagem conferida' })
+  t.is((await decide('diario')).status, 200)
+})
+
+test('group block: without the seeder token both blocks are refused', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const tokenless = createGroupCheck({ baseUrl: 'http://127.0.0.1:' + seeder.port })
+  const s = await setup(t, { groupCheck: tokenless })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer, group })
+  for (const block of ['grupo', 'diario']) {
+    const res = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+    t.alike(res.body, { error: 'grupo-nao-confirmado' }, block)
+  }
+  t.is(seeder.posts.length, 0, 'nothing read without the token')
+})
+
+test('group report: the creator writes through the root core, so writer may equal the group key', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const group = keys().hex
+  seeder.groups[group] = [{ key: group, diary: s.bia.hex }]
+  const first = await sendReport(s, s.ana, s.bia.hex, { seq: 1, quote: 'mensagem', writer: group, group })
+  t.is(first.status, 200, first.text)
+  t.is(s.moderation.get(first.body.id).writer, group)
+  const second = await sendReport(s, s.ana, s.bia.hex, { seq: 2, writer: group, group })
+  t.is(second.status, 200, second.text)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const info = await s.api('GET', '/account/mod/api/reports/' + first.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: true, root: true, name: 'Horta', creator: s.bia.hex, texto: 'mensagem conferida' })
+  const asGroup = await s.api('POST', '/account/mod/api/reports/' + first.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })
+  t.is(asGroup.status, 200, asGroup.text)
+  t.is(asGroup.body.change.member, group)
+  const asAccount = await s.api('POST', '/account/mod/api/reports/' + second.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'diario' } })
+  t.is(asAccount.status, 200, asAccount.text)
+  t.is(asAccount.body.change.member, s.bia.hex)
+})
+
+test('group report: an old group block keeps its grupo label beyond the listing window', async (t) => {
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const old = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer, group })
+  t.is((await s.api('POST', '/account/mod/api/reports/' + old.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })).status, 200)
+  s.c.offset += 1000
+  seeder.state.diaries.add(s.ana.hex)
+  const newer = await sendReport(s, s.bia, s.ana.hex)
+  t.is((await s.api('POST', '/account/mod/api/reports/' + newer.body.id + '/decide', { cookie, body: { decision: 'bloquear' } })).status, 200)
+  // Stand-in for MAX_REPORTS newer decided rows: any listing window now
+  // holds only the newest decision, never the old group block.
+  const list = s.moderation.list
+  s.moderation.list = (opts = {}) => list({ ...opts, limit: opts.status === 'decidida' ? 1 : opts.limit })
+  const listed = await s.api('GET', '/account/mod/api/blocked', { cookie })
+  t.alike(listed.body.pending.map((c) => [c.member, c.kind]), [[group, 'grupo'], [s.ana.hex, 'conta']])
+})
+
+test('group lookups have their own budget: a panel full of them never locks decide', async (t) => {
+  const s = await setup(t)
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer: keys().hex, group: keys().hex })
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const statuses = []
+  for (let i = 0; i < 60; i++) statuses.push((await s.api('GET', '/account/mod/api/reports/' + r.body.id + '/grupo', { cookie })).status)
+  t.is(statuses.filter((x) => x === 200).length, 30, 'the group window answers 30 a minute')
+  t.ok(statuses.slice(30).every((x) => x === 429))
+  const reports = await s.api('GET', '/account/mod/api/reports?estado=aberta', { cookie })
+  t.is(reports.status, 200, 'the lists still answer')
+  const dropped = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'descartar' } })
+  t.is(dropped.status, 200, 'decide still answers')
+})
+
+test('a report naming the moderator diary as its group is listed and can be discarded, never blocked as a group', async (t) => {
+  const s = await setup(t)
+  // carol is the signed-in moderator (EMAIL_MOD).
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, writer: keys().hex, group: s.carol.hex })
+  t.is(r.status, 200, r.text)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const list = await s.api('GET', '/account/mod/api/reports?estado=aberta', { cookie })
+  t.ok(list.body.reports.some((x) => x.id === r.body.id), 'listed: the group key is the reporter\'s choice')
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.body.open, 1, 'counted')
+  const asGroup = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })
+  t.is(asGroup.status, 404)
+  t.alike(asGroup.body, { error: 'nao-encontrado' }, 'never a group block of the own diary')
+  const asAccount = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'diario' } })
+  t.alike(asAccount.body, { error: 'grupo-nao-confirmado' }, 'diario follows the normal rule')
+  const dropped = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'descartar' } })
+  t.is(dropped.status, 200, dropped.text)
+  t.is(s.moderation.get(r.body.id).status, 'descartar')
 })
 
 test('reports: the daily cap answers limite-denuncias', async (t) => {

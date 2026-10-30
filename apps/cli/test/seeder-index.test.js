@@ -171,6 +171,10 @@ function scanFixture (options = {}) {
     _admitted: new Map(),
     _dropping: new Map(),
     _mediaServed: new Map(),
+    // _drop also leaves the group index and its group writers (seeder.js).
+    _groupServed: new Map(),
+    _groupIndex: { removeDiary () {} },
+    _groupRootStartup: null,
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),

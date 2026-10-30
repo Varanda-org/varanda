@@ -11,6 +11,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const {
   PREFIX,
+  PREFIX_V2,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -19,6 +20,7 @@ const {
   NONCE_RE,
   isCleanText,
   digest,
+  isGroupReport,
   reportPayload,
   signReport,
   verifyReport
@@ -47,6 +49,9 @@ const POST = {
   quote: 'linha 1\nlinha 2'
 }
 const ACCOUNT = { ...POST, seq: null, reason: 'spam', text: '', quote: '' }
+const WRITER = 'a1'.repeat(32)
+const GROUP = 'b2'.repeat(32)
+const GROUP_POST = { ...POST, writer: WRITER, group: GROUP }
 
 // Bidi controls, built from their code points so no raw one sits in source.
 const RLO = String.fromCodePoint(0x202e)
@@ -122,6 +127,60 @@ test('golden vector: an account report, exact bytes and signature', (t) => {
   t.is(signature, '743d27de6c9d8aa45422b9ec0efdceca3d499c6733552a9960016db155927bddbf2666b9013d0f88ea371cab39c71c31f9e1bd4415464ec51f80fbd9d825ec07')
   t.alike(verifyReport(ACCOUNT, signature), { ok: true })
   t.alike(verifyReport({ ...ACCOUNT, seq: 1 }, signature), { ok: false, reason: 'bad-signature' }, 'an account report is not a report of seq 1')
+})
+
+test('golden vector: a group message report (v2), exact bytes and signature', (t) => {
+  t.is(PREFIX_V2, 'varanda-report-v2')
+  t.ok(isGroupReport(GROUP_POST))
+  t.absent(isGroupReport(POST))
+  t.absent(isGroupReport({ ...POST, writer: null, group: null }))
+  const payload = reportPayload(GROUP_POST)
+  t.is(b4a.toString(payload, 'utf8'), [
+    'varanda-report-v2',
+    NONCE,
+    MEMBER,
+    ASSOCIATION,
+    TARGET,
+    GROUP,
+    WRITER,
+    '7',
+    'assedio',
+    '45ba497256f581d6f28f95238271f89c269453a8a531ee4bbf398b73ccfc080c',
+    '0191749cdb277fcfe427ca55cab5e31636b26d76b6b8f4966e145dbb2eeacb81'
+  ].join('\n'))
+  const signature = signReport(GROUP_POST, MEMBER_KP)
+  t.is(signature, 'c9cfc5207c822b8c1803680cc24f70b83d016d599ae5a7733a9518a41b2da7cf7feb5bbc03a520b57863438e904dc793490302fd446a8ac28aa8fdf0abf3c60a')
+  t.alike(verifyReport(GROUP_POST, signature), { ok: true })
+  t.alike(reportPayload({ ...POST, writer: null, group: null }), reportPayload(POST), 'null writer and group keep the v1 bytes')
+})
+
+test('v1 and v2 signatures never cross', (t) => {
+  const v1 = signReport(POST, MEMBER_KP)
+  const v2 = signReport(GROUP_POST, MEMBER_KP)
+  t.alike(verifyReport(GROUP_POST, v1), { ok: false, reason: 'bad-signature' }, 'a diary post report is not a group report')
+  t.alike(verifyReport(POST, v2), { ok: false, reason: 'bad-signature' }, 'a group report is not a diary post report')
+  const changes = {
+    writer: { writer: 'a3'.repeat(32) },
+    group: { group: 'b4'.repeat(32) },
+    'writer and group swapped': { writer: GROUP, group: WRITER },
+    seq: { seq: 8 },
+    target: { target: '12'.repeat(32) }
+  }
+  for (const [name, change] of Object.entries(changes)) {
+    t.alike(verifyReport({ ...GROUP_POST, ...change }, v2), { ok: false, reason: 'bad-signature' }, name)
+  }
+  const bad = {
+    'writer without seq': { ...GROUP_POST, seq: null, quote: '' },
+    'writer without group': { ...POST, writer: WRITER },
+    'group without writer': { ...POST, group: GROUP },
+    'uppercase writer': { ...GROUP_POST, writer: WRITER.toUpperCase() },
+    'short group': { ...GROUP_POST, group: 'ab'.repeat(31) },
+    'writer not a string': { ...GROUP_POST, writer: 1 }
+  }
+  for (const [label, fields] of Object.entries(bad)) {
+    t.exception.all(() => reportPayload(fields), TypeError, label)
+    t.alike(verifyReport(fields, v2), { ok: false, reason: 'malformed' }, label)
+  }
 })
 
 test('every field is bound by the signature', (t) => {

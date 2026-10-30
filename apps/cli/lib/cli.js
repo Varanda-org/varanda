@@ -35,6 +35,15 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
+  group create               cria um grupo público (--name, --join open|approval)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group post <chave>         publica no grupo (--text)
+  group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
+  group list                 grupos dos quais você participa
+  group info|members|requests <chave>  dados do grupo, membros e pedidos de entrada
+  group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
+  group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
+  group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -45,15 +54,16 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --join --undo`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--undo', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
-  '--issuer', '--account-port', '--account-host', '--moderator', '--server'
+  '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -208,6 +218,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     noPublish: get('no-publish') === true,
     newList: get('new-list') === true,
     yes: get('yes') === true,
+    undo: get('undo') === true,
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
@@ -247,6 +258,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     out: get('out') === null ? null : path.resolve(cwd, get('out')),
     certFile: get('cert-file') === null ? null : path.resolve(cwd, get('cert-file')),
     name: get('name'),
+    join: get('join'),
     bio: get('bio'),
     text: get('text'),
     to: replyTo(get('to')),

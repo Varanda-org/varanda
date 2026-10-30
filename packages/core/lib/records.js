@@ -28,6 +28,14 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Groups (lib/group.js): a diary binds a group writer core with `group-join`.
+const MAX_GROUP_WRITERS = 512
+const MAX_GROUPS_PER_DIARY = 64
+const MAX_GROUPS_PER_COMMUNITY = 32
+const MAX_GROUP_CUTS = 16
+// Writers one diary may count in a group; also the cuts of a group-leave.
+const MAX_GROUP_WRITERS_PER_DIARY = 8
+const MAX_GROUP_NAME = 80
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
@@ -41,6 +49,7 @@ const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
+const GROUP_JOIN_KEYS = ['type', 'group', 'writer', 'on', 'at']
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -208,7 +217,7 @@ function validMediaList (media) {
   return true
 }
 
-const TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost']
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join'])
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -237,6 +246,11 @@ function check (record, seq) {
   }
   if (type === 'follow') {
     if (!hasExactKeys(record, FOLLOW_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // The creator binds the group root itself: writer may equal group.
+  if (type === 'group-join') {
+    if (!hasExactKeys(record, GROUP_JOIN_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'like' || type === 'repost') {
@@ -325,6 +339,10 @@ function followRecord ({ key, on, at = nowIso() } = {}) {
   return build({ type: 'follow', key, on, at }, 1)
 }
 
+function groupJoinRecord ({ group, writer, on, at = nowIso() } = {}) {
+  return build({ type: 'group-join', group, writer, on, at }, 1)
+}
+
 function parseRef (str) {
   if (typeof str !== 'string') return null
   // Canonical decimal only: no leading zeros (except '0'), no rounding.
@@ -392,6 +410,16 @@ function validRecordCopy (record, seq) {
   return validateRecord(copy, seq) === null ? copy : null
 }
 
+// Plain-data copy of any value read once, or null. Never throws.
+function plainCopy (value) {
+  try {
+    if (!isPlainObject(value)) return null
+    return cloneRecord(value)
+  } catch {
+    return null
+  }
+}
+
 function latestProfile (entries) {
   let best = null
   for (const { seq, record } of entries) {
@@ -425,7 +453,19 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  MAX_GROUP_WRITERS,
+  MAX_GROUPS_PER_DIARY,
+  MAX_GROUPS_PER_COMMUNITY,
+  MAX_GROUP_CUTS,
+  MAX_GROUP_NAME,
+  MAX_GROUP_WRITERS_PER_DIARY,
+  TYPES,
   nowIso,
+  isPlainObject,
+  hasExactKeys,
+  hasControlChars,
+  charLength,
+  plainCopy,
   isHex64,
   isCanonicalIso,
   decodeBlock,
@@ -434,6 +474,7 @@ module.exports = {
   postRecord,
   mediaCoreRecord,
   followRecord,
+  groupJoinRecord,
   likeRecord,
   repostRecord,
   validDescriptor,

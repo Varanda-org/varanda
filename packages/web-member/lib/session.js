@@ -1,3 +1,5 @@
+'use strict'
+
 // The browser node session (docs/rpc.md section 5): ONE serialized session
 // over a ./node-storage.js storage that implements the RPC methods the app
 // uses on Hypercore 10, syncing through one seeder over a WebSocket
@@ -68,6 +70,12 @@
 // post.create / post.reply carries in `media`; member-ops verifies it
 // against the own cores before the post is appended ('mídia inválida').
 // Nothing about the bytes is logged.
+//
+// Group keys use the passkey PRF handed in as setKeyPair(pair, { prf }).
+// The session copies it, derives each writer with its stored nonce and
+// clears it with the identity. Writes also wait for group-synced on the
+// own writer (and the creator root), then restart sync to push new lengths.
+// Lock/reset cancel queued group writes and interrupt their pending gates.
 //
 // Follows are local-first (member-ops followChange: kv follows and kv
 // followsPending change at once; the handler's result is unchanged) but
@@ -213,6 +221,7 @@ const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
+const { groupKeyPairFromPrf } = require('./passkey')
 const { checkSeederUrl } = require('./seeder-url')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -255,6 +264,10 @@ const USAGE_MESSAGES = new Set([
   'não é possível seguir a própria chave',
   'limite de diários seguidos atingido',
   'limite do diário atingido',
+  'sem permissão no grupo',
+  'limite de grupos atingido',
+  'limite do grupo atingido',
+  'nada a alterar',
   'diretório não é de um membro',
   'associação diferente da configurada',
   store.LOCKED,
@@ -276,6 +289,7 @@ const USAGE_PATTERNS = [
 const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
   'sem dados locais para este diário',
+  'grupo não encontrado',
   SEEDER_UNAVAILABLE,
   DIARY_UNAVAILABLE
 ])
@@ -306,6 +320,7 @@ function toRpcError (err, onInternalError = noop) {
   if (code === 'USAGE' && err instanceof UsageError) {
     return rpcError('USAGE', isSafeMessage(message) ? message : 'pedido inválido')
   }
+  if (code === 'NOT_FOUND' && NOT_FOUND_MESSAGES.has(message)) return rpcError('NOT_FOUND', message)
   if (message !== null && (code === null || code === 'INVALID_RECORD')) {
     if (USAGE_MESSAGES.has(message) || USAGE_PATTERNS.some((re) => re.test(message))) return rpcError('USAGE', message)
     if (NOT_FOUND_MESSAGES.has(message)) return rpcError('NOT_FOUND', message)
@@ -406,7 +421,16 @@ function createBrowserSession ({
   }
 
   function ctx () {
-    return { storage, association: cfg.association, keyPair, mediaKeyPair, limits }
+    const epoch = connection
+    const generation = groupEpoch
+    return {
+      storage,
+      association: cfg.association,
+      keyPair,
+      mediaKeyPair,
+      groupKeyPair: keyPair !== null && groupPrf !== null ? (nonce) => deriveGroupKeyPair(nonce, epoch, generation) : null,
+      limits
+    }
   }
 
   let emitter = null
@@ -436,6 +460,15 @@ function createBrowserSession ({
   // copies, zero-filled together when cleared).
   let keyPair = null
   let mediaKeyPair = null
+  let groupPrf = null
+  let groupEpoch = 0
+  let groupWriting = false
+  const groupPairs = new Set()
+  const groupUnpushed = new Map()
+  // The length of each own group core when last read here (after a write or
+  // before a write gate): a 'group-synced' at a shorter length is stale and
+  // never lets a write append past what the seeder was compared with.
+  const groupLengths = new Map()
   // The follow drain: at most one operation queued; drainWanted after a
   // failure (retried from own-synced, drainRetries times in a row).
   let drainQueued = false
@@ -538,14 +571,14 @@ function createBrowserSession ({
   // internal: a gate or push run of the session itself (its line names it;
   // it never changes syncIntent). onOwnSynced: called on the run's first
   // own-synced. -> the run record.
-  function startRun ({ once, timeoutMs, internal = false, label = null, onOwnSynced = noop }) {
+  function startRun ({ once, timeoutMs, internal = false, label = null, onOwnSynced = noop, onGroupProgress = noop }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
     const epoch = connection
     const { signal, abort } = createAbort()
     // leased: a user's continuous run under the lease; settled: its last
     // readiness report; leaseTimer: the hold.
-    const r = { runId, once, internal, ownSynced: false, abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null }
+    const r = { runId, once, internal, ownSynced: false, groupSynced: new Map(), groupBehind: new Set(), abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null }
     run = r
     send('sync.started', { runId, once }, epoch)
     if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
@@ -579,10 +612,27 @@ function createBrowserSession ({
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
                 if (!r.ownSynced) {
                   r.ownSynced = true
-                  try { onOwnSynced() } catch {}
+                  try { onOwnSynced(r) } catch {}
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
                 return
+              case 'groups-changed':
+                if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
+                return
+              case 'group-synced':
+                if (!Number.isSafeInteger(ev.length) || ev.length < 0) return
+                r.groupSynced.set(ev.key, ev.length)
+                r.groupBehind.delete(ev.key)
+                onGroupProgress(r)
+                break
+              case 'group-behind':
+                r.groupSynced.delete(ev.key)
+                r.groupBehind.add(ev.key)
+                onGroupProgress(r)
+                break
+              case 'group-pushed':
+                if (groupUnpushed.has(ev.key) && ev.length >= groupUnpushed.get(ev.key)) groupUnpushed.delete(ev.key)
+                break
               case 'follows-changed':
                 // The sync folded the own diary's follow records into kv
                 // follows: the page learns the count; a continuous run is
@@ -607,6 +657,8 @@ function createBrowserSession ({
                 event('diário próprio atrasado (' + safe(String(ev.length)) + '/' + safe(String(ev.theirs)) + ')')
                 return
               case 'link-closed':
+                r.groupSynced.clear()
+                r.groupBehind.clear()
                 synced = false
                 r.ownSynced = false
                 return
@@ -805,31 +857,57 @@ function createBrowserSession ({
   // epoch: the handler's connection epoch; a client that detached while the
   // gate ran gets 'conexão encerrada' and nothing is written, and the sync
   // intent is restored only when nothing (detach) changed it meanwhile.
-  async function ensureCaughtUp (epoch) {
+  async function ensureCaughtUp (epoch, groupKeys = [], generation = null) {
     kickLease() // a write redials, inside the lease's gap too
-    if (!writeGate || trackingOwn()) return
+    if (!writeGate) return
+    if (trackingOwn() && groupKeys.every((key) => groupCaughtUp(run, key))) return
     if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
     if (run !== null) await stopRun('preempted')
+    if (generation !== null) checkGroupOperation(epoch, generation)
+    for (const key of groupKeys) await readGroupLength(key)
+    if (generation !== null) checkGroupOperation(epoch, generation)
     const intent = syncIntent
     synced = false
     let ok = false
     let arrived
+    const progress = (r) => {
+      if (groupKeys.some((key) => r.groupBehind.has(key))) {
+        ok = false
+        return arrived()
+      }
+      if (r.ownSynced && groupKeys.every((key) => groupCaughtUp(r, key))) {
+        ok = true
+        arrived()
+      }
+    }
     const caughtUp = new Promise((resolve) => { arrived = resolve })
     const r = startRun({
       once: true,
       timeoutMs: writeGateTimeoutMs,
       internal: true,
       label: GATE_LINE,
-      onOwnSynced: () => {
-        ok = true
-        arrived()
-      }
+      onOwnSynced: progress,
+      onGroupProgress: progress
     })
     await Promise.race([caughtUp, r.done])
     await stopRun('preempted')
     if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+    if (generation !== null) checkGroupOperation(epoch, generation)
     syncIntent = intent
     if (!ok) throw new UsageError(NOT_SYNCED_MESSAGE)
+  }
+
+  // Whether run r reported own group core `key` in sync at no less than its
+  // current length (not only the key's presence).
+  function groupCaughtUp (r, key) {
+    return r.groupSynced.has(key) && r.groupSynced.get(key) >= (groupLengths.get(key) || 0)
+  }
+
+  // Only while no run holds the core (one handle per core).
+  async function readGroupLength (key) {
+    const core = await store.openGroupCoreReadOnly(storage, key)
+    if (core === null) return
+    try { groupLengths.set(key, core.length) } finally { await core.close() }
   }
 
   // After a diary write (or any write handler while the seeder is not known
@@ -840,7 +918,7 @@ function createBrowserSession ({
   // way, and an unconfirmed push is retried on the next write).
   async function pushAfterWrite () {
     kickLease()
-    if (!writeGate || closed || !unpushed || syncIntent === 'continuous') return
+    if (!writeGate || closed || (!unpushed && groupUnpushed.size === 0) || syncIntent === 'continuous') return
     if (run !== null) await stopRun('preempted')
     const r = startRun({ once: true, timeoutMs: writeGateTimeoutMs, internal: true, label: PUSH_LINE })
     await r.done
@@ -985,11 +1063,12 @@ function createBrowserSession ({
   function serial (fn) {
     return (params) => {
       const epoch = connection
+      const generation = groupEpoch
       queued++
       const p = chain.then(async () => {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
         try {
-          return await fn(params, epoch)
+          return await fn(params, epoch, generation)
         } catch (err) {
           throw toRpcError(err, reportInternal)
         } finally {
@@ -1035,6 +1114,75 @@ function createBrowserSession ({
     return { seq: r.seq, on: r.on, changed: r.changed }
   }
 
+  function checkGroupOperation (epoch, generation) {
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+    if (generation !== groupEpoch || keyPair === null || groupPrf === null) throw new UsageError(store.LOCKED)
+  }
+
+  function cancelGroups () {
+    groupEpoch++
+    if (groupWriting && run !== null && run.internal) run.abort()
+  }
+
+  async function deriveGroupKeyPair (nonce, epoch, generation) {
+    checkGroupOperation(epoch, generation)
+    const pair = await groupKeyPairFromPrf(groupPrf, nonce)
+    try {
+      checkGroupOperation(epoch, generation)
+    } catch (err) {
+      zeroPair(pair)
+      throw err
+    }
+    groupPairs.add(pair)
+    return pair
+  }
+
+  async function ownGroupKeys (group) {
+    const entry = (await store.readGroupWriters(storage)).find((e) => e.group === group)
+    if (!entry) return []
+    return [...new Set([entry.key, ...(entry.rootNonce === null ? [] : [entry.group])])]
+  }
+
+  function groupWrite (operation) {
+    return serial(async (params, epoch, generation) => {
+      checkGroupOperation(epoch, generation)
+      await requireUnlocked()
+      groupWriting = true
+      try {
+        const keys = await ownGroupKeys(params.group)
+        checkGroupOperation(epoch, generation)
+        await ensureCaughtUp(epoch, keys, generation)
+        const result = await withStore(async (c) => {
+          checkGroupOperation(epoch, generation)
+          const result = await operation(c, params)
+          const group = result.group || params.group
+          // A join can create a writer after the previous run took its snapshot.
+          // The next run opens every own writer from the updated kv list.
+          for (const key of await ownGroupKeys(group)) {
+            const core = await store.openGroupCoreReadOnly(storage, key)
+            if (core === null) continue
+            try {
+              groupUnpushed.set(key, core.length)
+              groupLengths.set(key, core.length)
+            } finally { await core.close() }
+          }
+          await member.withIdentity(c, async ({ diary }) => { wrote(diary.length - 1) })
+          send('groups.changed', { group }, epoch)
+          return result
+        })
+        checkGroupOperation(epoch, generation)
+        await pushAfterWrite()
+        checkGroupOperation(epoch, generation)
+        return result
+      } finally {
+        groupWriting = false
+        for (const pair of groupPairs) zeroPair(pair)
+        groupPairs.clear()
+      }
+    })
+  }
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -1046,7 +1194,8 @@ function createBrowserSession ({
         memberCert,
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
-        publicDht: false
+        publicDht: false,
+        groups: true
       }
     }),
 
@@ -1109,7 +1258,7 @@ function createBrowserSession ({
     // exactly like account.sign: not a diary write, no append, no network,
     // and the result never carries the payload or a key. The session fills
     // in member and association; text and quote enter the payload hashed.
-    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote }) => {
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -1121,6 +1270,8 @@ function createBrowserSession ({
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       if (target === own) throw new UsageError(SELF_REPORT)
       const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
+      if (writer !== undefined) fields.writer = writer
+      if (group !== undefined) fields.group = group
       let signature
       try {
         signature = signReport(fields, keyPair)
@@ -1360,6 +1511,21 @@ function createBrowserSession ({
       }
     },
 
+    'group.create': groupWrite(member.groupCreate),
+    'group.join': groupWrite(member.groupJoin),
+    'group.leave': groupWrite(member.groupLeave),
+    'group.post': groupWrite(member.groupPost),
+    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+    'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
+    'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
+    'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),
+    'group.requests': serial((params) => withStore((c) => member.groupRequests(c, params))),
+    'group.admit': groupWrite(member.groupAdmit),
+    'group.ban': groupWrite(member.groupBan),
+    'group.admin': groupWrite(member.groupAdmin),
+    'group.hide': groupWrite(member.groupHide),
+    'group.meta': groupWrite(member.groupMeta),
+
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection
       if (gone()) throw rpcError('USAGE', 'conexão encerrada')
@@ -1413,7 +1579,7 @@ function createBrowserSession ({
     pair.publicKey.fill(0)
   }
 
-  // Both keys go together: a locked identity has no media key either. A
+  // All keys go together: a locked identity has no media key or group PRF. A
   // notices read in flight (its link is held by the proof the pair signed)
   // is aborted and its slot freed, wherever the lock comes from.
   function zeroKeyPair () {
@@ -1423,6 +1589,10 @@ function createBrowserSession ({
     keyPair = null
     zeroPair(mediaKeyPair)
     mediaKeyPair = null
+    if (groupPrf !== null) groupPrf.fill(0)
+    groupPrf = null
+    for (const pair of groupPairs) zeroPair(pair)
+    groupPairs.clear()
   }
 
   // A follow change happened: a drain is due, retries start afresh.
@@ -1433,21 +1603,27 @@ function createBrowserSession ({
 
   // Unlocks the identity with the pair derived from the passkey, and this
   // device's media key pair when the page derived one (`media`; without it
-  // uploads are refused as locked). Both are copied synchronously (the
-  // caller may zero its buffers right away); any previous pair is
+  // uploads are refused as locked). The optional PRF derives group keys.
+  // All are copied synchronously (the caller may zero its buffers right
+  // away); any previous pair and PRF are
   // zero-filled. The cached identity is forgotten so a stored diary of
   // another key surfaces on the next operation as USAGE 'passkey não
   // corresponde ao diário guardado'. Nothing is written here; the follow
   // drain is scheduled right after.
-  function setKeyPair (pair, { media } = {}) {
+  function setKeyPair (pair, { media, prf } = {}) {
     const copy = copyPair(pair)
     let mediaCopy = null
+    let prfCopy = null
     try {
+      if (prf !== undefined && prf !== null) prfCopy = copyKey(prf, 32)
       if (media !== undefined && media !== null) mediaCopy = copyPair(media)
     } catch (err) {
       zeroPair(copy)
+      zeroPair(mediaCopy)
+      if (prfCopy !== null) prfCopy.fill(0)
       throw err
     }
+    cancelGroups()
     return serial(async () => {
       // A peek in flight belongs to the previous identity.
       peeker.abort()
@@ -1457,6 +1633,7 @@ function createBrowserSession ({
       zeroKeyPair()
       keyPair = copy
       mediaKeyPair = mediaCopy
+      groupPrf = prfCopy
       synced = false
       ownKey = null
       certKnown = false
@@ -1464,6 +1641,7 @@ function createBrowserSession ({
     })().catch((err) => {
       zeroPair(copy)
       zeroPair(mediaCopy)
+      if (prfCopy !== null) prfCopy.fill(0)
       throw err
     })
   }
@@ -1522,6 +1700,7 @@ function createBrowserSession ({
   // Locks the identity: the pair is zero-filled. After close() it already is.
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
+    cancelGroups()
     return serial(async () => { zeroKeyPair() })()
   }
 
@@ -1567,7 +1746,8 @@ function createBrowserSession ({
 
   // Removes the diary (every page, the oplog header slots of a legacy store
   // included), this device's media cores (kv mediaCores and mediaDevice
-  // with them), the pending follow changes and the per-device migration
+  // with them), every group core and binding replica (store.deleteGroupData),
+  // the pending follow changes and the per-device migration
   // marker, and locks both keys; 'config' and 'follows' stay. A sync in
   // progress is stopped and not restarted.
   const reset = serial(async () => {
@@ -1581,6 +1761,7 @@ function createBrowserSession ({
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
     await store.deleteMediaCores(storage)
+    await store.deleteGroupData(storage)
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     zeroKeyPair()
@@ -1590,6 +1771,8 @@ function createBrowserSession ({
     synced = false
     unpushed = true
     localLength = null
+    groupUnpushed.clear()
+    groupLengths.clear()
     drainWanted = false
     drainRetries = 0
     lastFoldLength = null
@@ -1658,7 +1841,10 @@ function createBrowserSession ({
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,
     identityStatus: () => identityStatus({}),
-    reset: () => reset({}),
+    reset: () => {
+      cancelGroups()
+      return reset({})
+    },
     // 'open' | 'closed'
     get state () {
       return closed ? 'closed' : 'open'

@@ -189,7 +189,8 @@ test('before an identity exists', async (t) => {
     memberCert: false,
     followCount: 0,
     sync: { state: 'idle' },
-    publicDht: false
+    publicDht: false,
+    groups: true
   })
   for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }], ['peek.read', {}]]) {
     const err = await errorOf(web.request(method, params))

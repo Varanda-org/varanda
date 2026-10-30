@@ -53,6 +53,10 @@ Every message is ONE JSON object of one of three kinds. The protocol version is 
 | `PEEK_SEQS_MAX` | 36 | `diary.peek` seqs |
 | `PEEK_TIMEOUT_MS` | 8000 | `diary.peek` deadline (ms) of the browser node |
 | `FOLLOW_LIMIT_DEFAULT`, `FOLLOW_LIMIT_MAX` | 100, 500 | `follow.list` page |
+| `GROUP_LIMIT_DEFAULT`, `GROUP_LIMIT_MAX` | 30, 31 | `group.read` and `group.list` page (group items carry no media; 31 worst-case items fit `MAX_MESSAGE`, `test/sizes.test.js`) |
+| `GROUP_MEMBERS_LIMIT_MAX` | 100 | `group.members` page |
+| `MAX_GROUP_NAME` | 80 | chars of a group name, same value as `records.js` |
+| `MAX_GROUP_CUTS` | 16 | entries of a `cuts` list in a group record (protocol, groups) |
 | `SYNC_TIMEOUT_MIN`, `SYNC_TIMEOUT_MAX`, `SYNC_TIMEOUT_DEFAULT` | 1000, 600000, 30000 | `sync.start` `timeoutMs` (ms) |
 
 - Capped lists: a result list marked "capped" below holds at most `MAX_LIST` entries and travels with an integer `<name>Truncated` = the number of entries cut (`0` when none). `capList(list, max = MAX_LIST)` -> `{ list, truncated }` is the pure helper (first `max` entries, always a copy; a non-array is `[]`).
@@ -65,6 +69,8 @@ Every message is ONE JSON object of one of three kinds. The protocol version is 
   - `engagement.read`: 62 liked and 62 reposted refs = 10,483 bytes.
   - `notices.list`: 64 notices (80-char name of lone surrogates, the longest username, a cursor and the flags) = 42,256 bytes (about 16% of `MAX_MESSAGE`).
   - `profile.read`: one profile (hex64 author, 80-char name, 20-char username, 280-char bio) is at most 2,290 bytes; the envelope with empty lists is 71 bytes. 100 profiles = 229,170 bytes (fits, 32,974 bytes to spare); the largest count that fits is 114 (261,244 bytes; 115 = 263,535 bytes does not), so `PROFILE_LIMIT_MAX` = 100 leaves a margin. A `missing` entry (a hex64 key, 66 bytes) is smaller than the profile it replaces, and duplicates are folded, so `profiles` plus `missing` never exceed 100 entries.
+  - `group.read`: one item (hex64 `writer` and `diary`, 1000-char text of lone surrogates, a reply, `hidden`, 80-char name, 20-char username) has no media, so 31 items plus the envelope (`next`, `hidden`, `incomplete`) = 213,242 bytes (fits, about 49,000 bytes to spare); `GROUP_LIMIT_MAX` = `FEED_LIMIT_MAX` = 31.
+  - `group.members`: 100 members (80-char name, 20-char username, flags, `joinedAt`) = 67,081 bytes.
   - `follow.list`: 500 keys = 33,581 bytes (about 13% of `MAX_MESSAGE`).
 - No method takes a filesystem path, a data dir, an association key, a bootstrap list, a DHT host, a secret key or a limit override. Those are node configuration, fixed when the node starts; a request carrying any of them fails on the unknown key.
 
@@ -122,12 +128,13 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 ### 5.2 `node.info`
 
 - Params: `{}`.
-- Result: `{ publicKey: hex64 | null, memberCert: boolean, followCount: integer, sync: SyncState, publicDht: boolean }`.
+- Result: `{ publicKey: hex64 | null, memberCert: boolean, followCount: integer, sync: SyncState, publicDht: boolean, groups?: true }`.
   - `publicKey`: the own diary key, `null` when no identity was created yet.
   - `memberCert`: block 0 of the own diary holds a member certificate that passes `certForKey` against the trust root.
   - `followCount`: `follows.json` length.
   - `sync`: as `sync.status` (5.16).
   - `publicDht`: `true` when the node was started against the public DHT (no bootstrap override). Always `false` for the browser node, which uses no DHT (its only peer is the configured seeder).
+  - `groups`: `true`, present in the answer of the BROWSER node only; the Node session (`packages/core/lib/session.js`) does not send the field, although it implements the group methods 5.30 to 5.43.
 - It carries no path, no secret, no association key, no bootstrap list and no DHT host.
 
 ### 5.3 `identity.create`
@@ -248,8 +255,8 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 
 ### 5.20 `report.sign`
 
-- Params: `{ nonce, target, seq?, reason, text?, quote? }`, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce); `target` the reported diary key (lowercase hex64); `seq` optional, an integer `1..99999` (`MAX_LOG_BLOCKS - 1`: seq 0 is the member certificate), present for a report of that post and absent for a report of the whole account; `reason` one of `'spam'`, `'assedio'`, `'ilegal'`, `'outro'`; `text` the reporter's own words, `0..280` code points (default `''`); `quote` the reported post's text, `0..MAX_TEXT` (1000) code points (default `''`). A quote without `seq` -> `USAGE` `'quote só com seq'`; `seq` with an empty (or absent) quote is allowed (the report of a photo-only post, whose text is empty). Not mutating.
-- The caller never passes the member, the association, a digest or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these nine lines joined by LF (`0x0a`), no trailing LF (`reportPayload`, `packages/core/lib/report.js`):
+- Params: `{ nonce, target, seq?, writer?, group?, reason, text?, quote? }`, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce); `target` the reported diary key (lowercase hex64); `seq` optional, an integer `1..99999` (`MAX_LOG_BLOCKS - 1`: seq 0 is the member certificate), present for a report of that post and absent for a report of the whole account; `reason` one of `'spam'`, `'assedio'`, `'ilegal'`, `'outro'`; `text` the reporter's own words, `0..280` code points (default `''`); `quote` the reported post's text, `0..MAX_TEXT` (1000) code points (default `''`). `writer` and `group` (both lowercase hex64) address a post of a public group: `writer` is the writer core that holds the post and `group` the group root key, and both require each other and `seq` (`writer` without `seq` or `group` -> `USAGE` `'writer só com seq e group'`; `group` without `writer` -> `USAGE` `'group só com writer'`); `target` is then the author's diary key. `report.sign` does not compare the keys with each other; the account service intake refuses a version 2 report whose `group` equals `target`, or whose `writer` equals `target` (`pedido-invalido`; a `writer` equal to `group` is accepted, the creator writes through the root core; protocol section 10 "Blocklist and moderation"). A quote without `seq` -> `USAGE` `'quote só com seq'`; `seq` with an empty (or absent) quote is allowed (the report of a photo-only post, whose text is empty). A block on a report without `group` whose target has no linked account waits for the account service to confirm that the local seeder serves the diary (HTTP 409 `alvo-nao-confirmado` otherwise; protocol section 10 "Blocklist and moderation"); discarding always works. Not mutating.
+- The caller never passes the member, the association, a digest or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these nine lines joined by LF (`0x0a`), no trailing LF (`reportPayload`, `packages/core/lib/report.js`). With `writer` and `group` (a report of a group message) the statement is version 2 and has these eleven lines, in this order: `varanda-report-v2`, `<nonce>`, `<member>`, `<association>`, `<target>`, `<group>`, `<writer>`, `<seq>`, `<reason>`, `<digest(text)>`, `<digest(quote)>`. The two prefixes keep a v1 signature from ever verifying as a v2 statement and back. The nine lines of version 1:
 
   ```
   varanda-report-v1
@@ -363,6 +370,58 @@ Who started following the caller and whom the caller does not follow yet ("follo
 - Where it runs: browser node only (`packages/web-member/lib/session.js`), like `account.sign`: not a diary write, no append, no network. Not mutating.
 - Errors: the node session (`packages/core/lib/session.js`, the CLI and `varanda-serve`) answers `USAGE` `'assinatura disponível só no navegador'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
 
+### 5.30 `group.create`
+
+- Params: `{ name, join }`, nothing else: `name` `1..MAX_GROUP_NAME` (80) code points; `join` `'open'` (anyone may join) or `'approval'` (an admin admits each request). Mutating. Creates a public group (protocol, groups): the caller becomes its creator and first admin.
+- Result: `{ group: hex64 }`, the root key of the new group. Visibility is fixed at creation (public) and the call has no way to choose it. Needs an identity with a genesis block. A full group list that cannot give up an entry -> `USAGE` `'limite de grupos atingido'` (created groups are never evicted).
+
+### 5.31 `group.join` / 5.32 `group.leave`
+
+- Params: `{ group }`, nothing else: `group` the group root key (lowercase hex64). Both mutating. `group.join` joins an open group at once or files a request in an approval group; `group.leave` ends the caller's own membership (and every device's writer of the same diary, protocol section 10) and writes `cuts`: every counted writer of the caller's diary at its local length (the fold reads them only for the creator's root; the records of the diary's other devices are withdrawn whatever they say, protocol section 10), at most `MAX_GROUP_WRITERS_PER_DIARY` entries. A group the caller already belongs to answers its state without a new writer. When the caller's own diary is not among the fold's members the state is `'left'`, never null.
+- Result: `{ state: 'member' | 'requested' | 'left' | 'pending' }`. `'pending'`: the node does not hold the group root yet; `group.join` then creates the caller's writer, writes the diary join and lists the group, and the next sync fetches the root (the ban, approval and rejoin checks apply once it arrives). A repeated `group.leave` answers `{ state: 'left' }` without writing anything. Errors (pt-BR messages, never echoing a key): a `group.join` while `bans` lists the caller's diary, a `group.leave` only when the caller's member status is `'banned'`, and a join while the caller's own diary is blocked -> `USAGE` `'sem permissão no grupo'`; a join whose writer would fall outside the 512-writer cap, or when the caller's diary already binds `MAX_GROUP_WRITERS_PER_DIARY` (8) writers in the group -> `USAGE` `'limite do grupo atingido'` (a writer the fold did not count never reports `'member'`); a `group.leave` with nothing to end -> `USAGE` `'nada a alterar'`; a `group.leave` while the group is `'pending'` (root not stored yet) when the caller's own diary join history binds any writer of the group other than this device's -> `USAGE` `'aguarde a sincronização do grupo para sair'`; a loaded `group.leave` never waits for other devices (anyone leaves at once), and its only refusal is the creator's: the caller's diary is the creator's, the root is bound and the root is not among the leave's cuts -> `USAGE` `'saia pelo aparelho que criou o grupo'` (holding the root core suffices; in a loaded group this practically never triggers); a root key on the blocklist, or a malformed key, -> `NOT_FOUND` `'grupo não encontrado'`. A joined group whose root is not held is not an error, see `'pending'`.
+
+### 5.33 `group.post`
+
+- Params: `{ group, text, replyTo? }`, nothing else: `text` `1..MAX_TEXT` (1000) code points; `replyTo` optional `{ writer, seq }` (exactly these two keys: `writer` lowercase hex64, `seq` an integer `>= 1`), the group post answered. Mutating. There is no `seen` parameter: the node writes `seen` from its own fold at send time. The caller must be a `member` with a live writer, else `USAGE` `'sem permissão no grupo'`; a writer outside the cap -> `USAGE` `'limite do grupo atingido'`.
+- Result: `{ seq: integer >= 1 }`, the block of the new record in the caller's writer core.
+
+### 5.34 `group.read`
+
+- Params: `{ group, limit?, before? }`: `limit` `1..GROUP_LIMIT_MAX` (31), default `GROUP_LIMIT_DEFAULT` (30); `before` optional, exactly `{ at, writer, seq }` (`at` a canonical ISO string, `writer` hex64, `seq` an integer `>= 1`), the group-order position of the oldest item the caller holds. Absent = the newest page. Not mutating.
+- Result: `{ items: [{ writer, diary, seq, at, text, replyTo, hidden, name, username }], next, hidden, incomplete }`: newest first. `writer` the writer core that holds the post, `diary` the author's diary key, `replyTo` `null` or `{ writer, seq }`, `hidden` boolean, `name` and `username` the author's profile name and verified username (`null` when unknown); `next` `null` or the cursor for the next page; `incomplete` true when the node could not read every writer of the group. **Hidden items are INCLUDED** with `text: ''` and `hidden: true` (the client decides whether to show a placeholder), and `hidden` (the top-level integer) counts the hidden items of THIS page. Posts of authors whose diary the node does not hold or has blocked are left out. A group whose root is not held yet answers `{ items: [], next: null, hidden: 0, incomplete: true }`. Peer text goes through `displayText` (section 10).
+
+### 5.35 `group.list`
+
+- Params: `{ offset?, limit? }`: `offset` an integer `>= 0` (default 0), `limit` `1..GROUP_LIMIT_MAX` (default `GROUP_LIMIT_DEFAULT`). Not mutating.
+- Result: `{ groups: [{ group, name, join, role, members }], total }` for every group in the caller's local list (`groups.json` or kv `groupWriters`), including groups the caller left; a group whose root is blocklisted is left out of the list and of `total`. `role` is one of `'creator'`, `'admin'`, `'member'`, `'requested'`, `'banned'`, `'left'` or `'pending'` (`'left'`, never null, when the caller's own diary is not among the fold's members); `members` counts the diaries whose state is `member`. A group joined before its root arrived is listed as `{ group, name: null, join: null, role: 'pending', members: 0 }`.
+
+### 5.36 `group.info`
+
+- Params: `{ group }`. Not mutating. Result: `{ group, name, join, creator, role, members, state }`, where `role` is as in 5.35 and `state` is the caller's fold state (`'member'`, `'requested'`, `'banned'`, `'left'`, or `'pending'`); `'left'` also when the caller's own diary is not among the fold's members (never null). A malformed or blocklisted root -> `NOT_FOUND` `'grupo não encontrado'`. A group joined before its root arrived answers `{ group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending' }`; until then `group.read` answers an empty page with `incomplete: true`, `group.leave` works, and every other group method answers `NOT_FOUND` `'grupo não encontrado'`.
+
+### 5.37 `group.members`
+
+- Params: `{ group, offset?, limit? }`: `offset` an integer `>= 0` (default 0), `limit` `1..GROUP_MEMBERS_LIMIT_MAX` (100, also the default). Not mutating.
+- Result: `{ members: [{ member, name, username, admin, banned, joinedAt }], total }`: the diaries whose state is `member` or `banned` (requests and departed members are not listed), in key order; `joinedAt` the header time of the diary's oldest bound writer.
+
+### 5.38 `group.requests`
+
+- Params: `{ group, offset?, limit? }`, paged like `group.members` (`limit` `1..GROUP_MEMBERS_LIMIT_MAX`, 100 by default): a group of up to 512 writers can hold more pending requests than one response carries. Not mutating, for admins (else `USAGE` `'sem permissão no grupo'`). Result: `{ requests: [{ member, name, username, at }], total }`, the pending join requests of an approval group, plus (in approval groups) an admitted member with a counted writer the current admission does not cover, such as a device added after the admission, so admins may admit again; `at` is the header time of the diary's newest writer (a rejoin is a new request).
+
+### 5.39 `group.admit` / 5.40 `group.ban` / 5.41 `group.admin`
+
+- Params: `{ group, member, on }`, nothing else: `member` the member's diary key (hex64), `on` a boolean. All mutating. `admit` and `ban` are for admins with a live writer; `admin` is for the CREATOR only and writes through the root. `admit` admits (`on: true`) or withdraws an admission; `ban` bans (`on: true`) or lifts a ban (`on: false` names the latest ban in `lifts`; none -> `USAGE` `'nada a alterar'`); `admin` grants (`on: true`) or revokes admin rights. Each record carries `cuts` computed from the writers of `member` the node has folded: `admit` with `on: true` and an unban (`ban` with `on: false`) cut each writer at max(contiguous length, signed length), so records the member signed during the ban that the admin has not downloaded stay banned, while `admit` with `on: false` and a ban (`on: true`) keep the contiguous length. `admin` with `on: true` lists every counted writer of the promoted diary at max(contiguous length, signed length) (never seq 0), because an `on: true` admin grant gives authority only to the writers it lists (protocol section 10); a diary with more counted writers than `MAX_GROUP_CUTS` -> `USAGE` `'limite do grupo atingido'`. A positive `admit` covers only the writers its `cuts` list (unlisted writers keep their previous state), so a writer created after an admit stays hidden until a later admit lists it; a repeated admit names every held counted writer in its `cuts`. An unban (`ban` with `on: false`) likewise covers only the writers its `cuts` list: an unlisted writer stays banned, including one created after the unban, and the unban may cite the same ban again while any counted writer of that diary stays banned; an `admit` withdrawal and a ban still cover unlisted writers from seq 0. An `admit` with `on: true` is refused with `USAGE` `'aguarde a sincronização do grupo para admitir'` when the member's diary is not held or binds a counted writer that is not held, because an admit missing an unheld writer would leave that writer hidden (`on: false` admits and bans are unchanged). A new device of an admin needs a new grant. Targeting the creator, or an admin with `admit`/`ban`, -> `USAGE` `'sem permissão no grupo'`; so does any other caller. Result: `{ ok: true }`.
+
+### 5.42 `group.hide`
+
+- Params: `{ group, target, on }`, nothing else: `target` exactly `{ writer, seq }` (the post), `on` a boolean. Mutating. The post's author may hide or unhide it even after leaving the group (any bound writer of the author's diary); anyone else must be an admin with a live writer, else `USAGE` `'sem permissão no grupo'`. Result: `{ ok: true }`.
+
+### 5.43 `group.meta`
+
+- Params: `{ group, name?, join? }`: at least one of `name` (`1..MAX_GROUP_NAME` code points) and `join` (`'open'` or `'approval'`); none -> `USAGE` `'nada a alterar'`. Mutating, for the CREATOR only (root record; others `USAGE` `'sem permissão no grupo'`). Result: `{ ok: true }`.
+
+- Mutating group methods follow the rule of every mutating method (section 9): the client never resends, and a lost connection or a timeout surfaces `uncertain: true`. Each group method that changes the fold makes the node emit `groups.changed` (section 6). Sync growth of a group's cores emits it too, coalesced.
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -378,8 +437,10 @@ Who started following the caller and whom the caller does not follow yet ("follo
 | `sync.stopped` | `{ runId, reason: 'done' \| 'stopped' \| 'preempted' \| 'timeout' \| 'error' \| 'idle', result?: SyncResult }` |
 | `warning` | `{ line: string <= MAX_LINE chars }` |
 | `follows.changed` | `{ count: integer >= 0 }` |
+| `groups.changed` | `{ group: hex64 }` |
 
 - `follows.changed` (browser node only): the follow set changed from the own diary, normally another device's `follow` records folded in by the sync; `count` is the new number of follows. The UI reloads A Rua and the follow count. The browser node also restarts its continuous run once per distinct folded diary length (coalesced), so the run follows the new set; a once run is never restarted. The core node never sends it.
+- `groups.changed`: the folded state of that group changed (new posts, members, requests or metadata), from a local write or from the sync. `group` is the group root key and nothing else is carried; the UI re-reads with `group.read`, `group.info` or `group.members`.
 
 - `sync.started`: emitted every time a run starts, whether from `sync.start` or from the node restarting a continuous run after a preemption (section 6.1); `once` is the run's mode. With `sync.stopped` it lets the UI track the sync state from events alone: a run is active between its `sync.started` and its `sync.stopped`.
 
@@ -493,7 +554,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 
 ## 12. Module exports (`require('@varanda/rpc')`)
 
-`index.js` re-exports: every constant of section 2 (including `PEEK_LIMIT_DEFAULT`, `PEEK_LIMIT_MAX`, `PROFILE_LIMIT_MAX`, `ENGAGEMENT_LIMIT_MAX`, `PEEK_SEQS_MAX`, `PEEK_TIMEOUT_MS`, `NOTICES_LIMIT_DEFAULT` and `NOTICES_LIMIT_MAX`); every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error', 'idle']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
+`index.js` re-exports: every constant of section 2 (including `PEEK_LIMIT_DEFAULT`, `PEEK_LIMIT_MAX`, `PROFILE_LIMIT_MAX`, `ENGAGEMENT_LIMIT_MAX`, `PEEK_SEQS_MAX`, `PEEK_TIMEOUT_MS`, `NOTICES_LIMIT_DEFAULT`, `NOTICES_LIMIT_MAX`, `GROUP_LIMIT_DEFAULT`, `GROUP_LIMIT_MAX`, `GROUP_MEMBERS_LIMIT_MAX`, `MAX_GROUP_NAME` and `MAX_GROUP_CUTS`); every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error', 'idle']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
 
 ## 13. Known limits (v1)
 

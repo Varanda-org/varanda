@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -111,6 +111,16 @@ test('event: follows.changed', (t) => {
   t.ok(ev({ count: Number.MAX_SAFE_INTEGER }).ok)
   t.alike(ev({ count: 3 }).value, { v: 1, event: 'follows.changed', seq: 1, data: { count: 3 } })
   for (const data of [{}, { count: -1 }, { count: 1.5 }, { count: '1' }, { count: null }, { count: 2 ** 53 }, { count: 1, extra: 1 }, { runId: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: groups.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'groups.changed', seq: 1, data })
+  const group = 'ab'.repeat(32)
+  t.ok(ev({ group }).ok)
+  t.alike(ev({ group }).value, { v: 1, event: 'groups.changed', seq: 1, data: { group } })
+  for (const data of [{}, { group: group.toUpperCase() }, { group: group.slice(1) }, { group: group + '0' }, { group: 1 }, { group: null }, { group, extra: 1 }, { count: 1 }, [], null]) {
     t.absent(ev(data).ok, JSON.stringify(data))
   }
 })

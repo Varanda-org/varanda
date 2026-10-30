@@ -43,6 +43,15 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
+  group create               cria um grupo público (--name, --join open|approval)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group post <chave>         publica no grupo (--text)
+  group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
+  group list                 grupos dos quais você participa
+  group info|members|requests <chave>  dados do grupo, membros e pedidos de entrada
+  group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
+  group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
+  group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -53,7 +62,8 @@ Opções globais:
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
-  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes`
+  --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
+  --join --undo`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -125,6 +135,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     noPublish: false,
     newList: false,
     yes: false,
+    undo: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
@@ -152,6 +163,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     out: null,
     certFile: null,
     name: null,
+    join: null,
     bio: null,
     text: null,
     to: null,

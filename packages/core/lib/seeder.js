@@ -68,6 +68,24 @@
 // sai do índice"). Same trust model: a hit is a hint `<author>:<seq>`, the
 // node reads and verifies the post itself (indexTopic backs the
 // /index/topic route of apps/cli/lib/seed-ws.js).
+//
+// Group cores (lib/group.js, docs/protocol.md section 10) ride on the media
+// invariants with the same TWO-WAY binding: a writer core W is kept only
+// once an admitted, gated, non-blocked diary D holds a live `group-join`
+// naming W AND W's block 0 is a group-writer header naming that group and D;
+// a root G once its block 0 is a valid group header and some admitted,
+// unblocked diary joins G (the diary its header names counts only through
+// its own join for writer G: _rootBound). At most MAX_GROUP_WRITERS_PER_DIARY
+// writers of one diary count per group (liveGroupJoins). Listed in
+// admitted.json (`groups: { K: { diary, group, seq } }`), persisted before
+// the open, purged before un-listing.
+// Leaving (a join turned off) NEVER purges: it only marks the writer as
+// left in the group index (lib/group-index.js), so the moderation record of
+// a departed member stays verifiable. Purges happen for a dropped or
+// blocked diary, a root its blocked or revoked creator bound, a root key in
+// the blocklist snapshot, a fork or the quota.
+// Group keys never travel on the admission channel; members learn writer
+// sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
 const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
@@ -124,9 +142,15 @@ const {
   MAX_LOG_BYTES,
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_BYTES,
-  MAX_MEDIA_CORES
+  MAX_MEDIA_CORES,
+  MAX_GROUP_WRITERS,
+  MAX_GROUPS_PER_DIARY,
+  MAX_GROUP_WRITERS_PER_DIARY
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
+const { createGroupIndex } = require('./group-index')
+const { attachGroups } = require('./groups-net')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { parseQuery } = require('./search-text')
@@ -196,11 +220,16 @@ function key8 (hex) {
 // is a valid member certificate for keyHex under the trusted association.
 // opts = { revokedIssuers } of the current blocklist snapshot: a v2
 // certificate from a revoked issuer answers 'revoked-issuer' (cert.js
-// verifyIssued).
-function gateVerdict (raw, keyHex, associationHex, opts) {
+// verifyIssued). `out`, when given, receives the block-0 certificate
+// (out.cert) the verdict judged: a revoked-issuer verdict must be recorded
+// against that certificate's issuer, never an announced one, so a diary
+// holding certificates from two issuers cannot keep its roots served once
+// the one in its log is revoked.
+function gateVerdict (raw, keyHex, associationHex, opts, out = null) {
   try {
     const block0 = decodeBlock(raw)
     if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
+    if (out !== null) out.cert = block0.cert
     const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
   } catch {
@@ -210,10 +239,10 @@ function gateVerdict (raw, keyHex, associationHex, opts) {
 
 // LOCAL gate: block 0 already in the main store. Any error is 'not-in-log',
 // so a failure can never skip the purge.
-async function localVerdict (core, keyHex, associationHex, opts) {
+async function localVerdict (core, keyHex, associationHex, opts, out = null) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return gateVerdict(raw, keyHex, associationHex, opts)
+    return gateVerdict(raw, keyHex, associationHex, opts, out)
   } catch {
     return 'not-in-log'
   }
@@ -252,8 +281,112 @@ function mediaBinding (value) {
   return { diary, seq }
 }
 
-// Both maps of admitted.json: `admitted` (diaries) and `media` (media cores,
-// values normalized through mediaBinding; absent before this version).
+// A persisted group binding { diary, group, seq }, or null (purged at start
+// as 'unbound', like an unusable media binding). A root's binding also
+// carries `by`, the diary whose join admitted it and whose group budget it
+// uses; a file written before `by` existed reads without it (charged to
+// nobody, never to the header's diary). `bound: true` records that the
+// header's diary bound the root with its own join (_rootBound) while it was
+// served: only then does blocking or revoking that diary purge the root.
+// `issuer` is the issuer of that diary's verified block-0 certificate, kept
+// with `bound` so a later revocation of it still purges the root after the
+// creator left for another reason (quota, its own drop).
+function groupBinding (value) {
+  if (!isPlainObject(value)) return null
+  const { diary, group, seq, by, bound, issuer } = value
+  if (typeof diary !== 'string' || !HEX64.test(diary)) return null
+  if (typeof group !== 'string' || !HEX64.test(group)) return null
+  if (!Number.isSafeInteger(seq) || seq < 1) return null
+  const out = { diary, group, seq }
+  if (typeof by === 'string' && HEX64.test(by)) out.by = by
+  if (bound === true) out.bound = true
+  if (out.bound === true && typeof issuer === 'string' && HEX64.test(issuer)) out.issuer = issuer
+  return out
+}
+
+// Sets k -> v in a denial map. At ROOT_CREATORS_MAX entries those whose
+// denial is no longer in force (`lifted(k, v)`) go; one still in force
+// never goes, or a purged root could return. false when the map holds
+// ROOT_DENIALS_HARD entries and nothing was set. Only moderation outcomes
+// (a served diary dropped or refused, a root purged) reach these maps,
+// never an announce.
+function bounded (map, k, v, lifted) {
+  map.delete(k)
+  if (map.size >= ROOT_CREATORS_MAX) {
+    for (const [ek, ev] of [...map]) if (lifted(ek, ev)) map.delete(ek)
+  }
+  if (map.size >= ROOT_DENIALS_HARD) return false
+  map.set(k, v)
+  return true
+}
+
+// goneRoots as read from admitted.json: root -> { creator, issuer } (issuer
+// null for a block). A plain creator string (the format before issuers were
+// kept) reads as { creator, issuer: null }.
+function goneRootMap (value) {
+  const out = new Map()
+  if (!isPlainObject(value)) return out
+  for (const [k, v] of Object.entries(value)) {
+    if (out.size >= ROOT_DENIALS_HARD) break
+    if (!HEX64.test(k)) continue
+    if (typeof v === 'string' && HEX64.test(v)) out.set(k, { creator: v, issuer: null })
+    else if (isPlainObject(v) && typeof v.creator === 'string' && HEX64.test(v.creator)) {
+      const issuer = typeof v.issuer === 'string' && HEX64.test(v.issuer) ? v.issuer : null
+      out.set(k, { creator: v.creator, issuer })
+    }
+  }
+  return out
+}
+
+// A bounded map of hex keys to hex values read from admitted.json (at most
+// ROOT_CREATORS_MAX entries, the rest ignored).
+function hexMap (value) {
+  const out = new Map()
+  if (!isPlainObject(value)) return out
+  for (const [k, v] of Object.entries(value)) {
+    if (out.size >= ROOT_DENIALS_HARD) break
+    if (HEX64.test(k) && typeof v === 'string' && HEX64.test(v)) out.set(k, v)
+  }
+  return out
+}
+
+// The header fields /index/group answers for a root this seeder verified
+// (_groupHeaders), kept after the root itself is purged or refused. A
+// private root keeps no name.
+function headerRecord (header) {
+  const name = header.visibility === 'public' && typeof header.name === 'string' ? header.name : null
+  return { kind: header.kind, visibility: header.visibility, join: header.join, name }
+}
+
+// groupHeaders as read from admitted.json: only well-formed records, at most
+// ROOT_DENIALS_HARD (start prunes those of groups with no core left).
+function headerRecordMap (value) {
+  const out = new Map()
+  if (!isPlainObject(value)) return out
+  for (const [k, v] of Object.entries(value)) {
+    if (out.size >= ROOT_DENIALS_HARD) break
+    if (!HEX64.test(k) || !isPlainObject(v)) continue
+    if ((v.kind !== 'group' && v.kind !== 'community') || (v.join !== 'open' && v.join !== 'approval')) continue
+    if (v.visibility !== 'public' && v.visibility !== 'private') continue
+    if (v.name !== null && (v.visibility !== 'public' || typeof v.name !== 'string' || v.name.length > 1024)) continue
+    out.set(k, { kind: v.kind, visibility: v.visibility, join: v.join, name: v.name })
+  }
+  return out
+}
+
+// The issuer a v2 certificate names (lower-case hex), or null.
+function issuerOf (cert) {
+  const issuer = isPlainObject(cert) && typeof cert.issuer === 'string' ? cert.issuer.toLowerCase() : null
+  return issuer !== null && HEX64.test(issuer) ? issuer : null
+}
+
+// The maps of admitted.json: `admitted` (diaries), `media` (media cores,
+// values normalized through mediaBinding; absent before this version),
+// `groups` (group cores through groupBinding; absent reads as {}),
+// `revokedCreators` (diary -> the issuer of the certificate it was dropped
+// or refused for) and `goneRoots` (root -> { creator, issuer } of the
+// block or revocation that purged it, judged on its own against the current
+// list); the last two absent read as empty.
 function readAdmittedFile (dataDir) {
   const data = readJson(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: {} })
   const admitted = isPlainObject(data) && isPlainObject(data.admitted) ? data.admitted : {}
@@ -261,7 +394,29 @@ function readAdmittedFile (dataDir) {
   if (isPlainObject(data) && isPlainObject(data.media)) {
     for (const [key, value] of Object.entries(data.media)) media[key] = mediaBinding(value)
   }
-  return { admitted, media }
+  const groups = {}
+  if (isPlainObject(data) && isPlainObject(data.groups)) {
+    for (const [key, value] of Object.entries(data.groups)) groups[key] = groupBinding(value)
+  }
+  const revokedCreators = hexMap(isPlainObject(data) ? data.revokedCreators : null)
+  const goneRoots = goneRootMap(isPlainObject(data) ? data.goneRoots : null)
+  const groupHeaders = headerRecordMap(isPlainObject(data) ? data.groupHeaders : null)
+  return { admitted, media, groups, revokedCreators, goneRoots, groupHeaders }
+}
+
+// The file as _persist and Seeder.drop write it: `groups`, `revokedCreators`
+// and `goneRoots` only when non-empty, so a seeder without groups keeps its
+// old shape.
+function admittedFile (admitted, media, groups, { revokedCreators = new Map(), goneRoots = new Map(), groupHeaders = new Map() } = {}) {
+  const file = { v: 1, admitted, media }
+  if (Object.keys(groups).length > 0) file.groups = groups
+  if (revokedCreators.size > 0) file.revokedCreators = Object.fromEntries(revokedCreators)
+  if (goneRoots.size > 0) {
+    file.goneRoots = {}
+    for (const [k, { creator, issuer }] of goneRoots) file.goneRoots[k] = issuer === null ? { creator } : { creator, issuer }
+  }
+  if (groupHeaders.size > 0) file.groupHeaders = Object.fromEntries(groupHeaders)
+  return file
 }
 
 // Block-0 verdict of a media core (lib/media.js): null when the raw block is
@@ -286,6 +441,99 @@ async function localMediaVerdict (core, diaryHex) {
   } catch {
     return 'header-invalid'
   }
+}
+
+// Block-0 verdict of a group core K for group G: a root (K === G) must be a
+// valid group header, a writer a valid group-writer header naming G
+// ('wrong-group') and the diary ('wrong-diary'). `diary` null accepts any
+// root creator (a fresh root admission learns it from the header).
+function groupVerdict (raw, key, group, diary) {
+  try {
+    const header = decodeBlock(raw)
+    if (header === null) return 'header-invalid'
+    if (key === group) {
+      if (validateGroupHeader(header) !== null) return 'header-invalid'
+      return diary === null || header.diary === diary ? null : 'wrong-diary'
+    }
+    if (validateWriterHeader(header) !== null) return 'header-invalid'
+    if (header.group !== group) return 'wrong-group'
+    return header.diary === diary ? null : 'wrong-diary'
+  } catch {
+    return 'header-invalid'
+  }
+}
+
+// LOCAL group gate (block 0 in the main store): the verdict and the raw
+// block; any error is 'header-invalid'.
+async function localGroupVerdict (core, key, binding) {
+  try {
+    const raw = await core.get(0, { wait: false, raw: true })
+    return { reason: groupVerdict(raw, key, binding.group, binding.diary), raw }
+  } catch {
+    return { reason: 'header-invalid', raw: null }
+  }
+}
+
+// Writer cores one diary may hold at a seeder across all its groups, left
+// ones included (leaving never frees a slot): its share of the group cores.
+const MAX_GROUP_CORES_PER_DIARY = MAX_GROUPS_PER_DIARY * MAX_GROUP_WRITERS_PER_DIARY
+// Waits before a group core that timed out or found no peer is tried again
+// for the same diary, so scans and connections do not restart fetches.
+const GROUP_BACKOFF_MS = [2000, 10000, 30000, 60000, 300000, 900000]
+// Group admissions (quarantine fetches) in flight at once, in all and per
+// diary.
+const GROUP_INFLIGHT_MAX = 32
+const GROUP_INFLIGHT_PER_DIARY = 2
+// How long, in total within GROUP_STALL_WINDOW_MS, a diary's join scan may
+// sit caught up with its local blocks behind its signed length before it
+// stops holding other diaries' group answers incomplete (_groupScanCounts).
+const GROUP_SCAN_STALL_MS = 10000
+const GROUP_STALL_WINDOW_MS = 10 * 60 * 1000
+// Bound on _revokedCreators and _goneRoots (persisted in admitted.json):
+// past ROOT_CREATORS_MAX denials still in force no group root is admitted
+// (_rootsClosed), and a live denial is never evicted to make room; each
+// map still holds at most ROOT_DENIALS_HARD entries.
+const ROOT_CREATORS_MAX = 4096
+const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
+
+// The live joins of a diary from its newest join per writer (lib/group.js
+// groupJoins), keeping only joins of its first MAX_GROUPS_PER_DIARY groups
+// by diary seq, so the extra joins are ignored the same way on every scan.
+// Per group only the MAX_GROUP_WRITERS_PER_DIARY writers with the earliest
+// on:true join count, a root joined by its own key holding one of them (the
+// fold's rule, lib/group.js capPerDiary): this protects a group's writer cap
+// and the seeder's group cores from one diary declaring hundreds of writers.
+// `first` is group -> Map(writer -> earliest on:true seq).
+// writer -> { group, seq }.
+function liveGroupJoins (decls, first = new Map()) {
+  const allowed = new Set()
+  for (const [group, writers] of first) {
+    const list = [...writers].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    let room = MAX_GROUP_WRITERS_PER_DIARY
+    if (writers.has(group)) {
+      allowed.add(group + ':' + group)
+      room--
+    }
+    for (const [writer] of list) {
+      if (writer === group) continue
+      if (room <= 0) break
+      allowed.add(group + ':' + writer)
+      room--
+    }
+  }
+  const entries = [...decls].map(([writer, d]) => ({ seq: d.seq, record: { type: 'group-join', group: d.group, writer, on: d.on, at: d.at } }))
+  const live = [...groupJoins(entries).values()].sort((a, b) => a.seq - b.seq)
+  const groups = new Set()
+  const out = new Map()
+  for (const j of live) {
+    if (!allowed.has(j.group + ':' + j.writer)) continue
+    if (!groups.has(j.group)) {
+      if (groups.size >= MAX_GROUPS_PER_DIARY) continue
+      groups.add(j.group)
+    }
+    out.set(j.writer, { group: j.group, seq: j.seq })
+  }
+  return out
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -328,7 +576,8 @@ class Seeder {
   // purgeHook(core), gateHook(key), admitHook(key, step) ('persist' |
   // 'open', awaited right before that admission step; a throw simulates the
   // step failing), regateHook(key, reason) (awaited after a served replica's
-  // local block-0 verdict is computed and before it is applied, _gate) and
+  // local block-0 verdict is computed and before it is applied, _gate and
+  // _gateGroup) and
   // storeHook() (awaited right after the main store, and
   // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
@@ -345,6 +594,14 @@ class Seeder {
   // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
+  // maxGroupCores bounds the group cores (roots and writers; default
+  // maxServed) and maxGroupWriters the writers of one group (default
+  // MAX_GROUP_WRITERS); maxGroupInflight the group admissions in flight
+  // at once (default GROUP_INFLIGHT_MAX); groupScanStallMs the stall bound
+  // of _groupScanCounts (default GROUP_SCAN_STALL_MS);
+  // groupHeaderTimeoutMs how long an admitted group core may wait for its
+  // block 0 in the main store (default GATE_TIMEOUT_MS); admitHook and
+  // purgeHook also see group keys.
   constructor ({
     dataDir,
     associationKey = null,
@@ -374,6 +631,12 @@ class Seeder {
     maxMedia = null,
     maxMediaBlocks = MAX_MEDIA_BLOCKS,
     maxMediaBytes = MAX_MEDIA_BYTES,
+    maxGroupCores = null,
+    maxGroupWriters = MAX_GROUP_WRITERS,
+    maxGroupInflight = GROUP_INFLIGHT_MAX,
+    groupScanStallMs = GROUP_SCAN_STALL_MS,
+    groupHeaderTimeoutMs = GATE_TIMEOUT_MS,
+    regateTimeoutMs = GATE_TIMEOUT_MS,
     indexMaxRecords = undefined,
     indexMaxTargets = undefined,
     indexPerAuthorMax = undefined,
@@ -388,6 +651,12 @@ class Seeder {
     this.maxMedia = maxMedia === null ? maxServed : maxMedia
     this.maxMediaBlocks = maxMediaBlocks
     this.maxMediaBytes = maxMediaBytes
+    this.maxGroupCores = maxGroupCores === null ? maxServed : maxGroupCores
+    this.maxGroupWriters = maxGroupWriters
+    this.maxGroupInflight = maxGroupInflight
+    this.groupScanStallMs = groupScanStallMs
+    this.groupHeaderTimeoutMs = groupHeaderTimeoutMs
+    this.regateTimeoutMs = regateTimeoutMs
     this.maxAnnounces = maxAnnounces
     this.announceRate = announceRate
     this.announceBurst = announceBurst
@@ -452,6 +721,11 @@ class Seeder {
     this.qstore = null
     this.swarm = null
     this.fatal = false
+    // Discovery key (hex) -> purges running, and -> replication opens in
+    // flight: a peer's request for a key never opens it while its storage
+    // is being deleted (_guardReplication).
+    this._purgingKeys = new Map()
+    this._attaching = new Map()
 
     // Source of truth after start(): admitted (served) and dropping (being
     // purged); admitted.json is always the union of both (R6.1).
@@ -473,6 +747,26 @@ class Seeder {
     this._mediaReserved = new Set() // media keys holding a media slot mid-admission
     this._mediaFetches = new Map() // media key -> quarantine fetch in flight (new peers are attached to it)
     this._scanQueue = Promise.resolve() // diary scans for media-core records run one at a time
+    // Group cores (header comment): bound and dropping bindings, key ->
+    // { diary, group, seq }; admitted.json `groups` is the union of both.
+    // They share _inflight and _drops with diaries and media.
+    this._groups = new Map()
+    this._groupsDropping = new Map()
+    this._groupServed = new Map() // key -> { core, diary, group, download, stopFork, stopGrow, stopQuota, dropped, headerOk, gating, expected }
+    this._groupReserved = new Map() // key -> group, holding a group slot mid-admission
+    this._groupReservedBy = new Map() // key -> diary whose join is admitting it
+    this._groupBackoff = new Map() // 'diary:key' -> { reason, step, until } after 'timeout' / 'no-peers'
+    this._groupRefusals = new Map() // 'diary:key' -> last refusal logged ('reason:seq')
+    this._groupDeferred = new Set() // diaries with a join waiting for an admission slot
+    this._groupStalls = new Map() // diary key -> stall budget of _groupScanCounts, kept across _drop/_serve
+    this._goneRoots = new Map() // root key -> { creator, issuer } of the block or revocation that purged it (persisted)
+    this._unrecordedRevoked = new Map() // diary -> issuer that _revokedCreators had no room for (this process only)
+    this._denialsLost = false // a denial found no room: roots stay refused until restart (_rootsClosed)
+    this._revokedCreators = new Map() // diary -> issuer it was dropped or refused for (persisted, _creatorGone)
+    this._groupFetches = new Map() // group key -> quarantine fetch in flight
+    this._groupHeaders = new Map() // root key -> headerRecord of a root this seeder verified, while a core of its group is kept (persisted)
+    this._groupIndex = createGroupIndex({ maxGroups: this.maxGroupCores, maxWritersPerGroup: maxGroupWriters })
+    this._groupHandles = new Set()
     // Engagement index (header comment): its own scan queue (one diary at a
     // time, never the media scan's), and the keys served at start whose
     // first index pass has not finished yet (null until step 4 of start():
@@ -484,6 +778,11 @@ class Seeder {
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
     this._indexStartup = null
+    // Diaries served at start whose first group scan has not ended: a listed
+    // root kept at start only provisionally (a member's live join may keep
+    // it) is judged once this set empties (_groupStartupScanned); null when
+    // nothing waits.
+    this._groupRootStartup = null
     this._indexDropped = new Set()
     this._indexRebuildQueued = false
     // Topic search index (header comment): its own queue and startup set,
@@ -584,6 +883,8 @@ class Seeder {
   // stopped. A listed key with no stored core is reported empty and never
   // opened: listing creates no core in the main store. A listed media core
   // whose diary is not listed is not shown (the next start purges it).
+  // Group cores are listed the same way under the diary their binding names
+  // (`groups: [{ key, group, length, byteLength }]`; a root under its creator).
   static async list (dataDir, associationKey) {
     Seeder.checkConfig(dataDir, associationKey)
     const store = await openStore(dataDir)
@@ -608,6 +909,12 @@ class Seeder {
           if (!HEX64.test(k) || binding === null || binding.diary !== key) continue
           entry.media.push(await sizes(k, openMediaReplica))
         }
+        entry.groups = []
+        for (const [k, binding] of Object.entries(file.groups)) {
+          if (!HEX64.test(k) || binding === null || binding.diary !== key) continue
+          const g = await sizes(k, openMediaReplica)
+          entry.groups.push({ key: k, group: binding.group, length: g.length, byteLength: g.byteLength })
+        }
         admitted.push(entry)
       }
       return { admitted }
@@ -620,7 +927,9 @@ class Seeder {
   // the data-dir lock), in the startup-drop order of R6.1: the replica is
   // purged FIRST, and only then the key leaves admitted.json, so every core
   // in the main store stays listed. A diary's media cores go first, the same
-  // way (purge, then un-list); a media key itself may also be dropped. A
+  // way (purge, then un-list), and so do its group writer cores (a root
+  // stays: other members may still keep it, the next start re-gates it); a
+  // media or group key itself may also be dropped. A
   // purge failure throws and leaves the file untouched. It is not a block:
   // the author's next announce runs the full gate again (to keep an author
   // out, block the key with `mod block`), and a dropped media core is bound
@@ -630,25 +939,31 @@ class Seeder {
     if (typeof key !== 'string' || !HEX64.test(key)) throw new UsageError('chave inválida')
     const store = await openStore(dataDir)
     try {
-      const { admitted, media } = readAdmittedFile(dataDir)
+      const { admitted, media, groups, revokedCreators, goneRoots, groupHeaders } = readAdmittedFile(dataDir)
       const listed = Object.prototype.hasOwnProperty.call(admitted, key)
       const listedMedia = Object.prototype.hasOwnProperty.call(media, key)
+      const listedGroup = Object.prototype.hasOwnProperty.call(groups, key)
       const stored = await storedCore(store, key)
-      if (!listed && !listedMedia && !stored) throw new Error('diário não está no semeador')
+      if (!listed && !listedMedia && !listedGroup && !stored) throw new Error('diário não está no semeador')
       const gone = new Set([key])
       for (const [k, binding] of Object.entries(media)) {
         if (HEX64.test(k) && binding !== null && binding.diary === key) gone.add(k)
+      }
+      for (const [k, binding] of Object.entries(groups)) {
+        if (HEX64.test(k) && binding !== null && binding.diary === key && k !== binding.group) gone.add(k)
       }
       for (const k of gone) {
         if (k !== key && await storedCore(store, k)) await purgeReplica(store, k)
       }
       if (stored) await purgeReplica(store, key)
-      if (listed || listedMedia || gone.size > 1) {
+      if (listed || listedMedia || listedGroup || gone.size > 1) {
         const rest = {}
         for (const [k, cert] of Object.entries(admitted)) if (k !== key) rest[k] = cert
         const restMedia = {}
         for (const [k, binding] of Object.entries(media)) if (!gone.has(k)) restMedia[k] = binding
-        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: rest, media: restMedia })
+        const restGroups = {}
+        for (const [k, binding] of Object.entries(groups)) if (!gone.has(k)) restGroups[k] = binding
+        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), admittedFile(rest, restMedia, restGroups, { revokedCreators, goneRoots, groupHeaders }))
       }
       return { key }
     } finally {
@@ -709,6 +1024,7 @@ class Seeder {
     this.store = await openStore(this.dataDir)
 
     try {
+      this._guardReplication()
       if (this.storeHook) await this.storeHook()
       const file = readAdmittedFile(this.dataDir)
       for (const [key, cert] of Object.entries(file.admitted)) {
@@ -717,6 +1033,12 @@ class Seeder {
       // Media bindings (null for an unusable one: purged below as 'unbound').
       for (const [key, binding] of Object.entries(file.media)) {
         if (HEX64.test(key) && !this._admitted.has(key)) this._media.set(key, binding)
+      }
+      this._revokedCreators = file.revokedCreators
+      this._goneRoots = file.goneRoots
+      this._groupHeaders = file.groupHeaders
+      for (const [key, binding] of Object.entries(file.groups)) {
+        if (HEX64.test(key) && !this._admitted.has(key) && !this._media.has(key)) this._groups.set(key, binding)
       }
       // The stored moderation snapshot, read under the lock like
       // admitted.json and kept only when it verifies for the association
@@ -752,22 +1074,31 @@ class Seeder {
       for (const key of [...this._admitted.keys()]) {
         const core = await openReplica(this.store, key)
         let reason = null
+        const judged = {}
         // A blocked author takes the fork path (rejected, purged, un-listed),
         // never _drop: _drop returns for a key not in _served (it is only
         // filled in step 4). A revoked issuer surfaces through localVerdict.
-        if (this._isBlocked(key)) reason = 'blocked'
-        else if (core.fork !== 0) reason = 'fork'
+        if (this._isBlocked(key)) {
+          reason = 'blocked'
+          // A creator both blocked and from a revoked issuer: lifting only
+          // the block must not bring back the roots it bound (_noteGoneRoot).
+          if (core.fork === 0 && core.contiguousLength > 0 && await localVerdict(core, key, this.association, this._certOpts(), judged) === 'revoked-issuer') {
+            this._noteRevokedCreator(key, judged.cert)
+          }
+        } else if (core.fork !== 0) reason = 'fork'
         else if (core.contiguousLength === 0) reason = 'no-cert'
         else if (this._overQuota(core)) reason = 'quota' // item 5: before any serve/join
-        else reason = await localVerdict(core, key, this.association, this._certOpts())
+        else reason = await localVerdict(core, key, this.association, this._certOpts(), judged)
         if (reason === null && survivors.length < this.maxServed) {
-          survivors.push([key, core])
+          this._forgetRevoked(key)
+          survivors.push([key, core, judged.cert])
           continue
         }
         // Capacity (M1): a listed log beyond maxServed is purged through the
         // same path, so a restart always comes back under the cap.
         if (reason === null) this.log({ event: 'warning', key, reason: 'seeder-full' })
         else this.log({ event: 'rejected', key, reason })
+        if (reason === 'revoked-issuer') this._noteRevokedCreator(key, judged.cert)
         try {
           await this._purge(key)
         } catch {
@@ -811,6 +1142,83 @@ class Seeder {
         await this._persist()
       }
 
+      // Step 3c: listed group cores, the same way (header comment). A writer
+      // needs its diary to have survived; a root its creator or a listed
+      // writer of the group whose diary survived. A root key in the
+      // snapshot takes its group down. The stored block 0 must be the header
+      // the binding names.
+      const groupSurvivors = []
+      const perGroup = new Map()
+      let provisionalRoot = false
+      const perDiary = new Map() // diary -> { total, roots, groups: Map(group -> writers) }
+      // A root's creator supports it only if it bound the root (_rootBound),
+      // which its scan tells: until then the root is provisional.
+      const supported = (key, binding) => {
+        if (key !== binding.group) return kept.has(binding.diary)
+        for (const [k, b] of this._groups) {
+          if (k !== key && b !== null && b.group === key && kept.has(b.diary)) return true
+        }
+        // Live joins are known only after the scans, which run after this
+        // step: a root admitted through a member's join whose writer never
+        // completed would be lost for good if purged now. It stays while
+        // any unblocked diary survived, and is judged after the scans.
+        for (const d of kept) {
+          if (!this._isBlocked(d)) {
+            provisionalRoot = true
+            return true
+          }
+        }
+        return false
+      }
+      for (const [key, binding] of [...this._groups]) {
+        let reason = null
+        let core = null
+        let raw = null
+        if (binding === null || !supported(key, binding)) reason = 'unbound'
+        else if (this._isBlocked(binding.group)) reason = 'group-blocked'
+        else if (key === binding.group && this._rootGone(key) !== null) {
+          reason = this._rootGone(key)
+          this._noteGoneRoot(key, binding.diary, reason)
+        } else {
+          core = await openMediaReplica(this.store, key)
+          if (core.fork !== 0) reason = 'fork'
+          else if (core.contiguousLength === 0) reason = 'no-header'
+          else if (this._overQuota(core)) reason = 'quota'
+          else ({ reason, raw } = await localGroupVerdict(core, key, binding))
+        }
+        if (reason === null && (groupSurvivors.length >= this.maxGroupCores || (perGroup.get(binding.group) || 0) >= this.maxGroupWriters)) reason = 'group-full'
+        // The per-diary budget restored: writers under their diary, roots
+        // under the diary charged with them (`by`; none for an old entry).
+        const isRoot = reason === null && key === binding.group
+        const chargedTo = reason !== null ? null : isRoot ? (binding.by || null) : binding.diary
+        let held = null
+        if (chargedTo !== null) {
+          held = perDiary.get(chargedTo) || { total: 0, roots: 0, groups: new Map() }
+          if (held.total >= MAX_GROUP_CORES_PER_DIARY) reason = 'group-full'
+          else if (isRoot ? held.roots >= MAX_GROUPS_PER_DIARY : (held.groups.get(binding.group) || 0) >= MAX_GROUP_WRITERS_PER_DIARY) reason = 'group-full'
+        }
+        if (reason === null) {
+          if (held !== null) {
+            held.total++
+            if (isRoot) held.roots++
+            else held.groups.set(binding.group, (held.groups.get(binding.group) || 0) + 1)
+            perDiary.set(chargedTo, held)
+          }
+          perGroup.set(binding.group, (perGroup.get(binding.group) || 0) + 1)
+          groupSurvivors.push([key, binding, core, raw])
+          continue
+        }
+        if (core !== null) await core.close().catch(noop)
+        this.log({ event: 'group-rejected', key, diary: binding === null ? null : binding.diary, group: binding === null ? null : binding.group, reason })
+        try {
+          await this._purge(key)
+        } catch {
+          throw new Error('falha ao limpar núcleo de grupo rejeitado: ' + key8(key))
+        }
+        this._groups.delete(key)
+        await this._persist()
+      }
+
       // Step 4: watchers and live downloads (no swarm yet). A persisted
       // binding is served right away: the scan of its diary (after ready)
       // only confirms or drops it, it never has to rediscover it. The
@@ -819,8 +1227,18 @@ class Seeder {
       // a pass that pauses at the cap must still count as covered.
       this._indexStartup = new Set(survivors.map(([key]) => key))
       this._topicStartup = new Set(survivors.map(([key]) => key))
-      for (const [key, core] of survivors) this._serve(key, core, { regate: false })
+      if (provisionalRoot) this._groupRootStartup = new Set(survivors.map(([key]) => key))
+      for (const [key, core, cert0] of survivors) this._serve(key, core, { regate: false, cert0 })
       for (const [key, diary, core] of mediaSurvivors) this._serveMedia(key, diary, core, { headerOk: true })
+      for (const [key, binding, core, raw] of groupSurvivors) {
+        if (key === binding.group) {
+          this._groupIndex.setHeader(key, decodeBlock(raw))
+          this._keepGroupHeader(key, decodeBlock(raw))
+        }
+        this._serveGroup(key, binding, core, { headerOk: true })
+        if (key === binding.group && !this._served.has(binding.diary)) this._indexKeptRoot(key, false)
+      }
+      for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
       // Step 5: the swarm, with the seeder's Noise key pair.
       this.topic = topicFor(this.association)
@@ -829,7 +1247,8 @@ class Seeder {
       const topics = [
         this.topic,
         ...survivors.map(([, core]) => core.discoveryKey),
-        ...mediaSurvivors.filter(([key]) => this._mediaServed.has(key)).map(([, , core]) => core.discoveryKey)
+        ...mediaSurvivors.filter(([key]) => this._mediaServed.has(key)).map(([, , core]) => core.discoveryKey),
+        ...groupSurvivors.filter(([key]) => this._groupServed.has(key)).map(([, , core]) => core.discoveryKey)
       ]
       const done = this.store.findingPeers()
       try {
@@ -901,6 +1320,7 @@ class Seeder {
       blocklistSeq: this._blocklist && this._blocklist.current() ? this._blocklist.current().seq : 0,
       mediaCores: this._media.size,
       mediaBytes,
+      groupCores: this._groups.size,
       indexRecords: this._index.stats().records,
       indexSaturated: this._index.stats().saturated,
       topicPosts: this._topics.stats().posts,
@@ -930,6 +1350,13 @@ class Seeder {
       // A certificate from a revoked issuer is a moderation outcome, like a
       // blocked author: an honest member re-announcing it is not misbehaving.
       if (r.reason !== 'revoked-issuer') this._badAnnounce(peer)
+      else {
+        // A first refusal is a moderation outcome; the same key again from
+        // the same peer is a replay, so it counts like a bad announce.
+        if (!peer.revokedSeen) peer.revokedSeen = new Set()
+        if (peer.revokedSeen.has(key)) this._badAnnounce(peer)
+        else if (peer.revokedSeen.size < 256) peer.revokedSeen.add(key)
+      }
       return Promise.resolve()
     }
     // A blocked author is refused before anything is queued or fetched (no
@@ -1007,7 +1434,7 @@ class Seeder {
     // media header, not a certificate. Refusing here (instead of letting the
     // gate find out) keeps the two admission paths from fetching the same
     // key through the quarantine at once (_admitMedia checks the reverse).
-    if (this._media.has(key) || this._mediaDropping.has(key) || this._mediaReserved.has(key)) {
+    if (this._media.has(key) || this._mediaDropping.has(key) || this._mediaReserved.has(key) || this._isGroupKey(key)) {
       return this._reject(peer, key, 'not-in-log')
     }
     if (!this._peers.has(peer)) return
@@ -1159,7 +1586,7 @@ class Seeder {
     return length > this.maxLogBlocks || byteLength > this.maxLogBytes
   }
 
-  _serve (key, core, { regate }) {
+  _serve (key, core, { regate, cert0 = null }) {
     // Media scan state (header comment): `scanned` is the next block to read
     // for media-core records (block 0 is the certificate), `decls` the
     // declared cores seen so far (key -> { seq, at }, newest seq; a seq/key
@@ -1177,6 +1604,10 @@ class Seeder {
       stopGrow: noop,
       stopQuota: noop,
       gated: !regate,
+      headerTimer: null, // the re-gate deadline of a replica served before its block 0 is local
+      // The block-0 certificate the gate passed (judged again when the
+      // diary is blocked, _drop).
+      cert0,
       gating: false,
       dropped: false,
       scanned: 1,
@@ -1186,6 +1617,23 @@ class Seeder {
       decls: new Map(),
       latest: [],
       refused: new Map(),
+      // Group scan state: `groupDecls` the newest group-join per writer
+      // (writer -> { group, on, seq, at }), `groupLive` the live joins kept
+      // under MAX_GROUPS_PER_DIARY (writer -> { group, seq }) and
+      // `groupRefused` the joins whose core failed the gate (writer -> seq),
+      // `groupBound` the newest on:true join of each root key G naming G
+      // itself (G -> { group: G, seq }), which keeps binding after a later
+      // on:false or a later on:true join of G into another group: one
+      // entry per root key, so a creator cannot unbind its own root (and
+      // escape its purge) by naming the root key as a writer elsewhere, and
+      // the map grows no faster than groupDecls; and
+      // `groupFirst` the earliest on:true join per group and writer (group
+      // -> Map(writer -> seq)), which ranks writers for the per-diary cap.
+      groupDecls: new Map(),
+      groupBound: new Map(),
+      groupFirst: new Map(),
+      groupLive: new Map(),
+      groupRefused: new Map(),
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -1233,6 +1681,18 @@ class Seeder {
     this._notices.markPending(key)
     checkQuota()
     if (entry.dropped) return
+    // A peer that served block 0 to the quarantine and then withholds it
+    // from the main store must not hold every group answer incomplete: past
+    // the gate timeout the replica goes ('timeout') and the key returns only
+    // through a new announce and the full quarantine gate.
+    if (regate) {
+      entry.headerTimer = setTimeout(() => {
+        entry.headerTimer = null
+        if (entry.dropped || entry.gated || entry.gating || this._closing || this._served.get(key) !== entry) return
+        this._drop(key, 'timeout')
+      }, this.regateTimeoutMs)
+      if (entry.headerTimer.unref) entry.headerTimer.unref()
+    }
     // A replica opened for re-gating may already hold block 0.
     if (regate && core.contiguousLength >= 1) this._onGrow(key, entry, core.contiguousLength)
   }
@@ -1265,7 +1725,8 @@ class Seeder {
   // _onGrow never starts a second one).
   _gate (key, entry) {
     const gen = this._moderationGen
-    localVerdict(entry.core, key, this.association, this._certOpts()).then(async (reason) => {
+    const judged = {}
+    localVerdict(entry.core, key, this.association, this._certOpts(), judged).then(async (reason) => {
       if (this.regateHook) await this.regateHook(key, reason)
       if (entry.dropped || this._closing) {
         entry.gating = false
@@ -1274,8 +1735,12 @@ class Seeder {
       if (reason === null && this._isBlocked(key)) reason = 'blocked'
       if (reason === null && gen !== this._moderationGen) return this._gate(key, entry)
       entry.gating = false
-      if (reason !== null) return this._drop(key, reason)
+      if (reason !== null) return this._drop(key, reason, judged.cert)
       entry.gated = true
+      entry.cert0 = judged.cert
+      clearTimeout(entry.headerTimer)
+      entry.headerTimer = null
+      this._forgetRevoked(key)
       this._broadcastHave(key, entry.core.contiguousLength)
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
@@ -1293,6 +1758,8 @@ class Seeder {
   }
 
   _stopEntry (entry) {
+    clearTimeout(entry.headerTimer)
+    entry.headerTimer = null
     clearTimeout(entry.indexRetry)
     entry.indexRetry = null
     clearTimeout(entry.topicRetry)
@@ -1313,7 +1780,9 @@ class Seeder {
   // purge succeeds. The drop wins over announces: it runs right away (after
   // an admission step that is mid-flight for the key, never after queued
   // announces), and every announce for the key waits for it (_admitNow).
-  _drop (key, reason) {
+  // `judgedCert` is the block-0 certificate a 'revoked-issuer' verdict
+  // judged (_noteRevokedCreator).
+  _drop (key, reason, judgedCert = null) {
     const entry = this._served.get(key)
     if (!entry || entry.dropped || this._closing) return
     entry.dropped = true
@@ -1337,6 +1806,7 @@ class Seeder {
       if (this._indexDropped.size >= MAX_INVENTORY) this._rebuildIndex()
     })
     if (this._indexStartup !== null) this._indexStartup.delete(key)
+    this._groupStartupScanned(key)
     // Same deadline for the topic search index: synchronous, before the
     // purge, on every drop path (blocked, fork, quota, revoked issuer, failed
     // gate, blocklist adoption). No timer.
@@ -1347,6 +1817,22 @@ class Seeder {
     for (const [k, m] of [...this._mediaServed]) {
       if (m.diary === key) this._dropMedia(k, reason)
     }
+    // Its group writers too; a root stays while another diary keeps it.
+    const rootRows = this._boundRootRows(key)
+    this._groupIndex.removeDiary(key)
+    this._forgetGroupAttempts(key)
+    if (reason === 'revoked-issuer' && this._revokedCreators) this._noteRevokedCreator(key, judgedCert)
+    // A blocked creator whose block-0 issuer is also revoked: noted before
+    // its roots go, so lifting only the block does not let the roots it
+    // bound back in while the issuer stays revoked.
+    if (reason === 'blocked' && this._revokedCreators && entry.cert0 && certForKey(entry.cert0, key, this.association, this._certOpts()).reason === 'revoked-issuer') {
+      this._noteRevokedCreator(key, entry.cert0)
+    }
+    for (const [k, g] of [...this._groupServed]) {
+      if (g.diary === key && k !== g.group) this._dropGroup(k, reason)
+    }
+    this._dropUnsupportedRoots()
+    for (const [k, row] of rootRows) this._indexKeptRoot(k, row.left)
     if (this.swarm) {
       try {
         this.swarm.leave(entry.core.discoveryKey).catch(noop)
@@ -1415,6 +1901,8 @@ class Seeder {
             this._scanDiary(key, entry)
           }, SCAN_RETRY_MS)
           entry.scanRetry.unref()
+        } else if (entry.scanRetry === null) {
+          this._groupStartupScanned(key)
         }
         return
       }
@@ -1425,6 +1913,23 @@ class Seeder {
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
+        continue
+      }
+      if (block.type === 'group-join') {
+        const r = validRecordCopy(block, i)
+        if (r === null) continue
+        const prev = entry.groupDecls.get(r.writer)
+        if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
+        const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
+        if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
+        if (r.on) {
+          let firsts = entry.groupFirst.get(r.group)
+          if (firsts === undefined) {
+            firsts = new Map()
+            entry.groupFirst.set(r.group, firsts)
+          }
+          if (!firsts.has(r.writer) || i < firsts.get(r.writer)) firsts.set(r.writer, i)
+        }
         continue
       }
       if (block.type !== 'media-core') continue
@@ -1446,6 +1951,20 @@ class Seeder {
       if (!entry.latest.some((b) => b.key === k)) entry.refused.delete(k)
     }
     this._reconcileMedia(key, entry)
+    entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupFirst)
+    this._reconcileGroups(key, entry)
+    this._groupStartupScanned(key)
+  }
+
+  // Diary D's first group scan since start ended (or gave up, or D left):
+  // once every diary served at start is through, the provisional roots are
+  // judged like any root at runtime.
+  _groupStartupScanned (key) {
+    if (this._groupRootStartup === null) return
+    this._groupRootStartup.delete(key)
+    if (this._groupRootStartup.size > 0) return
+    this._groupRootStartup = null
+    this._dropUnsupportedRoots()
   }
 
   // Brings the media cores of a diary in line with its latest set: cores
@@ -1494,7 +2013,7 @@ class Seeder {
     if (entry.dropped || !entry.gated || this._served.get(diary) !== entry) return false
     if (this._isBlocked(diary)) return false
     if (!entry.latest.some((b) => b.key === key)) return false
-    return !(this._admitted.has(key) || this._dropping.has(key) || this._reserved.has(key) || this._chains.has(key))
+    return !(this._admitted.has(key) || this._dropping.has(key) || this._reserved.has(key) || this._chains.has(key) || this._isGroupKey(key))
   }
 
   // Open sockets of every connected peer (swarm and external): the quarantine
@@ -1727,6 +2246,920 @@ class Seeder {
     this._drops.set(key, tracked)
   }
 
+  // ---- Group cores (header comment) -------------------------------------
+
+  _isGroupKey (key) {
+    return this._groups.has(key) || this._groupsDropping.has(key) || this._groupReserved.has(key)
+  }
+
+  // One log line per (diary, key) and refusal: a join retried on every scan,
+  // connection and blocklist adoption must not flood the log. A new join
+  // (another seq) or another reason is logged again.
+  _rejectGroup (key, diary, group, reason, seq = null) {
+    const id = diary + ':' + key
+    const what = reason + ':' + seq
+    if (this._groupRefusals.get(id) === what) return
+    this._groupRefusals.set(id, what)
+    this.log({ event: 'group-rejected', key, diary, group, reason })
+  }
+
+  // 'timeout' and 'no-peers' are remembered per (diary, key): the next try
+  // waits GROUP_BACKOFF_MS, longer after each failure in a row.
+  // A 'timeout' wait arms one unref'd timer per (diary, key) that retries
+  // the join when the wait ends, so a writer missed once is fetched again
+  // without waiting for some unrelated peer's hello.
+  _groupBackoffHit (diary, key, reason, group = null) {
+    const id = diary + ':' + key
+    const prev = this._groupBackoff.get(id)
+    if (prev !== undefined && prev.timer) clearTimeout(prev.timer)
+    const step = prev === undefined ? 0 : Math.min(prev.step + 1, GROUP_BACKOFF_MS.length - 1)
+    const b = { reason, step, group, until: Date.now() + GROUP_BACKOFF_MS[step], timer: null }
+    this._groupBackoff.set(id, b)
+    if (reason !== 'timeout') return
+    b.timer = setTimeout(() => {
+      b.timer = null
+      if (this._closing || this._groupBackoff.get(id) !== b) return
+      // Timers may fire a moment before Date.now() reaches `until`: the
+      // wait is over now, or the reconcile would skip the join for good.
+      b.until = Math.min(b.until, Date.now())
+      // A core whose drop (purge) outlasts the wait is skipped by the
+      // reconcile while it is dropping: the retry waits for that drop, or
+      // it is lost and a step-0 timeout keeps the group's answers
+      // incomplete until some unrelated hello.
+      const dropping = this._groupsDropping.has(key) ? this._drops.get(key) : undefined
+      if (dropping !== undefined) {
+        dropping.then(() => {
+          if (this._closing || this._groupBackoff.get(id) !== b) return
+          this._reconcileDiaries([diary])
+        })
+        return
+      }
+      this._reconcileDiaries([diary])
+    }, GROUP_BACKOFF_MS[step])
+    if (b.timer.unref) b.timer.unref()
+  }
+
+  _deleteGroupBackoff (id) {
+    const b = this._groupBackoff.get(id)
+    if (b === undefined) return
+    if (b.timer) clearTimeout(b.timer)
+    this._groupBackoff.delete(id)
+  }
+
+  // Live joins whose core is missing for a reason that must keep answers
+  // about G from looking final: the seeder's own capacity ('group-full':
+  // maxGroupCores, maxGroupWriters) or a first timeout not yet retried
+  // (_groupJoinStale takes over after the retry). For group G (or any when
+  // null) and diary D (or any).
+  _groupFullFor (group, diary = null) {
+    for (const [id, b] of this._groupBackoff) {
+      if (b.group === null || !(b.reason === 'group-full' || (b.reason === 'timeout' && b.step === 0))) continue
+      if (group !== null && b.group !== group) continue
+      const d = id.slice(0, 64)
+      if (diary !== null && d !== diary) continue
+      const key = id.slice(65)
+      if (this._groups.has(key)) continue
+      const e = this._served.get(d)
+      if (!e || e.dropped) continue
+      const j = e.groupLive.get(key)
+      if (j !== undefined && j.group === b.group && e.groupRefused.get(key) !== j.seq) return true
+      if (key === b.group) {
+        for (const lj of e.groupLive.values()) if (lj.group === key && e.groupRefused.get(key) !== lj.seq) return true
+      }
+    }
+    return false
+  }
+
+  _groupBackingOff (diary, key) {
+    const b = this._groupBackoff.get(diary + ':' + key)
+    return b !== undefined && Date.now() < b.until
+  }
+
+  // Why a root naming diary D cannot be served: 'blocked' (D blocked),
+  // 'revoked-issuer' (D was dropped or refused at start for a revoked
+  // issuer and is not served again), or null.
+  _creatorGone (diary) {
+    if (this._isBlocked(diary)) return 'blocked'
+    // Judged against the CURRENT list: lifting the revocation lifts this.
+    // Only a diary's own block-0 verdict counts: an announce is signed by the
+    // issuer alone, so a revoked issuer's key could name any diary.
+    const issuer = this._revokedCreators.has(diary) ? this._revokedCreators.get(diary) : this._unrecordedRevoked.get(diary)
+    if (issuer !== undefined && !this._served.has(diary) && this._issuerRevoked(issuer)) return 'revoked-issuer'
+    return null
+  }
+
+  // Whether no group root may be admitted now: a denial map holds
+  // ROOT_CREATORS_MAX denials still in force, or one denial found no room
+  // at all. Fail closed: an evicted or unrecorded denial would let a purged
+  // root come back through any member's join.
+  _rootsClosed () {
+    if (this._denialsLost) return true
+    let n = 0
+    if (this._revokedCreators.size >= ROOT_CREATORS_MAX) {
+      for (const i of this._revokedCreators.values()) if (this._issuerRevoked(i)) n++
+      if (n >= ROOT_CREATORS_MAX) return true
+    }
+    if (this._goneRoots.size < ROOT_CREATORS_MAX) return false
+    n = 0
+    for (const k of this._goneRoots.keys()) if (this._goneRootReason(k) !== null) n++
+    return n >= ROOT_CREATORS_MAX
+  }
+
+  _denialNotKept (what) {
+    if (!this._denialsLost) this.log({ event: 'warning', reason: 'denials-full', what })
+    this._denialsLost = true
+  }
+
+  _issuerRevoked (issuer) {
+    return issuer !== null && this._certOpts().revokedIssuers.has(issuer)
+  }
+
+  // Why root K must go: its header's diary bound it (`bound`, set while that
+  // diary was served) and is now gone (_creatorGone). A root naming a diary
+  // that never bound it only names it: blocking that diary leaves it to the
+  // members that keep it (it has no creator).
+  // The issuer kept with the binding counts too, so a creator that left
+  // first for another reason (quota, its own drop) cannot escape a later
+  // revocation of its issuer while a member keeps its root served.
+  _rootGone (key) {
+    const b = this._groups.get(key)
+    if (!b || b.group !== key || b.bound !== true) return null
+    const gone = this._creatorGone(b.diary)
+    if (gone !== null) return gone
+    if (typeof b.issuer === 'string' && !this._served.has(b.diary) && this._issuerRevoked(b.issuer)) {
+      // Recorded like a revoked-issuer drop of the creator: the purged root
+      // stays refused (goneRoots) whichever member's join names it.
+      this._noteRevokedCreator(b.diary, { issuer: b.issuer })
+      return 'revoked-issuer'
+    }
+    return null
+  }
+
+  // Why purged root K stays refused, from its own goneRoots entry alone (no
+  // other map can have evicted the evidence): its creator is blocked, or the
+  // issuer recorded at the purge is revoked under the CURRENT list while the
+  // creator is not served again.
+  _goneRootReason (key) {
+    const e = this._goneRoots.get(key)
+    if (e === undefined) return null
+    if (this._isBlocked(e.creator)) return 'blocked'
+    if (e.issuer !== null && !this._served.has(e.creator) && this._issuerRevoked(e.issuer)) return 'revoked-issuer'
+    return null
+  }
+
+  // A purged root of a gone creator stays refused across restarts while the
+  // creator stays gone, whichever member's join names it. The creator's
+  // revoked issuer is kept whatever the purge reason, and a known issuer is
+  // never replaced by none: a creator both blocked and revoked keeps its
+  // roots out once only the block is lifted.
+  _noteGoneRoot (key, creator, reason) {
+    let issuer = this._revokedCreators.get(creator) || this._unrecordedRevoked.get(creator) || null
+    const prev = this._goneRoots.get(key)
+    if (issuer === null && prev !== undefined && prev.creator === creator) issuer = prev.issuer
+    if (!bounded(this._goneRoots, key, { creator, issuer }, (k) => this._goneRootReason(k) === null)) this._denialNotKept('goneRoots')
+    this._persist().catch(noop)
+  }
+
+  // A moderation outcome: diary D, served or listed, was dropped or refused
+  // because its certificate's issuer is revoked. `cert` is the block-0
+  // certificate the verdict judged (v2 names its issuer); without an issuer
+  // nothing is kept. Nothing is
+  // written when the pair is already known.
+  _noteRevokedCreator (diary, cert) {
+    const issuer = issuerOf(cert)
+    if (issuer === null) return
+    // Roots already purged for this creator under another reason (a block
+    // judged first) take the issuer too, so the denial outlives the block.
+    let backfilled = false
+    for (const e of this._goneRoots.values()) {
+      if (e.creator !== diary || e.issuer !== null) continue
+      e.issuer = issuer
+      backfilled = true
+    }
+    if (this._revokedCreators.get(diary) === issuer) {
+      if (backfilled) this._persist().catch(noop)
+      return
+    }
+    if (!bounded(this._revokedCreators, diary, issuer, (d, i) => !this._issuerRevoked(i))) {
+      // Its bound roots are still purged now (_creatorGone reads this).
+      if (this._unrecordedRevoked.size < ROOT_DENIALS_HARD) this._unrecordedRevoked.set(diary, issuer)
+      this._denialNotKept('revokedCreators')
+    }
+    this._persist().catch(noop)
+  }
+
+  // D was admitted with a certificate that verifies under the current list
+  // (a new certificate, or the revocation lifted): whatever was remembered
+  // about a revoked issuer of D no longer holds.
+  _forgetRevoked (diary) {
+    if (!this._revokedCreators) return
+    this._unrecordedRevoked.delete(diary)
+    let changed = this._revokedCreators.delete(diary)
+    for (const [k, e] of [...this._goneRoots]) {
+      if (e.creator !== diary || e.issuer === null) continue
+      this._goneRoots.delete(k)
+      changed = true
+    }
+    if (changed) this._persist().catch(noop)
+  }
+
+  // A diary gone forgets its admission memory (bounded by its join set).
+  _forgetGroupAttempts (diary) {
+    const prefix = diary + ':'
+    if (this._groupBackoff) {
+      for (const id of [...this._groupBackoff.keys()]) if (id.startsWith(prefix)) this._deleteGroupBackoff(id)
+    }
+    for (const map of [this._groupRefusals]) {
+      if (!map) continue
+      for (const id of [...map.keys()]) if (id.startsWith(prefix)) map.delete(id)
+    }
+    if (this._groupDeferred) this._groupDeferred.delete(diary)
+  }
+
+  // Group cores charged to a diary, bound or being admitted: its writers in
+  // group G (`inGroup`), the roots its joins admitted (`roots`, by the
+  // binding's `by`, never the header's diary, which anyone may name) and
+  // both together (`total`). Charges stay after the join is withdrawn, so
+  // admitting and withdrawing in a loop cannot fill the seeder's group cores.
+  _diaryGroupCores (diary, group) {
+    let inGroup = 0
+    let roots = 0
+    let total = 0
+    for (const [k, b] of this._groups) {
+      if (b === null) continue
+      if (k === b.group) {
+        if (b.by !== diary) continue
+        roots++
+      } else {
+        if (b.diary !== diary) continue
+        if (b.group === group) inGroup++
+      }
+      total++
+    }
+    for (const [k, d] of this._groupReservedBy) {
+      const g = this._groupReserved.get(k)
+      if (d !== diary || g === undefined || this._groups.has(k)) continue
+      if (k === g) roots++
+      else if (g === group) inGroup++
+      total++
+    }
+    return { inGroup, roots, total }
+  }
+
+  // In-flight group admissions started by a diary.
+  _diaryGroupInflight (diary) {
+    let n = 0
+    for (const d of this._groupReservedBy.values()) if (d === diary) n++
+    return n
+  }
+
+  // Whether the diary a root's header names bound the root: served,
+  // unblocked and with an on:true group-join for writer G in its own diary
+  // (any ever, the fold's binding rule). Anyone may name any diary in a
+  // header, so only then does that diary support the root or show as its
+  // creator. The creator's scan indexes the root as its writer exactly then
+  // (_reconcileGroups), and its drop removes that row.
+  _rootBound (group, creator) {
+    const e = this._served.get(creator)
+    if (!e || e.dropped || this._isBlocked(creator)) return false
+    const row = this._groupIndex.writer(group)
+    return row !== null && row.group === group && row.diary === creator
+  }
+
+  // The index rows of the served roots diary D bound, as [root, row].
+  _boundRootRows (diary) {
+    const out = []
+    if (!this._groups) return out
+    for (const [k, b] of this._groups) {
+      if (b === null || k !== b.group || b.diary !== diary || b.bound !== true || !this._groupServed.has(k)) continue
+      const row = this._groupIndex.writer(k)
+      if (row !== null && row.group === k && row.diary === diary) out.push([k, row])
+    }
+    return out
+  }
+
+  // A root its creator bound stays listed under that creator, from its
+  // binding, while members keep it served after the creator's diary is gone
+  // here (quota, capacity, a restart without it): without the row the
+  // account service's check of a report on a root post answers 'nao-membro'
+  // and both block options are refused. A blocked or revoked creator's
+  // bound root is purged instead (_dropUnsupportedRoots), and the root's own
+  // drop removes the row.
+  _indexKeptRoot (key, left) {
+    const b = this._groups.get(key)
+    if (!b || b.group !== key || b.bound !== true || !this._groupServed.has(key)) return
+    if (this._served.has(b.diary) || this._isBlocked(b.diary)) return
+    if (this._groupIndex.writer(key) !== null) return
+    if (this._groupIndex.addWriter(key, key, b.diary, b.seq)) this._groupIndex.setLeft(key, left === true)
+  }
+
+  // Whether row (diary, key) is a root kept for a creator gone here
+  // (_indexKeptRoot): listed although that diary is not visible.
+  _keptRootRow (diary, key) {
+    const b = this._groups.get(key)
+    return !!b && b.group === key && b.bound === true && b.diary === diary &&
+      !this._served.has(diary) && !this._isBlocked(diary)
+  }
+
+  // Cores bound or being admitted for a group (the root counts: it is the
+  // creator's writer). An admission is listed in _groups from persist on
+  // while still reserved: each key counts once, or a valid writer would be
+  // refused as group-full before the cap is reached.
+  _groupCoreCount (group) {
+    let n = 0
+    for (const b of this._groups.values()) if (b !== null && b.group === group) n++
+    for (const [k, g] of this._groupReserved) {
+      if (g !== group) continue
+      const b = this._groups.get(k)
+      if (b === undefined || b === null || b.group !== group) n++
+    }
+    return n
+  }
+
+  // Group cores served or being admitted, each key once.
+  _groupCoresInUse () {
+    let n = this._groupServed.size
+    for (const k of this._groupReserved.keys()) if (!this._groupServed.has(k)) n++
+    return n
+  }
+
+  // Brings the group cores of a diary in line with its scan: index rows for
+  // the cores bound to it (left once no live join names them; leaving never
+  // drops a core) and admissions for live joins not yet bound, the writer
+  // itself and the group root.
+  _reconcileGroups (diary, entry) {
+    if (entry.dropped || !entry.gated || this._closing) return
+    for (const [k, b] of this._groups) {
+      if (b === null || b.diary !== diary || !this._groupServed.has(k)) continue
+      const live = entry.groupLive.get(k)
+      const bound = live !== undefined && live.group === b.group
+      let seq = bound ? live.seq : b.seq
+      if (k === b.group) {
+        // A root's row must point at a join in its creator's own diary: the
+        // binding may have been persisted with the seq of the member join
+        // that admitted it. Binding is any on:true join ever (lib/group.js),
+        // so the creator's newest on:true join for G is used even after an
+        // on:false; with none, the root is no writer of that diary and is
+        // not listed.
+        const own = entry.groupBound.get(k)
+        if (own === undefined || own.group !== k) continue
+        seq = own.seq
+        // Kept for when this diary is gone: only a root it bound is its
+        // content (_rootGone).
+        if (b.bound !== true) {
+          b.bound = true
+          this._persist().catch(noop)
+        }
+        // Its block-0 issuer stays with the binding: a revocation adopted
+        // after this diary left still purges the root (_rootGone).
+        const issuer = issuerOf(entry.cert0)
+        if (issuer !== null && b.issuer !== issuer) {
+          b.issuer = issuer
+          this._persist().catch(noop)
+        }
+      }
+      if (seq !== b.seq) {
+        b.seq = seq
+        this._persist().catch(noop)
+      }
+      this._groupIndex.addWriter(b.group, k, diary, b.seq)
+      this._groupIndex.setLeft(k, !bound)
+    }
+    if (this._isBlocked(diary)) return
+    for (const [writer, j] of entry.groupLive) {
+      const keys = writer === j.group ? [writer] : [writer, j.group]
+      for (const k of keys) {
+        if (this._groups.has(k) || this._groupsDropping.has(k)) continue
+        if (this._inflight.has(k) || this._groupReserved.has(k)) continue
+        const refused = entry.groupRefused.get(k)
+        if (refused !== undefined && refused === j.seq) continue
+        if (this._groupBackingOff(diary, k)) continue
+        this._admitGroup(diary, entry, k, j.group, j.seq).catch(noop)
+      }
+    }
+  }
+
+  _retryGroups (peer) {
+    if (peer) {
+      if (!peer.socket || peer.seederDropped) return
+      for (const fetch of this._groupFetches.values()) fetch.addSocket(peer.socket)
+      // A new socket is what a 'no-peers' refusal lacked. Only those
+      // diaries reconcile: a connection must not re-run every diary's joins.
+      // Expired 'timeout' waits wait for the peer's hello
+      // (_retryGroupTimeouts).
+      const diaries = new Set()
+      for (const [id, b] of [...this._groupBackoff]) {
+        if (b.reason !== 'no-peers') continue
+        this._deleteGroupBackoff(id)
+        diaries.add(id.slice(0, 64))
+      }
+      this._reconcileDiaries(diaries)
+      return
+    }
+    for (const [key, entry] of this._served) {
+      if (entry.gated && entry.groupLive.size > 0) this._reconcileGroups(key, entry)
+    }
+  }
+
+  // A helloed peer may hold a core whose fetch timed out: each expired
+  // 'timeout' wait is retried at most once per wait from a connection, so
+  // peers connecting in a loop cannot restart fetches of unservable cores.
+  _retryGroupTimeouts () {
+    if (this._closing) return
+    const diaries = new Set()
+    const now = Date.now()
+    for (const [id, b] of this._groupBackoff) {
+      if (b.reason !== 'timeout' || now < b.until || b.retried) continue
+      b.retried = true
+      diaries.add(id.slice(0, 64))
+    }
+    this._reconcileDiaries(diaries)
+  }
+
+  _reconcileDiaries (diaries) {
+    for (const d of diaries) {
+      const e = this._served.get(d)
+      if (e && e.gated && !e.dropped) this._reconcileGroups(d, e)
+    }
+  }
+
+  // A join whose core timed out again on its retry past the first wait is
+  // still retried, but no longer holds group answers back: a core nobody
+  // serves would otherwise keep every page of its group incomplete. A
+  // writer missed once stays pending until that retry; 'group-full' never
+  // goes stale (the seeder's own capacity is the reason: _groupFullFor).
+  _groupJoinStale (diary, key) {
+    const b = this._groupBackoff.get(diary + ':' + key)
+    return b !== undefined && b.reason === 'timeout' && b.step >= 1
+  }
+
+  // A core in admission that still holds group answers back.
+  _groupReservedCounts (key) {
+    const d = this._groupReservedBy.get(key)
+    return d === undefined || !this._groupJoinStale(d, key)
+  }
+
+  // Whether admitting group core K (the root when K === G) for diary D
+  // still makes sense after an await: D served, gated and unblocked, G not
+  // blocked, the list not held, D still joining (a writer: a live join
+  // naming K for G; the root: any live join for G), and K no diary or media.
+  _groupStillWanted (diary, entry, key, group) {
+    if (entry.dropped || !entry.gated || this._served.get(diary) !== entry) return false
+    if (this._isBlocked(diary) || this._isBlocked(group) || this._blocklistHeld) return false
+    if (key === group) {
+      let joined = false
+      for (const j of entry.groupLive.values()) if (j.group === group) joined = true
+      if (!joined) return false
+    } else {
+      const j = entry.groupLive.get(key)
+      if (!j || j.group !== group) return false
+    }
+    return !(this._admitted.has(key) || this._dropping.has(key) || this._reserved.has(key) || this._chains.has(key) ||
+      this._media.has(key) || this._mediaDropping.has(key) || this._mediaReserved.has(key))
+  }
+
+  // Admission of group core K for D's join, the media steps: synchronous
+  // checks and slot, quarantine gate on every peer socket, persist BEFORE
+  // open, late checks, serve and join.
+  async _admitGroup (diary, entry, key, group, seq) {
+    if (this._closing) return
+    if (this._isBlocked(group)) return this._rejectGroup(key, diary, group, 'group-blocked', seq)
+    // A root already fetched once and naming a still blocked diary is
+    // refused without fetching it again; blocklist adoption forgets these.
+    if (key === group && this._goneRootReason(key) !== null) return this._rejectGroup(key, diary, group, this._goneRootReason(key), seq)
+    if (key === group && this._rootsClosed()) {
+      if (this._groupRefusals.get(diary + ':' + key) !== 'denials-full:' + seq) this.log({ event: 'warning', key, reason: 'denials-full' })
+      return this._rejectGroup(key, diary, group, 'denials-full', seq)
+    }
+    if (this._blocklistHeld) return this._rejectGroup(key, diary, group, 'blocklist-pending', seq)
+    if (!this._groupStillWanted(diary, entry, key, group)) {
+      this._deleteGroupBackoff(diary + ':' + key)
+      return
+    }
+    if (this._groupCoresInUse() >= this.maxGroupCores || this._groupCoreCount(group) >= this.maxGroupWriters) {
+      this._groupBackoffHit(diary, key, 'group-full', group)
+      return this._rejectGroup(key, diary, group, 'group-full', seq)
+    }
+    // liveGroupJoins already keeps one diary's live joins under the caps;
+    // this also counts the cores it left (still bound and served).
+    const held = this._diaryGroupCores(diary, group)
+    if (held.total >= MAX_GROUP_CORES_PER_DIARY ||
+      (key === group ? held.roots >= MAX_GROUPS_PER_DIARY : held.inGroup >= MAX_GROUP_WRITERS_PER_DIARY)) {
+      return this._rejectGroup(key, diary, group, 'group-full', seq)
+    }
+    // Bounded fan-out: scans, connections and blocklist adoptions may ask
+    // for every live join at once. Past either limit the join waits; the
+    // end of an admission re-runs the waiting diaries (_groupDeferred).
+    if (this._groupReserved.size >= this.maxGroupInflight || this._diaryGroupInflight(diary) >= GROUP_INFLIGHT_PER_DIARY) {
+      this._groupDeferred.add(diary)
+      return
+    }
+    const sockets = this._peerSockets()
+    if (sockets.length === 0) {
+      this._groupBackoffHit(diary, key, 'no-peers')
+      return this._rejectGroup(key, diary, group, 'no-peers', seq)
+    }
+    this._groupReserved.set(key, group)
+    this._groupReservedBy.set(key, diary)
+    // An attempt that sets no new wait of its own ended for good (admitted,
+    // refused by its header or size, no longer wanted): an older wait must
+    // not keep group answers incomplete for a join already judged.
+    const waitBefore = this._groupBackoff.get(diary + ':' + key)
+    const work = this._admitGroupReserved(diary, entry, key, group, seq, sockets)
+    this._inflight.set(key, work)
+    try {
+      return await work
+    } finally {
+      this._groupReserved.delete(key)
+      this._groupReservedBy.delete(key)
+      this._pruneGroupHeader(group)
+      // A core admitted for this join and still awaiting its header in the
+      // main store keeps the wait (_gateGroup clears it): a header withheld
+      // after every quarantine pass must still advance the wait, or the
+      // group's pages never stop waiting for it.
+      const awaiting = this._groupServed.get(key)
+      const kept = awaiting !== undefined && !awaiting.dropped && !awaiting.headerOk && awaiting.by === diary
+      if (!kept && waitBefore !== undefined && this._groupBackoff.get(diary + ':' + key) === waitBefore) this._deleteGroupBackoff(diary + ':' + key)
+      if (this._inflight.get(key) === work) this._inflight.delete(key)
+      this._resumeDeferredGroups()
+    }
+  }
+
+  // A slot freed: waiting diaries take turns, oldest first (_groupDeferred
+  // is a FIFO in insertion order). Each reconciles once; one that still has
+  // joins waiting re-queues itself at the tail (_admitGroup), so a few
+  // diaries whose joins name unservable cores cannot keep every slot from a
+  // later diary. Stops when the slots are full or each waiting diary had
+  // its turn.
+  _resumeDeferredGroups () {
+    if (this._closing) return
+    let turns = this._groupDeferred.size
+    while (turns-- > 0 && this._groupReserved.size < this.maxGroupInflight) {
+      const d = this._groupDeferred.values().next().value
+      this._groupDeferred.delete(d)
+      const e = this._served.get(d)
+      if (e && e.gated && !e.dropped) this._reconcileGroups(d, e)
+    }
+  }
+
+  // Whether a diary waiting for an admission slot has a live join for G
+  // whose cores are not bound yet.
+  // `group` null: any group. Joins whose cores went stale (_groupJoinStale)
+  // do not count.
+  _groupDeferredFor (group) {
+    for (const d of this._groupDeferred) {
+      if (this._groupDiaryWaiting(d, group)) return true
+    }
+    return false
+  }
+
+  // Whether diary D has a live join (for G, or any when G is null) with a
+  // core neither bound nor stale.
+  _groupDiaryWaiting (diary, group) {
+    const e = this._served.get(diary)
+    if (!e || e.dropped) return false
+    for (const [writer, j] of e.groupLive) {
+      if (group !== null && j.group !== group) continue
+      for (const k of writer === j.group ? [writer] : [writer, j.group]) {
+        if (!this._groups.has(k) && !this._groupJoinStale(diary, k)) return true
+      }
+    }
+    return false
+  }
+
+  async _admitGroupReserved (diary, entry, key, group, seq, sockets) {
+    while (this._drops.has(key)) await this._drops.get(key)
+    if (this._closing || !this._groupStillWanted(diary, entry, key, group)) return
+    let res
+    try {
+      const fetch = startQuarantineFetch(this.qstore, key, sockets, GATE_TIMEOUT_MS)
+      this._groupFetches.set(key, fetch)
+      try {
+        res = await fetch.promise
+      } finally {
+        if (this._groupFetches.get(key) === fetch) this._groupFetches.delete(key)
+      }
+    } catch {
+      if (!this._closing) this._fatal(key)
+      return
+    }
+    if (this._closing) return
+    if (res.error) {
+      this._groupBackoffHit(diary, key, 'timeout', group)
+      return this._rejectGroup(key, diary, group, 'timeout', seq)
+    }
+    if (!this._groupStillWanted(diary, entry, key, group)) return
+    const verdict = groupVerdict(res.raw, key, group, key === group ? null : diary)
+    if (verdict !== null) {
+      entry.groupRefused.set(key, seq)
+      return this._rejectGroup(key, diary, group, verdict, seq)
+    }
+    // Verified here: a root refused or purged from now on still shows its
+    // kind on /index/group while members' writers stay served.
+    if (key === group) this._keepGroupHeader(group, decodeBlock(res.raw))
+    // Refusals after a fetch are remembered (this join) or backed off, so a
+    // rescan does not fetch the same core again.
+    if (this._overQuota(res)) {
+      entry.groupRefused.set(key, seq)
+      return this._rejectGroup(key, diary, group, 'quota', seq)
+    }
+    if (this._groupServed.size >= this.maxGroupCores) {
+      this._groupBackoffHit(diary, key, 'group-full', group)
+      return this._rejectGroup(key, diary, group, 'group-full', seq)
+    }
+
+    // A root is listed under its creator (the diary its header names).
+    const header = decodeBlock(res.raw)
+    const owner = key === group ? header.diary : diary
+    // A root naming a blocked or revoked diary is that diary's content
+    // (_dropUnsupportedRoots). Backed off rather than remembered: unlike
+    // block 0 and its size, a block or a revocation can be lifted, and
+    // blocklist adoption clears these waits (backoff reason 'blocked').
+    if (key === group && (this._goneRootReason(key) || this._creatorGone(owner)) !== null) {
+      const gone = this._goneRootReason(key) || this._creatorGone(owner)
+      this._groupBackoffHit(diary, key, 'blocked')
+      return this._rejectGroup(key, diary, group, gone, seq)
+    }
+    // Until the creator's scan rewrites it (_reconcileGroups), a root
+    // admitted through a member's join carries that join's seq only as a
+    // placeholder: it is never indexed for the creator.
+    let ownSeq = seq
+    if (owner !== diary) {
+      const ownerEntry = this._served.get(owner)
+      const own = ownerEntry ? ownerEntry.groupBound.get(key) : undefined
+      if (own !== undefined && own.group === key) ownSeq = own.seq
+    }
+    // A root is charged to the diary whose join admitted it (`by`), never to
+    // the diary its header names unless that diary's own join did it.
+    // A root purged for its creator and admitted again once the denial was
+    // lifted keeps `bound` from that purge, so blocking or revoking the
+    // creator again purges it even before the creator is served.
+    const wasGone = key === group ? this._goneRoots.get(key) : undefined
+    const rootBinding = { diary: owner, group, seq: ownSeq, by: diary }
+    if (wasGone !== undefined && wasGone.creator === owner) {
+      rootBinding.bound = true
+      if (wasGone.issuer !== null) rootBinding.issuer = wasGone.issuer
+    }
+    this._groups.set(key, key === group ? rootBinding : { diary: owner, group, seq: ownSeq })
+    let core
+    let opening = false
+    try {
+      if (this.admitHook) await this.admitHook(key, 'persist')
+      await this._persist()
+      if (this._closing) return
+      opening = true
+      if (this.admitHook) await this.admitHook(key, 'open')
+      core = await openMediaReplica(this.store, key)
+    } catch {
+      if (opening) {
+        try {
+          if (await this._stored(key)) await this._purge(key)
+        } catch {
+          if (!this._closing) this._fatal(key)
+          return
+        }
+      }
+      this._groups.delete(key)
+      await this._persist().catch(noop)
+      if (this._closing) return
+      return this._rejectGroup(key, diary, group, 'admission-failed', seq)
+    }
+    if (this._closing) return
+    let late = null
+    if (this._isBlocked(group)) late = 'group-blocked'
+    else if (this._isBlocked(diary)) late = 'blocked'
+    else if (key === group && (this._goneRootReason(key) || this._creatorGone(owner)) !== null) late = this._goneRootReason(key) || this._creatorGone(owner)
+    else if (key === group && this._rootsClosed()) late = 'denials-full'
+    else if (!this._groupStillWanted(diary, entry, key, group)) late = 'unbound'
+    else if (core.fork !== 0) late = 'fork'
+    else if (this._overQuota(core)) late = 'quota'
+    if (late !== null) {
+      await core.close().catch(noop)
+      try {
+        if (await this._stored(key)) await this._purge(key)
+      } catch {
+        if (!this._closing) this._fatal(key)
+        return
+      }
+      this._groups.delete(key)
+      await this._persist().catch(noop)
+      if (this._closing) return
+      return this._rejectGroup(key, diary, group, late, seq)
+    }
+    // The (diary, key) backoff stays until the header verifies in the main
+    // store (_gateGroup): a core whose block 0 is then withheld keeps
+    // growing its wait instead of starting over at every admission.
+    this._groupRefusals.delete(diary + ':' + key)
+    this._serveGroup(key, { diary: owner, group }, core, { expected: res.raw, by: diary })
+    const served = this._groupServed.get(key)
+    if (!served || served.dropped) return
+    this.swarm.join(core.discoveryKey, { server: true, client: true })
+    if (key === group) this._groupIndex.setHeader(group, header)
+    // Another diary's join may have admitted it (a root through a member's
+    // join) while the owner's scan skipped it as in flight: index it from
+    // the owner's scan now, never only when the owner admitted it.
+    const ownerEntry = this._served.get(owner)
+    if (ownerEntry && !ownerEntry.dropped && ownerEntry.gated) this._reconcileGroups(owner, ownerEntry)
+    this.log({ event: 'group-admitted', key, diary: owner, group, length: core.contiguousLength })
+    // Its denial was lifted: the root is served again and `bound` came back
+    // with it (set above), so the entry is no longer needed.
+    if (key === group && this._goneRoots.delete(key)) this._persist().catch(noop)
+  }
+
+  // Serving a group core: live download, fork watcher, the log quota on
+  // every append, no growth broadcast. `expected` and `headerOk` as for
+  // media (_serveMedia): a fresh admission is re-gated once block 0 is local.
+  _serveGroup (key, { diary, group }, core, { expected = null, headerOk = false, by = diary } = {}) {
+    const entry = {
+      core,
+      diary,
+      group,
+      by,
+      headerTimer: null,
+      download: null,
+      stopFork: noop,
+      stopGrow: noop,
+      stopQuota: noop,
+      dropped: false,
+      headerOk,
+      gating: false,
+      expected
+    }
+    const checkQuota = () => {
+      if (entry.dropped || this._closing) return
+      if (this._overQuota(core)) this._dropGroup(key, 'quota')
+    }
+    core.on('append', checkQuota)
+    entry.stopQuota = () => core.off('append', checkQuota)
+    entry.stopFork = watchFork(core, (reason) => this._dropGroup(key, reason))
+    entry.download = core.download({ start: 0, end: -1 })
+    entry.stopGrow = watchContiguous(core, () => this._gateGroup(key, entry))
+    this._groupServed.set(key, entry)
+    checkQuota()
+    if (entry.dropped) return
+    // A peer that served block 0 to the quarantine and then withholds it
+    // from the main store must not keep the group's answers incomplete
+    // forever: past the gate timeout the core goes and its join backs off.
+    if (!entry.headerOk) {
+      entry.headerTimer = setTimeout(() => {
+        entry.headerTimer = null
+        if (entry.dropped || entry.headerOk || entry.gating || this._closing || this._groupServed.get(key) !== entry) return
+        this._dropGroup(key, 'timeout')
+        this._groupBackoffHit(entry.by, key, 'timeout', group)
+      }, this.groupHeaderTimeoutMs)
+      if (entry.headerTimer.unref) entry.headerTimer.unref()
+    }
+    if (!entry.headerOk && core.contiguousLength >= 1) this._gateGroup(key, entry)
+  }
+
+  // Local re-gate of a served group core, the twin of _gateMedia: block 0
+  // in the main store must be byte-identical to the quarantined one (else
+  // 'fork') and a header naming the same keys.
+  _gateGroup (key, entry) {
+    if (entry.dropped || entry.headerOk || entry.gating || this._closing) return
+    if (entry.core.contiguousLength < 1) return
+    entry.gating = true
+    const check = async () => {
+      let raw
+      try {
+        raw = await entry.core.get(0, { wait: false, raw: true })
+      } catch {
+        return 'header-invalid'
+      }
+      if (raw === null) return 'header-invalid'
+      if (entry.expected !== null && !b4a.equals(raw, entry.expected)) return 'fork'
+      return groupVerdict(raw, key, entry.group, entry.diary)
+    }
+    check().then(async (reason) => {
+      if (this.regateHook) await this.regateHook(key, reason)
+      entry.gating = false
+      if (entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+      if (reason !== null) return this._dropGroup(key, reason)
+      entry.headerOk = true
+      entry.expected = null
+      clearTimeout(entry.headerTimer)
+      entry.headerTimer = null
+      this._deleteGroupBackoff(entry.by + ':' + key)
+    }, () => {
+      entry.gating = false
+      if (!entry.dropped && !this._closing) this._dropGroup(key, 'header-invalid')
+    })
+  }
+
+  // Runtime drop of a group core (R6.1 order, as _dropMedia).
+  _dropGroup (key, reason) {
+    const entry = this._groupServed.get(key)
+    if (!entry || entry.dropped || this._closing) return
+    entry.dropped = true
+    this._groupServed.delete(key)
+    // A core judged before its header verified (fork, quota, blocked) ends
+    // its join's wait, as a refusal during admission does; only the header
+    // deadline grows it (the timer's _groupBackoffHit reads it).
+    if (!entry.headerOk && reason !== 'timeout') this._deleteGroupBackoff(entry.by + ':' + key)
+    this._pruneGroupHeader(entry.group)
+    const binding = this._groups.get(key)
+    this._groups.delete(key)
+    this._groupsDropping.set(key, binding)
+    this._stopEntry(entry)
+    this._groupIndex.removeWriter(key)
+    if (key === entry.group) this._groupIndex.setHeader(key, null)
+    if (this.swarm) {
+      try {
+        this.swarm.leave(entry.core.discoveryKey).catch(noop)
+      } catch {}
+    }
+    this.log({ event: 'group-rejected', key, diary: entry.diary, group: entry.group, reason })
+    const inflight = this._inflight.get(key) || null
+    const drop = (async () => {
+      if (inflight) await inflight.catch(noop)
+      try {
+        await this._purge(key)
+      } catch {
+        if (!this._closing) this._fatal(key)
+        return
+      }
+      this._groupsDropping.delete(key)
+      await this._persist()
+    })()
+    const tracked = drop.catch(noop).then(() => {
+      if (this._drops.get(key) === tracked) this._drops.delete(key)
+    })
+    this._drops.set(key, tracked)
+  }
+
+  // Whether a core of G is served or being admitted.
+  _groupHasCore (group) {
+    for (const e of this._groupServed.values()) if (e.group === group && !e.dropped) return true
+    for (const g of this._groupReserved.values()) if (g === group) return true
+    return false
+  }
+
+  // Keeps the header fields of root G (verified through the quarantine or
+  // in the main store). Bounded: a record lives only while a core of G is
+  // served or being admitted, so stale ones go first; past the bound the
+  // record is not kept and G's pages stay incomplete (indexGroup).
+  _keepGroupHeader (group, header) {
+    if (this._isBlocked(group) || header === null) return
+    const rec = headerRecord(header)
+    const prev = this._groupHeaders.get(group)
+    if (prev !== undefined && prev.kind === rec.kind && prev.visibility === rec.visibility && prev.join === rec.join && prev.name === rec.name) return
+    const max = this.maxGroupCores + this.maxGroupInflight
+    if (prev === undefined && this._groupHeaders.size >= max) {
+      for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
+      if (this._groupHeaders.size >= max) return
+    }
+    this._groupHeaders.set(group, rec)
+    this._persist().catch(noop)
+  }
+
+  // A blocked group, or one with no core left here, loses its record.
+  _pruneGroupHeader (group) {
+    if (!this._groupHeaders.has(group)) return
+    if (!this._isBlocked(group) && this._groupHasCore(group)) return
+    this._groupHeaders.delete(group)
+    this._persist().catch(noop)
+  }
+
+  // A root stays while at least one served, unblocked diary still keeps the
+  // group: its creator if it bound the root (_rootBound), a diary with a
+  // bound writer in it, or a live join.
+  _groupSupported (group) {
+    const live = (d) => {
+      const e = this._served.get(d)
+      return !!e && !e.dropped && !this._isBlocked(d)
+    }
+    for (const [k, b] of this._groups) {
+      if (b === null || b.group !== group) continue
+      if (k === group ? this._rootBound(group, b.diary) : live(b.diary)) return true
+    }
+    for (const [d, e] of this._served) {
+      if (!live(d)) continue
+      for (const j of e.groupLive.values()) if (j.group === group) return true
+    }
+    return false
+  }
+
+  // Blocking a group's creator, or revoking the issuer of its certificate,
+  // removes the group root at seeders when that diary bound the root (the
+  // `bound` bit recorded while it was served): the root's posts and
+  // authority records are then the creator's content. A root whose header
+  // only names the diary has no creator and stays while members keep it.
+  // The purged root stays refused, across restarts, while the creator stays
+  // gone (_goneRoots). Members' writers stay under the usual rules.
+  _dropUnsupportedRoots () {
+    for (const [k, g] of [...this._groupServed]) {
+      if (k !== g.group) continue
+      const gone = this._rootGone(k)
+      if (gone === null) continue
+      this._noteGoneRoot(k, g.diary, gone)
+      this._dropGroup(k, gone)
+    }
+    if (this._groupRootStartup !== null) return
+    for (const [k, g] of [...this._groupServed]) {
+      if (k === g.group && !this._groupSupported(k)) this._dropGroup(k, 'unbound')
+    }
+  }
+
   // Blocks start..start+blocks-1 of media core K bound to diary D, for the
   // HTTP route: null unless the binding exists, D is admitted and not
   // blocked, start >= 1, the range is within K's signed length and EVERY
@@ -1783,6 +3216,52 @@ class Seeder {
   // raw bytes this seeder's own Hypercore verified on arrival, not a
   // portable proof; the caller trusts this process plus its authenticated
   // loopback for authenticity and re-validates only the record's shape.
+  // The group-post at block <seq> of served group core <writer> (a member's
+  // writer or the root), for the account service's check of a group report
+  // (seed-ws.js, /moderation-group-post/): { group, diary, seq, texto,
+  // resposta } read from local blocks only, block 0 re-checked as the header
+  // the binding names and block <seq> validated as a group-post. null for
+  // anything else: not served, header not checked yet, the group or the
+  // diary blocked, a block not local, another record type, or a change
+  // while it read. The text is the author's signed record, not a quote.
+  async groupPostBlock (writerHex, seq) {
+    try {
+      if (typeof writerHex !== 'string' || !HEX64.test(writerHex)) return null
+      if (!Number.isSafeInteger(seq) || seq < 1) return null
+      const entry = this._groupServed.get(writerHex)
+      const gen = this._moderationGen
+      const live = () => !this._closing && this._groupServed.get(writerHex) === entry &&
+        entry.headerOk && !entry.dropped && !this._isBlocked(entry.group) &&
+        !this._isBlocked(entry.diary) && this._moderationGen === gen
+      if (!entry || !live()) return null
+      const core = entry.core
+      if (core.fork !== 0 || seq >= core.length) return null
+      const read = async (i) => {
+        if (!(await core.has(i)) || !live()) return null
+        const raw = await core.get(i, { wait: false, raw: true })
+        return raw && live() ? raw : null
+      }
+      const block0 = await read(0)
+      if (block0 === null || groupVerdict(block0, writerHex, entry.group, entry.diary) !== null) return null
+      const raw = await read(seq)
+      if (raw === null) return null
+      const record = decodeBlock(raw)
+      if (record === null || record.type !== 'group-post') return null
+      if (validateGroupRecord(record, seq, { root: writerHex === entry.group }) !== null) return null
+      if (!live() || core.fork !== 0) return null
+      const reply = record.replyTo
+      return {
+        group: entry.group,
+        diary: entry.diary,
+        seq,
+        texto: record.text,
+        resposta: reply ? { writer: reply.writer, seq: reply.seq } : null
+      }
+    } catch {
+      return null
+    }
+  }
+
   async postBlock (diaryHex, seq) {
     try {
       if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
@@ -2174,6 +3653,236 @@ class Seeder {
     }
   }
 
+  // ---- Group index answers (header comment) ----------------------------
+
+  // A group core an answer may name: served, its header gated, not dropped.
+  _groupCoreVisible (key) {
+    const e = this._groupServed.get(key)
+    return !!e && e.headerOk && !e.dropped
+  }
+
+  // Whether a diary's join scan reached its signed length. The scan stops
+  // at contiguousLength while the signed length advances before the blocks
+  // arrive, and a join beyond the local prefix is not seen yet (the notices
+  // fold commits only at core.length for the same reason).
+  _groupScanBehind (entry) {
+    return !entry.gated || entry.scanQueued || entry.scanned < entry.core.contiguousLength || entry.scanned < entry.core.length
+  }
+
+  // Whether a diary's scan holds answers about OTHER diaries' groups
+  // incomplete. A member can sign a length and withhold the blocks forever,
+  // or release them one at a time just faster than any progress-based
+  // bound, or close and reopen the gap over and over, and its scan can only
+  // hide its own joins (joins live in the joining diary). So each diary has
+  // a budget of groupScanStallMs of time spent caught up with its local
+  // prefix while the signed length is ahead (a gap open), summed over every
+  // gap within GROUP_STALL_WINDOW_MS: blocks trickling in and gaps closing
+  // never refill it. Once spent, the diary stops counting until the window
+  // passes. Counting only for groups the diary already joined is unsafe: a
+  // join hidden in the gap can name any group.
+  // The budget is kept per diary key, not on the served entry, so a diary
+  // cannot refill it by getting dropped (a fork) and announcing again.
+  // Monotonic clock: a wall-clock step must not end the wait early.
+  _groupScanCounts (key, entry) {
+    const now = clock.now()
+    let s = this._groupStalls.get(key) || null
+    if (s !== null && s.out !== null) {
+      if (now - s.out < GROUP_STALL_WINDOW_MS) return false
+      this._groupStalls.delete(key)
+      s = null
+    }
+    if (s !== null && now - s.from >= GROUP_STALL_WINDOW_MS) {
+      s.spent = 0
+      s.from = now
+      if (s.since !== null) s.since = now
+    }
+    const behind = this._groupScanBehind(entry)
+    const contiguous = entry.core.contiguousLength
+    // A replica still waiting for its block 0 (a re-gate) spends the budget
+    // too: its block 0 can be withheld, and the scan cannot start without it.
+    const stalled = behind && (!entry.gated || (contiguous < entry.core.length && !entry.scanQueued && entry.scanned >= contiguous))
+    if (s !== null && s.since !== null && !stalled) {
+      s.spent += now - s.since
+      s.since = null
+    }
+    if (!behind) return false
+    if (!stalled) return true
+    if (s === null) s = this._newGroupStall(key, now)
+    else if (s.since === null) s.since = now
+    if (s.spent + now - s.since < this.groupScanStallMs) return true
+    s.out = now
+    s.since = null
+    return false
+  }
+
+  // Budgets of keys no longer stalling within the window go first; past
+  // 2 * maxServed entries the oldest of a diary not served goes, so keys
+  // announced and dropped in a loop cannot grow the map, and a served
+  // diary's budget is never the one evicted.
+  _newGroupStall (key, now) {
+    const max = 2 * this.maxServed
+    if (this._groupStalls.size >= max) {
+      for (const [k, s] of [...this._groupStalls]) {
+        const done = s.out !== null ? now - s.out >= GROUP_STALL_WINDOW_MS : s.since === null && now - s.from >= GROUP_STALL_WINDOW_MS
+        if (done) this._groupStalls.delete(k)
+      }
+    }
+    if (this._groupStalls.size >= max) {
+      for (const k of this._groupStalls.keys()) {
+        if (this._served.has(k)) continue
+        this._groupStalls.delete(k)
+        break
+      }
+    }
+    const s = { from: now, since: now, spent: 0, out: null }
+    this._groupStalls.set(key, s)
+    return s
+  }
+
+  // A served group core whose local header check still holds answers back:
+  // once its header deadline expired on a retry past the first wait
+  // (_groupJoinStale), a core whose block 0 is withheld no longer does.
+  _groupHeaderPending (key, e) {
+    return !e.dropped && !e.headerOk && !this._groupJoinStale(e.by, key)
+  }
+
+  // Group core K is being admitted or still waits for its local header
+  // check (answers hide it until then).
+  _groupCorePending (key) {
+    if (this._groupReserved.has(key)) return true
+    const e = this._groupServed.get(key)
+    return !!e && !e.dropped && !e.headerOk
+  }
+
+  // Any group answer may still miss something: a diary scan is behind, a
+  // group core is being admitted or waits for an admission slot, or a served
+  // one awaits its header check.
+  _groupsUnsettled () {
+    if (!this._ready || this._closing) return true
+    for (const k of this._groupReserved.keys()) if (this._groupReservedCounts(k)) return true
+    if (this._groupDeferredFor(null) || this._groupFullFor(null)) return true
+    for (const [k, e] of this._groupServed) if (this._groupHeaderPending(k, e)) return true
+    for (const [key, entry] of this._served) {
+      if (!entry.dropped && this._groupScanCounts(key, entry)) return true
+    }
+    return false
+  }
+
+  // Pages of a group stay incomplete while any diary scan is behind
+  // (_groupScanCounts), a core
+  // of that group is being admitted or waits for an admission slot
+  // (_groupDeferredFor), or a served core of it still waits for
+  // its local header check (pages hide it until then).
+  _groupIncomplete (group) {
+    if (!this._ready || this._closing) return true
+    for (const [k, g] of this._groupReserved) if (g === group && this._groupReservedCounts(k)) return true
+    if (this._groupDeferredFor(group) || this._groupFullFor(group)) return true
+    for (const [k, e] of this._groupServed) {
+      if (e.group === group && this._groupHeaderPending(k, e)) return true
+    }
+    for (const [key, entry] of this._served) {
+      if (entry.dropped) continue
+      if (this._groupScanCounts(key, entry)) return true
+    }
+    return false
+  }
+
+  _groupPage (group, after, limit) {
+    if (typeof group !== 'string' || !HEX64.test(group) || this._isBlocked(group)) return null
+    return this._groupIndex.page(group, after, limit, {
+      visible: (diary, key) => (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key),
+      lengthOf: (key) => this._groupServed.get(key).core.contiguousLength,
+      // A writer's withheld block must not hold its group's pages
+      // incomplete forever: the signed length is reported, never awaited.
+      signedOf: (key) => this._groupServed.get(key).core.length
+    })
+  }
+
+  // The 'varanda/groups/1' answer (groups-net.js page): writers of a group
+  // whose diary is visible and whose core is served, in key order. A
+  // blocked root answers an empty, final page.
+  groupWriters ({ group, after = null, limit } = {}) {
+    try {
+      if (this._isBlocked(group)) return { items: [], next: null, incomplete: false }
+      const page = this._groupPage(group, after, limit)
+      if (page === null) return { items: [], next: null, incomplete: true }
+      const items = page.items.map(({ key, diary, length, signed, seq }) => ({ key, diary, length, signed, seq }))
+      return { items, next: page.next, incomplete: this._groupIncomplete(group) }
+    } catch {
+      return { items: [], next: null, incomplete: true }
+    }
+  }
+
+  // GET /index/group/<G>[/<after>]: the root header fields the seeder holds
+  // (`name` null for a private root), `rootServed` whether the root core
+  // itself is served, and a page of writers, each with `left`; null for a
+  // malformed or blocked group. Hints only. A root this seeder verified
+  // keeps its header fields while writers of G stay served after the root
+  // was purged or refused (_groupHeaders): the account service needs `kind`
+  // to confirm a report against the group. With no header at all while a
+  // writer of G is served the page is never complete.
+  indexGroup (group, after = null) {
+    try {
+      const page = this._groupPage(group, after, 64)
+      if (page === null) return null
+      const rootServed = this._groupCoreVisible(group)
+      let header = rootServed ? this._groupIndex.header(group) : null
+      // No creator unless the header's diary bound the root (_rootBound).
+      if (header !== null && !this._rootBound(group, header.diary)) header.diary = null
+      let writerServed = false
+      for (const [k, e] of this._groupServed) {
+        if (k !== group && e.group === group && this._groupCoreVisible(k)) {
+          writerServed = true
+          break
+        }
+      }
+      if (header === null && writerServed && this._groupHeaders.has(group)) header = { ...this._groupHeaders.get(group), diary: null }
+      const incomplete = this._groupIncomplete(group) || (header === null && writerServed)
+      return { header, rootServed, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/groups/<D>: the groups a visible diary writes to, one row per
+  // group naming its newest live writer (`left` once every join of D in
+  // that group is off), at most MAX_GROUPS_PER_DIARY rows; null when not
+  // visible.
+  indexGroups (diaryHex) {
+    try {
+      if (!this._indexVisible(diaryHex)) return null
+      const groups = this._groupIndex.groupsOf(diaryHex, (group, writer) => !this._isBlocked(group) && this._groupCoreVisible(writer))
+      const entry = this._served.get(diaryHex)
+      let complete = this._ready && !this._closing && !this._groupScanBehind(entry)
+      // A live join whose writer is in admission or awaits its header check
+      // is left out of `groups` above: not complete yet.
+      for (const writer of entry.groupLive.keys()) {
+        if (this._groupCorePending(writer) && !this._groupJoinStale(diaryHex, writer)) complete = false
+      }
+      if (this._groupDeferred.has(diaryHex) && this._groupDiaryWaiting(diaryHex, null)) complete = false
+      if (this._groupFullFor(null, diaryHex)) complete = false
+      return { groups, indexing: !this._ready, complete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/group-search/<segment>: public groups whose header name
+  // matches, each with that name as the root header wrote it (peer text,
+  // rendered by the client through displayText), served roots only, never a
+  // blocked one; null for a malformed segment. Nothing about the query is
+  // logged.
+  indexGroupSearch (segment) {
+    try {
+      const visible = (group) => !this._isBlocked(group) && this._groupCoreVisible(group)
+      const page = this._groupIndex.search(segment, visible)
+      if (page === null) return null
+      return { groups: page.groups, more: page.more, indexing: !this._ready, complete: !this._groupsUnsettled() }
+    } catch {
+      return null
+    }
+  }
+
   _fatal (key) {
     this.fatal = true
     this.log({ event: 'fatal', key, reason: 'purge-failed' })
@@ -2185,20 +3894,59 @@ class Seeder {
     return storedCore(this.store, key)
   }
 
-  async _purge (key) {
-    if (!this.purgeHook) return purgeReplica(this.store, key)
-    const core = this.store.get({ key: b4a.from(key, 'hex') })
-    await core.ready()
-    try {
-      await this.purgeHook(core)
-    } catch (err) {
-      await core.close().catch(noop)
-      throw err
+  // A peer's replication request opens a stored core (corestore
+  // _attachMaybe, private API of the exactly pinned corestore; a test fails
+  // if it disappears). That open waits for a purge's close but not for its
+  // storage delete, and a delete committing mid-open throws inside the
+  // protocol stream, outside any handler: the process would exit. So a
+  // request for a key under purge is not attached (the peer asking after
+  // the delete finds no core, as before), and a purge first lets the opens
+  // already in flight for its key settle.
+  _guardReplication () {
+    const store = this.store
+    const attach = store._attachMaybe
+    if (typeof attach !== 'function') throw new Error('corestore sem _attachMaybe: proteção da limpeza indisponível')
+    store._attachMaybe = (muxer, dk) => {
+      const id = b4a.toString(dk, 'hex')
+      if (this._purgingKeys.has(id)) return Promise.resolve()
+      const p = attach.call(store, muxer, dk)
+      let inflight = this._attaching.get(id)
+      if (!inflight) this._attaching.set(id, inflight = new Set())
+      inflight.add(p)
+      const settled = () => {
+        inflight.delete(p)
+        if (inflight.size === 0 && this._attaching.get(id) === inflight) this._attaching.delete(id)
+      }
+      p.then(settled, settled)
+      return p
     }
   }
 
-  // ONE serialized writer: admitted.json = admitted ∪ dropping, and
-  // media = media ∪ mediaDropping (same file, same write).
+  async _purge (key) {
+    const id = b4a.toString(crypto.discoveryKey(b4a.from(key, 'hex')), 'hex')
+    this._purgingKeys.set(id, (this._purgingKeys.get(id) || 0) + 1)
+    try {
+      const inflight = this._attaching.get(id)
+      if (inflight) await Promise.allSettled([...inflight])
+      if (!this.purgeHook) return await purgeReplica(this.store, key)
+      const core = this.store.get({ key: b4a.from(key, 'hex') })
+      await core.ready()
+      try {
+        await this.purgeHook(core)
+      } catch (err) {
+        await core.close().catch(noop)
+        throw err
+      }
+    } finally {
+      const n = this._purgingKeys.get(id) - 1
+      if (n === 0) this._purgingKeys.delete(id)
+      else this._purgingKeys.set(id, n)
+    }
+  }
+
+  // ONE serialized writer: admitted.json = admitted ∪ dropping, media =
+  // media ∪ mediaDropping and groups = groups ∪ groupsDropping (same file,
+  // same write).
   _persist () {
     const write = () => {
       const admitted = {}
@@ -2207,7 +3955,10 @@ class Seeder {
       const media = {}
       for (const [key, binding] of this._media) media[key] = binding
       for (const [key, binding] of this._mediaDropping) media[key] = binding
-      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), { v: 1, admitted, media })
+      const groups = {}
+      for (const [key, binding] of this._groups) groups[key] = binding
+      for (const [key, binding] of this._groupsDropping) groups[key] = binding
+      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), admittedFile(admitted, media, groups, { revokedCreators: this._revokedCreators, goneRoots: this._goneRoots, groupHeaders: this._groupHeaders }))
     }
     const next = this._writeQueue.then(write, write)
     this._writeQueue = next.catch(noop)
@@ -2251,6 +4002,18 @@ class Seeder {
     for (const key of [...this._served.keys()]) {
       if (this._isBlocked(key)) this._drop(key, 'blocked')
     }
+    // The group map too: this loop alone walks only diaries. A root key in
+    // the snapshot takes the root and every writer of its group.
+    for (const [k, g] of [...this._groupServed]) {
+      if (this._isBlocked(g.group)) this._dropGroup(k, 'group-blocked')
+      else if (k !== g.group && this._isBlocked(g.diary)) this._dropGroup(k, 'blocked')
+    }
+    for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
+    this._dropUnsupportedRoots()
+    // Joins held while the list was lost may be admitted now, and so may
+    // roots refused for naming a diary the new list no longer blocks.
+    for (const [id, b] of [...this._groupBackoff]) if (b.reason === 'blocked') this._deleteGroupBackoff(id)
+    this._retryGroups(null)
     if (result.revokedAdded.size === 0) return
     // Newly revoked issuers: re-run the local gate on every served replica
     // whose block 0 has been gated. An ungated one is either waiting for
@@ -2264,10 +4027,11 @@ class Seeder {
       // afresh on its next announce.
       // Held out of search until every pending verdict cleared it (indexSearch).
       entry.searchHold = (entry.searchHold || 0) + 1
-      localVerdict(entry.core, key, this.association, this._certOpts()).then((reason) => {
+      const judged = {}
+      localVerdict(entry.core, key, this.association, this._certOpts(), judged).then((reason) => {
         if (reason === null) entry.searchHold--
         if (reason === null || entry.dropped || this._closing) return
-        if (this._served.get(key) === entry) this._drop(key, reason)
+        if (this._served.get(key) === entry) this._drop(key, reason, judged.cert)
       })
     }
   }
@@ -2562,6 +4326,21 @@ class Seeder {
     }
     this._noticeHandles.add(notices)
     socket.once('close', () => this._noticeHandles.delete(notices))
+    // Groups channel: writer pages from the group index, before the hello
+    // like the notices channel (groups-net.js).
+    let groups = null
+    try {
+      groups = attachGroups(socket, {
+        role: 'seeder',
+        page: (q) => this.groupWriters(q),
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._groupHandles.add(groups)
+    socket.once('close', () => this._groupHandles.delete(groups))
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
@@ -2586,10 +4365,12 @@ class Seeder {
     // A new socket may be the one that can supply a wanted media core's
     // block 0: retry the pending bindings (bounded: one attempt per trigger).
     this._retryMedia(peer)
+    this._retryGroups(peer)
     // hello resolves null when the peer leaves first: never block on it.
     Promise.resolve(peer.hello).then((hello) => {
       if (!hello || this._closing || !this._peers.has(peer)) return
       this.log({ event: 'peer', role: peer.remoteRole, peerKey: peer.peerKey })
+      this._retryGroupTimeouts()
     }, noop)
   }
 
@@ -2646,6 +4427,9 @@ class Seeder {
       this._notices = createNoticeIndex() // nothing of the index outlives close
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
+      for (const entry of this._groupServed.values()) this._stopEntry(entry)
+      this._groupServed.clear()
+      this._groupIndex.clear()
       for (const socket of [...this._external]) {
         try { socket.destroy() } catch {}
       }
@@ -2672,6 +4456,10 @@ class Seeder {
         try { handle.close() } catch {}
       }
       this._noticeHandles.clear()
+      for (const handle of this._groupHandles) {
+        try { handle.close() } catch {}
+      }
+      this._groupHandles.clear()
       this._resolveClosed()
     })()
     return this._closing

@@ -102,6 +102,11 @@ const ERROR_STATUS = Object.freeze({
   'limite-denuncias': 429,
   limite: 503,
   defasado: 409,
+  // A group block whose key the seeder did not confirm as a group root.
+  'grupo-nao-confirmado': 409,
+  // A block of a key without a linked account that the seeder did not
+  // confirm as a served diary (it could be a group root).
+  'alvo-nao-confirmado': 409,
   'ja-revertido': 409
 })
 
@@ -521,7 +526,7 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms })
+// terms, groupCheck })
 // -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
@@ -533,8 +538,10 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // (the AI report triage worker of ./ai/worker.js, or null when it is off),
 // `statsEmails` (lowercase e-mails, a subset of `modEmails`, allowed to see
 // the usage statistics), `usage` (a createUsageStats of ./usage-stats.js,
-// or null when the stats tab is off) and `panelDir` (tests only) are passed
-// to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
+// or null when the stats tab is off), `groupCheck` (a createGroupCheck of
+// ./group-check.js that confirms a group key at the seeder before a group
+// block, or null: group blocks are then refused) and `panelDir` (tests only)
+// are passed to ./mod-routes.js. `terms` is an openTermsStore (./terms-store.js), or
 // null: the terms routes then answer 503 'indisponivel'.
 function createAccountServer ({
   association,
@@ -550,6 +557,7 @@ function createAccountServer ({
   triage = null,
   statsEmails = [],
   usage = null,
+  groupCheck = null,
   panelDir,
   terms = null,
   maxConnections = MAX_SOCKETS,
@@ -590,6 +598,7 @@ function createAccountServer ({
     triage,
     statsEmails,
     usage,
+    groupCheck,
     panelDir,
     log,
     now,
