@@ -26,7 +26,7 @@ import { HELP } from '../help'
 import {
   PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  skippedText, withoutAuthor
+  recordFollow, skippedText, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
 import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
@@ -99,11 +99,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   const markFollowed = useCallback((author) => {
     followedHereRef.current.set(author.toLowerCase(), ++followStampRef.current)
   }, [])
-  const unfollowed = useCallback((list) => {
-    const map = followedHereRef.current
-    if (map.size === 0) return list
-    return list.filter((item) => typeof item.author !== 'string' || !map.has(item.author.toLowerCase()))
-  }, [])
+  const unfollowed = useCallback((list) => withoutFollowed(list, followedHereRef.current), [])
 
   // The node serves one peek at a time ('espiadinha já em andamento'): a
   // refresh, a follow or a reselect while a page is loading waits for the
@@ -284,13 +280,16 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // without a reload (the pages and the scroll stay); followedHereRef keeps a
   // page in flight from bringing them back. An uncertain failure (timeout) is
   // reported, never retried automatically.
+  const dropFollowed = (author) => {
+    commit({ items: recordFollow(followedHereRef.current, ++followStampRef.current, stateRef.current.items, author) })
+  }
+
   const follow = async (author, name, username) => {
     if (stateRef.current.following.has(author)) return
     commit({ following: new Set(stateRef.current.following).add(author) })
     try {
       await request('follow.add', { key: author })
-      markFollowed(author)
-      commit({ items: withoutAuthor(stateRef.current.items, author) })
+      dropFollowed(author)
       const named = name || username ? ' ' + displayText(whoOf({ name, username }).title) : ''
       if (typeof onToast === 'function') onToast('seguindo' + named)
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
@@ -489,7 +488,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         onOpenMention={onOpenMention}
         onOpenEngagers={onOpenEngagers}
         onFollowsChanged={onFollowsChanged}
-        onFollowed={(author) => commit({ items: withoutAuthor(stateRef.current.items, author) })}
+        onFollowed={dropFollowed}
         onSocialChanged={() => { socialDirtyRef.current = true }}
         onToast={onToast}
       />

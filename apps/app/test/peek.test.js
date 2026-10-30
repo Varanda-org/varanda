@@ -53,6 +53,19 @@ test('withoutAuthor drops every row of one author and keeps the rest in order', 
   t.is(items.length, 4, 'the input is not changed')
 })
 
+test('a follow drops the author and a page read before it cannot bring the author back', async (t) => {
+  const { recordFollow, withoutFollowed } = await load()
+  const followed = new Map()
+  const items = Object.freeze([item('a', 1), item('B', 1), item('c', 1)])
+  t.alike(recordFollow(followed, 1, items, 'B'), [item('a', 1), item('c', 1)])
+  t.is(followed.get('b'), 1, 'the author is recorded in lowercase with its stamp')
+  const late = Object.freeze([item('b', 2), item('c', 2)])
+  t.alike(withoutFollowed(late, followed), [item('c', 2)], 'a late page loses the author')
+  t.alike(withoutFollowed(late, new Map()), [...late], 'nothing is dropped without a follow')
+  recordFollow(followed, 2, items, 'b')
+  t.is(followed.get('b'), 2, 'a repeated follow takes a new stamp')
+})
+
 test('the notice is web-only first, then offline, else none', async (t) => {
   const { peekNotice } = await load()
   t.is(peekNotice({ supported: true, hosted: true, online: true, loadedAt: 1 }), null)
