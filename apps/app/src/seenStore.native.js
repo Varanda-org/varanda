@@ -33,7 +33,8 @@ function replaceFile (text) {
   if (!file().exists && file('.bak').exists) {
     try { file('.bak').move(file()) } catch {}
   }
-  removeQuietly(file('.bak'))
+  // A .bak that could not be put back is still the only good copy: keep it.
+  if (file().exists) removeQuietly(file('.bak'))
   const hadCurrent = file().exists
   try {
     if (hadCurrent) file().move(file('.bak'))
