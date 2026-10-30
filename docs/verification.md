@@ -3036,3 +3036,44 @@ Pré-requisitos: Android com `assetlinks.json` publicado no domínio da instala�
 - Criar a passkey pelo app ainda envia `excludeCredentials: []`: a web guarda em memória os ids das passkeys inutilizáveis e os exclui, o app não, então uma passkey rejeitada pode ser oferecida de novo.
 - O item no chaveiro dá a identidade a quem tiver o aparelho desbloqueado (ou código rodando dentro do app) até Sair ou 30 dias sem uso. Não vai para backups nem para o iCloud Keychain.
 - No iOS, se a plataforma não aplicar à entrada da PRF o mesmo prefixo "WebAuthn PRF" que o navegador aplica, a chave sai diferente da web: o primeiro passo da verificação humana existe para pegar isso antes de publicar.
+
+## 52. Rolagem infinita em todas as listas (PR fix/infinite-scroll, 2026-10-30)
+
+As seções 1 a 47 não mudam.
+
+### O que mudou
+
+- `apps/app/src/ui/RefreshableList.js` não tem mais o "mostrar mais" no estado normal. Uma só função confere o fim da lista (`endStep` em `apps/app/src/paging.js`) ao chegar ao fim, ao rolar, ao mudar o tamanho do conteúdo, ao medir a lista, quando `atEnd`, o carregador ou o erro mudam e quando termina um carregamento ou uma atualização (`spanEnd`). Uma lista mais curta que a tela (que não rola) e uma lista vazia com mais páginas carregam sozinhas.
+- Um pedido de fim que chega enquanto uma página carrega não é mais descartado quando o carregamento termina com os mesmos dados (por exemplo, a leitura silenciosa de A Rua): a lista confere de novo.
+- Uma página pedida pela lista que não mostra nada novo conta como seca. Depois de três seguidas (`AUTO_DRY_MAX`), a lista para e mostra "Nada novo nas últimas páginas." com o botão "carregar mais" (papel de botão, rótulo "carregar mais"), que carrega uma página e recomeça a contagem. Sair da região do fim zera a contagem e a pausa. Uma página que falha continua esperando a pessoa ("tentar de novo" ou sair do fim e voltar).
+- A Rua: a leitura silenciosa durante a sincronização usa `quietNewestPlan`. Uma página cheia que cortaria linhas mostradas não troca a lista e não tira mais a lista do fim (antes, `atEnd: false` fazia a leitura `before` voltar vazia e repetir em laço); ela marca `deep` e `probeOlder`, e a próxima leitura automática (`canSyncRead`, uma vez mesmo sem crescimento) é `loadOlder({ fromSync: true })`, que acrescenta no fim as linhas mais antigas que tiverem chegado. Uma lista cheia ou já paginada sempre lê abaixo da última linha (`syncReadKind`); as mais novas chegam só pela pílula "ver novidades". O espaçamento `FEED_REARM_MS`, o recuo depois de leituras vazias e a regra de nenhuma leitura automática depois de um erro (seção 36) continuam.
+- Diário: sai o limite de cinco páginas sem publicação seguidas e o efeito que as carregava; a lista conduz esses carregamentos, e um Diário vazio com mais páginas também chega ao botão da pausa.
+- Avisos: "ocupado" ao carregar a próxima página vira o erro visível "Os avisos ainda estão carregando. Tente de novo.", com "tentar de novo", em vez de sumir sem nada na tela.
+- A Rua e Avisos só passam o carregador quando ele de fato começaria uma página (fora da primeira carga e com cursor).
+
+### Testes automatizados
+
+- `apps/app/test/paging.test.js`: `nearListEnd` (lista curta está no fim, lista sem medida não), `endStep` (carrega perto do fim; parado no fim, sem carregador e depois de falha; espera ocupado; pausa em três páginas secas), `spanEnd` (fim de um carregamento que a lista não pediu confere de novo; página própria sem nada novo conta seca e a lista pede outra; página com linhas zera; falha não confere), `quietNewestPlan`, `syncReadKind` e `canSyncRead` (a sonda roda uma vez sem crescimento, nunca com erro nem fora do fim). Os testes novos falham com o `paging.js` anterior (as funções não existem; vários também codificam a regra antiga e mostram que ela falha no cenário).
+
+Não há executor de testes de interface no navegador. O resultado de lint, dos testes e da demo fica com o orquestrador e não é repetido aqui.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
+
+- [ ] Lista curta (menos linhas que a tela) com mais páginas, na web e no nativo: a próxima página vem sem rolar e sem botão (não realizada ainda)
+- [ ] Rede cortada no meio da rolagem: a página falha, aparece "tentar de novo" e nada é repetido sozinho até a pessoa tocar ou sair do fim e voltar (não realizada ainda)
+- [ ] Diário cheio de curtidas e outros registros técnicos: a rolagem passa por eles e, depois de três páginas sem publicação, aparece "Nada novo nas últimas páginas." com "carregar mais" (não realizada ainda)
+- [ ] A Rua durante a sincronização: publicações mais antigas que chegam aparecem no fim ao rolar, e as mais novas só pela pílula "ver novidades", sem a lista pular (não realizada ainda)
+- [ ] Espiadinha: as páginas continuam até o fim das rodadas, sem botão (não realizada ainda)
+- [ ] Leitor de tela (TalkBack e VoiceOver): rolar pela lista carrega as próximas páginas, e o botão "carregar mais" da pausa é anunciado como botão (não realizada ainda)
+
+### Limites
+
+- O fim da lista é conferido pelas medidas da própria lista: se a plataforma não informar o tamanho do conteúdo depois de novas linhas, a próxima conferência espera a pessoa rolar.
+- Um carregador que não começa nada quando chamado (sem conexão, uma primeira carga em andamento) é esquecido depois de 1,5 s e a lista confere o fim de novo.
+- A pausa depois de três páginas secas vale por lista: numa lista curta, que não rola, só o botão "carregar mais" ou uma atualização retomam.
+- Em A Rua, uma lista cheia não relê a página mais nova sozinha: as publicações mais novas que chegam dependem da pílula "ver novidades".
+- Um "carregar mais" tocado quando o carregador não começa nada já tira a pausa, então a rolagem automática volta a contar três páginas secas.
+- No Diário, uma página mais antiga cancelada por uma releitura (voltar à aba) conta como página seca; três seguidas pausam a lista.
+- A lista em si (RefreshableList) não tem teste automatizado: só as regras puras de `paging.js` têm. As verificações acima cobrem o componente.

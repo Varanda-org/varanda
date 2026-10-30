@@ -50,7 +50,6 @@ import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useS
 import { DeletePrompt, useDelete } from './Conversa'
 
 const BAND = 96
-const MAX_EMPTY_PAGES = 5
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -148,6 +147,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
+  // A newest page is on its way: an older page started now would take its
+  // cursor from the rows that page is about to replace.
+  const newestBusy = useRef(false)
   const lastRefresh = useRef(refresh)
   const dataRef = useRef(null)
   dataRef.current = data
@@ -160,6 +162,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
+    newestBusy.current = true
     setLoadingMore(false)
     setOlderError('')
     olderBusy.current = false
@@ -188,13 +191,15 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(rows, info.publicKey), reset: true })
     } catch (err) {
       if (mine === seqRef.current) setLoadError(errorText(err))
+    } finally {
+      if (mine === seqRef.current) newestBusy.current = false
     }
   }, [request, ackFresh, resolve, invalidate, ingest])
 
   // Appends the next older page; never while one is loading.
   const loadOlder = useCallback(async () => {
     const current = dataRef.current
-    if (current === null || current.atEnd || olderBusy.current) return
+    if (current === null || current.atEnd || olderBusy.current || newestBusy.current) return
     olderBusy.current = true
     const mine = seqRef.current
     setLoadingMore(true)
@@ -234,34 +239,19 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     // A refresh bump while hidden is consumed on the next activation.
     const refreshProfile = refresh !== lastRefresh.current || ownGrewRef.current
     lastRefresh.current = refresh
-    emptyPages.current = 0
     loadNewest(refreshProfile)
   }, [active, loadNewest, refresh])
 
   const reload = () => pull.run(() => loadNewest(true))
 
-  // Pages with no publication (only technical records) while older pages
-  // remain: load the next one by itself, at most MAX_EMPTY_PAGES in a row
-  // per trigger; then the footer's 'mostrar mais' takes over.
-  const emptyPages = useRef(0)
+  // Pages with no publication (only technical records) are paged through by
+  // RefreshableList's infinite scroll, which pauses after a few dry pages.
   // Publications: posts (quotes included) and the reposts still on.
   const shownRows = useMemo(() => {
     if (data === null) return []
     const live = liveReposts(data.rows)
     return data.rows.filter((row) => isPostRow(row) || (isRepostRow(row) && live.has(row.seq)))
   }, [data])
-  const postCount = shownRows.length
-  const dataAtEnd = data === null ? true : data.atEnd
-  useEffect(() => {
-    if (data === null) return
-    if (postCount > 0 || dataAtEnd) {
-      emptyPages.current = 0
-      return
-    }
-    if (loadingMore || olderError || olderBusy.current || emptyPages.current >= MAX_EMPTY_PAGES) return
-    emptyPages.current += 1
-    loadOlder()
-  }, [data, postCount, dataAtEnd, loadingMore, olderError, loadOlder])
 
   const info = data === null ? null : data.info
   const posts = shownRows

@@ -229,7 +229,7 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
 
   // No automatic continuation over an empty list: there the 'mostrar mais'
   // of the empty view is the only way forward.
-  const canMore = ready && next !== null && !moreError && rows.length > 0
+  const canMore = hosted && online !== false && ready && next !== null && !moreError && rows.length > 0
 
   return (
     <View style={styles.flex}>
