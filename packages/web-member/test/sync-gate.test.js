@@ -274,7 +274,8 @@ test('a followed diary downloads block 0, then its newest window, then the rest 
 })
 
 // A seeder's copy of `from` holding only the blocks of `ranges` ([start,
-// end) pairs) at its full signed length; fill() fetches the rest.
+// end) pairs) at its full signed length; fill() fetches the rest, fetch(list)
+// more ranges.
 async function sparseCopy (t, from, ranges) {
   const core = new Hypercore(memoryStorage(), from.key, { valueEncoding: 'json' })
   await core.ready()
@@ -288,7 +289,7 @@ async function sparseCopy (t, from, ranges) {
     b.destroy()
   }
   await fetch(ranges)
-  return { core, fill: () => fetch([[0, from.length]]) }
+  return { core, fetch, fill: () => fetch([[0, from.length]]) }
 }
 
 async function until (fn, ms = 20000) {
@@ -396,6 +397,112 @@ test('a returning visit downloads the newest window first and never advertises a
   for (const { length, uploaded } of haves) {
     t.ok(range(100, length).every((i) => uploaded.has(i)), 'have ' + length + ' covers only stored blocks')
   }
+})
+
+test('the newest window of a followed diary is announced once, before its present length grows', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const served = await longDiary(t, assoc, 98)
+  const key = hex(served.key)
+  const partial = await sparseCopy(t, served, [[0, 100]])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [partial.core] })
+  const { web } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key })
+  const first = await onceRun(web)
+  t.is(first.result.downloaded[key], 100, 'fixture: the first visit holds 100 blocks')
+  for (let i = 98; i < 298; i++) {
+    await served.append(postRecord({ text: 'post ' + i, at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }))
+  }
+  // The seeder has the new tip but not the blocks between.
+  await partial.fetch([[268, 300]])
+  t.is(partial.core.length, 300, 'fixture: the seeder knows the signed length')
+
+  const from = web.events.length
+  await web.request('sync.start', {})
+  const lines = () => web.events.slice(from).filter((e) => e.name === 'sync.event').map((e) => e.data.line)
+  const newest = 'newest ' + key + ' 300'
+  t.ok(await until(() => lines().includes(newest)), 'the window is announced')
+  t.absent(lines().some((l) => l.startsWith('downloaded ' + key + ' ')), 'no growth while the history is missing')
+  const feed = await wholeFeed(web)
+  t.ok(postsOf(feed, key).includes('post 297'), 'the newest post is in the feed')
+
+  await partial.fill()
+  t.ok(await until(() => lines().includes('downloaded ' + key + ' 300')), 'the history arrived')
+  const all = lines()
+  t.ok(all.indexOf(newest) < all.findIndex((l) => l.startsWith('downloaded ' + key + ' ')), 'before the first growth')
+  t.is(all.filter((l) => l.startsWith('newest ')).length, 1, 'once')
+  await web.request('sync.stop')
+})
+
+// A follower that stored [0, 3) and the window [68, 100) of a 100-block
+// diary (its seeder never had the middle), then the author posts 40 more and
+// the seeder gets only [108, 140) of them for now (partial.fetch the rest).
+// The head never stalls into the body here (headStallMs).
+async function tailFixture (t, syncOptions = {}) {
+  const assoc = association()
+  const served = await longDiary(t, assoc, 98)
+  const key = hex(served.key)
+  const partial = await sparseCopy(t, served, [[0, 3], [68, 100]])
+  const uploads = new Set()
+  partial.core.on('upload', (index) => uploads.add(index))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [partial.core] })
+  const { web } = await webNode(t, assoc, seeder.url, { headStallMs: 60000, ...syncOptions })
+  await web.request('follow.add', { key })
+  await web.request('sync.start', {})
+  t.ok(await until(async () => postsOf(await wholeFeed(web), key).length === 33), 'fixture: the first visit shows the old window')
+  await web.request('sync.stop')
+  for (let i = 98; i < 138; i++) {
+    await served.append(postRecord({ text: 'post ' + i, at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }))
+  }
+  await partial.fetch([[108, 140]])
+  t.is(partial.core.length, 140, 'fixture: the seeder knows the signed length')
+  uploads.clear()
+  const lines = () => web.events.filter((e) => e.name === 'sync.event').map((e) => e.data.line)
+  return { web, key, uploads, partial, lines }
+}
+
+test('a follower coming back fetches the whole new tail, so the stored window reconnects', async (t) => {
+  t.timeout(90000)
+  await testnet(t)
+  const { web, key, uploads, partial, lines } = await tailFixture(t)
+  const newest = 'newest ' + key + ' 140'
+  await web.request('sync.start', {})
+  t.ok(await until(() => range(108, 140).every((i) => uploads.has(i))), 'the newest 32 blocks arrived')
+  // Without the tail rule the window [108, 140) is complete now.
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.absent(lines().includes(newest), 'the head still waits for [100, 108)')
+  await partial.fetch([[100, 108]])
+  // Blocks 68..139 hold posts 66..137; the middle never arrives.
+  const want = ['post 0', ...posts(66, 138)].sort()
+  let feed = null
+  const shown = await until(async () => {
+    feed = await wholeFeed(web)
+    return postsOf(feed, key).length === want.length
+  })
+  t.ok(shown, 'the old window is shown again with the tail')
+  t.alike(postsOf(feed, key).sort(), want)
+  t.ok(range(100, 108).every((i) => uploads.has(i)), 'every block of the tail was requested')
+  t.ok(lines().includes(newest), 'the window [100, 140) completed')
+  await web.request('sync.stop')
+})
+
+test('a tail longer than tailBlocks gets only the newest window', async (t) => {
+  t.timeout(90000)
+  await testnet(t)
+  const { web, key, uploads, lines } = await tailFixture(t, { tailBlocks: 16 })
+  await web.request('sync.start', {})
+  t.ok(await until(() => lines().includes('newest ' + key + ' 140')), 'the window [108, 140) completed without [100, 108)')
+  t.absent(range(100, 108).some((i) => uploads.has(i)), 'fixture: the seeder had none of [100, 108)')
+  // Blocks 108..139 hold posts 106..137: the run does not reach the old window.
+  const want = ['post 0', ...posts(106, 138)].sort()
+  let feed = null
+  t.ok(await until(async () => {
+    feed = await wholeFeed(web)
+    return postsOf(feed, key).length === want.length
+  }), 'the newest window is shown')
+  t.alike(postsOf(feed, key).sort(), want, 'the old window is not, until the history arrives')
+  await web.request('sync.stop')
 })
 
 test('a followed diary whose seeder withholds the newest blocks still downloads its history', async (t) => {

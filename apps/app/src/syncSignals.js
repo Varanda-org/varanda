@@ -13,6 +13,7 @@ export const EMPTY_SIGNALS = Object.freeze({
   reconnecting: false,
   unverified: false,
   lengths: {},
+  newest: {},
   fresh: {},
   ownLength: null,
   lastDownloadAt: null,
@@ -91,6 +92,19 @@ export function foldSignal (state, name, data, now) {
     }
     next.lengths = { ...state.lengths, [key]: Math.max(known ?? n, n) }
   }
+  // The newest posts of a followed diary arrived. Its own map: `lengths` is
+  // the present length, which a later history download must still grow.
+  const head = /^newest ([0-9a-f]{64}) (0|[1-9][0-9]*)$/.exec(line)
+  if (head) {
+    const key = head[1]
+    const n = Number(head[2])
+    const known = (state.newest || {})[key]
+    if (known === undefined || n > known) {
+      next.fresh = { ...state.fresh, [key]: n }
+      next.lastDownloadAt = now
+    }
+    next.newest = { ...state.newest, [key]: Math.max(known ?? n, n) }
+  }
   const own = /^diário próprio sincronizado \((0|[1-9][0-9]*)\)$/.exec(line)
   if (own) {
     const n = Number(own[1])
@@ -98,6 +112,15 @@ export function foldSignal (state, name, data, now) {
     next.ownLength = Math.max(state.ownLength ?? n, n)
   }
   return next
+}
+
+// One flat map for the feed's growth trigger: present lengths under the key,
+// newest-post lengths under 'newest:' + key, so either growing counts.
+export function syncLengths (state) {
+  if (!state) return undefined
+  const out = { ...(state.lengths || {}) }
+  for (const [key, n] of Object.entries(state.newest || {})) out['newest:' + key] = n
+  return out
 }
 
 // The idle gap is over without a new run (a start failed or gave up, or the
@@ -203,10 +226,10 @@ export function waitForCatchUp ({ runId = null, timeoutMs = 10000, quietMs = 150
         } else done()
       } else if (name === 'sync.event') {
         const line = data.line
-        if (/^peer seeder [0-9a-f]{8}$/.test(line) || /^downloaded [0-9a-f]{64} (0|[1-9][0-9]*)$/.test(line) ||
+        if (/^peer seeder [0-9a-f]{8}$/.test(line) || /^(downloaded|newest) [0-9a-f]{64} (0|[1-9][0-9]*)$/.test(line) ||
             /^diário próprio atrasado \(/.test(line)) {
-          // Downloads (followed diaries, and the own diary catching up from
-          // another device) only matter once the verified link is up; they
+          // Downloads (followed diaries, their newest posts, and the own
+          // diary catching up from another device) only matter once the verified link is up; they
           // push the window out.
           if (line.startsWith('peer') || quiet !== null) arm()
         }
