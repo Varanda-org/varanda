@@ -22,6 +22,15 @@ test('eas.json has no prebuildCommand and no updates', (t) => {
   t.absent('updates' in eas)
 })
 
+// The builder's default Node (20) cannot load the bare-module-lexer prebuild
+// that pack-worklet needs (Node ^22.21 or >=24.9), so the hook would fail.
+test('the preview profile pins a Node of at least 24.9', (t) => {
+  const node = JSON.parse(read('eas.json')).build.preview.node
+  t.ok(/^\d+\.\d+\.\d+$/.test(node), 'a full version: eas.json refuses ranges')
+  const [major, minor] = node.split('.').map(Number)
+  t.ok(major > 24 || (major === 24 && minor >= 9), 'Node ' + node)
+})
+
 test('the post install hook runs prepare-native.sh', (t) => {
   const script = read('scripts/eas-post-install.sh')
   t.ok(script.includes('prepare-native.sh'))
