@@ -481,6 +481,10 @@ function ownGroupVerdict (length, pageLength, peerLength) {
 const MAX_CAP_CONTENDERS = 2
 
 const NO_READER = { set: noop, clear: noop }
+// A startup that has not reached the seeder link ('ready') by then logs the
+// step it is on, and again at the same interval (local diagnostics only).
+const STARTUP_SLOW_MS = 5000
+const NO_STARTUP = { step: noop }
 
 function key8 (hex) {
   return String(hex).slice(0, 8)
@@ -1104,13 +1108,51 @@ function watchFork (core, onFork) {
 // function (see the header). The limits and timings after `signal` are
 // injectable for tests; their defaults are the protocol constants.
 // The session's reader (see the header) is withdrawn however the run ends,
-// before it published too.
+// before it published too. startupSlowMs: the startup watchdog's interval
+// (tests).
 async function runSync (opts = {}) {
   const reader = (opts && opts.reader) || NO_READER
+  const log = opts && typeof opts.log === 'function' ? opts.log : noop
+  const onEvent = opts && typeof opts.onEvent === 'function' ? opts.onEvent : noop
+  const startup = startupWatchdog(log, (opts && opts.startupSlowMs) || STARTUP_SLOW_MS)
   try {
-    return await syncRun({ ...opts, reader })
+    return await syncRun({
+      ...opts,
+      reader,
+      startup,
+      onEvent: (ev) => {
+        if (ev && ev.event === 'ready') startup.stop()
+        onEvent(ev)
+      }
+    })
   } finally {
+    startup.stop()
     clearReader(reader)
+  }
+}
+
+function startupWatchdog (log, ms) {
+  const started = Date.now()
+  let step = 'configuração'
+  let connectNoted = false
+  let timer = setTimeout(tick, ms)
+  function tick () {
+    // The connection step is noted once: a seeder that does not answer has
+    // its own warnings (sem conexão, nova tentativa), repeated by the run.
+    if (step !== 'conexão' || !connectNoted) {
+      try {
+        log('aviso: partida demorada (etapa: ' + step + ', ' + Math.round((Date.now() - started) / 1000) + ' s)')
+      } catch {}
+      if (step === 'conexão') connectNoted = true
+    }
+    if (timer !== null) timer = setTimeout(tick, ms)
+  }
+  return {
+    step (name) { step = name },
+    stop () {
+      clearTimeout(timer)
+      timer = null
+    }
   }
 }
 
@@ -1131,6 +1173,7 @@ async function syncRun ({
   onEvent = noop,
   peeker = null,
   reader = NO_READER,
+  startup = NO_STARTUP,
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
@@ -1172,6 +1215,7 @@ async function syncRun ({
     },
     save: (snapshot) => store.writeBlocklist(storage, snapshot)
   })
+  startup.step('lista de bloqueio')
   try {
     await blocklist.ready()
   } catch {
@@ -4231,14 +4275,18 @@ async function syncRun ({
   }
 
   try {
+    startup.step('diário')
     diary = await store.openDiary(storage)
     ownHex = hex(diary.key)
     const block0 = await store.readBlock0(diary)
     if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) cert = block0.cert
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
     ownRefused()
+    startup.step('mídia própria')
     await openOwnMedia()
+    startup.step('grupos')
     await openGroups()
+    startup.step('leitura do próprio diário')
     // Deleted blocks and media are cleared, and growth is measured on the
     // present length, before any connection; whatever the verified seeder
     // holds beyond us is fetched (only a verified link replicates the
@@ -4266,6 +4314,7 @@ async function syncRun ({
     }
 
     // Follow gate at start (R5.8 a), before any connection.
+    startup.step('seguidos (abertura)')
     let followList = await store.readFollows(storage)
     for (const k of followList) if (typeof k === 'string') stillFollowed.add(k.toLowerCase())
     if (followList.length > maxFollows) {
@@ -4397,10 +4446,13 @@ async function syncRun ({
 
     // Binding diaries only once the follows hold their replicas (a followed
     // diary is never opened twice).
+    startup.step('diários de grupo')
     if (!ending) await startGroupDiaries()
+    startup.step('índice de réplicas')
     if (!ending) await updateReplicaIndex()
     // Stored replicas of blocked keys, and unfollowed ones from a revoked
     // issuer, go before any connection.
+    startup.step('varredura de bloqueados')
     if (!ending) await sweepBlocked()
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevoked()
     // The stored group cores accepted again at start: their authors'
@@ -4409,6 +4461,7 @@ async function syncRun ({
 
     if (!ending) {
       reader.set({ diary, replica, hold, release })
+      startup.step('conexão')
       connect()
     }
 

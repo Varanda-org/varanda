@@ -13,8 +13,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket } = require('ws')
-const { testnet } = require('./helpers/net')
-const { connectClient, errorOf } = require('./helpers/session')
+const { testnet, until } = require('./helpers/net')
+const { connectClient, errorOf, stoppedOf } = require('./helpers/session')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -72,7 +72,7 @@ async function otherDiary (t, assoc, name) {
 
 // A certified member with two posts, following F (stored replica), with a
 // stored replica of an unfollowed U too; the write gate is off.
-async function fixture (t, { blockFollowed = false } = {}) {
+async function fixture (t, { blockFollowed = false, readerWaitMs } = {}) {
   const storage = memoryNodeStorage()
   const assoc = association()
   const port = await deadPort()
@@ -88,6 +88,7 @@ async function fixture (t, { blockFollowed = false } = {}) {
     },
     onInternalError: (err) => internal.push(err),
     writeGate: false,
+    ...(readerWaitMs === undefined ? {} : { readerWaitMs }),
     syncOptions: { retryMinMs: 100, retryMaxMs: 200 }
   })
   t.teardown(() => node.close(), { force: true })
@@ -136,6 +137,53 @@ function hangNextReadAll (t) {
     release: () => release()
   }
 }
+
+// The run's own store.readFollows call (its follow gate at startup) held
+// until release(); every other caller goes through.
+function holdRunFollowGate (t) {
+  const original = store.readFollows
+  let armed = true
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  store.readFollows = async function (...args) {
+    if (armed && /\bat syncRun \(/.test(new Error().stack)) {
+      armed = false
+      await gate
+    }
+    return original.apply(this, args)
+  }
+  t.teardown(() => {
+    store.readFollows = original
+    release()
+  })
+  return { release: () => release() }
+}
+
+test('a read never waits unbounded for a run whose startup has not published its cores', async (t) => {
+  await testnet(t)
+  const { web, own } = await fixture(t, { readerWaitMs: 300 })
+  const LINE = 'aviso: leitura sem esperar a partida da sincronização (300 ms)'
+  const lines = () => web.events.filter((e) => e.name === 'warning' && e.data.line === LINE)
+  const held = holdRunFollowGate(t)
+  // The startup step ends once the read gave up on it: the preemption's
+  // abort waits for the run to unwind, which a stuck step never does.
+  until(() => lines().length > 0, { timeoutMs: 10000 }).then(held.release, held.release)
+  const { runId } = await web.request('sync.start', {})
+  let timer = null
+  const read = await Promise.race([
+    web.request('feed.read', {}),
+    new Promise((resolve) => { timer = setTimeout(resolve, 5000, null) })
+  ])
+  clearTimeout(timer)
+  t.ok(read !== null, 'feed.read answered, not stuck behind the startup')
+  if (read === null) return
+  t.is(read.items.filter((i) => i.author === own).length, 2, 'served on the exclusive path')
+  t.is(lines().length, 1, 'one warning line')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the starting run was preempted')
+  await until(() => web.events.some((e) => e.name === 'sync.started' && e.data.runId > runId), { timeoutMs: 10000 })
+  t.pass('the continuous run was restarted after the read')
+  await web.request('sync.stop')
+})
 
 test('feed, log, profile and engagement reads are served on the live run without preempting it', async (t) => {
   await testnet(t)

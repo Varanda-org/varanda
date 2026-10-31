@@ -3383,3 +3383,29 @@ Nenhuma verificação foi feita ainda. No PWA:
 ### Limites
 
 - Uma lista que não estava no fim pode fazer uma leitura de rolagem a mais, vazia, para descobrir o fim.
+
+## 61. Leituras não esperam uma partida da sincronização que não termina (PR fix/reads-never-hang, 2026-10-31)
+
+### O que mudou
+
+- No nó do navegador, `feed.read`, `profile.read`, `log.read`, `engagement.read` e a leitura do próprio diário dos avisos esperavam sem limite que a rodada em curso publicasse os seus núcleos (`withCores` em `packages/web-member/lib/session.js`). Uma partida lenta ou presa deixava A Rua sem dados e travava tudo o que estava na fila atrás das leituras, `sync.stop` e `sync.status` inclusive. Sintoma visto no PWA: Sincronização em "conectando…" e "sincronizando (contínua, execução 2)", sem nenhuma linha da execução 2.
+- Agora a leitura espera no máximo 3 s (`readerWaitMs`). Depois disso ela para a rodada que está partindo (uma preempção, `sync.stopped` `'preempted'`), lê pelo caminho exclusivo e a rodada contínua volta depois, como em qualquer preempção. A tela de Sincronização mostra uma vez `aviso: leitura sem esperar a partida da sincronização (3000 ms)`.
+- Diagnóstico local, sem telemetria: uma rodada que não chegou à conexão com o semeador 5 s depois de começar mostra `aviso: partida demorada (etapa: <etapa>, <s> s)` e repete a cada 5 s até conectar ou acabar. As etapas: `configuração`, `lista de bloqueio`, `diário`, `mídia própria`, `grupos`, `leitura do próprio diário`, `seguidos (abertura)`, `diários de grupo`, `índice de réplicas`, `varredura de bloqueados` e `conexão`.
+
+### Testes automatizados
+
+- `packages/web-member/test/read-while-sync.test.js`: "a read never waits unbounded for a run whose startup has not published its cores" (a partida fica presa na abertura dos seguidos; `feed.read` responde pelo caminho exclusivo, uma linha de aviso, a rodada é preemptada e recomeça; falha sem a correção: a leitura fica presa).
+- `packages/web-member/test/sync-reader.test.js`: "a slow startup logs the step it is held on until it goes on, and nothing once the run ended" (falha sem o vigia da partida).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. No PWA:
+
+- [ ] Abrir o app, mandar para o fundo e trazer de volta várias vezes: A Rua carrega a cada volta (não realizada ainda).
+- [ ] Se uma partida demorar, Ajustes › Avançado › Sincronização mostra `aviso: partida demorada (etapa: …)`: mandar uma captura de tela com a etapa (não realizada ainda).
+
+### Limites
+
+- Uma partida presa num `await` que nunca termina ainda trava a preempção da leitura: parar a rodada espera ela terminar. O aviso de partida demorada diz em que etapa ela parou.
+- A etapa `conexão` aparece uma vez só no aviso `partida demorada`; um semeador que não responde já tem os próprios avisos (`sem conexão com o semeador`, nova tentativa).
+
