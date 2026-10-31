@@ -899,6 +899,18 @@ test('appeal: one per member per 30 days, open or decided', async (t) => {
   t.not(next.appeal.id, a.appeal.id)
 })
 
+test('appeal: the 30 days run from the denial, not from the sending', async (t) => {
+  const { store, c } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  c.t += 25 * 24 * HOUR
+  await store.decideAppeal(a.appeal.id, { decision: 'negar', by: 'outro@example.test' })
+  c.t += 6 * 24 * HOUR
+  await rejects(t, store.addAppeal(appeal(target)), 'limite-recursos', 'day 31 of the sending is day 6 after the denial')
+  c.t += 25 * 24 * HOUR
+  t.is((await store.addAppeal(appeal(target))).duplicate, false, 'past 30 days after the denial')
+})
+
 test('appeal: the window counts denied appeals only; a new block after an accepted one appeals at once', async (t) => {
   const { store } = setup(t)
   const target = await blockedMember(store)

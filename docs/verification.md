@@ -1838,7 +1838,7 @@ Nenhuma destas conferências foi feita ao escrever esta seção.
 - Declaração assinada `varanda-terms-v1` (`packages/core/lib/terms.js`): `'varanda-terms-v1'`, nonce, membro, associação e versão, unidos por LF, sem LF final e sem data. A data é a do serviço de conta. Assinada pela chave do diário do membro; nenhuma outra assinatura do protocolo usa o prefixo.
 - RPC `terms.sign` `{ nonce, version }` -> `{ signature }` (`docs/rpc.md` 5.29): só no nó do navegador; os nós nativo, `varanda-serve` e CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/server.js`): `POST /account/terms/start` `{ member, version }` -> `{ nonce }` e `POST /account/terms/finish` `{ member, nonce, signature }` -> `{ version, acceptedAt }`. Recusas: `pedido-invalido`, `nao-vinculado`, `expirado`, `assinatura-invalida`, `indisponivel` e `limite`. Só membro com vínculo Google aceita no servidor; o nonce vale 10 minutos, uma vez, no máximo 1000 pendentes.
-- `terms.json` (`apps/cli/lib/account/terms-store.js`, volume `account-data`, modo 0600): `{ v: 1, members: { <hex64>: [{ version, acceptedAt, nonce, signature }] } }`. Cada aceite relê e une o arquivo; o teto por membro é 32 (guarda as MAIORES versões); `MAX_MEMBERS` (100000) limita só admissões novas; um membro com lista vazia torna o arquivo inválido (indisponível, nunca regravado). Uma recusa da guarda (`lock.owned()`) recusa só aquele pedido; a indisponibilidade permanente só vem de `fail()` quando o batimento confirma a perda do bloqueio, ou de um arquivo malformado. Um reparo (`heal()`) roda a cada 10 s no `serve` (`startTermsHeal`, registro `{ event: 'terms', reason: 'reparado' }`) e uma vez numa parada limpa.
+- `terms.json` (`apps/cli/lib/account/terms-store.js`, volume `account-data`, modo 0600): `{ v: 1, members: { <hex64>: [{ version, acceptedAt, nonce, signature }] } }`. Cada aceite relê e une o arquivo; o teto por membro é 32 (guarda as MAIORES versões); `MAX_MEMBERS` (100000) limita só admissões novas; um membro com lista vazia torna o arquivo inválido (indisponível, nunca regravado). Uma recusa da guarda (`lock.owned()`) recusa só aquele pedido; a indisponibilidade permanente só vem de `fail()` quando o batimento confirma a perda do bloqueio, ou de um arquivo malformado. Um reparo (`heal()`) roda a cada 10 s no `serve` (`startTermsHeal`, registro `{ event: 'terms', reason: 'reparado' }`) e uma vez numa parada limpa. O `heal()` só relê o arquivo quando inode, tamanho, `mtime` ou `ctime` mudaram, ou quando a loja está suja; depois de gravar, não guarda a impressão do que gravou (uma troca tardia de um gravador desatualizado ficaria sem leitura), então o reparo seguinte lê uma vez. Um erro de leitura que não seja arquivo malformado (`EIO`, `EMFILE`) não derruba a loja: registra `{ event: 'terms', reason: 'leitura-falhou', code }` (só o código do erro) e tenta de novo no próximo intervalo.
 - Aparelho: um registro por aparelho (chave `varanda-terms` no `localStorage` da web, arquivo `varanda-terms.json` no nativo): `{ v: 1, version, members: { <hex64>: { acceptedAt, synced } } }`, no máximo 16 membros, lido sempre como não confiável (`termsRecordOf`); um registro recusado significa "perguntar de novo".
 - Sincronização com o servidor: no máximo 3 tentativas por membro e versão em cada carga da página (falhas de verdade), rearmadas ao voltar a rede, depois de mudar a geração da passkey e depois de um vínculo confirmado em Ajustes › Conta; `nao-vinculado` vale como "só neste aparelho".
 - Ajustes › Termos e privacidade mostra os dois documentos em todos os modos e o estado do aceite (registrado, pendente, só neste aparelho). Recomeçar tira aquele membro do registro do aparelho; Sair não tira.
@@ -1891,6 +1891,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - O nó pode subir, retomar a sessão e fazer a sincronização de recuperação do certificado antes do aceite; a sincronização contínua, a fila de saída, o convite e as chamadas à conta esperam.
 - Subir a versão substitui o registro do aparelho (aceites antigos ainda não sincronizados se perdem).
 - Textos v1 pendentes de revisão jurídica; o encarregado não está nomeado; ainda não há URL pública dos textos.
+- O portão substitui a interface em vez de ficar acima dela, e não vale a pena mudar isso: nada pode renderizar ou ficar acessível atrás dele (o aceite precede o nó, a fila de saída e o convite), e uma sobreposição exigiria prender o foco e esconder o conteúdo de leitores de tela. O que estava montado antes se perde só quando o portão aparece depois do aplicativo (versão nova dos termos ou conta sem registro), caso em que rascunhos não salvos se perdem; o que o #209 tratou, o bloqueio com a conta em dia, não passa pelo portão. Não confirmado no nativo.
 - O portão pertence ao app oficial: um cliente modificado ou outro cliente do protocolo não passa por ele, e o aceite no servidor é um registro, não uma barreira.
 - Na web hospedada, antes de o nó conectar o modo ainda não é "hospedado": quem tem o registro do aparelho em dia pode ver a tela de erro de conexão antes do portão. Nada sai dessa tela; o portão aparece assim que o nó conecta.
 - Num navegador compartilhado, o aceite dado antes de Entrar vale para a próxima conta que entrar naquela carga da página.
@@ -3243,11 +3244,177 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
 - Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.
 
-## 57. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+## 57. A Rua relê o trecho mostrado enquanto os seguidos sincronizam (PR fix/rua-sync-refresh, 2026-10-30)
 
 ### O que mudou
 
-- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.57) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- Na web hospedada, A Rua mostrava "Isso é tudo por enquanto." com publicações de seguidos já guardadas no aparelho, e só puxar ou rolar à mão as trazia. Duas causas, reproduzidas com um semeador real e o nó do navegador:
+  - Visita de volta: a réplica guardada tem comprimento igual ao presente até chegar a atualização do Hypercore (cerca de 1 s), então a primeira leitura vinha com `incomplete` vazio, a linha de base ficava vazia e `canSyncRead` nunca mais ficava verdadeiro; as linhas `downloaded` seguintes só acendiam a pílula.
+  - Lista longa: com uma linha de base válida, a leitura automática de uma lista funda ou cheia era sempre `before` abaixo da última linha. Com o download do mais novo primeiro (seção 56), o histórico chega ENTRE as mais novas e a última mostrada, então toda leitura automática voltava vazia, a espera crescia até 32 s e, quando o download acabava, `incomplete` esvaziava e o rodapé anunciava o fim com linhas faltando.
+- `apps/app/src/paging.js`: `syncBaseline` grava todos os comprimentos conhecidos no momento da leitura (mais os diários incompletos e os sem certificado em -1), e `advancedKeys` conta como crescimento uma chave que cresceu ou que apareceu depois da leitura. Continuam as regras de antes: nada automático durante uma leitura, depois de `loadError` ou `moreError`, nem antes do intervalo de `FEED_REARM_MS` com a espera de `rearmDelay`.
+- `syncReadKind` tem o tipo novo `range`, usado por uma lista funda ou cheia; `older` fica só para a sonda abaixo da lista. `planSyncRead` junta a condição, o tipo e a espera (leituras `range` e `older` vazias aumentam a espera). A leitura `range` (`loadRange` em `ARua.js`) pede páginas de 31 a partir de logo abaixo da primeira linha mostrada (`rangeStart`) até uma página chegar ao cursor da lista (`reached`), voltar curta (`end`) ou bater o teto de `rangePageCap` (ceil(mostradas/31)+1, no máximo 10); uma leitura cortada pelo teto guarda `rangeFrom` e a próxima continua dali sem precisar de crescimento novo. `mergeRange` encaixa as linhas na ordem do feed sem tirar nenhuma mostrada (como `mergeOlder`); as mais novas que a primeira linha não entram e contam para a pílula. Depois de `reached` com página cheia, a próxima leitura é a sonda abaixo da lista, como depois de uma página mais nova cheia.
+- A linha de base só avança para comprimentos tirados no INÍCIO de uma leitura que cobriu todo o trecho mostrado: uma recarga que trocou a lista, ou uma sequência de releitura (as páginas `range` e as continuações de `rangeFrom` guardam em `seqBase` os comprimentos de antes da primeira página; `sequenceBase`). Uma página abaixo da lista (rolagem ou sonda, `olderPagePatch`) só acrescenta linhas: não avança a linha de base nem encerra uma sequência pendente. Assim uma publicação que chegou no trecho já lido dispara outra leitura `range` em vez de ser dada como lida.
+- Só as leituras no fim da lista esperam por ele (a sonda abaixo da lista e a página mais nova de uma lista curta). A leitura `range` relê o trecho mostrado, então roda com a pessoa em qualquer ponto da lista (no topo de uma lista longa, por exemplo), sempre que os comprimentos passam da linha de base ou há continuação pendente. `rangeEnd` mantém o `atEnd` de antes: uma lista que não estava no fim continua paginando pela rolagem, sem sonda.
+- `waitForCatchUp` (a janela de silêncio de puxar para atualizar) também empurra a janela com uma linha `newest`, como com `downloaded`.
+- A leitura mais nova automática de uma lista curta que voltaria cheia e cortaria linhas passa a ser a primeira página de uma leitura `range` (antes só marcava a sonda abaixo da lista).
+- `feedSyncing`: o rodapé e o estado vazio dizem "Ainda sincronizando quem você segue." enquanto há `incomplete`, crescimento depois da última leitura, sonda ou leitura `range` pendente.
+- `apps/app/src/syncSignals.js`: a linha `newest <chave> <comprimento>` (os posts mais novos de um diário seguido chegaram; vem no PR do nó) fica num mapa próprio (`signals.newest`), acende a pílula e dispara a leitura automática. `lengths` continua sendo só o comprimento presente das linhas `downloaded`, para que o histórico que chega depois ainda conte como crescimento. `syncLengths` junta os dois mapas (o mais novo sob `newest:<chave>`) para a linha de base, o gatilho e o rodapé. Linhas desconhecidas continuam ignoradas.
+- `apps/app/src/ui/RefreshableList.js`: a opção `keepVisiblePosition` (só A Rua usa) passa `maintainVisibleContentPosition` `{ minIndexForVisible: 0, autoscrollToTopThreshold: 24 }` à `FlatList` (React Native 0.83.10), então no app nativo as linhas encaixadas acima da que a pessoa lê não a empurram para baixo; perto do topo a lista acompanha as linhas novas, e a recarga pela pílula continua mostrando as mais novas. As outras listas não mudam.
+
+### Testes automatizados
+
+- `apps/app/test/paging.test.js`: lista funda com cursor na última linha, linha de base `{k: 51}`, comprimentos `{k: 147}` e `emptyStreak` 1 planeja `range`, não `older`; uma página com `incomplete` e `skipped` vazios seguida de crescimento (réplica guardada ou chave que aparece depois) libera `canSyncRead`; `mergeRange` encaixa as linhas na ordem do feed, guarda as mais novas para a pílula e não corta nada; o laço de páginas para no cursor, numa página curta e no teto, e `rangeEnd` decide cursor, sonda e continuação; regra do rodapé. Sem a mudança em `paging.js`, falham os testes da linha de base, do crescimento e do tipo de leitura (asserções), e os de `planSyncRead`, `mergeRange`, `rangeStep` e `feedSyncing` (funções ausentes).
+- `apps/app/test/paging.test.js`, depois da revisão: crescimento durante uma sequência cortada pelo teto planeja outra leitura `range`; a sonda depois de `reached` não consome o crescimento da sequência e, com comprimentos acima da foto inicial, a próxima leitura é `range`; rolar abaixo da lista com uma página cheia e depois chegar ao fim não avança a linha de base nem encerra a sequência, e o crescimento durante a rolagem planeja `range`. Com `sequenceBase` medindo dos comprimentos atuais, o primeiro falha; com a página abaixo da lista gravando a linha de base dos comprimentos atuais (a regra anterior), os outros dois falham.
+- `apps/app/test/syncSignals.test.js`: `newest <chave> <n>` fica em `signals.newest`, não sobe `lengths`, acende a dica, e um `downloaded` menor que o mais novo ainda conta como crescimento por `syncLengths`; formatos errados e rodada antiga são ignorados. Com `newest` gravado em `lengths` (a primeira versão deste PR), seis asserções falham.
+- `apps/app/test/paging.test.js`: com a lista longe do fim, crescimento ou continuação pendente planejam `range`; a sonda e a página mais nova de lista curta esperam o fim; `rangeEnd` com a lista fora do fim não cria sonda. Com a regra anterior (tudo só no fim), falha.
+- `apps/app/test/syncSignals.test.js`: uma linha `newest` empurra a janela de silêncio de `waitForCatchUp`. Sem a mudança, falha.
+- `maintainVisibleContentPosition` não tem teste automático: depende da rolagem nativa, que os testes em Node não rodam.
+- Reprodução com semeador real (`Seeder` em processo atrás da entrada WebSocket, 3 autores, rede local presa a `127.0.0.1`), repetindo a lógica de leitura de A Rua com o `paging.js` e o `syncSignals.js` deste PR e o nó da `main`, sem nenhuma leitura manual depois da carga inicial:
+  - Navegador novo, 600 publicações, latência de 40 ms: antes, 147 mostradas de 600 e rodapé "Isso é tudo por enquanto."; agora, 600 de 600 em cerca de 7 s, com três leituras automáticas.
+  - Visita de volta com a primeira leitura antes da atualização (60 publicações novas por autor, latência de 200 ms): antes, nenhuma leitura automática e 300 mostradas de 480; agora a leitura automática acontece e as 180 que faltam são todas mais novas que a primeira linha mostrada, com a pílula "ver novidades" acesa (regra de sempre: nada entra no topo embaixo da pessoa). Com a primeira leitura depois da atualização, 480 de 480.
+  - Navegador novo com a primeira leitura só com o começo de cada diário (3 linhas): 401 mostradas e as 199 restantes todas mais novas que a primeira linha, com a pílula acesa.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Navegador novo na web hospedada, seguindo contas com histórico longo: A Rua completa as publicações mais antigas sozinha, sem puxar nem rolar (não realizada ainda).
+- [ ] Visita de volta depois de as contas postarem: a pílula "ver novidades" aparece e A Rua completa sozinha o que faltava no trecho mostrado (não realizada ainda).
+- [ ] Enquanto sincroniza, o rodapé diz "Ainda sincronizando quem você segue." e nunca "Isso é tudo por enquanto." (não realizada ainda).
+
+### Limites
+
+- As publicações mais novas que a primeira linha mostrada só entram pela pílula "ver novidades" ou ao puxar, como antes.
+- Cada leitura `range` relê até 10 páginas; no app nativo cada pedido ainda interrompe a rodada de sincronização (docs/rpc.md seção 6.1), limitado pelo intervalo e pela espera de `rearmDelay`.
+- Uma chave que aparece pela primeira vez no mapa de comprimentos (por exemplo, pelo resultado de uma rodada parada) dispara no máximo uma leitura a mais.
+- Na web, o react-native-web 0.21.3 descarta `maintainVisibleContentPosition` (não está entre as propriedades que ele repassa). O que segura a linha lida é a ancoragem de rolagem do próprio navegador (CSS `overflow-anchor`), que pode variar entre navegadores; não foi conferido em aparelho.
+
+## 58. Janela mais nova sinalizada e ponta nova inteira na volta (PR perf/newest-window-signal, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada, depois do PR da seção 56, dois problemas apareceram com um semeador real. (1) Quando a janela dos 32 blocos mais novos chegava, o nó não emitia linha nenhuma de `sync.event`: o comprimento presente fica parado no prefixo enquanto a janela baixa, e só o crescimento dele gerava `downloaded`, então a leitura automática de A Rua esperava o histórico. (2) Depois de um crescimento, `readVisible` mostra só a sequência que termina no comprimento NOVO: a janela guardada numa sessão anterior sumia até a ponta nova baixar (o feed caía de 99 itens para 3 por alguns segundos).
+- A regra estrita de leitura fica como está (decisão do responsável pelo produto, depois de um achado de segurança: mostrar todo bloco guardado deixaria um post apagado visível por minutos, porque a tombstone fora da janela só baixa quando o corpo linear chega nela). `readVisible` continua: o prefixo mais a sequência contínua guardada que chega ao comprimento assinado, um buraco nela só passa se a dobra efetiva o apaga, julgado num retrato só, com o bloco 0 e dentro de `MAX_LOG_BLOCKS`. A única diferença é que um buraco que a sequência passa não entra mais na lista (o `log.read` o pula).
+- `lib/sync.js`, sinal: quando a cabeça encontra a janela inteira guardada ou apagada (o passo que entrega ao corpo), a sincronização emite `newest <chave> <comprimento>`, uma vez por chave e comprimento assinado, pelo mesmo caminho das linhas `downloaded` (`lib/session.js`, com `safe()`). Um diário ainda em `regate` guarda o aviso até o bloco 0 passar pela porta local. Nada anunciado ou medido muda: hello, `have`, `downloaded`, metas e `settled` continuam no comprimento presente.
+- `lib/sync.js`, ponta nova inteira: se a réplica já tem uma sequência guardada acima do prefixo cujo topo `T` (o bloco mais alto que a varredura inicial achou, depois o fim de cada janela completada) está a no máximo `TAIL_MAX` (256) blocos do comprimento assinado, a janela da cabeça começa em `T`: baixa toda a ponta nova `[T, comprimento)`, sem os apagados, e a sequência que já aparecia volta a chegar ao comprimento novo assim que ela chega. Crescimento maior mantém a janela dos 32 mais novos. Um novo crescimento na mesma sincronização usa a mesma regra a partir da última janela completada. `runSync` aceita `tailBlocks` (testes).
+- `lib/member-ops.js` e `lib/session.js`: `log.read` de um autor seguido (não o próprio) lê os mesmos blocos que `feed.read` e pagina por seq: a janela termina em `before` (exclusivo) e traz até `limit` desses blocos, os de seq mais alta abaixo dele; blocos não guardados são pulados sem aparecer em `invalid`, um bloco guardado malformado continua em `invalid`, e `entriesTruncated` conta os blocos abaixo da janela. O próprio diário não tem buracos e responde igual a antes.
+- `incomplete` não muda: comprimento assinado acima do presente.
+- Documentos normativos: `docs/rpc.md` 5.12 e §6 (linha `newest`); `docs/protocol.md` §6 "Browser node download order".
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: visita de volta com o semeador tendo a ponta nova mas não o meio: a linha `newest <chave> 300` chega, nenhum `downloaded` da chave vem enquanto falta o histórico, o post mais novo está no feed, e quando o histórico chega a linha `newest` veio antes do primeiro `downloaded` da chave, uma vez só (sem a chamada `onNewest`, falha). Seguidor com [0, 3) e a janela antiga [68, 100), o autor posta mais 40 e o semeador tem só [108, 140): a cabeça espera [100, 108) (sem `newest` enquanto falta), e quando o semeador os recebe todo bloco de [100, 140) é pedido e o feed volta a mostrar a janela antiga com a ponta (sem a regra da ponta, falha: a janela [108, 140) completa sozinha). Com `tailBlocks: 16`, a mesma volta pede só a janela dos 32 mais novos e o feed mostra só ela.
+- `packages/web-member/test/member.test.js`: `log.read` de um autor seguido traz o prefixo e a sequência mais nova por seq, sem o bloco apagado e limpo que a sequência passa e com o apagado guardado marcado (sem a troca em `member-ops.js` ou sem o filtro em `node-store.js`, falha). Os testes estritos existentes (sequência que não chega ao comprimento, tombstone que chega depois da varredura, buraco nomeado só por tombstone cancelada, bloqueado e emissor revogado) seguem sem mudança.
+- `packages/web-member/test/read-while-sync.test.js`: diário seguido com buracos e um bloco malformado no prefixo: o feed mostra prefixo e sequência mais nova, sem a ilha do meio; `log.read` com `limit` 5 pagina por seq (12 a 16 com 6 abaixo; depois 1, 2, 4, 11 com o 3 em `invalid` `malformed` e 1 abaixo; depois 0), um `before` dentro de um buraco termina no bloco visível abaixo, e com a sincronização ativa (caminho emprestado) as respostas são as mesmas, sem preempção. Sem a mudança em `member-ops.js` ou em `session.js`, falha.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Reabrir a web hospedada depois de as contas seguidas postarem alguns posts: A Rua continua com os posts que mostrava, ou volta a mostrá-los em cerca de um segundo (não realizada ainda).
+- [ ] Na mesma situação, os posts mais novos aparecem antes do histórico que faltava, sem puxar para atualizar (com o PR do app) (não realizada ainda).
+
+### Limites
+
+- Crescimento de mais de 256 blocos desde a última visita: a janela antiga ainda some até o histórico chegar até ela (só os 32 mais novos aparecem antes).
+- Até 256 blocos são pedidos pela cabeça antes do corpo; se o semeador não tem parte da ponta, a cabeça espera `HEAD_STALL_MS` (3 s) sem bloco novo antes de passar ao corpo.
+- `newest` é só um aviso: chega uma vez por comprimento assinado, e uma janela que nunca completa (semeador sem ela) não gera aviso; nesse caso a leitura espera o crescimento do comprimento presente, como antes.
+
+## 59. Comunidades (PR feat/communities)
+
+Segunda parte de Cadeiras de Praia: uma comunidade junta grupos públicos, `docs/protocol.md` seção 10 ("Communities") e `docs/rpc.md` 5.57 a 5.60. A raiz da comunidade (cabeçalho `kind: 'community'`) guarda só `group-meta`, `group-admin` e `group-link`; a raiz do grupo guarda `community-link`. O vínculo só vale com os dois lados ligados, um grupo fica em uma comunidade por vez e uma comunidade conta no máximo 32 grupos. O criador e os administradores da comunidade agem como administradores em todo grupo vinculado dos dois lados (banir, admitir, ocultar), nunca nomeiam administradores de grupo.
+
+### Como verificar
+
+Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `npm test`.
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/group.test.js` (testes de comunidade) | registros `group-link` e `community-link`, construtores, `buildGroup` com `communities` (vínculo dos dois lados, raiz vinculada pelo criador, uma comunidade por grupo, teto de 32 grupos, cortes de vínculo e de nomeação, rebaixamento e desvínculo, raízes ausentes ou bifurcadas, ordem de entrega) e `buildCommunity` |
+| `packages/core/test/community-member.test.js` | `community.create`, `community.link`, `community.admin`, `community.info` no nó do núcleo, `group.info` com `communities`, recusas e idempotência |
+| `packages/core/test/sync-communities.test.js` | sincronização do núcleo: raízes de comunidade seguidas pelos vínculos, portão por papel, `not-community`, evento `community-linked` |
+| `packages/core/test/seeder-communities.test.js` | semeador: admissão da raiz de comunidade, página com só a raiz, raiz sem vínculo do criador |
+| `packages/core/test/group-index.test.js` | índice do semeador: `community` nas linhas de `/index/group`, `/index/community/<C>`, busca só de grupos |
+| `packages/web-member/test/community-ops.test.js` | os mesmos métodos no nó do navegador (`member-ops.js`) |
+| `apps/cli/test/community-commands.test.js` | comandos `community create|link|admin|info` da CLI, saída `--json` e recusas |
+| `packages/web-member/test/groups-e2e.test.js` (segundo teste) | ponta a ponta em loopback: semeador real atrás de WebSocket e na DHT local; o criador (núcleo) vincula grupo e comunidade, nomeia uma administradora (outro nó do núcleo) que oculta uma mensagem, vista oculta pelo criador e pelo nó do navegador; rebaixada sem ter sincronizado, ela oculta outra mensagem, e essa ocultação não vale para os dois nós, enquanto a anterior continua |
+
+### Checagens humanas (a fazer)
+
+- CLI: `varanda community create --name <nome>` imprime `comunidade criada: <chave>`; `community info <chave>` mostra nome, criador e nenhum grupo.
+- Vincular dos dois lados: com outra pessoa dona do grupo, `community link <comunidade> <grupo>` de quem criou a comunidade imprime `vínculo gravado (lado: comunidade)`; `community info` ainda não lista o grupo. Depois de a dona do grupo rodar o mesmo comando (`lado: grupo`) e de uma sincronização, os dois lados listam o grupo e `group info <grupo> --json` mostra `communities` com a chave.
+- `community admin <comunidade> --member <diário>`: a pessoa nomeada oculta uma mensagem do grupo vinculado; no navegador, a mensagem aparece como oculta depois da sincronização.
+- Rebaixar (`--undo`): uma ocultação nova da pessoa rebaixada não vale; as anteriores continuam.
+- Desvincular (`community link ... --undo`) de qualquer lado: o grupo sai de `community info` e a pessoa administradora da comunidade perde o poder no grupo.
+- Semeador: `curl /index/community/<C>` numa comunidade vinculada dos dois lados mostra o grupo com `writerCount`; desvincular de qualquer lado tira o grupo, e `/index/group/<G>` passa a mostrar `community: null`.
+- Bloquear a raiz da comunidade: `/index/community/<C>` responde 404 e o log do semeador mostra `group-rejected` com `group-blocked`.
+
+### Não verificado / limites conhecidos
+
+- Um aparelho de uma pessoa administradora que existia antes do vínculo e que o criador do grupo não guardava conta a partir do início da nomeação, não do vínculo.
+- Depois de um desvínculo, um novo vínculo só vale para os escritores que ele lista.
+- Um grupo cujos vínculos já nomearam mais de 32 comunidades distintas fica marcado como incompleto.
+- O índice do semeador é só uma dica e ignora a retirada de registros por saída (`group-leave`).
+- A raiz vinculada que deixa de ser nomeada antes do portão (`unwanted`) não tem teste.
+- Um grupo cuja comunidade foi bloqueada pela associação não consegue desligá-la nem ligar outra (o pedido recusa a comunidade bloqueada antes do `on: false`); a autoridade não muda, porque uma raiz bloqueada nunca entra na dobra.
+- Num desligamento ou rebaixamento com mais escritores que o teto, cada nó lista os primeiros em ordem de chave e omite o resto (cortado em 0); o nó do núcleo conta também escritores guardados ainda não vinculados e o navegador só os vinculados, então os dois podem gravar listas diferentes para o mesmo pedido (os dois são seguros). A ramificação do navegador que deixa em repouso um escritor guardado sob uma chave só ligada não tem teste.
+- Núcleos de escritor que nomeiam uma comunidade são admitidos pelo semeador e contam nos tetos, mas nunca entram nas páginas.
+- A nova tentativa de uma leitura falha na varredura de vínculos e a nova varredura da própria raiz de grupo quando ela cresce não têm teste de regressão (não há gancho para forçá-las).
+- Sem interface nativa; as telas da web vêm na PR4.
+
+## 60. A Rua não fica presa em "Isso é tudo por enquanto" (PR fix/rua-sync-loop, 2026-10-31)
+
+### O que mudou
+
+- Uma releitura automática do trecho mostrado (`range`) que volta com uma página curta não marca mais a lista como no fim (`rangeEnd`, passo `'end'`, em `apps/app/src/paging.js`). Antes, uma página curta tirava a lista do estado "não chegou ao fim" para sempre. As leituras automáticas paravam, o rodapé dizia "Isso é tudo por enquanto." e a rolagem infinita sumia (A Rua só passa `onLoadMore` enquanto a lista não está no fim). Só puxar para atualizar recuperava.
+- A página curta acontece quando o feed visível encolhe por um tempo: um diário seguido cujo comprimento assinado cresceu antes de a ponta nova chegar mostra só o prefixo (regra estrita, seção 56). A busca da ponta inteira (seção 58) deixa esse estado durar mais. Agora a lista guarda o estado de fim que tinha, e uma leitura de rolagem acha o fim de verdade.
+
+### Testes automatizados
+
+- `apps/app/test/paging.test.js`: "regression: a short range page while the visible feed shrank never ends a list that was not at its end" (falha sem a correção); o teste das leituras longe do fim passou a esperar que uma página curta mantenha o estado de fim.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. No PWA:
+
+- [ ] Abrir A Rua com quem você segue publicando: a rolagem infinita continua e o rodapé não diz "Isso é tudo por enquanto." enquanto há mais publicações (não realizada ainda).
+- [ ] Depois de alguém que você segue publicar com o app aberto, rolar até o fim: as publicações mais antigas continuam carregando (não realizada ainda).
+
+### Limites
+
+- Uma lista que não estava no fim pode fazer uma leitura de rolagem a mais, vazia, para descobrir o fim.
+
+## 61. Leituras não esperam uma partida da sincronização que não termina (PR fix/reads-never-hang, 2026-10-31)
+
+### O que mudou
+
+- No nó do navegador, `feed.read`, `profile.read`, `log.read`, `engagement.read` e a leitura do próprio diário dos avisos esperavam sem limite que a rodada em curso publicasse os seus núcleos (`withCores` em `packages/web-member/lib/session.js`). Uma partida lenta ou presa deixava A Rua sem dados e travava tudo o que estava na fila atrás das leituras, `sync.stop` e `sync.status` inclusive. Sintoma visto no PWA: Sincronização em "conectando…" e "sincronizando (contínua, execução 2)", sem nenhuma linha da execução 2.
+- Agora a leitura espera no máximo 3 s (`readerWaitMs`). Depois disso ela para a rodada que está partindo (uma preempção, `sync.stopped` `'preempted'`), lê pelo caminho exclusivo e a rodada contínua volta depois, como em qualquer preempção. A tela de Sincronização mostra uma vez `aviso: leitura sem esperar a partida da sincronização (3000 ms)`.
+- Diagnóstico local, sem telemetria: uma rodada que não chegou à conexão com o semeador 5 s depois de começar mostra `aviso: partida demorada (etapa: <etapa>, <s> s)` e repete a cada 5 s até conectar ou acabar. As etapas: `configuração`, `lista de bloqueio`, `diário`, `mídia própria`, `grupos`, `leitura do próprio diário`, `seguidos (abertura)`, `diários de grupo`, `índice de réplicas`, `varredura de bloqueados` e `conexão`.
+
+### Testes automatizados
+
+- `packages/web-member/test/read-while-sync.test.js`: "a read never waits unbounded for a run whose startup has not published its cores" (a partida fica presa na abertura dos seguidos; `feed.read` responde pelo caminho exclusivo, uma linha de aviso, a rodada é preemptada e recomeça; falha sem a correção: a leitura fica presa).
+- `packages/web-member/test/sync-reader.test.js`: "a slow startup logs the step it is held on until it goes on, and nothing once the run ended" (falha sem o vigia da partida).
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. No PWA:
+
+- [ ] Abrir o app, mandar para o fundo e trazer de volta várias vezes: A Rua carrega a cada volta (não realizada ainda).
+- [ ] Se uma partida demorar, Ajustes › Avançado › Sincronização mostra `aviso: partida demorada (etapa: …)`: mandar uma captura de tela com a etapa (não realizada ainda).
+
+### Limites
+
+- Uma partida presa num `await` que nunca termina ainda trava a preempção da leitura: parar a rodada espera ela terminar. O aviso de partida demorada diz em que etapa ela parou.
+- A etapa `conexão` aparece uma vez só no aviso `partida demorada`; um semeador que não responde já tem os próprios avisos (`sem conexão com o semeador`, nova tentativa).
+
+
+## 62. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+
+### O que mudou
+
+- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.61) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/mod-routes.js`): `POST /account/appeal/start` (só membro com conta Google vinculada; nonce sem estado, domínio `varanda-appeal-nonce`, 600 s) e `POST /account/appeal` (confere o nonce, a assinatura e grava; o nonce só é gasto depois de a assinatura valer). Respostas `{ id, duplicate }`; `nao-bloqueado` (403) se a chave não está na lista publicada nem tem bloqueio pendente; `limite-recursos` (429) para um novo recurso em 30 dias depois de um recurso negado; `limite` (503) com 2000 abertos ou 20000 guardados.
 - `moderation.json` passa a `v: 3` com `appeals` (linha: `id`, `at`, `member`, `text`, `nonce`, `signature`, `status` `aberta`/`aceito`/`negado`/`encerrado`, `decidedBy`, `decidedAt`, `note`). Um `v: 1` ou `v: 2` é lido sem recursos e regravado como `v: 3`. Linha malformada deixa o armazém `indisponivel`, como as denúncias. Eventos novos: `recurso-aceito`, `recurso-negado` e `recurso-encerrado` (a chave deixou de estar bloqueada com o recurso aberto: desbloqueio, bloqueio cancelado ou lista publicada sem ela), com `appealId`; nunca o texto, a assinatura, o nonce nem a nota.
 - Painel: `GET api/appeals?estado=aberta|decidida` (a decidida aceita `antes=<id>`, como `api/reports`, e a aba tem "mostrar mais") e `POST api/appeals/<id>/decide { decision: 'aceitar'|'negar', note }`. O recurso fica fora da lista e responde `nao-encontrado` para a própria pessoa recorrente e para quem decidiu (por e-mail) uma denúncia `bloquear` daquela chave; a IA não conta como pessoa. `api/me` ganha `appeals` (abertos que a pessoa pode julgar). Aceitar acrescenta uma mudança `unblock` como o botão Desbloquear (se havia um bloqueio pendente ainda não enviado, as duas se anulam), e conta como reversão humana para a triagem por IA; negar não mexe em Pendentes.
@@ -3277,6 +3444,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - `account reports` não exporta recursos; um pedido legal de acesso a esses dados ainda é manual (`moderation.json`).
 - A independência de quem julga compara o e-mail de quem decidiu a denúncia. Um bloqueio feito fora do painel (`mod block`) ou pela IA não tem esse e-mail, e um segundo diário ligado a outra conta Google não é detectável (seção 14). Com um só moderador, o recurso de um bloqueio dele fica sem quem decida.
 - O recurso vale para a chave do diário; bloqueio de chave de grupo (raiz) não tem recurso.
+- O recurso também vale para um bloqueio ainda pendente (não publicado): a pessoa fica sabendo de uma decisão antes de o operador assinar a lista. É intencional: só quem prova a chave do diário envia, e o recurso aceito cancela o bloqueio pendente sem esperar o `mod apply`.
 - A janela de 30 dias conta da negação, não do bloqueio: negado o recurso, uma chave desbloqueada por outro caminho e bloqueada de novo dentro de 30 dias só recorre depois dela.
 - Não há aviso à pessoa quando o recurso é decidido: ela só vê o resultado pela própria conta (desbloqueada ou não) ou ao tentar de novo.
 - Retenção das linhas de recurso é a mesma pendência das denúncias (issue #38).

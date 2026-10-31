@@ -22,6 +22,22 @@ test('eas.json has no prebuildCommand and no updates', (t) => {
   t.absent('updates' in eas)
 })
 
+// The builder's default Node (20) cannot load the bare-module-lexer prebuild
+// that pack-worklet needs (Node ^22.21 or >=24.9), so the hook would fail.
+test('the preview profile pins a Node of at least 24.9', (t) => {
+  const node = JSON.parse(read('eas.json')).build.preview.node
+  t.ok(/^\d+\.\d+\.\d+$/.test(node), 'a full version: eas.json refuses ranges')
+  const [major, minor] = node.split('.').map(Number)
+  t.ok(major > 24 || (major === 24 && minor >= 9), 'Node ' + node)
+})
+
+// Without it the module fails to compile (ActivityResultCallback is not on
+// its classpath), and that only shows on the EAS build.
+test('the auth-session module declares androidx.activity', (t) => {
+  const gradle = read('modules/auth-session/android/build.gradle')
+  t.ok(/implementation "androidx\.activity:activity(-ktx)?:\d+\.\d+\.\d+"/.test(gradle))
+})
+
 test('the post install hook runs prepare-native.sh', (t) => {
   const script = read('scripts/eas-post-install.sh')
   t.ok(script.includes('prepare-native.sh'))
@@ -32,10 +48,10 @@ test('the post install hook runs prepare-native.sh', (t) => {
   t.is(rootPkg.scripts['eas-build-post-install'], 'npm run eas-build-post-install -w apps/app')
 })
 
-test('app.json has no owner and no EAS project id', (t) => {
+test('app.json is linked to the varanda-org EAS project', (t) => {
   const { expo } = JSON.parse(read('app.json'))
-  t.absent('owner' in expo)
-  t.absent(expo.extra && expo.extra.eas && expo.extra.eas.projectId)
+  t.is(expo.owner, 'varanda-org')
+  t.ok(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(expo.extra.eas.projectId), 'projectId is a UUID')
 })
 
 test('.easignore keeps the build outputs and every secret out of the upload', (t) => {

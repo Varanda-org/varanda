@@ -25,7 +25,7 @@ const path = require('#path')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
-const { readConfig, readFollows, storeExists } = require('./store')
+const { readConfig, readFollows, readGroups, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
@@ -76,7 +76,8 @@ const USAGE_PATTERNS = [
 const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
   'sem dados locais para este diário',
-  'grupo não encontrado'
+  'grupo não encontrado',
+  'comunidade não encontrada'
 ])
 
 function messageOf (err) {
@@ -100,7 +101,7 @@ function codeOf (err) {
 //   RpcError raised by the session itself       -> unchanged
 //   code LOCKED or LOCK_INVALID                 -> LOCKED 'diretório de dados em uso'
 //   UsageError (code USAGE)                     -> USAGE, its message (else 'pedido inválido')
-//   code NOT_FOUND with a NOT_FOUND_MESSAGES one -> NOT_FOUND, that message ('grupo não encontrado')
+//   code NOT_FOUND with a NOT_FOUND_MESSAGES one -> NOT_FOUND, that message ('grupo não encontrado', 'comunidade não encontrada')
 //   a user-caused member message (USAGE_*)      -> USAGE, that message
 //   'identidade não encontrada', 'sem dados ...'-> NOT_FOUND, that message
 //   anything else (STORE_INVALID included)      -> INTERNAL 'erro interno', onInternalError(err)
@@ -316,7 +317,20 @@ function createSession ({
     let grownTimer = null
     const flushGrown = () => {
       grownTimer = null
-      for (const group of grown) send('groups.changed', { group }, epoch)
+      // A grown root that is no group of groups.json is a community root:
+      // its links and admins may change any group held here, and which ones
+      // is not known without opening the store mid-run.
+      let local = []
+      try {
+        local = readGroups(dataDir)
+      } catch {}
+      const own = new Set(local.filter((g) => g && g.kind !== 'community').map((g) => g.group))
+      const out = new Set(grown)
+      for (const key of grown) {
+        if (own.has(key)) continue
+        for (const group of own) out.add(group)
+      }
+      for (const group of out) send('groups.changed', { group }, epoch)
       grown.clear()
     }
     const groupGrew = (group) => {
@@ -533,7 +547,7 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
-    // And for the appeal statement (docs/rpc.md 5.57).
+    // And for the appeal statement (docs/rpc.md 5.61).
     'appeal.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
     }),
@@ -784,6 +798,30 @@ function createSession ({
     'group.meta': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupMeta(c, params))
       send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
+    'community.create': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.communityCreate(c, params))
+      send('groups.changed', { group: r.community }, epoch)
+      return r
+    }),
+
+    // A link changes the group's `communities` and the admins it inherits;
+    // an admin change reaches every group linked two-way.
+    'community.link': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityLink(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
+
+    'community.admin': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityAdmin(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
       return r
     }),
 

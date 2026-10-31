@@ -15,7 +15,15 @@
 // group or writer past a cap is refused (false, nothing stored); existing
 // entries always update. Pure and total: no I/O, no timers, and no method
 // ever throws (a hostile argument answers false / null / empty).
-const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY } = require('./records')
+//
+// Communities (docs/protocol.md section 10): the seeder folds the link
+// records of each served root once, in log order (foldRoot): a group root's
+// community-link records keep at most one community at a time, a community
+// root's group-link records at most MAX_GROUPS_PER_COMMUNITY groups on, both
+// by the same rules as lib/group.js. A link is answered only while BOTH
+// sides name each other; like everything here it is a hint (lib/group.js
+// decides authority, and a creator's leave withdrawing a link is not seen).
+const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./records')
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
 
 const DEFAULT_MAX_GROUPS = 4096
@@ -56,7 +64,9 @@ function count (fn, key) {
 function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup = MAX_GROUP_WRITERS } = {}) {
   const groupCap = Number.isSafeInteger(maxGroups) && maxGroups >= 1 ? maxGroups : DEFAULT_MAX_GROUPS
   const writerCap = Number.isSafeInteger(maxWritersPerGroup) && maxWritersPerGroup >= 1 ? maxWritersPerGroup : MAX_GROUP_WRITERS
-  // group -> { header: null | { kind, visibility, join, diary, name }, tokens, writers: Map<writer, { diary, seq, left }> }
+  // group -> { header: null | { kind, visibility, join, diary, name }, tokens, writers: Map<writer, { diary, seq, left }>,
+  //   community: null | hex64 (group root), linked: Set<group> (community root),
+  //   meta: null | string (the last group-meta name, metaSeen once one folded), metaSeen: boolean }
   const groups = new Map()
   const writerGroup = new Map() // writer -> group
   const diaryWriters = new Map() // diary -> Set<writer>
@@ -65,9 +75,13 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     let g = groups.get(group)
     if (g) return g
     if (groups.size >= groupCap) return null
-    g = { header: null, tokens: [], writers: new Map() }
+    g = { header: null, tokens: [], writers: new Map(), ...noLinks() }
     groups.set(group, g)
     return g
+  }
+
+  function noLinks () {
+    return { community: null, linked: new Set(), meta: null, metaSeen: false }
   }
 
   function prune (group) {
@@ -181,12 +195,14 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         if (!g) return false
         g.header = null
         g.tokens = []
+        Object.assign(g, noLinks())
         prune(group)
         return true
       }
       const g = ensureGroup(group)
       if (!g) return false
       const { kind, visibility, join, diary, name } = header
+      if (g.header !== null && g.header.kind !== kind) Object.assign(g, noLinks())
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
       g.header = { kind, visibility, join, diary, name: shownName }
       g.tokens = shownName === null ? [] : foldTokens(shownName)
@@ -288,7 +304,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const exact = q.join(' ')
       const hits = []
       for (const [group, g] of groups) {
-        if (!g.header || g.header.visibility !== 'public' || g.tokens.length === 0) continue
+        if (!g.header || g.header.kind !== 'group' || g.header.visibility !== 'public' || g.tokens.length === 0) continue
         if (searchRank(q, g.tokens, null) < 0) continue
         if (!shown(visible, group)) continue
         const members = new Set()
@@ -305,6 +321,120 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  // One record of root `root` (validated by the caller with
+  // validateGroupRecord, in log order, each once): community-link in a group
+  // root, group-link and group-meta in a community root. Anything else, or a
+  // root without a header, answers false.
+  function foldRoot (root, record) {
+    try {
+      const g = groups.get(root)
+      if (!g || g.header === null || record === null || typeof record !== 'object') return false
+      const on = record.on
+      if (g.header.kind === 'group' && record.type === 'community-link') {
+        if (!isHex64(record.community) || typeof on !== 'boolean') return false
+        if (on) {
+          if (g.community !== null && g.community !== record.community) return false
+          g.community = record.community
+        } else {
+          if (g.community !== record.community) return false
+          g.community = null
+        }
+        return true
+      }
+      if (g.header.kind !== 'community') return false
+      if (record.type === 'group-link') {
+        if (!isHex64(record.group) || typeof on !== 'boolean') return false
+        if (on) {
+          if (!g.linked.has(record.group) && g.linked.size >= MAX_GROUPS_PER_COMMUNITY) return false
+          g.linked.add(record.group)
+          return true
+        }
+        return g.linked.delete(record.group)
+      }
+      if (record.type === 'group-meta' && g.header.visibility === 'public' && (record.name === null || typeof record.name === 'string')) {
+        // A cleared name (null) wins too: it hides the header's.
+        g.meta = record.name
+        g.metaSeen = true
+        return true
+      }
+      return false
+    } catch {
+      return false
+    }
+  }
+
+  // Forgets what foldRoot folded for root, so the caller can fold it again.
+  function resetRoot (root) {
+    try {
+      const g = groups.get(root)
+      if (!g) return false
+      Object.assign(g, noLinks())
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // What root `root` itself links, one side only: the community its
+  // community-links name (group root) and the groups its group-links name
+  // (community root, key order). null for a root without a header.
+  function rootLinks (root) {
+    try {
+      const g = groups.get(root)
+      if (!g || g.header === null) return null
+      return { community: g.community, groups: [...g.linked].sort(cmp) }
+    } catch {
+      return null
+    }
+  }
+
+  function linkedTwoWay (c, C, G) {
+    const g = groups.get(G)
+    return !!g && g.header !== null && g.header.kind === 'group' && g.community === C && c.linked.has(G)
+  }
+
+  // The community group G is linked with from both sides, or null.
+  // `visible(C)` filters the community at read time.
+  function communityOf (group, visible = null) {
+    try {
+      const g = groups.get(group)
+      if (!g || g.header === null || g.header.kind !== 'group' || g.community === null) return null
+      const C = g.community
+      const c = groups.get(C)
+      if (!c || c.header === null || c.header.kind !== 'community') return null
+      if (!linkedTwoWay(c, C, group) || !shown(visible, C)) return null
+      return C
+    } catch {
+      return null
+    }
+  }
+
+  // Community root C: its display name (the last group-meta of a public
+  // root, else its header's; null when private) and the groups linked from
+  // both sides that `visible(group)` admits, in key order (at most
+  // MAX_GROUPS_PER_COMMUNITY by construction), each with its header name and
+  // members (diaries with a writer that has not left). null when C is no
+  // community root here.
+  function community (C, visible = null) {
+    try {
+      if (!isHex64(C)) return null
+      const c = groups.get(C)
+      if (!c || c.header === null || c.header.kind !== 'community') return null
+      const name = c.header.visibility === 'public' ? (c.metaSeen ? c.meta : c.header.name) : null
+      const rows = []
+      for (const G of [...c.linked].sort(cmp)) {
+        if (!linkedTwoWay(c, C, G) || !shown(visible, G)) continue
+        const g = groups.get(G)
+        const members = new Set()
+        for (const w of g.writers.values()) if (!w.left) members.add(w.diary)
+        rows.push({ group: G, name: g.header.name, members: members.size })
+      }
+      return { name, groups: rows }
+    } catch {
+      return null
+    }
+  }
+
   function clear () {
     groups.clear()
     writerGroup.clear()
@@ -315,7 +445,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, writer, page, groupsOf, search, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, writer, page, groupsOf, search, foldRoot, resetRoot, rootLinks, communityOf, community, clear, stats }
 }
 
 module.exports = {

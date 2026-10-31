@@ -585,3 +585,79 @@ test('heal() never throws when the write fails', async (t) => {
   t.is(await store.heal(), true, 'dirty: healed on the next call')
   t.is(readFile(file).members[a].length, 1)
 })
+
+// Counts the reads of `file`; `fail` makes the next ones throw its error.
+function watchReads (t, file) {
+  const { readFileSync } = fs
+  t.teardown(() => { fs.readFileSync = readFileSync }, { force: true })
+  const watch = { n: 0, fail: null, read: () => JSON.parse(readFileSync(file, 'utf8')) }
+  fs.readFileSync = function (p, ...rest) {
+    if (p === file) {
+      watch.n++
+      if (watch.fail !== null) throw watch.fail
+    }
+    return readFileSync.call(this, p, ...rest)
+  }
+  return watch
+}
+
+test('heal() keeps the store after a transient read error, logs its code and tries again', async (t) => {
+  const events = []
+  const { store, file } = setup(t, { log: (e) => events.push(e) })
+  const a = memberKey()
+  await store.accept(req(a, 1))
+  const disk = readFile(file)
+  delete disk.members[a]
+  fs.writeFileSync(file, JSON.stringify(disk))
+  const watch = watchReads(t, file)
+  watch.fail = Object.assign(new Error('EIO: i/o error, read ' + file), { code: 'EIO' })
+  t.is(await store.heal(), false)
+  t.ok(store.available(), 'a read that failed is not a verdict on the file')
+  t.alike(events, [{ event: 'terms', reason: 'leitura-falhou', code: 'EIO' }], 'the code only, no path')
+  watch.fail = null
+  t.is(await store.heal(), true, 'the next interval heals')
+  t.ok(readFile(file).members[a], 'the dropped entry is back')
+  t.is(events.length, 1)
+})
+
+test('heal() makes the store unavailable for a malformed file', async (t) => {
+  const events = []
+  const { store, file } = setup(t, { log: (e) => events.push(e) })
+  await store.accept(req(memberKey(), 1))
+  fs.writeFileSync(file, '{not json')
+  t.is(await store.heal(), false)
+  t.absent(store.available())
+  t.alike(events, [], 'a malformed file is not a transient error')
+
+  const { store: other, file: otherFile } = setup(t)
+  await other.accept(req(memberKey(), 1))
+  fs.writeFileSync(otherFile, JSON.stringify({ v: 2, members: {} }))
+  t.is(await other.heal(), false)
+  t.absent(other.available(), 'a valid JSON of another shape too')
+})
+
+test('heal() reads the file only when it changed or the store is dirty', async (t) => {
+  const { store, file } = setup(t)
+  const a = memberKey()
+  await store.accept(req(a, 1))
+  const watch = watchReads(t, file)
+  t.is(await store.heal(), false)
+  t.is(watch.n, 1, 'the first heal after a write reads once')
+  t.is(await store.heal(), false)
+  t.is(await store.heal(), false)
+  t.is(watch.n, 1, 'nothing changed, nothing read')
+
+  const disk = watch.read()
+  delete disk.members[a]
+  fs.writeFileSync(file, JSON.stringify(disk))
+  t.is(await store.heal(), true, 'a replaced file is read and healed')
+  t.is(watch.n, 2)
+  t.is(await store.heal(), false)
+  t.is(watch.n, 3, 'its own write is read back once: a late rename between the write and the fingerprint is not skipped')
+  t.is(await store.heal(), false)
+  t.is(watch.n, 3, 'and not again')
+
+  fs.writeFileSync(file, JSON.stringify(watch.read()) + '\n')
+  await store.heal()
+  t.is(watch.n, 4, 'a rewrite with the same entries is still noticed')
+})

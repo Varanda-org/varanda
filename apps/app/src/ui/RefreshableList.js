@@ -78,6 +78,13 @@ function renderSlot (slot) {
   return isValidElement(slot) ? slot : createElement(slot)
 }
 
+// keepVisiblePosition (A Rua): rows merged above the one being read keep it
+// in place on native instead of moving it by their height. Near the top the
+// list still follows new rows up, so a reload after the pill shows them.
+// react-native-web 0.21 drops the prop, so the web gets only what the
+// browser's own scroll anchoring does.
+const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThreshold: 24 })
+
 export function RefreshableList ({
   data,
   renderItem,
@@ -95,7 +102,8 @@ export function RefreshableList ({
   atEnd,
   scrollToTopSignal,
   newItems,
-  listRef
+  listRef,
+  keepVisiblePosition = false
 }) {
   const node = useNode()
   const syncNow = node && node.syncNow
@@ -548,6 +556,7 @@ export function RefreshableList ({
         onLayout={onLayout}
         scrollEventThrottle={16}
         dataSet={{ pull: 'y' }}
+        maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
         refreshControl={web
           ? undefined
           : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} />}

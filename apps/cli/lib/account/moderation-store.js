@@ -596,7 +596,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       const open = mine.find((a) => a.status === 'aberta')
       if (open) return { appeal: { ...open }, duplicate: true }
       const t = now()
-      if (mine.some((a) => a.status === 'negado' && Date.parse(a.at) >= t - APPEAL_WINDOW_MS)) throw fail('limite-recursos')
+      if (mine.some((a) => a.status === 'negado' && Date.parse(a.decidedAt) >= t - APPEAL_WINDOW_MS)) throw fail('limite-recursos')
       let waiting = 0
       for (const a of rows) if (a.status === 'aberta') waiting++
       if (waiting >= MAX_APPEALS || rows.length >= MAX_STORED_APPEALS) throw fail('limite')

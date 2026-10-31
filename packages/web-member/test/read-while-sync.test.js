@@ -13,8 +13,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket } = require('ws')
-const { testnet } = require('./helpers/net')
-const { connectClient, errorOf } = require('./helpers/session')
+const { testnet, until } = require('./helpers/net')
+const { connectClient, errorOf, stoppedOf } = require('./helpers/session')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -72,7 +72,7 @@ async function otherDiary (t, assoc, name) {
 
 // A certified member with two posts, following F (stored replica), with a
 // stored replica of an unfollowed U too; the write gate is off.
-async function fixture (t, { blockFollowed = false } = {}) {
+async function fixture (t, { blockFollowed = false, readerWaitMs } = {}) {
   const storage = memoryNodeStorage()
   const assoc = association()
   const port = await deadPort()
@@ -88,6 +88,7 @@ async function fixture (t, { blockFollowed = false } = {}) {
     },
     onInternalError: (err) => internal.push(err),
     writeGate: false,
+    ...(readerWaitMs === undefined ? {} : { readerWaitMs }),
     syncOptions: { retryMinMs: 100, retryMaxMs: 200 }
   })
   t.teardown(() => node.close(), { force: true })
@@ -136,6 +137,53 @@ function hangNextReadAll (t) {
     release: () => release()
   }
 }
+
+// The run's own store.readFollows call (its follow gate at startup) held
+// until release(); every other caller goes through.
+function holdRunFollowGate (t) {
+  const original = store.readFollows
+  let armed = true
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  store.readFollows = async function (...args) {
+    if (armed && /\bat syncRun \(/.test(new Error().stack)) {
+      armed = false
+      await gate
+    }
+    return original.apply(this, args)
+  }
+  t.teardown(() => {
+    store.readFollows = original
+    release()
+  })
+  return { release: () => release() }
+}
+
+test('a read never waits unbounded for a run whose startup has not published its cores', async (t) => {
+  await testnet(t)
+  const { web, own } = await fixture(t, { readerWaitMs: 300 })
+  const LINE = 'aviso: leitura sem esperar a partida da sincronização (300 ms)'
+  const lines = () => web.events.filter((e) => e.name === 'warning' && e.data.line === LINE)
+  const held = holdRunFollowGate(t)
+  // The startup step ends once the read gave up on it: the preemption's
+  // abort waits for the run to unwind, which a stuck step never does.
+  until(() => lines().length > 0, { timeoutMs: 10000 }).then(held.release, held.release)
+  const { runId } = await web.request('sync.start', {})
+  let timer = null
+  const read = await Promise.race([
+    web.request('feed.read', {}),
+    new Promise((resolve) => { timer = setTimeout(resolve, 5000, null) })
+  ])
+  clearTimeout(timer)
+  t.ok(read !== null, 'feed.read answered, not stuck behind the startup')
+  if (read === null) return
+  t.is(read.items.filter((i) => i.author === own).length, 2, 'served on the exclusive path')
+  t.is(lines().length, 1, 'one warning line')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the starting run was preempted')
+  await until(() => web.events.some((e) => e.name === 'sync.started' && e.data.runId > runId), { timeoutMs: 10000 })
+  t.pass('the continuous run was restarted after the read')
+  await web.request('sync.stop')
+})
 
 test('feed, log, profile and engagement reads are served on the live run without preempting it', async (t) => {
   await testnet(t)
@@ -282,5 +330,75 @@ test('a stored replica the run does not hold falls back to the exclusive path an
   const stops = preempted(web, from)
   t.is(stops.length, 1, 'one preemption')
   t.is(stops[0].data.runId, runId)
+  await web.request('sync.stop')
+})
+
+// A followed diary stored with holes at its full signed length: the prefix
+// [0, 5) with a block that does not decode at 3, an island [7, 9) the
+// reader does not show, and the newest run [11, 17).
+async function holeyReplica (t, storage, assoc) {
+  const source = new Hypercore(memoryStorage())
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  const put = (record) => source.append(b4a.from(JSON.stringify(record)))
+  await put(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+  await put(profileRecord({ name: 'Furada', bio: '' }))
+  await put(postRecord({ text: 'p0', at: '2026-01-01T00:00:10.000Z' }))
+  await source.append(b4a.from('{oops'))
+  for (let i = 1; i < 14; i++) await put(postRecord({ text: 'p' + i, at: '2026-01-01T00:00:' + String(10 + i) + '.000Z' }))
+  const key = hex(source.key)
+  const replica = new Hypercore(storage.core('replica/' + key), source.key)
+  await replica.ready()
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  for (const [start, end] of [[0, 5], [7, 9], [11, 17]]) await replica.download({ start, end }).done()
+  assert.equal(replica.length, 17)
+  a.destroy()
+  b.destroy()
+  await replica.close()
+  return key
+}
+
+// Every log.read page of `author` (limit 5) -> the pages' { seqs, invalid,
+// entriesTruncated }.
+async function logPages (web, author) {
+  const pages = []
+  let before
+  for (;;) {
+    const page = await web.request('log.read', before === undefined ? { author, limit: 5 } : { author, limit: 5, before })
+    pages.push({ seqs: page.entries.map((e) => e.seq), invalid: page.invalid, entriesTruncated: page.entriesTruncated })
+    if (page.entriesTruncated === 0 || pages.length > 10) return pages
+    before = Math.min(...page.entries.map((e) => e.seq), ...page.invalid.map((e) => e.seq))
+  }
+}
+
+test('a followed diary with holes: log.read pages by seq over the prefix and the newest run, borrowed or not', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await fixture(t)
+  const H = await holeyReplica(t, storage, assoc)
+  await web.request('follow.add', { key: H })
+  const feed = await web.request('feed.read', {})
+  const shown = feed.items.filter((i) => i.author === H).map((i) => i.text).sort()
+  t.alike(shown, ['p0', 'p1', 'p10', 'p11', 'p12', 'p13', 'p8', 'p9'], 'the prefix and the newest run, not the island')
+  t.ok(feed.incomplete.includes(H))
+  const pages = await logPages(web, H)
+  t.alike(pages, [
+    { seqs: [12, 13, 14, 15, 16], invalid: [], entriesTruncated: 6 },
+    { seqs: [1, 2, 4, 11], invalid: [{ seq: 3, reason: 'malformed' }], entriesTruncated: 1 },
+    { seqs: [0], invalid: [], entriesTruncated: 0 }
+  ], 'pages by seq, the holes skipped, the bad block invalid')
+  const head = await web.request('log.read', { author: H, limit: 3, before: 9 })
+  t.alike(head.entries.map((e) => e.seq), [2, 4], 'a before inside a hole ends at the visible block below it')
+  t.alike(head.invalid, [{ seq: 3, reason: 'malformed' }])
+  t.is(head.entriesTruncated, 2)
+
+  const { runId } = await web.request('sync.start', {})
+  await web.request('profile.read', { authors: [H] })
+  const from = web.events.length
+  t.alike(await web.request('feed.read', {}), feed, 'the borrowed feed answers the same')
+  t.alike(await logPages(web, H), pages, 'the borrowed log pages answer the same')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  t.is(preempted(web, from).length, 0, 'served on the run')
   await web.request('sync.stop')
 })

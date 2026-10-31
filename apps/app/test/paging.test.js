@@ -107,17 +107,18 @@ test('feed footer says syncing only while the last page reported incomplete diar
   t.is(isLastFeedPage({ items: [], incomplete: [KEY_A] }, 2), true, 'a short syncing page still ends the list')
 })
 
-test('sync baseline covers incomplete and no-cert follows, plus every length when truncated', async (t) => {
+test('sync baseline records every known length plus incomplete and no-cert follows', async (t) => {
   const { syncBaseline } = await load()
   const lengths = Object.freeze({ [KEY_A]: 3, [KEY_C]: 7 })
-  t.alike(syncBaseline({ incomplete: [KEY_A, KEY_B] }, lengths), { [KEY_A]: 3, [KEY_B]: -1 })
+  t.alike(syncBaseline({ incomplete: [KEY_A, KEY_B] }, lengths), { [KEY_A]: 3, [KEY_B]: -1, [KEY_C]: 7 })
   t.alike(syncBaseline({ incomplete: [KEY_B] }, undefined), { [KEY_B]: -1 })
-  t.alike(syncBaseline({ items: [] }, lengths), {})
+  t.alike(syncBaseline({ items: [] }, lengths), { [KEY_A]: 3, [KEY_C]: 7 }, 'nothing incomplete still records every length')
   t.alike(syncBaseline({ incomplete: [KEY_B], incompleteTruncated: 2 }, lengths), { [KEY_A]: 3, [KEY_B]: -1, [KEY_C]: 7 })
+  t.alike(syncBaseline({ items: [] }, { [KEY_A]: '3' }), {}, 'non-number lengths are not recorded')
   t.alike(syncBaseline({
     incomplete: [],
-    skipped: [{ key: KEY_B, reason: 'no-cert' }, { key: KEY_C, reason: 'blocked' }]
-  }, lengths), { [KEY_B]: -1 }, 'only a no-cert follow joins the baseline')
+    skipped: [{ key: KEY_B, reason: 'no-cert' }, { key: 'd'.repeat(64), reason: 'blocked' }]
+  }, lengths), { [KEY_A]: 3, [KEY_B]: -1, [KEY_C]: 7 }, 'only a no-cert follow joins the baseline at -1')
 })
 
 test('sync advances only on growth past the baseline', async (t) => {
@@ -129,7 +130,7 @@ test('sync advances only on growth past the baseline', async (t) => {
   t.is(syncAdvanced(baseline, 0, { [KEY_B]: 1 }), true, 'first block of an unknown key')
   t.is(syncAdvanced(baseline, 0, { [KEY_A]: '9' }), false, 'non-number')
   t.is(syncAdvanced(baseline, 0, undefined), false)
-  t.is(syncAdvanced(baseline, 0, { [KEY_C]: 1 }), false, 'key outside the baseline, not truncated')
+  t.is(syncAdvanced(baseline, 0, { [KEY_C]: 1 }), true, 'a key that appeared after the read')
   t.is(syncAdvanced(baseline, 1, { [KEY_C]: 1 }), true, 'key outside the baseline, truncated')
   t.is(syncAdvanced(baseline, 1, { nothex: 5 }), false, 'non-hex key ignored')
   t.alike(advancedKeys(baseline, 1, { [KEY_C]: 1, [KEY_B]: 0, [KEY_A]: 3, nothex: 9 }), [KEY_B, KEY_C])
@@ -138,7 +139,7 @@ test('sync advances only on growth past the baseline', async (t) => {
   const page = { incomplete: [], skipped: [{ key: KEY_B, reason: 'no-cert' }, { key: KEY_C, reason: 'blocked' }] }
   const fromSkipped = syncBaseline(page, {})
   t.is(syncAdvanced(fromSkipped, 0, { [KEY_B]: 1 }), true, 'a no-cert follow growing triggers')
-  t.is(syncAdvanced(fromSkipped, 0, { [KEY_C]: 1 }), false, 'a blocked follow does not')
+  t.is(syncAdvanced(syncBaseline(page, { [KEY_C]: 1 }), 0, { [KEY_C]: 1 }), false, 'a blocked follow that does not grow does not')
 })
 
 test('a capped skipped or incomplete list opens the trigger to every key', async (t) => {
@@ -271,12 +272,13 @@ test('a quiet newest page keeps the list at its end and probes below it when ful
     'a full page holding every shown row replaces and probes')
 })
 
-test('sync reads re-read the newest page only for a short list', async (t) => {
+test('sync reads re-read the newest page for a short list and the shown range for a deep one', async (t) => {
   const { syncReadKind } = await load()
   t.is(syncReadKind({ deep: false, probeOlder: false, shown: 12, limit: 30 }), 'newest')
-  t.is(syncReadKind({ deep: false, probeOlder: false, shown: 30, limit: 30 }), 'older', 'the old rule re-read the newest page here')
-  t.is(syncReadKind({ deep: true, probeOlder: false, shown: 3, limit: 30 }), 'older')
+  t.is(syncReadKind({ deep: false, probeOlder: false, shown: 30, limit: 30 }), 'range')
+  t.is(syncReadKind({ deep: true, probeOlder: false, shown: 3, limit: 30 }), 'range')
   t.is(syncReadKind({ deep: false, probeOlder: true, shown: 3, limit: 30 }), 'older')
+  t.is(syncReadKind({ deep: true, probeOlder: true, shown: 90, limit: 30 }), 'older', 'only a pending probe reads below the list')
 })
 
 test('a probe below the list runs once without growth, never after an error', async (t) => {
@@ -302,4 +304,192 @@ test('a probe below the list runs once without growth, never after an error', as
   t.is(canSyncRead({ ...feed, atEnd: false }, same, true), false, 'never when not at the end')
   t.is(canSyncRead(feed, same, false), false, 'not shown')
   t.is(canSyncRead({ ...feed, loadingMore: true }, same, true), false)
+})
+
+const at = (minute) => new Date(Date.parse('2026-10-01T00:00:00.000Z') + minute * 60000).toISOString()
+const post = (author, seq, minute) => Object.freeze({ author, seq, at: at(minute), text: 'olá' })
+const syncFeed = (patch) => Object.freeze({
+  items: [],
+  cursor: null,
+  loadedAt: 1,
+  atEnd: true,
+  loading: false,
+  loadingMore: false,
+  refreshing: false,
+  loadError: '',
+  moreError: '',
+  incomplete: [],
+  incompleteTruncated: 0,
+  syncBase: {},
+  syncTruncated: 0,
+  emptyStreak: 0,
+  deep: false,
+  probeOlder: false,
+  rangeFrom: null,
+  ...patch
+})
+
+test('a deep list whose diaries grew re-reads its range, not below its cursor', async (t) => {
+  const { planSyncRead, rearmDelay } = await load()
+  const items = Array.from({ length: 147 }, (_, i) => post(KEY_A, 147 - i, 147 - i))
+  const feed = syncFeed({ items, cursor: { at: items[146].at, author: KEY_A, seq: 1 }, deep: true, syncBase: { [KEY_A]: 51 }, emptyStreak: 1 })
+  t.alike(planSyncRead(feed, { [KEY_A]: 147 }, true, 30), { kind: 'range', delay: rearmDelay(1) })
+  t.is(planSyncRead(feed, { [KEY_A]: 51 }, true, 30), null, 'no growth, no read')
+  t.alike(planSyncRead({ ...feed, deep: false, items: items.slice(0, 5) }, { [KEY_A]: 147 }, true, 30), { kind: 'newest', delay: rearmDelay(0) })
+  t.is(planSyncRead({ ...feed, moreError: 'falhou' }, { [KEY_A]: 147 }, true, 30), null, 'never after a failed read')
+  t.is(planSyncRead({ ...feed, loadingMore: true }, { [KEY_A]: 147 }, true, 30), null)
+  t.alike(planSyncRead({ ...feed, rangeFrom: { at: items[60].at, author: KEY_A, seq: 87 } }, { [KEY_A]: 51 }, true, 30), { kind: 'range', delay: rearmDelay(1) },
+    'a capped range read continues without new growth')
+})
+
+test('a read before the upgrade lists nothing incomplete and later growth still re-arms', async (t) => {
+  const { canSyncRead, syncBaseline, syncTruncated } = await load()
+  const page = { items: [], incomplete: [], skipped: [] }
+  const stored = syncFeed({ syncBase: syncBaseline(page, { [KEY_A]: 102 }), syncTruncated: syncTruncated(page) })
+  t.is(canSyncRead(stored, { [KEY_A]: 102 }, true), false)
+  t.is(canSyncRead(stored, { [KEY_A]: 162 }, true), true, 'a stored replica grew after the read')
+  const early = syncFeed({ syncBase: syncBaseline(page, {}), syncTruncated: syncTruncated(page) })
+  t.is(canSyncRead(early, {}, true), false)
+  t.is(canSyncRead(early, { [KEY_A]: 162 }, true), true, 'a length first reported after the read')
+})
+
+test('a range merge inserts rows inside the shown range in feed order and holds newer rows for the pill', async (t) => {
+  const { mergeRange } = await load()
+  const shown = Object.freeze([post(KEY_B, 9, 90), post(KEY_A, 5, 50), post(KEY_B, 2, 20)])
+  const page = Object.freeze([
+    post(KEY_A, 1, 10), post(KEY_B, 2, 20), post(KEY_A, 3, 30), post(KEY_C, 1, 50),
+    post(KEY_A, 5, 50), post(KEY_A, 6, 60), post(KEY_B, 9, 90), post(KEY_C, 2, 95), post(KEY_C, 2, 95)
+  ])
+  const merged = mergeRange(shown, page)
+  t.alike(merged.items.map((i) => i.author[0] + i.seq), ['b9', 'a6', 'c1', 'a5', 'a3', 'b2', 'a1'])
+  t.is(merged.added, 4)
+  t.alike(merged.newer, [KEY_C + ':2'])
+  for (const row of shown) t.ok(merged.items.includes(row), 'a shown row is kept as is')
+  t.alike(mergeRange(shown, []), { items: [...shown], added: 0, newer: [] })
+  const kept = mergeRange(shown, [post(KEY_A, 6, 60)])
+  t.is(kept.items.length, 4, 'a row the pages did not return is never cut')
+  t.alike(shown.map((i) => i.seq), [9, 5, 2], 'the shown list is not changed in place')
+})
+
+test('a range read pages to the list cursor, stops on a short page or at the cap', async (t) => {
+  const { RANGE_PAGES_MAX, cursorOf, rangeEnd, rangePageCap, rangeStep } = await load()
+  const pageOf = (from, n) => ({ items: Array.from({ length: n }, (_, i) => post(KEY_A, from + i, from + i)) })
+  const until = cursorOf([post(KEY_A, 40, 40)])
+  t.is(rangePageCap(147, 31), 6)
+  t.is(rangePageCap(0, 31), 1)
+  t.is(rangePageCap(5000, 31), RANGE_PAGES_MAX)
+  t.is(rangeStep({ page: pageOf(100, 31), limit: 31, until, pages: 1, cap: 6 }), 'more')
+  t.is(rangeStep({ page: pageOf(41, 31), limit: 31, until, pages: 2, cap: 6 }), 'more', 'still above the cursor')
+  t.is(rangeStep({ page: pageOf(40, 31), limit: 31, until, pages: 2, cap: 6 }), 'reached')
+  t.is(rangeStep({ page: pageOf(10, 31), limit: 31, until, pages: 6, cap: 6 }), 'reached', 'reaching wins over the cap')
+  t.is(rangeStep({ page: pageOf(50, 12), limit: 31, until, pages: 1, cap: 6 }), 'end')
+  t.is(rangeStep({ page: { items: [] }, limit: 31, until, pages: 1, cap: 6 }), 'end')
+  t.is(rangeStep({ page: pageOf(100, 31), limit: 31, until, pages: 6, cap: 6 }), 'cap')
+  t.alike(rangeEnd({ step: 'reached', cursor: until, page: pageOf(30, 31) }), { cursor: cursorOf([post(KEY_A, 30, 30)]), atEnd: true, probeOlder: true, rangeFrom: null })
+  t.alike(rangeEnd({ step: 'end', cursor: until, page: pageOf(50, 3) }), { cursor: until, atEnd: true, probeOlder: false, rangeFrom: null })
+  t.alike(rangeEnd({ step: 'end', cursor: until, page: { items: [] } }), { cursor: until, atEnd: true, probeOlder: false, rangeFrom: null })
+  t.alike(rangeEnd({ step: 'cap', cursor: until, page: pageOf(100, 31) }), { cursor: until, atEnd: true, probeOlder: false, rangeFrom: cursorOf([post(KEY_A, 100, 100)]) })
+})
+
+test('the footer says syncing while the diaries grew since the last read', async (t) => {
+  const { feedSyncing } = await load()
+  const feed = syncFeed({ syncBase: { [KEY_A]: 51 } })
+  t.is(feedSyncing(feed, { [KEY_A]: 147 }), true, 'nothing incomplete but grown since the read')
+  t.is(feedSyncing(feed, { [KEY_A]: 51 }), false)
+  t.is(feedSyncing({ ...feed, incomplete: [KEY_A] }, { [KEY_A]: 51 }), true)
+  t.is(feedSyncing({ ...feed, probeOlder: true }, { [KEY_A]: 51 }), true, 'a probe below the list is pending')
+  t.is(feedSyncing({ ...feed, rangeFrom: { at: at(1), author: KEY_A, seq: 1 } }, { [KEY_A]: 51 }), true, 'a capped range read is pending')
+  t.is(feedSyncing(feed, undefined), false)
+})
+
+test('growth during a capped range sequence plans another range read', async (t) => {
+  const { planSyncRead, sequenceBase, syncBaseline } = await load()
+  const items = Array.from({ length: 90 }, (_, i) => post(KEY_A, 90 - i, 90 - i))
+  const cursor = { at: items[89].at, author: KEY_A, seq: 1 }
+  const start = Object.freeze({ [KEY_A]: 100 })
+  const first = sequenceBase(null, start, true)
+  t.alike(first, { start, seqBase: start }, 'a capped first read keeps its start lengths')
+  const grown = Object.freeze({ [KEY_A]: 110 })
+  const last = sequenceBase(first.seqBase, grown, false)
+  t.alike(last, { start, seqBase: null }, 'the continuation measures from the sequence start')
+  const feed = syncFeed({ items, cursor, deep: true, syncBase: syncBaseline({ incomplete: [] }, last.start) })
+  t.is((planSyncRead(feed, grown, true, 30) || {}).kind, 'range', 'posts that arrived in the part already read are read again')
+  t.alike(sequenceBase(null, grown, false), { start: grown, seqBase: null }, 'a read outside a sequence uses the current lengths')
+  t.alike(sequenceBase(null, undefined, false), { start: {}, seqBase: null })
+})
+
+test('a probe after a range sequence does not consume growth from the sequence', async (t) => {
+  const { planSyncRead, rangeEnd, sequenceBase, syncBaseline, cursorOf, olderPagePatch } = await load()
+  const items = Array.from({ length: 60 }, (_, i) => post(KEY_A, 60 - i, 60 - i))
+  const until = cursorOf([items[59]])
+  const page = { items: Array.from({ length: 31 }, (_, i) => post(KEY_A, i + 1, i + 1)) }
+  const end = rangeEnd({ step: 'reached', cursor: until, page })
+  const start = Object.freeze({ [KEY_A]: 70 })
+  const range = sequenceBase(null, start, end.rangeFrom !== null)
+  t.is(range.seqBase, null, 'a sequence that reached the cursor is over')
+  const grown = Object.freeze({ [KEY_A]: 80 })
+  const probing = syncFeed({ items, ...end, deep: true, syncBase: syncBaseline(page, range.start) })
+  t.is((planSyncRead(probing, grown, true, 30) || {}).kind, 'older')
+  const after = { ...probing, ...olderPagePatch(probing, { items: [] }, { before: end.cursor, fromSync: true, limit: 31 }) }
+  t.alike(after.syncBase, { [KEY_A]: 70 }, 'the probe keeps the baseline of the sequence start')
+  t.is((planSyncRead(after, grown, true, 30) || {}).kind, 'range', 'rows that became readable above the cursor are read')
+  t.is(planSyncRead({ ...after, syncBase: syncBaseline({ items: [] }, grown) }, grown, true, 30), null, 'no growth since the start, no read')
+})
+
+test('paging below the list never advances the baseline or ends a pending sequence', async (t) => {
+  const { planSyncRead, olderPagePatch, cursorOf } = await load()
+  const items = Array.from({ length: 60 }, (_, i) => post(KEY_A, 100 - i, 100 - i))
+  const before = cursorOf([items[59]])
+  const seqBase = Object.freeze({ [KEY_A]: 70 })
+  const feed = syncFeed({ items, cursor: before, atEnd: false, deep: true, syncBase: { [KEY_A]: 70 }, seqBase })
+  const full = { items: Array.from({ length: 31 }, (_, i) => post(KEY_A, i + 10, i + 10)), incomplete: [] }
+  const patch = olderPagePatch(feed, full, { before, fromSync: false, limit: 31 })
+  t.absent('syncBase' in patch, 'a page below the list leaves the baseline alone')
+  t.absent('seqBase' in patch, 'nor ends a pending sequence')
+  const scrolled = { ...feed, ...patch }
+  t.is(scrolled.items.length, 91)
+  t.is(scrolled.atEnd, false)
+  const last = { ...scrolled, ...olderPagePatch(scrolled, { items: [post(KEY_A, 1, 1)] }, { before: scrolled.cursor, fromSync: false, limit: 31 }) }
+  t.is(last.atEnd, true)
+  t.alike(last.syncBase, { [KEY_A]: 70 })
+  t.is((planSyncRead(last, { [KEY_A]: 90 }, true, 30) || {}).kind, 'range', 'growth during the scroll is read once the list is at its end')
+})
+
+test('a range read runs away from the list end; only the probe and a short newest read wait for it', async (t) => {
+  const { planSyncRead, rangeEnd, cursorOf, rearmDelay } = await load()
+  const items = Array.from({ length: 120 }, (_, i) => post(KEY_A, 120 - i, 120 - i))
+  const cursor = cursorOf([items[119]])
+  const top = syncFeed({ items, cursor, atEnd: false, deep: true, syncBase: { [KEY_A]: 70 } })
+  t.alike(planSyncRead(top, { [KEY_A]: 80 }, true, 30), { kind: 'range', delay: rearmDelay(0) }, 'growth while the person reads the top of a long list')
+  t.is(planSyncRead(top, { [KEY_A]: 70 }, true, 30), null, 'no growth, no read')
+  t.is((planSyncRead({ ...top, rangeFrom: cursorOf([items[60]]) }, { [KEY_A]: 70 }, true, 30) || {}).kind, 'range', 'a pending capped read continues')
+  t.is(planSyncRead({ ...top, probeOlder: true }, { [KEY_A]: 80 }, true, 30), null, 'the probe below the list waits for its end')
+  t.is(planSyncRead({ ...top, deep: false, items: items.slice(0, 5) }, { [KEY_A]: 80 }, true, 30), null, 'a short newest read waits for the end')
+  t.is(planSyncRead({ ...top, moreError: 'falhou' }, { [KEY_A]: 80 }, true, 30), null)
+  t.is(planSyncRead({ ...top, refreshing: true }, { [KEY_A]: 80 }, true, 30), null)
+  const page = { items: Array.from({ length: 31 }, (_, i) => post(KEY_A, i + 1, i + 1)) }
+  t.alike(rangeEnd({ step: 'reached', cursor, page, atEnd: false }), { cursor: cursorOf(page.items), atEnd: false, probeOlder: false, rangeFrom: null },
+    'a list not at its end keeps paging by scrolling, no probe')
+  t.alike(rangeEnd({ step: 'cap', cursor, page, atEnd: false }), { cursor, atEnd: false, probeOlder: false, rangeFrom: cursorOf(page.items) })
+  t.is(rangeEnd({ step: 'end', cursor, page: { items: [] }, atEnd: false }).atEnd, false, 'a short range page keeps the list end state')
+})
+
+test('regression: a short range page while the visible feed shrank never ends a list that was not at its end', async (t) => {
+  const { planSyncRead, rangeEnd, cursorOf, feedSyncing } = await load()
+  // 60 rows shown, not at the end; a followed diary grew before its new tail
+  // arrived, so the node shows only its prefix for a while and the range
+  // page comes back short.
+  const items = Array.from({ length: 60 }, (_, i) => post(KEY_A, 60 - i, 60 - i))
+  const cursor = cursorOf([items[59]])
+  const prev = syncFeed({ items, cursor, atEnd: false, deep: true, syncBase: { [KEY_A]: 60 } })
+  const short = { items: items.slice(0, 3) }
+  const end = rangeEnd({ step: 'end', cursor: prev.cursor, page: short, atEnd: prev.atEnd })
+  t.is(end.atEnd, false, 'the list is not marked as ended')
+  const after = { ...prev, ...end }
+  // ARua passes onLoadMore only while !atEnd: infinite scroll stays on.
+  t.absent(after.atEnd, 'infinite scroll stays available')
+  t.is((planSyncRead(after, { [KEY_A]: 90 }, true, 30) || {}).kind, 'range', 'later growth still plans a range read')
+  t.is(feedSyncing(after, { [KEY_A]: 90 }), true, 'and the footer says syncing, not the end')
+  // A list that really was at its end stays there.
+  t.is(rangeEnd({ step: 'end', cursor, page: short, atEnd: true }).atEnd, true)
 })

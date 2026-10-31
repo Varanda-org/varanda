@@ -582,6 +582,11 @@ const SPECS = {
   'group.ban': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.admin': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
+  // Communities (docs/rpc.md 5.57 to 5.60): sets of groups, named by their root key.
+  'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)) }, mutating: true },
+  'community.link': { fields: { community: req(isKey), group: req(isKey), on: req(isBool) }, mutating: true },
+  'community.info': { fields: { community: req(isKey) } },
+  'community.admin': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

@@ -275,6 +275,10 @@ const DIARY_PEEK_BUSY = 'ocupado'
 const MAX_DIARY_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
+// The longest a read waits for a starting run to publish its cores
+// (withCores) before it preempts the run instead.
+const READER_WAIT_MS = 3000
+const NOT_READY = Symbol('not ready')
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
 // The lease (see the header): the gap after an idle end, how long a run
@@ -297,6 +301,10 @@ const USAGE_MESSAGES = new Set([
   'sem permissão no grupo',
   'limite de grupos atingido',
   'limite do grupo atingido',
+  'sem permissão na comunidade',
+  'limite da comunidade atingido',
+  'o grupo já está em outra comunidade',
+  'o criador da comunidade já administra',
   'nada a alterar',
   'diretório não é de um membro',
   'associação diferente da configurada',
@@ -322,6 +330,7 @@ const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
   'sem dados locais para este diário',
   'grupo não encontrado',
+  'comunidade não encontrada',
   SEEDER_UNAVAILABLE,
   DIARY_UNAVAILABLE
 ])
@@ -422,6 +431,13 @@ function redactLogLine (text) {
   return [UNSAFE_LOG.test(head) ? 'aviso: erro interno' : head + ': erro interno', true]
 }
 
+// A run's `ready`, or NOT_READY once ms passed first.
+function readyWithin (ready, ms) {
+  let timer = null
+  const late = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, ms), NOT_READY) })
+  return Promise.race([ready, late]).finally(() => clearTimeout(timer))
+}
+
 // ---- the session ----
 
 // syncOptions: test-only overrides passed to runSync (limits and timings).
@@ -429,6 +445,7 @@ function redactLogLine (text) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
@@ -443,6 +460,7 @@ function createBrowserSession ({
   limits,
   writeGate = true,
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
@@ -721,6 +739,9 @@ function createBrowserSession ({
                 certKnown = true
                 event('certificado recuperado do semeador')
                 return
+              case 'newest':
+                event('newest ' + safe(String(ev.key)) + ' ' + safe(String(ev.length)))
+                return
               case 'have':
               case 'admitted':
                 if (ev.key === ownKey && localLength !== null && ev.length >= localLength) unpushed = false
@@ -904,11 +925,18 @@ function createBrowserSession ({
   // instance and without stopping the run, the lease or its clocks; only a
   // read the run cannot serve (member-ops NEEDS_EXCLUSIVE) falls back to
   // withStore and preempts. The hold is released before that fallback:
-  // stopRun waits for every hold, ours included.
+  // stopRun waits for every hold, ours included. A startup that has not
+  // published the cores within readerWaitMs (slow or stuck storage) is
+  // preempted too: every read, and whatever is queued behind it, would
+  // otherwise wait on it with no limit.
   async function withCores (fn) {
     const r = run
     if (r === null) return withStore(fn)
-    const api = await r.ready
+    const api = await readyWithin(r.ready, readerWaitMs)
+    if (api === NOT_READY) {
+      warning('aviso: leitura sem esperar a partida da sincronização (' + readerWaitMs + ' ms)')
+      return withStore(fn)
+    }
     if (api === null || !api.hold()) {
       await r.done
       return withStore(fn)
@@ -1263,31 +1291,41 @@ function createBrowserSession ({
     return [...new Set([entry.key, ...(entry.rootNonce === null ? [] : [entry.group])])]
   }
 
-  function groupWrite (operation) {
+  // The own cores a group write may touch (the write gate waits for each),
+  // and the keys whose groups.changed it emits: `roots` lists the group or
+  // community roots of the params, `changed` the keys after the write.
+  const GROUP_ROOTS = (params) => [params.group]
+  const GROUP_CHANGED = async (c, result, params) => [result.group || params.group]
+
+  function groupWrite (operation, { roots = GROUP_ROOTS, changed = GROUP_CHANGED } = {}) {
     return serial(async (params, epoch, generation) => {
       checkGroupOperation(epoch, generation)
       await requireUnlocked()
       groupWriting = true
       try {
-        const keys = await ownGroupKeys(params.group)
+        const keys = []
+        for (const root of roots(params)) keys.push(...await ownGroupKeys(root))
         checkGroupOperation(epoch, generation)
-        await ensureCaughtUp(epoch, keys, generation)
+        await ensureCaughtUp(epoch, [...new Set(keys)], generation)
         const result = await withStore(async (c) => {
           checkGroupOperation(epoch, generation)
           const result = await operation(c, params)
-          const group = result.group || params.group
+          const groups = [...new Set(await changed(c, result, params))]
           // A join can create a writer after the previous run took its snapshot.
           // The next run opens every own writer from the updated kv list.
-          for (const key of await ownGroupKeys(group)) {
-            const core = await store.openGroupCoreReadOnly(storage, key)
-            if (core === null) continue
-            try {
-              groupUnpushed.set(key, core.length)
-              groupLengths.set(key, core.length)
-            } finally { await core.close() }
+          const written = new Set([...roots(params), result.group, result.community].filter((k) => typeof k === 'string'))
+          for (const group of written) {
+            for (const key of await ownGroupKeys(group)) {
+              const core = await store.openGroupCoreReadOnly(storage, key)
+              if (core === null) continue
+              try {
+                groupUnpushed.set(key, core.length)
+                groupLengths.set(key, core.length)
+              } finally { await core.close() }
+            }
           }
           await member.withIdentity(c, async ({ diary }) => { wrote(diary.length - 1) })
-          send('groups.changed', { group }, epoch)
+          for (const group of groups) send('groups.changed', { group }, epoch)
           return result
         })
         checkGroupOperation(epoch, generation)
@@ -1416,7 +1454,7 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.57),
+    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.61),
     // exactly like terms.sign: not a diary write, no append, no network. The
     // session fills in member and association; the text enters the payload
     // hashed.
@@ -1664,9 +1702,15 @@ function createBrowserSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
-      // The window ends at `before` (exclusive), clamped to the length.
-      const end = before === undefined ? all.length : Math.min(before, all.length)
-      const window = all.slice(Math.max(0, end - limit), end)
+      // The window ends at `before` (exclusive), by seq: a followed diary's
+      // entries skip the blocks not stored, the own diary's are dense (seq
+      // = position), so there this is the slice clamped to the length.
+      let end = all.length
+      if (before !== undefined) {
+        while (end > 0 && all[end - 1].seq >= before) end--
+      }
+      const start = Math.max(0, end - limit)
+      const window = all.slice(start, end)
       const entries = []
       const invalid = []
       for (const { seq, record, deleted } of window) {
@@ -1678,7 +1722,7 @@ function createBrowserSession ({
         if (copy !== null) entries.push({ seq, record: copy })
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
-      return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
+      return { key: r.key, entries, invalid, entriesTruncated: start }
     }),
 
     'feed.read': serial(async ({ limit, before }) => {
@@ -1796,6 +1840,19 @@ function createBrowserSession ({
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide),
     'group.meta': groupWrite(member.groupMeta),
+    'community.create': groupWrite(member.communityCreate, {
+      roots: () => [],
+      changed: async (c, result) => [result.community]
+    }),
+    'community.link': groupWrite(member.communityLink, {
+      roots: (params) => [params.community, params.group],
+      changed: async (c, result) => [result.community, result.group]
+    }),
+    'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
+    'community.admin': groupWrite(member.communityAdmin, {
+      roots: (params) => [params.community],
+      changed: async (c, result) => [result.community, ...await member.communityGroups(c, { community: result.community })]
+    }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection

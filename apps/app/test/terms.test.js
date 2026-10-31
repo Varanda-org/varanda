@@ -244,6 +244,7 @@ test('termsSyncStep: every transition', async (t) => {
   t.alike(step(step(flying, 'online'), 'fail'), { count: 1, state: 'retry' }, 'back online meanwhile: tried again')
   const last = { count: TERMS_SYNC_MAX, state: 'busy' }
   t.is(step(last, 'online'), last, 'online never re-arms past the cap')
+  t.is(step(last, 'rearm'), last, 'rearm never re-arms past the cap')
   t.alike(step(step(flying, 'online'), 'start'), { count: 2, state: 'busy' }, 'a new run clears the mark')
   // drop: always forgotten
   for (const state of ['busy', 'done', 'transient', 'retry', 'so-aparelho']) {

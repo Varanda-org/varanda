@@ -7,7 +7,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
-const { testnet } = require('./helpers/net')
+const { testnet, until } = require('./helpers/net')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord } = require('@varanda/core/lib/records')
 const { runSync } = require('../lib/sync')
@@ -183,4 +183,43 @@ test('a run that throws early clears the reader and never sets it', async (t) =>
   store.readBlocklist = readBlocklist
   t.ok(badList.calls.includes('clear'), 'cleared')
   t.absent(badList.calls.includes('set'), 'never set')
+})
+
+test('a slow startup logs the step it is held on until it goes on, and nothing once the run ended', async (t) => {
+  t.timeout(30000)
+  await testnet(t)
+  const m = await member(t)
+  // The run's own follow gate (store.readFollows called from syncRun) is
+  // held; every other caller goes through.
+  const original = store.readFollows
+  let armed = true
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  store.readFollows = async function (...args) {
+    if (armed && /\bat syncRun \(/.test(new Error().stack)) {
+      armed = false
+      await gate
+    }
+    return original.apply(this, args)
+  }
+  t.teardown(() => {
+    store.readFollows = original
+    release()
+  })
+  const lines = []
+  const reader = recorder()
+  const ac = new AbortController()
+  const done = sync(m.storage, reader, ac.signal, { startupSlowMs: 100, log: (line) => lines.push(line) })
+  await until(() => lines.filter((l) => l.startsWith('aviso: partida demorada (etapa: seguidos (abertura), ')).length >= 2, { timeoutMs: 10000 })
+  t.pass('the held step is named, again at the interval')
+  t.absent(lines.some((l) => /etapa: (?!seguidos \(abertura\))/.test(l)), 'no other step while held')
+  release()
+  await reader.published
+  await until(() => lines.some((l) => l.startsWith('aviso: partida demorada (etapa: conexão, ')), { timeoutMs: 10000 })
+  t.pass('then the connection step, until the seeder link is up')
+  ac.abort()
+  await done
+  const count = lines.length
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  t.is(lines.length, count, 'no line after the run ended')
 })

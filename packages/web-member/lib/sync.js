@@ -324,6 +324,13 @@ const MAX_GROUP_GATE_ATTEMPTS = 4
 // Growth of a group's cores within this window makes one 'groups-changed'.
 const GROUPS_CHANGED_MS = 50
 // A group's root and writers together: at most MAX_GROUP_WRITERS cores.
+// The communities a group root's community-link records name (on or off),
+// in root order of first appearance, that a run pages: the same bound the
+// group fold loads, since an earlier community's admin acts still count.
+const MAX_LINKED_COMMUNITIES = 32
+// The linked communities (not this device's own) one run pages at most,
+// over every group root.
+const MAX_SYNCED_COMMUNITIES = 32
 const MAX_GROUP_PAGES = Math.ceil((MAX_GROUP_WRITERS + 1) / GROUPS_LIMIT_MAX) + 1
 
 // Gate failures that depend on the page item (its group, diary or join
@@ -474,6 +481,10 @@ function ownGroupVerdict (length, pageLength, peerLength) {
 const MAX_CAP_CONTENDERS = 2
 
 const NO_READER = { set: noop, clear: noop }
+// A startup that has not reached the seeder link ('ready') by then logs the
+// step it is on, and again at the same interval (local diagnostics only).
+const STARTUP_SLOW_MS = 5000
+const NO_STARTUP = { step: noop }
 
 function key8 (hex) {
   return String(hex).slice(0, 8)
@@ -503,9 +514,10 @@ function groupHeaderOf (raw, key) {
   try {
     const h = decodeBlock(raw)
     if (h === null) return null
-    // This version folds only public groups: a crafted private or
-    // community root would be joined and stored but never fold.
-    if (validateGroupHeader(h) === null) return h.kind === 'group' && h.visibility === 'public' ? { group: key, diary: h.diary } : null
+    // This version folds only public groups and communities: a crafted
+    // private root would be joined and stored but never fold. A community
+    // root is paged and gated as a group root of its own key.
+    if (validateGroupHeader(h) === null) return h.visibility === 'public' ? { group: key, diary: h.diary, community: h.kind === 'community' } : null
     if (validateWriterHeader(h) === null && h.group !== key) return { group: h.group, diary: h.diary }
     return null
   } catch {
@@ -514,11 +526,18 @@ function groupHeaderOf (raw, key) {
 }
 
 // Block-0 verdict of group core `key` listed for `group` under diary D, as
-// the seeder's: null = accepted.
-function groupVerdict (raw, key, group, diary) {
+// the seeder's: null = accepted. `linkedOnly` marks a `group` paged only
+// because a group root names it as a community: its root must be a
+// community header (a group header there is this device's own verdict
+// 'not-community'); any other paged root must be a group header.
+function groupVerdict (raw, key, group, diary, linkedOnly = false) {
   const h = groupHeaderOf(raw, key)
   if (h === null) return 'header-invalid'
   if (h.group !== group) return key === group ? 'header-invalid' : 'wrong-group'
+  if (key === group) {
+    if (linkedOnly && !h.community) return 'not-community'
+    if (h.community !== linkedOnly) return 'header-invalid'
+  }
   return h.diary === diary ? null : 'wrong-diary'
 }
 
@@ -692,6 +711,11 @@ const TOMB_RETRY_MAX = 5
 const NEWEST_BLOCKS = 32
 const HEAD_LOW = 3
 const HEAD_STALL_MS = 3000
+// A stored run above the prefix (an earlier window) at most TAIL_MAX blocks
+// below the signed length gets the whole new tail instead of the newest
+// window: the reader shows a run only while it reaches the signed length,
+// so the tail reconnects what is already on screen.
+const TAIL_MAX = 256
 
 // Target seq of the valid tombstone at block seq, null for any other block,
 // undefined for a read error (the checks of tombstoneAt, block read once).
@@ -732,7 +756,9 @@ function foldTargets (tombs) {
 // the initial scan is done; onGrow(present) when the present length grows
 // after it; onDeleted(deleted) whenever the deleted set changed (and after
 // the initial scan when it is not empty); onError(err) once when the
-// initial scan fails (the tracker then stops, with present 0).
+// initial scan fails (the tracker then stops, with present 0);
+// onNewest(length) when the head finds the newest window below the signed
+// `length` all stored or deleted (the present length does not move then).
 //
 // newest > 0 (followed diaries in the browser) downloads in two strict
 // phases, never both at once: Hypercore 10.38.2 picks among a core's open
@@ -741,7 +767,11 @@ function foldTargets (tombs) {
 // (only those while block 0 is missing), waits for the signed length when
 // expect(length) announced more than the core knows (nothing is requested
 // past the signed length), then asks for the newest `newest` blocks below
-// it, split around deleted seqs. The BODY is the linear download above,
+// it, split around deleted seqs; when blocks are stored above the present
+// length (the scan's highest, or the last window completed) at most tailMax
+// blocks below the signed length, the window starts right above them
+// instead (the whole new tail).
+// The BODY is the linear download above,
 // from block 0. The body runs when the newest window already reaches the
 // prefix (a small diary: newest 0 behaves exactly so), once the window is
 // all stored or deleted, or when it brought no block for stallMs (the
@@ -749,7 +779,7 @@ function foldTargets (tombs) {
 // history more than `newest` blocks behind runs the head again. The
 // reported length stays the present length on both phases.
 // -> also expect(length), the length a seeder advertised (a hint only).
-function trackPresent (core, { noClear = false, download = true, newest = 0, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
@@ -767,6 +797,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
   let headKey = ''
   let hint = 0
   let bodyAt = -1 // the target the body was chosen for (window done or stalled)
+  // Where the stored run the reader shows ends: one past the highest block
+  // the scan found, then the end of each window completed. Blocks of a
+  // window still downloading never move it (the run is not connected yet).
+  let top = 0
   let stall = null
 
   const sameSet = (a, b) => a.size === b.size && [...a].every((s) => b.has(s))
@@ -901,7 +935,8 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     } else {
       segs.push(...around(0, Math.min(HEAD_LOW, len)))
       if (len >= target) {
-        const ws = Math.max(HEAD_LOW, len - newest)
+        let ws = Math.max(HEAD_LOW, len - newest)
+        if (top > present && top < ws && len - top <= tailMax) ws = top
         const window = around(ws, len)
         done = true
         for (const [a, b] of window) {
@@ -913,6 +948,8 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     if (stopped) return
     if (done) {
       bodyAt = target
+      top = len
+      onNewest(len)
       return toBody()
     }
     closeBody()
@@ -989,6 +1026,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     }
     deleted = state.deleted
     present = state.present
+    top = Math.max(top, state.raw.length)
     if (stopped) return
     if (!noClear) await clearDeleted(core, deleted)
     if (stopped) return
@@ -1070,13 +1108,51 @@ function watchFork (core, onFork) {
 // function (see the header). The limits and timings after `signal` are
 // injectable for tests; their defaults are the protocol constants.
 // The session's reader (see the header) is withdrawn however the run ends,
-// before it published too.
+// before it published too. startupSlowMs: the startup watchdog's interval
+// (tests).
 async function runSync (opts = {}) {
   const reader = (opts && opts.reader) || NO_READER
+  const log = opts && typeof opts.log === 'function' ? opts.log : noop
+  const onEvent = opts && typeof opts.onEvent === 'function' ? opts.onEvent : noop
+  const startup = startupWatchdog(log, (opts && opts.startupSlowMs) || STARTUP_SLOW_MS)
   try {
-    return await syncRun({ ...opts, reader })
+    return await syncRun({
+      ...opts,
+      reader,
+      startup,
+      onEvent: (ev) => {
+        if (ev && ev.event === 'ready') startup.stop()
+        onEvent(ev)
+      }
+    })
   } finally {
+    startup.stop()
     clearReader(reader)
+  }
+}
+
+function startupWatchdog (log, ms) {
+  const started = Date.now()
+  let step = 'configuração'
+  let connectNoted = false
+  let timer = setTimeout(tick, ms)
+  function tick () {
+    // The connection step is noted once: a seeder that does not answer has
+    // its own warnings (sem conexão, nova tentativa), repeated by the run.
+    if (step !== 'conexão' || !connectNoted) {
+      try {
+        log('aviso: partida demorada (etapa: ' + step + ', ' + Math.round((Date.now() - started) / 1000) + ' s)')
+      } catch {}
+      if (step === 'conexão') connectNoted = true
+    }
+    if (timer !== null) timer = setTimeout(tick, ms)
+  }
+  return {
+    step (name) { step = name },
+    stop () {
+      clearTimeout(timer)
+      timer = null
+    }
   }
 }
 
@@ -1097,6 +1173,7 @@ async function syncRun ({
   onEvent = noop,
   peeker = null,
   reader = NO_READER,
+  startup = NO_STARTUP,
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
@@ -1114,6 +1191,7 @@ async function syncRun ({
   socketCloseMs = SOCKET_CLOSE_MS,
   blocklistMinIntervalMs, // test-only: blocklist-net.js minIntervalMs
   newestBlocks = NEWEST_BLOCKS, // followed diaries: trackPresent `newest`
+  tailBlocks = TAIL_MAX, // followed diaries: trackPresent `tailMax`
   headStallMs = HEAD_STALL_MS,
   noClear = false // keep the bytes of deleted blocks (tombstones still apply)
 } = {}) {
@@ -1137,6 +1215,7 @@ async function syncRun ({
     },
     save: (snapshot) => store.writeBlocklist(storage, snapshot)
   })
+  startup.step('lista de bloqueio')
   try {
     await blocklist.ready()
   } catch {
@@ -1212,6 +1291,10 @@ async function syncRun ({
   let gateOrder = 0 // the fair queue of group gates (lastAttempt)
   let groupKvChain = Promise.resolve() // kv groupReplicas changes, one at a time
   const changedGroups = new Set()
+  const linkedGroups = new Map() // community -> Set of groups whose root links it
+  const linkedCommunities = new Set() // communities paged because a group root links them
+  const ownCommunities = new Set() // communities whose root this device holds
+  const notCommunities = new Set() // linked keys whose root is a group header: never paged again this run
   let changedTimer = null
   const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
@@ -1891,6 +1974,7 @@ async function syncRun ({
     const tracker = trackPresent(core, {
       noClear,
       newest: newestBlocks,
+      tailMax: tailBlocks,
       stallMs: headStallMs,
       onReady: (present) => {
         if (entry.core !== core) return
@@ -1903,6 +1987,9 @@ async function syncRun ({
       },
       onGrow: (length) => {
         if (entry.core === core) onGrow(entry, length)
+      },
+      onNewest: (length) => {
+        if (entry.core === core) onNewest(entry, length)
       },
       // Fail closed: nothing is downloaded, but the follow is reported.
       onError: () => {
@@ -1942,6 +2029,23 @@ async function syncRun ({
     evaluate()
   }
 
+  // The newest window is on the device ahead of the history: a hint for the
+  // reader (docs/rpc.md §6 `newest`), once per length. Nothing advertised or
+  // measured changes: those stay on the present length.
+  // A replica still in regate holds it until its block 0 passes the gate.
+  function onNewest (entry, length) {
+    if (ended) return
+    if (entry.state === 'regate') {
+      entry.newestHeld = length
+      return
+    }
+    if (entry.state !== 'active') return
+    if (checkQuota(entry)) return
+    if (entry.newestSent.has(length)) return
+    entry.newestSent.add(length)
+    emit({ event: 'newest', key: entry.key, length })
+  }
+
   // The initial scan of a stored replica finished: advertise what it holds
   // and judge completion again, as a growth would.
   function onScanned (entry, present) {
@@ -1975,6 +2079,7 @@ async function syncRun ({
       const length = entryPresent(entry)
       send({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
+      if (entry.newestHeld > 0) onNewest(entry, entry.newestHeld)
       evaluate()
     }, () => {
       entry.gating = false
@@ -2810,6 +2915,8 @@ async function syncRun ({
       stopQuota: null,
       retryTimer: null,
       reason: null, // why it failed
+      scanning: false, // a scan of a root's community links runs
+      rescan: false,
       hints: new Set() // 'group:diary:seq' listings whose gate failed on the hint
     }
   }
@@ -2842,6 +2949,7 @@ async function syncRun ({
     }
     for (const e of writers) {
       if (ending) return
+      if (e.kind === 'community') ownCommunities.add(e.group)
       if (!isBlockedKey(e.group)) ensureGroup(e.group)
       await openOwnGroupCore(e.key, e.group)
       if (e.rootNonce !== null) await openOwnGroupCore(e.group, e.group)
@@ -2881,6 +2989,29 @@ async function syncRun ({
       }
       stored.push({ key, core, raw, ...h })
     }
+    for (const e of writers) {
+      if (e.rootNonce === null || e.kind === 'community') continue
+      const m = groupOwn.find((x) => x.key === e.group)
+      if (m !== undefined) await scanCommunityLinks(e.group, m.core)
+    }
+    for (const s of stored) {
+      if (s.key === s.group && !s.community && groups.has(s.group) && !linkedCommunities.has(s.group)) await scanCommunityLinks(s.group, s.core)
+    }
+    // The role of each paged key holds for stored cores too: under a
+    // linked-only community only its community root is restored, and a
+    // joined group's root must be a group header, as at the gate.
+    for (const s of stored) {
+      const linkedOnly = linkedCommunities.has(s.group)
+      if (linkedOnly && s.key === s.group && !s.community) {
+        emit({ event: 'group-skipped', key: s.key, group: s.group, reason: 'not-community' })
+        notCommunities.add(s.group)
+        groups.delete(s.group)
+      } else if (!linkedOnly && s.key === s.group && s.community && groups.has(s.group) && !ownCommunities.has(s.group)) {
+        s.invalid = true
+      } else if (linkedOnly && s.key !== s.group) {
+        s.rest = true
+      }
+    }
     const bindings = new Map()
     const live = []
     for (const s of stored) {
@@ -2891,13 +3022,18 @@ async function syncRun ({
       // block is not stored yet: a restart never frees it from its creator.
       s.rootBound = s.key === s.group && (boundRoots.has(s.key) || storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.group).proven)
       const unboundRoot = s.key === s.group && !s.rootBound
+      if (s.invalid === true) {
+        await s.core.close().catch(noop)
+        if (!ending) purgeGroupKey(s.key, 'header-invalid')
+        continue
+      }
       if (ending || (isBlockedKey(s.diary) && !unboundRoot) || isBlockedKey(s.group)) {
         await s.core.close().catch(noop)
         if (!ending) purgeGroupKey(s.key, 'blocked')
         continue
       }
       // A group no longer synced keeps its cores at rest.
-      if (!groups.has(s.group) || isBlockedKey(s.group) || isBlockedKey(s.diary)) {
+      if (s.rest === true || !groups.has(s.group) || isBlockedKey(s.group) || isBlockedKey(s.diary)) {
         await s.core.close().catch(noop)
         restingCores.set(s.key, { group: s.group, diary: s.diary, rootBound: s.rootBound })
         continue
@@ -3410,8 +3546,85 @@ async function syncRun ({
       return
     }
     if (ge.state !== 'active') return
+    if (ge.key === ge.group) rescanCommunityLinks(ge)
     markGroupChanged(ge.group)
     evaluate()
+  }
+
+  // ---- groups: the communities linked from group roots ----
+
+  // The communities named by the community-link records of group root
+  // `core` (root order of first appearance, at most MAX_LINKED_COMMUNITIES)
+  // are paged as
+  // roots of their own key, through the same gate, caps and probe as a
+  // root asked for before a join: unlisted after a complete pass whose
+  // pages hold no root of that key. Never throws.
+  async function scanCommunityLinks (group, core) {
+    const keys = []
+    try {
+      const h = decodeBlock(await core.get(0, { wait: false, raw: true }))
+      if (validateGroupHeader(h) !== null || h.kind !== 'group') return
+      for (let i = 1; i < core.contiguousLength && keys.length < MAX_LINKED_COMMUNITIES; i++) {
+        const r = decodeBlock(await core.get(i, { wait: false, raw: true }))
+        if (r === null || typeof r !== 'object' || r.type !== 'community-link' || typeof r.community !== 'string' || !HEX64.test(r.community)) continue
+        const key = r.community.toLowerCase()
+        if (!keys.includes(key)) keys.push(key)
+      }
+    } catch {
+      return
+    }
+    linkCommunities(group, keys)
+  }
+
+  // A linked key whose root is a group header: this device's own view of
+  // which keys are communities, so nothing under it is gated or stored and
+  // the key is not paged again this run.
+  function refuseNotCommunity (ge) {
+    failGroupEntry(ge, 'not-community', { purge: false })
+    dropNotCommunity(ge.group)
+  }
+
+  function dropNotCommunity (c) {
+    notCommunities.add(c)
+    if (!groups.delete(c)) return
+    track(groupKv(() => store.removeGroupReplica(storage, forgetListed(listedAtStart, c))), noop, noop)
+    evaluate()
+  }
+
+  function rescanCommunityLinks (ge) {
+    if (ge.scanning) {
+      ge.rescan = true
+      return
+    }
+    ge.scanning = true
+    const core = ge.core
+    track(scanCommunityLinks(ge.group, core), () => {
+      ge.scanning = false
+      if (ge.rescan && !ending && ge.core === core) {
+        ge.rescan = false
+        rescanCommunityLinks(ge)
+      }
+    }, () => { ge.scanning = false })
+  }
+
+  function linkCommunities (group, keys) {
+    let added = false
+    for (const c of keys) {
+      if (ending || c === group || isBlockedKey(c)) continue
+      if (!linkedGroups.has(c)) linkedGroups.set(c, new Set())
+      linkedGroups.get(c).add(group)
+      // A key asked for before a join (probe, no own writer) has no role
+      // yet: named as a community, it is paged as one, as the core node does.
+      const g0 = groups.get(c)
+      if (notCommunities.has(c) || ownCommunities.has(c) || (g0 !== undefined && (g0.probe !== true || linkedCommunities.has(c)))) continue
+      if (linkedCommunities.size >= MAX_SYNCED_COMMUNITIES) continue
+      linkedCommunities.add(c)
+      ensureGroup(c)
+      groups.get(c).probe = true
+      added = true
+    }
+    const l = seederLink()
+    if (added && l !== null && l.groups !== null) pageGroups(l)
   }
 
   // Block 0 arrived in the storage: it must be the one the gate accepted.
@@ -3448,6 +3661,7 @@ async function syncRun ({
         track(groupKv(() => store.putGroupCert(storage, ge.diary, ge.diaryRaw0)), noop, noop)
       }
       ensureGroupDiary(ge.diary, ge.seq + 1)
+      if (ge.key === ge.group) rescanCommunityLinks(ge)
       markGroupChanged(ge.group)
       evaluate()
     }, () => {
@@ -3479,6 +3693,9 @@ async function syncRun ({
   function markGroupChanged (group) {
     if (ending) return
     changedGroups.add(group)
+    // A community root changed: every group linking it re-reads its admins.
+    const linked = linkedGroups.get(group)
+    if (linked !== undefined) for (const g of linked) changedGroups.add(g)
     if (changedTimer !== null) return
     changedTimer = later(() => {
       changedTimer = null
@@ -3581,6 +3798,7 @@ async function syncRun ({
   }
 
   async function pageGroup (l, g) {
+    const community = ownCommunities.has(g.group) || linkedCommunities.has(g.group)
     const items = new Map()
     let after = null
     let incomplete = false
@@ -3607,6 +3825,9 @@ async function syncRun ({
       if (ending || link !== l) return
       if (page.incomplete) incomplete = true
       for (const it of page.items) {
+        // A community has no writers: only its root is ever gated under it,
+        // and another listing is ignored before it can take a slot.
+        if (community && it.key !== g.group) continue
         if (items.size >= MAX_GROUP_WRITERS) break
         if (!items.has(it.key)) items.set(it.key, it)
       }
@@ -3869,7 +4090,8 @@ async function syncRun ({
     const probe = await probeGroupCore(l, ge.key, timeout)
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary)
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, linkedCommunities.has(ge.group))
+    if (verdict === 'not-community') return refuseNotCommunity(ge)
     if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
@@ -4053,14 +4275,18 @@ async function syncRun ({
   }
 
   try {
+    startup.step('diário')
     diary = await store.openDiary(storage)
     ownHex = hex(diary.key)
     const block0 = await store.readBlock0(diary)
     if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) cert = block0.cert
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
     ownRefused()
+    startup.step('mídia própria')
     await openOwnMedia()
+    startup.step('grupos')
     await openGroups()
+    startup.step('leitura do próprio diário')
     // Deleted blocks and media are cleared, and growth is measured on the
     // present length, before any connection; whatever the verified seeder
     // holds beyond us is fetched (only a verified link replicates the
@@ -4088,6 +4314,7 @@ async function syncRun ({
     }
 
     // Follow gate at start (R5.8 a), before any connection.
+    startup.step('seguidos (abertura)')
     let followList = await store.readFollows(storage)
     for (const k of followList) if (typeof k === 'string') stillFollowed.add(k.toLowerCase())
     if (followList.length > maxFollows) {
@@ -4168,7 +4395,9 @@ async function syncRun ({
           advSeq: 0,
           fetchedAdv: 0,
           cutByDeadline: false,
-          discardedRegate: false
+          discardedRegate: false,
+          newestSent: new Set(), // lengths whose `newest` line was emitted
+          newestHeld: 0 // a `newest` length seen in regate
         }
         follows.set(key, entry)
         if (blocked) {
@@ -4217,10 +4446,13 @@ async function syncRun ({
 
     // Binding diaries only once the follows hold their replicas (a followed
     // diary is never opened twice).
+    startup.step('diários de grupo')
     if (!ending) await startGroupDiaries()
+    startup.step('índice de réplicas')
     if (!ending) await updateReplicaIndex()
     // Stored replicas of blocked keys, and unfollowed ones from a revoked
     // issuer, go before any connection.
+    startup.step('varredura de bloqueados')
     if (!ending) await sweepBlocked()
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevoked()
     // The stored group cores accepted again at start: their authors'
@@ -4229,6 +4461,7 @@ async function syncRun ({
 
     if (!ending) {
       reader.set({ diary, replica, hold, release })
+      startup.step('conexão')
       connect()
     }
 
@@ -4292,4 +4525,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

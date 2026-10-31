@@ -174,40 +174,177 @@ export function quietNewestPlan (page, limit, shown) {
   return { replace, atEnd: true, probeOlder: full, deep: !replace }
 }
 
-// Below a full list only a before read can find rows; re-reading the newest
-// page would just meet the shown ones again (newer rows reach a full list
-// through the 'ver novidades' pill).
+// A short list re-reads the newest page. A deep or full list re-reads the
+// range it shows: a diary downloaded newest first fills in between the newest
+// rows and the oldest shown one, where a before read never looks (newer rows
+// reach a full list through the 'ver novidades' pill). Only a pending probe
+// reads below the list.
 export function syncReadKind ({ deep, probeOlder, shown, limit }) {
-  return deep || probeOlder || shown >= limit ? 'older' : 'newest'
+  if (probeOlder) return 'older'
+  return deep || shown >= limit ? 'range' : 'newest'
 }
 
-// Never after a failed read: only a manual action clears the error.
-export function canSyncRead (feed, lengths, active) {
-  return !!active && feed.loadedAt !== null && feed.atEnd && !feed.loading && !feed.loadingMore && !feed.refreshing &&
-    !feed.loadError && !feed.moreError &&
-    (feed.probeOlder === true || ((Object.keys(feed.syncBase).length > 0 || feed.syncTruncated > 0) &&
-      syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)))
+// Never after a failed read: only a manual action clears the error. A range
+// read cut by its page cap continues without new growth. Only reads at the
+// list's end need it there (the probe below it, and a short list's newest
+// page); a range read re-reads the shown span, so it runs wherever the
+// person is in the list.
+export function canSyncRead (feed, lengths, active, limit = 30) {
+  return planSyncRead(feed, lengths, active, limit) !== null
+}
+
+// The next automatic read, or null. Empty range and older reads back off.
+export function planSyncRead (feed, lengths, active, limit = 30) {
+  if (!active || feed.loadedAt === null || feed.loading || feed.loadingMore || feed.refreshing ||
+    feed.loadError || feed.moreError) return null
+  const shown = Array.isArray(feed.items) ? feed.items.length : 0
+  const kind = syncReadKind({ deep: feed.deep, probeOlder: feed.probeOlder, shown, limit })
+  const grown = () => syncAdvanced(feed.syncBase, feed.syncTruncated, lengths)
+  if (kind === 'older') {
+    if (!feed.atEnd) return null
+  } else if (kind === 'newest') {
+    if (!feed.atEnd || !grown()) return null
+  } else if (!(feed.rangeFrom !== undefined && feed.rangeFrom !== null) && !grown()) {
+    return null
+  }
+  return { kind, delay: rearmDelay(kind === 'newest' ? 0 : feed.emptyStreak) }
+}
+
+// The footer never announces the end while the node still reports growth
+// since the last read, an incomplete diary or a pending automatic read.
+export function feedSyncing (feed, lengths) {
+  return feedStillSyncing(feed) || feed.probeOlder === true ||
+    (feed.rangeFrom !== undefined && feed.rangeFrom !== null) ||
+    syncAdvanced(feed.syncBase || {}, feed.syncTruncated, lengths)
+}
+
+function cmp (a, b) {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+// Feed order (docs/rpc.md section 5.13), oldest first.
+export function compareFeed (a, b) {
+  return (Date.parse(a.at) - Date.parse(b.at)) || cmp(a.author, b.author) || a.seq - b.seq
+}
+
+export const RANGE_PAGES_MAX = 10
+
+// Where a range read starts: below the newest shown row, since rows above it
+// never enter the list there (the pill shows them), or where a capped read
+// stopped.
+export function rangeStart (currentNewestFirst, rangeFrom) {
+  const top = currentNewestFirst.length > 0 ? cursorOf([currentNewestFirst[0]]) : null
+  if (rangeFrom && (top === null || compareFeed(rangeFrom, top) < 0)) return rangeFrom
+  return top
+}
+
+export function rangePageCap (shown, limit) {
+  return Math.max(1, Math.min(RANGE_PAGES_MAX, Math.ceil(shown / limit) + 1))
+}
+
+// After each page of a range read: 'end' on a short page (the rest of the
+// local feed was read), 'reached' when the page got to the list's cursor,
+// 'cap' at the page cap, else 'more'. A page that adds nothing does not stop
+// the loop: the rows still missing may sort further down.
+export function rangeStep ({ page, limit, until, pages, cap }) {
+  const items = Array.isArray(page.items) ? page.items : []
+  if (items.length < limit) return 'end'
+  if (until && compareFeed(items[0], until) <= 0) return 'reached'
+  if (pages >= cap) return 'cap'
+  return 'more'
+}
+
+// Merges the pages of a range read into the shown list without cutting a
+// row. Rows newer than the newest shown are never inserted above the person:
+// they are counted for the 'ver novidades' pill instead.
+export function mergeRange (currentNewestFirst, pageAscending) {
+  const top = currentNewestFirst.length > 0 ? currentNewestFirst[0] : null
+  const seen = new Set(currentNewestFirst.map(feedKey))
+  const newer = new Set()
+  const add = []
+  for (const item of pageAscending) {
+    const key = feedKey(item)
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (top !== null && compareFeed(item, top) > 0) newer.add(key)
+    else add.push(item)
+  }
+  add.sort((a, b) => compareFeed(b, a))
+  const items = []
+  let i = 0
+  for (const row of currentNewestFirst) {
+    while (i < add.length && compareFeed(add[i], row) > 0) items.push(add[i++])
+    items.push(row)
+  }
+  while (i < add.length) items.push(add[i++])
+  return { items, added: add.length, newer: [...newer] }
+}
+
+// The baseline only advances to lengths taken at the START of a read that
+// covered the whole shown range: a reload that replaced the list, or a range
+// sequence (its pages and capped continuations keep the lengths taken before
+// its first page in seqBase while pending). Growth in the part a sequence
+// already read is then never marked handled; once it ends, any such growth
+// plans another range read.
+export function sequenceBase (seqBase, now, pending) {
+  const start = seqBase || now || {}
+  return { start, seqBase: pending ? start : null }
+}
+
+// A page below the list (scrolling, or the probe) only appends rows: it never
+// advances the baseline nor ends a pending sequence, since it read nothing of
+// the range already shown. Growth above the baseline then plans a range read
+// once the list is at its end again.
+export function olderPagePatch (prev, page, { before, fromSync = false, limit }) {
+  const cursor = cursorOf(page.items)
+  return {
+    items: mergeOlder(prev.items, page.items).items,
+    // An empty page keeps the cursor so a later sync pass can ask again.
+    cursor: cursor === null ? before : cursor,
+    atEnd: isLastFeedPage(page, limit) || !cursorMoved(before, cursor),
+    emptyStreak: page.items.length > 0 ? 0 : fromSync ? prev.emptyStreak + 1 : prev.emptyStreak,
+    deep: prev.deep || page.items.length > 0,
+    probeOlder: false
+  }
+}
+
+// The list after a range read. A full page that reached the list's cursor
+// says nothing about rows below its oldest one, so a list that was at its end
+// stays there and the next automatic read probes below it (as after a full
+// quiet newest page); a list that was not keeps paging by scrolling. A read
+// cut by the cap continues from its last page.
+export function rangeEnd ({ step, cursor, page, atEnd = true }) {
+  const last = Array.isArray(page.items) ? cursorOf(page.items) : null
+  const older = last !== null && (cursor === null || compareFeed(last, cursor) < 0) ? last : cursor
+  if (step === 'cap') return { cursor, atEnd, probeOlder: false, rangeFrom: last }
+  if (step === 'reached') return { cursor: older, atEnd, probeOlder: atEnd, rangeFrom: null }
+  // A short page re-read the shown span, not the rest of the feed: the
+  // visible feed can shrink for a while (a followed diary whose signed
+  // length grew before its new tail arrived shows only its prefix), so the
+  // list keeps its end state and a scroll read finds the real end.
+  return { cursor: older, atEnd, probeOlder: false, rangeFrom: null }
 }
 
 // The baseline is the lengths map taken before the request, so growth that
-// lands while the read runs still triggers the next pass. A key with no local
-// length yet starts at -1 so its first downloaded block counts. A follow with
-// no local replica is skipped as no-cert, never listed as incomplete, and its
-// first arrival must still reach the list.
+// lands while the read runs still triggers the next pass. Every known length
+// is recorded: a stored replica reports its old length until its upgrade
+// arrives, so a read before it lists nothing incomplete and only later growth
+// says there is more. A key with no local length yet starts at -1 so its
+// first downloaded block counts. A follow with no local replica is skipped as
+// no-cert, never listed as incomplete, and its first arrival must still reach
+// the list.
 export function syncBaseline (page, lengths) {
   const known = lengths || {}
   const baseline = {}
+  for (const key of Object.keys(known)) {
+    if (Number.isSafeInteger(known[key])) baseline[key] = known[key]
+  }
   const add = (key) => {
-    if (typeof key === 'string') baseline[key] = known[key] ?? -1
+    if (typeof key === 'string' && !(key in baseline)) baseline[key] = -1
   }
   for (const key of Array.isArray(page.incomplete) ? page.incomplete : []) add(key)
   for (const entry of Array.isArray(page.skipped) ? page.skipped : []) {
     if (entry && entry.reason === 'no-cert') add(entry.key)
-  }
-  if (syncTruncated(page) > 0) {
-    for (const key of Object.keys(known)) {
-      if (!(key in baseline)) baseline[key] = known[key]
-    }
   }
   return baseline
 }
@@ -215,17 +352,14 @@ export function syncBaseline (page, lengths) {
 const HEX64 = /^[0-9a-f]{64}$/
 
 // Growth is only a trigger to read again, because every read preempts the
-// sync run: the read itself decides what the list shows.
+// sync run: the read itself decides what the list shows. A key outside the
+// baseline appeared after the read, so its length counts as growth.
 export function advancedKeys (baseline, truncated, lengths) {
   if (!lengths) return []
   const grown = []
-  for (const key of Object.keys(baseline)) {
-    if (Number.isSafeInteger(lengths[key]) && lengths[key] > baseline[key]) grown.push(key)
-  }
-  if (truncated > 0) {
-    for (const key of Object.keys(lengths)) {
-      if (!(key in baseline) && HEX64.test(key) && Number.isSafeInteger(lengths[key])) grown.push(key)
-    }
+  for (const key of Object.keys(lengths)) {
+    if (!Number.isSafeInteger(lengths[key])) continue
+    if (key in baseline ? lengths[key] > baseline[key] : HEX64.test(key.replace(/^newest:/, ''))) grown.push(key)
   }
   return grown.sort()
 }

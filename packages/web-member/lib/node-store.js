@@ -352,7 +352,8 @@ async function readAll (core) {
 // trackPresent): the readAll prefix plus the unbroken run of blocks that
 // ends at core.length, a hole in that run passed only when the effective
 // deletion fold of the stored blocks deletes it. -> { entries, present, tail }
-// with entries = the prefix, then the blocks of [tail, core.length);
+// with entries = the prefix, then the stored blocks of [tail, core.length)
+// (a hole the run passed is absent, so log.read skips it);
 // tail === core.length when there is no such run (or none is needed). The
 // run needs block 0 (moderation reads it) and is never read past
 // MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
@@ -361,7 +362,19 @@ async function readAll (core) {
 async function readVisible (core) {
   assertOpen(core)
   const length = core.length
-  const { raw, entries, deleted, present } = await presentState(core)
+  // presentState folds holes and blocks that do not decode into the same
+  // { record: null }; the view records which blocks this snapshot read.
+  const stored = new Set()
+  const view = {
+    get length () { return length },
+    has: (i) => core.has(i),
+    get: async (i, opts) => {
+      const block = await core.get(i, opts)
+      if (block !== null) stored.add(i)
+      return block
+    }
+  }
+  const { raw, entries, deleted, present } = await presentState(view)
   const prefix = entries.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
     return { entries: prefix, present, tail: length }
@@ -382,7 +395,10 @@ async function readVisible (core) {
   // Only a block that arrived after presentState can close the gap: the
   // next read shows it.
   if (tail <= present) return { entries: prefix, present, tail: length }
-  return { entries: prefix.concat(entries.slice(tail, length)), present, tail }
+  for (let seq = tail; seq < length; seq++) {
+    if (stored.has(seq)) prefix.push(entries[seq])
+  }
+  return { entries: prefix, present, tail }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the
@@ -429,9 +445,10 @@ function appendRecord (core, record, limits) {
 }
 
 // The same queue and limits for a group core: block 0 is its header, the
-// root (`root: true`) alone may hold root-only records.
-function appendGroupRecord (core, record, { root = false, limits } = {}) {
-  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true })
+// root (`root: true`) alone may hold root-only records, and a community root
+// (`community: true`) only its own set of them.
+function appendGroupRecord (core, record, { root = false, community = false, limits } = {}) {
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: root === true && community === true })
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
@@ -847,7 +864,8 @@ function removeBoundRoot (storage, hex) {
 
 function validWriterEntry (e) {
   return e !== null && typeof e === 'object' && isHex64(e.group) && isHex64(e.key) && isHex64(e.nonce) &&
-    (e.rootNonce === undefined || e.rootNonce === null || isHex64(e.rootNonce))
+    (e.rootNonce === undefined || e.rootNonce === null || isHex64(e.rootNonce)) &&
+    (e.kind === undefined || e.kind === 'group' || e.kind === 'community')
 }
 
 // The root's nonce of a group this device created: kept apart from the
@@ -859,11 +877,17 @@ function rootNonceOf (e) {
   return e.key.toLowerCase() === e.group.toLowerCase() ? e.nonce.toLowerCase() : null
 }
 
+function kindOf (e) {
+  return e.kind === 'community' ? { kind: 'community' } : {}
+}
+
 // kv groupWriters = { v: 1, entries: [{ group, key, nonce, rootNonce }] }: per
 // group the core this device writes (key === group for a group it created
 // and has not left), the nonce its key pair is derived with, and the root's
 // nonce when this device created the group (else null); one entry per
-// group, at most MAX_GROUPS_PER_DIARY, oldest first.
+// group, at most MAX_GROUPS_PER_DIARY, oldest first. A community root this
+// device created takes a slot too, with `kind: 'community'` (an entry
+// without a kind is a group).
 async function readGroupWriters (storage) {
   const data = await readKv(storage, 'groupWriters')
   if (!isVersioned(data) || !Array.isArray(data.entries)) return []
@@ -874,7 +898,7 @@ async function readGroupWriters (storage) {
     const group = e.group.toLowerCase()
     if (seen.has(group)) continue
     seen.add(group)
-    out.push({ group, key: e.key.toLowerCase(), nonce: e.nonce.toLowerCase(), rootNonce: rootNonceOf(e) })
+    out.push({ group, key: e.key.toLowerCase(), nonce: e.nonce.toLowerCase(), rootNonce: rootNonceOf(e), ...kindOf(e) })
   }
   return out.slice(0, MAX_GROUPS_PER_DIARY)
 }
@@ -889,7 +913,7 @@ async function putGroupWriter (storage, entry) {
   const prev = current.find((e) => e.group === group)
   let rootNonce = rootNonceOf(entry)
   if (rootNonce === null && prev !== undefined) rootNonce = prev.rootNonce
-  const plain = { group, key: entry.key.toLowerCase(), nonce: entry.nonce.toLowerCase(), rootNonce }
+  const plain = { group, key: entry.key.toLowerCase(), nonce: entry.nonce.toLowerCase(), rootNonce, ...kindOf(prev !== undefined && prev.kind ? prev : entry) }
   const entries = current.filter((e) => e.group !== group)
   if (entries.length >= MAX_GROUPS_PER_DIARY) throw new UsageError(GROUPS_FULL)
   entries.push(plain)
