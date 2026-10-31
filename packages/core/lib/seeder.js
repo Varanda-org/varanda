@@ -2168,6 +2168,8 @@ class Seeder {
     entry.topicRetry = null
     clearTimeout(entry.pushRetry)
     entry.pushRetry = null
+    clearTimeout(entry.rootRetry)
+    entry.rootRetry = null
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
@@ -3870,7 +3872,11 @@ class Seeder {
       dropped: false,
       headerOk,
       gating: false,
-      expected
+      expected,
+      rootScanned: 0,
+      rootScanning: false,
+      rootRetry: null, // the retry of a failed root block read (_retryRootScan)
+      rootReadFailures: 0
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
@@ -3880,10 +3886,14 @@ class Seeder {
     entry.stopQuota = () => core.off('append', checkQuota)
     entry.stopFork = watchFork(core, (reason) => this._dropGroup(key, reason))
     entry.download = core.download({ start: 0, end: -1 })
-    entry.stopGrow = watchContiguous(core, () => this._gateGroup(key, entry))
+    entry.stopGrow = watchContiguous(core, () => {
+      this._gateGroup(key, entry)
+      this._scanRoot(key, entry)
+    })
     this._groupServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
+    this._scanRoot(key, entry)
     // A peer that served block 0 to the quarantine and then withholds it
     // from the main store must not keep the group's answers incomplete
     // forever: past the gate timeout the core goes and its join backs off.
@@ -3927,10 +3937,78 @@ class Seeder {
       clearTimeout(entry.headerTimer)
       entry.headerTimer = null
       this._deleteGroupBackoff(entry.by + ':' + key)
+      this._scanRoot(key, entry)
     }, () => {
       entry.gating = false
       if (!entry.dropped && !this._closing) this._dropGroup(key, 'header-invalid')
     })
+  }
+
+  // Folds the link records of a served root into the group index, each block
+  // once, in log order, up to the contiguous prefix (docs/protocol.md section
+  // 10, "Communities"): community-link in a group root, group-link and
+  // group-meta in a community root. Only after the header verified locally,
+  // so the root's kind is known. One pass at a time per root; growth during
+  // a pass runs another. Never recursive: one root's records never make the
+  // seeder read another root.
+  _scanRoot (key, entry) {
+    if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
+    const header = this._groupIndex.header(key)
+    if (header === null || (header.kind !== 'group' && header.kind !== 'community')) return
+    const community = header.kind === 'community'
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
+    if (entry.rootScanned === 0) {
+      this._groupIndex.resetRoot(key)
+      entry.rootScanned = 1
+    }
+    entry.rootScanning = true
+    let failed = false
+    const run = async () => {
+      while (!stale() && entry.rootScanned < entry.core.contiguousLength) {
+        const i = entry.rootScanned
+        // A read that fails leaves the cursor here (what is folded stays)
+        // and _retryRootScan reads it again: growth may never come.
+        let raw = null
+        try {
+          raw = await entry.core.get(i, { wait: false, raw: true })
+        } catch {}
+        if (stale()) return
+        if (raw === null) {
+          failed = true
+          return
+        }
+        entry.rootScanned = i + 1
+        entry.rootReadFailures = 0
+        let block = null
+        try {
+          block = decodeBlock(raw)
+        } catch {}
+        if (block === null || typeof block !== 'object') continue
+        const t = block.type
+        if (t !== 'community-link' && t !== 'group-link' && t !== 'group-meta') continue
+        if (validateGroupRecord(block, i, { root: true, community }) !== null) continue
+        this._groupIndex.foldRoot(key, block)
+      }
+    }
+    run().catch(noop).then(() => {
+      entry.rootScanning = false
+      if (stale()) return
+      if (failed) return this._retryRootScan(key, entry)
+      if (entry.rootScanned < entry.core.contiguousLength) this._scanRoot(key, entry)
+    })
+  }
+
+  // As _retryIndex: one timer per served root, backoff 2/10/30/60 s; the
+  // root's answers stay incomplete meanwhile (_rootScanBehind).
+  _retryRootScan (key, entry) {
+    if (entry.rootRetry || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+    entry.rootReadFailures = Math.min(entry.rootReadFailures + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.rootReadFailures - 1]
+    entry.rootRetry = setTimeout(() => {
+      entry.rootRetry = null
+      this._scanRoot(key, entry)
+    }, delay)
+    if (entry.rootRetry.unref) entry.rootRetry.unref()
   }
 
   // Runtime drop of a group core (R6.1 order, as _dropMedia).
@@ -4881,8 +4959,12 @@ class Seeder {
 
   _groupPage (group, after, limit) {
     if (typeof group !== 'string' || !HEX64.test(group) || this._isBlocked(group)) return null
+    // A community has no writers but its root: a writer core naming C in a
+    // join is never paged (members read any other item as a bad hint).
+    const header = this._groupIndex.header(group)
+    const rootOnly = header !== null && header.kind === 'community'
     return this._groupIndex.page(group, after, limit, {
-      visible: (diary, key) => (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key),
+      visible: (diary, key) => (!rootOnly || key === group) && (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key),
       lengthOf: (key) => this._groupServed.get(key).core.contiguousLength,
       // A writer's withheld block must not hold its group's pages
       // incomplete forever: the signed length is reported, never awaited.
@@ -4929,8 +5011,73 @@ class Seeder {
         }
       }
       if (header === null && writerServed && this._groupHeaders.has(group)) header = { ...this._groupHeaders.get(group), diary: null }
-      const incomplete = this._groupIncomplete(group) || (header === null && writerServed)
-      return { header, rootServed, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
+      let incomplete = this._groupIncomplete(group) || (header === null && writerServed) || this._rootScanBehind(group)
+      // `community` reads the other root too: the one G's community-link
+      // names must be settled here before the answer is.
+      const links = rootServed ? this._groupIndex.rootLinks(group) : null
+      if (links !== null && links.community !== null && this._linkedRootPending(links.community)) incomplete = true
+      const community = rootServed ? this._groupIndex.communityOf(group, (c) => this._communityVisible(c)) : null
+      return { header, rootServed, community, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
+    } catch {
+      return null
+    }
+  }
+
+  // Whether a served root still has link records to fold (_scanRoot).
+  _rootScanBehind (key) {
+    const e = this._groupServed.get(key)
+    if (!e || e.dropped || e.group !== key || !e.headerOk) return false
+    return e.rootScanning || e.rootScanned < e.core.contiguousLength
+  }
+
+  // Whether root `key`, named by a link of another root, may still change
+  // what that link means here: being admitted, its header not verified, its
+  // links not folded yet, or writers of it in admission. A root this seeder
+  // neither serves nor admits (or blocks) settles nothing more.
+  _linkedRootPending (key) {
+    if (this._isBlocked(key)) return false
+    if (this._groupIncomplete(key)) return true
+    if (!this._groupServed.has(key) && !this._groupReserved.has(key)) return false
+    return !this._groupCoreVisible(key) || this._rootScanBehind(key)
+  }
+
+  // Whether community root C may be answered: unblocked, served with its
+  // header verified, of kind community and bound by the diary its header
+  // names (the fold's binding rule; kept for a creator gone here as a group
+  // root is, _keptRootRow).
+  _communityVisible (C) {
+    if (this._isBlocked(C) || !this._groupCoreVisible(C)) return false
+    const header = this._groupIndex.header(C)
+    if (header === null || header.kind !== 'community') return false
+    return this._rootBound(C, header.diary) || this._keptRootRow(header.diary, C)
+  }
+
+  // GET /index/community/<C>: the community's display name and the groups
+  // linked from both sides whose roots are served here, each with its public
+  // name and live member count, at most MAX_GROUPS_PER_COMMUNITY; null for a
+  // malformed or blocked key, or one that is no community root here once
+  // nothing about it is pending (while its root is being admitted the answer
+  // is an empty, incomplete one). An unbound community root lists no groups
+  // and is never complete. Hints only: nodes verify with buildCommunity.
+  indexCommunity (C) {
+    try {
+      if (typeof C !== 'string' || !HEX64.test(C) || this._isBlocked(C)) return null
+      const header = this._groupCoreVisible(C) ? this._groupIndex.header(C) : null
+      if (header !== null && header.kind !== 'community') return null
+      if (header === null) {
+        if (!this._groupIncomplete(C) && !this._groupHasCore(C)) return null
+        return { name: null, groups: [], indexing: !this._ready, complete: false }
+      }
+      const bound = this._communityVisible(C)
+      const visible = (g) => bound && !this._isBlocked(g) && this._groupCoreVisible(g)
+      const c = this._groupIndex.community(C, visible)
+      if (c === null) return null
+      let incomplete = !bound || this._groupIncomplete(C) || this._rootScanBehind(C)
+      // Every group C links (listed or not folded back yet) that is served
+      // or being admitted here must be settled, writers in admission too.
+      const links = this._groupIndex.rootLinks(C)
+      for (const G of links === null ? [] : links.groups) if (this._linkedRootPending(G)) incomplete = true
+      return { name: c.name, groups: c.groups, indexing: !this._ready, complete: !incomplete }
     } catch {
       return null
     }

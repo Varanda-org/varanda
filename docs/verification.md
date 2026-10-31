@@ -1838,7 +1838,7 @@ Nenhuma destas conferências foi feita ao escrever esta seção.
 - Declaração assinada `varanda-terms-v1` (`packages/core/lib/terms.js`): `'varanda-terms-v1'`, nonce, membro, associação e versão, unidos por LF, sem LF final e sem data. A data é a do serviço de conta. Assinada pela chave do diário do membro; nenhuma outra assinatura do protocolo usa o prefixo.
 - RPC `terms.sign` `{ nonce, version }` -> `{ signature }` (`docs/rpc.md` 5.29): só no nó do navegador; os nós nativo, `varanda-serve` e CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/server.js`): `POST /account/terms/start` `{ member, version }` -> `{ nonce }` e `POST /account/terms/finish` `{ member, nonce, signature }` -> `{ version, acceptedAt }`. Recusas: `pedido-invalido`, `nao-vinculado`, `expirado`, `assinatura-invalida`, `indisponivel` e `limite`. Só membro com vínculo Google aceita no servidor; o nonce vale 10 minutos, uma vez, no máximo 1000 pendentes.
-- `terms.json` (`apps/cli/lib/account/terms-store.js`, volume `account-data`, modo 0600): `{ v: 1, members: { <hex64>: [{ version, acceptedAt, nonce, signature }] } }`. Cada aceite relê e une o arquivo; o teto por membro é 32 (guarda as MAIORES versões); `MAX_MEMBERS` (100000) limita só admissões novas; um membro com lista vazia torna o arquivo inválido (indisponível, nunca regravado). Uma recusa da guarda (`lock.owned()`) recusa só aquele pedido; a indisponibilidade permanente só vem de `fail()` quando o batimento confirma a perda do bloqueio, ou de um arquivo malformado. Um reparo (`heal()`) roda a cada 10 s no `serve` (`startTermsHeal`, registro `{ event: 'terms', reason: 'reparado' }`) e uma vez numa parada limpa.
+- `terms.json` (`apps/cli/lib/account/terms-store.js`, volume `account-data`, modo 0600): `{ v: 1, members: { <hex64>: [{ version, acceptedAt, nonce, signature }] } }`. Cada aceite relê e une o arquivo; o teto por membro é 32 (guarda as MAIORES versões); `MAX_MEMBERS` (100000) limita só admissões novas; um membro com lista vazia torna o arquivo inválido (indisponível, nunca regravado). Uma recusa da guarda (`lock.owned()`) recusa só aquele pedido; a indisponibilidade permanente só vem de `fail()` quando o batimento confirma a perda do bloqueio, ou de um arquivo malformado. Um reparo (`heal()`) roda a cada 10 s no `serve` (`startTermsHeal`, registro `{ event: 'terms', reason: 'reparado' }`) e uma vez numa parada limpa. O `heal()` só relê o arquivo quando inode, tamanho, `mtime` ou `ctime` mudaram, ou quando a loja está suja; depois de gravar, não guarda a impressão do que gravou (uma troca tardia de um gravador desatualizado ficaria sem leitura), então o reparo seguinte lê uma vez. Um erro de leitura que não seja arquivo malformado (`EIO`, `EMFILE`) não derruba a loja: registra `{ event: 'terms', reason: 'leitura-falhou', code }` (só o código do erro) e tenta de novo no próximo intervalo.
 - Aparelho: um registro por aparelho (chave `varanda-terms` no `localStorage` da web, arquivo `varanda-terms.json` no nativo): `{ v: 1, version, members: { <hex64>: { acceptedAt, synced } } }`, no máximo 16 membros, lido sempre como não confiável (`termsRecordOf`); um registro recusado significa "perguntar de novo".
 - Sincronização com o servidor: no máximo 3 tentativas por membro e versão em cada carga da página (falhas de verdade), rearmadas ao voltar a rede, depois de mudar a geração da passkey e depois de um vínculo confirmado em Ajustes › Conta; `nao-vinculado` vale como "só neste aparelho".
 - Ajustes › Termos e privacidade mostra os dois documentos em todos os modos e o estado do aceite (registrado, pendente, só neste aparelho). Recomeçar tira aquele membro do registro do aparelho; Sair não tira.
@@ -1891,6 +1891,7 @@ Ainda não feita; marcar na hora de verificar, fora dos testes acima.
 - O nó pode subir, retomar a sessão e fazer a sincronização de recuperação do certificado antes do aceite; a sincronização contínua, a fila de saída, o convite e as chamadas à conta esperam.
 - Subir a versão substitui o registro do aparelho (aceites antigos ainda não sincronizados se perdem).
 - Textos v1 pendentes de revisão jurídica; o encarregado não está nomeado; ainda não há URL pública dos textos.
+- O portão substitui a interface em vez de ficar acima dela, e não vale a pena mudar isso: nada pode renderizar ou ficar acessível atrás dele (o aceite precede o nó, a fila de saída e o convite), e uma sobreposição exigiria prender o foco e esconder o conteúdo de leitores de tela. O que estava montado antes se perde só quando o portão aparece depois do aplicativo (versão nova dos termos ou conta sem registro), caso em que rascunhos não salvos se perdem; o que o #209 tratou, o bloqueio com a conta em dia, não passa pelo portão. Não confirmado no nativo.
 - O portão pertence ao app oficial: um cliente modificado ou outro cliente do protocolo não passa por ele, e o aceite no servidor é um registro, não uma barreira.
 - Na web hospedada, antes de o nó conectar o modo ainda não é "hospedado": quem tem o registro do aparelho em dia pode ver a tela de erro de conexão antes do portão. Nada sai dessa tela; o portão aparece assim que o nó conecta.
 - Num navegador compartilhado, o aceite dado antes de Entrar vale para a próxima conta que entrar naquela carga da página.
@@ -3318,3 +3319,45 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Crescimento de mais de 256 blocos desde a última visita: a janela antiga ainda some até o histórico chegar até ela (só os 32 mais novos aparecem antes).
 - Até 256 blocos são pedidos pela cabeça antes do corpo; se o semeador não tem parte da ponta, a cabeça espera `HEAD_STALL_MS` (3 s) sem bloco novo antes de passar ao corpo.
 - `newest` é só um aviso: chega uma vez por comprimento assinado, e uma janela que nunca completa (semeador sem ela) não gera aviso; nesse caso a leitura espera o crescimento do comprimento presente, como antes.
+
+## 59. Comunidades (PR feat/communities)
+
+Segunda parte de Cadeiras de Praia: uma comunidade junta grupos públicos, `docs/protocol.md` seção 10 ("Communities") e `docs/rpc.md` 5.57 a 5.60. A raiz da comunidade (cabeçalho `kind: 'community'`) guarda só `group-meta`, `group-admin` e `group-link`; a raiz do grupo guarda `community-link`. O vínculo só vale com os dois lados ligados, um grupo fica em uma comunidade por vez e uma comunidade conta no máximo 32 grupos. O criador e os administradores da comunidade agem como administradores em todo grupo vinculado dos dois lados (banir, admitir, ocultar), nunca nomeiam administradores de grupo.
+
+### Como verificar
+
+Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `npm test`.
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/group.test.js` (testes de comunidade) | registros `group-link` e `community-link`, construtores, `buildGroup` com `communities` (vínculo dos dois lados, raiz vinculada pelo criador, uma comunidade por grupo, teto de 32 grupos, cortes de vínculo e de nomeação, rebaixamento e desvínculo, raízes ausentes ou bifurcadas, ordem de entrega) e `buildCommunity` |
+| `packages/core/test/community-member.test.js` | `community.create`, `community.link`, `community.admin`, `community.info` no nó do núcleo, `group.info` com `communities`, recusas e idempotência |
+| `packages/core/test/sync-communities.test.js` | sincronização do núcleo: raízes de comunidade seguidas pelos vínculos, portão por papel, `not-community`, evento `community-linked` |
+| `packages/core/test/seeder-communities.test.js` | semeador: admissão da raiz de comunidade, página com só a raiz, raiz sem vínculo do criador |
+| `packages/core/test/group-index.test.js` | índice do semeador: `community` nas linhas de `/index/group`, `/index/community/<C>`, busca só de grupos |
+| `packages/web-member/test/community-ops.test.js` | os mesmos métodos no nó do navegador (`member-ops.js`) |
+| `apps/cli/test/community-commands.test.js` | comandos `community create|link|admin|info` da CLI, saída `--json` e recusas |
+| `packages/web-member/test/groups-e2e.test.js` (segundo teste) | ponta a ponta em loopback: semeador real atrás de WebSocket e na DHT local; o criador (núcleo) vincula grupo e comunidade, nomeia uma administradora (outro nó do núcleo) que oculta uma mensagem, vista oculta pelo criador e pelo nó do navegador; rebaixada sem ter sincronizado, ela oculta outra mensagem, e essa ocultação não vale para os dois nós, enquanto a anterior continua |
+
+### Checagens humanas (a fazer)
+
+- CLI: `varanda community create --name <nome>` imprime `comunidade criada: <chave>`; `community info <chave>` mostra nome, criador e nenhum grupo.
+- Vincular dos dois lados: com outra pessoa dona do grupo, `community link <comunidade> <grupo>` de quem criou a comunidade imprime `vínculo gravado (lado: comunidade)`; `community info` ainda não lista o grupo. Depois de a dona do grupo rodar o mesmo comando (`lado: grupo`) e de uma sincronização, os dois lados listam o grupo e `group info <grupo> --json` mostra `communities` com a chave.
+- `community admin <comunidade> --member <diário>`: a pessoa nomeada oculta uma mensagem do grupo vinculado; no navegador, a mensagem aparece como oculta depois da sincronização.
+- Rebaixar (`--undo`): uma ocultação nova da pessoa rebaixada não vale; as anteriores continuam.
+- Desvincular (`community link ... --undo`) de qualquer lado: o grupo sai de `community info` e a pessoa administradora da comunidade perde o poder no grupo.
+- Semeador: `curl /index/community/<C>` numa comunidade vinculada dos dois lados mostra o grupo com `writerCount`; desvincular de qualquer lado tira o grupo, e `/index/group/<G>` passa a mostrar `community: null`.
+- Bloquear a raiz da comunidade: `/index/community/<C>` responde 404 e o log do semeador mostra `group-rejected` com `group-blocked`.
+
+### Não verificado / limites conhecidos
+
+- Um aparelho de uma pessoa administradora que existia antes do vínculo e que o criador do grupo não guardava conta a partir do início da nomeação, não do vínculo.
+- Depois de um desvínculo, um novo vínculo só vale para os escritores que ele lista.
+- Um grupo cujos vínculos já nomearam mais de 32 comunidades distintas fica marcado como incompleto.
+- O índice do semeador é só uma dica e ignora a retirada de registros por saída (`group-leave`).
+- A raiz vinculada que deixa de ser nomeada antes do portão (`unwanted`) não tem teste.
+- Um grupo cuja comunidade foi bloqueada pela associação não consegue desligá-la nem ligar outra (o pedido recusa a comunidade bloqueada antes do `on: false`); a autoridade não muda, porque uma raiz bloqueada nunca entra na dobra.
+- Num desligamento ou rebaixamento com mais escritores que o teto, cada nó lista os primeiros em ordem de chave e omite o resto (cortado em 0); o nó do núcleo conta também escritores guardados ainda não vinculados e o navegador só os vinculados, então os dois podem gravar listas diferentes para o mesmo pedido (os dois são seguros). A ramificação do navegador que deixa em repouso um escritor guardado sob uma chave só ligada não tem teste.
+- Núcleos de escritor que nomeiam uma comunidade são admitidos pelo semeador e contam nos tetos, mas nunca entram nas páginas.
+- A nova tentativa de uma leitura falha na varredura de vínculos e a nova varredura da própria raiz de grupo quando ela cresce não têm teste de regressão (não há gancho para forçá-las).
+- Sem interface nativa; as telas da web vêm na PR4.

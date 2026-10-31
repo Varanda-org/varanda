@@ -54,6 +54,10 @@ Comandos:
   group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
+  community create           cria uma comunidade de grupos (--name)
+  community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
+  community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
+  community info <chave>     dados da comunidade e seus grupos
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
