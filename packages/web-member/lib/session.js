@@ -272,6 +272,10 @@ const DIARY_PEEK_BUSY = 'ocupado'
 const MAX_DIARY_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
+// The longest a read waits for a starting run to publish its cores
+// (withCores) before it preempts the run instead.
+const READER_WAIT_MS = 3000
+const NOT_READY = Symbol('not ready')
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
 // The lease (see the header): the gap after an idle end, how long a run
@@ -423,6 +427,13 @@ function redactLogLine (text) {
   return [UNSAFE_LOG.test(head) ? 'aviso: erro interno' : head + ': erro interno', true]
 }
 
+// A run's `ready`, or NOT_READY once ms passed first.
+function readyWithin (ready, ms) {
+  let timer = null
+  const late = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, ms), NOT_READY) })
+  return Promise.race([ready, late]).finally(() => clearTimeout(timer))
+}
+
 // ---- the session ----
 
 // syncOptions: test-only overrides passed to runSync (limits and timings).
@@ -430,6 +441,7 @@ function redactLogLine (text) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
@@ -444,6 +456,7 @@ function createBrowserSession ({
   limits,
   writeGate = true,
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
@@ -908,11 +921,18 @@ function createBrowserSession ({
   // instance and without stopping the run, the lease or its clocks; only a
   // read the run cannot serve (member-ops NEEDS_EXCLUSIVE) falls back to
   // withStore and preempts. The hold is released before that fallback:
-  // stopRun waits for every hold, ours included.
+  // stopRun waits for every hold, ours included. A startup that has not
+  // published the cores within readerWaitMs (slow or stuck storage) is
+  // preempted too: every read, and whatever is queued behind it, would
+  // otherwise wait on it with no limit.
   async function withCores (fn) {
     const r = run
     if (r === null) return withStore(fn)
-    const api = await r.ready
+    const api = await readyWithin(r.ready, readerWaitMs)
+    if (api === NOT_READY) {
+      warning('aviso: leitura sem esperar a partida da sincronização (' + readerWaitMs + ' ms)')
+      return withStore(fn)
+    }
     if (api === null || !api.hold()) {
       await r.done
       return withStore(fn)
