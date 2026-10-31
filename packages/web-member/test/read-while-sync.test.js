@@ -284,3 +284,73 @@ test('a stored replica the run does not hold falls back to the exclusive path an
   t.is(stops[0].data.runId, runId)
   await web.request('sync.stop')
 })
+
+// A followed diary stored with holes at its full signed length: the prefix
+// [0, 5) with a block that does not decode at 3, an island [7, 9) the
+// reader does not show, and the newest run [11, 17).
+async function holeyReplica (t, storage, assoc) {
+  const source = new Hypercore(memoryStorage())
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  const put = (record) => source.append(b4a.from(JSON.stringify(record)))
+  await put(memberCertRecord(createCert({ member: hex(source.key) }, assoc.kp)))
+  await put(profileRecord({ name: 'Furada', bio: '' }))
+  await put(postRecord({ text: 'p0', at: '2026-01-01T00:00:10.000Z' }))
+  await source.append(b4a.from('{oops'))
+  for (let i = 1; i < 14; i++) await put(postRecord({ text: 'p' + i, at: '2026-01-01T00:00:' + String(10 + i) + '.000Z' }))
+  const key = hex(source.key)
+  const replica = new Hypercore(storage.core('replica/' + key), source.key)
+  await replica.ready()
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  for (const [start, end] of [[0, 5], [7, 9], [11, 17]]) await replica.download({ start, end }).done()
+  assert.equal(replica.length, 17)
+  a.destroy()
+  b.destroy()
+  await replica.close()
+  return key
+}
+
+// Every log.read page of `author` (limit 5) -> the pages' { seqs, invalid,
+// entriesTruncated }.
+async function logPages (web, author) {
+  const pages = []
+  let before
+  for (;;) {
+    const page = await web.request('log.read', before === undefined ? { author, limit: 5 } : { author, limit: 5, before })
+    pages.push({ seqs: page.entries.map((e) => e.seq), invalid: page.invalid, entriesTruncated: page.entriesTruncated })
+    if (page.entriesTruncated === 0 || pages.length > 10) return pages
+    before = Math.min(...page.entries.map((e) => e.seq), ...page.invalid.map((e) => e.seq))
+  }
+}
+
+test('a followed diary with holes: log.read pages by seq over the prefix and the newest run, borrowed or not', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await fixture(t)
+  const H = await holeyReplica(t, storage, assoc)
+  await web.request('follow.add', { key: H })
+  const feed = await web.request('feed.read', {})
+  const shown = feed.items.filter((i) => i.author === H).map((i) => i.text).sort()
+  t.alike(shown, ['p0', 'p1', 'p10', 'p11', 'p12', 'p13', 'p8', 'p9'], 'the prefix and the newest run, not the island')
+  t.ok(feed.incomplete.includes(H))
+  const pages = await logPages(web, H)
+  t.alike(pages, [
+    { seqs: [12, 13, 14, 15, 16], invalid: [], entriesTruncated: 6 },
+    { seqs: [1, 2, 4, 11], invalid: [{ seq: 3, reason: 'malformed' }], entriesTruncated: 1 },
+    { seqs: [0], invalid: [], entriesTruncated: 0 }
+  ], 'pages by seq, the holes skipped, the bad block invalid')
+  const head = await web.request('log.read', { author: H, limit: 3, before: 9 })
+  t.alike(head.entries.map((e) => e.seq), [2, 4], 'a before inside a hole ends at the visible block below it')
+  t.alike(head.invalid, [{ seq: 3, reason: 'malformed' }])
+  t.is(head.entriesTruncated, 2)
+
+  const { runId } = await web.request('sync.start', {})
+  await web.request('profile.read', { authors: [H] })
+  const from = web.events.length
+  t.alike(await web.request('feed.read', {}), feed, 'the borrowed feed answers the same')
+  t.alike(await logPages(web, H), pages, 'the borrowed log pages answer the same')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  t.is(preempted(web, from).length, 0, 'served on the run')
+  await web.request('sync.stop')
+})

@@ -692,6 +692,11 @@ const TOMB_RETRY_MAX = 5
 const NEWEST_BLOCKS = 32
 const HEAD_LOW = 3
 const HEAD_STALL_MS = 3000
+// A stored run above the prefix (an earlier window) at most TAIL_MAX blocks
+// below the signed length gets the whole new tail instead of the newest
+// window: the reader shows a run only while it reaches the signed length,
+// so the tail reconnects what is already on screen.
+const TAIL_MAX = 256
 
 // Target seq of the valid tombstone at block seq, null for any other block,
 // undefined for a read error (the checks of tombstoneAt, block read once).
@@ -732,7 +737,9 @@ function foldTargets (tombs) {
 // the initial scan is done; onGrow(present) when the present length grows
 // after it; onDeleted(deleted) whenever the deleted set changed (and after
 // the initial scan when it is not empty); onError(err) once when the
-// initial scan fails (the tracker then stops, with present 0).
+// initial scan fails (the tracker then stops, with present 0);
+// onNewest(length) when the head finds the newest window below the signed
+// `length` all stored or deleted (the present length does not move then).
 //
 // newest > 0 (followed diaries in the browser) downloads in two strict
 // phases, never both at once: Hypercore 10.38.2 picks among a core's open
@@ -741,7 +748,11 @@ function foldTargets (tombs) {
 // (only those while block 0 is missing), waits for the signed length when
 // expect(length) announced more than the core knows (nothing is requested
 // past the signed length), then asks for the newest `newest` blocks below
-// it, split around deleted seqs. The BODY is the linear download above,
+// it, split around deleted seqs; when blocks are stored above the present
+// length (the scan's highest, or the last window completed) at most tailMax
+// blocks below the signed length, the window starts right above them
+// instead (the whole new tail).
+// The BODY is the linear download above,
 // from block 0. The body runs when the newest window already reaches the
 // prefix (a small diary: newest 0 behaves exactly so), once the window is
 // all stored or deleted, or when it brought no block for stallMs (the
@@ -749,7 +760,7 @@ function foldTargets (tombs) {
 // history more than `newest` blocks behind runs the head again. The
 // reported length stays the present length on both phases.
 // -> also expect(length), the length a seeder advertised (a hint only).
-function trackPresent (core, { noClear = false, download = true, newest = 0, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop }) {
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
@@ -767,6 +778,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
   let headKey = ''
   let hint = 0
   let bodyAt = -1 // the target the body was chosen for (window done or stalled)
+  // Where the stored run the reader shows ends: one past the highest block
+  // the scan found, then the end of each window completed. Blocks of a
+  // window still downloading never move it (the run is not connected yet).
+  let top = 0
   let stall = null
 
   const sameSet = (a, b) => a.size === b.size && [...a].every((s) => b.has(s))
@@ -901,7 +916,8 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     } else {
       segs.push(...around(0, Math.min(HEAD_LOW, len)))
       if (len >= target) {
-        const ws = Math.max(HEAD_LOW, len - newest)
+        let ws = Math.max(HEAD_LOW, len - newest)
+        if (top > present && top < ws && len - top <= tailMax) ws = top
         const window = around(ws, len)
         done = true
         for (const [a, b] of window) {
@@ -913,6 +929,8 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     if (stopped) return
     if (done) {
       bodyAt = target
+      top = len
+      onNewest(len)
       return toBody()
     }
     closeBody()
@@ -989,6 +1007,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, sta
     }
     deleted = state.deleted
     present = state.present
+    top = Math.max(top, state.raw.length)
     if (stopped) return
     if (!noClear) await clearDeleted(core, deleted)
     if (stopped) return
@@ -1114,6 +1133,7 @@ async function syncRun ({
   socketCloseMs = SOCKET_CLOSE_MS,
   blocklistMinIntervalMs, // test-only: blocklist-net.js minIntervalMs
   newestBlocks = NEWEST_BLOCKS, // followed diaries: trackPresent `newest`
+  tailBlocks = TAIL_MAX, // followed diaries: trackPresent `tailMax`
   headStallMs = HEAD_STALL_MS,
   noClear = false // keep the bytes of deleted blocks (tombstones still apply)
 } = {}) {
@@ -1891,6 +1911,7 @@ async function syncRun ({
     const tracker = trackPresent(core, {
       noClear,
       newest: newestBlocks,
+      tailMax: tailBlocks,
       stallMs: headStallMs,
       onReady: (present) => {
         if (entry.core !== core) return
@@ -1903,6 +1924,9 @@ async function syncRun ({
       },
       onGrow: (length) => {
         if (entry.core === core) onGrow(entry, length)
+      },
+      onNewest: (length) => {
+        if (entry.core === core) onNewest(entry, length)
       },
       // Fail closed: nothing is downloaded, but the follow is reported.
       onError: () => {
@@ -1942,6 +1966,23 @@ async function syncRun ({
     evaluate()
   }
 
+  // The newest window is on the device ahead of the history: a hint for the
+  // reader (docs/rpc.md §6 `newest`), once per length. Nothing advertised or
+  // measured changes: those stay on the present length.
+  // A replica still in regate holds it until its block 0 passes the gate.
+  function onNewest (entry, length) {
+    if (ended) return
+    if (entry.state === 'regate') {
+      entry.newestHeld = length
+      return
+    }
+    if (entry.state !== 'active') return
+    if (checkQuota(entry)) return
+    if (entry.newestSent.has(length)) return
+    entry.newestSent.add(length)
+    emit({ event: 'newest', key: entry.key, length })
+  }
+
   // The initial scan of a stored replica finished: advertise what it holds
   // and judge completion again, as a growth would.
   function onScanned (entry, present) {
@@ -1975,6 +2016,7 @@ async function syncRun ({
       const length = entryPresent(entry)
       send({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
+      if (entry.newestHeld > 0) onNewest(entry, entry.newestHeld)
       evaluate()
     }, () => {
       entry.gating = false
@@ -4168,7 +4210,9 @@ async function syncRun ({
           advSeq: 0,
           fetchedAdv: 0,
           cutByDeadline: false,
-          discardedRegate: false
+          discardedRegate: false,
+          newestSent: new Set(), // lengths whose `newest` line was emitted
+          newestHeld: 0 // a `newest` length seen in regate
         }
         follows.set(key, entry)
         if (blocked) {
@@ -4292,4 +4336,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
