@@ -18,4 +18,8 @@ dependencies {
   // Auth Tab (an https redirect that only returns to this app) arrived in
   // 1.9.0, which needs compileSdk 36 and AGP 8.9.1 or newer.
   implementation "androidx.browser:browser:1.9.0"
+  // expo's activity-result launcher takes an androidx.activity callback,
+  // which no dependency puts on this module's compile classpath; the same
+  // version as expo-image-picker, so Gradle resolves one.
+  implementation "androidx.activity:activity-ktx:1.11.0"
 }
