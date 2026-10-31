@@ -340,6 +340,25 @@ test('decide POSTs JSON with credentials after confirm, then refetches', async (
   t.is(calls.filter((c) => c.url === '/account/mod/api/me').length, 2, 'the queue is refetched')
 })
 
+test('a private group report shows the reporter quote with its provenance, never the seeder label', async (t) => {
+  const doc = fakeDocument()
+  const W = 'a1'.repeat(32)
+  const G = 'b2'.repeat(32)
+  const routes = signedIn([report({ writer: W, group: G, quote: 'citação <i>x' })])
+  routes['GET /account/mod/api/reports/r1abcdefghijklmnopqrst/grupo'] = () => [200, { confirmed: true, root: true, name: null, creator: B, texto: null, sealed: true, provenance: 'cifrada: citação do denunciante' }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  await p.settled()
+  const card = cardsOf(doc)[0]
+  const labels = walk(card).filter((n) => n.className === 'label').map((n) => n.textContent)
+  t.ok(labels.includes('cifrada: citação do denunciante'))
+  t.absent(labels.includes(panel.TEXT.groupVerifiedText))
+  t.is(buttons(doc, 'Bloquear conta').length, 1)
+  t.absent(buttons(doc, 'Bloquear conta')[0].disabled)
+  t.absent(buttons(doc, 'Bloquear grupo')[0].disabled)
+})
+
 test('a group message shows its label beside the unverified quote and offers both blocks', async (t) => {
   const doc = fakeDocument()
   const W = 'a1'.repeat(32)

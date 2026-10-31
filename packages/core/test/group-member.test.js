@@ -133,7 +133,7 @@ test('create requires a diary genesis and persists a root writer and join', asyn
   const { entries } = await member.logRead(ctx)
   t.alike(entries[1].record, groupJoinRecord({ group, writer: group, on: true, at: entries[1].record.at }))
   t.alike(await member.groupInfo(ctx, { group }), {
-    group, name: 'Horta', join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', communities: []
+    group, name: 'Horta', join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', communities: [], visibility: 'public'
   })
   t.alike(await member.groupList(ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1 }], total: 1 })
   await rejects(t, member.groupInfo(ctx, { group: 'f'.repeat(64) }), 'grupo não encontrado', 'NOT_FOUND')
@@ -941,8 +941,8 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(await heldWriters(b, group), 1, 'no second writer')
   t.is((await groupJoins(b, group)).length, 1, 'no second diary join')
   t.alike(await member.groupList(b), { groups: [{ group, name: null, join: null, role: 'pending', members: 0 }], total: 1 })
-  t.alike(await member.groupInfo(b, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [] })
-  t.alike(await member.groupRead(b, { group }), { items: [], next: null, hidden: 0, incomplete: true })
+  t.alike(await member.groupInfo(b, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [], visibility: 'public' })
+  t.alike(await member.groupRead(b, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member')
   t.alike(await member.groupJoin(b, { group }), { state: 'member' })

@@ -262,7 +262,7 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
 
 function groupReadResult (n, ch) {
   const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
-  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true }
+  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
 test('group.read: GROUP_LIMIT_MAX fits', (t) => {

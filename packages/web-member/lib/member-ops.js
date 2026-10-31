@@ -73,6 +73,7 @@ const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/enga
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const grp = require('@varanda/core/lib/group')
+const gc = require('@varanda/core/lib/group-crypto')
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX } = require('@varanda/rpc')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
@@ -1250,10 +1251,10 @@ async function openOwnGroupCore (ctx, entry) {
   return store.openGroupWriter(ctx.storage, kp)
 }
 
-async function appendToOwnGroupCore (ctx, entry, record) {
+async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
   const core = await openOwnGroupCore(ctx, entry)
   try {
-    return await store.appendGroupRecord(core, record, { root: entry.key === entry.group, community: entry.kind === 'community', limits: ctx.limits })
+    return await store.appendGroupRecord(core, record, { root: entry.key === entry.group, community: entry.kind === 'community', private: priv, limits: ctx.limits })
   } finally {
     await core.close()
   }
@@ -1290,10 +1291,9 @@ async function readWriterCoreOf (storage, key, group) {
   }
 }
 
-// This version folds only public groups: a crafted private or community
-// root would take a kv groupWriters slot and never fold.
+// Public and private groups fold; a community root never does as a group.
 function foldableHeader (h) {
-  return validateGroupHeader(h) === null && h.kind === 'group' && h.visibility === 'public'
+  return validateGroupHeader(h) === null && h.kind === 'group' && (h.visibility === 'public' || h.visibility === 'private')
 }
 
 // A stored root that will never fold (its block 0 is no public group
@@ -1329,7 +1329,16 @@ function joinedCounted (history, d, rootDiary, group) {
 function missingWriters (g, d, history) {
   const held = new Set()
   for (const [key, c] of g.cores) if (c.diary === d) held.add(key)
-  return joinedCounted(history, d, g.cores.get(g.group).diary, g.group).some((w) => !held.has(w))
+  // In a private group a writer whose latest join is off was unbound by its
+  // device (a boxless writer replaced on rejoin): seeders refuse it, so it
+  // can never be held, and the fold never counts it without a box.
+  const off = new Set()
+  if (g.private) {
+    const latest = new Map()
+    for (const j of history || []) latest.set(j.writer, j.on === true)
+    for (const [w, on] of latest) if (!on) off.add(w)
+  }
+  return joinedCounted(history, d, g.cores.get(g.group).diary, g.group).some((w) => !held.has(w) && !off.has(w))
 }
 
 function hasLeave (entries) {
@@ -1417,8 +1426,12 @@ async function loadGroup (ctx, base, group) {
     const c = await loadCommunityRoot(ctx, base, key)
     if (c !== null) communities.push({ key, entries: c.entries, joins: c.joins })
   }
-  const built = buildGroup({ root: { key: group, entries: root.entries }, writers, joins, communities, now: Date.now() })
-  return { group, own, built, cores, diaries, joins }
+  const input = { root: { key: group, entries: root.entries }, writers, joins, communities }
+  const priv = rootHeader.visibility === 'private'
+  const mine = priv ? mineOf(group, rootHeader, writers, ownHex, boxHexOf(ctx)) : new Set()
+  const epochs = []
+  const built = foldWithKeys(ctx, input, mine, null, epochs)
+  return { group, own, built, cores, diaries, joins, input, mine, private: priv, epochs }
 }
 
 // The writer cores the fold counts for diary `d`: its own header names d and
@@ -1574,10 +1587,13 @@ function groupWritersFull (g) {
   return n >= grp.MAX_GROUP_WRITERS - 1
 }
 
-// -> { group }: a new public group whose root is a new own core; the own
-// diary binds it at once (writer === group).
-async function groupCreate (ctx, { name, join }) {
+// -> { group }: a new group whose root is a new own core; the own diary
+// binds it at once (writer === group). A private root holds the header
+// (name null, this device's box), the first epoch sealed to that box and the
+// name in a sealed group-meta; the epoch key stays in the holder only.
+async function groupCreate (ctx, { name, join, visibility = 'public' }) {
   needGroupKeys(ctx)
+  if (visibility === 'private') return groupCreatePrivate(ctx, { name })
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   return withIdentity(ctx, async ({ diary, ownHex }) => {
@@ -1588,6 +1604,39 @@ async function groupCreate (ctx, { name, join }) {
     try {
       await store.appendGroupRecord(core, header, { root: true, limits: ctx.limits })
     } finally {
+      await core.close()
+    }
+    await store.putGroupWriter(ctx.storage, { group: key, key, nonce, rootNonce: nonce })
+    await appendOwn(ctx, diary, groupJoinRecord({ group: key, writer: key, on: true }))
+    return { group: key }
+  })
+}
+
+async function groupCreatePrivate (ctx, { name }) {
+  const boxHex = needBox(ctx)
+  const h = holderOf(ctx)
+  const tok = h.token()
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const header = buildRecord(() => grp.groupHeader({ kind: 'group', diary: ownHex, visibility: 'private', join: 'approval', name: null, box: boxHex }))
+    // Checked before anything is written: a bad name must not leave a root.
+    buildRecord(() => grp.groupMeta({ name, join: 'approval', seen: null }))
+    await makeGroupRoom(ctx, { ownHex, ownEntries: await store.readAll(diary), association, mod }, null)
+    const { core, key, nonce } = await newOwnGroupCore(ctx)
+    const epochKey = gc.newEpochKey()
+    try {
+      await store.appendGroupRecord(core, header, { root: true, private: true, limits: ctx.limits })
+      const kid = { writer: key, seq: core.length }
+      const sealed = b4a.toString(gc.sealEpochKey(epochKey, key, kid, b4a.from(boxHex, 'hex')), 'base64')
+      await store.appendGroupRecord(core, buildRecord(() => grp.groupKey({ kid: null, basis: [], keys: [{ writer: key, sealed }], commit: hex(gc.keyCommit(epochKey, key, kid)) })), { root: true, private: true, limits: ctx.limits })
+      const meta = buildRecord(() => grp.groupMeta({ name, join: 'approval', seen: kid }))
+      const { nonce: n, box } = gc.sealRecord(grp.sealedInner(meta, { writer: key, group: key, kid }), epochKey)
+      await store.appendGroupRecord(core, buildRecord(() => grp.groupSealed({ kid, nonce: n, box, at: meta.at })), { root: true, private: true, limits: ctx.limits })
+      h.put(tok, kid, epochKey)
+    } finally {
+      gc.wipe(epochKey)
       await core.close()
     }
     await store.putGroupWriter(ctx.storage, { group: key, key, nonce, rootNonce: nonce })
@@ -1633,21 +1682,36 @@ async function groupJoin (ctx, { group }) {
     if (g.built.bans.has(ownHex)) throw new UsageError(GROUP_FORBIDDEN)
     // A blocked own diary binds none of its writers in the fold.
     if (g.diaries.get(ownHex) === null) throw new UsageError(GROUP_FORBIDDEN)
+    // In a private group a writer whose header box is not this device's
+    // (null from a join before the root arrived, or another key) never
+    // counts: it stays retired and a boxed writer takes its place.
+    const box = g.private ? needBox(ctx) : null
+    const usable = (key) => !g.private || boxOfWriter(g, key) === box
     const live = liveOwnWriter(g, ownHex)
-    if (live !== null) return { state: joinState(g, ownHex, live.key) }
+    if (live !== null && usable(live.key)) return { state: joinState(g, ownHex, live.key) }
+    // As the core node: the unusable own writer's binding goes first, so
+    // nobody waits for a core that seeders refuse.
+    let unbound = null
+    if (g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)) {
+      const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === g.own.key).pop()
+      if (last !== undefined && last.on) await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: g.own.key, on: false }))
+      unbound = g.own.key
+    }
     // Listed and still writing but not bound (a join cut short): bind it.
     const current = g.own === null ? undefined : g.cores.get(g.own.key)
     const left = statusOf(g, ownHex) === 'left'
-    let writer = !left && current !== undefined && !hasLeave(current.entries) ? g.own.key : null
+    let writer = !left && current !== undefined && !hasLeave(current.entries) && usable(g.own.key) ? g.own.key : null
     if (writer === null) {
       if (groupWritersFull(g)) throw new UsageError(store.GROUP_FULL)
       // The fold counts at most MAX_GROUP_WRITERS_PER_DIARY writers per diary
       // (the earliest bound): a new one would never count.
-      if (boundWriters(g, ownHex).length >= MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(store.GROUP_FULL)
+      if (boundWriters(g, ownHex).filter((w) => w !== unbound).length >= MAX_GROUP_WRITERS_PER_DIARY) {
+        throw new UsageError(live !== null ? GROUP_BOXLESS_FULL : store.GROUP_FULL)
+      }
       await makeGroupRoom(ctx, base, g.group)
       // The causal latest leave, never the newest timestamp.
       const rejoin = statusOf(g, ownHex) === 'left' ? (g.built.leaves.get(ownHex) || null) : null
-      const record = buildRecord(() => grp.writerHeader({ group: g.group, diary: ownHex, rejoin }))
+      const record = buildRecord(() => grp.writerHeader({ group: g.group, diary: ownHex, rejoin, box }))
       const { core, key, nonce } = await newOwnGroupCore(ctx)
       try {
         await store.appendGroupRecord(core, record, { root: false, limits: ctx.limits })
@@ -1692,7 +1756,7 @@ async function groupLeave (ctx, { group }) {
     if (root.diary === ownHex && g.built.writers.has(g.group) && !cuts.some((c) => c.writer === g.group)) {
       throw new UsageError(GROUP_LEAVE_CREATOR)
     }
-    await appendToOwnGroupCore(ctx, own, buildRecord(() => grp.groupLeave({ seen: g.built.last, cuts })))
+    await appendToOwnGroupCore(ctx, own, buildRecord(() => grp.groupLeave({ seen: g.built.last, cuts })), g.private)
     await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: own.key, on: false }))
     return { state: 'left' }
   }, async (p, { diary, base }) => {
@@ -1717,22 +1781,30 @@ async function groupPost (ctx, { group, text, replyTo = null }) {
     const own = liveOwnWriter(g, ownHex)
     if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
     requireCounted(g, own.key)
-    const record = buildRecord(() => grp.groupPost({ text, replyTo, seen: g.built.last }))
-    return { seq: await appendToOwnGroupCore(ctx, own, record) }
+    let record = buildRecord(() => grp.groupPost({ text, replyTo, seen: g.built.last }))
+    if (g.private) record = sealForGroup(ctx, g, own.key, record)
+    return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
   })
 }
 
 // A moderation record in this device's writer, checked against the local
 // fold first.
-async function groupModerate (ctx, group, make) {
-  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+async function groupModerate (ctx, group, make, keyChange = null) {
+  return withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
     const own = liveOwnWriter(g, ownHex)
     if (own === null) throw new UsageError(GROUP_FORBIDDEN)
+    if (g.private) needBox(ctx)
     const record = make(g, ownHex)
     requireCounted(g, own.key)
-    await appendToOwnGroupCore(ctx, own, record)
+    await appendToOwnGroupCore(ctx, own, record, g.private)
+    if (g.private && keyChange !== null) await afterKeyChange(ctx, base, g.group, ownHex, keyChange(record))
     return { ok: true }
   })
+}
+
+// History on admit after an on: true grant, a rotation after a withdrawal.
+function grantKeyChange (record) {
+  return record.on === true ? { history: true } : { rotate: true }
 }
 
 // The author keeps the right to hide their own posts after leaving: the
@@ -1751,7 +1823,9 @@ async function groupHide (ctx, { group, target, on }) {
     }
     if (writer === null) throw new UsageError(GROUP_FORBIDDEN)
     requireCounted(g, writer.key)
-    await appendToOwnGroupCore(ctx, writer, buildRecord(() => grp.groupHide({ target, on, seen: g.built.last })))
+    let record = buildRecord(() => grp.groupHide({ target, on, seen: g.built.last }))
+    if (g.private) record = sealForGroup(ctx, g, writer.key, record)
+    await appendToOwnGroupCore(ctx, writer, record, g.private)
     return { ok: true }
   })
 }
@@ -1778,7 +1852,7 @@ function groupAdmit (ctx, { group, member, on }) {
       if (history === undefined || missingWriters(g, d, history)) throw new UsageError(GROUP_ADMIT_WAIT)
     }
     return buildRecord(() => grp.groupAdmit({ member: d, on, cuts, seen: g.built.last }))
-  })
+  }, grantKeyChange)
 }
 
 // An unban lifts the ban the local fold holds in force for the member, the
@@ -1793,17 +1867,20 @@ function groupBan (ctx, { group, member, on }) {
       if (lifts === null) throw new UsageError(GROUP_UNCHANGED)
     }
     return buildRecord(() => grp.groupBan({ member: d, on, cuts: cutsFor(g, d, !on), lifts, seen: g.built.last }))
-  })
+  }, (record) => record.on === true ? { rotate: true } : { history: true })
 }
 
 // Root-only records: the creator, through the root this device created
 // (its nonce kept in the entry even after a leave and rejoin).
-async function groupCharter (ctx, group, make) {
-  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+async function groupCharter (ctx, group, make, keyChange = null) {
+  return withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
     if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null) {
       throw new UsageError(GROUP_FORBIDDEN)
     }
-    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, make(g))
+    if (g.private) needBox(ctx)
+    const record = make(g)
+    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record, g.private)
+    if (g.private && keyChange !== null) await afterKeyChange(ctx, base, g.group, ownHex, keyChange(record))
     return { ok: true }
   })
 }
@@ -1818,16 +1895,21 @@ function groupAdmin (ctx, { group, member, on }) {
     const cuts = countedCuts(g, d, true)
     if (cuts.length > MAX_GROUP_CUTS) throw new UsageError(store.GROUP_FULL)
     return buildRecord(() => grp.groupAdmin({ member: d, on, cuts, seen: g.built.last }))
-  })
+  }, grantKeyChange)
 }
 
 function groupMeta (ctx, { group, name, join }) {
   if (name === undefined && join === undefined) throw new UsageError(GROUP_UNCHANGED)
-  return groupCharter(ctx, group, (g) => buildRecord(() => grp.groupMeta({
-    name: name === undefined ? g.built.name : name,
-    join: join === undefined ? g.built.join : join,
-    seen: g.built.last
-  })))
+  return groupCharter(ctx, group, (g) => {
+    if (g.private && join !== undefined && join !== 'approval') throw new UsageError(GROUP_PRIVATE_APPROVAL)
+    // A private group is always 'approval'; its name travels sealed.
+    const record = buildRecord(() => grp.groupMeta({
+      name: name === undefined ? g.built.name : name,
+      join: g.private ? 'approval' : (join === undefined ? g.built.join : join),
+      seen: g.built.last
+    }))
+    return g.private ? sealForGroup(ctx, g, g.group, record) : record
+  })
 }
 
 // One page backwards over the causal order, newest first (feed.read's
@@ -1867,11 +1949,14 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
       items,
       next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null,
       hidden: items.filter((p) => p.hidden).length,
-      incomplete: g.built.incomplete
+      incomplete: g.built.incomplete,
+      sealed: g.built.sealed,
+      epoch: g.built.epoch === null ? null : { writer: g.built.epoch.writer, seq: g.built.epoch.seq },
+      state: keyState(ctx, g)
     }
   }, (p) => {
     requirePendingOwn(p)
-    return { items: [], next: null, hidden: 0, incomplete: true }
+    return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
   })
 }
 
@@ -1910,10 +1995,11 @@ async function groupInfo (ctx, { group }) {
     role: roleOf(g, ownHex),
     members: memberCount(g),
     state: stateOf(g, ownHex),
-    communities: g.built.community === null ? [] : [g.built.community]
+    communities: g.built.community === null ? [] : [g.built.community],
+    visibility: g.private ? 'private' : 'public'
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', communities: [] }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', communities: [], visibility: 'public' }
   })
 }
 
@@ -1948,6 +2034,359 @@ async function groupRequests (ctx, { group, offset = 0, limit = GROUP_MEMBERS_LI
       return { member: d, ...authorOf(g, d, base.association, base.mod), at: times.length > 0 ? times[times.length - 1] : null }
     })
     return { requests, total: list.length }
+  })
+}
+
+// ---- private groups (docs/protocol.md "Private groups") ----
+//
+// This device's box key pair and the epoch keys it opened live in
+// ctx.groupKeys (./group-keys.js), in memory only: storage keeps the sealed
+// blocks and nothing else. Every fold of a private group hands buildGroup an
+// unseal that opens with the held pair and installs each key it opens in
+// the holder (under the holder's token), so sealing and the history handed
+// on admit read the key from there; no result ever carries a key.
+
+const GROUP_REKEY_PENDING = 'aguardando nova chave'
+const GROUP_PRIVATE_APPROVAL = 'grupo privado exige aprovação'
+const ROTATION_TOO_BIG = 'rotação grande demais para o espaço do diário'
+const { MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const GROUP_BOXLESS_FULL = 'limite de aparelhos no grupo atingido: os aparelhos que entraram antes de receber o grupo privado não leem nele'
+const GROUP_PUBLIC_NO_KEY = 'grupo público não usa chave'
+const ROTATION_UNCONFIRMED = 'a nova chave do grupo não se confirmou'
+const DUMMY_SEALED = b4a.toString(b4a.alloc(gc.SEALED_EPOCH_KEY_BYTES), 'base64')
+
+function holderOf (ctx) {
+  const h = ctx.groupKeys
+  return h !== null && typeof h === 'object' && typeof h.get === 'function' ? h : null
+}
+
+// The held box public key as hex, or null while locked.
+function boxHexOf (ctx) {
+  const h = holderOf(ctx)
+  const pk = h === null ? null : h.boxPublicKey()
+  if (pk === null) return null
+  const out = hex(pk)
+  pk.fill(0)
+  return out
+}
+
+function needBox (ctx) {
+  const box = boxHexOf(ctx)
+  if (box === null) throw new UsageError(store.LOCKED)
+  return box
+}
+
+// buildGroup over `input` with this device's keys. unseal hands the fold the
+// raw crypto_box_seal_open plaintext (key || tag); the fold checks the tag
+// against G and the kid and wipes it. `probe` ({ pair }) replaces the
+// device pair with a throwaway one a planned rotation sealed to, so the
+// real fold says whether that epoch would be eligible before anything is
+// written. `epochs` receives { kid, recipients } of every epoch the fold
+// accepted and opened (onKey, the only source of the keys sealed with or
+// handed on); each key goes to the holder under its token, nowhere else.
+function foldWithKeys (ctx, input, mine, probe = null, epochs = null) {
+  const h = holderOf(ctx)
+  const opened = []
+  let keys = null
+  if (mine.size > 0 && (probe !== null || (h !== null && h.unlocked))) {
+    const tok = h === null ? null : h.token()
+    keys = {
+      onKey (kid, key, recipients) {
+        try {
+          if (probe === null && epochs !== null && h.put(tok, kid, key)) {
+            epochs.push({ kid: { writer: kid.writer, seq: kid.seq }, recipients: new Set(recipients) })
+          }
+        } finally {
+          gc.wipe(key)
+        }
+      },
+      writers: mine,
+      unseal (sealed) {
+        const pair = probe !== null ? probe.pair : h.boxKeyPair()
+        if (pair === null) return null
+        const out = gc.openFrom(b4a.from(sealed, 'base64'), pair)
+        if (out !== null) opened.push(out)
+        return out
+      }
+    }
+  }
+  try {
+    return buildGroup({ ...input, keys, now: Date.now() })
+  } finally {
+    for (const k of opened) gc.wipe(k)
+  }
+}
+
+// The writers of this device in the group: the cores of the own diary whose
+// header carries the held box key (G for the creator's device).
+function mineOf (group, rootHeader, writers, ownHex, boxHex) {
+  const mine = new Set()
+  if (boxHex === null) return mine
+  if (rootHeader.diary === ownHex && rootHeader.box === boxHex) mine.add(group)
+  for (const w of writers) if (w.diary === ownHex && w.entries[0].record.box === boxHex) mine.add(w.key)
+  return mine
+}
+
+// Whether an epoch key may be sealed to `boxHex`: not a weak point, and the
+// seal itself works (tried on zeros, nothing secret involved).
+function canSealTo (boxHex) {
+  if (boxHex === null || grp.isWeakBoxKey(boxHex)) return false
+  try {
+    const pk = b4a.from(boxHex, 'hex')
+    gc.sealTo(b4a.alloc(gc.KEY_BYTES + gc.KEY_TAG_BYTES), pk)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function boxOfWriter (g, w) {
+  const c = g.cores.get(w)
+  if (c === undefined || c.entries.length === 0) return null
+  const box = c.entries[0].record.box
+  return typeof box === 'string' && HEX64.test(box) ? box.toLowerCase() : null
+}
+
+// The read state of rpc.md group.read.
+function keyState (ctx, g) {
+  if (!g.private) return 'ok'
+  if (boxHexOf(ctx) === null) return 'locked'
+  return g.built.rekeyPending ? 'rekey-pending' : 'ok'
+}
+
+// The writer this device distributes keys from, or null: its live writer
+// while its diary is the creator or an acting admin (community powers
+// included, as the fold's `admins` reads them).
+function distributorOf (g, ownHex) {
+  if (!g.private || statusOf(g, ownHex) !== 'member') return null
+  if (g.built.creator !== ownHex && !g.built.admins.has(ownHex)) return null
+  const own = liveOwnWriter(g, ownHex)
+  if (own === null || !g.built.writers.has(own.key) || !g.mine.has(own.key)) return null
+  return own
+}
+
+// The epochs whose first block sits in a counted core, with every writer a
+// group-key block hands them to -> Map 'writer:seq' -> { kid, recipients }.
+// A peer's record as the fold would count it: valid for its place in this
+// private group, else null (never read raw).
+function validRecord (g, w, seq, r) {
+  return grp.validateGroupRecord(r, seq, { root: w === g.group, private: g.private }) === null ? r : null
+}
+
+// The removals a rotation from writer `wk` lists in its basis: only the
+// fold's own requirement set (`removals`), never a scan of raw records, so
+// records the fold ignores (bans from unadmitted writers) cost nothing.
+// Those `wk` already follows (its own records and the basis of its earlier
+// first blocks) are left out, except community refs (writer not a core of
+// this group): the fold covers one only through first blocks it counted, and
+// an earlier block written while `wk`'s authority was being cut is not.
+function removalRefs (g, wk) {
+  const covered = new Set()
+  for (const { seq, record } of g.cores.get(wk).entries) {
+    const r = validRecord(g, wk, seq, record)
+    if (r === null || r.type !== 'group-key' || r.kid !== null) continue
+    for (const b of r.basis) if (g.cores.has(b.writer)) covered.add(b.writer + ':' + b.seq)
+  }
+  const out = []
+  for (const r of Array.isArray(g.built.removals) ? g.built.removals : []) {
+    const id = r.writer + ':' + r.seq
+    if (r.writer === wk || covered.has(id)) continue
+    covered.add(id)
+    out.push({ writer: r.writer, seq: r.seq })
+  }
+  return out
+}
+
+// The group-key records of a rotation on writer `wk` from seq `from`: one
+// first block per basis chunk (the last one sealed to `recipients`, the
+// earlier ones only to `wk`, since nobody sends under them), then
+// continuations for recipients beyond MAX_KEY_RECIPIENTS.
+// sealFor(i, writer, kid) -> base64 of epoch i's key sealed to that writer;
+// commitFor(i, kid) -> hex commitment of epoch i's key, on its first block.
+function rotationRecords (wk, from, chunks, recipients, sealFor, commitFor, at) {
+  const out = []
+  let seq = from
+  for (let i = 0; i < chunks.length; i++) {
+    const kid = { writer: wk, seq }
+    const list = i === chunks.length - 1 ? recipients : [wk]
+    for (let j = 0; j < list.length; j += gc.MAX_KEY_RECIPIENTS) {
+      const keys = list.slice(j, j + gc.MAX_KEY_RECIPIENTS).map((w) => ({ writer: w, sealed: sealFor(i, w, kid) }))
+      const fields = j === 0 ? { kid: null, basis: chunks[i], keys, commit: commitFor(i, kid), at } : { kid, basis: [], keys, at }
+      out.push({ seq, record: buildRecord(() => grp.groupKey(fields)) })
+      seq++
+    }
+  }
+  return out
+}
+
+function withAppended (input, wk, records) {
+  const extra = records.map(({ seq, record }) => ({ seq, record }))
+  if (wk === input.root.key) return { ...input, root: { ...input.root, entries: [...input.root.entries, ...extra] } }
+  return { ...input, writers: input.writers.map((w) => w.key === wk ? { ...w, entries: [...w.entries, ...extra] } : w) }
+}
+
+// Whether the planned rotation's last epoch would be the one this device
+// sends under, recipients and basis as given: the fold's own eligibility
+// ("Entitled writers", "Eligibility") is the judge, so a recipient the fold
+// would not entitle (a pending device, a banned or departed writer) is
+// never sealed to.
+function rotationEligible (ctx, g, wk, from, chunks, recipients) {
+  const pair = gc.newBoxKeyPair()
+  const key = gc.newEpochKey()
+  try {
+    const sealFor = (i, w, kid) => w === wk ? b4a.toString(gc.sealEpochKey(key, g.group, kid, pair.publicKey), 'base64') : DUMMY_SEALED
+    const commitFor = (i, kid) => hex(gc.keyCommit(key, g.group, kid))
+    const records = rotationRecords(wk, from, chunks, recipients, sealFor, commitFor, nowIso())
+    const last = records.filter((r) => r.record.kid === null).pop()
+    const built = foldWithKeys(ctx, withAppended(g.input, wk, records), new Set([wk]), { pair })
+    return built.epoch !== null && built.epoch.writer === wk && built.epoch.seq === last.seq
+  } finally {
+    gc.wipe(key)
+    gc.wipe(pair.secretKey)
+  }
+}
+
+// The writers the fold entitles now (rpc "Entitled writers").
+function entitledOf (g) {
+  return new Set(Array.isArray(g.built.entitled) ? g.built.entitled : [])
+}
+
+// A new epoch from this device's writer -> its kid. The key is sealed to
+// exactly the writers the fold entitles, then kept in the holder only.
+async function rotateGroup (ctx, g, ownHex) {
+  const own = distributorOf(g, ownHex)
+  if (own === null) throw new UsageError(GROUP_FORBIDDEN)
+  const h = holderOf(ctx)
+  if (h === null || !h.unlocked) throw new UsageError(store.LOCKED)
+  const tok = h.token()
+  const wk = own.key
+  const from = g.cores.get(wk).length
+  const removals = removalRefs(g, wk)
+  const chunks = []
+  for (let i = 0; i < removals.length; i += grp.MAX_KEY_BASIS) chunks.push(removals.slice(i, i + grp.MAX_KEY_BASIS))
+  if (chunks.length === 0) chunks.push([])
+  const recipients = [wk, ...[...entitledOf(g)].filter((w) => w !== wk && canSealTo(boxOfWriter(g, w))).sort()]
+  // The real fold over the planned blocks must pick this epoch, or the
+  // rotation would leave every sender rekey-pending: nothing is written then.
+  if (!rotationEligible(ctx, g, wk, from, chunks, recipients)) throw new Error(ROTATION_UNCONFIRMED)
+  const keys = chunks.map(() => gc.newEpochKey())
+  try {
+    const sealFor = (i, w, kid) => b4a.toString(gc.sealEpochKey(keys[i], g.group, kid, b4a.from(boxOfWriter(g, w), 'hex')), 'base64')
+    const commitFor = (i, kid) => hex(gc.keyCommit(keys[i], g.group, kid))
+    const records = rotationRecords(wk, from, chunks, recipients, sealFor, commitFor, nowIso())
+    await checkRotationRoom(ctx, wk, records)
+    let last = null
+    for (const r of records) {
+      const seq = await appendToOwnGroupCore(ctx, own, r.record, true)
+      if (seq !== r.seq) throw new Error(ROTATION_UNCONFIRMED)
+      if (r.record.kid === null) last = { writer: wk, seq }
+    }
+    h.put(tok, last, keys[keys.length - 1])
+    return last
+  } finally {
+    for (const k of keys) gc.wipe(k)
+  }
+}
+
+// A rotation is written whole or not at all: refused before the first block
+// when its blocks would not fit the writer's remaining log budget.
+async function checkRotationRoom (ctx, wk, records) {
+  const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
+  const core = await store.openGroupCoreReadOnly(ctx.storage, wk)
+  if (core === null) throw new Error(GROUP_NOT_FOUND)
+  let length, bytes
+  try {
+    length = core.length
+    bytes = core.byteLength
+  } finally {
+    await core.close()
+  }
+  for (const r of records) bytes += b4a.byteLength(JSON.stringify(r.record))
+  if (length + records.length > limits.maxLogBlocks || bytes > limits.maxLogBytes) throw new UsageError(ROTATION_TOO_BIG)
+}
+
+// History ("History on admit"): continuation blocks handing every epoch
+// key the fold gave this device to every entitled writer its recipients do
+// not list yet, so a delivery that failed earlier is made up for too.
+// Planned whole first: a hand-off that would not fit the log (a rogue
+// distributor opening thousands of epochs) writes nothing.
+async function shareHistory (ctx, g, ownHex) {
+  const own = distributorOf(g, ownHex)
+  const h = holderOf(ctx)
+  if (own === null || h === null || !h.unlocked) return
+  const targets = [...entitledOf(g)].filter((w) => w !== own.key && canSealTo(boxOfWriter(g, w))).sort()
+  if (targets.length === 0) return
+  const records = []
+  for (const e of g.epochs) {
+    const need = targets.filter((w) => !e.recipients.has(w))
+    const key = need.length === 0 ? null : h.get(e.kid)
+    if (key === null) continue
+    for (let j = 0; j < need.length; j += gc.MAX_KEY_RECIPIENTS) {
+      const keys = need.slice(j, j + gc.MAX_KEY_RECIPIENTS).map((w) => ({
+        writer: w,
+        sealed: b4a.toString(gc.sealEpochKey(key, g.group, e.kid, b4a.from(boxOfWriter(g, w), 'hex')), 'base64')
+      }))
+      records.push({ kid: e.kid, record: buildRecord(() => grp.groupKey({ kid: e.kid, basis: [], keys })) })
+    }
+  }
+  if (records.length === 0) return
+  await checkRotationRoom(ctx, own.key, records)
+  for (const r of records) {
+    // Asked again before every append: a lock in between wipes the keys
+    // and stops the hand-off.
+    if (h.get(r.kid) === null) return
+    await appendToOwnGroupCore(ctx, own, r.record, true)
+  }
+}
+
+// A plaintext group-post, group-hide or group-meta sealed under the fold's
+// epoch for writer `writer` (USAGE 'aguardando nova chave' without one).
+function sealForGroup (ctx, g, writer, record) {
+  if (boxHexOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (g.built.rekeyPending || g.built.epoch === null) throw new UsageError(GROUP_REKEY_PENDING)
+  const h = holderOf(ctx)
+  const key = g.epochs.some((e) => e.kid.writer === g.built.epoch.writer && e.kid.seq === g.built.epoch.seq) ? h.get(g.built.epoch) : null
+  if (key === null) throw new UsageError(GROUP_REKEY_PENDING)
+  const kid = { writer: g.built.epoch.writer, seq: g.built.epoch.seq }
+  const { nonce, box } = gc.sealRecord(grp.sealedInner(record, { writer, group: g.group, kid }), key)
+  return buildRecord(() => grp.groupSealed({ kid, nonce, box, at: record.at }))
+}
+
+// After a write that may change who reads, on a device that may
+// distribute: `history` hands every held epoch to the entitled writers
+// that lack it, `rotate` opens a new epoch, `repair` opens one only when
+// the fold is rekey-pending after the history. The triggering record is
+// already written: history that cannot be handed now is not its error, the
+// next admit, grant, unban, link or group.rekey makes it up.
+async function afterKeyChange (ctx, base, group, ownHex, { rotate = false, history = false, repair = false }) {
+  let g = await loadGroup(ctx, base, group)
+  if (g === null || distributorOf(g, ownHex) === null) return
+  if (history) {
+    try {
+      await shareHistory(ctx, g, ownHex)
+    } catch {}
+    if (rotate || repair) g = await loadGroup(ctx, base, group)
+  }
+  if (repair && g !== null && g.built.rekeyPending) rotate = true
+  // Likewise a rotation that fails here leaves the group rekey-pending,
+  // which group.rekey repairs.
+  if (rotate) {
+    try {
+      await rotateGroup(ctx, g, ownHex)
+    } catch {}
+  }
+}
+
+// -> { group, epoch }: rpc.md 5.61. Old epochs missing from an entitled
+// writer are handed on first, then the new epoch is opened.
+async function groupRekey (ctx, { group }) {
+  return withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
+    if (!g.private) throw new UsageError(GROUP_PUBLIC_NO_KEY)
+    needBox(ctx)
+    if (distributorOf(g, ownHex) === null) throw new UsageError(GROUP_FORBIDDEN)
+    await shareHistory(ctx, g, ownHex)
+    const epoch = await rotateGroup(ctx, await loadGroup(ctx, base, g.group), ownHex)
+    return { group: g.group, epoch }
   })
 }
 
@@ -2159,6 +2598,7 @@ async function communityLink (ctx, { community, group, on }) {
     const writers = await store.readGroupWriters(ctx.storage)
     const c = await loadCommunityRoot(ctx, base, C)
     const g = await loadGroup(ctx, base, G)
+    if (g !== null && g.private) needBox(ctx)
     const cEntry = ownRootEntry(writers, C, 'community')
     const gEntry = ownRootEntry(writers, G, 'group')
     const ownsC = cEntry !== null && c !== null && c.header.diary === ownHex
@@ -2189,7 +2629,12 @@ async function communityLink (ctx, { community, group, on }) {
       if (on === true ? !(side.current === C && linkCovers(current, cuts)) : (current !== null && current.on === true)) write.push('group')
     }
     if (write.includes('community')) await appendToOwnGroupCore(ctx, rootWriter(cEntry), buildRecord(() => grp.groupLink({ group: G, on: on === true, cuts })))
-    if (write.includes('group')) await appendToOwnGroupCore(ctx, rootWriter(gEntry), buildRecord(() => grp.communityLink({ community: C, on: on === true, cuts })))
+    if (write.includes('group')) await appendToOwnGroupCore(ctx, rootWriter(gEntry), buildRecord(() => grp.communityLink({ community: C, on: on === true, cuts })), g !== null && g.private)
+    // Owner decision: community powers in a private group hold its keys, so
+    // a link hands them the history and an unlink rotates.
+    // A G-side relink makes the community's latest removal required again;
+    // one written while unlinked is in no epoch's basis yet.
+    if (write.length > 0 && g !== null && g.private) await afterKeyChange(ctx, base, G, ownHex, on === true ? { history: true, repair: write.includes('group') } : { rotate: true })
     return { community: C, group: G, on: on === true, sides: owned }
   })
 }
@@ -2207,6 +2652,7 @@ async function communityAdmin (ctx, { community, member, on }) {
     const d = String(member).toLowerCase()
     if (d === c.header.diary) throw new UsageError(COMMUNITY_CREATOR)
     const { groups } = await foldHeldCommunity(ctx, base, c)
+    if ([...groups.values()].some((g) => g.private)) needBox(ctx)
     let cuts = []
     for (const g of groups.values()) cuts.push(...diaryCuts(g, [d], on === true))
     cuts.sort(byWriter)
@@ -2217,6 +2663,9 @@ async function communityAdmin (ctx, { community, member, on }) {
       cuts = cuts.slice(0, MAX_COMMUNITY_CUTS)
     }
     await appendToOwnGroupCore(ctx, rootWriter(entry), buildRecord(() => grp.communityAdmin({ member: d, on: on === true, cuts })))
+    for (const [key, g] of groups) {
+      if (g.private) await afterKeyChange(ctx, base, key, ownHex, on === true ? { history: true } : { rotate: true })
+    }
     return { community: C, member: d, on: on === true }
   })
 }
@@ -2312,6 +2761,8 @@ module.exports = {
   groupAdmit,
   groupAdmin,
   groupMeta,
+  groupRekey,
+  canSealTo,
   groupRead,
   groupList,
   groupInfo,

@@ -5,6 +5,7 @@ const path = require('#path')
 const process = require('#process')
 const { randomBytes, discoveryKey } = require('hypercore-crypto')
 const b4a = require('b4a')
+const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { presentState } = require('./deletion')
@@ -691,6 +692,90 @@ function writeGroups (dataDir, groups) {
   }, 0o600)
 }
 
+const BOX_FILE = 'group-box.json'
+const HEX64 = /^[0-9a-f]{64}$/
+
+function boxFileError (why) {
+  return new Error('group-box.json is unusable (' + why + '): private group operations are refused and the file is left as it is')
+}
+
+// Parses the device's X25519 box key file. Errors never carry key material.
+function parseBoxKeyPair (raw) {
+  let data
+  try { data = JSON.parse(raw) } catch { throw boxFileError('not JSON') }
+  if (data === null || typeof data !== 'object' || Array.isArray(data) || data.v !== 1) throw boxFileError('wrong shape or version')
+  if (typeof data.publicKey !== 'string' || !HEX64.test(data.publicKey) || typeof data.secretKey !== 'string' || !HEX64.test(data.secretKey)) {
+    throw boxFileError('wrong key size')
+  }
+  const publicKey = b4a.from(data.publicKey, 'hex')
+  const secretKey = b4a.from(data.secretKey, 'hex')
+  const derived = b4a.alloc(sodium.crypto_scalarmult_BYTES)
+  sodium.crypto_scalarmult_base(derived, secretKey)
+  if (!b4a.equals(derived, publicKey)) throw boxFileError('public key does not match')
+  return { publicKey, secretKey }
+}
+
+// The device's box key pair for private groups: created once with an
+// exclusive create (never replaced) and read only by group operations. A
+// malformed file throws and is never regenerated, since a new key would lose
+// every epoch sealed to the old one.
+function ensureBoxKeyPair (dataDir) {
+  const file = path.join(dataDir, BOX_FILE)
+  const read = () => {
+    let raw
+    try { raw = fs.readFileSync(file, 'utf8') } catch (err) {
+      if (err.code === 'ENOENT') return null
+      throw boxFileError('unreadable')
+    }
+    // A zero-length file can only be a crashed creation: it holds no key.
+    if (raw === '') return null
+    return parseBoxKeyPair(raw)
+  }
+  const existing = read()
+  if (existing !== null) return existing
+  const publicKey = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  const secretKey = b4a.alloc(sodium.crypto_box_SECRETKEYBYTES)
+  sodium.crypto_box_keypair(publicKey, secretKey)
+  const content = JSON.stringify({ v: 1, publicKey: b4a.toString(publicKey, 'hex'), secretKey: b4a.toString(secretKey, 'hex') }, null, 2) + '\n'
+  fs.mkdirSync(dataDir, { recursive: true })
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+  // Exclusive create of `target`; a failed write removes the partial file.
+  const writeNew = (target) => {
+    const fd = fs.openSync(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+    let ok = false
+    try {
+      fs.fchmodSync(fd, 0o600)
+      fs.writeFileSync(fd, content)
+      fs.fsyncSync(fd)
+      ok = true
+    } finally {
+      fs.closeSync(fd)
+      if (!ok) { try { fs.unlinkSync(target) } catch {} }
+    }
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (typeof fs.linkSync === 'function') {
+        // Complete content first, then link: never replaces a winner.
+        const tmp = path.join(dataDir, '.' + BOX_FILE + '.' + process.pid + '.' + b4a.toString(randomBytes(6), 'hex') + '.tmp')
+        writeNew(tmp)
+        try { fs.linkSync(tmp, file) } finally { try { fs.unlinkSync(tmp) } catch {} }
+      } else {
+        writeNew(file)
+      }
+      fsyncDir(dataDir)
+      return { publicKey, secretKey }
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw boxFileError('cannot create')
+      const winner = read()
+      if (winner !== null) return winner
+      // zero-length leftover of a crashed creation: remove it and retry once
+      try { fs.unlinkSync(file) } catch {}
+    }
+  }
+  throw boxFileError('cannot create')
+}
+
 function blocklistShape (data) {
   return data && typeof data === 'object' && !Array.isArray(data) && data.v === 1 &&
     data.snapshot && typeof data.snapshot === 'object' && !Array.isArray(data.snapshot)
@@ -787,6 +872,7 @@ module.exports = {
   writeFollows,
   readGroups,
   writeGroups,
+  ensureBoxKeyPair,
   readBlocklist,
   hasUnreadableBlocklist,
   writeBlocklist,

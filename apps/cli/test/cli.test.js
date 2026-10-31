@@ -45,7 +45,7 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo público (--name, --join open|approval)
+  group create               cria um grupo (--name, --join open|approval, --private cifrado)
   group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
@@ -54,6 +54,7 @@ Comandos:
   group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
+  group rekey <chave>        gera uma nova chave do grupo privado
   community create           cria uma comunidade de grupos (--name)
   community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
   community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
@@ -69,7 +70,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo
+  --join --undo --private
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
@@ -180,6 +181,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     newList: false,
     yes: false,
     undo: false,
+    private: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,

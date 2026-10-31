@@ -39,6 +39,9 @@ const { MAX_REPORTS, AI_ACTOR } = require('./moderation-store')
 //     anonymous usage view from ./usage-stats.js; counts only, never a key,
 //     e-mail, sub, username or address.
 
+// What the panel shows for a private group's report: the seeder holds
+// ciphertext, so the quote is the reporter's word.
+const SEALED_PROVENANCE = 'cifrada: citação do denunciante'
 const LOGIN_COOKIE = '__Host-varanda-mod-login'
 const SESSION_COOKIE = '__Host-varanda-mod'
 const LOGIN_TTL_MS = 600 * 1000
@@ -565,7 +568,7 @@ function createModRoutes ({
     return r.target === own || r.reporter === own
   }
 
-  // -> { ok: true, root, name, creator, texto } | { ok: false, code }. Never throws.
+  // -> { ok: true, root, name, creator, texto, sealed? } | { ok: false, code }. Never throws.
   async function confirmGroup (r) {
     if (r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
     if (groupCheck === null) return { ok: false, code: 'config' }
@@ -787,7 +790,11 @@ function createModRoutes ({
     if (!v.ok) log({ event: 'grupo', reason: v.code })
     // `texto`: the reported message as the seeder decoded it (peer text,
     // rendered by the panel as text only).
-    send(res, 200, v.ok ? { confirmed: true, root: v.root === true, name: v.name ?? null, creator: v.creator ?? null, texto: typeof v.texto === 'string' ? v.texto : null } : { confirmed: false, reason: v.code })
+    // A private group's block is confirmed structurally: no text, and the
+    // panel labels the reporter's quote with the provenance.
+    send(res, 200, v.ok
+      ? { confirmed: true, root: v.root === true, name: v.name ?? null, creator: v.creator ?? null, texto: typeof v.texto === 'string' ? v.texto : null, ...(v.sealed === true ? { sealed: true, provenance: SEALED_PROVENANCE } : {}) }
+      : { confirmed: false, reason: v.code })
   }
 
   // The panel asks before offering 'Bloquear' on a report without a group
