@@ -7,7 +7,9 @@
 //    whose sodium-universal is the shim (a child process with a require
 //    hook mapping sodium-native to the shim, as the browser bundle does) and
 //    a native peer in this process, over TCP on loopback, both roles, data
-//    both ways, handshakeHash equal and remotePublicKey correct.
+//    both ways, handshakeHash equal and remotePublicKey correct;
+//  - the private group primitives (secretbox, box seal, seed key pair)
+//    present and agreeing with sodium-universal on fixed inputs.
 // This file is its own child: with VARANDA_SODIUM_SHIM_PEER set it runs the
 // shim-backed peer and never loads brittle.
 /* eslint-disable camelcase */
@@ -280,6 +282,76 @@ function tests () {
     t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32, 1), Buffer.alloc(31)), /length 32/, 'short point')
     t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(Buffer.alloc(31), Buffer.alloc(32, 1), pk), /length 32/, 'short output')
     t.exception(() => sodium.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(31), pk), 'sodium-native rejects a short scalar too')
+  })
+
+  // packages/core/lib/group-crypto.js runs on the shim in the bundle: every
+  // primitive it uses must exist there and agree with sodium-universal.
+  test('the shim has the private group primitives and matches sodium-universal', (t) => {
+    const universal = require('sodium-universal')
+    const fixed = (n, from) => Buffer.from(Array.from({ length: n }, (_, i) => (from + i) & 255))
+    const names = ['crypto_secretbox_easy', 'crypto_secretbox_open_easy', 'crypto_box_seal', 'crypto_box_seal_open',
+      'crypto_box_seed_keypair', 'crypto_box_keypair', 'crypto_generichash', 'randombytes_buf', 'sodium_memzero']
+    for (const name of names) t.is(typeof shim[name], 'function', name)
+    for (const name of ['crypto_secretbox_KEYBYTES', 'crypto_secretbox_NONCEBYTES', 'crypto_secretbox_MACBYTES',
+      'crypto_box_PUBLICKEYBYTES', 'crypto_box_SECRETKEYBYTES', 'crypto_box_SEEDBYTES', 'crypto_box_SEALBYTES']) {
+      t.is(shim[name], universal[name], name)
+    }
+
+    const seed = fixed(32, 0)
+    const pkS = Buffer.alloc(32)
+    const skS = Buffer.alloc(32)
+    const pkU = Buffer.alloc(32)
+    const skU = Buffer.alloc(32)
+    shim.crypto_box_seed_keypair(pkS, skS, seed)
+    universal.crypto_box_seed_keypair(pkU, skU, seed)
+    t.is(pkS.toString('hex'), pkU.toString('hex'), 'seed key pair: same public key')
+    t.is(skS.toString('hex'), skU.toString('hex'), 'seed key pair: same secret key')
+    t.is(pkU.toString('hex'), '4701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01', 'golden vector of group-crypto.test.js')
+
+    const key = fixed(32, 100)
+    const nonce = fixed(24, 200)
+    const message = Buffer.from(JSON.stringify({ type: 'group-post', text: 'olá' }))
+    const boxS = Buffer.alloc(message.byteLength + 16)
+    const boxU = Buffer.alloc(message.byteLength + 16)
+    shim.crypto_secretbox_easy(boxS, message, nonce, key)
+    universal.crypto_secretbox_easy(boxU, message, nonce, key)
+    t.is(boxS.toString('hex'), boxU.toString('hex'), 'secretbox: same ciphertext')
+    const outS = Buffer.alloc(message.byteLength)
+    const outU = Buffer.alloc(message.byteLength)
+    t.ok(shim.crypto_secretbox_open_easy(outS, boxU, nonce, key), 'shim opens the universal box')
+    t.ok(universal.crypto_secretbox_open_easy(outU, boxS, nonce, key), 'universal opens the shim box')
+    t.alike(outS, message)
+    t.alike(outU, message)
+    const tampered = Buffer.from(boxU)
+    tampered[0] ^= 1
+    t.absent(shim.crypto_secretbox_open_easy(outS, tampered, nonce, key), 'shim rejects tampering')
+    t.absent(universal.crypto_secretbox_open_easy(outU, tampered, nonce, key), 'universal rejects tampering')
+
+    // crypto_box_seal uses an ephemeral key: compare by opening across.
+    const epochKey = fixed(32, 50)
+    const sealedS = Buffer.alloc(32 + 48)
+    const sealedU = Buffer.alloc(32 + 48)
+    shim.crypto_box_seal(sealedS, epochKey, pkU)
+    universal.crypto_box_seal(sealedU, epochKey, pkU)
+    const openS = Buffer.alloc(32)
+    const openU = Buffer.alloc(32)
+    t.ok(universal.crypto_box_seal_open(openU, sealedS, pkU, skU), 'universal opens the shim seal')
+    t.ok(shim.crypto_box_seal_open(openS, sealedU, pkU, skU), 'shim opens the universal seal')
+    t.alike(openU, epochKey)
+    t.alike(openS, epochKey)
+    const badSeal = Buffer.from(sealedU)
+    badSeal[40] ^= 1
+    t.absent(shim.crypto_box_seal_open(openS, badSeal, pkU, skU), 'shim rejects a tampered seal')
+    t.absent(universal.crypto_box_seal_open(openU, badSeal, pkU, skU), 'universal rejects a tampered seal')
+
+    // keyTag (group-crypto.js): BLAKE2b-128 over domain, group, kid writer, kid seq.
+    const tagInput = Buffer.concat([Buffer.from('varanda/group-key/v1'), Buffer.alloc(32, 0xaa), Buffer.alloc(32, 0xbb), Buffer.from('0000000000000007', 'hex')])
+    const tagS = Buffer.alloc(16)
+    const tagU = Buffer.alloc(16)
+    shim.crypto_generichash(tagS, tagInput)
+    universal.crypto_generichash(tagU, tagInput)
+    t.is(tagS.toString('hex'), tagU.toString('hex'), 'generichash(16): same tag')
+    t.is(tagU.toString('hex'), '1ed8aa677c59e6a78947331d0bae14ec', 'keyTag vector of group-crypto.test.js')
   })
 
   // A TCP server on loopback for one shim-backed child; resolves with the

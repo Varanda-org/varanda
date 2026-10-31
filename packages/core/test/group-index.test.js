@@ -259,3 +259,23 @@ test('communities: a hostile root listing many groups is bounded', (t) => {
   idx.foldRoot(C, groupLink({ group: gs[50], on: true }))
   t.is(idx.communityOf(gs[50]), C, 'an unlink frees a slot')
 })
+
+test('communities: a linked private group is listed by key and visibility only', (t) => {
+  const idx = createGroupIndex()
+  const C = k('c')
+  idx.setHeader(G1, header(null, 'private'))
+  idx.addWriter(G1, G1, D1, 1)
+  idx.addWriter(G1, k('3'), D2, 2)
+  idx.setHeader(G2, header('jardim'))
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'bairro' }))
+  for (const G of [G1, G2]) {
+    idx.foldRoot(C, groupLink({ group: G, on: true }))
+    idx.foldRoot(G, communityLink({ community: C, on: true }))
+  }
+  t.alike(idx.community(C).groups, [
+    { group: G1, visibility: 'private' },
+    { group: G2, name: 'jardim', members: 0 }
+  ])
+  t.is(idx.communityOf(G1), C, 'the link itself stays plaintext')
+  t.alike(idx.search('jardim').groups.map((r) => r.group), [G2])
+})

@@ -1212,3 +1212,71 @@ test('groups round-trip uses the versioned private atomic file', (t) => {
   t.is(fs.statSync(path.join(dir, 'groups.json')).mode & 0o777, 0o600)
   t.alike(fs.readdirSync(dir), ['groups.json'])
 })
+
+test('box key pair is created once, private and never replaced', (t) => {
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'group-box.json')
+  const a = store.ensureBoxKeyPair(dir)
+  t.is(a.publicKey.byteLength, 32)
+  t.is(a.secretKey.byteLength, 32)
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  const before = fs.readFileSync(file, 'utf8')
+  const b = store.ensureBoxKeyPair(dir)
+  t.alike(b, a, 'second call returns the same pair')
+  t.is(fs.readFileSync(file, 'utf8'), before, 'file unchanged')
+  const raw = JSON.parse(before)
+  t.is(raw.v, 1)
+  t.is(raw.publicKey, b4a.toString(a.publicKey, 'hex'))
+  t.alike(fs.readdirSync(dir), ['group-box.json'])
+})
+
+test('box key creation survives a write failure and a zero-length leftover', (t) => {
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'group-box.json')
+  const real = fs.writeFileSync
+  fs.writeFileSync = () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }) }
+  try {
+    t.exception(() => store.ensureBoxKeyPair(dir))
+  } finally {
+    fs.writeFileSync = real
+  }
+  t.alike(fs.readdirSync(dir), [], 'no partial file or temp left')
+  const a = store.ensureBoxKeyPair(dir)
+  t.alike(store.ensureBoxKeyPair(dir), a, 'next call succeeds')
+  fs.unlinkSync(file)
+  fs.writeFileSync(file, '')
+  const b = store.ensureBoxKeyPair(dir)
+  t.is(b.secretKey.byteLength, 32, 'zero-length file replaced by a valid pair')
+  t.alike(store.ensureBoxKeyPair(dir), b)
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  t.alike(fs.readdirSync(dir), ['group-box.json'])
+})
+
+test('box key file that is malformed or mismatched is refused and left alone', (t) => {
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'group-box.json')
+  const good = store.ensureBoxKeyPair(dir)
+  const pub = b4a.toString(good.publicKey, 'hex')
+  const sec = b4a.toString(good.secretKey, 'hex')
+  const otherPub = b4a.toString(store.ensureBoxKeyPair(tmpDir(t)).publicKey, 'hex')
+  const cases = [
+    'not json{',
+    JSON.stringify({ v: 2, publicKey: pub, secretKey: sec }),
+    JSON.stringify({ v: 1, publicKey: pub.slice(2), secretKey: sec }),
+    JSON.stringify({ v: 1, publicKey: pub, secretKey: sec + '00' }),
+    JSON.stringify({ v: 1, publicKey: pub, secretKey: 'z'.repeat(64) }),
+    JSON.stringify({ v: 1, publicKey: otherPub, secretKey: sec }),
+    '[]',
+    ' '
+  ]
+  for (const content of cases) {
+    fs.writeFileSync(file, content, { mode: 0o600 })
+    try {
+      store.ensureBoxKeyPair(dir)
+      t.fail('should refuse: ' + content.slice(0, 20))
+    } catch (err) {
+      t.absent(err.message.includes(sec) || err.message.includes(pub) || err.message.includes(otherPub), 'error carries no key material')
+    }
+    t.is(fs.readFileSync(file, 'utf8'), content, 'file never replaced')
+  }
+})

@@ -796,6 +796,12 @@ function createSession ({
       return r
     }),
 
+    'group.rekey': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupRekey(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
     'community.create': serial(async (params, epoch) => {
       const r = await withStore((c) => member.communityCreate(c, params))
       send('groups.changed', { group: r.community }, epoch)

@@ -413,7 +413,8 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   // root, else its header's; null when private) and the groups linked from
   // both sides that `visible(group)` admits, in key order (at most
   // MAX_GROUPS_PER_COMMUNITY by construction), each with its header name and
-  // members (diaries with a writer that has not left). null when C is no
+  // members (diaries with a writer that has not left); a private group is
+  // only { group, visibility: 'private' }. null when C is no
   // community root here.
   function community (C, visible = null) {
     try {
@@ -425,6 +426,11 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       for (const G of [...c.linked].sort(cmp)) {
         if (!linkedTwoWay(c, C, G) || !shown(visible, G)) continue
         const g = groups.get(G)
+        // A private group is listed by key and visibility only.
+        if (g.header.visibility !== 'public') {
+          rows.push({ group: G, visibility: 'private' })
+          continue
+        }
         const members = new Set()
         for (const w of g.writers.values()) if (!w.left) members.add(w.diary)
         rows.push({ group: G, name: g.header.name, members: members.size })

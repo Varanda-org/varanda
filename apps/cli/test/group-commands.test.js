@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('node:fs')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { testnet, tmpDir } = require('./helpers/net')
@@ -39,9 +40,12 @@ test('group commands end to end', async (t) => {
   t.is(varanda(dir, ['group', 'create', '--join', 'open']).code, 2, 'create needs --name')
   t.is(varanda(dir, ['group', 'create', '--name', 'x']).code, 2, 'create needs --join')
   const priv = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'private'])
-  t.is(priv.code, 2, 'private creation refused')
-  t.ok(priv.stderr.includes('grupos privados ainda não existem'), 'clear message')
-  t.is(varanda(dir, ['group', 'create', '--name', 'x', '--join', 'open', '--private']).code, 2, 'no --private flag')
+  t.is(priv.code, 2, '--join private refused')
+  t.ok(priv.stderr.includes('para um grupo privado use --private'), 'points to --private')
+  const openPriv = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'open', '--private'])
+  t.is(openPriv.code, 2, 'a private group is never open')
+  t.ok(openPriv.stderr.includes('sempre por aprovação'), 'says why')
+  t.is(varanda(dir, ['group', 'rekey']).code, 2, 'rekey needs a key')
   t.is(varanda(dir, ['group', 'join']).code, 2, 'join needs a key')
   t.is(varanda(dir, ['group', 'join', 'abc']).code, 2, 'join rejects a malformed key')
 
@@ -99,6 +103,58 @@ test('group commands end to end', async (t) => {
   t.is(pending.stdout.trim(), 'entrada registrada: o grupo chega na próxima sincronização')
   const listed = varanda(dir, ['group', 'list'])
   t.ok(listed.stdout.includes('a'.repeat(64) + ' (aguardando a sincronização)'), 'listed as pending')
+
+  const info = varanda(dir, ['group', 'info', G])
+  t.ok(info.stdout.includes('\nvisibilidade: público\n'), 'info shows a public group')
+  t.is(lastJson(varanda(dir, ['group', 'info', G, '--json'])).visibility, 'public')
+  const publicRekey = varanda(dir, ['group', 'rekey', G])
+  t.is(publicRekey.code, 2, 'a public group has no key')
+  t.ok(publicRekey.stderr.includes('grupo público não usa chave'))
+
+  // private group: created by approval, readable by its creator, rekeyed
+  const outputs = []
+  const run = (args) => {
+    const r = varanda(dir, args)
+    outputs.push(r.stdout, r.stderr)
+    return r
+  }
+  const privCreated = run(['group', 'create', '--private', '--name', 'Segredo'])
+  t.is(privCreated.code, 0, privCreated.stderr)
+  t.ok(privCreated.stdout.startsWith('grupo privado criado: '), 'pt-BR create line')
+  const P = privCreated.stdout.trim().slice('grupo privado criado: '.length)
+  t.ok(HEX64.test(P), 'private root key')
+  const privInfo = run(['group', 'info', P])
+  t.ok(privInfo.stdout.includes(P + ' Segredo (por aprovação'), 'name opened from the sealed meta, approval forced')
+  t.ok(privInfo.stdout.includes('\nvisibilidade: privado (cifrado)\n'), 'info shows the visibility')
+  const privJson = lastJson(run(['group', 'info', P, '--json']))
+  t.is(privJson.visibility, 'private')
+  t.is(privJson.join, 'approval')
+  t.ok(run(['group', 'post', P, '--text', 'só para membros']).stdout.startsWith('publicado #'), 'sealed post')
+  const privRead = run(['group', 'read', P])
+  t.is(privRead.code, 0, privRead.stderr)
+  t.ok(privRead.stdout.trim().endsWith('Ana: só para membros'), 'the creator reads its own sealed post')
+  t.is(privRead.stderr, '', 'nothing sealed for the creator')
+  const readJson = lastJson(run(['group', 'read', P, '--json']))
+  t.is(readJson.sealed, 0)
+  t.is(readJson.state, 'ok')
+  t.ok(readJson.epoch !== null && HEX64.test(readJson.epoch.writer), 'epoch is a ref, not a key')
+  const rekeyed = run(['group', 'rekey', P])
+  t.is(rekeyed.code, 0, rekeyed.stderr)
+  t.is(rekeyed.stdout.trim(), 'nova chave do grupo gerada e entregue aos membros')
+  const rekeyJson = lastJson(run(['group', 'rekey', P, '--json']))
+  t.is(rekeyJson.group, P)
+  t.alike(Object.keys(rekeyJson.epoch).sort(), ['seq', 'writer'], 'only the epoch ref')
+  t.ok(run(['group', 'post', P, '--text', 'depois da troca']).stdout.startsWith('publicado #'), 'posts under the new epoch')
+  const afterRead = run(['group', 'read', P]).stdout.trim().split('\n')
+  t.is(afterRead.length, 2, 'both epochs readable')
+  t.ok(afterRead[0].endsWith('Ana: depois da troca'), 'reads the new epoch')
+  t.ok(run(['group', 'list']).stdout.includes(P + ' Segredo'), 'listed with its sealed name')
+
+  // No output ever carries the box secret.
+  const box = JSON.parse(fs.readFileSync(path.join(dir, 'group-box.json'), 'utf8'))
+  t.ok(HEX64.test(box.secretKey), 'box key file exists')
+  t.absent(outputs.some((o) => o.includes(box.secretKey)), 'box secret never printed')
+  t.absent(outputs.some((o) => o.includes(Buffer.from(box.secretKey, 'hex').toString('base64'))), 'nor in base64')
 
   const left = varanda(dir, ['group', 'leave', G])
   t.is(left.code, 0, left.stderr)

@@ -162,7 +162,8 @@ test('header shapes', async (t) => {
   delete noRejoin.rejoin
   t.is(validateWriterHeader(noRejoin), 'malformed', 'rejoin is required, null or a ref')
   t.is(validateWriterHeader(wh), null)
-  t.is(validateWriterHeader({ ...wh, box: K(9) }), 'malformed')
+  t.is(validateWriterHeader({ ...wh, box: K(9) }), null, 'the shape accepts a box; the fold matches it to the visibility')
+  t.is(validateWriterHeader({ ...wh, box: 'x' }), 'malformed')
   t.is(validateWriterHeader({ ...wh, extra: 1 }), 'malformed')
   t.is(validateGroupRecord(wh, 0), null)
   t.is(validateGroupRecord(h, 0, { root: true }), null)
@@ -173,7 +174,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-link', 'community-link'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-link', 'community-link', 'group-key', 'group-sealed'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)

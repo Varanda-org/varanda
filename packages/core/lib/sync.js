@@ -244,9 +244,11 @@ function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
     const header = decodeBlock(raw)
     if (header === null) return 'header-invalid'
     if (key === group) {
-      // This version folds public groups only: a private root would be
-      // joined and fetched but never folded.
-      if (validateGroupHeader(header) !== null || header.visibility !== 'public') return 'header-invalid'
+      // A private root syncs like a public one (its header is plaintext;
+      // validateGroupHeader demands its `box` and join approval). Only a
+      // group may be private.
+      if (validateGroupHeader(header) !== null) return 'header-invalid'
+      if (header.kind === 'community' && header.visibility !== 'public') return 'header-invalid'
       if (linkedOnly && header.kind === 'group') return 'not-community'
       if (header.kind !== (linkedOnly ? 'community' : 'group')) return 'header-invalid'
     } else {
@@ -256,6 +258,30 @@ function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
     return header.diary === diary ? null : 'wrong-diary'
   } catch {
     return 'header-invalid'
+  }
+}
+
+// A writer's `box` must match its root's verified visibility (null while
+// unknown): hex64 in a private group, null in a public one. A mismatch is
+// this node's own verdict 'header-invalid', as in the fold.
+function boxMismatch (raw, key, group, visibility) {
+  if (key === group || visibility === null) return false
+  try {
+    const header = decodeBlock(raw)
+    if (header === null || validateWriterHeader(header) !== null) return false
+    return visibility === 'private' ? header.box === null : header.box !== null
+  } catch {
+    return false
+  }
+}
+
+// The verified visibility a group root's block 0 names, else null.
+function rootVisibility (raw) {
+  try {
+    const header = decodeBlock(raw)
+    return header !== null && validateGroupHeader(header) === null ? header.visibility : null
+  } catch {
+    return null
   }
 }
 
@@ -498,6 +524,7 @@ async function runSync ({
   let linksReady = false // own roots are scanned (and rescanned on growth) once startup reaches the scan
   const ownWriters = new Map() // own writer key -> { group, core }
   const groupCores = new Map() // foreign writer key -> entry (gating, active, failing, failed)
+  const rootVis = new Map() // group -> the visibility its verified root header names ('public' | 'private')
   const groupDiaries = new Map() // diary key -> { core, range, stopFork, stopQuota, want, failed }
   const qchains = new Map() // key -> the last group quarantine read of that key
   const revokedDiaries = new Set() // diaries purged in this run for a revoked issuer
@@ -1769,6 +1796,9 @@ async function runSync ({
       groupSet.add(g.group)
       if (g.writer === g.group) {
         if (await ownRootKind(core) === 'community') ownCommunities.add(g.group)
+        try {
+          if (core.length > 0) noteRootVisibility(g.group, rootVisibility(await core.get(0, { wait: false, raw: true })))
+        } catch {}
         // An own root also grows by replication (a peer holding the same
         // root key, restored storage): its new blocks are scanned too.
         const grown = () => { if (linksReady) scanLinks(g.group, core) }
@@ -1776,6 +1806,53 @@ async function runSync ({
         core.on('download', grown)
       }
     }
+  }
+
+  // Root G's verified visibility, first learned: a writer gated before it
+  // never had its `box` checked, so G's writers are checked again.
+  function noteRootVisibility (group, visibility) {
+    if (visibility === null || rootVis.get(group) === visibility) return
+    rootVis.set(group, visibility)
+    recheckGroupBoxes(group, visibility)
+  }
+
+  // Mirrors the seeder's _recheckGroupBoxes: every admitted writer of G
+  // whose gated block 0 does not match the visibility goes with
+  // 'header-invalid' (a gating one is checked again when its gate lands,
+  // onGroupGate). The block 0 the gate accepted is judged, never a local
+  // read: the main store may not hold it yet, and a later block 0 must be
+  // byte-identical to it (onGroupGrow). Its key is refused under G; the
+  // blocks a stored writer held before this run stay, as for any writer
+  // its own data refuses.
+  function recheckGroupBoxes (group, visibility) {
+    for (const e of [...groupCores.values()]) {
+      if (e.group !== group || e.key === group || e.state !== 'active' || !e.gatedRaw) continue
+      if (!boxMismatch(e.gatedRaw, e.key, group, visibility)) continue
+      refused.add(groupKey(group, e.key))
+      failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
+    }
+  }
+
+  // The visibility of root G read from the main store when it holds G's
+  // block 0 (stored in an earlier run, or admitted in this one), else null.
+  async function storedRootVisibility (group) {
+    let raw = null
+    try {
+      const held = groupCores.get(group)
+      if (held && held.core) {
+        raw = await readLocal(held.core, 0)
+      } else if (await replicaStored(store, group)) {
+        const core = await openGroupReplica(store, group)
+        try {
+          raw = await readLocal(core, 0)
+        } finally {
+          await core.close().catch(noop)
+        }
+      }
+    } catch {}
+    const visibility = raw === null ? null : rootVisibility(raw)
+    noteRootVisibility(group, visibility)
+    return visibility
   }
 
   async function ownRootKind (core) {
@@ -2411,6 +2488,7 @@ async function runSync ({
       stopFork: null,
       stopQuota: null,
       expected: null, // block 0 read through the quarantine, checked again in the main store
+      gatedRaw: null, // the block 0 the gate accepted
       confirming: false,
       diaryRaw: null, // D's block 0, judged again when an issuer is revoked
       wasStored: false,
@@ -2645,6 +2723,12 @@ async function runSync ({
       // ('wrong-diary') before anything about that diary is believed.
       const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, !groupSet.has(e.group))
       if (reason) return fail(reason, ownVerdict(reason))
+      // Protecting an honest seeder that has not served the root yet (it
+      // checks a writer's `box` only once it knows the root): a box that
+      // does not match the visibility this node verified refuses the
+      // writer, never charged.
+      const vis = rootVis.get(e.group) || await storedRootVisibility(e.group)
+      if (boxMismatch(raw0, e.key, e.group, vis)) return { ...(await fail('header-invalid', true)), box: true }
       if (openHook && writerHere) await openHook(e.diary) // test-only
       if (isBlockedKey(e.diary)) return fail('blocked', false, true)
       if (forkedDiaries.has(e.diary)) return fail('fork', false, true)
@@ -2692,7 +2776,7 @@ async function runSync ({
       }
       const verdict = diaryVerdict(e, diaryRaws)
       if (verdict) return fail(verdict)
-      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore }
+      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis }
     } catch (err) {
       await fail(null)
       throw err
@@ -2807,6 +2891,17 @@ async function runSync ({
       dropGroupCore(e.key)
       return
     }
+    // The root's visibility may have been learned while this gate ran, and
+    // recheckGroupBoxes skips a writer still gating: its box is checked
+    // against the visibility known now.
+    if (!r.reason && e.key !== e.group) {
+      const now = rootVis.get(e.group) || null
+      if (now !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, now)) {
+        const writerHere = r.core !== null && r.core !== undefined
+        await closeOpened()
+        r = { reason: 'header-invalid', own: true, box: true, writerHere }
+      }
+    }
     if (r.reason) {
       if (transient(r.reason)) {
         groupTimeoutError(e.key)
@@ -2872,7 +2967,7 @@ async function runSync ({
           e.state = 'failed'
           refused.add(groupKey(e.group, e.key))
           dropGroupCore(e.key)
-          if (r.reason === 'header-invalid' || r.reason === 'wrong-group') badHint(e.peer, e.hint)
+          if ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group') badHint(e.peer, e.hint)
           return
         }
         // A verdict about the hinted diary judges the hint alone (I2).
@@ -2885,6 +2980,7 @@ async function runSync ({
       failGroupCore(e, r.reason, { purge: e.accepted && condemning(r.reason) })
       return
     }
+    if (e.key === e.group) noteRootVisibility(e.group, rootVisibility(r.gatedRaw))
     if (ending) {
       await closeOpened()
       return
@@ -2970,6 +3066,7 @@ async function runSync ({
     }
     e.core = core
     e.expected = r.expected
+    e.gatedRaw = r.gatedRaw // the block 0 the gate accepted, judged again by recheckGroupBoxes
     e.diaryRaw = r.diaryRaw
     // A block or revocation that arrived while the gate or the opens above
     // were awaited is enforced now, against the current snapshot: its
@@ -3021,6 +3118,13 @@ async function runSync ({
         await core.close()
         if (!e.wasStored) await purgeKey(e.key)
       })(), noop, () => { if (!ended) purgeFailed(e.key) })
+      return
+    }
+    // recheckGroupBoxes skips a writer that is not active yet: a root
+    // learned during the awaits above is checked against here.
+    if (e.key !== e.group && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
+      refused.add(groupKey(e.group, e.key))
+      failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
       return
     }
     activateGroupCore(e, core)

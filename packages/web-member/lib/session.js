@@ -247,6 +247,7 @@ const { createNoticer } = require('./notices')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
+const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -477,6 +478,7 @@ function createBrowserSession ({
       keyPair,
       mediaKeyPair,
       groupKeyPair: keyPair !== null && groupPrf !== null ? (nonce) => deriveGroupKeyPair(nonce, epoch, generation) : null,
+      groupKeys: boxKeys,
       limits,
       noClear: noClear === true
     }
@@ -515,6 +517,10 @@ function createBrowserSession ({
   let keyPair = null
   let mediaKeyPair = null
   let groupPrf = null
+  // The private-group box key pair and the epoch keys opened this session,
+  // in memory only (./group-keys.js): locked with every identity change,
+  // closed with the session.
+  const boxKeys = createGroupKeys()
   let groupEpoch = 0
   let groupWriting = false
   const groupPairs = new Set()
@@ -1265,6 +1271,7 @@ function createBrowserSession ({
 
   function cancelGroups () {
     groupEpoch++
+    boxKeys.lock()
     if (groupWriting && run !== null && run.internal) run.abort()
   }
 
@@ -1810,6 +1817,7 @@ function createBrowserSession ({
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide),
     'group.meta': groupWrite(member.groupMeta),
+    'group.rekey': groupWrite(member.groupRekey),
     'community.create': groupWrite(member.communityCreate, {
       roots: () => [],
       changed: async (c, result) => [result.community]
@@ -1890,6 +1898,7 @@ function createBrowserSession ({
     mediaKeyPair = null
     if (groupPrf !== null) groupPrf.fill(0)
     groupPrf = null
+    boxKeys.lock()
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
   }
@@ -1936,6 +1945,15 @@ function createBrowserSession ({
       synced = false
       ownKey = null
       certKnown = false
+      if (prfCopy !== null) {
+        // Without the box pair private groups read as locked; the identity
+        // itself is unlocked either way.
+        try {
+          await boxKeys.unlock(storage, prfCopy)
+        } catch (err) {
+          if (!(err instanceof UsageError)) reportInternal(err)
+        }
+      }
       followChanged()
     })(), { abort: true }).catch((err) => {
       zeroPair(copy)
@@ -2124,6 +2142,7 @@ function createBrowserSession ({
       peeker.close()
       noticer.close()
       zeroKeyPair()
+      boxKeys.close()
     })()
     return closing
   }

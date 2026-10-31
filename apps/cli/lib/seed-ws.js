@@ -101,7 +101,8 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
 // - /index/community/<C> -> Seeder#indexCommunity: `{ name, groups: [{ group,
-//   name, writerCount }] (linked from both sides, at most 32), indexing,
+//   name, writerCount }] (linked from both sides, at most 32; a private
+//   group is only { group, visibility: 'private' }), indexing,
 //   complete }`; a blocked key or one that is no community root here is
 //   the generic 404.
 // - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
@@ -155,7 +156,9 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // block <seq> of served group core W (a member's writer or the root, header
 // checked locally) and answers 200 JSON { group, diary, seq, texto,
 // resposta } only when it validates as a group-post, so a group block is
-// decided on the record the member signed, not on the reporter's quote.
+// decided on the record the member signed, not on the reporter's quote. A
+// group-sealed block of a private group answers { sealed: true, writer,
+// diary, group, seq } and nothing else.
 // Same token check, budget, deadline, 404 and silence as /moderation-post,
 // and likewise never proxied by Caddy.
 const DEFAULT_HOST = '127.0.0.1'
@@ -504,7 +507,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       kind: h.kind ?? null,
       visibility: h.visibility ?? null,
       join: h.join ?? null,
-      name: h.name ?? null,
+      name: h.visibility === 'private' ? null : h.name ?? null,
       creator: h.diary ?? null,
       rootServed: rootServed === true,
       community: typeof community === 'string' && HEX64_RE.test(community) ? community : null,
@@ -527,7 +530,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function communityBody ({ name, groups, indexing, complete }) {
     return {
       name: name ?? null,
-      groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
+      groups: groups.map(({ group, visibility, name, members }) => visibility === 'private'
+        ? { group, visibility: 'private' }
+        : { group, name: name ?? null, writerCount: members }),
       indexing,
       complete
     }
@@ -634,6 +639,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // POST_MAX_BODY. JSON escapes the text; the account service renders it.
   function groupPostBody (answer) {
     if (answer === null || typeof answer !== 'object') return null
+    // A sealed block of a private group: the structure only, never the
+    // envelope (docs/protocol.md section 10, "Sealed reports").
+    if (answer.sealed === true) {
+      const { writer, diary, group, seq } = answer
+      if (![writer, diary, group].every((k) => typeof k === 'string' && HEX64_RE.test(k))) return null
+      if (!Number.isSafeInteger(seq) || seq < 1) return null
+      return JSON.stringify({ sealed: true, writer, diary, group, seq }) + '\n'
+    }
     const { group, diary, seq, texto, resposta } = answer
     if (typeof group !== 'string' || !HEX64_RE.test(group) || typeof diary !== 'string' || !HEX64_RE.test(diary)) return null
     if (!Number.isSafeInteger(seq) || seq < 1 || typeof texto !== 'string') return null

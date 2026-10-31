@@ -26,7 +26,15 @@
 // with the core in kv 'groupWriters' (./node-store.js):
 //   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-group/hkdf/v1'),
 //                       info = utf8('varanda/member-group/ed25519/v1') || nonce, 32)
-//   groupKeyPair = hypercore-crypto.keyPair(seed) The labels are raw UTF-8 bytes, not hashes, so every option is built
+//   groupKeyPair = hypercore-crypto.keyPair(seed)
+//
+// The device's group box key pair (X25519, one per device for every private
+// group), version 1, from the same PRF output and a random 32-byte nonce the
+// device keeps in kv 'groupBoxDevice' (./node-store.js):
+//   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-group-box/hkdf/v1'),
+//                       info = utf8('varanda/member-group-box/x25519/v1') || nonce, 32)
+//   boxKeyPair = crypto_box_seed_keypair(seed)
+// The labels are raw UTF-8 bytes, not hashes, so every option is built
 // synchronously and the WebAuthn call stays inside the user's click.
 //
 // Browser-bundleable: no Node builtin, only globalThis.crypto (subtle and
@@ -39,6 +47,7 @@
 // never shown.
 const b4a = require('b4a')
 const hypercoreCrypto = require('hypercore-crypto')
+const groupCrypto = require('@varanda/core/lib/group-crypto')
 
 const PRF_EVAL = b4a.from('varanda/member-identity/prf/v1', 'utf8')
 const HKDF_SALT = b4a.from('varanda/member-identity/hkdf/v1', 'utf8')
@@ -47,6 +56,8 @@ const MEDIA_HKDF_SALT = b4a.from('varanda/member-media/hkdf/v1', 'utf8')
 const MEDIA_HKDF_INFO = b4a.from('varanda/member-media/ed25519/v1', 'utf8')
 const GROUP_HKDF_SALT = b4a.from('varanda/member-group/hkdf/v1', 'utf8')
 const GROUP_HKDF_INFO = b4a.from('varanda/member-group/ed25519/v1', 'utf8')
+const BOX_HKDF_SALT = b4a.from('varanda/member-group-box/hkdf/v1', 'utf8')
+const BOX_HKDF_INFO = b4a.from('varanda/member-group-box/x25519/v1', 'utf8')
 
 const PRF_BYTES = 32
 const NONCE_BYTES = 32
@@ -214,15 +225,34 @@ async function groupKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
   return nonceKeyPair(prf, nonce, GROUP_HKDF_SALT, GROUP_HKDF_INFO, derive)
 }
 
+// The device's group box key pair: prf (32 bytes) and the device's
+// groupBoxDevice nonce (32 bytes), neither kept nor changed. -> { publicKey:
+// Uint8Array(32), secretKey: Uint8Array(32) } in fresh buffers; the seed and
+// the pair group-crypto allocated are zeroed.
+async function boxKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
+  return nonceKeyPair(prf, nonce, BOX_HKDF_SALT, BOX_HKDF_INFO, derive, boxKeyPairFromSeed)
+}
+
+function boxKeyPairFromSeed (seed) {
+  let kp = null
+  try {
+    kp = groupCrypto.boxKeyPairFromSeed(seed)
+    return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) }
+  } finally {
+    seed.fill(0)
+    if (kp) kp.secretKey.fill(0)
+  }
+}
+
 // info = label || nonce. derive: see hkdf() above.
-async function nonceKeyPair (prf, nonce, salt, label, derive) {
+async function nonceKeyPair (prf, nonce, salt, label, derive, fromSeed = keyPairFromSeed) {
   checkPrf(prf)
   if (!(nonce instanceof Uint8Array) || nonce.byteLength !== NONCE_BYTES) throw new TypeError('nonce inválido')
   const info = new Uint8Array(label.byteLength + NONCE_BYTES)
   info.set(label, 0)
   info.set(nonce, label.byteLength)
   try {
-    return keyPairFromSeed(await hkdf(prf, salt, info, derive))
+    return fromSeed(await hkdf(prf, salt, info, derive))
   } finally {
     info.fill(0)
   }
@@ -400,11 +430,14 @@ module.exports = {
   MEDIA_HKDF_INFO,
   GROUP_HKDF_SALT,
   GROUP_HKDF_INFO,
+  BOX_HKDF_SALT,
+  BOX_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
   mediaKeyPairFromPrf,
   groupKeyPairFromPrf,
+  boxKeyPairFromPrf,
   rpIdFor,
   supportStatus,
   createOptions,

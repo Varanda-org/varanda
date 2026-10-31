@@ -508,17 +508,22 @@ function gateVerdict (raw, keyHex, associationHex, opts) {
   }
 }
 
-// Block 0 of group core `key` -> { group, diary } (a root names itself), or
-// null when it is neither header.
+// Block 0 of group core `key` -> { group, diary } (a root names itself, with
+// its visibility; a writer carries its `box`), or null when it is neither
+// header.
 function groupHeaderOf (raw, key) {
   try {
     const h = decodeBlock(raw)
     if (h === null) return null
-    // This version folds only public groups and communities: a crafted
-    // private root would be joined and stored but never fold. A community
-    // root is paged and gated as a group root of its own key.
-    if (validateGroupHeader(h) === null) return h.visibility === 'public' ? { group: key, diary: h.diary, community: h.kind === 'community' } : null
-    if (validateWriterHeader(h) === null && h.group !== key) return { group: h.group, diary: h.diary }
+    // A private root syncs like a public one (its header is plaintext;
+    // validateGroupHeader demands its `box` and join approval). Only a
+    // group may be private. A community root is paged and gated as a group
+    // root of its own key.
+    if (validateGroupHeader(h) === null) {
+      if (h.kind === 'community' && h.visibility !== 'public') return null
+      return { group: key, diary: h.diary, community: h.kind === 'community', visibility: h.visibility }
+    }
+    if (validateWriterHeader(h) === null && h.group !== key) return { group: h.group, diary: h.diary, box: h.box }
     return null
   } catch {
     return null
@@ -530,7 +535,10 @@ function groupHeaderOf (raw, key) {
 // because a group root names it as a community: its root must be a
 // community header (a group header there is this device's own verdict
 // 'not-community'); any other paged root must be a group header.
-function groupVerdict (raw, key, group, diary, linkedOnly = false) {
+// `visibility` is the root's verified visibility when known (else null): a
+// writer's `box` must match it, hex64 in a private group and null in a
+// public one, else 'header-invalid' as in the fold and the seeder.
+function groupVerdict (raw, key, group, diary, linkedOnly = false, visibility = null) {
   const h = groupHeaderOf(raw, key)
   if (h === null) return 'header-invalid'
   if (h.group !== group) return key === group ? 'header-invalid' : 'wrong-group'
@@ -538,7 +546,23 @@ function groupVerdict (raw, key, group, diary, linkedOnly = false) {
     if (linkedOnly && !h.community) return 'not-community'
     if (h.community !== linkedOnly) return 'header-invalid'
   }
-  return h.diary === diary ? null : 'wrong-diary'
+  if (h.diary !== diary) return 'wrong-diary'
+  return boxMismatch(raw, key, group, visibility) ? 'header-invalid' : null
+}
+
+// A writer block 0 whose `box` does not match its root's visibility (null
+// while unknown).
+function boxMismatch (raw, key, group, visibility) {
+  if (key === group || visibility === null) return false
+  const h = groupHeaderOf(raw, key)
+  if (h === null || h.group !== group) return false
+  return visibility === 'private' ? h.box === null : h.box !== null
+}
+
+// The visibility a root block 0 names, else null.
+function rootVisibilityOf (raw, key) {
+  const h = raw === null ? null : groupHeaderOf(raw, key)
+  return h !== null && h.group === key ? h.visibility : null
 }
 
 async function localGate (core, keyHex, associationHex, opts) {
@@ -1279,6 +1303,7 @@ async function syncRun ({
   const ownGroupKeys = new Set()
   const groups = new Map() // group -> { group, paged, items } (see the header)
   const groupCores = new Map() // foreign group core key -> entry (newGroupEntry)
+  const rootVis = new Map() // group -> the visibility its verified root header names ('public' | 'private')
   const groupDiaries = new Map() // binding diary hex -> entry (ensureGroupDiary)
   const restingCores = new Map() // stored group core not synced this run -> { group, diary }
   const listedAtStart = new Set() // kv groupReplicas keys when the run started
@@ -2988,6 +3013,7 @@ async function syncRun ({
         continue
       }
       stored.push({ key, core, raw, ...h })
+      if (key === h.group) noteRootVisibility(key, h.visibility)
     }
     for (const e of writers) {
       if (e.rootNonce === null || e.kind === 'community') continue
@@ -3010,6 +3036,10 @@ async function syncRun ({
         s.invalid = true
       } else if (linkedOnly && s.key !== s.group) {
         s.rest = true
+      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null)) {
+        // A writer whose box does not match its root's visibility, as at
+        // the gate.
+        s.invalid = true
       }
     }
     const bindings = new Map()
@@ -3062,6 +3092,8 @@ async function syncRun ({
       const ge = newGroupEntry(x.key, x.group, x.diary, x.seq)
       ge.raw0 = x.raw
       ge.state = 'active'
+      // Stored before this run: a late box mismatch keeps its blocks (I4).
+      ge.preStored = true
       ge.proven = x.proven
       ge.rootBound = x.rootBound
       // The binding certificate, from the stored diary or the one kept when
@@ -3408,6 +3440,11 @@ async function syncRun ({
       return
     }
     if (core === null) return
+    if (key === group && core.length > 0) {
+      try {
+        noteRootVisibility(group, rootVisibilityOf(await core.get(0, { wait: false, raw: true }), key))
+      } catch {}
+    }
     const m = pushEntry(key, core, 'group-pushed')
     m.group = group
     m.synced = null // the 'length/theirs' last reported on this link
@@ -4090,9 +4127,11 @@ async function syncRun ({
     const probe = await probeGroupCore(l, ge.key, timeout)
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, linkedCommunities.has(ge.group))
+    const vis = rootVis.get(ge.group) || null
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, linkedCommunities.has(ge.group), vis)
     if (verdict === 'not-community') return refuseNotCommunity(ge)
     if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
+    if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
     if (proof === undefined) return gateUnanswered(ge)
@@ -4142,6 +4181,32 @@ async function syncRun ({
     ge.raw0 = probe.raw
     ge.state = 'regate'
     watchGroupEntry(ge, core)
+    // The root's visibility may have been learned while this gate ran, and
+    // recheckGroupBoxes skips a pending writer: its box is checked against
+    // the visibility known now.
+    const now = rootVis.get(ge.group) || null
+    if (now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+  }
+
+  // Root G's verified visibility, first learned: a writer gated before it
+  // never had its `box` checked, so G's writers are checked again.
+  function noteRootVisibility (group, visibility) {
+    if (visibility === null || visibility === undefined || rootVis.get(group) === visibility) return
+    rootVis.set(group, visibility)
+    recheckGroupBoxes(group, visibility)
+  }
+
+  // Mirrors the seeder's _recheckGroupBoxes and the core node: every
+  // accepted writer of G whose gated block 0 does not match the visibility
+  // goes with 'header-invalid' (a pending one is checked when its gate
+  // lands); a core stored before this run keeps its blocks, as for any
+  // writer its own data refuses.
+  function recheckGroupBoxes (group, visibility) {
+    for (const ge of [...groupCores.values()]) {
+      if (ge.group !== group || ge.key === group || ge.raw0 === null) continue
+      if (ge.state !== 'regate' && ge.state !== 'active') continue
+      if (boxMismatch(ge.raw0, ge.key, group, visibility)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+    }
   }
 
   // Nothing came within the timeout: a continuous run asks again later; a
@@ -4525,4 +4590,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

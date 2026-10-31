@@ -125,7 +125,7 @@ test('group and community RPC handler names match the core session', async (t) =
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 14)
+  t.is(keys(core.handlers, 'group.').length, 15)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
   t.is(keys(core.handlers, 'community.').length, 4)
   t.alike(keys(browser.handlers, 'community.'), keys(core.handlers, 'community.'))
@@ -406,4 +406,34 @@ test('reset removes every group core, the group kv lists and unfollowed binding 
   t.absent(await store.replicaExists(b.storage, a.key), 'an unfollowed binding replica goes')
   t.ok(await store.replicaExists(b.storage, c.key), 'a followed one stays with its follow')
   t.alike(b.internal, [])
+})
+
+test('private groups: locked state wipes keys and reads sealed, unlock and a reload read again, reset drops the box nonce', async (t) => {
+  const a = await setup(t)
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  await a.web.request('group.post', { group, text: 'só para membros' })
+  t.alike((await a.web.request('group.read', { group })).items.map((p) => p.text), ['só para membros'])
+
+  await a.node.clearKeyPair()
+  const locked = await a.web.request('group.read', { group })
+  t.alike([locked.state, locked.items, locked.sealed, locked.epoch], ['locked', [], 2, null], 'keys wiped: sealed while locked')
+  t.is((await a.web.request('group.info', { group })).name, null)
+  let err = await errorOf(a.web.request('group.post', { group, text: 'x' }))
+  t.alike([err.code, err.message], ['USAGE', LOCKED])
+  err = await errorOf(a.web.request('group.rekey', { group }))
+  t.alike([err.code, err.message], ['USAGE', LOCKED])
+
+  await a.node.setKeyPair(a.keyPair, { prf: a.prf })
+  const again = await a.web.request('group.read', { group })
+  t.alike([again.state, again.items.map((p) => p.text)], ['ok', ['só para membros']], 'readable after unlock')
+
+  // A reload: a new node over the same storage with the persistent session's PRF.
+  await a.node.close()
+  const b = await setup(t, { assoc: a.assoc, storage: a.storage, keyPair: a.keyPair, prf: a.prf })
+  t.alike((await b.web.request('group.read', { group })).items.map((p) => p.text), ['só para membros'], 'keys reopened from the blocks')
+  t.is((await b.web.request('group.info', { group })).name, 'Segredo')
+  t.ok(await a.storage.readJson('groupBoxDevice'))
+  await b.node.reset()
+  t.is(await a.storage.readJson('groupBoxDevice'), null, 'reset clears the box nonce')
+  t.alike(a.internal.concat(b.internal), [])
 })
