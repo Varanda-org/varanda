@@ -50,6 +50,7 @@ import Carteira from './Carteira'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Perfil from './Perfil'
+import Recurso from './Recurso'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -63,6 +64,7 @@ const TITLES = {
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
+  recurso: 'Recorrer de um bloqueio',
   carteira: 'Conta de pagamentos'
 }
 
@@ -270,6 +272,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
+              {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {paying ? <Item icon='credit-card' label='Conta de pagamentos' onPress={() => onNavigate('carteira')} /> : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
@@ -381,6 +384,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {account
+          ? (
+            <View style={shown('recurso')}>
+              <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
+            </View>
+            )
+          : null}
         {inviting
           ? (
             <View style={shown('convites')}>

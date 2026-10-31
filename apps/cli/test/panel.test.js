@@ -1052,7 +1052,7 @@ test('stats: no tab and no api/stats call without me.stats', async (t) => {
   t.is(p.state.stats, false, 'only a boolean true counts')
   t.is(buttons(doc, 'Estatísticas').length, 0)
   t.is(statsCalls(calls), 0)
-  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 4, 'load() is api/me plus the three lists (and the per-report seeder lookups)')
+  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 6, 'load() is api/me plus the five lists (and the per-report seeder lookups)')
 
   const doc2 = fakeDocument()
   const plain = fakeFetch(signedIn([report()]))
@@ -1068,7 +1068,7 @@ test('stats: lazy fetch on click, text figures, meters, Atualizar, no refetch on
   const { fetch, calls } = fakeFetch(routes)
   const p = panel.createPanel(env(doc, fetch))
   await p.start()
-  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 4, 'load() is unchanged')
+  t.is(calls.filter((c) => !c.url.endsWith('/alvo')).length, 6, 'load() is the same five lists plus api/me')
   t.is(statsCalls(calls), 0, 'nothing fetched before the click')
   t.is(buttons(doc, 'Estatísticas').length, 1)
 
@@ -1449,4 +1449,112 @@ test('stats: a 401 on the stats GET wins over a decision that later fails', asyn
   t.is(buttons(doc, 'Entrar com Google').length, 1, 'the login view is still there')
   t.absent(doc.main.textContent.includes('serviço de moderação indisponível'), 'no bare error screen')
   t.is(f.calls.filter((c) => c.url === '/account/mod/api/me').length, 1, 'the queue is not reloaded behind the login')
+})
+
+function appeal (fields = {}) {
+  return {
+    id: 'a1abcdefghijklmnopqrst',
+    at: '2026-10-23T12:00:00.000Z',
+    member: A,
+    username: 'dona',
+    text: 'foi <b>um</b> engano',
+    bloqueios: [{ id: 'r9', reason: 'spam', at: '2026-10-22T00:00:00.000Z' }],
+    status: 'aberta',
+    decidedAt: null,
+    note: '',
+    ...fields
+  }
+}
+
+test('Recursos tab: untrusted words as text, the block behind it, Aceitar and Negar post the decision', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/appeals?estado=aberta'] = () => [200, { appeals: [appeal(), appeal({ id: 'a2abcdefghijklmnopqrst', member: C, username: '', text: '', bloqueios: [] })], truncated: false }]
+  routes['GET /account/mod/api/appeals?estado=decidida'] = () => [200, { appeals: [appeal({ id: 'a3abcdefghijklmnopqrst', status: 'negado', decidedAt: '2026-10-24T00:00:00.000Z', note: 'mantido <i>' })], truncated: false }]
+  const sent = []
+  routes['POST /account/mod/api/appeals/a1abcdefghijklmnopqrst/decide'] = (opts) => { sent.push(JSON.parse(opts.body)); return [200, { appeal: {}, change: null }] }
+  routes['POST /account/mod/api/appeals/a2abcdefghijklmnopqrst/decide'] = (opts) => { sent.push(JSON.parse(opts.body)); return [200, { appeal: {}, change: null }] }
+  const { fetch } = fakeFetch(routes)
+  const asked = []
+  const p = panel.createPanel(env(doc, fetch, { confirm: (q) => { asked.push(q); return true } }))
+  await p.start()
+  t.absent(doc.main.textContent.includes('foi <b>um</b> engano'), 'not on the first tab')
+  buttons(doc, 'Recursos')[0].click()
+  const text = doc.main.textContent
+  t.ok(text.includes('@dona'))
+  t.ok(text.includes('foi <b>um</b> engano'), 'rendered as text, never parsed')
+  t.ok(text.includes('Palavras de quem recorreu, não conferidas.'))
+  t.ok(text.includes('Bloqueio decidido por denúncia de motivo: spam'))
+  t.ok(text.includes('Esta chave foi bloqueada fora do painel.'))
+  t.ok(text.includes('Recursos decididos'))
+  t.ok(text.includes('negado'))
+  t.ok(text.includes('mantido <i>'))
+  t.absent(walk(doc.main).some((n) => n.tagName === 'B' || n.tagName === 'I'), 'no element came out of peer text')
+
+  buttons(doc, 'Aceitar')[0].click()
+  await p.settled()
+  t.ok(asked[0].includes('Aceitar o recurso de @dona?'))
+  t.ok(asked[0].includes('desbloqueio'))
+  t.alike(sent[0], { decision: 'aceitar', note: '' })
+  t.ok(doc.main.textContent.includes('Recurso aceito. O desbloqueio só vale quando a operação rodar `varanda mod apply`'))
+  buttons(doc, 'Recursos')[0].click()
+  buttons(doc, 'Negar')[1].click()
+  await p.settled()
+  t.ok(asked[1].includes('Negar o recurso de'))
+  t.ok(asked[1].includes('30 dias'))
+  t.alike(sent[1], { decision: 'negar', note: '' })
+})
+
+test('Recursos tab: an empty list, and a server without the route still loads the panel', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([report()])
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.ok(doc.main.textContent.includes('Nenhuma denúncia aberta') === false && buttons(doc, 'Bloquear').length === 1, 'the report queue still shows (appeals answered 404)')
+  buttons(doc, 'Recursos')[0].click()
+  t.ok(doc.main.textContent.includes('Nenhum recurso aberto.'))
+  t.alike(p.state.appeals, { appeals: [], truncated: false, beyondLimit: false })
+  t.is(p.state.appealsError, '', 'an unknown route is the old service, not an error')
+
+  for (const [status, token] of [[429, 'muitos-pedidos'], [500, 'indisponivel']]) {
+    const docE = fakeDocument()
+    const failing = signedIn([])
+    failing['GET /account/mod/api/appeals?estado=aberta'] = () => [status, { error: token }]
+    const pE = panel.createPanel(env(docE, fakeFetch(failing).fetch))
+    await pE.start()
+    buttons(docE, 'Recursos')[0].click()
+    t.ok(docE.main.textContent.includes(status === 429 ? 'muitos pedidos' : 'serviço de moderação indisponível'), 'the tab shows the ' + status)
+    t.absent(docE.main.textContent.includes('Nenhum recurso aberto.'), 'a failure is not an empty queue (' + status + ')')
+  }
+
+  const doc2 = fakeDocument()
+  const lost = signedIn([])
+  lost['GET /account/mod/api/appeals?estado=aberta'] = () => [401, { error: 'nao-autorizado' }]
+  const p2 = panel.createPanel(env(doc2, fakeFetch(lost).fetch))
+  await p2.start()
+  t.ok(doc2.main.textContent.includes('Entrar com Google'), 'a lost session still goes to the login')
+})
+
+test('Recursos tab: the decided ones page with "mostrar mais" and antes', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  const row = (id, status = 'negado') => appeal({ id, status, decidedAt: '2026-10-24T00:00:00.000Z' })
+  const urls = []
+  routes['GET /account/mod/api/appeals?estado=decidida'] = () => [200, { appeals: [row('b1abcdefghijklmnopqrst')], truncated: true }]
+  routes['GET /account/mod/api/appeals?estado=decidida&antes=b1abcdefghijklmnopqrst'] = () => {
+    urls.push('antes')
+    return [200, { appeals: [row('b2abcdefghijklmnopqrst', 'encerrado')], truncated: false, alemDoLimite: true }]
+  }
+  const p = panel.createPanel(env(doc, fakeFetch(routes).fetch))
+  await p.start()
+  buttons(doc, 'Recursos')[0].click()
+  t.ok(doc.main.textContent.includes('Há mais decisões antes destas.'))
+  buttons(doc, 'mostrar mais')[0].click()
+  await p.settled()
+  t.is(urls.length, 1)
+  t.alike(p.state.appealsDecided.appeals.map((a) => a.id), ['b1abcdefghijklmnopqrst', 'b2abcdefghijklmnopqrst'])
+  t.ok(doc.main.textContent.includes('encerrado'))
+  t.absent(buttons(doc, 'mostrar mais').length > 0, 'the last page has no button')
+  t.ok(doc.main.textContent.includes('Há decisões mais antigas que o painel não mostra.'))
 })

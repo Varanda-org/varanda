@@ -19,6 +19,7 @@ const crypto = require('hypercore-crypto')
 const { createIssuerCert, createModeratorCert } = require('@varanda/core/lib/cert')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { signReport } = require('@varanda/core/lib/report')
+const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signModRequest, canonicalBody } = require('@varanda/core/lib/mod-request')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
@@ -255,6 +256,28 @@ async function sendReport (s, reporter, target, { seq = null, reason = 'spam', t
   const signature = signReport(fields, reporter.kp)
   const extra = writer === undefined ? {} : { writer, group }
   return s.api('POST', '/account/report', { body: { member: reporter.hex, nonce, target, seq, ...extra, reason, text, quote, signature } })
+}
+
+// start + signed appeal; -> the /account/appeal response.
+async function sendAppeal (s, member, { text = 'foi um engano', signer = member, claimed } = {}) {
+  const started = await s.api('POST', '/account/appeal/start', { body: { member: member.hex } })
+  if (started.status !== 200) return started
+  const nonce = started.body.nonce
+  const signature = signAppeal({ nonce, member: member.hex, association: s.iss.association, text }, signer.kp)
+  return s.api('POST', '/account/appeal', { body: { member: member.hex, nonce, text: claimed === undefined ? text : claimed, signature } })
+}
+
+// A block of `member` decided by `by` and published in snapshot `seq`.
+async function blockAndPublish (s, member, by, seq = 1) {
+  const r = await sendReport(s, s.ana.hex === member.hex ? s.bia : s.ana, member.hex)
+  const d = await s.moderation.decide(r.body.id, { decision: 'bloquear', by })
+  await s.moderation.pull()
+  const mod = crypto.keyPair()
+  const cert = createModeratorCert({ moderator: b4a.toString(mod.publicKey, 'hex'), date: '2026-10-01T00:00:00.000Z' }, s.iss.assoc)
+  const blocked = [...s.moderation.blocked().map((b) => b.member), member.hex]
+  const snapshot = createSnapshot({ seq, date: new Date(s.c.now()).toISOString(), blocked }, mod, cert)
+  await s.moderation.ack({ changeIds: [d.change.id], snapshot, moderatorCert: cert })
+  return r.body.id
 }
 
 function cookieFrom (res, name) {
@@ -805,7 +828,7 @@ test('panel: a moderator lists, decides and never sees their own case; operator 
   t.is(me.status, 200)
   // Two open reports, one about the moderator's own diary: the count leaves
   // it out, like the list does.
-  t.alike(me.body, { email: EMAIL_MOD.toLowerCase(), published: null, open: 1, pending: 0 })
+  t.alike(me.body, { email: EMAIL_MOD.toLowerCase(), published: null, open: 1, appeals: 0, pending: 0 })
 
   const list = await s.api('GET', '/account/mod/api/reports?estado=aberta', { cookie })
   t.is(list.status, 200)
@@ -1086,7 +1109,7 @@ test('moderator login: stateless sealed cookie; a /login flood never breaks an i
       t.is(r.status, 302, 'anonymous login ' + (batch * 50 + i))
     }
   }
-  t.alike(s.server.modStats(), { spentReportNonces: 0, spentChallenges: 0, spentLogins: 0, sessions: 0 }, 'logins store nothing')
+  t.alike(s.server.modStats(), { spentReportNonces: 0, spentAppealNonces: 0, spentChallenges: 0, spentLogins: 0, sessions: 0 }, 'logins store nothing')
   t.is(s.fake.tokenCalls(), calls, 'no token call yet')
 
   s.c.offset += 5 * 1000
@@ -1452,4 +1475,172 @@ test('account reports and status: contacts joined, issuer key never read; bad mo
   t.is(bad.code, 1)
   t.ok(bad.stderr.includes('VARANDA_MODERATOR_EMAILS inválido'))
   t.absent(bad.stderr.includes('segredo-sem-arroba') || bad.stdout.includes('segredo-sem-arroba'), 'the value is never printed')
+})
+
+test('appeals: linked start, signed appeal; not blocked, replay, wrong signer, tampered text, Origin', async (t) => {
+  const s = await setup(t)
+  const stranger = keys()
+  const unlinked = await s.api('POST', '/account/appeal/start', { body: { member: stranger.hex } })
+  t.is(unlinked.status, 403)
+  t.alike(unlinked.body, { error: 'nao-vinculado' })
+
+  const free = await sendAppeal(s, s.bia)
+  t.is(free.status, 403, 'a member that is not blocked')
+  t.alike(free.body, { error: 'nao-bloqueado' })
+
+  const r = await sendReport(s, s.ana, s.bia.hex)
+  await s.moderation.decide(r.body.id, { decision: 'bloquear', by: 'outra moderadora' })
+  const started = await s.api('POST', '/account/appeal/start', { body: { member: s.bia.hex } })
+  t.ok(TOKEN_RE.test(started.body.nonce.slice(0, 43)) && started.body.nonce.length === 54)
+  const fields = { nonce: started.body.nonce, member: s.bia.hex, association: s.iss.association, text: 'foi um engano' }
+  const signature = signAppeal(fields, s.bia.kp)
+  const body = { member: s.bia.hex, nonce: fields.nonce, text: 'foi um engano', signature }
+
+  const tampered = await s.api('POST', '/account/appeal', { body: { ...body, text: 'outro texto' } })
+  t.alike(tampered.body, { error: 'assinatura-invalida' }, 'the text is bound')
+  const wrongSigner = await s.api('POST', '/account/appeal', { body: { ...body, signature: signAppeal(fields, s.ana.kp) } })
+  t.alike(wrongSigner.body, { error: 'assinatura-invalida' }, 'only the key itself signs')
+  const noOrigin = await s.api('POST', '/account/appeal', { origin: null, body })
+  t.is(noOrigin.status, 403, 'the Origin rule holds')
+  const asReport = await s.api('POST', '/account/appeal', { body: { ...body, nonce: (await s.api('POST', '/account/report/start', { body: { member: s.bia.hex } })).body.nonce } })
+  t.alike(asReport.body, { error: 'expirado' }, 'a report nonce is not an appeal nonce')
+
+  const sent = await s.api('POST', '/account/appeal', { body })
+  t.is(sent.status, 200, sent.text)
+  t.alike(Object.keys(sent.body).sort(), ['duplicate', 'id'])
+  t.is(sent.body.duplicate, false)
+  const replay = await s.api('POST', '/account/appeal', { body })
+  t.alike(replay.body, { error: 'expirado' }, 'a nonce works once')
+  const again = await sendAppeal(s, s.bia, { text: 'mais palavras' })
+  t.is(again.status, 200)
+  t.alike(again.body, { id: sent.body.id, duplicate: true }, 'the open appeal answers again')
+  t.is(s.moderation.getAppeal(sent.body.id).text, 'foi um engano')
+  t.is(s.server.modStats().spentAppealNonces, 3, 'spent by the three verified signatures (not blocked, first, duplicate), never by a refused one')
+
+  const huge = await s.api('POST', '/account/appeal', { raw: '{"text":"' + 'a'.repeat(9000) + '"}' })
+  t.is(huge.status, 413)
+  noLeak(t, s)
+})
+
+test('appeals: the panel lists them, hides what a moderator may not judge, and decides', async (t) => {
+  const s = await setup(t)
+  const MOD_EMAIL = EMAIL_MOD.toLowerCase()
+  // ana is blocked and published by another moderator; bia is blocked by
+  // this moderator; carol is the moderator's own diary, blocked too.
+  await blockAndPublish(s, s.ana, 'outra moderadora', 1)
+  const biaReport = await sendReport(s, s.ana, s.bia.hex)
+  await s.moderation.decide(biaReport.body.id, { decision: 'bloquear', by: MOD_EMAIL })
+  const carolReport = await sendReport(s, s.ana, s.carol.hex)
+  await s.moderation.decide(carolReport.body.id, { decision: 'bloquear', by: 'outra moderadora' })
+  for (const m of [s.ana, s.bia, s.carol]) t.is((await sendAppeal(s, m)).status, 200)
+
+  t.is((await s.api('GET', '/account/mod/api/appeals')).status, 401, 'a session is required')
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const me = await s.api('GET', '/account/mod/api/me', { cookie })
+  t.is(me.body.appeals, 1, 'only ana\'s appeal is theirs to judge')
+
+  const list = await s.api('GET', '/account/mod/api/appeals', { cookie })
+  t.is(list.status, 200)
+  t.is(list.body.appeals.length, 1, 'neither their own appeal nor the one about a block they decided')
+  const row = list.body.appeals[0]
+  t.is(row.member, s.ana.hex)
+  t.is(row.username, 'ana')
+  t.is(row.text, 'foi um engano')
+  t.is(row.status, 'aberta')
+  t.alike(row.bloqueios.map((b) => b.reason), ['spam'])
+  t.alike(Object.keys(row).sort(), ['at', 'bloqueios', 'decidedAt', 'id', 'member', 'note', 'status', 'text', 'username'])
+  for (const secret of [EMAIL_A, EMAIL_B, EMAIL_MOD, MOD_EMAIL, SUB_A, SUB_B, SUB_C, 'signature', 'outra moderadora']) t.absent(list.text.includes(secret), 'no ' + secret)
+  t.is((await s.api('GET', '/account/mod/api/appeals?estado=x', { cookie })).status, 400)
+
+  const biaAppeal = s.moderation.listAppeals().appeals.find((a) => a.member === s.bia.hex)
+  const ownAppeal = s.moderation.listAppeals().appeals.find((a) => a.member === s.carol.hex)
+  for (const hidden of [biaAppeal, ownAppeal]) {
+    const res = await s.api('POST', '/account/mod/api/appeals/' + hidden.id + '/decide', { cookie, body: { decision: 'aceitar' } })
+    t.is(res.status, 404, 'cannot decide it')
+    t.is(s.moderation.getAppeal(hidden.id).status, 'aberta')
+  }
+  const noOrigin = await s.api('POST', '/account/mod/api/appeals/' + row.id + '/decide', { cookie, origin: null, body: { decision: 'aceitar' } })
+  t.is(noOrigin.status, 403)
+  const bad = await s.api('POST', '/account/mod/api/appeals/' + row.id + '/decide', { cookie, body: { decision: 'bloquear' } })
+  t.alike(bad.body, { error: 'pedido-invalido' })
+  t.is((await s.api('POST', '/account/mod/api/appeals/' + 'x'.repeat(22) + '/decide', { cookie, body: { decision: 'aceitar' } })).status, 404)
+
+  const accepted = await s.api('POST', '/account/mod/api/appeals/' + row.id + '/decide', { cookie, body: { decision: 'aceitar', note: 'conferi' } })
+  t.is(accepted.status, 200, accepted.text)
+  t.is(accepted.body.appeal.status, 'aceito')
+  t.is(accepted.body.appeal.note, 'conferi')
+  t.is(accepted.body.change.op, 'unblock')
+  t.is(accepted.body.change.member, s.ana.hex)
+  t.absent(accepted.text.includes(MOD_EMAIL), 'no moderator e-mail')
+  const again = await s.api('POST', '/account/mod/api/appeals/' + row.id + '/decide', { cookie, body: { decision: 'negar' } })
+  t.is(again.status, 404, 'decided once')
+  t.alike((await s.api('GET', '/account/mod/api/appeals', { cookie })).body.appeals, [])
+  const history = await s.api('GET', '/account/mod/api/appeals?estado=decidida', { cookie })
+  t.alike(history.body.appeals.map((a) => [a.id, a.status]), [[row.id, 'aceito']])
+  const pending = await s.api('GET', '/account/mod/api/blocked', { cookie })
+  t.ok(pending.body.pending.some((c) => c.op === 'unblock' && c.member === s.ana.hex), 'a pending unblock waits for the operator')
+  t.ok(pending.body.blocked.some((b) => b.member === s.ana.hex), 'still listed until mod apply')
+  noLeak(t, s)
+})
+
+test('appeals: the case shows the diary blocks, not a group block of the same member', async (t) => {
+  const s = await setup(t)
+  await blockAndPublish(s, s.ana, 'outra moderadora', 1)
+  const group = await s.moderation.add({ reporter: s.carol.hex, target: s.ana.hex, seq: 3, writer: s.ana.hex, group: s.bia.hex, reason: 'ilegal', text: '', quote: 'x', signature: 'a'.repeat(128), nonce: 'G'.repeat(43) })
+  await s.moderation.decide(group.report.id, { decision: 'bloquear', by: 'outra moderadora', block: 'grupo' })
+  t.is((await sendAppeal(s, s.ana)).status, 200)
+  const { session } = await signIn(s)
+  const list = await s.api('GET', '/account/mod/api/appeals', { cookie: sessionCookie(session) })
+  t.is(list.body.appeals.length, 1)
+  t.alike(list.body.appeals[0].bloqueios.map((b) => b.reason), ['spam'], 'the group decision is not the reason of the account block')
+})
+
+test('appeals: the decided ones page with antes, without repeats or gaps', async (t) => {
+  const s = await setup(t)
+  const ids = []
+  for (let i = 0; i < 105; i++) {
+    const target = keys().hex
+    s.c.offset += 1
+    const { report } = await s.moderation.add({ reporter: keys().hex, target, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+    await s.moderation.decide(report.id, { decision: 'bloquear', by: 'outra moderadora' })
+    const { appeal } = await s.moderation.addAppeal({ member: target, text: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+    s.c.offset += 1
+    await s.moderation.decideAppeal(appeal.id, { decision: 'negar', by: 'outra moderadora' })
+    ids.push(appeal.id)
+  }
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const page = (query) => s.api('GET', '/account/mod/api/appeals?estado=decidida' + query, { cookie })
+  const first = await page('')
+  t.is(first.status, 200, first.text)
+  t.is(first.body.appeals.length, 100)
+  t.is(first.body.truncated, true)
+  const second = await page('&antes=' + first.body.appeals[99].id)
+  t.is(second.body.appeals.length, 5)
+  t.is(second.body.truncated, false, 'the last page')
+  t.alike([...first.body.appeals, ...second.body.appeals].map((a) => a.id), ids.slice().reverse(), 'every decision once, newest first')
+  for (const bad of ['&antes=nao-existe', '&antes=', '&antes=%00']) {
+    const r = await page(bad)
+    t.is(r.status, 400, 'antes ' + bad)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const open = await s.api('GET', '/account/mod/api/appeals?estado=aberta&antes=' + ids[0], { cookie })
+  t.is(open.status, 400, 'antes is for the decided ones only')
+})
+
+test('appeals: negar closes the case and leaves the block', async (t) => {
+  const s = await setup(t)
+  await blockAndPublish(s, s.ana, 'outra moderadora', 1)
+  const sent = await sendAppeal(s, s.ana)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const denied = await s.api('POST', '/account/mod/api/appeals/' + sent.body.id + '/decide', { cookie, body: { decision: 'negar', note: 'mantido' } })
+  t.is(denied.status, 200, denied.text)
+  t.is(denied.body.appeal.status, 'negado')
+  t.is(denied.body.change, null)
+  t.alike(s.moderation.pending().changes, [])
+  const again = await sendAppeal(s, s.ana)
+  t.is(again.status, 429, 'one appeal per 30 days')
+  t.alike(again.body, { error: 'limite-recursos' })
 })

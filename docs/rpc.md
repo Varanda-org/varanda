@@ -118,7 +118,7 @@ The browser node (`packages/web-member/lib/node.js`, loaded by the web app as `v
 
 ## 5. Methods
 
-Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`, and the IPC-only host controls `identity.install`, `identity.clear`, `identity.reset`, `identity.forget`, `identity.sessionSaved` and `media.uploadFile` (5.50 to 5.56). All others are reads (`account.sign`, `report.sign`, `terms.sign`, `invite.sign`, `push.sign`, `age.sign` and `wallet.sign` sign but write nothing, 5.18, 5.20, 5.29, 5.30, 5.31, 5.32 and 5.35).
+Mutating methods (`MUTATING`, exported as a frozen array; test with `isMutating(method)`): `identity.create`, `cert.add`, `profile.set`, `profile.delete`, `username.add`, `post.create`, `post.reply`, `post.quote`, `post.delete`, `like.set`, `repost.set`, `follow.add`, `follow.remove`, `sync.start`, `sync.stop`, `node.close`, and the IPC-only host controls `identity.install`, `identity.clear`, `identity.reset`, `identity.forget`, `identity.sessionSaved` and `media.uploadFile` (5.50 to 5.56). All others are reads (`account.sign`, `report.sign`, `appeal.sign`, `terms.sign`, `invite.sign`, `push.sign`, `age.sign` and `wallet.sign` sign but write nothing, 5.18, 5.20, 5.61, 5.29, 5.30, 5.31, 5.32 and 5.35).
 
 The IPC-only host controls of the in-app web node (5.50 to 5.56) carry what the browser handle does in-page (section 11). The in-app web node never offers the legacy-follows confirmation (the handle's `follows` API, section 11): its storage is created fresh and therefore has no unsigned follow list, so its host handle reports no legacy follows.
 
@@ -612,6 +612,22 @@ Who started following the caller and whom the caller does not follow yet ("follo
 
 - Mutating community methods follow the same client rule as group methods (never resent, `uncertain: true` on a lost connection). Each one that changes a fold makes the node emit `groups.changed` (section 6): `community.create` for the new community key; `community.link` for the community key and the group key (a link changes the group's `communities` and the admins it inherits); `community.admin` for the community key and the key of every group linked two-way with it.
 
+### 5.61 `appeal.sign`
+
+- Params: `{ nonce, text? }`, nothing else: `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/appeal/start`); `text` the appellant's own words, `0..MAX_TEXT` (1000) code points (default `''`).
+- The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF (`appealPayload`, `packages/core/lib/appeal.js`):
+
+  ```
+  varanda-appeal-v1
+  <nonce>
+  <member hex64>
+  <association hex64>
+  <digest(text)>   (lowercase hex of the BLAKE2b-256 hash of the UTF-8 text; '' hashes too)
+  ```
+
+- Result: `{ signature }`, lowercase hex128, never the payload or a key. A control character or a lone surrogate in `text` -> `USAGE` `'recurso inválido'`. The statement names no target: an appeal is always about the signer's own key, and the account service refuses it unless that key is blocked (`nao-bloqueado`).
+- Where it runs: browser node only (`packages/web-member/lib/session.js`), like `report.sign`: not a diary write, no append, no network. Not mutating.
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -754,6 +770,7 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 - `push.sign` is browser-only (5.31): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
 - `age.sign` is browser-only (5.32): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. Native and `varanda-serve` members keep the operator certificate path (`assoc certify`).
 - `wallet.sign` is browser-only (5.35): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`.
+- `appeal.sign` is browser-only (5.61): the core node, `varanda-serve` and the CLI answer `USAGE` `'assinatura disponível só no navegador'`. An appeal from the CLI waits for a CLI client of the account service (issue #142).
 - `feed.read` and `log.read` page BACKWARDS only, with `before` (5.12, 5.13); there is no forward or `since` paging (newer data needs a reload of the newest page). The page maxima are 31 items and 36 blocks (lowered from 35 and 42 when posts gained media). `follow.list` pages with `offset` and `limit`.
 - The app treats a missing `incomplete` field as not syncing (an older node), and `incomplete` is relative to the length the node knows locally: a diary nobody serves is not reported.
 - The page maxima are derived from the worst case of section 2 (lone surrogates at every record limit, 4 maximal descriptors per post). Ordinary pages are far smaller; the maxima only guarantee that no page a peer can craft exceeds `MAX_MESSAGE`.

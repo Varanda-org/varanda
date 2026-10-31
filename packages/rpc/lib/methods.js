@@ -383,6 +383,15 @@ const SPECS = {
       return null
     }
   },
+  // Signs a blocked member's appeal with the identity key; the node fills in
+  // member and association itself and hashes the text into the payload, so a
+  // caller never chooses the bytes.
+  'appeal.sign': {
+    fields: {
+      nonce: req(isNonce),
+      text: opt(str(0, L.MAX_TEXT), '')
+    }
+  },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
   // bytes.

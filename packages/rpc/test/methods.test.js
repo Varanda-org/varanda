@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.sign', 'appeal.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
@@ -98,6 +98,25 @@ test('account.sign', (t) => {
   bad(t, 'account.sign', { ...base, phase: 'finish', sub: '' }, 'finish without sub')
   bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
   bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
+})
+
+test('appeal.sign', (t) => {
+  const base = { nonce: 'n'.repeat(43) }
+  t.absent(isMutating('appeal.sign'))
+  ok(t, 'appeal.sign', base, { ...base, text: '' })
+  ok(t, 'appeal.sign', { ...base, text: 'foi um engano' })
+  ok(t, 'appeal.sign', { ...base, text: 'a'.repeat(1000) })
+  ok(t, 'appeal.sign', { nonce: 'A-_9'.repeat(32) }, { nonce: 'A-_9'.repeat(32), text: '' })
+  bad(t, 'appeal.sign', {})
+  bad(t, 'appeal.sign', { text: 'x' }, 'missing nonce')
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'target', 'reason']) {
+    bad(t, 'appeal.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const text of ['a'.repeat(1001), 1, null]) bad(t, 'appeal.sign', { ...base, text }, 'text ' + String(text).slice(0, 8))
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'appeal.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
 })
 
 test('terms.sign', (t) => {
