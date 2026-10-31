@@ -127,7 +127,7 @@ test('group and community RPC handler names match the core session', async (t) =
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
   t.is(keys(core.handlers, 'group.').length, 15)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
-  t.is(keys(core.handlers, 'community.').length, 4)
+  t.is(keys(core.handlers, 'community.').length, 5)
   t.alike(keys(browser.handlers, 'community.'), keys(core.handlers, 'community.'))
 })
 

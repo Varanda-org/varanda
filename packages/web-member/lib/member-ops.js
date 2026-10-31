@@ -2697,6 +2697,55 @@ async function communityInfo (ctx, { community }) {
   })
 }
 
+// Created entries first, then by name (null last), then by key.
+function compareCommunities (a, b) {
+  if (a.creator !== b.creator) return a.creator ? -1 : 1
+  if (a.name !== b.name) {
+    if (a.name === null) return 1
+    if (b.name === null) return -1
+    return a.name < b.name ? -1 : 1
+  }
+  return a.community < b.community ? -1 : a.community > b.community ? 1 : 0
+}
+
+// -> { communities }: the own community roots (kv groupWriters) and those
+// linked two-way to a group this diary is in, once each.
+async function communityList (ctx) {
+  return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
+    const found = new Map()
+    const entry = (key) => {
+      const k = key.toLowerCase()
+      if (!found.has(k)) found.set(k, { community: k, creator: false, linked: false })
+      return found.get(k)
+    }
+    const writers = await store.readGroupWriters(ctx.storage)
+    for (const e of writers) if (e.kind === 'community') entry(e.group).creator = true
+    // A blocked group loads as null, so its community is not reached through it.
+    for (const group of new Set(writers.filter((e) => e.kind !== 'community').map((e) => e.group))) {
+      const g = await loadGroup(ctx, base, group)
+      if (g === null || g.built.community === null) continue
+      const role = roleOf(g, ownHex)
+      if (role === 'creator' || role === 'admin' || role === 'member') entry(g.built.community).linked = true
+    }
+    const list = []
+    for (const e of found.values()) {
+      if (base.mod.blocked.has(e.community)) continue
+      const c = await loadCommunityRoot(ctx, base, e.community)
+      if (c === null) {
+        const root = await readGroupCore(ctx.storage, e.community)
+        if (root !== null && root.length > 0) continue
+        list.push({ community: e.community, name: null, state: 'pending', creator: e.creator, linked: e.linked })
+        continue
+      }
+      const built = grp.buildCommunity({ root: { key: c.key, entries: c.entries, joins: c.joins } })
+      const name = typeof built.name === 'string' ? built.name : null
+      const creator = e.creator || (built.creator !== null && built.creator === ownHex)
+      list.push({ community: e.community, name, state: 'ready', creator, linked: e.linked })
+    }
+    return { communities: list.sort(compareCommunities).slice(0, 2 * MAX_GROUPS_PER_DIARY) }
+  })
+}
+
 // The groups linked two-way with `community` held here (the groups.changed
 // of a community admin change); [] when it does not fold.
 async function communityGroups (ctx, { community }) {
@@ -2771,6 +2820,7 @@ module.exports = {
   communityCreate,
   communityLink,
   communityInfo,
+  communityList,
   communityAdmin,
   communityGroups,
   isNeedsExclusive

@@ -1853,6 +1853,7 @@ function createBrowserSession ({
       changed: async (c, result) => [result.community, result.group]
     }),
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
+    'community.list': serial(() => withStore((c) => member.communityList(c))),
     'community.admin': groupWrite(member.communityAdmin, {
       roots: (params) => [params.community],
       changed: async (c, result) => [result.community, ...await member.communityGroups(c, { community: result.community })]

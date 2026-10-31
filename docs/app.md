@@ -252,7 +252,7 @@ As Cadeiras de Praia são conversas em grupo, só de texto. Cada grupo é uma **
 
 ### Aba Cadeiras
 
-Na web hospedada, a aba **Cadeiras** fica logo depois da Espiadinha. A tela tem **Buscar cadeiras públicas** (cadeiras privadas nunca aparecem), **Entrar por link** (cola um link `/g/<chave>` ou a chave), os botões **Nova cadeira** e **Nova comunidade** e a lista **Minhas cadeiras**, com o nome, o papel e o modo de entrada.
+Na web hospedada, a aba **Cadeiras** fica logo depois da Espiadinha. A tela tem **Buscar cadeiras públicas** (cadeiras privadas nunca aparecem), **Entrar por link** (cola um link `/g/<chave>` ou a chave), os botões **Nova cadeira** e **Nova comunidade** e a lista **Minhas cadeiras**, com o nome, o papel e o modo de entrada. Abaixo dela fica **Minhas comunidades** (`community.list`): as comunidades que a pessoa criou ou que estão ligadas às suas cadeiras, cada uma com o nome, "criada por você" e "ligada às suas cadeiras"; tocar abre a comunidade. A lista é lida de novo ao puxar a tela, quando as cadeiras mudam e depois de Nova comunidade. Sem comunidades, a seção não aparece, e um nó antigo sem o método a esconde sem aviso.
 
 - **Nova cadeira.** Folha com o nome, a visibilidade **pública** ou **privada** e a entrada **aberta** ou **com aprovação**. Uma cadeira privada sempre pede aprovação.
 

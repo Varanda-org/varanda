@@ -819,6 +819,8 @@ function createSession ({
 
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
 
+    'community.list': serial(() => withStore((c) => member.communityList(c))),
+
     'community.admin': serial(async (params, epoch) => {
       const affected = new Set()
       const r = await withStore((c) => member.communityAdmin(c, params, { affected }))

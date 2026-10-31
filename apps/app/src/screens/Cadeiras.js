@@ -4,7 +4,8 @@
 // (a /g/<hex> link or a bare key, then group.join) and the Nova cadeira sheet.
 // Hosted web only: elsewhere the tab shows the "só na versão web" note, like
 // Avisos, and calls nothing. App.js draws the top bar.
-// Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
+// Minhas comunidades (community.list) sits under the groups; an older node
+// that does not know the method hides it. Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
 // root key. onOpenCommunity opens a community just made in Nova comunidade.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -30,6 +31,7 @@ const PAGE = rpc.GROUP_LIMIT_MAX
 const SEARCH_DELAY_MS = 400
 const LIST_DELAY_MS = 800
 const HEX64 = /^[0-9a-f]{64}$/
+const NO_COMMUNITY_LIST = 'método desconhecido'
 
 // A link, or a bare key pasted as it is.
 function keyOfInput (text) {
@@ -44,13 +46,25 @@ function groupTitle (row) {
   return typeof row.name === 'string' && row.name !== '' ? displayText(row.name) : PRIVATE_LABEL
 }
 
-function GroupRow ({ title, subtitle, dot, onPress }) {
+function communityTitle (row) {
+  if (row.state !== 'ready') return 'Comunidade ainda chegando'
+  return typeof row.name === 'string' && row.name !== '' ? displayText(row.name) : 'Comunidade sem nome'
+}
+
+function communitySubtitle (row) {
+  const parts = []
+  if (row.creator === true) parts.push('criada por você')
+  if (row.linked === true) parts.push('ligada às suas cadeiras')
+  return parts.join(' · ')
+}
+
+function GroupRow ({ title, subtitle, dot, hint = 'abre a cadeira', onPress }) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
       accessibilityLabel={title + (subtitle ? ', ' + subtitle : '') + (dot ? ', novidades' : '')}
-      accessibilityHint='abre a cadeira'
+      accessibilityHint={hint}
       onPress={onPress}
     >
       <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
@@ -182,6 +196,27 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
     }
   }, [])
 
+  const [communities, setCommunities] = useState([])
+  const communityGen = useRef(0)
+
+  const loadCommunities = useCallback(async () => {
+    const mine = ++communityGen.current
+    try {
+      const res = await requestRef.current('community.list', {})
+      if (mine !== communityGen.current) return
+      const rows = Array.isArray(res && res.communities) ? res.communities : []
+      setCommunities(rows.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community)))
+    } catch (err) {
+      if (mine !== communityGen.current) return
+      if (err && err.code === rpc.ERROR_CODES.USAGE && err.message === NO_COMMUNITY_LIST) setCommunities([])
+    }
+  }, [])
+
+  const reload = useCallback(() => {
+    loadCommunities()
+    return loadFirst()
+  }, [loadCommunities, loadFirst])
+
   const loadMore = useCallback(async () => {
     const mine = loadGen.current
     setList((l) => ({ ...l, more: true, error: '' }))
@@ -202,8 +237,8 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
   }, [list.groups.length])
 
   useEffect(() => {
-    if (hosted) loadFirst()
-  }, [hosted, loadFirst])
+    if (hosted) reload()
+  }, [hosted, reload])
 
   // Roles and member counts move with groups.changed: re-read the local list,
   // coalesced so a burst of events costs one read.
@@ -211,9 +246,9 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
   const firstVersions = useRef(versions)
   useEffect(() => {
     if (!hosted || versions === firstVersions.current) return
-    const timer = setTimeout(loadFirst, LIST_DELAY_MS)
+    const timer = setTimeout(reload, LIST_DELAY_MS)
     return () => clearTimeout(timer)
-  }, [hosted, versions, loadFirst])
+  }, [hosted, versions, reload])
 
   const getVersion = node.getGroupVersion
   useEffect(() => {
@@ -359,6 +394,28 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
     )
   }
 
+  const footer = (
+    <View>
+      {list.groups.length > 0 ? <ListFooter loading={list.more} atEnd={false} /> : null}
+      {communities.length > 0
+        ? (
+          <View>
+            <SectionHeader>Minhas comunidades</SectionHeader>
+            {communities.map((c) => (
+              <GroupRow
+                key={'c' + c.community}
+                title={communityTitle(c)}
+                subtitle={communitySubtitle(c)}
+                hint='abre a comunidade'
+                onPress={() => { if (typeof onOpenCommunity === 'function') onOpenCommunity(c.community) }}
+              />
+            ))}
+          </View>
+          )
+        : null}
+    </View>
+  )
+
   const hasMore = list.loaded && list.groups.length < list.total
   return (
     <View style={styles.root}>
@@ -369,9 +426,9 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
         extraData={{ versions, getVersion }}
         ListHeaderComponent={header}
         ListEmptyComponent={empty}
-        ListFooterComponent={list.groups.length > 0 ? <ListFooter loading={list.more} atEnd={false} /> : null}
+        ListFooterComponent={footer}
         contentContainerStyle={{ paddingBottom: bottomPad }}
-        onRefresh={loadFirst}
+        onRefresh={reload}
         refreshing={list.loading && list.loaded}
         onLoadMore={hasMore && !list.more && !list.loading ? loadMore : undefined}
         loadingMore={list.more}
@@ -388,9 +445,10 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
       />
       <NovaComunidade
         visible={creatingCommunity}
-        onClose={() => setCreatingCommunity(false)}
+        onClose={() => { setCreatingCommunity(false); loadCommunities() }}
         onCreated={(community) => {
           setCreatingCommunity(false)
+          loadCommunities()
           if (typeof onOpenCommunity === 'function') onOpenCommunity(community)
         }}
       />
