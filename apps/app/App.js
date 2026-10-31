@@ -58,7 +58,7 @@ import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureGroupLink } from './src/groupLink'
+import { captureCommunityLink, captureGroupLink } from './src/groupLink'
 import { tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
@@ -180,6 +180,10 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // render; it only lives in memory and opens the group on the hosted web.
 const CAPTURED_GROUP = hostedPage === true && Platform.OS === 'web'
   ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
+  : null
+// A community link (/c/<hex>) works the same way and opens the community.
+const CAPTURED_COMMUNITY = hostedPage === true && Platform.OS === 'web'
+  ? captureCommunityLink({ location: globalThis.location, history: globalThis.history })
   : null
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
@@ -1098,6 +1102,13 @@ function Member () {
     const key = pendingGroup.current
     pendingGroup.current = null
     pushScreen({ screen: 'cadeira', key, params: {} })
+  }, [mode, atTabs, pushScreen])
+  const pendingCommunity = useRef(CAPTURED_COMMUNITY)
+  useEffect(() => {
+    if (pendingCommunity.current === null || mode !== 'hosted' || !atTabs) return
+    const key = pendingCommunity.current
+    pendingCommunity.current = null
+    pushScreen({ screen: 'comunidade', key, params: {} })
   }, [mode, atTabs, pushScreen])
   const action = inviteAction({
     invite,

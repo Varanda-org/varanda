@@ -268,15 +268,15 @@ A tela de uma cadeira mostra a conversa, da mensagem mais antiga para a mais nov
 
 ### Administração
 
-A folha de administração, aberta pela cadeira, mostra o **link da cadeira** e tem **Nome** (só a criadora renomeia), **Pedidos** (aprovar ou recusar), **Membros**, **Administradores** (só a criadora nomeia), **Banidos**, o vínculo com a comunidade (só a criadora vincula ou desvincula), **Sair da cadeira** e, em cadeira privada, **Gerar nova chave**. Escape fecha a folha sem sair da cadeira. Sair de uma cadeira com aprovação exige nova aprovação para voltar. Gerar nova chave abre uma nova época para as mensagens seguintes; o app nunca mostra a chave.
+A folha de administração, aberta pela cadeira, tem o botão **Compartilhar** (abre a folha de compartilhar do sistema ou, sem ela, copia o convite e avisa "Link copiado"; o endereço nunca aparece na tela) e tem **Nome** (só a criadora renomeia), **Pedidos** (aprovar ou recusar), **Membros**, **Administradores** (só a criadora nomeia), **Banidos**, o vínculo com a comunidade (só a criadora vincula ou desvincula), **Sair da cadeira** e, em cadeira privada, **Gerar nova chave**. Escape fecha a folha sem sair da cadeira. Sair de uma cadeira com aprovação exige nova aprovação para voltar. Gerar nova chave abre uma nova época para as mensagens seguintes; o app nunca mostra a chave.
 
 ### Comunidade
 
-A tela da comunidade lista as cadeiras vinculadas e quantos administradores ela tem; quem a criou vincula uma cadeira (colando o link) e adiciona administradores (pela chave da pessoa). Ela abre pelo botão "comunidade" da cadeira vinculada. Vincular pede o consentimento dos dois lados, a cadeira e a comunidade: um lado só não vincula nada. Os administradores da comunidade agem nas cadeiras vinculadas (banir, admitir, ocultar), mas não nomeiam administradores delas.
+A tela da comunidade lista as cadeiras vinculadas e quantos administradores ela tem; quem a criou vincula uma cadeira (colando o link) e adiciona administradores: digitando o nome ou o @nome, ou colando o código da pessoa. O @nome é conferido no serviço de conta e a tela mostra quem será adicionado antes de tornar a pessoa administradora; a busca por nome (só na web hospedada, como em Seguindo) lista as pessoas confirmadas, cada uma com **Tornar administrador**. Qualquer pessoa pode tocar em **Compartilhar** na comunidade, que abre a folha de compartilhar do sistema ou copia o link e avisa "Link copiado"; o link nunca aparece como texto. Ela abre pelo botão "comunidade" da cadeira vinculada. Vincular pede o consentimento dos dois lados, a cadeira e a comunidade: um lado só não vincula nada. Os administradores da comunidade agem nas cadeiras vinculadas (banir, admitir, ocultar), mas não nomeiam administradores delas.
 
 ### Links de entrada
 
-Cada cadeira tem um link `/g/<chave>`, com a chave do grupo em hexadecimal. Abrir o link leva à cadeira na web hospedada, com as mesmas regras de entrada. Cadeiras privadas nunca aparecem na busca.
+Cada cadeira tem um link `/g/<chave>`, com a chave do grupo em hexadecimal, e cada comunidade tem um link `/c/<chave>`. Abrir o link leva à cadeira ou à comunidade na web hospedada, com as mesmas regras de entrada. Os links só se compartilham pelo botão **Compartilhar**. Cadeiras privadas nunca aparecem na busca.
 
 ### Limites
 

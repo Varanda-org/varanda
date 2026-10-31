@@ -9,11 +9,22 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
-import rpc from '@varanda/rpc'
+import rpc, { isKey } from '@varanda/rpc'
 import { useNode } from '../node'
+import { isUsername, lookupUsername, usernameMatches } from '../account'
+import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
+import { communityLink } from '../groupLink'
+import { canShare, copyText, shareUrl } from '../share'
+import { shareNav } from '../shareNav'
+import { fetchCommunity } from '../indexClient'
+import { useMemberSearch } from '../useMemberSearch'
+import { whoOf } from '../who'
+import { shortKey } from '../format'
 import { PRIVATE_LABEL, parseJoinLink, reconcile } from '../groups'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
+import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
@@ -21,6 +32,11 @@ import { WEB_ONLY_MESSAGE } from './Cadeiras'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
+const NOT_FOUND = '@nome não encontrado.'
+
+function origin () {
+  return typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string' ? window.location.origin : ''
+}
 
 function keyOf (text) {
   const fromLink = parseJoinLink(text)
@@ -34,7 +50,7 @@ function adminsLabel (n) {
   return n === 1 ? '1 administrador' : n + ' administradores'
 }
 
-function GroupRow ({ title, onPress }) {
+function GroupRow ({ title, detail, onPress }) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -44,7 +60,10 @@ function GroupRow ({ title, onPress }) {
       onPress={onPress}
     >
       <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
-      <Text style={styles.name} numberOfLines={1}>{title}</Text>
+      <View style={styles.hitText}>
+        <Text style={styles.name} numberOfLines={1}>{title}</Text>
+        {detail ? <Text style={styles.handle} numberOfLines={1}>{detail}</Text> : null}
+      </View>
     </Pressable>
   )
 }
@@ -59,12 +78,23 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   const [ownKey, setOwnKey] = useState(null)
   const [adminInput, setAdminInput] = useState('')
   const [adminNote, setAdminNote] = useState('')
+  // Who the typed key or @nome resolved to, shown before the grant.
+  const [candidate, setCandidate] = useState(null)
+  const [resolving, setResolving] = useState(false)
+  const [localError, setLocalError] = useState('')
+  const [shareNote, setShareNote] = useState('')
+  // The seeder index's view, for someone whose node holds nothing of this
+  // community yet: { status, name, groups, partial, error }.
+  const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, error: '' })
+  const idxGen = useRef(0)
+  const [granting, setGranting] = useState(null)
   const [adminUncertain, setAdminUncertain] = useState(false)
   const [linkInput, setLinkInput] = useState('')
   const [linkNote, setLinkNote] = useState('')
   // An uncertain link: { group, verdict } until reconciled.
   const [linkCheck, setLinkCheck] = useState(null)
   const admin = useAction()
+  const resolveGen = useRef(0)
   const link = useAction()
   const gen = useRef(0)
   const requestRef = useRef(node.request)
@@ -85,6 +115,29 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
       if (mine === gen.current) setLoading(false)
     }
   }, [community])
+
+  const search = useMemberSearch({ request: node.request, hosted, online: node.online !== false, ownKey })
+
+  const needIndex = hosted && ((info !== null && info.state === 'pending') || (info === null && loadError !== ''))
+  const loadIndex = useCallback(async () => {
+    const mine = ++idxGen.current
+    setIdx((s) => ({ ...s, status: 'loading', error: '' }))
+    const res = await fetchCommunity(community)
+    if (mine !== idxGen.current) return
+    if (!res || !res.ok) {
+      setIdx({ status: 'error', name: '', groups: [], partial: false, error: res && res.reason === 'not-found' ? 'O servidor ainda não conhece esta comunidade.' : 'Não foi possível consultar o índice agora.' })
+      return
+    }
+    const v = res.value
+    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, error: '' })
+  }, [community])
+  useEffect(() => {
+    if (!needIndex) {
+      idxGen.current++
+      return
+    }
+    loadIndex()
+  }, [needIndex, loadIndex])
 
   useEffect(() => {
     if (!hosted) return
@@ -116,27 +169,89 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   const offline = node.online === false
   const creator = info !== null && typeof ownKey === 'string' && info.creator === ownKey
   const pending = info !== null && info.state === 'pending'
-  const title = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : 'Comunidade'
+  const title = info && typeof info.name === 'string' && info.name !== ''
+    ? displayText(info.name)
+    : (idx.status === 'done' && needIndex && idx.name !== '' ? displayText(idx.name) : 'Comunidade')
   const groups = info && Array.isArray(info.groups) ? info.groups : []
 
-  // A member key, never a group link.
-  const adminKey = HEX64.test(adminInput.trim().toLowerCase()) ? adminInput.trim().toLowerCase() : null
-  const addAdmin = async () => {
-    if (!adminKey || offline || adminUncertain) return
+  const cls = classifyFollowInput(adminInput)
+  const searchable = cls.kind === 'name' || cls.kind === 'handle'
+  const hits = search.hits.filter((h) => h.author !== ownKey)
+
+  const typeAdmin = (t) => {
+    setAdminInput(t)
+    setAdminUncertain(false)
     setAdminNote('')
-    const res = await admin.run(() => node.request('community.admin', { community, member: adminKey, on: true }))
-    if (res.ok) {
-      setAdminInput('')
-      setAdminNote('Administrador adicionado.')
-      load()
-      return
+    setCandidate(null)
+    setLocalError('')
+    resolveGen.current++
+    setResolving(false)
+    admin.clearError()
+    const c = classifyFollowInput(t)
+    search.setQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
+  }
+
+  // A key or @nome becomes a candidate first; the grant waits for a tap.
+  const findPerson = async () => {
+    setLocalError('')
+    setAdminNote('')
+    if (cls.kind === 'key') return setCandidate({ member: cls.key, label: shortKey(cls.key) })
+    if (cls.kind !== 'handle') return
+    const name = isUsername(cls.handle)
+    if (name === null) return setLocalError('@nome inválido')
+    const mine = ++resolveGen.current
+    setResolving(true)
+    try {
+      const found = await lookupUsername(name)
+      if (mine !== resolveGen.current) return
+      // Same-origin data, not a signature check: only a consistent answer.
+      if (found === null || !isKey(found.member) || !usernameMatches(found.usernameRecord, found.member, name)) {
+        setLocalError(NOT_FOUND)
+      } else {
+        setCandidate({ member: found.member, label: '@' + displayText(name) })
+      }
+    } catch (err) {
+      if (mine === resolveGen.current) setLocalError(errorText(err))
+    } finally {
+      if (mine === resolveGen.current) setResolving(false)
     }
-    if (res.uncertain) {
-      // The count alone cannot tell whether this grant landed: re-read and
-      // leave a new attempt to the person.
-      setAdminUncertain(true)
-      load()
+  }
+
+  const grant = async (member, label) => {
+    if (!HEX64.test(member) || offline || adminUncertain) return
+    setAdminNote('')
+    setGranting(member)
+    try {
+      const res = await admin.run(() => node.request('community.admin', { community, member, on: true }))
+      if (res.ok) {
+        setAdminInput('')
+        setCandidate(null)
+        search.clear()
+        setAdminNote(label + ' agora é administrador.')
+        load()
+        return
+      }
+      if (res.uncertain) {
+        // The count alone cannot tell whether this grant landed: re-read and
+        // leave a new attempt to the person.
+        setAdminUncertain(true)
+        load()
+      }
+    } finally {
+      setGranting(null)
     }
+  }
+
+  // The system share sheet when there is one, else a copy. The link is never
+  // shown as text.
+  const shareCommunity = async () => {
+    const path = communityLink(community)
+    if (path === null) return
+    const url = origin() + path
+    const nav = shareNav()
+    setShareNote('')
+    if (canShare(nav) && (await shareUrl(nav, { url, title: title === 'Comunidade' ? 'Varanda' : title })) !== 'failed') return
+    setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
 
   const linkKey = keyOf(linkInput)
@@ -193,8 +308,35 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   }
 
   let body
-  if (info === null && loadError) {
-    body = <ErrorState message={loadError} onRetry={load} pending={loading} />
+  const fromIndex = needIndex && idx.status === 'done'
+  if (fromIndex) {
+    body = (
+      <View>
+        <View style={styles.block}>
+          <Soft>Pelo índice do servidor; abra uma cadeira para entrar.</Soft>
+          {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
+          <View style={styles.inline}>
+            <Btn label='Compartilhar' onPress={shareCommunity} secondary />
+          </View>
+          {shareNote ? <Soft>{shareNote}</Soft> : null}
+        </View>
+        <SectionHeader>Cadeiras</SectionHeader>
+        {idx.groups.length === 0
+          ? <View style={styles.block}><Soft>Nenhuma cadeira vinculada ainda.</Soft></View>
+          : idx.groups.map((g) => (
+            <GroupRow
+              key={g.group}
+              title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
+              detail={Number.isSafeInteger(g.writerCount) ? (g.writerCount === 1 ? '1 membro' : g.writerCount + ' membros') : 'cadeira privada'}
+              onPress={() => { if (typeof onOpenGroup === 'function') onOpenGroup(g.group) }}
+            />
+          ))}
+      </View>
+    )
+  } else if (info === null && loadError && idx.status === 'loading') {
+    body = <Skeleton />
+  } else if (info === null && loadError) {
+    body = <ErrorState message={idx.status === 'error' ? idx.error : loadError} onRetry={() => { load(); loadIndex() }} pending={loading} />
   } else if (info === null) {
     body = <Skeleton />
   } else {
@@ -202,6 +344,10 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
       <View>
         <View style={styles.block}>
           {info.admins > 0 ? <Soft>{adminsLabel(info.admins)}</Soft> : null}
+          <View style={styles.inline}>
+            <Btn label='Compartilhar' onPress={shareCommunity} secondary />
+          </View>
+          {shareNote ? <Soft>{shareNote}</Soft> : null}
           {pending ? <Soft>Aguardando a sincronização desta comunidade.</Soft> : null}
           {!pending && info.incomplete === true ? <Soft>Algumas cadeiras ainda não chegaram a este aparelho; a lista pode estar incompleta.</Soft> : null}
           {loadError ? <ErrorText>{loadError}</ErrorText> : null}
@@ -235,15 +381,56 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
               </View>
               <View style={styles.block}>
                 <Field
-                  label='Adicionar administrador (chave da pessoa)'
+                  label='Adicionar administrador'
+                  placeholder='nome, @nome ou código'
                   value={adminInput}
-                  onChangeText={(t) => { setAdminInput(t); setAdminUncertain(false); setAdminNote(''); admin.clearError() }}
+                  onChangeText={typeAdmin}
+                  maxLength={80}
                   mono
                 />
                 <Soft>Administradores da comunidade podem banir, admitir e ocultar nas cadeiras vinculadas.</Soft>
+                {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
+                {cls.kind === 'key' || cls.kind === 'handle'
+                  ? <Btn label={cls.kind === 'key' ? 'Conferir pessoa' : 'Procurar @nome'} onPress={findPerson} pending={resolving} disabled={offline || adminUncertain} secondary />
+                  : null}
+                {candidate
+                  ? (
+                    <View style={styles.inline}>
+                      <Text style={styles.name} numberOfLines={1}>{candidate.label}</Text>
+                      <Btn label='Tornar administrador' onPress={() => grant(candidate.member, candidate.label)} pending={admin.pending && granting === candidate.member} disabled={offline || adminUncertain} />
+                    </View>
+                    )
+                  : null}
+                {localError ? <ErrorText>{localError}</ErrorText> : null}
+                {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
+                {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
+                {searchable && search.phase === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
+                {search.phase === 'loading' && hits.length === 0 ? <Skeleton rows={2} /> : null}
+                {hits.map((hit) => {
+                  const who = whoOf({ name: hit.name, username: hit.username })
+                  const label = displayText(who.title)
+                  return (
+                    <View key={hit.author} style={styles.hit}>
+                      <Pressable
+                        style={({ pressed }) => [styles.hitWho, pressed && styles.pressed]}
+                        accessibilityRole='link'
+                        accessibilityLabel={'ver o perfil de ' + label}
+                        disabled={typeof onOpenMember !== 'function'}
+                        onPress={() => onOpenMember(hit.author, { name: hit.name, username: hit.username })}
+                      >
+                        <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
+                        <View style={styles.hitText}>
+                          <Text style={styles.name} numberOfLines={1}>{label}</Text>
+                          {who.subtitle ? <Text style={styles.handle} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
+                        </View>
+                      </Pressable>
+                      <Pill label='Tornar administrador' onPress={() => grant(hit.author, label)} pending={admin.pending && granting === hit.author} disabled={offline || adminUncertain || admin.pending} />
+                    </View>
+                  )
+                })}
+                {search.phase === 'ready' && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
                 {adminUncertain ? <ErrorText>{UNCERTAIN}</ErrorText> : <ErrorText>{admin.error}</ErrorText>}
                 {adminNote ? <Soft>{adminNote}</Soft> : null}
-                <Btn label='Adicionar' onPress={addAdmin} disabled={!adminKey || offline || adminUncertain} pending={admin.pending} />
               </View>
               {offline ? <View style={styles.block}><Soft>Sem internet: conecte-se para alterar a comunidade.</Soft></View> : null}
             </View>
@@ -282,5 +469,9 @@ const styles = StyleSheet.create({
   },
   pressed: { opacity: 0.6 },
   icon: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  name: { ...type.postName, color: colors.ink, flex: 1 }
+  name: { ...type.postName, color: colors.ink, flex: 1 },
+  handle: { ...type.postMeta, color: colors.soft },
+  hit: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  hitWho: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  hitText: { flex: 1 }
 })
