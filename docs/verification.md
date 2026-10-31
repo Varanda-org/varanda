@@ -3361,3 +3361,25 @@ Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira 
 - Núcleos de escritor que nomeiam uma comunidade são admitidos pelo semeador e contam nos tetos, mas nunca entram nas páginas.
 - A nova tentativa de uma leitura falha na varredura de vínculos e a nova varredura da própria raiz de grupo quando ela cresce não têm teste de regressão (não há gancho para forçá-las).
 - Sem interface nativa; as telas da web vêm na PR4.
+
+## 60. A Rua não fica presa em "Isso é tudo por enquanto" (PR fix/rua-sync-loop, 2026-10-31)
+
+### O que mudou
+
+- Uma releitura automática do trecho mostrado (`range`) que volta com uma página curta não marca mais a lista como no fim (`rangeEnd`, passo `'end'`, em `apps/app/src/paging.js`). Antes, uma página curta tirava a lista do estado "não chegou ao fim" para sempre. As leituras automáticas paravam, o rodapé dizia "Isso é tudo por enquanto." e a rolagem infinita sumia (A Rua só passa `onLoadMore` enquanto a lista não está no fim). Só puxar para atualizar recuperava.
+- A página curta acontece quando o feed visível encolhe por um tempo: um diário seguido cujo comprimento assinado cresceu antes de a ponta nova chegar mostra só o prefixo (regra estrita, seção 56). A busca da ponta inteira (seção 58) deixa esse estado durar mais. Agora a lista guarda o estado de fim que tinha, e uma leitura de rolagem acha o fim de verdade.
+
+### Testes automatizados
+
+- `apps/app/test/paging.test.js`: "regression: a short range page while the visible feed shrank never ends a list that was not at its end" (falha sem a correção); o teste das leituras longe do fim passou a esperar que uma página curta mantenha o estado de fim.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. No PWA:
+
+- [ ] Abrir A Rua com quem você segue publicando: a rolagem infinita continua e o rodapé não diz "Isso é tudo por enquanto." enquanto há mais publicações (não realizada ainda).
+- [ ] Depois de alguém que você segue publicar com o app aberto, rolar até o fim: as publicações mais antigas continuam carregando (não realizada ainda).
+
+### Limites
+
+- Uma lista que não estava no fim pode fazer uma leitura de rolagem a mais, vazia, para descobrir o fim.
