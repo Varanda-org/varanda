@@ -1188,6 +1188,20 @@ test('group writers reopen by nonce and group replicas refuse own keys', async (
   await t.exception(() => store.openGroupReplica(reopened, key), /chave do próprio grupo/)
 })
 
+test('groups file keeps kind community only and rejects other kinds', (t) => {
+  const dir = tmpDir(t)
+  const base = { group: 'a'.repeat(64), writer: 'b'.repeat(64), nonce: 'ab'.repeat(16) }
+  store.writeGroups(dir, [{ ...base, kind: 'community' }, { ...base, kind: 'group' }, base])
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'groups.json'), 'utf8'))
+  t.alike(raw.groups, [{ ...base, kind: 'community' }, base, base])
+  t.absent('kind' in raw.groups[1], 'group entries carry no kind key')
+  t.alike(store.readGroups(dir), raw.groups, 'community round trip keeps kind')
+  fs.writeFileSync(path.join(dir, 'groups.json'), JSON.stringify({ v: 1, groups: [{ ...base, kind: 'other' }, base] }))
+  t.alike(store.readGroups(dir), [base], 'unknown kind entry is skipped, the rest stays')
+  fs.writeFileSync(path.join(dir, 'groups.json'), JSON.stringify({ v: 1, groups: [base] }))
+  t.alike(store.readGroups(dir), [base], 'old files without kind still read')
+})
+
 test('groups round-trip uses the versioned private atomic file', (t) => {
   const dir = tmpDir(t)
   t.alike(store.readGroups(dir), [])

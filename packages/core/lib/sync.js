@@ -157,6 +157,9 @@ function createRequestPacer ({ burst = GROUP_REQUEST_BURST, rate = GROUP_REQUEST
 const HEX64 = /^[0-9a-f]{64}$/
 const NONCE = /^[0-9a-f]{32}$/
 const MAX_BOUND_ROOTS = 256
+// The community roots one group root makes the node follow: the same
+// bound as member.js MAX_COMMUNITY_ROOTS (the roots a group fold reads).
+const MAX_COMMUNITY_ROOTS = 32
 const BYTES_HEX = /^(?:[0-9a-f]{2})+$/
 
 // Roots this node saw bound by their creator's diary (its own fold or a
@@ -229,15 +232,23 @@ function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
 }
 
 // Block-0 verdict of a group core `key` claimed for `group` and diary
-// `diary` (same verdicts as the seeder): null = accepted.
-function groupHeaderVerdict (raw, key, group, diary) {
+// `diary` (same verdicts as the seeder): null = accepted. A root is judged
+// by its own block 0 against a role fixed for the whole run, never against
+// a link view that moves while it is gated: `linkedOnly` marks a `group`
+// this node pages only because a group root's community-link names it
+// (a community root wherever named; a group header there is this node's
+// own verdict 'not-community'), else it is a group this node joined (a
+// group header; a community has no writers to join with).
+function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
   try {
     const header = decodeBlock(raw)
     if (header === null) return 'header-invalid'
     if (key === group) {
-      // This version folds public groups only: a private or community root
-      // would be joined and fetched but never folded.
-      if (validateGroupHeader(header) !== null || header.kind !== 'group' || header.visibility !== 'public') return 'header-invalid'
+      // This version folds public groups only: a private root would be
+      // joined and fetched but never folded.
+      if (validateGroupHeader(header) !== null || header.visibility !== 'public') return 'header-invalid'
+      if (linkedOnly && header.kind === 'group') return 'not-community'
+      if (header.kind !== (linkedOnly ? 'community' : 'group')) return 'header-invalid'
     } else {
       if (validateWriterHeader(header) !== null) return 'header-invalid'
       if (header.group !== group) return 'wrong-group'
@@ -250,11 +261,11 @@ function groupHeaderVerdict (raw, key, group, diary) {
 
 // The diary a group core's own block 0 names when it is a valid header for
 // `group`, else null.
-function headerDiary (raw, key, group) {
+function headerDiary (raw, key, group, linkedOnly = false) {
   try {
     const header = decodeBlock(raw)
     if (header === null || typeof header.diary !== 'string') return null
-    return groupHeaderVerdict(raw, key, group, header.diary) === null ? header.diary : null
+    return groupHeaderVerdict(raw, key, group, header.diary, linkedOnly) === null ? header.diary : null
   } catch {
     return null
   }
@@ -469,6 +480,22 @@ async function runSync ({
   let warnedOwnBlocked = false
   let warnedOwnRevoked = false
   const groupList = [] // groups.json entries whose own writer opened: { group, writer, nonce }
+  const groupSet = new Set() // the groups of groupList
+  // Communities (docs/protocol.md section 10 "Communities"): own community
+  // roots listed in groups.json, and every community root a held group
+  // root's community-link records ever named, on or off (acts taken while
+  // a community was linked stay valid after an unlink, so the fold needs
+  // that root). Per group root at most MAX_COMMUNITY_ROOTS distinct keys in
+  // root order of first appearance, the keys member.js folds; a key past
+  // the cap is not followed and the fold reads as incomplete. Each is paged
+  // like a group whose only core is its root, so a run holds at most
+  // groupList.length * MAX_GROUP_WRITERS group cores plus
+  // groupList.length * MAX_COMMUNITY_ROOTS community roots (coreLimit),
+  // each community root with its one creator diary.
+  const ownCommunities = new Set() // groups.json entries whose own root is a community header
+  const linkedCommunities = new Map() // community key -> Set of groups whose root named it
+  const linkScans = new Map() // group -> { core, length, named, run, again }
+  let linksReady = false // own roots are scanned (and rescanned on growth) once startup reaches the scan
   const ownWriters = new Map() // own writer key -> { group, core }
   const groupCores = new Map() // foreign writer key -> entry (gating, active, failing, failed)
   const groupDiaries = new Map() // diary key -> { core, range, stopFork, stopQuota, want, failed }
@@ -479,7 +506,7 @@ async function runSync ({
   const groupTargets = new Map() // writer admitted in groupCores -> largest length (clamped) any seeder advertised in this run
   // Run-wide memories of the group gate (I3): bounded, expiring in
   // long-running mode.
-  const gateLimit = () => Math.max(1, groupList.length) * MAX_GROUP_WRITERS
+  const gateLimit = coreLimit
   const failedHints = createMemo(gateLimit) // 'group:key:diary:seq' page items a gate disproved
   const localSkips = createMemo(gateLimit) // page items refused for this node's own verdict on the hinted diary (never charged)
   const refused = createMemo(gateLimit) // 'group:key' refused by the writer's own data
@@ -1739,6 +1766,120 @@ async function runSync ({
       seen.add(g.group)
       ownWriters.set(g.writer, { group: g.group, core })
       groupList.push({ group: g.group, writer: g.writer, nonce: g.nonce })
+      groupSet.add(g.group)
+      if (g.writer === g.group) {
+        if (await ownRootKind(core) === 'community') ownCommunities.add(g.group)
+        // An own root also grows by replication (a peer holding the same
+        // root key, restored storage): its new blocks are scanned too.
+        const grown = () => { if (linksReady) scanLinks(g.group, core) }
+        core.on('append', grown)
+        core.on('download', grown)
+      }
+    }
+  }
+
+  async function ownRootKind (core) {
+    if (core.length === 0) return null
+    try {
+      const header = decodeBlock(await core.get(0, { wait: false, raw: true }))
+      return header !== null && validateGroupHeader(header) === null ? header.kind : null
+    } catch {
+      return null
+    }
+  }
+
+  // A key paged as a community: an own community root, or one a held group
+  // root links to that this node does not list as a group of its own.
+  function isCommunity (key) {
+    return ownCommunities.has(key) || (linkedCommunities.has(key) && !groupSet.has(key))
+  }
+
+  // Everything paged: groupList, then the linked communities (no own writer).
+  function pagedList () {
+    const out = groupList.slice()
+    for (const c of linkedCommunities.keys()) if (!groupSet.has(c)) out.push({ group: c, writer: null })
+    return out
+  }
+
+  function linkedOnlyCount () {
+    let n = 0
+    for (const c of linkedCommunities.keys()) if (!groupSet.has(c)) n++
+    return n
+  }
+
+  // A linked community is a single root core: it raises the run-wide core
+  // bounds by one, never by a group's worth of writers.
+  function coreLimit () {
+    return Math.max(1, groupList.length) * MAX_GROUP_WRITERS + linkedOnlyCount()
+  }
+
+  // Reads the community-link records a group root gained since the last
+  // scan (held blocks only, at most maxLogBlocks) and follows every
+  // community they name, up to MAX_COMMUNITY_ROOTS. Own community roots
+  // carry no community-link.
+  function scanLinks (group, core) {
+    if (ending || !groupSet.has(group) || ownCommunities.has(group) || !core) return
+    let st = linkScans.get(group)
+    if (!st || st.core !== core) {
+      st = { core, length: 1, named: [], run: null, again: false }
+      linkScans.set(group, st)
+    }
+    if (st.run) {
+      st.again = true
+      return
+    }
+    const s = st
+    s.run = (async () => {
+      const live = () => !ending && linkScans.get(group) === s
+      do {
+        s.again = false
+        const end = Math.min(core.contiguousLength, maxLogBlocks)
+        while (s.length < end && s.named.length < MAX_COMMUNITY_ROOTS && live()) {
+          const seq = s.length
+          const raw = await readLocal(core, seq)
+          // A failed read leaves the cursor on seq: the next scan (on the
+          // root's next growth) reads it again, so no block is skipped.
+          if (raw === null) break
+          s.length = seq + 1
+          let record = null
+          try {
+            record = decodeBlock(raw)
+          } catch {}
+          // The same keys member.js linkedKeys folds, in the same order.
+          if (record === null || typeof record !== 'object' || record.type !== 'community-link' ||
+            typeof record.community !== 'string' || !/^[0-9a-fA-F]{64}$/.test(record.community)) continue
+          const key = record.community.toLowerCase()
+          if (!s.named.includes(key)) s.named.push(key)
+        }
+      } while (s.again && live())
+      if (live()) setLinks(group, s.named)
+    })().catch(noop).finally(() => {
+      s.run = null
+      evaluate()
+    })
+  }
+
+  function setLinks (group, named) {
+    const keep = new Set(named)
+    for (const [c, groups] of linkedCommunities) {
+      if (keep.has(c) || !groups.has(group)) continue
+      groups.delete(group)
+      if (groups.size === 0) linkedCommunities.delete(c)
+    }
+    for (const community of named) {
+      if (community === group) continue
+      let groups = linkedCommunities.get(community)
+      if (groups && groups.has(group)) continue
+      const fresh = !groups
+      if (fresh) {
+        groups = new Set()
+        linkedCommunities.set(community, groups)
+      }
+      groups.add(group)
+      if (fresh && !groupSet.has(community)) {
+        emit({ event: 'community-linked', key: community, group })
+        if (!once) markGroupsDirty(community)
+      }
     }
   }
 
@@ -1788,9 +1929,9 @@ async function runSync ({
   }
 
   function dueGroups (peer) {
-    if (once) return groupList
+    if (once) return pagedList()
     const now = Date.now()
-    return groupList.filter((g) => peer.groupDirty.has(g.group) || (peer.groupNext.get(g.group) || 0) <= now)
+    return pagedList().filter((g) => peer.groupDirty.has(g.group) || (peer.groupNext.get(g.group) || 0) <= now)
   }
 
   function markGroupsDirty (group) {
@@ -1867,13 +2008,15 @@ async function runSync ({
   function groupUnmet () {
     if (groupList.length === 0) return []
     const unmet = []
+    for (const [g, st] of linkScans) if (st.run) unmet.push(g + ':vínculos')
     const seeders = verifiedSeeders().filter((p) => !p.groupClosed || p.groupPasses.size > 0)
     const live = seeders.some((p) => !p.groupClosed)
-    for (const g of groupList) {
+    for (const g of pagedList()) {
       if (groupBlocked(g.group) || seeders.length === 0) continue
       const passes = []
       for (const p of seeders) if (p.groupPasses.has(g.group)) passes.push(p.groupPasses.get(g.group))
       if (live && !passes.some((x) => x.complete)) unmet.push(g.group + ':páginas')
+      if (g.writer === null) continue
       let pushed = 0
       for (const x of passes) {
         const it = x.items.get(g.writer)
@@ -1939,7 +2082,7 @@ async function runSync ({
   // a target exists only for a writer held in the bounded groupCores table.
   function noteTarget (item) {
     if (!groupCores.has(item.key) || ownWriters.has(item.key)) return
-    if (!groupTargets.has(item.key) && groupTargets.size >= groupList.length * MAX_GROUP_WRITERS) return
+    if (!groupTargets.has(item.key) && groupTargets.size >= coreLimit()) return
     groupTargets.set(item.key, Math.max(groupTargets.get(item.key) || 0, Math.min(item.length, maxLogBlocks)))
   }
 
@@ -2197,6 +2340,11 @@ async function runSync ({
       badHint(peer, 'quota:' + hint, false)
       return
     }
+    // A community has no writers: only its root is ever gated under it.
+    // Protecting an honest seeder from this node's own view of which keys
+    // are communities (a key a community-link names may be a group root to
+    // the seeder): the listing is ignored, never charged.
+    if (item.key !== group && isCommunity(group)) return
     if (groupCores.has(item.key)) {
       noteTarget(item)
       return
@@ -2236,7 +2384,7 @@ async function runSync ({
       refuseForCap(group, item.key)
       return
     }
-    if (groupCores.size >= groupList.length * MAX_GROUP_WRITERS ||
+    if (groupCores.size >= coreLimit() ||
         gatesInFlight(group, item.diary) >= MAX_GROUP_WRITERS_PER_DIARY + MAX_CAP_CONTENDERS) {
       rescanDue.add(group)
       return
@@ -2468,7 +2616,7 @@ async function runSync ({
       if (dcore) await dcore.close().catch(noop)
       return { reason, writerHere, own, local }
     }
-    const ownVerdict = (reason) => reason === 'header-invalid' || reason === 'wrong-group'
+    const ownVerdict = (reason) => reason === 'header-invalid' || reason === 'wrong-group' || reason === 'not-community'
     try {
       let expected = null
       let raw0
@@ -2479,9 +2627,9 @@ async function runSync ({
         if (raw0 === null) return fail('timeout')
         // A stored writer's own validated block 0 names its diary: the page
         // item is only a hint.
-        const own = headerDiary(raw0, e.key, e.group)
+        const own = headerDiary(raw0, e.key, e.group, !groupSet.has(e.group))
         if (own !== null) e.diary = own
-        const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary)
+        const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary, !groupSet.has(e.group))
         if (header) return fail(header, ownVerdict(header))
         writerHere = true
         if (core.fork !== 0) return fail('fork', true)
@@ -2495,7 +2643,7 @@ async function runSync ({
       }
       // The hinted diary is judged against the diary the header names
       // ('wrong-diary') before anything about that diary is believed.
-      const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary)
+      const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, !groupSet.has(e.group))
       if (reason) return fail(reason, ownVerdict(reason))
       if (openHook && writerHere) await openHook(e.diary) // test-only
       if (isBlockedKey(e.diary)) return fail('blocked', false, true)
@@ -2646,6 +2794,17 @@ async function runSync ({
     }
     if (e.state !== 'gating' || ended) {
       await closeOpened()
+      return
+    }
+    // Protecting an honest seeder from this node's own link view: a root
+    // paged only as a linked community that no held group root names any
+    // more when its verdict lands is dropped here, never charged nor
+    // remembered as refused.
+    if (!e.accepted && e.key === e.group && !groupSet.has(e.group) && !linkedCommunities.has(e.group)) {
+      await closeOpened()
+      emit({ event: 'group-skipped', key: e.key, reason: 'unwanted' })
+      e.state = 'failed'
+      dropGroupCore(e.key)
       return
     }
     if (r.reason) {
@@ -3254,6 +3413,7 @@ async function runSync ({
     if (checkGroupQuota(e)) return
     if (e.expected === null) {
       emit({ event: 'group-downloaded', key: e.key, group: e.group, length })
+      if (e.key === e.group) scanLinks(e.group, e.core)
       if (!once) markGroupsDirty(e.group)
       evaluate()
       return
@@ -3280,6 +3440,11 @@ async function runSync ({
     if (e.state === 'failing' || e.state === 'failed') return
     stopGroupCore(e)
     emit({ event: 'group-skipped', key: e.key, reason })
+    // A failed group root no longer names a community this node follows.
+    if (e.key === e.group && linkScans.has(e.group)) {
+      linkScans.delete(e.group)
+      setLinks(e.group, [])
+    }
     const core = e.core
     e.core = null
     // A writer that fails, activated or not, leaves the table once the
@@ -3517,7 +3682,7 @@ async function runSync ({
       }
       case 'have': {
         // Any growth the seeder reports may come with new writers.
-        if (peer.verifiedSeeder && !once && peer.groupDirty) for (const g of groupList) peer.groupDirty.add(g.group)
+        if (peer.verifiedSeeder && !once && peer.groupDirty) for (const g of pagedList()) peer.groupDirty.add(g.group)
         // H1 (cycle 3): only our own key or a followed key, and only when
         // the length this peer advertises for it changed; a repeat does no
         // work at all (no event, no evaluate).
@@ -3787,6 +3952,9 @@ async function runSync ({
     // And every stored diary that forked, with what it binds.
     if (!ending) await sweepForkedDiaries()
     if (!ending) await loadDiskSlots()
+    // Growth while a scan runs marks it to go again (scanLinks `again`).
+    linksReady = true
+    for (const g of groupList) if (g.writer === g.group) scanLinks(g.group, ownWriters.get(g.writer).core)
 
     qstore = await openQuarantine(dataDir, storeOptions)
     if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only

@@ -119,14 +119,16 @@ async function groupLength (s, group) {
   try { return core.length } finally { await core.close() }
 }
 
-test('group RPC handler names match the core session', async (t) => {
+test('group and community RPC handler names match the core session', async (t) => {
   const core = createSession({ dataDir: tmpDir(t), association: KEY, bootstrap: ['127.0.0.1:1'] })
   const browser = createBrowserSession({ storage: memoryNodeStorage(), association: KEY, seederUrl: 'ws://127.0.0.1:9/seeder', createSocket: () => null })
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
-  const keys = (handlers) => Object.keys(handlers).filter((key) => key.startsWith('group.')).sort()
-  t.is(keys(core.handlers).length, 14)
-  t.alike(keys(browser.handlers), keys(core.handlers))
+  const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
+  t.is(keys(core.handlers, 'group.').length, 14)
+  t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
+  t.is(keys(core.handlers, 'community.').length, 4)
+  t.alike(keys(browser.handlers, 'community.'), keys(core.handlers, 'community.'))
 })
 
 test('groups through connectClient: create, join, post, read and local events', async (t) => {

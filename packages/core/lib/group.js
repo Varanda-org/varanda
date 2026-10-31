@@ -21,7 +21,7 @@
 const b4a = require('b4a')
 const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
-  MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_COMMUNITY_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
   charLength, plainCopy, validRecordCopy
 } = require('./records')
@@ -39,10 +39,15 @@ const RECORD_KEYS = {
   'group-ban': ['type', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'],
   'group-meta': ['type', 'name', 'join', 'seen', 'at'],
   'group-admin': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
-  'group-leave': ['type', 'seen', 'cuts', 'at']
+  'group-leave': ['type', 'seen', 'cuts', 'at'],
+  'group-link': ['type', 'group', 'on', 'cuts', 'at'],
+  'community-link': ['type', 'community', 'on', 'cuts', 'at']
 }
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
-const ROOT_ONLY = new Set(['group-meta', 'group-admin'])
+const ROOT_ONLY = new Set(['group-meta', 'group-admin', 'group-link', 'community-link'])
+// A community root (header kind `community`) is a set of groups: it carries
+// no posts or moderation of its own.
+const COMMUNITY_TYPES = new Set(['group-meta', 'group-admin', 'group-link'])
 
 function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
@@ -109,7 +114,7 @@ function checkWriterHeader (h) {
   return isCanonicalIso(h.at) ? null : 'date-invalid'
 }
 
-function checkRecord (record, seq, root) {
+function checkRecord (record, seq, root, community) {
   if (!Number.isSafeInteger(seq) || seq < 0) return 'malformed'
   if (seq === 0) return root ? checkHeader(record) : checkWriterHeader(record)
   if (!isPlainObject(record)) return 'malformed'
@@ -117,9 +122,11 @@ function checkRecord (record, seq, root) {
   if (typeof type !== 'string' || !Object.prototype.hasOwnProperty.call(RECORD_KEYS, type)) return 'malformed'
   if (!hasExactKeys(record, RECORD_KEYS[type])) return 'malformed'
   if (ROOT_ONLY.has(type) && !root) return 'root-only'
+  if (community && !COMMUNITY_TYPES.has(type)) return 'group-only'
+  if (!community && type === 'group-link') return 'community-only'
   // Every writer record may name the newest node its author had seen (seq 0
   // names a rejoining writer's block 0), so it orders after a rejoin.
-  if (record.seen !== null && !validRef(record.seen, 0)) return 'seen-invalid'
+  if (Object.prototype.hasOwnProperty.call(record, 'seen') && record.seen !== null && !validRef(record.seen, 0)) return 'seen-invalid'
   if (type === 'group-post') {
     const { text } = record
     if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
@@ -132,7 +139,8 @@ function checkRecord (record, seq, root) {
     if (!validRef(record.target, 1) || typeof record.on !== 'boolean') return 'malformed'
   } else if (type === 'group-admit' || type === 'group-admin' || type === 'group-ban') {
     if (!isHex64(record.member) || typeof record.on !== 'boolean') return 'malformed'
-    if (!validCuts(record.cuts)) return 'cuts-invalid'
+    // A community admin's writers spread across the linked groups.
+    if (!validCuts(record.cuts, community && type === 'group-admin' ? MAX_COMMUNITY_CUTS : MAX_GROUP_CUTS)) return 'cuts-invalid'
     // An unban names the ban it lifts; a ban lifts nothing.
     if (type === 'group-ban' && (record.on ? record.lifts !== null : !validRef(record.lifts, 1))) return 'lifts-invalid'
   } else if (type === 'group-meta') {
@@ -141,6 +149,9 @@ function checkRecord (record, seq, root) {
       if (reason) return reason
     }
     if (record.join !== 'open' && record.join !== 'approval') return 'malformed'
+  } else if (type === 'group-link' || type === 'community-link') {
+    if (!isHex64(type === 'group-link' ? record.group : record.community) || typeof record.on !== 'boolean') return 'malformed'
+    if (!validCuts(record.cuts)) return 'cuts-invalid'
   }
   return isCanonicalIso(record.at) ? null : 'date-invalid'
 }
@@ -163,16 +174,17 @@ function validateWriterHeader (record) {
 }
 
 // Seq 0 is the header (group-header in the root, group-writer elsewhere).
-function validateGroupRecord (record, seq, { root = false } = {}) {
+// `community` marks the root of a community (its header kind).
+function validateGroupRecord (record, seq, { root = false, community = false } = {}) {
   try {
-    return checkRecord(record, seq, root === true)
+    return checkRecord(record, seq, root === true, root === true && community === true)
   } catch {
     return 'malformed'
   }
 }
 
-function build (record, seq, root) {
-  const reason = validateGroupRecord(record, seq, { root })
+function build (record, seq, root, community = false) {
+  const reason = validateGroupRecord(record, seq, { root, community })
   if (reason) throw new TypeError(reason)
   return record
 }
@@ -223,12 +235,44 @@ function groupLeave ({ seen = null, cuts = [], at = nowIso() } = {}) {
   return build({ type: 'group-leave', seen: copyRef(seen), cuts: copyCuts(cuts), at }, 1, false)
 }
 
+// A group-admin in a community root: cuts up to MAX_COMMUNITY_CUTS.
+function communityAdmin ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-admin', member, on, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, true, true)
+}
+
+function groupLink ({ group, on, cuts = [], at = nowIso() } = {}) {
+  return build({ type: 'group-link', group, on, cuts: copyCuts(cuts), at }, 1, true, true)
+}
+
+function communityLink ({ community, on, cuts = [], at = nowIso() } = {}) {
+  return build({ type: 'community-link', community, on, cuts: copyCuts(cuts), at }, 1, true)
+}
+
+// Stands in for a record too deep (or otherwise unfit) to copy: it is never
+// valid, but its seq still counts as held so readLog sees a fork.
+const UNREADABLE = Symbol('unreadable')
+
 function eachEntry (entries, fn) {
   if (!Array.isArray(entries)) return
   for (let i = 0; i < entries.length; i++) {
     const e = plainCopy(entries[i])
-    if (e === null || !Number.isSafeInteger(e.seq) || e.seq < 0) continue
+    if (e === null) {
+      const seq = unreadableSeq(entries[i])
+      if (seq !== null) fn(seq, UNREADABLE)
+      continue
+    }
+    if (!Number.isSafeInteger(e.seq) || e.seq < 0) continue
     fn(e.seq, e.record)
+  }
+}
+
+function unreadableSeq (entry) {
+  try {
+    if (!isPlainObject(entry)) return null
+    const seq = entry.seq
+    return Number.isSafeInteger(seq) && seq >= 0 ? seq : null
+  } catch {
+    return null
   }
 }
 
@@ -322,18 +366,117 @@ class Heap {
 }
 
 // Valid records of one core: header (seq 0) and the rest by seq. The first
-// valid copy of a seq wins.
-function readLog (entries, root) {
-  const bySeq = new Map()
+// valid copy of a seq wins. A root's records are checked against its header
+// kind (`fallback` stands in for a header the entries lack). `raw` maps every
+// seq held, valid or not, to a canonical text of its block (the one chosen,
+// else the first), so mergeCopies sees any difference as a fork.
+function readLog (entries, root, fallback = null) {
+  const copies = new Map()
+  const firstRaw = new Map()
   eachEntry(entries, (seq, record) => {
-    if (bySeq.has(seq)) return
-    const copy = plainCopy(record)
-    if (copy !== null && validateGroupRecord(copy, seq, { root }) === null) bySeq.set(seq, copy)
+    const copy = record === UNREADABLE ? null : plainCopy(record)
+    if (!firstRaw.has(seq)) firstRaw.set(seq, record === UNREADABLE ? '#unreadable' : copy === null ? '#' : safeCanon(copy))
+    if (copy !== null) pushTo(copies, seq, copy)
   })
-  const header = bySeq.get(0) || null
-  bySeq.delete(0)
+  const first = (seq, opts) => (copies.get(seq) || []).find((c) => validateGroupRecord(c, seq, opts) === null)
+  let header = first(0, { root }) || null
+  if (header === null && root && fallback !== null) {
+    const copy = plainCopy(fallback)
+    if (copy !== null && validateGroupHeader(copy) === null) header = copy
+  }
+  const community = root && header !== null && header.kind === 'community'
+  const bySeq = new Map()
+  for (const seq of copies.keys()) {
+    if (seq === 0) continue
+    const copy = first(seq, { root, community })
+    if (copy) bySeq.set(seq, copy)
+  }
   const records = [...bySeq.keys()].sort((a, b) => a - b).map((seq) => ({ seq, record: bySeq.get(seq) }))
-  return { header, records }
+  const raw = new Map(firstRaw)
+  for (const r of records) raw.set(r.seq, safeCanon(r.record))
+  const h0 = first(0, { root })
+  if (h0) raw.set(0, safeCanon(h0))
+  return { header, records, raw }
+}
+
+// A stable text of a plain value, so copies compare whatever their key order.
+// Iterative, so a deeply nested block from a peer cannot overflow the stack;
+// a cycle throws.
+function canon (value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  const out = []
+  const stack = []
+  const open = new Set()
+  const emit = (v, inArray) => {
+    if (v !== null && typeof v === 'object') {
+      if (open.has(v)) throw new TypeError('cycle')
+      open.add(v)
+      const array = Array.isArray(v)
+      out.push(array ? '[' : '{')
+      stack.push({ v, keys: array ? null : Object.keys(v).sort(), i: 0 })
+      return
+    }
+    const s = JSON.stringify(v)
+    out.push(s !== undefined ? s : inArray ? '' : 'undefined')
+  }
+  emit(value, false)
+  while (stack.length > 0) {
+    const f = stack[stack.length - 1]
+    const n = f.keys === null ? f.v.length : f.keys.length
+    if (f.i === n) {
+      out.push(f.keys === null ? ']' : '}')
+      open.delete(f.v)
+      stack.pop()
+      continue
+    }
+    if (f.i > 0) out.push(',')
+    if (f.keys === null) {
+      emit(f.v[f.i++], true)
+    } else {
+      const k = f.keys[f.i++]
+      out.push(JSON.stringify(k) + ':')
+      emit(f.v[k], false)
+    }
+  }
+  return out.join('')
+}
+
+// canon for a block's comparison text in readLog, which must never throw: a
+// value canon cannot render (a BigInt, a cycle) still reads as held and
+// different from any valid block.
+function safeCanon (v) {
+  try {
+    return canon(v)
+  } catch {
+    return '#unreadable'
+  }
+}
+
+// Several copies of one core (each { header, records, raw } from readLog)
+// merged by seq, so the result never depends on their order. Copies whose
+// blocks differ at any seq, valid or not, or whose headers differ are a fork:
+// null, and the caller ignores the core. A copy without a block 0 (and no
+// fallback header) brings no header and takes no part in that comparison.
+function mergeCopies (logs) {
+  const headed = logs.filter((l) => l.header !== null || l.raw.has(0))
+  const base = headed.length > 0 ? headed[0] : logs[0]
+  const header = canon(base.header)
+  for (const log of headed) if (canon(log.header) !== header) return null
+  const rawBy = new Map()
+  const bySeq = new Map()
+  for (const log of logs) {
+    for (const [seq, text] of log.raw) {
+      const prev = rawBy.get(seq)
+      if (prev === undefined) rawBy.set(seq, text)
+      else if (prev !== text) return null
+    }
+    for (const r of log.records) {
+      const prev = bySeq.get(r.seq)
+      if (prev === undefined) bySeq.set(r.seq, r)
+      else if (canon(prev.record) !== canon(r.record)) return null
+    }
+  }
+  return { ...base, records: [...bySeq.values()].sort((a, b) => a.seq - b.seq) }
 }
 
 function emptyGroup () {
@@ -344,6 +487,7 @@ function emptyGroup () {
     visibility: null,
     creator: null,
     admins: new Set(),
+    community: null,
     members: new Map(),
     posts: [],
     requests: [],
@@ -424,7 +568,7 @@ function referencesOf (record, root) {
     refs.push(record.target)
   } else if (t === 'group-leave') {
     for (const c of record.cuts) if (c.seq >= 1 && c.writer === root) refs.push({ writer: c.writer, seq: c.seq - 1 })
-  } else if (t === 'group-admit' || t === 'group-ban' || t === 'group-admin') {
+  } else if (t === 'group-admit' || t === 'group-ban' || t === 'group-admin' || t === 'community-link') {
     for (const c of record.cuts) if (c.seq >= 1) refs.push({ writer: c.writer, seq: c.seq - 1 })
     if (t === 'group-ban' && record.lifts) refs.push(record.lifts)
   }
@@ -660,6 +804,220 @@ function leaveWithdrawal (order, logs, root) {
   }
 }
 
+// Communities. A community C is the key of a root whose header kind is
+// `community`, written by its creator only. A group G and C are linked only
+// while both sides are on: G's root carries `community-link { community: C }`
+// and C's root `group-link { group: G }`. Links and community admin records
+// are layers keyed by G's writers, with PR1's group-admin rule: an `on: true`
+// link or grant starts only the writers its cuts list, each from its cut (an
+// unlisted writer gets nothing, nothing is retroactive), and an `on: false`
+// one cuts every listed writer at its cut and every other writer at 0 (a
+// writer the cuts never saw could hold backdated moderation no cut can place).
+//
+// How they combine, for a writer w of diary d at seq s (owner decision:
+// appointing is enough, no group creator has to act for a new admin or a new
+// device). A community admin acts when its grant lists w at or below s, no
+// later demotion cutting it, and both link sides are on for w at s. A link
+// cut only RAISES the start of the writers it lists: start = max(grant
+// start, group-side cut if that side lists w, community-side cut if it lists
+// w); a writer no link lists is bounded by the grant alone. The community
+// creator has no grant: its own side (the group-link it writes in its root,
+// holding its own devices) must list w, and the group side raises the start
+// when it lists w. So a new admin device needs a grant only, and a new
+// creator device a community-side group-link only. Accepted residual: a
+// device that existed before the link and that the group side did not list
+// counts from its grant start.
+//
+// An unlink (`on: false`, either side) cuts each listed writer at its cut
+// and every other writer at 0. After a side's first unlink, a relink on that
+// side counts only for the writers it lists, from their cut: a relink
+// without cuts restores nothing, and a writer the relink does not list
+// needs a new link on that side.
+//
+// A community root carries authority only when its creator's diary bound it
+// with a join { group: C, writer: C, on: true } (the `joins` of the root, as
+// for a group root): anyone can name any diary in a header.
+
+// Accepted community-link records of a root in order: one community at a
+// time, so a link to another community while one is on is ignored, and an
+// unlink counts only for the community that is on (an unlink of a link that
+// was ignored, or is already off, changes nothing).
+function oneAtATime (records) {
+  const out = []
+  let current = null
+  for (const r of records) {
+    if (r.on) {
+      if (current !== null && current !== r.community) continue
+      current = r.community
+    } else if (current === r.community) {
+      current = null
+    } else {
+      continue
+    }
+    out.push(r)
+  }
+  return out
+}
+
+// Appends one link record to the two layers of a side: `strict` (only the
+// listed writers start) and `open` (an unlisted writer is left to the other
+// bounds, until the side's first unlink). The `on: true` links since the
+// side's last unlink fold into one event whose start per writer is the cut
+// of the first of them that lists it: a repeated link only adds writers and
+// never moves a start (nodes list every writer at its current length, so
+// raising would void earlier actions); raising a start takes an unlink or a
+// demotion. The period's two events share one map that grows in place
+// (copying it per record would make repeated links quadratic); an unlink
+// ends the period, so a later one gets a fresh map and the earlier events
+// never change again.
+function pushLink (map, k, r) {
+  let side = map.get(k)
+  if (!side) {
+    side = { strict: [], open: [], closed: false, starts: null }
+    map.set(k, side)
+  }
+  if (!r.on) {
+    const cuts = cutsMap(r.cuts)
+    side.strict.push({ on: false, cuts, unlisted: 0 })
+    side.open.push({ on: false, cuts, unlisted: 0 })
+    side.closed = true
+    side.starts = null
+    return
+  }
+  if (side.starts === null) {
+    side.starts = new Map()
+    side.strict.push({ on: true, cuts: side.starts, unlisted: Infinity })
+    side.open.push({ on: true, cuts: side.starts, unlisted: side.closed ? Infinity : 0 })
+  }
+  for (const c of r.cuts) {
+    if (!side.starts.has(c.writer)) side.starts.set(c.writer, c.seq)
+  }
+}
+
+// The group side: `links` are the root's community-link records in order as
+// { record, out } (out: withdrawn by a creator's leave). The one-community
+// rule runs on the raw order first, so a withdrawn link to A never promotes a
+// link to B written while A was on; then again on what survives withdrawal.
+// Map community -> { strict, open, closed }.
+function groupSideEvents (links) {
+  const raw = new Set(oneAtATime(links.map((x) => x.record)))
+  const out = new Map()
+  for (const r of oneAtATime(links.filter((x) => !x.out && raw.has(x.record)).map((x) => x.record))) pushLink(out, r.community, r)
+  return out
+}
+
+// The copies of community roots in `list` ({ key, header?, entries, joins? }),
+// as key -> { logs, bound }: every copy with a block 0 counts, whatever its
+// header kind and even when that block is invalid, so a copy whose block 0
+// differs is seen as a fork. `bound` holds the pairs the copies' `joins` bind.
+function communityCopies (list) {
+  const out = new Map()
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i]
+    if (!isPlainObject(c) || !isHex64(c.key)) continue
+    const log = readLog(c.entries, true, c.header === undefined ? null : c.header)
+    if (log.header === null && !log.raw.has(0)) continue
+    let x = out.get(c.key)
+    if (!x) {
+      x = { logs: [], bound: new Set() }
+      out.set(c.key, x)
+    }
+    x.logs.push(log)
+    for (const pair of readJoins(c.joins).bound) x.bound.add(pair)
+  }
+  return out
+}
+
+// One community root from its copies: 'fork' when they disagree, 'invalid'
+// when they agree on a block 0 that is no valid header, null when it is not
+// a community, else { key, header, records, bound }. An unbound root keeps
+// only its header: no admins, no links, no creator.
+function mergeCommunity (key, { logs, bound }) {
+  const log = mergeCopies(logs)
+  if (log === null) return 'fork'
+  if (log.header === null) return 'invalid'
+  if (log.header.kind !== 'community') return null
+  const ok = bound.has(log.header.diary + ':' + key)
+  return { key, header: log.header, records: ok ? log.records : [], bound: ok }
+}
+
+// The state of one community from its own root: admins (layers per diary,
+// the creator excluded), its live group links with at most
+// MAX_GROUPS_PER_COMMUNITY on in record order (a link over the cap is
+// ignored), and, for group G, the community side events of that link.
+function communityState (c, G) {
+  const creator = c.bound ? c.header.diary : null
+  const admins = new Map()
+  const on = new Set()
+  const sides = new Map()
+  let name = c.header.visibility === 'public' ? c.header.name : null
+  for (const { record: r } of c.records) {
+    if (r.type === 'group-admin') {
+      if (r.member !== creator) pushTo(admins, r.member, { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 })
+    } else if (r.type === 'group-link') {
+      if (r.on) {
+        if (!on.has(r.group) && on.size >= MAX_GROUPS_PER_COMMUNITY) continue
+        on.add(r.group)
+      } else {
+        // An unlink of a link that is not on (ignored at the cap, or
+        // already off) changes nothing.
+        if (!on.has(r.group)) continue
+        on.delete(r.group)
+      }
+      if (r.group === G) pushLink(sides, G, r)
+    } else if (r.type === 'group-meta' && c.header.visibility === 'public') {
+      name = r.name
+    }
+  }
+  return { key: c.key, creator, name, admins, on, side: sides.get(G) || null }
+}
+
+// The communities given to buildGroup, keyed by root, the copies of a root
+// merged (mergeCopies) whatever their header kind. A forked root is ignored
+// and reads as incomplete. `given` also lists roots that are not
+// communities, so naming one does not read as missing, but not an unbound
+// community root nor an entry without a block 0: a link to one reads as
+// incomplete.
+function readCommunities (list, G) {
+  const byKey = new Map()
+  const given = new Set()
+  let forked = false
+  if (!Array.isArray(list)) return { byKey, given, forked }
+  // Only a root with a block 0 is given: an entry without one is missing.
+  for (const [k, copies] of communityCopies(list)) {
+    given.add(k)
+    if (k === G) continue
+    const c = mergeCommunity(k, copies)
+    if (c === 'fork') forked = true
+    if (c === 'fork' || c === null) continue
+    if (c === 'invalid' || !c.bound) given.delete(k)
+    else byKey.set(k, communityState(c, G))
+  }
+  return { byKey, given, forked }
+}
+
+// The communities whose two sides both named G at some point; `links` as
+// groupSideEvents takes them.
+function linkedCommunities (links, byKey) {
+  const out = []
+  for (const [k, groupSide] of groupSideEvents(links)) {
+    const c = byKey.get(k)
+    if (c && c.side !== null) out.push({ key: k, creator: c.creator, admins: c.admins, groupSide, side: c.side })
+  }
+  return out
+}
+
+function linkedNow (c) {
+  return lastOn(c.groupSide.strict) && lastOn(c.side.strict)
+}
+
+// Whether diary d acts through community c at (w, s), by the rule above.
+function communityPower (c, d, w, s) {
+  if (!layerAt(c.groupSide.open, w, s)) return false
+  if (d === c.creator) return layerAt(c.side.strict, w, s)
+  return layerAt(c.side.open, w, s) && layerAt(c.admins.get(d), w, s)
+}
+
 // The pure fold of a group. Input: the root core, the writer cores
 // ({ key, entries, diary }), every diary's group-join history for this group
 // (Map diary -> [{ writer, on, seq }], groupJoinHistory) and `now`. The
@@ -669,7 +1027,10 @@ function leaveWithdrawal (order, logs, root) {
 // demotes admins (with cuts on the admin's writers), a ban or admit can never
 // target the creator or an admin of the final root state, and a ban or an
 // unban counts in causal order, an unban only when it lifts the latest ban
-// seen for that diary. `communities` is reserved (community admins).
+// seen for that diary. `communities` lists the community roots held
+// ({ key, header, entries }): the creator and admins of a community linked
+// from both sides act as group admins (ban, admit, hide), cannot be banned
+// and need no admit there, and never appoint group admins.
 function buildGroup (input) {
   try {
     return fold(input)
@@ -691,7 +1052,7 @@ function fold (input) {
   const rootBound = bound.has(creator + ':' + G)
   let incomplete = !rootBound
 
-  const candidates = new Map()
+  const copies = new Map()
   if (Array.isArray(writers)) {
     for (let i = 0; i < writers.length; i++) {
       const w = writers[i]
@@ -699,13 +1060,23 @@ function fold (input) {
       const key = w.key
       if (!isHex64(key) || key === G) continue
       const log = readLog(w.entries, false)
-      const h = log.header
-      if (h === null || h.group !== G || h.diary !== w.diary || !bound.has(h.diary + ':' + key)) continue
-      const prev = candidates.get(key)
-      if (!prev || log.records.length > prev.records.length) {
-        candidates.set(key, { key, diary: h.diary, rejoin: h.rejoin, at: h.at, records: log.records })
-      }
+      if (log.header === null && !log.raw.has(0)) continue
+      pushTo(copies, key, { log, diary: w.diary })
     }
+  }
+  // Every copy with a block 0 takes part in the merge, whatever its header
+  // names and even when that block is invalid, so a copy with another block
+  // 0 is seen as a fork; the header is validated only after the merge. A forked writer
+  // counts as missing: the named check below marks it. The merged header
+  // must name G and a diary that bound the writer, and some copy must be
+  // given for that diary.
+  const candidates = new Map()
+  for (const [key, list] of copies) {
+    const log = mergeCopies(list.map((x) => x.log))
+    if (log === null || log.header === null) continue
+    const h = log.header
+    if (h.group !== G || !bound.has(h.diary + ':' + key) || !list.some((x) => x.diary === h.diary)) continue
+    candidates.set(key, { key, diary: h.diary, rejoin: h.rejoin, at: h.at, records: log.records })
   }
   // A root its creator's diary never bound carries no authority and no
   // posts: anyone can name any diary in a header. Only the header is read.
@@ -716,16 +1087,16 @@ function fold (input) {
     if (w !== G && !valid.has(w) && !rejected.has(w)) incomplete = true
   }
   const capped = capPerDiary(valid, joinSeq, rootBound ? creator : null)
-  const rootAdmins = new Set()
-  const lastGrant = new Map()
-  for (const { record } of rootRecords) {
-    if (record.type === 'group-admin' && record.member !== creator) lastGrant.set(record.member, record.on)
+  // A community root never takes community powers itself (no nesting).
+  const { byKey, given, forked } = header.kind === 'group' ? readCommunities(input.communities, G) : { byKey: new Map(), given: new Set(), forked: false }
+  if (forked) incomplete = true
+  for (const { record: r } of rootRecords) {
+    if (r.type === 'community-link' && !given.has(r.community)) incomplete = true
   }
-  for (const [d, on] of lastGrant) if (on) rootAdmins.add(d)
   // Over the group cap the creator's and the admins' writers go first, so
   // moderation is never evicted, and banned diaries last.
-  const select = (banned) => {
-    const tier = (c) => (rootBound && c.diary === creator) ? 0 : rootAdmins.has(c.diary) ? 1 : banned.has(c.diary) ? 3 : 2
+  const select = (banned, admins) => {
+    const tier = (c) => (rootBound && c.diary === creator) ? 0 : admins.has(c.diary) ? 1 : banned.has(c.diary) ? 3 : 2
     const ranked = capped.slice().sort((a, b) => (tier(a) - tier(b)) || cmp(a.key, b.key))
     const keptKeys = new Set(ranked.slice(0, MAX_GROUP_WRITERS - 1).map((c) => c.key))
     // The cap must not keep a rejoin whose leave it dropped: the fold would
@@ -745,12 +1116,20 @@ function fold (input) {
     }
     return { kept: [...keptKeys].sort(cmp).map((k) => valid.get(k)), dropped }
   }
-  const ctx = { G, header, creator, rootBound, rootEntry, now }
+  const ctx = { G, header, creator, rootBound, rootEntry, now, communities: byKey }
   const over = capped.length > MAX_GROUP_WRITERS - 1
-  let sel = select(new Set())
+  let sel = select(new Set(), new Set())
   // The final ban layer depends on the writers kept: a first pass ranks
-  // without it, the second puts the diaries it bans last.
-  if (over) sel = select(new Set(foldLogs(ctx, sel.kept).bans.keys()))
+  // without it, the second puts the diaries it bans last. Both rank by the
+  // admins a fold of the root and the creator's writers finds: leaves
+  // withdraw root records only through the creator's own writers, so a
+  // community link or grant a creator leave withdrew gives no priority.
+  if (over) {
+    const own = capped.filter((c) => rootBound && c.diary === creator)
+    const admins = foldLogs(ctx, own).admins
+    const first = foldLogs(ctx, select(new Set(), admins).kept)
+    sel = select(new Set(first.bans.keys()), first.admins)
+  }
   if (over || sel.dropped) incomplete = true
   const result = foldLogs(ctx, sel.kept)
   result.incomplete = incomplete
@@ -815,7 +1194,7 @@ function observedLeaves (order, logs) {
   }
 }
 
-function foldLogs ({ G, header, creator, rootBound, rootEntry, now }, kept) {
+function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities }, kept) {
   const logs = [rootEntry, ...kept]
   const writerDiary = new Map(logs.map((l) => [l.key, l.diary]))
   // The header names any diary it likes: creator powers come only from a
@@ -849,13 +1228,20 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now }, kept) {
   let name = header.name
   let join = header.join
 
-  const isAdmin = (d, w, s) => layerAt(rootAdmin.get(d), w, s)
+  // The root's community links in causal order: a creator's leave withdraws
+  // the links after its cut like any other root record.
+  const links = order.filter((n) => n.writer === G && n.record.type === 'community-link').map((n) => ({ record: n.record, out: withdrawn(n) }))
+  const linked = linkedCommunities(links, communities)
+  const communityAt = (d, w, s) => linked.some((c) => communityPower(c, d, w, s))
+  const communityNow = (d) => linked.some((c) => linkedNow(c) && (d === c.creator || lastOn(c.admins.get(d))))
+  const isAdmin = (d, w, s) => layerAt(rootAdmin.get(d), w, s) || communityAt(d, w, s)
   const authorized = (n) => !withdrawn(n) && (n.diary === owner ||
     (isAdmin(n.diary, n.writer, n.seq) && !layerAt(bans.get(n.diary), n.writer, n.seq)))
   // From the final root state, never from the causal position: shielding by
   // position would let clock skew decide whether two admins can ban each
   // other. A demoted admin loses the shield entirely.
-  const shielded = (d) => d === owner || lastOn(rootAdmin.get(d))
+  const adminNow = (d) => lastOn(rootAdmin.get(d)) || communityNow(d)
+  const shielded = (d) => d === owner || adminNow(d)
 
   // The newest node in causal order, a rejoin's block 0 included: a new post
   // names it as `seen`, so a post sent after a rejoin never sorts before it.
@@ -984,15 +1370,22 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now }, kept) {
     if (d === owner) status = left.has(d) ? 'left' : 'member'
     else if (lastOn(bans.get(d))) status = 'banned'
     else if (left.has(d)) status = 'left'
-    else if (join === 'approval' && !admittedNow(d, leaves.get(d) || 0) && !lastOn(rootAdmin.get(d))) status = 'requested'
+    else if (join === 'approval' && !admittedNow(d, leaves.get(d) || 0) && !adminNow(d)) status = 'requested'
     else status = 'member'
     members.set(d, status)
     if (status === 'requested' || (status === 'member' && d !== owner && join === 'approval' &&
-      !lastOn(rootAdmin.get(d)) && uncovered(d))) requests.push(d)
+      !adminNow(d) && uncovered(d))) requests.push(d)
   }
   const admins = new Set(owner !== null ? [owner] : [])
-  for (const d of [...rootAdmin.keys()].sort(cmp)) {
-    if (lastOn(rootAdmin.get(d))) admins.add(d)
+  const candidatesNow = [...rootAdmin.keys()]
+  let community = null
+  for (const c of linked) {
+    if (!linkedNow(c)) continue
+    community = c.key
+    candidatesNow.push(c.creator, ...c.admins.keys())
+  }
+  for (const d of [...new Set(candidatesNow)].sort(cmp)) {
+    if (adminNow(d)) admins.add(d)
   }
   // The leave a rejoining writer must name, for every diary that left.
   const leaveRefs = new Map()
@@ -1014,6 +1407,8 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now }, kept) {
     visibility: header.visibility,
     creator,
     admins,
+    // The community linked from both sides now, or null.
+    community,
     members,
     posts,
     requests,
@@ -1028,12 +1423,93 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now }, kept) {
   }
 }
 
+function emptyCommunity () {
+  return { name: null, creator: null, admins: new Set(), groups: [], incomplete: true }
+}
+
+// The pure fold of a community root: `root` is its key (or { key, entries,
+// joins }), `joins` the creator diary's group-join history for the root
+// (Map diary -> [{ writer, on, seq }], as buildGroup takes it), `groups` the
+// groups held, each { key, entries, writers?, joins? } as buildGroup takes
+// them. A root its creator's diary never bound (join { group: C, writer: C,
+// on: true }) has no creator, no admins and no groups, and is incomplete.
+// With `groups` the result lists a group only when buildGroup, given this
+// community, names it as the group's community: the same one-community rule
+// and leave withdrawal (a root of kind community is a nesting attempt and
+// never counts; a group not held, held in forked copies, or whose fold is
+// incomplete sets `incomplete`, and a group is still listed only when
+// linked). Leaves on the group creator's other writers are seen only when
+// the item carries `writers` and `joins`. When no item carries `joins` the
+// group root is read as bound to its header's diary, so that view is
+// advisory and buildGroup is the authority inside a group; `joins` given,
+// even empty, are used as they are. Without `groups`, the community's own
+// live links. Never throws.
+function buildCommunity (input) {
+  try {
+    return foldCommunity(input || {})
+  } catch {
+    return emptyCommunity()
+  }
+}
+
+function foldCommunity ({ root, header, entries, joins, groups, now }) {
+  const obj = isPlainObject(root)
+  const key = obj ? root.key : root
+  const self = {
+    key,
+    header,
+    entries: entries === undefined && obj ? root.entries : entries,
+    joins: joins === undefined && obj ? root.joins : joins
+  }
+  const copies = communityCopies([self]).get(key)
+  const c = copies ? mergeCommunity(key, copies) : null
+  if (c === null || c === 'fork') return emptyCommunity()
+  const state = communityState(c, null)
+  if (!c.bound) return { ...emptyCommunity(), name: state.name }
+  const admins = new Set([state.creator])
+  for (const d of [...state.admins.keys()].sort(cmp)) if (lastOn(state.admins.get(d))) admins.add(d)
+  let list = [...state.on].sort(cmp)
+  let incomplete = false
+  if (Array.isArray(groups)) {
+    const held = new Map()
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i]
+      if (isPlainObject(g) && isHex64(g.key)) pushTo(held, g.key, g)
+    }
+    list = list.filter((g) => {
+      const items = held.get(g)
+      const log = items ? mergeCopies(items.map((x) => readLog(x.entries, true))) : null
+      if (log === null || log.header === null) {
+        incomplete = true
+        return false
+      }
+      const writers = []
+      const joins = new Map()
+      let given = false
+      for (const x of items) {
+        if (Array.isArray(x.writers)) writers.push(...x.writers)
+        if (x.joins === undefined) continue
+        given = true
+        if (!(x.joins instanceof Map)) continue
+        for (const [d, l] of x.joins) if (Array.isArray(l)) joins.set(d, [...(joins.get(d) || []), ...l])
+      }
+      if (!given) joins.set(log.header.diary, [{ writer: g, on: true, seq: 0 }])
+      const rootEntries = [{ seq: 0, record: log.header }, ...log.records]
+      const built = buildGroup({ root: { key: g, entries: rootEntries }, writers, joins, communities: [self], now })
+      if (built.incomplete) incomplete = true
+      return built.community === c.key
+    })
+  }
+  return { name: state.name, creator: state.creator, admins, groups: list, incomplete }
+}
+
 module.exports = {
   MAX_FUTURE_MS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
+  MAX_COMMUNITY_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   GROUP_TYPES,
@@ -1049,10 +1525,14 @@ module.exports = {
   groupMeta,
   groupAdmin,
   groupLeave,
+  communityAdmin,
+  groupLink,
+  communityLink,
   groupJoins,
   groupJoinHistory,
   orderKey,
   compareOrder,
   isFuture,
-  buildGroup
+  buildGroup,
+  buildCommunity
 }

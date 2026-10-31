@@ -676,13 +676,18 @@ function writeFollows (dataDir, list) {
 
 function readGroups (dataDir) {
   const data = readJson(path.join(dataDir, 'groups.json'), null)
-  return data && data.v === 1 && Array.isArray(data.groups) ? data.groups : []
+  if (!data || data.v !== 1 || !Array.isArray(data.groups)) return []
+  // An unknown kind skips that entry only: an empty read could make callers
+  // rewrite the file and lose every other membership.
+  return data.groups.filter((g) => !(g && typeof g === 'object' && g.kind !== undefined && g.kind !== 'community'))
 }
 
 function writeGroups (dataDir, groups) {
   writeJsonAtomic(path.join(dataDir, 'groups.json'), {
     v: 1,
-    groups: groups.map(({ group, writer, nonce }) => ({ group, writer, nonce }))
+    groups: groups.map(({ group, writer, nonce, kind }) => kind === 'community'
+      ? { group, writer, nonce, kind }
+      : { group, writer, nonce })
   }, 0o600)
 }
 

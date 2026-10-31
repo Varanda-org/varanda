@@ -294,6 +294,10 @@ const USAGE_MESSAGES = new Set([
   'sem permissão no grupo',
   'limite de grupos atingido',
   'limite do grupo atingido',
+  'sem permissão na comunidade',
+  'limite da comunidade atingido',
+  'o grupo já está em outra comunidade',
+  'o criador da comunidade já administra',
   'nada a alterar',
   'diretório não é de um membro',
   'associação diferente da configurada',
@@ -318,6 +322,7 @@ const NOT_FOUND_MESSAGES = new Set([
   'identidade não encontrada',
   'sem dados locais para este diário',
   'grupo não encontrado',
+  'comunidade não encontrada',
   SEEDER_UNAVAILABLE,
   DIARY_UNAVAILABLE
 ])
@@ -1262,31 +1267,41 @@ function createBrowserSession ({
     return [...new Set([entry.key, ...(entry.rootNonce === null ? [] : [entry.group])])]
   }
 
-  function groupWrite (operation) {
+  // The own cores a group write may touch (the write gate waits for each),
+  // and the keys whose groups.changed it emits: `roots` lists the group or
+  // community roots of the params, `changed` the keys after the write.
+  const GROUP_ROOTS = (params) => [params.group]
+  const GROUP_CHANGED = async (c, result, params) => [result.group || params.group]
+
+  function groupWrite (operation, { roots = GROUP_ROOTS, changed = GROUP_CHANGED } = {}) {
     return serial(async (params, epoch, generation) => {
       checkGroupOperation(epoch, generation)
       await requireUnlocked()
       groupWriting = true
       try {
-        const keys = await ownGroupKeys(params.group)
+        const keys = []
+        for (const root of roots(params)) keys.push(...await ownGroupKeys(root))
         checkGroupOperation(epoch, generation)
-        await ensureCaughtUp(epoch, keys, generation)
+        await ensureCaughtUp(epoch, [...new Set(keys)], generation)
         const result = await withStore(async (c) => {
           checkGroupOperation(epoch, generation)
           const result = await operation(c, params)
-          const group = result.group || params.group
+          const groups = [...new Set(await changed(c, result, params))]
           // A join can create a writer after the previous run took its snapshot.
           // The next run opens every own writer from the updated kv list.
-          for (const key of await ownGroupKeys(group)) {
-            const core = await store.openGroupCoreReadOnly(storage, key)
-            if (core === null) continue
-            try {
-              groupUnpushed.set(key, core.length)
-              groupLengths.set(key, core.length)
-            } finally { await core.close() }
+          const written = new Set([...roots(params), result.group, result.community].filter((k) => typeof k === 'string'))
+          for (const group of written) {
+            for (const key of await ownGroupKeys(group)) {
+              const core = await store.openGroupCoreReadOnly(storage, key)
+              if (core === null) continue
+              try {
+                groupUnpushed.set(key, core.length)
+                groupLengths.set(key, core.length)
+              } finally { await core.close() }
+            }
           }
           await member.withIdentity(c, async ({ diary }) => { wrote(diary.length - 1) })
-          send('groups.changed', { group }, epoch)
+          for (const group of groups) send('groups.changed', { group }, epoch)
           return result
         })
         checkGroupOperation(epoch, generation)
@@ -1775,6 +1790,19 @@ function createBrowserSession ({
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide),
     'group.meta': groupWrite(member.groupMeta),
+    'community.create': groupWrite(member.communityCreate, {
+      roots: () => [],
+      changed: async (c, result) => [result.community]
+    }),
+    'community.link': groupWrite(member.communityLink, {
+      roots: (params) => [params.community, params.group],
+      changed: async (c, result) => [result.community, result.group]
+    }),
+    'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
+    'community.admin': groupWrite(member.communityAdmin, {
+      roots: (params) => [params.community],
+      changed: async (c, result) => [result.community, ...await member.communityGroups(c, { community: result.community })]
+    }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection

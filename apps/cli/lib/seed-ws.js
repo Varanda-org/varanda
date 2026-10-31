@@ -90,6 +90,8 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   are null until the seeder has verified the root's header (they stay
 //   while a writer of G is served after the root was purged or refused, with
 //   rootServed false and creator null), `name` stays null for a private root.
+//   `community` is the community the group is linked with from both sides
+//   (hex64), or null.
 //   /index/groups/<D> -> indexGroups: `{ groups: [{ group, writer, seq,
 //   left }] (one per group, at most 64), indexing, complete }`.
 //   /index/group-search/<segment> (the segment as in /index/search) ->
@@ -98,6 +100,10 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
+// - /index/community/<C> -> Seeder#indexCommunity: `{ name, groups: [{ group,
+//   name, writerCount }] (linked from both sides, at most 32), indexing,
+//   complete }`; a blocked key or one that is no community root here is
+//   the generic 404.
 // - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
 //   (at most 20 like/repost record refs, newest first by the engager's at).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
@@ -194,6 +200,7 @@ const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7
 const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
@@ -484,12 +491,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexGroups', [m[1]]]
     m = INDEX_GROUP_SEARCH_RE.exec(url)
     if (m) return ['indexGroupSearch', [m[1]], searchBody]
+    m = INDEX_COMMUNITY_RE.exec(url)
+    if (m) return ['indexCommunity', [m[1]], communityBody]
     return null
   }
 
   // The seeder's group answers flattened into the wire shape. The root
   // header is null until the root is served.
-  function groupBody ({ header, rootServed, writers, next, indexing, complete }) {
+  function groupBody ({ header, rootServed, community, writers, next, indexing, complete }) {
     const h = header || {}
     return {
       kind: h.kind ?? null,
@@ -498,6 +507,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       name: h.name ?? null,
       creator: h.diary ?? null,
       rootServed: rootServed === true,
+      community: typeof community === 'string' && HEX64_RE.test(community) ? community : null,
       writers,
       next,
       indexing,
@@ -509,6 +519,15 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return {
       groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
       more,
+      indexing,
+      complete
+    }
+  }
+
+  function communityBody ({ name, groups, indexing, complete }) {
+    return {
+      name: name ?? null,
+      groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
       indexing,
       complete
     }
@@ -883,6 +902,7 @@ module.exports = {
   INDEX_GROUP_RE,
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
+  INDEX_COMMUNITY_RE,
   INDEX_ENGAGERS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,

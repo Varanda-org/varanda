@@ -14,12 +14,12 @@ const { testnet, tmpDir, until, bootstrapFlags, localSwarmOptions } = require('.
 const { Seeder, MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission, generateNoiseKeyPair, createSwarm, joinAndFlush, topicFor } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES, MAX_GROUPS_PER_DIARY, MAX_GROUP_NAME } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, mediaCoreRecord, deleteRecord, MEDIA_BLOCK_BYTES, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_NAME } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
-const { groupHeader: makeGroupHeader } = require('@varanda/core/lib/group')
+const { groupHeader: makeGroupHeader, groupLink, communityLink } = require('@varanda/core/lib/group')
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -1797,6 +1797,7 @@ test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers
     name: 'Jardim',
     creator: A,
     rootServed: true,
+    community: null,
     writers: [{ key: W, diary: A, length: 3, seq: 1, left: false }],
     next: null,
     indexing: false,
@@ -1940,6 +1941,105 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
   const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
   t.teardown(() => old.close(), { force: true })
   t.is((await mediaRequest(old.port, '/index/group/' + G)).status, 404, 'a seeder without the methods -> 404')
+})
+
+// GET /index/community/<C>: the communities a seeder holds, shaped like the
+// group routes and under the same caps and 404 policy.
+const C = '9'.repeat(64)
+
+test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 404', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  seeder.indexCommunity = async (c) => {
+    seeder.calls.push(['indexCommunity', c])
+    return c === C ? { name: 'Bairro', groups: [{ group: G, name: 'Jardim', members: 2 }], indexing: false, complete: true } : null
+  }
+  seeder.indexGroup = async (group) => ({ header: groupHeader, rootServed: true, community: C, writers: [], next: null, indexing: false, complete: true })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const got = await mediaRequest(server.port, '/index/community/' + C)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { name: 'Bairro', groups: [{ group: G, name: 'Jardim', writerCount: 2 }], indexing: false, complete: true })
+  t.alike(seeder.calls, [['indexCommunity', C]])
+  const head = await mediaRequest(server.port, '/index/community/' + C, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, C, 'a group row names its two-way community')
+  seeder.indexGroup = async () => ({ header: groupHeader, rootServed: true, community: 'nope', writers: [], next: null, indexing: false, complete: true })
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, null, 'anything but hex64 is null')
+
+  const unknown = await mediaRequest(server.port, '/index/community/' + 'f'.repeat(64))
+  t.is(unknown.status, 404)
+  t.is(unknown.body.toString(), 'não encontrado\n')
+  t.ok(INDEX_COMMUNITY_RE.test('/index/community/' + C))
+  seeder.calls.length = 0
+  for (const url of ['/index/community', '/index/community/', '/index/community/' + 'a'.repeat(63), '/index/community/' + 'A'.repeat(64),
+    '/index/community/' + C + '/', '/index/community/' + C + '/' + G, '/index/community/' + C + '?x=1', '/index/communities/' + C]) {
+    const bad = await mediaRequest(server.port, url)
+    t.is(bad.status, 404, url + ' -> 404')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  for (const method of ['POST', 'PUT']) t.is((await mediaRequest(server.port, '/index/community/' + C, { method })).status, 405)
+
+  seeder.indexCommunity = async () => { throw new Error('secret') }
+  const thrown = await mediaRequest(server.port, '/index/community/' + C)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('secret'))
+})
+
+test('startSeedWs /index/community: the worst-case body stays within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const max = Number.MAX_SAFE_INTEGER
+  const seeder = groupSeeder()
+  const name = '\ud800'.repeat(MAX_GROUP_NAME)
+  const groups = Array.from({ length: MAX_GROUPS_PER_COMMUNITY }, (_, i) => ({ group: hex(i), name, members: max }))
+  seeder.indexCommunity = async () => ({ name, groups, indexing: true, complete: false })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/community/' + C)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'community worst case is ' + got.body.byteLength + ' bytes')
+  seeder.indexCommunity = async () => ({ name, groups: Array.from({ length: 400 }, (_, i) => ({ group: hex(i), name, members: max })), indexing: true, complete: false })
+  t.is((await mediaRequest(server.port, '/index/community/' + C)).status, 404, 'an answer over INDEX_MAX_BODY is never sent')
+})
+
+test('startSeedWs /index/community: the real Seeder lists two-way links only and hides a blocked community', async (t) => {
+  t.timeout(20000)
+  const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
+  seeder._ready = true
+  const B = 'b'.repeat(64)
+  const G2 = '8'.repeat(64)
+  const core = { contiguousLength: 2, length: 2 }
+  for (const diary of [A, B]) {
+    seeder._admitted.set(diary, {})
+    seeder._served.set(diary, { core, gated: true, dropped: false, scanQueued: false, scanned: 2, groupLive: new Map() })
+  }
+  for (const key of [G, G2, C, W]) seeder._groupServed.set(key, { core, headerOk: true, dropped: false })
+  seeder._groupIndex.setHeader(G, makeGroupHeader({ diary: A, name: 'Jardim' }))
+  seeder._groupIndex.setHeader(G2, makeGroupHeader({ diary: A, name: 'Praça' }))
+  seeder._groupIndex.setHeader(C, makeGroupHeader({ kind: 'community', diary: A, name: 'Bairro' }))
+  seeder._groupIndex.addWriter(G, G, A, 1)
+  seeder._groupIndex.addWriter(G, W, B, 1)
+  seeder._groupIndex.addWriter(G2, G2, A, 2)
+  seeder._groupIndex.addWriter(C, C, A, 3)
+  seeder._groupIndex.foldRoot(C, groupLink({ group: G, on: true }))
+  seeder._groupIndex.foldRoot(C, groupLink({ group: G2, on: true }))
+  seeder._groupIndex.foldRoot(G, communityLink({ community: C, on: true }))
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const c = JSON.parse((await mediaRequest(server.port, '/index/community/' + C)).body.toString())
+  t.alike(c, { name: 'Bairro', groups: [{ group: G, name: 'Jardim', writerCount: 2 }], indexing: false, complete: true }, 'G2 links one way only')
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, C)
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G2)).body.toString()).community, null)
+  t.is((await mediaRequest(server.port, '/index/community/' + G)).status, 404, 'a group root is no community')
+
+  seeder._blocklist = { blocked: () => new Set([C]), revokedIssuers: () => new Set() }
+  t.is((await mediaRequest(server.port, '/index/community/' + C)).status, 404, 'a blocked community is the generic 404')
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, null, 'and no group names it')
 })
 
 // GET /moderation-group-post/<W>/<seq>: the account service's read of the
