@@ -31,6 +31,13 @@ test('the preview profile pins a Node of at least 24.9', (t) => {
   t.ok(major > 24 || (major === 24 && minor >= 9), 'Node ' + node)
 })
 
+// Without it the module fails to compile (ActivityResultCallback is not on
+// its classpath), and that only shows on the EAS build.
+test('the auth-session module declares androidx.activity', (t) => {
+  const gradle = read('modules/auth-session/android/build.gradle')
+  t.ok(/implementation "androidx\.activity:activity(-ktx)?:\d+\.\d+\.\d+"/.test(gradle))
+})
+
 test('the post install hook runs prepare-native.sh', (t) => {
   const script = read('scripts/eas-post-install.sh')
   t.ok(script.includes('prepare-native.sh'))
