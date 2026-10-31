@@ -318,7 +318,11 @@ export function rangeEnd ({ step, cursor, page, atEnd = true }) {
   const older = last !== null && (cursor === null || compareFeed(last, cursor) < 0) ? last : cursor
   if (step === 'cap') return { cursor, atEnd, probeOlder: false, rangeFrom: last }
   if (step === 'reached') return { cursor: older, atEnd, probeOlder: atEnd, rangeFrom: null }
-  return { cursor: older, atEnd: true, probeOlder: false, rangeFrom: null }
+  // A short page re-read the shown span, not the rest of the feed: the
+  // visible feed can shrink for a while (a followed diary whose signed
+  // length grew before its new tail arrived shows only its prefix), so the
+  // list keeps its end state and a scroll read finds the real end.
+  return { cursor: older, atEnd, probeOlder: false, rangeFrom: null }
 }
 
 // The baseline is the lengths map taken before the request, so growth that

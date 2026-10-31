@@ -471,5 +471,25 @@ test('a range read runs away from the list end; only the probe and a short newes
   t.alike(rangeEnd({ step: 'reached', cursor, page, atEnd: false }), { cursor: cursorOf(page.items), atEnd: false, probeOlder: false, rangeFrom: null },
     'a list not at its end keeps paging by scrolling, no probe')
   t.alike(rangeEnd({ step: 'cap', cursor, page, atEnd: false }), { cursor, atEnd: false, probeOlder: false, rangeFrom: cursorOf(page.items) })
-  t.is(rangeEnd({ step: 'end', cursor, page: { items: [] }, atEnd: false }).atEnd, true, 'a short page read the rest of the feed')
+  t.is(rangeEnd({ step: 'end', cursor, page: { items: [] }, atEnd: false }).atEnd, false, 'a short range page keeps the list end state')
+})
+
+test('regression: a short range page while the visible feed shrank never ends a list that was not at its end', async (t) => {
+  const { planSyncRead, rangeEnd, cursorOf, feedSyncing } = await load()
+  // 60 rows shown, not at the end; a followed diary grew before its new tail
+  // arrived, so the node shows only its prefix for a while and the range
+  // page comes back short.
+  const items = Array.from({ length: 60 }, (_, i) => post(KEY_A, 60 - i, 60 - i))
+  const cursor = cursorOf([items[59]])
+  const prev = syncFeed({ items, cursor, atEnd: false, deep: true, syncBase: { [KEY_A]: 60 } })
+  const short = { items: items.slice(0, 3) }
+  const end = rangeEnd({ step: 'end', cursor: prev.cursor, page: short, atEnd: prev.atEnd })
+  t.is(end.atEnd, false, 'the list is not marked as ended')
+  const after = { ...prev, ...end }
+  // ARua passes onLoadMore only while !atEnd: infinite scroll stays on.
+  t.absent(after.atEnd, 'infinite scroll stays available')
+  t.is((planSyncRead(after, { [KEY_A]: 90 }, true, 30) || {}).kind, 'range', 'later growth still plans a range read')
+  t.is(feedSyncing(after, { [KEY_A]: 90 }), true, 'and the footer says syncing, not the end')
+  // A list that really was at its end stays there.
+  t.is(rangeEnd({ step: 'end', cursor, page: short, atEnd: true }).atEnd, true)
 })
