@@ -1514,7 +1514,19 @@ test('Recursos tab: an empty list, and a server without the route still loads th
   t.ok(doc.main.textContent.includes('Nenhuma denúncia aberta') === false && buttons(doc, 'Bloquear').length === 1, 'the report queue still shows (appeals answered 404)')
   buttons(doc, 'Recursos')[0].click()
   t.ok(doc.main.textContent.includes('Nenhum recurso aberto.'))
-  t.alike(p.state.appeals, { appeals: [], truncated: false })
+  t.alike(p.state.appeals, { appeals: [], truncated: false, beyondLimit: false })
+  t.is(p.state.appealsError, '', 'an unknown route is the old service, not an error')
+
+  for (const [status, token] of [[429, 'muitos-pedidos'], [500, 'indisponivel']]) {
+    const docE = fakeDocument()
+    const failing = signedIn([])
+    failing['GET /account/mod/api/appeals?estado=aberta'] = () => [status, { error: token }]
+    const pE = panel.createPanel(env(docE, fakeFetch(failing).fetch))
+    await pE.start()
+    buttons(docE, 'Recursos')[0].click()
+    t.ok(docE.main.textContent.includes(status === 429 ? 'muitos pedidos' : 'serviço de moderação indisponível'), 'the tab shows the ' + status)
+    t.absent(docE.main.textContent.includes('Nenhum recurso aberto.'), 'a failure is not an empty queue (' + status + ')')
+  }
 
   const doc2 = fakeDocument()
   const lost = signedIn([])
@@ -1522,4 +1534,27 @@ test('Recursos tab: an empty list, and a server without the route still loads th
   const p2 = panel.createPanel(env(doc2, fakeFetch(lost).fetch))
   await p2.start()
   t.ok(doc2.main.textContent.includes('Entrar com Google'), 'a lost session still goes to the login')
+})
+
+test('Recursos tab: the decided ones page with "mostrar mais" and antes', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  const row = (id, status = 'negado') => appeal({ id, status, decidedAt: '2026-10-24T00:00:00.000Z' })
+  const urls = []
+  routes['GET /account/mod/api/appeals?estado=decidida'] = () => [200, { appeals: [row('b1abcdefghijklmnopqrst')], truncated: true }]
+  routes['GET /account/mod/api/appeals?estado=decidida&antes=b1abcdefghijklmnopqrst'] = () => {
+    urls.push('antes')
+    return [200, { appeals: [row('b2abcdefghijklmnopqrst', 'encerrado')], truncated: false, alemDoLimite: true }]
+  }
+  const p = panel.createPanel(env(doc, fakeFetch(routes).fetch))
+  await p.start()
+  buttons(doc, 'Recursos')[0].click()
+  t.ok(doc.main.textContent.includes('Há mais decisões antes destas.'))
+  buttons(doc, 'mostrar mais')[0].click()
+  await p.settled()
+  t.is(urls.length, 1)
+  t.alike(p.state.appealsDecided.appeals.map((a) => a.id), ['b1abcdefghijklmnopqrst', 'b2abcdefghijklmnopqrst'])
+  t.ok(doc.main.textContent.includes('encerrado'))
+  t.absent(buttons(doc, 'mostrar mais').length > 0, 'the last page has no button')
+  t.ok(doc.main.textContent.includes('Há decisões mais antigas que o painel não mostra.'))
 })

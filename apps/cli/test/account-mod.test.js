@@ -1584,6 +1584,51 @@ test('appeals: the panel lists them, hides what a moderator may not judge, and d
   noLeak(t, s)
 })
 
+test('appeals: the case shows the diary blocks, not a group block of the same member', async (t) => {
+  const s = await setup(t)
+  await blockAndPublish(s, s.ana, 'outra moderadora', 1)
+  const group = await s.moderation.add({ reporter: s.carol.hex, target: s.ana.hex, seq: 3, writer: s.ana.hex, group: s.bia.hex, reason: 'ilegal', text: '', quote: 'x', signature: 'a'.repeat(128), nonce: 'G'.repeat(43) })
+  await s.moderation.decide(group.report.id, { decision: 'bloquear', by: 'outra moderadora', block: 'grupo' })
+  t.is((await sendAppeal(s, s.ana)).status, 200)
+  const { session } = await signIn(s)
+  const list = await s.api('GET', '/account/mod/api/appeals', { cookie: sessionCookie(session) })
+  t.is(list.body.appeals.length, 1)
+  t.alike(list.body.appeals[0].bloqueios.map((b) => b.reason), ['spam'], 'the group decision is not the reason of the account block')
+})
+
+test('appeals: the decided ones page with antes, without repeats or gaps', async (t) => {
+  const s = await setup(t)
+  const ids = []
+  for (let i = 0; i < 105; i++) {
+    const target = keys().hex
+    s.c.offset += 1
+    const { report } = await s.moderation.add({ reporter: keys().hex, target, seq: null, reason: 'spam', text: '', quote: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+    await s.moderation.decide(report.id, { decision: 'bloquear', by: 'outra moderadora' })
+    const { appeal } = await s.moderation.addAppeal({ member: target, text: '', signature: 'a'.repeat(128), nonce: 'N'.repeat(43) })
+    s.c.offset += 1
+    await s.moderation.decideAppeal(appeal.id, { decision: 'negar', by: 'outra moderadora' })
+    ids.push(appeal.id)
+  }
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const page = (query) => s.api('GET', '/account/mod/api/appeals?estado=decidida' + query, { cookie })
+  const first = await page('')
+  t.is(first.status, 200, first.text)
+  t.is(first.body.appeals.length, 100)
+  t.is(first.body.truncated, true)
+  const second = await page('&antes=' + first.body.appeals[99].id)
+  t.is(second.body.appeals.length, 5)
+  t.is(second.body.truncated, false, 'the last page')
+  t.alike([...first.body.appeals, ...second.body.appeals].map((a) => a.id), ids.slice().reverse(), 'every decision once, newest first')
+  for (const bad of ['&antes=nao-existe', '&antes=', '&antes=%00']) {
+    const r = await page(bad)
+    t.is(r.status, 400, 'antes ' + bad)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const open = await s.api('GET', '/account/mod/api/appeals?estado=aberta&antes=' + ids[0], { cookie })
+  t.is(open.status, 400, 'antes is for the decided ones only')
+})
+
 test('appeals: negar closes the case and leaves the block', async (t) => {
   const s = await setup(t)
   await blockAndPublish(s, s.ana, 'outra moderadora', 1)

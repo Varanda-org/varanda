@@ -15,7 +15,7 @@ import { useNode } from '../node'
 import { Btn, ErrorText, Field, Notice, Page, Soft, errorText, useAction } from '../ui'
 
 const NOT_HOSTED_MESSAGE = 'Nesta versão, recursos só pela versão web no site da associação.'
-const EXPLAIN = 'Se sua conta foi bloqueada pela moderação, você pode pedir uma revisão. Outra pessoa da equipe, que não decidiu o bloqueio, lê o seu pedido. Você só pode recorrer uma vez a cada 30 dias.'
+const EXPLAIN = 'Se sua conta foi bloqueada pela moderação, você pode pedir uma revisão. Outra pessoa da equipe, que não decidiu o bloqueio, lê o seu pedido. Se o pedido for negado, só dá para recorrer de novo em 30 dias.'
 const PRIVACY = 'O recurso é assinado com a chave do seu diário e fica só com a moderação. Não vai para o diário nem para outras pessoas.'
 
 export default function Recurso ({ open, active }) {

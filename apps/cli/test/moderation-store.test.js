@@ -899,6 +899,54 @@ test('appeal: one per member per 30 days, open or decided', async (t) => {
   t.not(next.appeal.id, a.appeal.id)
 })
 
+test('appeal: the window counts denied appeals only; a new block after an accepted one appeals at once', async (t) => {
+  const { store } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  await store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: 'outro@example.test' })
+  await rejects(t, store.addAppeal(appeal(target)), 'nao-bloqueado', 'unblocked')
+  const r = (await store.add(report(target))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  const next = await store.addAppeal(appeal(target, { nonce: 'n'.repeat(43) }))
+  t.is(next.duplicate, false, 'the accepted appeal ended its block')
+  t.not(next.appeal.id, a.appeal.id)
+})
+
+test('appeal: an open appeal is closed when the key stops being blocked', async (t) => {
+  const { store, dir } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  await store.unblock(target, { by: MOD })
+  const closed = store.getAppeal(a.appeal.id)
+  t.is(closed.status, 'encerrado')
+  t.is(closed.decidedBy, MOD)
+  t.is(store.stats().appeals, 0, 'nothing left waiting')
+  t.is(onDisk(dir).events.filter((e) => e.action === 'recurso-encerrado').length, 1)
+  await rejects(t, store.addAppeal(appeal(target)), 'nao-bloqueado', 'not blocked, not "already open"')
+  const r = (await store.add(report(target))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  const again = await store.addAppeal(appeal(target, { nonce: 'n'.repeat(43) }))
+  t.is(again.duplicate, false, 'a new block gets its own appeal')
+  t.not(again.appeal.id, a.appeal.id)
+  t.alike(store.listAppeals({ status: 'decidida' }).appeals.map((x) => x.id), [a.appeal.id], 'closed ones list as decided')
+})
+
+test('appeal: cancelling the block and the operator dropping the key close the open appeal too', async (t) => {
+  const { store, m } = setup(t)
+  const pending = await blockedMember(store)
+  const a = await store.addAppeal(appeal(pending))
+  await store.cancel(store.pending().changes[0].id, { by: MOD })
+  t.is(store.getAppeal(a.appeal.id).status, 'encerrado', 'pending block cancelled')
+
+  const listed = key()
+  await store.ack({ changeIds: [], snapshot: m.snap(1, [listed]), moderatorCert: m.cert })
+  const b = await store.addAppeal(appeal(listed))
+  await store.ack({ changeIds: [], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  const closed = store.getAppeal(b.appeal.id)
+  t.is(closed.status, 'encerrado', 'dropped from the published list')
+  t.is(closed.decidedBy, 'operador')
+})
+
 test('appeal: the desk is bounded', async (t) => {
   const { store, dir, m } = setup(t)
   const target = await blockedMember(store)

@@ -68,8 +68,9 @@ const LIST_DEFAULT = 100
 const AI_ACTOR = 'ia'
 const HUMAN_ACTOR = 'pessoa'
 const DAY_MS = 86400000
-// One appeal per member in this window, open or decided: a denied member
-// cannot flood the desk, and a retry of the open one answers the same row.
+// One appeal per block, and a denied member waits this long for the next: an
+// accepted or closed appeal ended its block, so a new block starts afresh. A
+// retry of the open one answers the same row.
 const APPEAL_WINDOW_MS = 30 * DAY_MS
 // The report rules of packages/core/lib/report.js (T22): same constants and
 // the same character rule, re-checked here because the store is the last
@@ -81,7 +82,8 @@ const SEQ_MAX = MAX_LOG_BLOCKS - 1
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const STATUSES = ['aberta', 'bloquear', 'descartar']
 const DECISIONS = ['bloquear', 'descartar']
-const APPEAL_STATUSES = ['aberta', 'aceito', 'negado']
+// 'encerrado': the key stopped being blocked while the appeal was open.
+const APPEAL_STATUSES = ['aberta', 'aceito', 'negado', 'encerrado']
 const APPEAL_DECISIONS = { aceitar: 'aceito', negar: 'negado' }
 const APPEAL_TEXT_MAX = MAX_TEXT
 // What a 'bloquear' decision blocks: the author's diary, or (group reports
@@ -163,7 +165,7 @@ function emptyState () {
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{22}$/
-const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado', 'recurso-aceito', 'recurso-negado']
+const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado', 'recurso-aceito', 'recurso-negado', 'recurso-encerrado']
 const EVENT_KEYS = ['at', 'by', 'action', 'member', 'reportId', 'appealId', 'changeId', 'seq']
 const APPEAL_KEYS = ['id', 'at', 'member', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
 const REPORT_KEYS_V1 = ['id', 'at', 'kind', 'target', 'seq', 'quote', 'reporter', 'reason', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
@@ -330,13 +332,17 @@ function netState (published, changes, member) {
   return blocked
 }
 
-function netBlockedCount (s) {
+function netSet (s) {
   const set = blockedSet(s.published.snapshot)
   for (const c of s.pending) {
     if (c.op === 'block') set.add(c.member)
     else set.delete(c.member)
   }
-  return set.size
+  return set
+}
+
+function netBlockedCount (s) {
+  return netSet(s).size
 }
 
 // The key a 'bloquear' row blocked.
@@ -549,17 +555,35 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   // The e-mails (`decidedBy`) of the humans who decided a 'bloquear' report
   // that blocked `member`'s diary or group root. A moderator in this set does
   // not review the member's appeal. The AI is not a person and is left out.
-  function blockers (member) {
-    const out = new Set()
+  function blockerMap () {
+    const out = new Map()
     for (const r of Object.values(state.reports)) {
-      if (r.status === 'bloquear' && r.decidedBy !== AI_ACTOR && blockedKey(r) === member) out.add(r.decidedBy)
+      if (r.status !== 'bloquear' || r.decidedBy === AI_ACTOR) continue
+      const key = blockedKey(r)
+      if (!out.has(key)) out.set(key, new Set())
+      out.get(key).add(r.decidedBy)
     }
     return out
   }
 
+  // An appeal still open for a key that is no longer blocked (unblocked,
+  // cancelled, or dropped by the operator's list) has nothing left to
+  // decide: closed, so a new block starts without it.
+  function closeEnded (next, by) {
+    let blocked = null
+    for (const a of Object.values(next.appeals)) {
+      if (a.status !== 'aberta') continue
+      if (blocked === null) blocked = netSet(next)
+      if (blocked.has(a.member)) continue
+      next.appeals[a.id] = { ...a, status: 'encerrado', decidedBy: by, decidedAt: iso(now()), note: '' }
+      event(next, { by, action: 'recurso-encerrado', member: a.member, appealId: a.id })
+    }
+  }
+
   // A member's appeal. Only a blocked member (published, or with a pending
-  // block) may appeal, and one appeal per APPEAL_WINDOW_MS. A retry of the
-  // open one answers the same row ('duplicate'), even when the desk is full.
+  // block) may appeal, once per block and not again within APPEAL_WINDOW_MS
+  // of a denial. A retry of the open one answers the same row ('duplicate'),
+  // even when the desk is full.
   function addAppeal ({ member, text = '', signature, nonce } = {}) {
     return enqueue(() => {
       usable()
@@ -568,11 +592,11 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) throw fail('pedido-invalido')
       const rows = Object.values(state.appeals)
       const mine = rows.filter((a) => a.member === member)
+      if (!netState(state.published, state.pending, member)) throw fail('nao-bloqueado')
       const open = mine.find((a) => a.status === 'aberta')
       if (open) return { appeal: { ...open }, duplicate: true }
-      if (!netState(state.published, state.pending, member)) throw fail('nao-bloqueado')
       const t = now()
-      if (mine.some((a) => Date.parse(a.at) >= t - APPEAL_WINDOW_MS)) throw fail('limite-recursos')
+      if (mine.some((a) => a.status === 'negado' && Date.parse(a.at) >= t - APPEAL_WINDOW_MS)) throw fail('limite-recursos')
       let waiting = 0
       for (const a of rows) if (a.status === 'aberta') waiting++
       if (waiting >= MAX_APPEALS || rows.length >= MAX_STORED_APPEALS) throw fail('limite')
@@ -606,15 +630,13 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_APPEALS) throw fail('pedido-invalido')
     if (exclude !== null && typeof exclude !== 'string') throw fail('pedido-invalido')
     if (excludeBy !== null && typeof excludeBy !== 'string') throw fail('pedido-invalido')
-    let out = Object.values(state.appeals).filter((a) => exclude === null || a.member !== exclude)
-    if (excludeBy !== null) out = out.filter((a) => !blockers(a.member).has(excludeBy))
-    if (status === 'aberta') {
-      out = out.filter((a) => a.status === 'aberta')
-      out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-    } else {
-      out = out.filter((a) => a.status !== 'aberta')
-      out.sort((a, b) => Date.parse(b.decidedAt) - Date.parse(a.decidedAt))
+    let out = Object.values(state.appeals).filter((a) => (status === 'aberta') === (a.status === 'aberta') && (exclude === null || a.member !== exclude))
+    if (excludeBy !== null) {
+      const by = blockerMap()
+      out = out.filter((a) => !(by.has(a.member) && by.get(a.member).has(excludeBy)))
     }
+    if (status === 'aberta') out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    else out.sort((a, b) => Date.parse(b.decidedAt) - Date.parse(a.decidedAt))
     return { appeals: out.slice(0, limit).map((a) => ({ ...a })), truncated: out.length > limit }
   }
 
@@ -627,7 +649,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   // The deciding moderators of the member's block, for the panel's rule.
   function blockedBy (member) {
     usable()
-    return [...blockers(member)]
+    return [...(blockerMap().get(member) || [])]
   }
 
   // -> { appeal, change | null }. 'aceitar' appends an 'unblock' change as
@@ -705,6 +727,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       const before = netBlockedCount(state)
       const next = cloneState(state)
       const { change } = setIntent(next, member, false, by, [], 'pedido')
+      closeEnded(next, by)
       checkCapacity(before, next)
       persist(next)
       return { change: change === null ? null : copyChange(change) }
@@ -737,6 +760,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         if (netState(state.published, state.pending, c.member) === wanted) throw fail('ja-revertido')
         change = setIntent(next, c.member, wanted, by, [], 'compensado').change
       }
+      closeEnded(next, by)
       checkCapacity(before, next)
       persist(next)
       return { change: change === null ? null : copyChange(change) }
@@ -833,6 +857,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       const copy = copySnapshot(snapshot)
       next.published = { snapshot: copy, at: iso(now()), moderatorDate: copy.moderatorDate }
       event(next, { by: 'operador', action: 'aplicado', seq: copy.seq })
+      closeEnded(next, 'operador')
       persist(next)
       return { ok: true, seq: copy.seq }
     })

@@ -339,7 +339,11 @@ function appealRow (a) {
 
 function appealList (json) {
   const rows = has(json, 'appeals') && Array.isArray(json.appeals) ? json.appeals : []
-  return { appeals: rows.map(appealRow).filter((a) => a !== null), truncated: has(json, 'truncated') && json.truncated === true }
+  return {
+    appeals: rows.map(appealRow).filter((a) => a !== null),
+    truncated: has(json, 'truncated') && json.truncated === true,
+    beyondLimit: has(json, 'alemDoLimite') && json.alemDoLimite === true
+  }
 }
 
 function reportList (json) {
@@ -500,7 +504,7 @@ function groupInfoOf (json) {
   }
 }
 
-function buildState ({ me, open, decided, blocked, appeals, appealsDecided } = {}) {
+function buildState ({ me, open, decided, blocked, appeals, appealsDecided, appealsError = '' } = {}) {
   const blockedRows = has(blocked, 'blocked') && Array.isArray(blocked.blocked) ? blocked.blocked : []
   const pendingRows = has(blocked, 'pending') && Array.isArray(blocked.pending) ? blocked.pending : []
   const published = publishedOf(has(blocked, 'published') ? blocked.published : null) ||
@@ -545,6 +549,7 @@ function buildState ({ me, open, decided, blocked, appeals, appealsDecided } = {
     decided: reportList(decided),
     appeals: appealList(appeals),
     appealsDecided: appealList(appealsDecided),
+    appealsError,
     blocked: list,
     pending,
     net
@@ -671,13 +676,17 @@ function createPanel (env) {
     return json
   }
 
-  // The appeals lists of a server from before they existed answer 404: the
-  // rest of the panel must still load. A lost session still goes to login.
-  async function optional (fn) {
+  // The appeals lists of a server from before they existed answer
+  // 'nao-encontrado' (an unknown route): the rest of the panel must still
+  // load, with no appeals. Any other failure (429, 500, network) is kept in
+  // `failed.message` for the Recursos tab, so it never reads as an empty
+  // queue. A lost session still goes to login.
+  async function optional (fn, failed) {
     try {
       return await fn()
     } catch (err) {
       if (err instanceof LoginRequired) throw err
+      if (err.token !== 'nao-encontrado') failed.message = err.message
       return null
     }
   }
@@ -737,15 +746,16 @@ function createPanel (env) {
   async function load () {
     const mine = ++gen
     const me = await call('GET', API + 'me')
+    const failed = { message: '' }
     const [open, decided, blocked, appeals, appealsDecided] = await Promise.all([
       call('GET', API + 'reports?estado=aberta'),
       call('GET', API + 'reports?estado=decidida'),
       call('GET', API + 'blocked'),
-      optional(() => call('GET', API + 'appeals?estado=aberta')),
-      optional(() => call('GET', API + 'appeals?estado=decidida'))
+      optional(() => call('GET', API + 'appeals?estado=aberta'), failed),
+      optional(() => call('GET', API + 'appeals?estado=decidida'), failed)
     ])
     if (mine !== gen) return
-    state = buildState({ me, open, decided, blocked, appeals, appealsDecided })
+    state = buildState({ me, open, decided, blocked, appeals, appealsDecided, appealsError: failed.message })
     const openIds = new Set([...state.open.reports, ...state.appeals.appeals].map((r) => r.id))
     for (const id of drafts.keys()) if (!openIds.has(id)) drafts.delete(id)
     render()
@@ -1117,19 +1127,22 @@ function createPanel (env) {
       )
     })
     const decided = state.appealsDecided.appeals.map((a) => h('div', { className: 'card' },
-      h('h2', { text: (a.status === 'aceito' ? 'aceito' : a.status === 'negado' ? 'negado' : '?') + ' · ' + who(a.member, a.username) }),
+      h('h2', { text: (a.status === 'aceito' ? 'aceito' : a.status === 'negado' ? 'negado' : a.status === 'encerrado' ? 'encerrado' : '?') + ' · ' + who(a.member, a.username) }),
       h('p', { className: 'meta', text: formatDate(a.decidedAt) }),
       a.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       a.note !== '' ? untrusted('p', a.note) : null
     ))
     return h('div', { className: 'list' },
       h('p', { className: 'meta', text: TEXT.appealNote }),
-      appeals.length === 0 ? h('p', { text: TEXT.noAppeals }) : null,
+      state.appealsError !== '' ? h('p', { className: 'error', text: state.appealsError }) : null,
+      appeals.length === 0 && state.appealsError === '' ? h('p', { text: TEXT.noAppeals }) : null,
       ...cards,
       state.appeals.truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null,
       decided.length > 0 ? h('h2', { text: TEXT.appealDecidedTitle }) : null,
       ...decided,
-      state.appealsDecided.truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null
+      state.appealsDecided.truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,
+      state.appealsDecided.truncated ? button(TEXT.showMore, showMoreAppealsDecided, { disabled: busy }) : null,
+      state.appealsDecided.beyondLimit ? h('p', { className: 'meta', text: TEXT.beyondLimit }) : null
     )
   }
 
@@ -1219,6 +1232,27 @@ function createPanel (env) {
         if (mine !== gen) return
         const seen = new Set(shown.map((r) => r.id))
         state.decided = { ...page, reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))] }
+      } finally {
+        busy = false
+        if (state) render()
+      }
+    })
+  }
+
+  function showMoreAppealsDecided () {
+    if (busy) return last
+    const mine = gen
+    const shown = state.appealsDecided.appeals
+    const cursor = shown[shown.length - 1].id
+    busy = true
+    error = ''
+    render()
+    return run(async () => {
+      try {
+        const page = appealList(await call('GET', API + 'appeals?estado=decidida&antes=' + encodeURIComponent(cursor)))
+        if (mine !== gen) return
+        const seen = new Set(shown.map((a) => a.id))
+        state.appealsDecided = { ...page, appeals: [...shown, ...page.appeals.filter((a) => !seen.has(a.id))] }
       } finally {
         busy = false
         if (state) render()

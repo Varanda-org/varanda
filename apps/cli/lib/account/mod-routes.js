@@ -760,7 +760,9 @@ function createModRoutes ({
   }
 
   function projectAppeal (a, cache) {
-    const blocks = store(() => moderation.exportRows({ member: a.member })).filter((r) => r.status === 'bloquear')
+    // A group block blocked the root key, not the diary: not the reason of
+    // this account's block.
+    const blocks = store(() => moderation.exportRows({ member: a.member })).filter((r) => r.status === 'bloquear' && r.blocked !== 'grupo')
     return {
       id: a.id,
       at: a.at,
@@ -779,9 +781,22 @@ function createModRoutes ({
   async function appeals (req, res, session, url) {
     const estado = url.searchParams.get('estado') ?? 'aberta'
     if (estado !== 'aberta' && estado !== 'decidida') throw refuse('pedido-invalido')
-    const { appeals: visible, truncated } = store(() => moderation.listAppeals({ status: estado, limit: MAX_APPEALS, exclude: ownMember(session), excludeBy: session.email }))
+    // `antes`, as in api/reports: only for the decided ones.
+    const antes = url.searchParams.get('antes')
+    if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    const { appeals: visible, truncated: cut } = store(() => moderation.listAppeals({ status: estado, limit: MAX_APPEALS, exclude: ownMember(session), excludeBy: session.email }))
+    let start = 0
+    if (antes !== null) {
+      const at = visible.findIndex((a) => a.id === antes)
+      if (at === -1) throw refuse('pedido-invalido')
+      start = at + 1
+    }
     const cache = new Map()
-    send(res, 200, { appeals: visible.slice(0, REPORTS_PAGE).map((a) => projectAppeal(a, cache)), truncated: visible.length > REPORTS_PAGE || truncated })
+    send(res, 200, {
+      appeals: visible.slice(start, start + REPORTS_PAGE).map((a) => projectAppeal(a, cache)),
+      truncated: visible.length > start + REPORTS_PAGE,
+      alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
+    })
   }
 
   async function decideAppeal (req, res, session, id, body) {
