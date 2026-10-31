@@ -73,6 +73,12 @@
           }
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "7b810b25-60ee-4d32-b009-3ee2c7c6793d"
+      }
+    },
+    "owner": "varanda-org"
   }
 }
