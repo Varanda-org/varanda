@@ -152,7 +152,7 @@ eas build --profile preview --platform android
 eas credentials -p android
 ```
 
-- `eas init` escreve `owner` e `extra.eas.projectId` no `app.json`; eles não estão no repositório de propósito.
+- O app já está ligado ao projeto `@varanda-org/varanda`: o `eas init` escreveu `owner` e `extra.eas.projectId` no `app.json`, e eles estão no repositório. Só rode `eas init` de novo para ligar o app a outra conta Expo.
 - O hook `eas-build-post-install` (`scripts/eas-post-install.sh`) roda `prepare-native.sh` para a plataforma do build: link dos addons, `main.bundle.js` do worklet e, no iOS, `pod install`. No iOS o serviço pode rodar o `pod install` dele antes ou depois do hook, e o hook roda de novo; o script é idempotente, então a ordem não importa. Ele falha se `assets/worklet/main.bundle.js` não existir no fim.
 - No log do primeiro build, confira as etapas `link-addons` e `pack-worklet` e a configuração de assinatura injetada pela EAS. `android/app/build.gradle` continua falhando fechado sem as credenciais `VARANDA_RELEASE_*`.
 - Se a assinatura injetada não funcionar, o plano B é `credentialsSource: local` no perfil, com um `credentials.json` fora do git (ele está no `.gitignore` do app e no `.easignore`).

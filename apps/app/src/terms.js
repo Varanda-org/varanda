@@ -192,7 +192,7 @@ export function termsSyncStep (entry, event) {
     return e.state === 'transient' && e.count < TERMS_SYNC_MAX ? { count: e.count, state: 'retry' } : entry
   }
   if (event === 'rearm') {
-    if (e.state === 'busy') return e.again !== true ? { ...e, again: true } : entry
+    if (e.state === 'busy') return e.count < TERMS_SYNC_MAX && e.again !== true ? { ...e, again: true } : entry
     if (e.state === 'so-aparelho') return undefined
     // A transient failure keeps its count: the re-arm must not reset the
     // TERMS_SYNC_MAX attempts per page load.

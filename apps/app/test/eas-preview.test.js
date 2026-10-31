@@ -32,10 +32,10 @@ test('the post install hook runs prepare-native.sh', (t) => {
   t.is(rootPkg.scripts['eas-build-post-install'], 'npm run eas-build-post-install -w apps/app')
 })
 
-test('app.json has no owner and no EAS project id', (t) => {
+test('app.json is linked to the varanda-org EAS project', (t) => {
   const { expo } = JSON.parse(read('app.json'))
-  t.absent('owner' in expo)
-  t.absent(expo.extra && expo.extra.eas && expo.extra.eas.projectId)
+  t.is(expo.owner, 'varanda-org')
+  t.ok(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(expo.extra.eas.projectId), 'projectId is a UUID')
 })
 
 test('.easignore keeps the build outputs and every secret out of the upload', (t) => {
