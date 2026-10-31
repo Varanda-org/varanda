@@ -350,11 +350,11 @@ function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       const next = merge(state, disk)
       if (dirty || canonical(next) !== canonical(disk || emptyState())) {
         persist(next)
-        try {
-          healed = fingerprint(file)
-        } catch {
-          healed = undefined
-        }
+        // Not the fingerprint of the file just written: a stale writer's
+        // rename may land between persist()'s rename and an lstat here, and
+        // that file would then never be read again. The next heal() reads
+        // once and keeps the fingerprint itself.
+        healed = undefined
         return true
       }
       state = next

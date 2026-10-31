@@ -653,9 +653,11 @@ test('heal() reads the file only when it changed or the store is dirty', async (
   t.is(await store.heal(), true, 'a replaced file is read and healed')
   t.is(watch.n, 2)
   t.is(await store.heal(), false)
-  t.is(watch.n, 2, 'its own write is not read back again')
+  t.is(watch.n, 3, 'its own write is read back once: a late rename between the write and the fingerprint is not skipped')
+  t.is(await store.heal(), false)
+  t.is(watch.n, 3, 'and not again')
 
   fs.writeFileSync(file, JSON.stringify(watch.read()) + '\n')
   await store.heal()
-  t.is(watch.n, 3, 'a rewrite with the same entries is still noticed')
+  t.is(watch.n, 4, 'a rewrite with the same entries is still noticed')
 })
