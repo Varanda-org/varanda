@@ -190,3 +190,103 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(web.init.cache, 'no-store', 'the web keeps no-store')
   t.alike(web.init.headers, { accept: 'application/json', 'content-type': 'application/json' })
 })
+
+const W = '12'.repeat(32)
+const G = '34'.repeat(32)
+
+// fetch stub that answers start with a nonce and the POST with an id.
+function flowStub (t, { failSend = false } = {}) {
+  const calls = stub(t, async () => {
+    const url = calls[calls.length - 1].url
+    if (url.endsWith('/start')) return json(200, { nonce: NONCE })
+    return failSend ? json(500, { error: 'x' }) : json(200, { id: 'r1' })
+  })
+  return calls
+}
+
+test('group message report: fields reach report.sign and the POST', async (t) => {
+  const { submitReport } = await load()
+  const calls = flowStub(t)
+  let params = null
+  const out = await submitReport({
+    member: M,
+    target: T,
+    seq: 4,
+    writer: W,
+    group: G,
+    reason: 'spam',
+    text: 'nota',
+    quote: 'oi ' + LONE,
+    sign: async (p) => { params = p; return { signature: SIG } },
+    isStale: () => false
+  })
+  t.alike(out, { id: 'r1', duplicate: false })
+  t.alike(params, { nonce: NONCE, target: T, reason: 'spam', text: 'nota', seq: 4, quote: 'oi ' + FFFD, writer: W, group: G })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce: NONCE, target: T, seq: 4, writer: W, group: G, reason: 'spam', text: 'nota', quote: 'oi ' + FFFD, signature: SIG })
+})
+
+test('existing variants: diary post and whole account carry no writer or group', async (t) => {
+  const { submitReport } = await load()
+  const calls = flowStub(t)
+  const seen = []
+  const sign = async (p) => { seen.push(p); return { signature: SIG } }
+  await submitReport({ member: M, target: T, seq: 2, reason: 'outro', text: '', quote: 'q', sign, isStale: () => false })
+  await submitReport({ member: M, target: T, seq: null, reason: 'outro', text: '', quote: 'ignored', sign, isStale: () => false })
+  t.alike(seen[0], { nonce: NONCE, target: T, reason: 'outro', text: '', seq: 2, quote: 'q' })
+  t.alike(seen[1], { nonce: NONCE, target: T, reason: 'outro', text: '' })
+  t.alike(Object.keys(JSON.parse(calls[1].init.body)).sort(), ['member', 'nonce', 'quote', 'reason', 'seq', 'signature', 'target', 'text'])
+  const whole = JSON.parse(calls[3].init.body)
+  t.is(whole.seq, null)
+  t.is(whole.quote, '')
+})
+
+test('nothing is asked before the explicit send', async (t) => {
+  const calls = flowStub(t)
+  await load()
+  t.is(calls.length, 0, 'loading the module never asks for a nonce')
+})
+
+test('cancelling between steps stops the flow', async (t) => {
+  const { submitReport } = await load()
+  const base = { member: M, target: T, seq: 4, writer: W, group: G, reason: 'spam', text: '', quote: 'q' }
+  let signed = 0
+  const sign = async () => { signed++; return { signature: SIG } }
+
+  const a = flowStub(t)
+  t.is(await submitReport({ ...base, sign, isStale: () => true }), null, 'stale after the nonce')
+  t.is(signed, 0, 'never signed')
+  t.is(a.length, 1, 'only the nonce request')
+
+  const b = flowStub(t)
+  let checks = 0
+  t.is(await submitReport({ ...base, sign, isStale: () => ++checks === 2 }), null, 'stale after signing')
+  t.is(signed, 1)
+  t.is(b.length, 1, 'never posted')
+})
+
+test('an identity change between steps invalidates the flow', async (t) => {
+  const { submitReport } = await load()
+  const calls = flowStub(t)
+  let current = M
+  const out = await submitReport({
+    member: M,
+    target: T,
+    seq: 4,
+    writer: W,
+    group: G,
+    reason: 'spam',
+    text: '',
+    quote: 'q',
+    sign: async () => { current = 'ff'.repeat(32); return { signature: SIG } },
+    isStale: () => current !== M
+  })
+  t.is(out, null)
+  t.is(calls.length, 1, 'the signed statement is not posted under another identity')
+})
+
+test('a failed POST is not retried', async (t) => {
+  const { submitReport } = await load()
+  const calls = flowStub(t, { failSend: true })
+  await t.exception(submitReport({ member: M, target: T, seq: 4, writer: W, group: G, reason: 'spam', text: '', quote: 'q', sign: async () => ({ signature: SIG }), isStale: () => false }))
+  t.is(calls.length, 2, 'one nonce, one POST')
+})

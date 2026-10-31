@@ -108,8 +108,15 @@ export function buildReportStart ({ member }) {
 }
 
 // `seq` null = a report of the whole account (quote '').
-export function buildReportSend ({ member, nonce, target, seq, reason, text, quote, signature }) {
-  return buildPost('/account/report', { member, nonce, target, seq, reason, text, quote, signature })
+// `writer` and `group` (report v2, a group message) are added to the body only
+// when present, so the diary-post and account bodies keep their exact keys.
+export function buildReportSend ({ member, nonce, target, seq, writer, group, reason, text, quote, signature }) {
+  const body = { member, nonce, target, seq, reason, text, quote, signature }
+  if (typeof writer === 'string' && typeof group === 'string') {
+    body.writer = writer
+    body.group = group
+  }
+  return buildPost('/account/report', body)
 }
 
 async function call ({ url, init }) {
@@ -143,4 +150,47 @@ export async function reportStart ({ member }) {
 export async function reportSend (fields) {
   const data = await call(buildReportSend(fields))
   return { id: typeof data.id === 'string' ? data.id : null, duplicate: data.duplicate === true }
+}
+
+// The report.sign params for one report. `seq` null = the whole account (no
+// quote). `writer` and `group` together = a group message (docs/rpc.md 5.20);
+// the quote is then the text the reporter sees (for a private group, the
+// locally decrypted one), normalized like a diary quote.
+export function reportParams ({ nonce, target, seq = null, writer = null, group = null, reason, text, quote = '' }) {
+  const params = { nonce, target, reason, text }
+  if (seq !== null && seq !== undefined) {
+    params.seq = seq
+    params.quote = wellFormed(quote)
+    if (writer !== null && group !== null) {
+      params.writer = writer
+      params.group = group
+    }
+  }
+  return params
+}
+
+// The three steps of a report: nonce, signature, POST. The nonce is asked only
+// when this runs (the caller runs it on an explicit send, never when a screen
+// opens). `isStale()` is checked after each step that can take a while: a
+// close, a lock or an identity change makes the flow stop before it signs and
+// before it sends (-> null). Nothing here retries: a failed POST throws and
+// the next attempt starts from a fresh nonce.
+export async function submitReport ({ member, sign, isStale, ...fields }) {
+  const { nonce } = await reportStart({ member })
+  if (isStale()) return null
+  const params = reportParams({ nonce, ...fields })
+  const { signature } = await sign(params)
+  if (isStale()) return null
+  return reportSend({
+    member,
+    nonce,
+    target: params.target,
+    seq: params.seq === undefined ? null : params.seq,
+    writer: params.writer,
+    group: params.group,
+    reason: params.reason,
+    text: params.text,
+    quote: params.quote === undefined ? '' : params.quote,
+    signature
+  })
 }

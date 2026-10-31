@@ -44,6 +44,10 @@ import { resolveUrl } from './installation.js'
 // `{ fetch, timeoutMs, now, setTimeout, clearTimeout, sleep }`; the clock
 // ones drive the queue, the cooldown, the cache TTL and the 8 s timeout.
 //
+// Groups: /index/group/<G>[/<after>], /index/groups/<D>,
+// /index/community/<C> and /index/group-search/<segment> (the segment as for
+// the account search). Same transport, scheduler and budget; never cached.
+//
 // Account search, GET /index/search/<segment>: the segment arrives already
 // folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
 // characters in all); it is checked here, never folded, lowercased or
@@ -59,6 +63,11 @@ export const SEARCH_MAX = 20
 export const TOPIC_MAX = 30
 // Must equal ENGAGER_PAGE in packages/core/lib/engagement-index.js.
 export const ENGAGERS_MAX = 20
+export const GROUP_WRITERS_MAX = 64
+export const GROUPS_MAX = 64
+export const GROUP_SEARCH_MAX = 20
+export const COMMUNITY_GROUPS_MAX = 32
+export const GROUP_NAME_MAX = 80
 export const MAX_IN_FLIGHT = 2
 export const WINDOW_MS = 10000
 export const MAX_STARTS = 18
@@ -84,6 +93,16 @@ const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
+const GROUP_KEYS = ['community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
+const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
+// An older seeder sends no `signed`.
+const WRITER_KEYS_OLD = ['diary', 'key', 'left', 'length', 'seq']
+const GROUPS_KEYS = ['complete', 'groups', 'indexing']
+const GROUPS_ROW_KEYS = ['group', 'left', 'seq', 'writer']
+const GROUP_SEARCH_KEYS = ['complete', 'groups', 'indexing', 'more']
+const GROUP_HIT_KEYS = ['group', 'name', 'writerCount']
+const COMMUNITY_KEYS = ['complete', 'groups', 'indexing', 'name']
+const COMMUNITY_PRIVATE_KEYS = ['group', 'visibility']
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 
 // --- strict checks (response values are never lowercased or coerced) ---
@@ -202,6 +221,35 @@ export function searchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
   return resolveUrl('/index/search/' + segment)
+}
+
+// /index/group/<G>[/<after>]: both keys lowercased, then checked.
+export function groupUrl (group, after = null) {
+  const g = inputAuthor(group)
+  if (g === null) return null
+  let a = null
+  if (after !== null) {
+    a = inputAuthor(after)
+    if (a === null) return null
+  }
+  return resolveUrl('/index/group/' + g + (a === null ? '' : '/' + a))
+}
+
+export function groupsUrl (diary) {
+  const d = inputAuthor(diary)
+  return d === null ? null : resolveUrl('/index/groups/' + d)
+}
+
+export function communityUrl (community) {
+  const c = inputAuthor(community)
+  return c === null ? null : resolveUrl('/index/community/' + c)
+}
+
+// The segment is built and checked exactly as for the member search.
+export function groupSearchUrl (segment) {
+  if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
+  if (segment.replace(/-/g, '').length < 2) return null
+  return resolveUrl('/index/group-search/' + segment)
 }
 
 // --- transport ---
@@ -676,6 +724,106 @@ export function validSearch (body) {
   return { members, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
+const isName = (n) => n === null || (typeof n === 'string' && n.length >= 1 && n.length <= GROUP_NAME_MAX * 2 && [...n].length <= GROUP_NAME_MAX)
+const isFlags = (body) => typeof body.indexing === 'boolean' && typeof body.complete === 'boolean'
+
+// `after`: the cursor asked for; every key must come after it. Writers:
+// <= 64, distinct, ascending by key, exact keys. A private group has no name.
+export function validGroup (body, after = null) {
+  if (!hasExactKeys(body, GROUP_KEYS) || !isFlags(body) || typeof body.rootServed !== 'boolean') return null
+  if (body.kind !== null && body.kind !== 'group' && body.kind !== 'community') return null
+  if (body.visibility !== null && body.visibility !== 'public' && body.visibility !== 'private') return null
+  if (body.join !== null && body.join !== 'open' && body.join !== 'approval') return null
+  if (!isName(body.name) || (body.visibility === 'private' && body.name !== null)) return null
+  for (const k of ['creator', 'community', 'next']) if (body[k] !== null && !isHex64(body[k])) return null
+  const list = body.writers
+  if (!Array.isArray(list) || list.length > GROUP_WRITERS_MAX) return null
+  let prev = after
+  const writers = []
+  for (const w of list) {
+    const exact = hasExactKeys(w, WRITER_KEYS)
+    if (!exact && !hasExactKeys(w, WRITER_KEYS_OLD)) return null
+    if (!isHex64(w.key) || !isHex64(w.diary) || typeof w.left !== 'boolean') return null
+    if (!isCount(w.length) || !isSeq(w.seq)) return null
+    if (exact && (!isCount(w.signed) || w.signed < w.length)) return null
+    if (prev !== null && w.key <= prev) return null
+    prev = w.key
+    writers.push({ key: w.key, diary: w.diary, length: w.length, signed: exact ? w.signed : w.length, seq: w.seq, left: w.left })
+  }
+  return {
+    kind: body.kind,
+    visibility: body.visibility,
+    join: body.join,
+    name: body.name,
+    creator: body.creator,
+    rootServed: body.rootServed,
+    community: body.community,
+    writers,
+    next: body.next,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
+// One row per group of the diary, <= 64, distinct.
+export function validGroups (body) {
+  if (!hasExactKeys(body, GROUPS_KEYS) || !isFlags(body)) return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > GROUPS_MAX) return null
+  const seen = new Set()
+  const groups = []
+  for (const r of list) {
+    if (!hasExactKeys(r, GROUPS_ROW_KEYS) || !isHex64(r.group) || !isHex64(r.writer)) return null
+    if (!isSeq(r.seq) || typeof r.left !== 'boolean' || seen.has(r.group)) return null
+    seen.add(r.group)
+    groups.push({ group: r.group, writer: r.writer, seq: r.seq, left: r.left })
+  }
+  return { groups, indexing: body.indexing, complete: body.complete }
+}
+
+function hitRows (list, max) {
+  if (!Array.isArray(list) || list.length > max) return null
+  const seen = new Set()
+  const out = []
+  for (const h of list) {
+    if (!hasExactKeys(h, GROUP_HIT_KEYS) || !isHex64(h.group) || !isName(h.name) || !isCount(h.writerCount) || seen.has(h.group)) return null
+    seen.add(h.group)
+    out.push({ group: h.group, name: h.name, writerCount: h.writerCount })
+  }
+  return out
+}
+
+// <= 20 public groups, distinct.
+export function validGroupSearch (body) {
+  if (!hasExactKeys(body, GROUP_SEARCH_KEYS) || !isFlags(body) || typeof body.more !== 'boolean') return null
+  const groups = hitRows(body.groups, GROUP_SEARCH_MAX)
+  return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 32 groups; a private one is only { group, visibility: 'private' }.
+export function validCommunity (body) {
+  if (!hasExactKeys(body, COMMUNITY_KEYS) || !isFlags(body) || !isName(body.name)) return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > COMMUNITY_GROUPS_MAX) return null
+  const seen = new Set()
+  const groups = []
+  for (const r of list) {
+    let row
+    if (hasExactKeys(r, COMMUNITY_PRIVATE_KEYS)) {
+      if (!isHex64(r.group) || r.visibility !== 'private') return null
+      row = { group: r.group, visibility: 'private' }
+    } else {
+      const one = hitRows([r], 1)
+      if (one === null) return null
+      row = one[0]
+    }
+    if (seen.has(row.group)) return null
+    seen.add(row.group)
+    groups.push(row)
+  }
+  return { name: body.name, groups, indexing: body.indexing, complete: body.complete }
+}
+
 // --- fetchers ---
 
 export function fetchPost (ref, cursor = null, deps = {}) {
@@ -768,4 +916,23 @@ export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
   const url = engagersUrl(kind, ref, cursor)
   const r = url === null ? null : inputRef(ref)
   return run(url, (body) => validEngagers(body, r, kind), deps)
+}
+
+// Never cached: membership and writers change with every join or leave.
+export function fetchGroup (group, after = null, deps = {}) {
+  const url = groupUrl(group, after)
+  const a = url === null || after === null ? null : inputAuthor(after)
+  return run(url, (body) => validGroup(body, a), deps)
+}
+
+export function fetchGroups (diary, deps = {}) {
+  return run(groupsUrl(diary), validGroups, deps)
+}
+
+export function fetchCommunity (community, deps = {}) {
+  return run(communityUrl(community), validCommunity, deps)
+}
+
+export function fetchGroupSearch (segment, deps = {}) {
+  return run(groupSearchUrl(segment), validGroupSearch, deps)
 }

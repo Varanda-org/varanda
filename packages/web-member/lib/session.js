@@ -976,6 +976,15 @@ function createBrowserSession ({
     if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
     if (run !== null) await stopRun('preempted')
     if (generation !== null) checkGroupOperation(epoch, generation)
+    const waited = []
+    for (const key of groupKeys) {
+      if (await refusedWriter(key)) {
+        groupUnpushed.delete(key)
+        continue
+      }
+      waited.push(key)
+    }
+    groupKeys = waited
     for (const key of groupKeys) await readGroupLength(key)
     if (generation !== null) checkGroupOperation(epoch, generation)
     const intent = syncIntent
@@ -1013,6 +1022,22 @@ function createBrowserSession ({
   // current length (not only the key's presence).
   function groupCaughtUp (r, key) {
     return r.groupSynced.has(key) && r.groupSynced.get(key) >= (groupLengths.get(key) || 0)
+  }
+
+  // Only while no run holds the core (one handle per core): whether own
+  // writer `key` has no `box` while its group's held, verified root is
+  // private (a join by key before the root arrived). No seeder admits it, so
+  // nothing waits for its push; the next join replaces it with a boxed one.
+  async function refusedWriter (key) {
+    const header = async (k) => {
+      const core = await store.openGroupCoreReadOnly(storage, k)
+      if (core === null) return null
+      try { return await store.readBlock0(core) } catch { return null } finally { await core.close() }
+    }
+    const w = await header(key)
+    if (w === null || w.type !== 'group-writer' || w.box !== null || typeof w.group !== 'string' || w.group === key) return false
+    const g = await header(w.group)
+    return g !== null && g.type === 'group-header' && g.visibility === 'private'
   }
 
   // Only while no run holds the core (one handle per core).
@@ -1319,6 +1344,7 @@ function createBrowserSession ({
           const written = new Set([...roots(params), result.group, result.community].filter((k) => typeof k === 'string'))
           for (const group of written) {
             for (const key of await ownGroupKeys(group)) {
+              if (await refusedWriter(key)) continue
               const core = await store.openGroupCoreReadOnly(storage, key)
               if (core === null) continue
               try {

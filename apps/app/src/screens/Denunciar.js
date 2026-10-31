@@ -7,14 +7,17 @@
 // Flow: /account/status -> /account/report/start (nonce) -> report.sign ->
 // /account/report. Nothing is stored: no localStorage, no diary write.
 // `target` = { author, name, username, seq, text } with the RAW peer strings; they are
-// rendered through displayText here (the PostRow rule).
+// rendered through displayText here (the PostRow rule). A group message adds
+// { group, writer, private } (the text is then the one the reporter sees; for
+// a private group, the locally decrypted one) and the sheet says what leaves
+// the group before anything is sent.
 
 import { useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
-import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, reportSend, reportStart, validateReportText, wellFormed } from '../report'
+import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, submitReport, validateReportText, wellFormed } from '../report'
 import { countChars } from '../format'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
@@ -23,6 +26,9 @@ import { HelpNote } from '../ui/Help'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { colors, type } from '../ui/theme'
+
+const PRIVATE_GROUP_NOTICE = 'Este grupo é privado. Ao enviar, a moderação da associação vai ler o texto acima, que sai do grupo como a citação do denunciante. A associação não consegue ler o grupo, só o que você enviar aqui.'
+const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da associação recebe o texto acima como citação do denunciante.'
 
 const NOT_HOSTED_MESSAGE = 'Nesta versão, denúncias só pela versão web no site da associação.'
 
@@ -57,6 +63,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
 
   const fromPost = target !== null && target.seq !== null && target.seq !== undefined
   const postMode = fromPost && !whole
+  const inGroup = fromPost && typeof target.group === 'string' && typeof target.writer === 'string'
   // The exact text that is signed and sent (lone surrogates normalized, D5).
   const quote = postMode ? wellFormed(target.text) : ''
   const noteText = validateReportText(wellFormed(note))
@@ -69,28 +76,19 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     // A close, a lock or a new target while this runs makes it stale: a stale
     // run stops before signing and before sending, not only before the toast.
     const mine = seqRef.current
-    const r = await send.run(async () => {
-      const { nonce } = await reportStart({ member })
-      if (mine !== seqRef.current) return null
-      // seq omitted (and quote empty) for a report of the whole account.
-      const params = { nonce, target: target.author, reason, text: noteText }
-      if (postMode) {
-        params.seq = target.seq
-        params.quote = quote
-      }
-      const { signature } = await node.request('report.sign', params)
-      if (mine !== seqRef.current) return null
-      return reportSend({
-        member,
-        nonce,
-        target: target.author,
-        seq: postMode ? target.seq : null,
-        reason,
-        text: noteText,
-        quote,
-        signature
-      })
-    })
+    // seq omitted (and quote empty) for a report of the whole account.
+    const r = await send.run(() => submitReport({
+      member,
+      target: target.author,
+      seq: postMode ? target.seq : null,
+      writer: postMode && inGroup ? target.writer : null,
+      group: postMode && inGroup ? target.group : null,
+      reason,
+      text: noteText,
+      quote,
+      sign: (params) => node.request('report.sign', params),
+      isStale: () => mine !== seqRef.current
+    }))
     if (r.ok && r.value !== null && mine === seqRef.current) onSent(r.value.duplicate ? 'você já tinha denunciado isso' : 'denúncia enviada')
   }
 
@@ -126,6 +124,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             </View>
             )
           : null}
+        {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
         {!postMode ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
         <View style={styles.pills}>
           {REASONS.map(([id, label]) => (

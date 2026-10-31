@@ -157,13 +157,13 @@ test('private groups end to end: core creator, browser member, non-member, real 
   t.is(idx.header.name, null, 'and never names it')
 
   // 2. The browser joins by key before the root arrives: its pending writer
-  // has no box, so the seeder never takes it and the run reports only that
-  // writer's push as timed out. Once the root is held, joining again binds a
-  // boxed writer (the boxless one is unbound) and requests entry.
+  // has no box, so the seeder never takes it; once the run holds the private
+  // root, that writer's push is no goal, so the run ends ok. Joining again
+  // binds a boxed writer (the boxless one is unbound) and requests entry.
   t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'join before the root is pending')
   const boxless = (await store.readGroupWriters(b.storage)).find((w) => w.group === group).key
   const first = await onceB(b, sd.url)
-  t.ok(first.res.errors.length > 0 && first.res.errors.every((e) => e.startsWith('tempo esgotado: ' + boxless)), 'only the boxless writer push fails: ' + JSON.stringify(first.res.errors))
+  t.ok(first.res.ok, 'the boxless writer is no push goal once the root arrives: ' + JSON.stringify(first.res.errors))
   t.ok(await store.groupCoreExists(b.storage, group), 'the root is stored')
   t.is(writerLength(sd.seeder, group, boxless), 0, 'the seeder never took the boxless writer')
   t.is((await ops.groupJoin(b.ctx, { group })).state, 'requested', 'boxed rejoin requests entry')

@@ -4,6 +4,7 @@
 // active state instead.
 
 import Feather from '@expo/vector-icons/Feather'
+import { View } from 'react-native'
 import { colors } from './theme'
 
 const GLYPHS = {
@@ -38,6 +39,20 @@ const GLYPHS = {
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
 // default line height adds about 10 %, which pushed the tab labels out).
 export function Icon ({ name, size = 24, color = colors.ink, style }) {
+  // Feather has no chair: drawn on its 24-unit grid with the same 2-unit stroke.
+  if (name === 'cadeira') {
+    const unit = size / 24
+    const stroke = { position: 'absolute', borderColor: color, borderWidth: 2 * unit, borderRadius: 2 * unit }
+    const leg = { position: 'absolute', top: 15 * unit, width: 2 * unit, height: 6 * unit, borderRadius: unit, backgroundColor: color }
+    return (
+      <View style={[{ width: size, height: size }, style]}>
+        <View style={{ ...stroke, left: 7 * unit, top: 3 * unit, width: 10 * unit, height: 10 * unit }} />
+        <View style={{ ...stroke, left: 4 * unit, top: 11 * unit, width: 16 * unit, height: 6 * unit }} />
+        <View style={{ ...leg, left: 5 * unit }} />
+        <View style={{ ...leg, left: 17 * unit }} />
+      </View>
+    )
+  }
   return <Feather name={GLYPHS[name] || name} size={size} color={color} style={[{ lineHeight: size }, style]} />
 }
 

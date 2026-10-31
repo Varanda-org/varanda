@@ -32,6 +32,7 @@ A rede se chama Varanda, no domínio varanda.app, e cada parte do app leva um no
 | --- | --- | --- |
 | A Rua | O feed dos diários que a pessoa segue | Continua com os diários seguidos; a descoberta fica na Espiadinha |
 | Cadeiras de Praia (Cadeiras) | Conversas em grupo e salas de áudio ao vivo, como as cadeiras de plástico puxadas para a calçada | Grupos públicos de texto entram no piloto web: cada aparelho de quem participa escreve o próprio núcleo, sem diário compartilhado (`docs/protocol.md` seção 10). Comunidades reúnem até 32 grupos, públicos ou privados, sob uma mesma moderação, com vínculo dos dois lados. Grupos privados de texto são cifrados de ponta a ponta: só os aparelhos de quem participa leem as mensagens, e entrar sempre pede aprovação; podem fazer parte de uma comunidade. Salas de áudio ao vivo ficam fora, pois pedem transmissão em tempo real entre aparelhos |
+| Comunidade | Conjunto de até 32 cadeiras, públicas ou privadas, sob uma mesma moderação, com raiz própria | Só na versão web, junto das cadeiras; o vínculo entre cadeira e comunidade só vale com os dois lados ligados |
 | Espiadinha | Espiar o que quem você não segue está publicando | No piloto web: uma publicação por diário por rodada, até três rodadas, sem algoritmo de engajamento; cidade e estado ficam para depois |
 | Gente da Gente | O selo de membro real e construtivo, no lugar do selo azul corporativo | "Real" já vem do certificado de membro; "construtivo" precisa de critério e de quem concede, e o selo não deve revelar a faixa etária |
 
@@ -305,6 +306,13 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 - Os e-mails dos moderadores ficam no `.env` do servidor (`VARANDA_MODERATOR_EMAILS`) e, ao lado de cada decisão, no registro de decisões. O e-mail do vínculo Google de quem denuncia e de quem é denunciado não aparece no painel nem em registro: só sai por `account reports`, na máquina de operação do servidor, para atender um pedido legal.
 - A pessoa denunciada não tem tela nem rota que mostre uma denúncia contra ela.
 - Quem vê as estatísticas de uso (`VARANDA_STATS_EMAILS`) é um subconjunto dos moderadores. A aba nunca mostra contagem de denúncias.
+
+**Cadeiras de Praia (hipóteses de desenho).**
+
+- **Metadados.** Participar de uma cadeira é público, como seguir: a entrada fica no diário (`group-join`) e a saída no núcleo do escritor, e quem tem essas cópias vê quem participa. Em cadeira privada, texto, respostas, alvo das ocultações e nome do grupo vão cifrados; participantes, banimentos, admissões, administração, a entrega de chaves por época e o momento e o tamanho de cada mensagem continuam em claro.
+- **Retenção.** A saída retira da leitura do grupo os registros do diário que sai, mas os semeadores não apagam o núcleo por causa dela: ele segue a regra de retenção de "Grupos públicos", e cópias já obtidas por outros aparelhos não são recolhidas.
+- **Ocultar não apaga.** Uma mensagem oculta sai da conversa, mas as cópias continuam nos núcleos. Só a remoção por diário derrubado ou bloqueado tira cópias dos semeadores.
+- **Denúncias.** A denúncia de mensagem de grupo identifica a mensagem pelo escritor, pelo grupo e pela posição, e é decisão humana, nunca triagem com IA. Em cadeira privada, a associação não lê o texto: o painel mostra só a citação feita pela denunciante, marcada como cifrada.
 
 **Direitos dos titulares (Art. 18) numa rede P2P**
 
