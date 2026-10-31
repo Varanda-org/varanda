@@ -1031,9 +1031,11 @@ async function followList (ctx) {
 // ---- log ----
 
 // Reads a replica that has local data, or throws 'sem dados locais para este
-// diário' without creating anything; an empty replica is purged (D).
+// diário' without creating anything; an empty replica is purged (D). The
+// entries are feedRead's (store.readVisible): the prefix and the newest
+// run, in seq order, a hole the run passed absent.
 async function readReplica (ctx, key) {
-  const read = HEX64.test(key) ? await withReplica(ctx, key, async (core) => ({ entries: await store.readAll(core), fork: core.fork })) : null
+  const read = HEX64.test(key) ? await withReplica(ctx, key, async (core) => ({ entries: (await store.readVisible(core)).entries, fork: core.fork })) : null
   if (read === null) throw new Error('sem dados locais para este diário')
   return read
 }
