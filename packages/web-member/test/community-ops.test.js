@@ -5,7 +5,8 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -77,7 +78,7 @@ test('community RPC handler names are registered', async (t) => {
   const browser = createBrowserSession({ storage: memoryNodeStorage(), association: KEY, seederUrl: 'ws://127.0.0.1:9/seeder', createSocket: () => null })
   t.teardown(() => browser.close(), { force: true })
   const names = Object.keys(browser.handlers).filter((key) => key.startsWith('community.')).sort()
-  t.alike(names, ['community.admin', 'community.create', 'community.info', 'community.link'])
+  t.alike(names, ['community.admin', 'community.create', 'community.info', 'community.link', 'community.list'])
 })
 
 test('community create, link both sides, info shapes and refusals', async (t) => {
@@ -130,6 +131,37 @@ test('community create, link both sides, info shapes and refusals', async (t) =>
   const off = [await coreLength(a, community), await coreLength(a, group)]
   t.alike((await a.web.request('community.link', { community, group, on: false })).sides, ['community', 'group'], 'already off: answered without writing')
   t.alike([await coreLength(a, community), await coreLength(a, group)], off)
+})
+
+test('community.list: created, linked through a group, once when both, blocklisted left out', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  t.alike(await a.web.request('community.list', {}), { communities: [] })
+  const bad = await errorOf(a.web.request('community.list', { limit: 1 }))
+  t.is(bad.code, 'USAGE', 'a field is refused')
+  const { community } = await a.web.request('community.create', { name: 'Bairro' })
+  t.alike(await a.web.request('community.list'), { communities: [{ community, name: 'Bairro', state: 'ready', creator: true, linked: false }] })
+  const { group } = await a.web.request('group.create', { name: 'Horta', join: 'open' })
+  await a.web.request('community.link', { community, group, on: true })
+  t.alike((await a.web.request('community.list')).communities, [{ community, name: 'Bairro', state: 'ready', creator: true, linked: true }], 'created and linked: one entry')
+
+  const { community: vila } = await b.web.request('community.create', { name: 'Vila' })
+  const { group: praca } = await b.web.request('group.create', { name: 'Praça', join: 'open' })
+  await b.web.request('community.link', { community: vila, group: praca, on: true })
+  await share(b, a, [vila, praca])
+  t.alike(await a.web.request('group.join', { group: praca }), { state: 'member' })
+  t.alike((await a.web.request('community.list')).communities, [
+    { community, name: 'Bairro', state: 'ready', creator: true, linked: true },
+    { community: vila, name: 'Vila', state: 'ready', creator: false, linked: true }
+  ])
+  t.alike((await a.web.request('group.list')).groups.map((g) => g.group).sort(), [group, praca].sort(), 'group.list never lists a community')
+
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey) }, a.assoc)
+  await store.writeBlocklist(a.storage, createSnapshot({ seq: 1, blocked: [vila] }, modKp, modCert))
+  t.alike((await a.web.request('community.list')).communities.map((c) => c.community), [community], 'a blocklisted root is left out')
+  await store.writeBlocklist(a.storage, createSnapshot({ seq: 2, blocked: [vila, community] }, modKp, modCert))
+  t.alike(await a.web.request('community.list'), { communities: [] })
 })
 
 test('one side per owner: a link counts once both owners wrote it', async (t) => {

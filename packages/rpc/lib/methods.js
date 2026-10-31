@@ -585,6 +585,7 @@ const SPECS = {
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)) }, mutating: true },
   'community.link': { fields: { community: req(isKey), group: req(isKey), on: req(isBool) }, mutating: true },
   'community.info': { fields: { community: req(isKey) } },
+  'community.list': { fields: none },
   'community.admin': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },

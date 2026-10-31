@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'community.list', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
@@ -623,6 +623,14 @@ test('community.info', (t) => {
   bad(t, 'community.info', {})
   bad(t, 'community.info', { community: 'x' })
   bad(t, 'community.info', { community: KEY, limit: 1 })
+})
+
+test('community.list', (t) => {
+  t.absent(isMutating('community.list'))
+  ok(t, 'community.list', {}, {})
+  bad(t, 'community.list', { community: KEY })
+  bad(t, 'community.list', { offset: 0 })
+  bad(t, 'community.list', { limit: 1 })
 })
 
 test('group.rekey', (t) => {
