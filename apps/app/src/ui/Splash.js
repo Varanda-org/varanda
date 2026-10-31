@@ -11,6 +11,7 @@ import { AccessibilityInfo, Animated, Easing, Image, Platform, StyleSheet, View 
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { colors, fonts, type } from './theme'
+import { loopTiming } from './loopMotion'
 import { SPLASH_HINT, SPLASH_LABEL, SPLASH_WORD, PULSE_MS, splashMotion } from './splashMotion'
 
 const mark = require('../../assets/cadeira.png')
@@ -90,12 +91,12 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
       hintOpacity.current.setValue(m.hint.to.opacity)
     }
     const startPulse = () => {
-      const pulse = (toValue) => Animated.timing(hintOpacity.current, {
+      const pulse = (toValue) => Animated.timing(hintOpacity.current, loopTiming({
         toValue,
         duration: PULSE_MS,
         easing: Easing.inOut(Easing.quad),
         useNativeDriver: native
-      })
+      }))
       // Without this the loop resets the hint to its initial 0 before each pass.
       loop = Animated.loop(Animated.sequence([pulse(0.6), pulse(1)]), { resetBeforeIteration: false })
       loop.start()

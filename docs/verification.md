@@ -3481,3 +3481,28 @@ Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira 
 - Ocultar e reexibir uma publicação seguem a ordem decifrada (o último vale, como nos grupos públicos): um administrador que saiu pode deixar uma publicação visível de novo com um registro preparado antes de sair, até outro administrador ocultá-la outra vez.
 - Não verificado: um administrador, enquanto tem poder, talvez consiga deixar pré-aprovada a volta de um membro listando de antemão o escritor da volta numa admissão; a admissão valeria mesmo se ele perdesse o poder depois. Exige um administrador agindo de má-fé enquanto ainda pode admitir.
 - Sem interface nativa; as telas da web vêm na PR4.
+
+## 63. Listas da web desenham além das primeiras linhas (PR fix/list-render-window, 2026-10-31)
+
+### O que mudou
+
+- Na web, A Rua, o Diário e Seguindo mostravam só umas dez linhas e depois "Isso é tudo por enquanto.", mesmo com centenas de publicações já carregadas. As publicações apareciam depois de abrir o Diário ou depois de cerca de um minuto. Visto no Chrome do computador e no PWA, mais fácil logo depois de limpar os dados do site.
+- A causa estava no esqueleto que pulsa enquanto uma lista carrega (`Skeleton` em `apps/app/src/ui/States.js`). Na web nenhuma animação roda no driver nativo, e uma `Animated.timing` sem `isInteraction: false` conta como interação enquanto roda. A `FlatList` do react-native-web só aumenta a janela de linhas desenhadas quando o `InteractionManager` está livre. Uma lista montada ainda vazia fica então nas linhas iniciais (`initialNumToRender`, 10). As abas ocultas continuam montadas, e Seguindo e o Diário mostram o esqueleto até a primeira visita, então o laço dele nunca parava. Abrir a aba terminava o carregamento e parava o laço, por isso os dados "só apareciam depois de ir ao Diário".
+- Agora toda `Animated.timing` dentro de um `Animated.loop` passa por `loopTiming` (`apps/app/src/ui/loopMotion.js`), que acrescenta `isInteraction: false`: o esqueleto e o pulso do "conectando…" da abertura. No iOS e no Android nada muda: com o driver nativo, essas animações já não contavam como interação.
+
+### Testes automatizados
+
+- `apps/app/test/loopMotion.test.js`: `loopTiming` nunca marca interação e mantém o resto da configuração; todo arquivo de `apps/app/src` com `Animated.loop(` passa as suas `Animated.timing` do laço por `loopTiming` (as duas do esqueleto e o pulso da abertura); o módulo continua puro. Falha sem a correção (o segundo teste).
+- Reprodução fora da CI: o app exportado (`npm run export:web`) num Chrome sem janela, com o nó do navegador real atrás de uma ponte, um semeador real com 60 diários seguidos (cerca de 3700 publicações), 150 ms de latência e armazenamento vazio, como depois de limpar os dados. Sem a correção, a `FlatList` de A Rua tinha 3757 itens e a janela desenhada vazia (`{ first: 0, last: -1 }`, só as 10 linhas iniciais) enquanto os esqueletos de Seguindo e do Diário pulsavam ocultos; abrir Seguindo parou o último laço e a janela foi a `{ 0, 85 }`. Com a correção, no mesmo roteiro e com os dois esqueletos ainda pulsando, A Rua desenhou `{ 0, 81 }` e depois `{ 188, 343 }` ao rolar, e o Diário as 61 linhas até "Isso é tudo por enquanto.".
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. No Chrome do computador e no PWA:
+
+- [ ] Limpar os dados do site, entrar e, sem abrir outra aba, rolar A Rua: as publicações de quem você segue continuam aparecendo e a lista não para nas primeiras linhas (não realizada ainda).
+- [ ] Logo depois de entrar, abrir Seguindo e o Diário e rolar até o fim: a lista inteira aparece (não realizada ainda).
+
+### Limites
+
+- O esqueleto de uma aba oculta continua pulsando até a primeira visita dela. Ele não segura mais as listas, mas ainda gasta o processamento da página; parar a animação nas abas ocultas fica para depois.
+- As outras animações curtas (o indicador de puxar para atualizar, a pílula "ver novidades", a entrada da abertura) continuam contando como interação enquanto duram, uma fração de segundo.
