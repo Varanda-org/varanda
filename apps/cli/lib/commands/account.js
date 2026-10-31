@@ -779,7 +779,7 @@ async function serve (flags, env) {
     // The terms acceptances (terms.json): every write asks the lock again.
     // An invalid file leaves the routes answering 'indisponivel'; the rest
     // of the service still runs.
-    terms = openTermsStore(flags.dataDir, { guard: () => lock.owned() })
+    terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is

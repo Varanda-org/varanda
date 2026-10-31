@@ -113,13 +113,18 @@ function copyEntry (e) {
   return { version: e.version, acceptedAt: e.acceptedAt, nonce: e.nonce, signature: e.signature }
 }
 
+// A file that is not a valid terms.json, as opposed to a read that failed.
+function invalidFile () {
+  return Object.assign(new Error('termos inválidos'), { invalid: true })
+}
+
 function emptyState () {
   return { v: VERSION, members: Object.create(null) }
 }
 
 function fromJson (obj) {
-  if (!isPlainObject(obj) || !exactKeys(obj, ['v', 'members']) || obj.v !== VERSION) throw new Error('termos inválidos')
-  if (!isPlainObject(obj.members)) throw new Error('termos inválidos')
+  if (!isPlainObject(obj) || !exactKeys(obj, ['v', 'members']) || obj.v !== VERSION) throw invalidFile()
+  if (!isPlainObject(obj.members)) throw invalidFile()
   // No member-count ceiling here: MAX_MEMBERS only limits admissions in
   // accept(). A heal after a takeover writes the union of two valid copies,
   // which may pass it, and a load-time ceiling would make this store refuse a
@@ -127,10 +132,10 @@ function fromJson (obj) {
   const state = emptyState()
   for (const [member, list] of Object.entries(obj.members)) {
     // This store never writes a member without an acceptance.
-    if (!validMember(member) || !Array.isArray(list) || list.length === 0 || list.length > MAX_PER_MEMBER) throw new Error('termos inválidos')
+    if (!validMember(member) || !Array.isArray(list) || list.length === 0 || list.length > MAX_PER_MEMBER) throw invalidFile()
     const seen = new Set()
     for (const e of list) {
-      if (!validEntry(e) || seen.has(e.version)) throw new Error('termos inválidos')
+      if (!validEntry(e) || seen.has(e.version)) throw invalidFile()
       seen.add(e.version)
     }
     state.members[member] = list.map(copyEntry).sort(byDate)
@@ -148,8 +153,27 @@ function readState (file) {
     if (err.code === 'ENOENT') return null
     throw err
   }
-  if (!st.isFile()) throw new Error('termos inválidos')
-  return fromJson(JSON.parse(fs.readFileSync(file, 'utf8')))
+  if (!st.isFile()) throw invalidFile()
+  const text = fs.readFileSync(file, 'utf8')
+  let obj
+  try {
+    obj = JSON.parse(text)
+  } catch {
+    throw invalidFile()
+  }
+  return fromJson(obj)
+}
+
+// What changes when the file is replaced or rewritten, or null when absent.
+// Any other failure to stat throws.
+function fingerprint (file) {
+  try {
+    const st = fs.lstatSync(file)
+    return [st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':')
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
 }
 
 function toJson (state) {
@@ -200,12 +224,15 @@ function memberCount (state) {
   return n
 }
 
-function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = () => true } = {}) {
+function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = () => true, log = () => {} } = {}) {
   refuseSymlinkDir(dataDir)
   const file = path.join(dataDir, FILE)
   let state = emptyState()
   let failed = false
   let dirty = false
+  // Fingerprint of the file as heal() last found it equal to memory (or left
+  // it); undefined until then.
+  let healed
   try {
     state = readState(file) || emptyState()
   } catch {
@@ -307,19 +334,31 @@ function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = ()
   function heal () {
     return enqueue(() => {
       if (failed || readOnly || !guard()) return false
-      let disk
+      let seen, disk
       try {
+        seen = fingerprint(file)
+        if (!dirty && seen === healed) return false
         disk = readState(file)
-      } catch {
-        failed = true
+      } catch (err) {
+        // Only a malformed file is final. A read that failed (EIO, EMFILE)
+        // is tried again at the next interval; the log carries the error
+        // code, never a path or a member.
+        if (err.invalid === true) failed = true
+        else log({ event: 'terms', reason: 'leitura-falhou', code: typeof err.code === 'string' ? err.code : 'desconhecido' })
         return false
       }
       const next = merge(state, disk)
       if (dirty || canonical(next) !== canonical(disk || emptyState())) {
         persist(next)
+        // Not the fingerprint of the file just written: a stale writer's
+        // rename may land between persist()'s rename and an lstat here, and
+        // that file would then never be read again. The next heal() reads
+        // once and keeps the fingerprint itself.
+        healed = undefined
         return true
       }
       state = next
+      healed = seen
       return false
     }).catch(() => false)
   }
