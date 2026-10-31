@@ -393,3 +393,13 @@ test('native store: links open a fresh invite in memory, never consent', async (
   t.ok(n.dropInvite())
   t.is(n.loadInvite(), null)
 })
+
+test('a /g/ group link is not a profile path and captureInvite leaves it alone', async (t) => {
+  const { isProfilePath, parseProfilePath, captureInvite } = await load()
+  t.absent(isProfilePath('/g/' + A))
+  t.is(parseProfilePath('/g/' + A), null)
+  const { location, history, calls } = fakeBrowser('/g/' + A)
+  const storage = memoryStorage()
+  t.is(captureInvite({ location, history, storage, now: NOW }), null)
+  t.is(calls.length, 0)
+})

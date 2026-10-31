@@ -285,6 +285,13 @@ test('community.info: 32 groups with maximal names fit', (t) => {
   t.ok(s <= MAX_MESSAGE)
 })
 
+test('community.list: 128 communities with maximal names fit', (t) => {
+  const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), state: 'pending', creator: false, linked: false }
+  const s = size({ communities: Array(128).fill(community) })
+  t.comment('community.list worst case at 128 communities: ' + s + ' bytes')
+  t.ok(s <= MAX_MESSAGE)
+})
+
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
   const sent = []
   const d = createServerDispatcher({

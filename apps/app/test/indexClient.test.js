@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchGroupSearch: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -899,4 +899,180 @@ test('with an installation set, every index URL is absolute on that origin only'
   t.alike(urls, [O + '/index/counts/' + REF])
   setInstallation(null)
   t.is(postUrl(REF), '/index/post/' + A + '/5', 'relative again once cleared')
+})
+
+function groupBody (over = {}) {
+  return {
+    kind: 'group',
+    visibility: 'public',
+    join: 'open',
+    name: 'Praia',
+    creator: A,
+    rootServed: true,
+    community: null,
+    writers: [
+      { key: A, diary: A, length: 4, signed: 5, seq: 1, left: false },
+      { key: B, diary: C, length: 2, signed: 2, seq: 3, left: true }
+    ],
+    next: null,
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('group URL builders lowercase and refuse anything else', async (t) => {
+  const { groupUrl, groupsUrl, communityUrl, groupSearchUrl } = await load()
+  t.is(groupUrl(A), '/index/group/' + A)
+  t.is(groupUrl(A.toUpperCase(), B), '/index/group/' + A + '/' + B)
+  t.is(groupsUrl(A.toUpperCase()), '/index/groups/' + A)
+  t.is(communityUrl(C), '/index/community/' + C)
+  t.is(groupSearchUrl('praia-azul'), '/index/group-search/praia-azul')
+  for (const bad of [null, 7, 'zz'.repeat(32), A + '/..', A.slice(2)]) {
+    t.is(groupUrl(bad), null)
+    t.is(groupsUrl(bad), null)
+    t.is(communityUrl(bad), null)
+  }
+  t.is(groupUrl(A, 'nope'), null)
+  t.is(groupUrl(A, A + '/x'), null)
+  for (const bad of ['a', 'Praia', 'a-', 'x y', '', 'a--b', null, 'a-b-c-d-e']) t.is(groupSearchUrl(bad), null, String(bad))
+})
+
+test('fetchGroup: request, exact shape, older seeder without signed', async (t) => {
+  const { fetchGroup } = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(groupBody({ next: C })))
+  }
+  const res = await fetchGroup(A, null, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, groupBody({ next: C }))
+  t.is(calls[0].url, '/index/group/' + A)
+  t.is(calls[0].opts.credentials, 'omit')
+  const old = groupBody()
+  old.writers = old.writers.map(({ signed, ...w }) => w)
+  const res2 = await fetchGroup(A, null, { fetch: json(old) })
+  t.is(res2.value.writers[0].signed, 4, 'signed defaults to length')
+  const paged = await fetchGroup(A, A, { fetch: json(groupBody({ writers: [{ key: B, diary: B, length: 1, signed: 1, seq: 1, left: false }] })) })
+  t.is(paged.ok, true)
+  t.is((await fetchGroup(A, 'bad', { fetch })).reason, 'invalid-input')
+})
+
+test('fetchGroup refuses malformed JSON whole', async (t) => {
+  const { fetchGroup } = await load()
+  const w = (over) => ({ key: A, diary: A, length: 1, signed: 1, seq: 1, left: false, ...over })
+  const bad = [
+    groupBody({ extra: 1 }),
+    groupBody({ kind: 'other' }),
+    groupBody({ visibility: 'secret' }),
+    groupBody({ join: 'closed' }),
+    groupBody({ visibility: 'private', name: 'Segredo' }),
+    groupBody({ name: 7 }),
+    groupBody({ name: '' }),
+    groupBody({ name: 'x'.repeat(81) }),
+    groupBody({ creator: A.toUpperCase() }),
+    groupBody({ community: 'ab' }),
+    groupBody({ next: 'ab' }),
+    groupBody({ rootServed: 'yes' }),
+    groupBody({ indexing: 1 }),
+    groupBody({ writers: 'x' }),
+    groupBody({ writers: Array.from({ length: 65 }, (_, i) => w({ key: String(i).padStart(64, '0') })) }),
+    groupBody({ writers: [w({ extra: 1 })] }),
+    groupBody({ writers: [w({ key: 'ab' })] }),
+    groupBody({ writers: [w({ diary: 7 })] }),
+    groupBody({ writers: [w({ left: 0 })] }),
+    groupBody({ writers: [w({ length: -1 })] }),
+    groupBody({ writers: [w({ seq: 0 })] }),
+    groupBody({ writers: [w({ length: 5, signed: 4 })] }),
+    groupBody({ writers: [w({ key: B }), w({ key: A })] }),
+    groupBody({ writers: [w({ key: A }), w({ key: A })] })
+  ]
+  for (const body of bad) t.is((await fetchGroup(A, null, { fetch: json(body) })).reason, 'malformed', JSON.stringify(body).slice(0, 90))
+  const mixed = groupBody({ writers: [w(), { key: B, diary: B, length: 1, seq: 1, left: false }] })
+  t.is((await fetchGroup(A, null, { fetch: json(mixed) })).ok, true, 'older rows may omit signed')
+  t.is((await fetchGroup(A, B, { fetch: json(groupBody()) })).reason, 'malformed', 'a row at or before the cursor is refused')
+  t.is((await fetchGroup(A, null, { fetch: json([]) })).reason, 'malformed')
+  t.is((await fetchGroup(A, null, { fetch: async () => response('{') })).reason, 'malformed')
+  t.is((await fetchGroup(A, null, { fetch: json(groupBody(), { status: 404 }) })).reason, 'not-found')
+  const nulls = groupBody({ kind: null, visibility: null, join: null, name: null, creator: null, rootServed: false, writers: [], complete: false })
+  t.is((await fetchGroup(A, null, { fetch: json(nulls) })).ok, true, 'an unverified root has null header fields')
+})
+
+test('fetchGroups: one row per group, caps, distinct', async (t) => {
+  const { fetchGroups } = await load()
+  const body = { groups: [{ group: A, writer: B, seq: 2, left: false }, { group: C, writer: B, seq: 1, left: true }], indexing: false, complete: true }
+  const calls = []
+  const res = await fetchGroups(A, { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
+  t.alike(res, { ok: true, value: body })
+  t.is(calls[0], '/index/groups/' + A)
+  const row = (i) => ({ group: String(i).padStart(64, '0'), writer: B, seq: 1, left: false })
+  t.is((await fetchGroups(A, { fetch: json({ ...body, groups: Array.from({ length: 64 }, (_, i) => row(i)) }) })).ok, true)
+  const bad = [
+    { ...body, groups: Array.from({ length: 65 }, (_, i) => row(i)) },
+    { ...body, groups: [row(1), row(1)] },
+    { ...body, groups: [{ ...row(1), extra: 1 }] },
+    { ...body, groups: [{ ...row(1), seq: 0 }] },
+    { ...body, groups: [{ ...row(1), left: 'no' }] },
+    { ...body, groups: [{ group: A, writer: 'x', seq: 1, left: false }] },
+    { ...body, complete: 'yes' },
+    { groups: body.groups, indexing: false }
+  ]
+  for (const b of bad) t.is((await fetchGroups(A, { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
+  t.is((await fetchGroups('x', { fetch: json(body) })).reason, 'invalid-input')
+})
+
+test('fetchGroupSearch: public hits only, cap 20, null name allowed', async (t) => {
+  const { fetchGroupSearch } = await load()
+  const body = { groups: [{ group: A, name: 'Praia', writerCount: 3 }, { group: B, name: null, writerCount: 0 }], more: false, indexing: false, complete: true }
+  const calls = []
+  const res = await fetchGroupSearch('praia', { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
+  t.alike(res, { ok: true, value: body })
+  t.is(calls[0], '/index/group-search/praia')
+  const hit = (i) => ({ group: String(i).padStart(64, '0'), name: 'n', writerCount: 1 })
+  t.is((await fetchGroupSearch('praia', { fetch: json({ ...body, groups: Array.from({ length: 20 }, (_, i) => hit(i)) }) })).ok, true)
+  const bad = [
+    { ...body, groups: Array.from({ length: 21 }, (_, i) => hit(i)) },
+    { ...body, groups: [hit(1), hit(1)] },
+    { ...body, groups: [{ ...hit(1), visibility: 'private' }] },
+    { ...body, groups: [{ group: A, visibility: 'private' }] },
+    { ...body, groups: [{ ...hit(1), writerCount: -1 }] },
+    { ...body, groups: [{ ...hit(1), name: 4 }] },
+    { ...body, more: 'no' },
+    { groups: body.groups, indexing: false, complete: true }
+  ]
+  for (const b of bad) t.is((await fetchGroupSearch('praia', { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
+  t.is((await fetchGroupSearch('a', { fetch: json(body) })).reason, 'invalid-input')
+})
+
+test('fetchCommunity: a private row is only group and visibility', async (t) => {
+  const { fetchCommunity } = await load()
+  const body = {
+    name: 'Cais',
+    groups: [{ group: A, name: 'Praia', writerCount: 3 }, { group: B, visibility: 'private' }],
+    indexing: false,
+    complete: true
+  }
+  const calls = []
+  const res = await fetchCommunity(C, { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
+  t.alike(res, { ok: true, value: body })
+  t.is(calls[0], '/index/community/' + C)
+  t.is((await fetchCommunity(C, { fetch: json({ ...body, name: null }) })).ok, true, 'name may be null')
+  const hit = (i) => ({ group: String(i).padStart(64, '0'), name: 'n', writerCount: 1 })
+  t.is((await fetchCommunity(C, { fetch: json({ ...body, groups: Array.from({ length: 32 }, (_, i) => hit(i)) }) })).ok, true)
+  const bad = [
+    { ...body, groups: Array.from({ length: 33 }, (_, i) => hit(i)) },
+    { ...body, groups: [{ group: B, visibility: 'private', name: 'Segredo' }] },
+    { ...body, groups: [{ group: B, visibility: 'private', writerCount: 2 }] },
+    { ...body, groups: [{ group: B, visibility: 'public' }] },
+    { ...body, groups: [{ group: B }] },
+    { ...body, groups: [hit(1), { group: String(1).padStart(64, '0'), visibility: 'private' }] },
+    { ...body, groups: [{ ...hit(1), name: 3 }] },
+    { ...body, name: 4 },
+    { ...body, name: '' },
+    { ...body, indexing: 'no' },
+    { name: 'x', groups: [], indexing: false, complete: true, extra: 1 }
+  ]
+  for (const b of bad) t.is((await fetchCommunity(C, { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
+  t.is((await fetchCommunity('nope', { fetch: json(body) })).reason, 'invalid-input')
 })

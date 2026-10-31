@@ -3,7 +3,8 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { createCert } = require('../lib/cert')
+const { createCert, createModeratorCert } = require('../lib/cert')
+const { createSnapshot } = require('../lib/blocklist')
 const store = require('../lib/store')
 const member = require('../lib/member')
 const { tmpDir } = require('./helpers/tmp')
@@ -102,6 +103,36 @@ test('create binds a community root, info reads it, and the group list leaves it
   // A community root is no group: leaving it keeps the created root's entry.
   await rejects(t, member.groupLeave(a, { group: community }), 'grupo não encontrado', 'NOT_FOUND')
   t.is(store.readGroups(a.dataDir).length, 2)
+})
+
+test('community list: created, linked through a group, once when both, blocklisted left out', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp)
+  const b = await person(t, kp, 'Bia')
+  t.alike(await member.communityList(a), { communities: [] })
+  const { community } = await member.communityCreate(a, { name: 'Bairro' })
+  t.alike(await member.communityList(a), { communities: [{ community, name: 'Bairro', state: 'ready', creator: true, linked: false }] })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open' })
+  await member.communityLink(a, { community, group, on: true })
+  t.alike((await member.communityList(a)).communities, [{ community, name: 'Bairro', state: 'ready', creator: true, linked: true }], 'created and linked: one entry')
+
+  const { community: vila } = await member.communityCreate(b, { name: 'Vila' })
+  const { group: praca } = await member.groupCreate(b, { name: 'Praça', join: 'open' })
+  await member.communityLink(b, { community: vila, group: praca, on: true })
+  await exchange(b, a)
+  await member.groupJoin(a, { group: praca })
+  t.alike((await member.communityList(a)).communities, [
+    { community, name: 'Bairro', state: 'ready', creator: true, linked: true },
+    { community: vila, name: 'Vila', state: 'ready', creator: false, linked: true }
+  ])
+  t.alike((await member.groupList(a)).groups.map((g) => g.group).sort(), [group, praca].sort(), 'group.list never lists a community')
+
+  const mod = crypto.keyPair()
+  const cert = createModeratorCert({ moderator: hex(mod.publicKey) }, kp)
+  store.writeBlocklist(a.dataDir, createSnapshot({ seq: 1, blocked: [vila] }, mod, cert))
+  t.alike((await member.communityList(a)).communities.map((c) => c.community), [community], 'a blocklisted root is left out')
+  store.writeBlocklist(a.dataDir, createSnapshot({ seq: 2, blocked: [vila, community] }, mod, cert))
+  t.alike(await member.communityList(a), { communities: [] })
 })
 
 test('one caller owning both roots links both sides, idempotently, one community per group', async (t) => {

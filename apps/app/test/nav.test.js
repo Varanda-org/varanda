@@ -192,3 +192,22 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
   native.unbind()
   t.pass()
 })
+
+test('cadeira and comunidade are keyed by a lowercase hex64 root key', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
+  t.ok(SCREENS.includes('cadeira'))
+  t.ok(SCREENS.includes('comunidade'))
+  for (const screen of ['cadeira', 'comunidade']) {
+    t.ok(validEntry({ screen, key: A }))
+    const stack = push(EMPTY, { screen, key: A })
+    t.alike(top(stack), { screen, key: A, params: {} })
+    t.is(push(stack, { screen, key: A }), stack, 'same top is a no-op')
+    for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, A + '0']) {
+      t.absent(validEntry({ screen, key }), screen + ' ' + String(key))
+      t.is(push(EMPTY, { screen, key }), EMPTY)
+    }
+  }
+  t.is(push(push(EMPTY, { screen: 'cadeira', key: A }), { screen: 'comunidade', key: A }).length, 2, 'same key on another screen is a new entry')
+  t.ok(validEntry({ screen: 'conversa', key: A + ':1' }) && validEntry({ screen: 'membro', key: A }), 'existing screens keep working')
+  t.is(MAX_DEPTH, 20)
+})

@@ -54,6 +54,11 @@
 // of the own diary changed, possibly on another device) and `followCount` is
 // that event's `count` (null until one arrived on this connection): the
 // screens reload what depends on the follows.
+// `groupVersions` maps each group to a version bumped per groups.changed.
+// `getGroupVersion(group)` reads it (0 until the first event). Screens can
+// compare their last read's version to refresh or show a dot. Versions
+// restart at 0 with every epoch (connect, close, lock, unlock, signOut), so
+// screens compare with !== and key what they remember by epoch.
 //
 // Sync is automatic. The APP owns the intent (`setAutoSync(wanted)`, decided
 // by the shell, never inferred here) because the node's `syncIntent` is lost
@@ -92,6 +97,7 @@ import { isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
+import { EMPTY_GROUP_VERSIONS, bumpGroupVersion, clearGroupVersions, readGroupVersion } from './groupVersions'
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
 import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
@@ -174,6 +180,8 @@ export function NodeProvider ({ children }) {
   const [hasLegacy, setHasLegacy] = useState(false)
   // follows.changed (see the header): the version never goes back.
   const [follows, setFollows] = useState({ version: 0, count: null })
+  const [groupVersions, setGroupVersions] = useState(EMPTY_GROUP_VERSIONS)
+  const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
   const recoveryRef = useRef(null)
@@ -287,12 +295,14 @@ export function NodeProvider ({ children }) {
   }, [setRecon, setWait, setBackoff, resetSignals])
   const bumpEpoch = useCallback(() => {
     epochRef.current += 1
+    setGroupVersions(clearGroupVersions)
     resetAuto()
     setEpoch((e) => e + 1)
   }, [resetAuto])
   // The identity may have changed: a give-up (no identity) no longer holds.
   const bumpGeneration = useCallback(() => {
     pkGenRef.current += 1
+    setGroupVersions(clearGroupVersions)
     resetAuto()
     gaveUpRef.current = false
     setGaveUp(false)
@@ -318,6 +328,10 @@ export function NodeProvider ({ children }) {
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
+    if (name === 'groups.changed') {
+      setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
+      return
+    }
     if (name === 'follows.changed') {
       setFollows((f) => ({ version: f.version + 1, count: data && Number.isInteger(data.count) ? data.count : null }))
       return
@@ -611,6 +625,7 @@ export function NodeProvider ({ children }) {
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
+          setGroupVersions(clearGroupVersions)
           setPkStatus((st) => (st === null
             ? st
             : { ...st, unlocked: false, synced: false, resumed: false, ...(name === 'reset' ? { exists: false, publicKey: null, legacy: false } : {}) }))
@@ -1035,8 +1050,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, autoSync, signals, ackFresh, setAutoSync, syncNow
-  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, autoSync, signals, ackFresh, setAutoSync, syncNow])
+    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, autoSync, signals, ackFresh, setAutoSync, syncNow
+  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, autoSync, signals, ackFresh, setAutoSync, syncNow])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

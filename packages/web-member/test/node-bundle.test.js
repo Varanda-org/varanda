@@ -17,10 +17,12 @@ const vm = require('node:vm')
 const { spawnSync } = require('node:child_process')
 const ws = require('ws')
 const b4a = require('b4a')
-const { testnet, tmpDir, localSwarmOptions } = require('./helpers/net')
+const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { keyPairFromPrf, toBase64Url } = require('../lib/passkey')
 const { Seeder } = require('@varanda/core/lib/seeder')
+const coreSync = require('@varanda/core/lib/sync')
+const coreMember = require('@varanda/core/lib/member')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 
 const BUILD = path.join(__dirname, '..', 'scripts', 'build.js')
@@ -382,6 +384,133 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.alike(await again.identity.unlock({ register: true }), { publicKey: key, created: true }, 'PRF on create unlocks at once')
   t.is((await web2.request('identity.create')).publicKey, key)
   t.absent(holds(await idbRows('pages'), secret), 'still no page holds the secret')
+})
+
+// The same built bundle, driven only through its RPC, exchanges a public and a
+// private group with a core node through a local seeder (loopback DHT).
+test('the built node bundle exchanges public and private group messages with a core node', async (t) => {
+  t.timeout(150000)
+  const started = Date.now()
+  const { bootstrap } = await testnet(t)
+  const out = path.join(tmpDir(t, 'varanda-node-bundle-g-'), 'varanda-node.js')
+  const r = spawnSync(process.execPath, [BUILD, '--node', out], { encoding: 'utf8', timeout: 110000 })
+  t.is(r.status, 0, 'build exits 0: ' + (r.stderr || '').trim())
+  const code = fs.readFileSync(out, 'utf8')
+
+  const assocKp = generateAssociationKeyPair()
+  const association = hex(assocKp.publicKey)
+  const seederDir = tmpDir(t, 'varanda-node-bundle-gseed-')
+  Seeder.ensureConfig(seederDir, association)
+  const { publicKey: seederKey } = Seeder.createKey(seederDir)
+  const certFile = path.join(tmpDir(t, 'varanda-node-bundle-gsc-'), 'seeder-cert.json')
+  fs.writeFileSync(certFile, JSON.stringify(createSeederCert({ seeder: seederKey }, assocKp)))
+  Seeder.addCert(seederDir, certFile, association)
+  const seeder = new Seeder({ dataDir: seederDir, ...localSwarmOptions(bootstrap), associationKey: association, log: () => {} })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  wss.on('connection', (socket) => {
+    const raw = ws.createWebSocketStream(socket)
+    raw.on('error', () => {})
+    seeder.acceptStream(raw)
+  })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+
+  const fake = fakeAuthenticator()
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  // A fresh IndexedDB: the first test left another association in the shared one.
+  installGlobals(t, {
+    indexedDB: new (require('fake-indexeddb').IDBFactory)(),
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' }
+  })
+  const savedWs = globalThis.WebSocket
+  globalThis.WebSocket = ws.WebSocket
+  t.teardown(() => {
+    globalThis.WebSocket = savedWs
+    delete globalThis.VarandaWebNode
+  })
+  vm.runInThisContext(code, { filename: out })
+  const handle = await globalThis.VarandaWebNode.start({ association, seederUrl })
+  t.teardown(() => handle.close(), { force: true })
+  const web = await connectClient(handle, { timeoutMs: 60000 })
+  const unlocked = await handle.identity.unlock({ register: true })
+  const bKey = unlocked.publicKey
+  await web.request('identity.create')
+  await web.request('cert.add', { cert: createCert({ member: bKey }, assocKp) })
+  await web.request('profile.set', { name: 'Bia', bio: '' })
+
+  const coreCtx = { dataDir: tmpDir(t, 'varanda-node-bundle-gcore-'), association }
+  const { publicKey: cKey } = await coreMember.idCreate(coreCtx)
+  await coreMember.certAdd(coreCtx, createCert({ member: cKey }, assocKp))
+  await coreMember.profileSet(coreCtx, { name: 'Caio' })
+
+  async function syncWeb () {
+    const { runId } = await web.request('sync.start', { once: true, timeoutMs: 30000 })
+    return (await stoppedOf(web.events, runId)).result
+  }
+  const syncCore = () => coreSync.runSync({ dataDir: coreCtx.dataDir, ...localSwarmOptions(bootstrap), once: true, timeoutMs: 30000, onEvent: () => {} })
+  const texts = (read) => read.items.filter((p) => !p.hidden).map((p) => p.text)
+  const rootOnSeeder = (group) => until(() => seeder.groupWriters({ group, after: null, limit: 64 }).items.some((it) => it.key === group && it.length > 0), { name: 'root on the seeder' })
+
+  // Public group: the core node creates and posts, the bundle joins and reads,
+  // posts, and the core node reads it back.
+  const { group: pub } = await coreMember.groupCreate(coreCtx, { name: 'Praia', join: 'open', visibility: 'public' })
+  await coreMember.groupPost(coreCtx, { group: pub, text: 'publica-c1' })
+  t.ok((await syncCore()).ok, 'core pushes the public group')
+  await rootOnSeeder(pub)
+  t.is((await web.request('group.join', { group: pub })).state, 'pending', 'join before the root is pending')
+  await syncWeb()
+  const infoPub = await web.request('group.info', { group: pub })
+  t.is(infoPub.state, 'member', 'the bundle is a member of the open group')
+  t.alike(texts(await web.request('group.read', { group: pub })), ['publica-c1'], 'the bundle reads the core post')
+  await web.request('group.post', { group: pub, text: 'publica-b1' })
+  await syncWeb()
+  t.ok((await syncCore()).ok, 'core fetches')
+  t.alike(texts(await coreMember.groupRead(coreCtx, { group: pub })).sort(), ['publica-b1', 'publica-c1'], 'the core node reads the bundle post')
+
+  // Private group, the core node as creator: the bundle joins by key before
+  // it holds the root (a boxless writer no seeder admits), syncs, joins
+  // again with a boxed writer, reads only a sealed count until admitted, then
+  // the history, and posts.
+  const { group: priv } = await coreMember.groupCreate(coreCtx, { name: 'Conselho', join: 'open', visibility: 'private' })
+  await coreMember.groupPost(coreCtx, { group: priv, text: 'privada-c1' })
+  t.ok((await syncCore()).ok, 'core pushes the private group')
+  await rootOnSeeder(priv)
+  t.is(seeder.indexGroup(priv).header.name, null, 'the index never names a private group')
+
+  t.is((await web.request('group.join', { group: priv })).state, 'pending', 'join before the root is pending')
+  const first = await syncWeb()
+  t.ok(first.ok, 'the boxless writer is no push goal once the private root arrives' + (first.ok ? '' : ': ' + first.errors.join('; ')))
+  t.is((await web.request('group.join', { group: priv })).state, 'requested', 'a boxed rejoin requests entry')
+  t.ok((await syncWeb()).ok, 'the bundle pushes the request')
+  const sealedRead = await web.request('group.read', { group: priv })
+  t.alike(texts(sealedRead), [], 'a non-member reads no text')
+  t.ok(sealedRead.sealed >= 1, 'it only counts sealed messages')
+
+  t.ok((await syncCore()).ok, 'core fetches the request')
+  t.alike((await coreMember.groupRequests(coreCtx, { group: priv })).requests.map((q) => q.member), [bKey], 'the core node sees the request')
+  t.alike(await coreMember.groupAdmit(coreCtx, { group: priv, member: bKey, on: true }), { ok: true })
+  t.ok((await syncCore()).ok, 'core pushes the admission and keys')
+  await syncWeb()
+  t.is((await web.request('group.info', { group: priv })).state, 'member', 'admitted')
+  const openRead = await web.request('group.read', { group: priv })
+  t.alike(texts(openRead), ['privada-c1'], 'the admitted bundle reads the history')
+  t.is(openRead.sealed, 0)
+  await web.request('group.post', { group: priv, text: 'privada-b1' })
+  t.ok((await syncWeb()).ok, 'the bundle pushes its post')
+  t.ok((await syncCore()).ok, 'core fetches')
+  t.alike(texts(await coreMember.groupRead(coreCtx, { group: priv })).sort(), ['privada-b1', 'privada-c1'], 'the core node reads the bundle post')
+  t.absent(holds(await idbRows('pages'), b4a.from('privada-b1')), 'the browser store never holds the private text in clear')
+  t.comment('group exchange took ' + (Date.now() - started) + ' ms')
 })
 
 function byBytes (a, b) {

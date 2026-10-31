@@ -2283,6 +2283,58 @@ async function communityInfo (ctx, { community }) {
   })
 }
 
+// Created entries first, then by name (null last), then by key.
+function compareCommunities (a, b) {
+  if (a.creator !== b.creator) return a.creator ? -1 : 1
+  if (a.name !== b.name) {
+    if (a.name === null) return 1
+    if (b.name === null) return -1
+    return a.name < b.name ? -1 : 1
+  }
+  return a.community < b.community ? -1 : a.community > b.community ? 1 : 0
+}
+
+async function communityList (ctx) {
+  return withIdentity(ctx, async (identity) => {
+    const block = enforcedBlocklist(ctx.dataDir, identity.association)
+    const found = new Map()
+    const entry = (key) => {
+      const k = key.toLowerCase()
+      if (!found.has(k)) found.set(k, { community: k, creator: false, linked: false })
+      return found.get(k)
+    }
+    const local = localGroups(ctx.dataDir)
+    for (const g of local) {
+      if (g.kind === 'community') entry(g.group).creator = true
+    }
+    // A blocked group loads as NOT_FOUND, so its community is not reached
+    // through it.
+    for (const group of new Set(local.filter((g) => g.kind !== 'community').map((g) => g.group))) {
+      try {
+        const { view } = await loadGroup(ctx, identity, group)
+        const role = groupRole(view, identity.ownHex)
+        if (view.community !== null && (role === 'creator' || role === 'admin' || role === 'member')) entry(view.community).linked = true
+      } catch (err) {
+        if (err.code !== 'NOT_FOUND') throw err
+      }
+    }
+    const list = []
+    for (const e of found.values()) {
+      const held = await readCommunityRoot(identity, e.community, block)
+      if (held === null) continue
+      if (held === PENDING) {
+        list.push({ community: e.community, name: null, state: 'pending', creator: e.creator, linked: e.linked })
+        continue
+      }
+      const view = groups.buildCommunity({ root: communityRoot(held) })
+      const name = typeof view.name === 'string' ? view.name : null
+      const creator = e.creator || (view.creator !== null && view.creator === identity.ownHex)
+      list.push({ community: e.community, name, state: 'ready', creator, linked: e.linked })
+    }
+    return { communities: list.sort(compareCommunities).slice(0, 2 * groups.MAX_GROUPS_PER_DIARY) }
+  })
+}
+
 module.exports = {
   PROFILE_PHOTO_WEB_ONLY,
   GENESIS_REQUIRED,
@@ -2332,5 +2384,6 @@ module.exports = {
   communityCreate,
   communityLink,
   communityAdmin,
-  communityInfo
+  communityInfo,
+  communityList
 }

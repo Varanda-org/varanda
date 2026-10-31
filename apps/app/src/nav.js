@@ -2,13 +2,14 @@
 // (a post and its replies, keyed by the post ref '<author hex64>:<seq>'),
 // 'membro' (a member's profile, keyed by the lowercase hex64 key) and
 // 'curtidas' (who liked or reposted a post, keyed by the post ref, params
-// { kind } with kind 'likes' or 'reposts'). The stack is an immutable
+// { kind } with kind 'likes' or 'reposts'), 'cadeira' (a group) and
+// 'comunidade' (a community), both keyed by the lowercase hex64 root key. The stack is an immutable
 // (frozen) array, oldest first. Invalid entries are refused by returning the
 // stack unchanged (never throws); pushing the screen that is already on top
 // is a no-op, whatever its params; past MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'cadeira', 'comunidade'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -31,7 +32,7 @@ export function isAuthorKey (s) {
 export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.screen === 'conversa') return isRef(entry.key)
-  if (entry.screen === 'membro') return isAuthorKey(entry.key)
+  if (entry.screen === 'membro' || entry.screen === 'cadeira' || entry.screen === 'comunidade') return isAuthorKey(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false

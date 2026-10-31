@@ -547,7 +547,7 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
-    // And for the appeal statement (docs/rpc.md 5.62).
+    // And for the appeal statement (docs/rpc.md 5.63).
     'appeal.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
     }),
@@ -823,6 +823,8 @@ function createSession ({
     }),
 
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
+
+    'community.list': serial(() => withStore((c) => member.communityList(c))),
 
     'community.admin': serial(async (params, epoch) => {
       const affected = new Set()

@@ -1,4 +1,4 @@
-// The bottom tab bar: A Rua, Espiadinha, Seguindo, Avisos and Diário. Pressing
+// The bottom tab bar, with Cadeiras added in hosted mode. Pressing
 // the tab that is already current calls onReselect (scroll to top / refresh),
 // not onSelect. `badges` maps a tab id to true to show a plain dot on its icon
 // (never a count).
@@ -7,20 +7,15 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
 import { colors, layout, type } from './theme'
+import { TABS } from '../tabs'
 
-export const TABS = [
-  { id: 'rua', label: 'A Rua', icon: 'casa' },
-  { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
-  { id: 'seguindo', label: 'Seguindo', icon: 'gente' },
-  { id: 'avisos', label: 'Avisos', icon: 'sino' },
-  { id: 'diario', label: 'Diário', icon: 'pessoa' }
-]
+export { TABS, tabsFor } from '../tabs'
 
-export function TabBar ({ current, onSelect, onReselect, badges = {} }) {
+export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TABS }) {
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
-      {TABS.map((tab) => {
+      {tabs.map((tab) => {
         const selected = tab.id === current
         const tint = selected ? colors.accent : colors.soft
         const badged = badges[tab.id] === true
@@ -43,7 +38,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {} }) {
               <Icon name={tab.icon} size={27} color={tint} />
               {badged && <View style={styles.dot} />}
             </View>
-            <Text style={[styles.label, { color: tint }, selected && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={1.3}>{tab.label}</Text>
+            <Text style={[styles.label, tabs.length === 6 && styles.labelCompact, { color: tint }, selected && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={1.3}>{tab.label}</Text>
           </Pressable>
         )
       })}
@@ -79,5 +74,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent
   },
   label: { ...type.tab },
+  labelCompact: { fontSize: 9, letterSpacing: -0.2 },
   labelOn: { fontWeight: '700' }
 })

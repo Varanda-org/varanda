@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { ErrorText, Soft, Spinner } from './index'
 import { Icon } from './Icon'
+import { loopTiming } from './loopMotion'
 import { Pill } from './Pill'
 import { colors, layout, motion, type } from './theme'
 
@@ -16,8 +17,8 @@ export function Skeleton ({ rows = 3 }) {
   const pulse = useRef(new Animated.Value(0.5)).current
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 1, duration: 600, useNativeDriver: native }),
-      Animated.timing(pulse, { toValue: 0.5, duration: 600, useNativeDriver: native })
+      Animated.timing(pulse, loopTiming({ toValue: 1, duration: 600, useNativeDriver: native })),
+      Animated.timing(pulse, loopTiming({ toValue: 0.5, duration: 600, useNativeDriver: native }))
     ]))
     loop.start()
     return () => loop.stop()

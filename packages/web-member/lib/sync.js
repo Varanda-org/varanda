@@ -2796,7 +2796,15 @@ async function syncRun ({
   }
 
   function pushPending () {
-    return pushCores().some((m) => m.core.length > 0 && m.pushed !== m.core.length && !(m.group && isBlockedKey(m.group)))
+    return media.some((m) => m.core.length > 0 && m.pushed !== m.core.length) || groupOwn.some(groupPushGoal)
+  }
+
+  // An own group core still to push. A writer without `box` in a group whose
+  // verified root is private (a join before the root arrived) is one no
+  // seeder admits: its push is never a goal, and a boxed join replaces it.
+  function groupPushGoal (m) {
+    if (m.core.length < 1 || m.pushed === m.core.length || isBlockedKey(m.group)) return false
+    return !(m.key !== m.group && m.box === null && rootVis.get(m.group) === 'private')
   }
 
   // Whether the seeder peer of the verified link holds blocks 0..length-1
@@ -2857,7 +2865,7 @@ async function syncRun ({
   // GROUP_PUSH_PAGE_MS per link.
   function repageForPushes (l) {
     if (l.groups === null || l.groupsUnsupported || l.groupsBroken || ending) return
-    if (!groupOwn.some((m) => m.core.length > 0 && m.pushed !== m.core.length && !isBlockedKey(m.group))) return
+    if (!groupOwn.some(groupPushGoal)) return
     const now = Date.now()
     if (now - l.pushPagedAt < Math.max(mediaPollMs, GROUP_PUSH_PAGE_MS)) return
     l.pushPagedAt = now
@@ -3445,8 +3453,17 @@ async function syncRun ({
         noteRootVisibility(group, rootVisibilityOf(await core.get(0, { wait: false, raw: true }), key))
       } catch {}
     }
+    // A writer's header `box` (null when written before the root was known).
+    let box
+    if (key !== group && core.length > 0) {
+      try {
+        const h = groupHeaderOf(await core.get(0, { wait: false, raw: true }), key)
+        if (h !== null && h.group === group) box = h.box
+      } catch {}
+    }
     const m = pushEntry(key, core, 'group-pushed')
     m.group = group
+    m.box = box
     m.synced = null // the 'length/theirs' last reported on this link
     groupOwn.push(m)
   }
@@ -4260,8 +4277,7 @@ async function syncRun ({
     // waiting for its push would hold a once run to the deadline.
     if (withPushes && !(l !== null && l.groupsUnsupported)) {
       for (const m of groupOwn) {
-        if (isBlockedKey(m.group) || m.core.length < 1 || m.pushed === m.core.length) continue
-        unmet.push(m.key + ':push ' + m.core.length)
+        if (groupPushGoal(m)) unmet.push(m.key + ':push ' + m.core.length)
       }
     }
     return unmet

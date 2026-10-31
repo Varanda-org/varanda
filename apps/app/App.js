@@ -58,6 +58,8 @@ import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
+import { captureGroupLink } from './src/groupLink'
+import { tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
@@ -87,6 +89,9 @@ import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
+import { Cadeira } from './src/screens/Cadeira'
+import { Cadeiras } from './src/screens/Cadeiras'
+import { Comunidade } from './src/screens/Comunidade'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
@@ -110,7 +115,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Cadeiras' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -171,10 +176,16 @@ const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.
 const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
+// A group link (/g/<hex>) is read and cleaned the same way, once, before any
+// render; it only lives in memory and opens the group on the hosted web.
+const CAPTURED_GROUP = hostedPage === true && Platform.OS === 'web'
+  ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
+  : null
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
 const NATIVE_APP = Platform.OS !== 'web'
+const NO_VERSIONS = Object.freeze({})
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
@@ -987,6 +998,12 @@ function Member () {
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
+  const openGroup = useCallback((group) => {
+    pushScreen({ screen: 'cadeira', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
+  }, [pushScreen])
+  const openCommunity = useCallback((community) => {
+    pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  }, [pushScreen])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -1035,6 +1052,36 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
+  // --- Cadeiras de Praia (hosted web only) ---
+  // Versions restart at 0 with every epoch, so what was seen is kept with its
+  // epoch and compared with !==. The dot shows when a group the node follows
+  // moved since the Cadeiras tab (or that group) was last on screen.
+  const nodeEpoch = node.epoch
+  const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
+  const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
+  const topEntry = nav.top(stack)
+  const groupsOnScreen = mode === 'hosted' && ready && (tab === 'cadeiras' || (topEntry !== null && topEntry.screen === 'cadeira'))
+  const groupVersions = node.groupVersions || NO_VERSIONS
+  useEffect(() => {
+    const open = topEntry !== null && topEntry.screen === 'cadeira' ? topEntry.key : null
+    setGroupSeen((cur) => {
+      const base = cur.epoch === nodeEpoch ? cur.map : {}
+      let map = base
+      if (groupsOnScreen) {
+        const all = tab === 'cadeiras' && topEntry === null
+        for (const g of Object.keys(groupVersions)) {
+          if ((all || g === open) && base[g] !== groupVersions[g]) {
+            if (map === base) map = { ...base }
+            map[g] = groupVersions[g]
+          }
+        }
+      }
+      return map === base && cur.epoch === nodeEpoch ? cur : { epoch: nodeEpoch, map }
+    })
+  }, [nodeEpoch, groupsOnScreen, tab, topEntry, groupVersions])
+  const groupsBadge = mode === 'hosted' && !groupsOnScreen &&
+    Object.keys(groupVersions).some((g) => groupVersions[g] !== (seenMap[g] || 0))
+
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
   // renders only in the tabs branch) and Membro are seen. !sheetOpen: on a
@@ -1044,6 +1091,14 @@ function Member () {
   // request now would preempt the recovery run.
   const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
+  // A /g/<hex> link opens its group once the tabs are on screen.
+  const pendingGroup = useRef(CAPTURED_GROUP)
+  useEffect(() => {
+    if (pendingGroup.current === null || mode !== 'hosted' || !atTabs) return
+    const key = pendingGroup.current
+    pendingGroup.current = null
+    pushScreen({ screen: 'cadeira', key, params: {} })
+  }, [mode, atTabs, pushScreen])
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
@@ -1514,6 +1569,13 @@ function Member () {
               onBadge={setAvisosNew}
             />
           </View>
+          {mode === 'hosted'
+            ? (
+              <View style={shown('cadeiras')}>
+                <Cadeiras key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+              </View>
+              )
+            : null}
           <View style={shown('diario')}>
             <Diario
               onDeletedPost={deletedPost}
@@ -1537,6 +1599,17 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
+                if (entry.screen === 'cadeira' || entry.screen === 'comunidade') {
+                  // Keyed by the node epoch: a lock, unlock or identity change
+                  // remounts the screen, so late answers from before are dropped.
+                  return (
+                    <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                      {entry.screen === 'cadeira'
+                        ? <Cadeira group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
+                        : <Comunidade community={entry.key} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
+                    </View>
+                  )
+                }
                 const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
                 return (
                   <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
@@ -1555,7 +1628,7 @@ function Member () {
             )
           : null}
         <Fab onPress={openComposer} />
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew }} />}
+        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, cadeiras: groupsBadge }} tabs={tabsFor(mode)} />}
       </View>
     )
   }
