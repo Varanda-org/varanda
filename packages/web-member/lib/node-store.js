@@ -352,7 +352,8 @@ async function readAll (core) {
 // trackPresent): the readAll prefix plus the unbroken run of blocks that
 // ends at core.length, a hole in that run passed only when the effective
 // deletion fold of the stored blocks deletes it. -> { entries, present, tail }
-// with entries = the prefix, then the blocks of [tail, core.length);
+// with entries = the prefix, then the stored blocks of [tail, core.length)
+// (a hole the run passed is absent, so log.read skips it);
 // tail === core.length when there is no such run (or none is needed). The
 // run needs block 0 (moderation reads it) and is never read past
 // MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
@@ -361,7 +362,19 @@ async function readAll (core) {
 async function readVisible (core) {
   assertOpen(core)
   const length = core.length
-  const { raw, entries, deleted, present } = await presentState(core)
+  // presentState folds holes and blocks that do not decode into the same
+  // { record: null }; the view records which blocks this snapshot read.
+  const stored = new Set()
+  const view = {
+    get length () { return length },
+    has: (i) => core.has(i),
+    get: async (i, opts) => {
+      const block = await core.get(i, opts)
+      if (block !== null) stored.add(i)
+      return block
+    }
+  }
+  const { raw, entries, deleted, present } = await presentState(view)
   const prefix = entries.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
     return { entries: prefix, present, tail: length }
@@ -382,7 +395,10 @@ async function readVisible (core) {
   // Only a block that arrived after presentState can close the gap: the
   // next read shows it.
   if (tail <= present) return { entries: prefix, present, tail: length }
-  return { entries: prefix.concat(entries.slice(tail, length)), present, tail }
+  for (let seq = tail; seq < length; seq++) {
+    if (stored.has(seq)) prefix.push(entries[seq])
+  }
+  return { entries: prefix, present, tail }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the

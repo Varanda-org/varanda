@@ -3288,7 +3288,38 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Uma chave que aparece pela primeira vez no mapa de comprimentos (por exemplo, pelo resultado de uma rodada parada) dispara no máximo uma leitura a mais.
 - Na web, o react-native-web 0.21.3 descarta `maintainVisibleContentPosition` (não está entre as propriedades que ele repassa). O que segura a linha lida é a ancoragem de rolagem do próprio navegador (CSS `overflow-anchor`), que pode variar entre navegadores; não foi conferido em aparelho.
 
-## 58. Comunidades (PR feat/communities)
+## 58. Janela mais nova sinalizada e ponta nova inteira na volta (PR perf/newest-window-signal, 2026-10-30)
+
+### O que mudou
+
+- Na web hospedada, depois do PR da seção 56, dois problemas apareceram com um semeador real. (1) Quando a janela dos 32 blocos mais novos chegava, o nó não emitia linha nenhuma de `sync.event`: o comprimento presente fica parado no prefixo enquanto a janela baixa, e só o crescimento dele gerava `downloaded`, então a leitura automática de A Rua esperava o histórico. (2) Depois de um crescimento, `readVisible` mostra só a sequência que termina no comprimento NOVO: a janela guardada numa sessão anterior sumia até a ponta nova baixar (o feed caía de 99 itens para 3 por alguns segundos).
+- A regra estrita de leitura fica como está (decisão do responsável pelo produto, depois de um achado de segurança: mostrar todo bloco guardado deixaria um post apagado visível por minutos, porque a tombstone fora da janela só baixa quando o corpo linear chega nela). `readVisible` continua: o prefixo mais a sequência contínua guardada que chega ao comprimento assinado, um buraco nela só passa se a dobra efetiva o apaga, julgado num retrato só, com o bloco 0 e dentro de `MAX_LOG_BLOCKS`. A única diferença é que um buraco que a sequência passa não entra mais na lista (o `log.read` o pula).
+- `lib/sync.js`, sinal: quando a cabeça encontra a janela inteira guardada ou apagada (o passo que entrega ao corpo), a sincronização emite `newest <chave> <comprimento>`, uma vez por chave e comprimento assinado, pelo mesmo caminho das linhas `downloaded` (`lib/session.js`, com `safe()`). Um diário ainda em `regate` guarda o aviso até o bloco 0 passar pela porta local. Nada anunciado ou medido muda: hello, `have`, `downloaded`, metas e `settled` continuam no comprimento presente.
+- `lib/sync.js`, ponta nova inteira: se a réplica já tem uma sequência guardada acima do prefixo cujo topo `T` (o bloco mais alto que a varredura inicial achou, depois o fim de cada janela completada) está a no máximo `TAIL_MAX` (256) blocos do comprimento assinado, a janela da cabeça começa em `T`: baixa toda a ponta nova `[T, comprimento)`, sem os apagados, e a sequência que já aparecia volta a chegar ao comprimento novo assim que ela chega. Crescimento maior mantém a janela dos 32 mais novos. Um novo crescimento na mesma sincronização usa a mesma regra a partir da última janela completada. `runSync` aceita `tailBlocks` (testes).
+- `lib/member-ops.js` e `lib/session.js`: `log.read` de um autor seguido (não o próprio) lê os mesmos blocos que `feed.read` e pagina por seq: a janela termina em `before` (exclusivo) e traz até `limit` desses blocos, os de seq mais alta abaixo dele; blocos não guardados são pulados sem aparecer em `invalid`, um bloco guardado malformado continua em `invalid`, e `entriesTruncated` conta os blocos abaixo da janela. O próprio diário não tem buracos e responde igual a antes.
+- `incomplete` não muda: comprimento assinado acima do presente.
+- Documentos normativos: `docs/rpc.md` 5.12 e §6 (linha `newest`); `docs/protocol.md` §6 "Browser node download order".
+
+### Testes automatizados
+
+- `packages/web-member/test/sync-gate.test.js`: visita de volta com o semeador tendo a ponta nova mas não o meio: a linha `newest <chave> 300` chega, nenhum `downloaded` da chave vem enquanto falta o histórico, o post mais novo está no feed, e quando o histórico chega a linha `newest` veio antes do primeiro `downloaded` da chave, uma vez só (sem a chamada `onNewest`, falha). Seguidor com [0, 3) e a janela antiga [68, 100), o autor posta mais 40 e o semeador tem só [108, 140): a cabeça espera [100, 108) (sem `newest` enquanto falta), e quando o semeador os recebe todo bloco de [100, 140) é pedido e o feed volta a mostrar a janela antiga com a ponta (sem a regra da ponta, falha: a janela [108, 140) completa sozinha). Com `tailBlocks: 16`, a mesma volta pede só a janela dos 32 mais novos e o feed mostra só ela.
+- `packages/web-member/test/member.test.js`: `log.read` de um autor seguido traz o prefixo e a sequência mais nova por seq, sem o bloco apagado e limpo que a sequência passa e com o apagado guardado marcado (sem a troca em `member-ops.js` ou sem o filtro em `node-store.js`, falha). Os testes estritos existentes (sequência que não chega ao comprimento, tombstone que chega depois da varredura, buraco nomeado só por tombstone cancelada, bloqueado e emissor revogado) seguem sem mudança.
+- `packages/web-member/test/read-while-sync.test.js`: diário seguido com buracos e um bloco malformado no prefixo: o feed mostra prefixo e sequência mais nova, sem a ilha do meio; `log.read` com `limit` 5 pagina por seq (12 a 16 com 6 abaixo; depois 1, 2, 4, 11 com o 3 em `invalid` `malformed` e 1 abaixo; depois 0), um `before` dentro de um buraco termina no bloco visível abaixo, e com a sincronização ativa (caminho emprestado) as respostas são as mesmas, sem preempção. Sem a mudança em `member-ops.js` ou em `session.js`, falha.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Reabrir a web hospedada depois de as contas seguidas postarem alguns posts: A Rua continua com os posts que mostrava, ou volta a mostrá-los em cerca de um segundo (não realizada ainda).
+- [ ] Na mesma situação, os posts mais novos aparecem antes do histórico que faltava, sem puxar para atualizar (com o PR do app) (não realizada ainda).
+
+### Limites
+
+- Crescimento de mais de 256 blocos desde a última visita: a janela antiga ainda some até o histórico chegar até ela (só os 32 mais novos aparecem antes).
+- Até 256 blocos são pedidos pela cabeça antes do corpo; se o semeador não tem parte da ponta, a cabeça espera `HEAD_STALL_MS` (3 s) sem bloco novo antes de passar ao corpo.
+- `newest` é só um aviso: chega uma vez por comprimento assinado, e uma janela que nunca completa (semeador sem ela) não gera aviso; nesse caso a leitura espera o crescimento do comprimento presente, como antes.
+
+## 59. Comunidades (PR feat/communities)
 
 Segunda parte de Cadeiras de Praia: uma comunidade junta grupos públicos, `docs/protocol.md` seção 10 ("Communities") e `docs/rpc.md` 5.57 a 5.60. A raiz da comunidade (cabeçalho `kind: 'community'`) guarda só `group-meta`, `group-admin` e `group-link`; a raiz do grupo guarda `community-link`. O vínculo só vale com os dois lados ligados, um grupo fica em uma comunidade por vez e uma comunidade conta no máximo 32 grupos. O criador e os administradores da comunidade agem como administradores em todo grupo vinculado dos dois lados (banir, admitir, ocultar), nunca nomeiam administradores de grupo.
 

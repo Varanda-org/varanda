@@ -702,14 +702,25 @@ test('newest-first: paging with before goes through the run, then the prefix, wi
   t.alike(own, ['t0', ...Array.from({ length: 12 }, (_, i) => 't' + (28 + i))], 'the prefix, then the run, in time order')
 })
 
-test('newest-first: log.read of a followed author still ends at the present length', async (t) => {
+// log.read of a followed author reads what feed.read shows: the prefix and
+// the newest run, in seq order; a hole the run passes because the fold
+// deletes it (a cleared post) is absent, a deleted block still held is
+// listed (log.read reports it 'deleted').
+test('newest-first: log.read of a followed author reads the prefix and the newest run', async (t) => {
   await testnet(t)
   const assoc = association()
   const W = await longAuthor(assoc)
-  const f = await newestFixture(W, assoc)
+  const cleared = W.seqs[33]
+  const held = W.seqs[35]
+  await ops.postDelete(W.ctx, { to: { author: W.key, seq: cleared } })
+  await ops.postDelete(W.ctx, { to: { author: W.key, seq: held } })
+  const f = await newestFixture(W, assoc, { clear: [cleared] })
   const log = await ops.logRead(f.ctx, { author: W.key })
-  t.is(log.entries.length, 3)
-  t.alike(log.entries.map((e) => e.seq), [0, 1, 2])
+  const run = Array.from({ length: 12 }, (_, i) => f.length - 12 + i)
+  t.ok(run.includes(cleared) && run.includes(held), 'fixture: both targets in the run')
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2, ...run.filter((s) => s !== cleared)])
+  const marked = log.entries.find((e) => e.seq === held)
+  t.ok(marked && marked.deleted, 'the held deleted block is marked')
   const { cores } = await borrow(t, f.storage, [W.key])
   t.alike(await ops.logRead({ ...f.ctx, cores }, { author: W.key }), log, 'borrowed')
 })
