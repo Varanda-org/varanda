@@ -27,7 +27,8 @@
 // -> { check({ group, writer, diary, seq }), checkDiary }. check never
 // throws, never retries and, once the index lists the writer, also reads
 // the reported message (readPost below, Bearer `token`). It resolves either
-// { ok: true, root, name, creator, texto } (`root` true when the page
+// { ok: true, root, name, creator, texto, sealed? } (`sealed` true for a
+// private group's block: texto null, only the structure confirmed; `root` true when the page
 // carries the root header's kind, so G is a group root this seeder
 // verified; the header's peer text and creator diary as the seeder holds
 // them, or null; the message text the seeder decoded) or { ok: false,
@@ -289,6 +290,10 @@ function createGroupCheck ({ baseUrl, token = null, timeoutMs = 5000, maxPages =
       return fail('recusado')
     }
     if (!isPlainObject(json) || json.group !== group || json.diary !== diary || json.seq !== seq) return fail('recusado')
+    // A block of a private group: the seeder holds ciphertext only and
+    // answers the structural fact, never text. The caller accepts it only
+    // for a root the index shows as private.
+    if (json.sealed === true) return json.writer === writer && json.texto === undefined ? { ok: true, sealed: true } : fail('recusado')
     if (typeof json.texto !== 'string' || json.texto.length > TEXTO_MAX) return fail('recusado')
     return { ok: true, texto: json.texto }
   }
@@ -318,6 +323,7 @@ function createGroupCheck ({ baseUrl, token = null, timeoutMs = 5000, maxPages =
           headerless = true
         } else if (header === null) {
           header = {
+            visibility: typeof page.visibility === 'string' ? page.visibility : null,
             name: typeof page.name === 'string' && page.name.length <= NAME_MAX ? page.name : null,
             creator: typeof page.creator === 'string' && HEX64_RE.test(page.creator) ? page.creator : null
           }
@@ -343,6 +349,12 @@ function createGroupCheck ({ baseUrl, token = null, timeoutMs = 5000, maxPages =
             }
             const post = await readPost(group, writer, diary, seq, signal)
             if (!post.ok) return hole ? { result: post, transient: true } : post
+            if (post.sealed === true) {
+              // Structural confirmation only: a sealed answer counts for a
+              // verified private root, and a public group never answers so.
+              if (header === null || header.visibility !== 'private') return header === null && partial ? { result: fail('recusado'), transient: true } : fail('recusado')
+              return { ok: true, root: true, sealed: true, name: null, creator: header.creator, texto: null }
+            }
             const result = { ok: true, root: header !== null, name: header?.name ?? null, creator: header?.creator ?? null, texto: post.texto }
             // A missing header on an index still being built may only lag:
             // asked again next time instead of holding 'root: false'.

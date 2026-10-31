@@ -621,7 +621,10 @@ async function localMediaVerdict (core, diaryHex) {
 // valid group header, a writer a valid group-writer header naming G
 // ('wrong-group') and the diary ('wrong-diary'). `diary` null accepts any
 // root creator (a fresh root admission learns it from the header).
-function groupVerdict (raw, key, group, diary) {
+// `visibility` is the root's verified visibility when known (else null): a
+// writer's `box` must match it, hex64 in a private group and null in a
+// public one, else 'header-invalid' as in the fold and member sync.
+function groupVerdict (raw, key, group, diary, visibility = null) {
   try {
     const header = decodeBlock(raw)
     if (header === null) return 'header-invalid'
@@ -631,7 +634,10 @@ function groupVerdict (raw, key, group, diary) {
     }
     if (validateWriterHeader(header) !== null) return 'header-invalid'
     if (header.group !== group) return 'wrong-group'
-    return header.diary === diary ? null : 'wrong-diary'
+    if (header.diary !== diary) return 'wrong-diary'
+    if (visibility === 'private' && header.box === null) return 'header-invalid'
+    if (visibility === 'public' && header.box !== null) return 'header-invalid'
+    return null
   } catch {
     return 'header-invalid'
   }
@@ -639,10 +645,10 @@ function groupVerdict (raw, key, group, diary) {
 
 // LOCAL group gate (block 0 in the main store): the verdict and the raw
 // block; any error is 'header-invalid'.
-async function localGroupVerdict (core, key, binding) {
+async function localGroupVerdict (core, key, binding, visibility = null) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return { reason: groupVerdict(raw, key, binding.group, binding.diary), raw }
+    return { reason: groupVerdict(raw, key, binding.group, binding.diary, visibility), raw }
   } catch {
     return { reason: 'header-invalid', raw: null }
   }
@@ -1384,7 +1390,7 @@ class Seeder {
           if (core.fork !== 0) reason = 'fork'
           else if (core.contiguousLength === 0) reason = 'no-header'
           else if (this._overQuota(core)) reason = 'quota'
-          else ({ reason, raw } = await localGroupVerdict(core, key, binding))
+          else ({ reason, raw } = await localGroupVerdict(core, key, binding, this._groupVisibility(binding.group)))
         }
         if (reason === null && (groupSurvivors.length >= this.maxGroupCores || (perGroup.get(binding.group) || 0) >= this.maxGroupWriters)) reason = 'group-full'
         // The per-diary budget restored: writers under their diary, roots
@@ -1442,6 +1448,12 @@ class Seeder {
         }
         this._serveGroup(key, binding, core, { headerOk: true })
         if (key === binding.group && !this._served.has(binding.diary)) this._indexKeptRoot(key, false)
+      }
+      // A writer served after its root's header was first recorded in this
+      // loop was gated without the root's visibility.
+      for (const group of new Set(groupSurvivors.map(([, binding]) => binding.group))) {
+        const visibility = this._groupVisibility(group)
+        if (visibility !== null) this._recheckGroupBoxes(group, visibility)
       }
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
@@ -3738,7 +3750,7 @@ class Seeder {
       return this._rejectGroup(key, diary, group, 'timeout', seq)
     }
     if (!this._groupStillWanted(diary, entry, key, group)) return
-    const verdict = groupVerdict(res.raw, key, group, key === group ? null : diary)
+    const verdict = groupVerdict(res.raw, key, group, key === group ? null : diary, this._groupVisibility(group))
     if (verdict !== null) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, verdict, seq)
@@ -3916,8 +3928,9 @@ class Seeder {
     if (entry.dropped || entry.headerOk || entry.gating || this._closing) return
     if (entry.core.contiguousLength < 1) return
     entry.gating = true
+    let raw = null
+    let visibility = null
     const check = async () => {
-      let raw
       try {
         raw = await entry.core.get(0, { wait: false, raw: true })
       } catch {
@@ -3925,12 +3938,18 @@ class Seeder {
       }
       if (raw === null) return 'header-invalid'
       if (entry.expected !== null && !b4a.equals(raw, entry.expected)) return 'fork'
-      return groupVerdict(raw, key, entry.group, entry.diary)
+      visibility = this._groupVisibility(entry.group)
+      return groupVerdict(raw, key, entry.group, entry.diary, visibility)
     }
     check().then(async (reason) => {
       if (this.regateHook) await this.regateHook(key, reason)
       entry.gating = false
       if (entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+      // The root's header may have been recorded while this gate ran, and
+      // _recheckGroupBoxes skips a writer not gated yet: check the box
+      // against the visibility known now.
+      const now = this._groupVisibility(entry.group)
+      if (reason === null && now !== visibility) reason = groupVerdict(raw, key, entry.group, entry.diary, now)
       if (reason !== null) return this._dropGroup(key, reason)
       entry.headerOk = true
       entry.expected = null
@@ -4075,6 +4094,37 @@ class Seeder {
     }
     this._groupHeaders.set(group, rec)
     this._persist().catch(noop)
+    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility)
+  }
+
+  // The verified visibility of root G ('public' | 'private'), or null while
+  // no header of G was verified here.
+  _groupVisibility (group) {
+    const kept = this._groupHeaders.get(group)
+    if (kept !== undefined) return kept.visibility
+    const header = this._groupIndex.header(group)
+    return header === null ? null : header.visibility
+  }
+
+  // A writer gated before its root's header was known never had its `box`
+  // checked: re-read the block 0 of every gated writer of G and drop a
+  // mismatch with 'header-invalid', as the gate would have.
+  _recheckGroupBoxes (group, visibility) {
+    for (const [key, entry] of this._groupServed) {
+      if (key === group || entry.group !== group || !entry.headerOk || entry.dropped) continue
+      const check = async () => {
+        let raw = null
+        try {
+          raw = await entry.core.get(0, { wait: false, raw: true })
+        } catch {}
+        if (raw === null) return null
+        return groupVerdict(raw, key, entry.group, entry.diary, visibility)
+      }
+      check().then((reason) => {
+        if (reason === null || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+        this._dropGroup(key, reason)
+      }, noop)
+    }
   }
 
   // A blocked group, or one with no core left here, loses its record.
@@ -4216,6 +4266,11 @@ class Seeder {
   // anything else: not served, header not checked yet, the group or the
   // diary blocked, a block not local, another record type, or a change
   // while it read. The text is the author's signed record, not a quote.
+  // A group-sealed block of a group whose verified root header says private
+  // answers only { sealed: true, writer, diary, group, seq }: the seeder
+  // cannot read it and never hands out the envelope (docs/protocol.md
+  // section 10, "Sealed reports"). In a private group a plaintext post is
+  // not a counted record, so it answers null.
   async groupPostBlock (writerHex, seq) {
     try {
       if (typeof writerHex !== 'string' || !HEX64.test(writerHex)) return null
@@ -4233,13 +4288,21 @@ class Seeder {
         const raw = await core.get(i, { wait: false, raw: true })
         return raw && live() ? raw : null
       }
+      const visibility = this._groupVisibility(entry.group)
       const block0 = await read(0)
-      if (block0 === null || groupVerdict(block0, writerHex, entry.group, entry.diary) !== null) return null
+      if (block0 === null || groupVerdict(block0, writerHex, entry.group, entry.diary, visibility) !== null) return null
       const raw = await read(seq)
       if (raw === null) return null
       const record = decodeBlock(raw)
-      if (record === null || record.type !== 'group-post') return null
-      if (validateGroupRecord(record, seq, { root: writerHex === entry.group }) !== null) return null
+      if (record === null) return null
+      const root = writerHex === entry.group
+      if (record.type === 'group-sealed') {
+        if (visibility !== 'private' || validateGroupRecord(record, seq, { root, private: true }) !== null) return null
+        if (!live() || core.fork !== 0 || this._groupVisibility(entry.group) !== 'private') return null
+        return { sealed: true, writer: writerHex, diary: entry.diary, group: entry.group, seq }
+      }
+      if (record.type !== 'group-post') return null
+      if (validateGroupRecord(record, seq, { root, private: visibility === 'private' }) !== null) return null
       if (!live() || core.fork !== 0) return null
       const reply = record.replyTo
       return {

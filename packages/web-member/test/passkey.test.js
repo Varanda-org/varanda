@@ -515,3 +515,76 @@ test('injected hkdf: group key pair byte-equal to WebCrypto', async (t) => {
     t.is(hex(injected.secretKey), hex(web.secretKey), 'secret key ' + i)
   }
 })
+
+// Box key pair golden vector, computed once (node:crypto hkdfSync and
+// sodium crypto_box_seed_keypair) and pinned.
+const GOLDEN_BOX_SEED = '020d767a1c48e4491061e0f40d9047b53b84b653cddb8df3b29fad456d2efb37'
+const GOLDEN_BOX_PUBLIC_KEY = '17a2f02a98e348b003c674765cd07c66814426427cd4c887fc329980d607da5e'
+
+test('box key pair: golden vector, per (PRF, nonce), unrelated to the other keys, zeroed buffers', async (t) => {
+  const sodium = require('sodium-universal')
+  const groupCrypto = require('@varanda/core/lib/group-crypto')
+  const { BOX_HKDF_SALT, BOX_HKDF_INFO, boxKeyPairFromPrf, groupKeyPairFromPrf } = passkey
+  t.is(b4a.toString(BOX_HKDF_SALT), 'varanda/member-group-box/hkdf/v1')
+  t.is(b4a.toString(BOX_HKDF_INFO), 'varanda/member-group-box/x25519/v1')
+  const seed = crypto.hkdfSync('sha256', GOLDEN_PRF, BOX_HKDF_SALT, b4a.concat([BOX_HKDF_INFO, GOLDEN_GROUP_NONCE]), 32)
+  t.is(hex(seed), GOLDEN_BOX_SEED, 'seed matches node:crypto hkdfSync')
+  const kp = await boxKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)
+  t.is(hex(kp.publicKey), GOLDEN_BOX_PUBLIC_KEY, 'public key')
+  const pk = b4a.alloc(32)
+  const sk = b4a.alloc(32)
+  sodium.crypto_box_seed_keypair(pk, sk, b4a.from(GOLDEN_BOX_SEED, 'hex'))
+  t.is(hex(pk), GOLDEN_BOX_PUBLIC_KEY, 'seed -> public key')
+  t.is(hex(kp.secretKey), hex(sk), 'secret key')
+  t.is(kp.publicKey.byteLength, 32)
+  t.is(kp.secretKey.byteLength, 32)
+  t.ok(GOLDEN_PRF.every((x, i) => x === i), 'caller PRF untouched')
+  t.ok(GOLDEN_GROUP_NONCE.every((x, i) => x === 255 - i), 'caller nonce untouched')
+
+  const again = await boxKeyPairFromPrf(new Uint8Array(GOLDEN_PRF), new Uint8Array(GOLDEN_GROUP_NONCE))
+  t.is(hex(again.secretKey), hex(kp.secretKey), 'deterministic')
+  t.not(again.secretKey.buffer, kp.secretKey.buffer, 'fresh buffers')
+  t.not(hex((await boxKeyPairFromPrf(GOLDEN_PRF, new Uint8Array(32).fill(1))).publicKey), GOLDEN_BOX_PUBLIC_KEY, 'another nonce, another key')
+  const group = await groupKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)
+  t.not(hex(group.secretKey.subarray(0, 32)), hex(kp.secretKey), 'not the group core seed')
+
+  // A box sealed to the derived public key opens with the derived pair.
+  const sealed = groupCrypto.sealTo(b4a.from('epoch key'), b4a.from(kp.publicKey))
+  const opened = groupCrypto.openFrom(sealed, { publicKey: b4a.from(kp.publicKey), secretKey: b4a.from(kp.secretKey) })
+  t.is(b4a.toString(opened), 'epoch key', 'usable with crypto_box_seal')
+
+  const original = groupCrypto.boxKeyPairFromSeed
+  let seenSeed = null
+  let made = null
+  groupCrypto.boxKeyPairFromSeed = (s) => {
+    seenSeed = s
+    made = original(s)
+    return made
+  }
+  try {
+    const kp2 = await boxKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)
+    t.is(hex(kp2.publicKey), GOLDEN_BOX_PUBLIC_KEY)
+    t.ok(seenSeed.every((x) => x === 0), 'seed zeroed')
+    t.ok(made.secretKey.every((x) => x === 0), 'internal secret key zeroed')
+  } finally {
+    groupCrypto.boxKeyPairFromSeed = original
+  }
+
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), null, 'x'.repeat(32), new Uint8Array(32).buffer]) {
+    t.is(await codeOf(() => boxKeyPairFromPrf(bad, GOLDEN_GROUP_NONCE)), 'TypeError', 'bad PRF refused')
+    t.is(await codeOf(() => boxKeyPairFromPrf(GOLDEN_PRF, bad)), 'TypeError', 'bad nonce refused')
+  }
+  t.is(await codeOf(() => boxKeyPairFromPrf(GOLDEN_PRF)), 'TypeError', 'a nonce is required')
+})
+
+test('injected hkdf: box key pair byte-equal to WebCrypto', async (t) => {
+  const { boxKeyPairFromPrf } = passkey
+  for (let i = 0; i < 3; i++) {
+    const prf = new Uint8Array(crypto.randomBytes(32))
+    const nonce = new Uint8Array(crypto.randomBytes(32))
+    const web = await boxKeyPairFromPrf(prf, nonce)
+    const injected = await boxKeyPairFromPrf(prf, nonce, { hkdf: injectedHkdf })
+    t.is(hex(injected.publicKey), hex(web.publicKey), 'public key ' + i)
+    t.is(hex(injected.secretKey), hex(web.secretKey), 'secret key ' + i)
+  }
+})

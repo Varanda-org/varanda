@@ -470,20 +470,29 @@ test('the writer cap keeps the earliest proven joins, never evicting on an unpro
   t.is(capVictim(root, 5).victim, root[held.length - 2], 'never the root')
 })
 
-test('a stored private root is never kept: only public group roots are accepted', async (t) => {
+test('a stored private group root is kept at start; a private community root and a boxless private root are purged', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const { url } = await seederOverWs(t, assocKp, bootstrap)
   const c = await member(assocKp, 'Caio')
-  const rootKp = crypto.keyPair()
-  const root = await store.openGroupWriter(c.storage, rootKp)
-  await root.append({ type: 'group-header', v: 1, kind: 'group', diary: 'ef'.repeat(32), visibility: 'private', join: 'approval', name: null, box: 'ab'.repeat(32), at: new Date().toISOString() })
-  await root.close()
-  const group = hex(rootKp.publicKey)
-  await store.addGroupReplica(c.storage, group)
+  const store1 = async (header) => {
+    const kp = crypto.keyPair()
+    const root = await store.openGroupWriter(c.storage, kp)
+    await root.append({ type: 'group-header', v: 1, diary: 'ef'.repeat(32), visibility: 'private', join: 'approval', name: null, at: new Date().toISOString(), ...header })
+    await root.close()
+    const key = hex(kp.publicKey)
+    await store.addGroupReplica(c.storage, key)
+    return key
+  }
+  const priv = await store1({ kind: 'group', box: 'ab'.repeat(32) })
+  const community = await store1({ kind: 'community', box: 'ab'.repeat(32) })
+  const boxless = await store1({ kind: 'group', box: null })
   await once(c, url, [], { timeoutMs: 5000 })
-  t.is(await store.groupCoreExists(c.storage, group), false, 'purged')
+  t.is(await store.groupCoreExists(c.storage, priv), true, 'the private group root is kept')
+  t.ok((await store.readGroupReplicas(c.storage)).includes(priv), 'and stays listed')
+  t.is(await store.groupCoreExists(c.storage, community), false, 'the private community root is purged')
+  t.is(await store.groupCoreExists(c.storage, boxless), false, 'the private root without a box is purged')
 })
 
 test('a listed key with no core and no root on the seeder is unlisted after one pass', async (t) => {

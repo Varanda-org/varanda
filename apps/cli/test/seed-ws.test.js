@@ -1952,7 +1952,7 @@ test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 
   const seeder = groupSeeder()
   seeder.indexCommunity = async (c) => {
     seeder.calls.push(['indexCommunity', c])
-    return c === C ? { name: 'Bairro', groups: [{ group: G, name: 'Jardim', members: 2 }], indexing: false, complete: true } : null
+    return c === C ? { name: 'Bairro', groups: [{ group: G, name: 'Jardim', members: 2 }, { group: W, visibility: 'private', name: 'vazou', members: 3 }], indexing: false, complete: true } : null
   }
   seeder.indexGroup = async (group) => ({ header: groupHeader, rootServed: true, community: C, writers: [], next: null, indexing: false, complete: true })
   const server = await startSeedWs({ port: 0, seeder })
@@ -1961,7 +1961,7 @@ test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 
   const got = await mediaRequest(server.port, '/index/community/' + C)
   t.is(got.status, 200)
   jsonHeaders(t, got)
-  t.alike(JSON.parse(got.body.toString()), { name: 'Bairro', groups: [{ group: G, name: 'Jardim', writerCount: 2 }], indexing: false, complete: true })
+  t.alike(JSON.parse(got.body.toString()), { name: 'Bairro', groups: [{ group: G, name: 'Jardim', writerCount: 2 }, { group: W, visibility: 'private' }], indexing: false, complete: true }, 'a private group: key and visibility only')
   t.alike(seeder.calls, [['indexCommunity', C]])
   const head = await mediaRequest(server.port, '/index/community/' + C, { method: 'HEAD' })
   t.is(head.status, 200)
@@ -1969,6 +1969,10 @@ test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 
   t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, C, 'a group row names its two-way community')
   seeder.indexGroup = async () => ({ header: groupHeader, rootServed: true, community: 'nope', writers: [], next: null, indexing: false, complete: true })
   t.is(JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString()).community, null, 'anything but hex64 is null')
+  seeder.indexGroup = async () => ({ header: { ...groupHeader, visibility: 'private', name: 'vazou' }, rootServed: true, community: C, writers: [], next: null, indexing: false, complete: true })
+  const priv = JSON.parse((await mediaRequest(server.port, '/index/group/' + G)).body.toString())
+  t.is(priv.visibility, 'private')
+  t.is(priv.name, null, 'a private group never shows a name')
 
   const unknown = await mediaRequest(server.port, '/index/community/' + 'f'.repeat(64))
   t.is(unknown.status, 404)
@@ -2074,6 +2078,8 @@ function groupPostSeeder () {
     if (seq === 2) return { group: GP_G, diary: GP_D, seq, texto: 'olá <b>grupo</b>', resposta: { writer: GP_W, seq: 1 } }
     if (seq === 3) return { group: GP_G, diary: GP_D, seq, texto: 'sem resposta', resposta: null }
     if (seq === 4) return { group: GP_G, diary: 'zz', seq, texto: 'forma errada', resposta: null }
+    if (seq === 6) return { sealed: true, writer: GP_W, diary: GP_D, group: GP_G, seq, nonce: 'ab'.repeat(24), box: 'segredo', texto: 'segredo' }
+    if (seq === 7) return { sealed: true, writer: 'zz', diary: GP_D, group: GP_G, seq }
     return null
   }
   return stub
@@ -2101,6 +2107,10 @@ test('GET /moderation-group-post: the validated group-post with the token, the g
   t.is(ok.headers['cache-control'], 'no-store')
   t.alike(JSON.parse(ok.body), { group: GP_G, diary: GP_D, seq: 2, texto: 'olá <b>grupo</b>', resposta: { writer: GP_W, seq: 1 } })
   t.alike(JSON.parse((await groupPostRequest(server.port, url(GP_W, 3))).body).resposta, null)
+  const sealedAnswer = await groupPostRequest(server.port, url(GP_W, 6))
+  t.is(sealedAnswer.status, 200)
+  t.alike(JSON.parse(sealedAnswer.body), { sealed: true, writer: GP_W, diary: GP_D, group: GP_G, seq: 6 }, 'a sealed block: the structure only')
+  t.absent(sealedAnswer.body.includes('segredo'), 'never the envelope or any extra field')
 
   const notFound = async (res, name) => {
     t.is(res.status, 404, name)
@@ -2110,6 +2120,7 @@ test('GET /moderation-group-post: the validated group-post with the token, the g
   await notFound(await groupPostRequest(server.port, url('f'.repeat(64), 2)), 'unknown writer')
   await notFound(await groupPostRequest(server.port, url(GP_W, 5)), 'not a group-post')
   await notFound(await groupPostRequest(server.port, url(GP_W, 4)), 'a malformed answer')
+  await notFound(await groupPostRequest(server.port, url(GP_W, 7)), 'a malformed sealed answer')
   const before = seeder.calls.length
   await notFound(await groupPostRequest(server.port, url(GP_W, 2), { token: null }), 'missing token')
   await notFound(await groupPostRequest(server.port, url(GP_W, 2), { token: 'ab'.repeat(32) }), 'wrong token')

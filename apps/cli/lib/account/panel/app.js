@@ -106,6 +106,7 @@ const TEXT = {
   groupConfirmed: 'Grupo conferido no semeador',
   groupCreator: 'criado pela conta: ',
   groupUnconfirmed: 'O semeador não confirmou que esta chave é de um grupo com esta pessoa como autora. Bloquear conta e Bloquear grupo ficam indisponíveis: nada nesta denúncia foi conferido.',
+  groupSealedQuote: 'cifrada: citação do denunciante',
   groupVerifiedText: 'Texto conferido no semeador:',
   groupRootUnconfirmed: 'O semeador conferiu a autoria, mas não confirmou a chave do grupo. Só é possível bloquear a conta.',
   targetChecking: 'conferindo a chave no semeador…',
@@ -497,6 +498,8 @@ function groupInfoOf (json) {
     name: typeof json.name === 'string' && json.name !== '' ? json.name : null,
     creator: has(json, 'creator') && HEX64.test(str(json.creator)) ? json.creator : null,
     texto: has(json, 'texto') && typeof json.texto === 'string' ? json.texto : null,
+    // A private group's report: confirmed by structure, no text at the seeder.
+    sealed: has(json, 'sealed') && json.sealed === true,
     // The writer row confirms the author without the root header: then the
     // key may not be a group at all, so no group block is offered. An older
     // service sends no `root` and confirms only with the header.
@@ -992,14 +995,16 @@ function createPanel (env) {
   function groupBlock (r, info) {
     let seen
     if (info === null) seen = h('p', { className: 'meta', text: TEXT.groupChecking })
-    else if (!info.confirmed || info.texto === null) seen = h('p', { className: 'warning', text: info.noMessage ? TEXT.groupNoMessage : info.failed ? TEXT.groupRetry : TEXT.groupUnconfirmed })
+    else if (!info.confirmed || (info.texto === null && info.sealed !== true)) seen = h('p', { className: 'warning', text: info.noMessage ? TEXT.groupNoMessage : info.failed ? TEXT.groupRetry : TEXT.groupUnconfirmed })
     else {
       seen = h('div', { className: 'verified' },
         h('p', { className: 'label', text: TEXT.groupConfirmed }),
         info.name !== null ? untrusted('p', info.name) : null,
         info.creator !== null ? h('p', { className: 'key', text: TEXT.groupCreator + info.creator }) : null,
-        h('p', { className: 'label', text: TEXT.groupVerifiedText }),
-        untrusted('p', info.texto)
+        info.sealed === true
+          ? h('p', { className: 'label', text: TEXT.groupSealedQuote })
+          : h('p', { className: 'label', text: TEXT.groupVerifiedText }),
+        info.sealed === true ? (r.quote !== '' ? untrusted('p', r.quote) : null) : untrusted('p', info.texto)
       )
     }
     return h('div', { className: 'group' },
@@ -1032,7 +1037,7 @@ function createPanel (env) {
       const lookup = needsLookup(r)
       const info = lookup ? groupInfo.get(r.id) : undefined
       const groupChecked = info !== undefined && info !== 'loading'
-      const groupOk = groupChecked && info.confirmed && (!grouped || info.texto !== null)
+      const groupOk = groupChecked && info.confirmed && (!grouped || info.texto !== null || info.sealed === true)
       const rootMissing = grouped && groupOk && info.root === false
       // Any key could be a group root: 'Bloquear'
       // waits for the seeder to confirm a served diary.

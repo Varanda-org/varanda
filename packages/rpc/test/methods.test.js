@@ -19,7 +19,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.sign', 'appeal.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.read', 'group.requests',
+    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
     'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
@@ -27,7 +27,7 @@ test('method list and mutating set', (t) => {
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.create', 'community.link', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.join', 'group.leave', 'group.meta', 'group.post', 'identity.clear', 'identity.create', 'identity.forget',
+    'group.create', 'group.hide', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
@@ -589,7 +589,10 @@ test('report.sign: writer and group (a group post)', (t) => {
 
 test('group.create', (t) => {
   t.ok(isMutating('group.create'))
-  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open' })
+  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open', visibility: 'public' })
+  ok(t, 'group.create', { name: 'Clube', join: 'approval', visibility: 'private' }, { name: 'Clube', join: 'approval', visibility: 'private' })
+  ok(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'private' })
+  for (const visibility of ['secret', 'Public', '', null, true, 1]) bad(t, 'group.create', { name: 'Clube', join: 'open', visibility }, 'visibility ' + visibility)
   ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval' })
   ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open' })
   bad(t, 'group.create', {})
@@ -598,7 +601,7 @@ test('group.create', (t) => {
   bad(t, 'group.create', { name: '', join: 'open' })
   bad(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open' })
   for (const join of ['closed', 'Open', '', null, true]) bad(t, 'group.create', { name: 'Clube', join }, 'join ' + join)
-  bad(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'public' })
+  bad(t, 'group.create', { name: 'Clube', join: 'open', epoch: 1 })
 })
 
 test('community.create', (t) => {
@@ -639,6 +642,15 @@ test('community.info', (t) => {
   bad(t, 'community.info', {})
   bad(t, 'community.info', { community: 'x' })
   bad(t, 'community.info', { community: KEY, limit: 1 })
+})
+
+test('group.rekey', (t) => {
+  t.ok(isMutating('group.rekey'))
+  ok(t, 'group.rekey', { group: KEY }, { group: KEY })
+  bad(t, 'group.rekey', {})
+  bad(t, 'group.rekey', { group: 'x' })
+  bad(t, 'group.rekey', { group: KEY, epoch: { writer: KEY, seq: 1 } })
+  bad(t, 'group.rekey', { group: KEY, key: 'x' })
 })
 
 test('group.join and group.leave', (t) => {

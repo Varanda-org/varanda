@@ -110,3 +110,41 @@ test('the core runs under Bare: smoke script prints BARE OK', async (t) => {
   // counts the connections open at that moment (the Bare side already left).
   t.is(peerResult.ok, true, 'Node peer run ended cleanly')
 })
+
+// lib/group-crypto.js under Bare: sodium-universal resolves to the Bare
+// build of sodium-native, and the seal/open round trips work there too.
+test('group-crypto.js loads and round trips under Bare', async (t) => {
+  t.timeout(60000)
+  const tmp = tmpDir(t, 'varanda-bare-crypto-')
+  const script = path.join(tmp, 'group-crypto.js')
+  fs.writeFileSync(script, [
+    'const g = require(' + JSON.stringify(path.join(__dirname, '..', 'lib', 'group-crypto.js')) + ')',
+    'const seed = new Uint8Array(32).map((_, i) => i)',
+    'const pair = g.boxKeyPairFromSeed(seed)',
+    'const key = g.newEpochKey()',
+    "const sealed = g.sealRecord({ type: 'group-post', text: 'olá' }, key)",
+    'const record = g.openRecord(sealed, key)',
+    'const opened = g.openFrom(g.sealTo(key, pair.publicKey), pair)',
+    'const same = opened !== null && opened.every((b, i) => b === key[i])',
+    "const pk = Array.from(pair.publicKey, (b) => b.toString(16).padStart(2, '0')).join('')",
+    "console.log('CRYPTO ' + JSON.stringify({ text: record && record.text, same, wrong: g.openRecord(sealed, g.newEpochKey()), pk }))"
+  ].join('\n') + '\n')
+  const child = spawn(BARE, [script], { stdio: ['ignore', 'pipe', 'pipe'] })
+  t.teardown(() => { try { child.kill('SIGKILL') } catch {} }, { force: true })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (d) => { stdout += d })
+  child.stderr.on('data', (d) => { stderr += d })
+  const code = await new Promise((resolve) => child.on('exit', resolve))
+  t.is(code, 0, 'bare exit 0 ' + stderr.trim())
+  const line = /^CRYPTO (.*)$/m.exec(stdout)
+  t.ok(line !== null, 'result printed')
+  if (line) {
+    t.alike(JSON.parse(line[1]), {
+      text: 'olá',
+      same: true,
+      wrong: null,
+      pk: '4701d08488451f545a409fb58ae3e58581ca40ac3f7f114698cd71deac73ca01'
+    }, 'round trips, rejects a wrong key, golden seed key pair')
+  }
+})

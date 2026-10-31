@@ -108,7 +108,7 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo público (--name, --join open|approval)
+  group create               cria um grupo (--name, --join open|approval, --private cifrado)
   group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
@@ -117,6 +117,7 @@ Comandos:
   group admit|ban|admin <chave>        modera um membro (--member, --undo desfaz)
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
+  group rekey <chave>        gera uma nova chave do grupo privado
   community create           cria uma comunidade de grupos (--name)
   community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
   community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
@@ -132,7 +133,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo
+  --join --undo --private
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -402,11 +403,13 @@ Para encerrar: Ctrl-C no semeador (código 0) e Ctrl-C na DHT local.
 
 ### 7. Grupos públicos
 
-`group create --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Grupos privados ainda não existem: `--join private` é recusado. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
+`group create --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
 
 `group read <chave>` imprime uma linha por mensagem, das mais novas para as mais antigas: `<at> <nome|@usuário|8 hex>: <texto>`, ou `(mensagem oculta)`. Com `--limit <n>` (até 31) e se há mais antigas, a última linha é `mais antigas: --before <at>,<escritor>,<seq>`. Com `--json`, a última linha é o resultado. Um pedido que altera estado nunca é reenviado: se o resultado for incerto, o erro avisa.
 
-Comunidades juntam grupos públicos. `community create --name <nome>` imprime `comunidade criada: <chave>`. `community link <comunidade> <grupo>` grava o vínculo do lado que você controla (a raiz da comunidade, a do grupo, ou as duas); o vínculo só vale quando os dois lados estão ligados, e `--undo` desfaz. Um grupo fica em uma comunidade por vez. `community admin <comunidade> --member <diário>` (só quem criou a comunidade, `--undo` retira) dá ao membro poder de administrador em todos os grupos vinculados, sem nomear administradores de grupo. `community info <chave>` lista os grupos vinculados dos dois lados. Detalhes em `docs/protocol.md` §10 e checagens em `docs/verification.md` §59.
+Comunidades juntam grupos públicos ou privados. `community create --name <nome>` imprime `comunidade criada: <chave>`. `community link <comunidade> <grupo>` grava o vínculo do lado que você controla (a raiz da comunidade, a do grupo, ou as duas); o vínculo só vale quando os dois lados estão ligados, e `--undo` desfaz. Um grupo fica em uma comunidade por vez. `community admin <comunidade> --member <diário>` (só quem criou a comunidade, `--undo` retira) dá ao membro poder de administrador em todos os grupos vinculados, sem nomear administradores de grupo. `community info <chave>` lista os grupos vinculados dos dois lados. Detalhes em `docs/protocol.md` §10 e checagens em `docs/verification.md` §59.
+
+Grupos privados são cifrados de ponta a ponta. `group create --private --name <nome>` imprime `grupo privado criado: <chave>`; a entrada é sempre por aprovação (`--join open` é recusado) e o nome viaja cifrado. Quem entra só lê depois que um administrador admite (`group admit`), e aí recebe também as chaves antigas. Banir, sair ou perder a administração gera uma chave nova que não vai para quem saiu; `group rekey <chave>` gera uma chave nova à mão. `group read` avisa `N mensagens cifradas sem chave neste aparelho` e `aguardando nova chave` (enquanto a troca não chega, publicar é recusado); `group info` mostra a visibilidade. Nenhum comando imprime chave: a chave de caixa do aparelho fica só em `group-box.json` (0600) no diretório de dados. O semeador guarda e serve só o texto cifrado. Quem é membro, quem posta e quando continuam visíveis. Detalhes em `docs/protocol.md` §10 ("Private groups") e checagens em `docs/verification.md` §62.
 
 ## Demo automática
 

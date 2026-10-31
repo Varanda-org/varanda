@@ -129,7 +129,10 @@ async function fakeSeeder (t, groups = {}) {
   const requests = []
   const posts = []
   // Served diaries for /index/groups/<D>; `down` answers 503 there.
-  const state = { diaries: new Set(), down: false, unread: new Set(), rootless: new Set(), unserved: new Set() }
+  // `private` lists private group roots (visibility private); a sealed block
+  // of a writer in `sealed` answers the structural body, `sealedWrong` a
+  // mismatching one.
+  const state = { private: new Set(), sealed: new Set(), sealedWrong: new Set(), diaries: new Set(), down: false, unread: new Set(), rootless: new Set(), unserved: new Set() }
   const server = http.createServer((req, res) => {
     const p = /^\/moderation-group-post\/([0-9a-f]{64})\/([0-9]{1,15})$/.exec(req.url)
     if (p !== null) {
@@ -141,6 +144,7 @@ async function fakeSeeder (t, groups = {}) {
       }
       if (req.headers.authorization !== 'Bearer ' + SEEDER_TOKEN || found === null || state.unread.has(p[1])) return res.writeHead(404).end()
       res.writeHead(200, { 'content-type': 'application/json' })
+      if (state.sealed.has(p[1])) return res.end(JSON.stringify({ sealed: true, writer: p[1], ...found, seq: state.sealedWrong.has(p[1]) ? seq + 1 : seq }))
       return res.end(JSON.stringify({ ...found, seq, texto: 'mensagem conferida', resposta: null }))
     }
     requests.push(req.url)
@@ -157,7 +161,7 @@ async function fakeSeeder (t, groups = {}) {
     const header = Object.hasOwn(groups, m[1]) && !state.rootless.has(m[1])
     const served = header && !state.unserved.has(m[1])
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ kind: header ? 'grupo' : null, visibility: null, join: null, name: header ? 'Horta' : null, creator: served ? writers[0].diary : null, rootServed: served, writers, next: null, indexing: false, complete: true }))
+    res.end(JSON.stringify({ kind: header ? 'grupo' : null, visibility: state.private.has(m[1]) ? 'private' : null, join: null, name: header ? 'Horta' : null, creator: served ? writers[0].diary : null, rootServed: served, writers, next: null, indexing: false, complete: true }))
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   t.teardown(() => new Promise((resolve) => {
@@ -498,6 +502,61 @@ test('group block: refused unless the seeder confirms the group and its writer, 
   const listed = await s.api('GET', '/account/mod/api/blocked', { cookie })
   t.alike(listed.body.pending.map((c) => [c.member, c.kind]), [[group, 'grupo'], [s.bia.hex, 'conta']])
   t.ok(seeder.requests.every((u) => /^\/index\/group\/[0-9a-f]{64}$/.test(u)), 'only the public group index was read')
+  noLeak(t, s)
+})
+
+test('private group report: confirmed by structure, labelled, never triaged, refused on any mismatch', async (t) => {
+  const calls = []
+  const triage = {
+    onReport: (id) => calls.push(id),
+    onHumanDecision: () => {},
+    suggestionOf: () => null,
+    verifiedOf: () => null
+  }
+  const seeder = await fakeSeeder(t)
+  const s = await setup(t, { triage, groupCheck: seeder.groupCheck })
+  const writer = keys().hex
+  const group = keys().hex
+  seeder.groups[group] = [{ key: writer, diary: s.bia.hex }]
+  seeder.state.private.add(group)
+  seeder.state.sealed.add(writer)
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const decide = (id, block) => s.api('POST', '/account/mod/api/reports/' + id + '/decide', { cookie, body: { decision: 'bloquear', block } })
+
+  const r = await sendReport(s, s.ana, s.bia.hex, { seq: 1, quote: 'citação', writer, group })
+  t.is(r.status, 200, r.text)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.alike(calls, [], 'a private group report never reaches the triage')
+  const info = await s.api('GET', '/account/mod/api/reports/' + r.body.id + '/grupo', { cookie })
+  t.alike(info.body, { confirmed: true, root: true, name: null, creator: s.bia.hex, texto: null, sealed: true, provenance: 'cifrada: citação do denunciante' })
+  const d = await decide(r.body.id, 'diario')
+  t.is(d.status, 200, d.text)
+  t.is(d.body.change.member, s.bia.hex)
+  const r2 = await sendReport(s, s.ana, s.bia.hex, { seq: 2, quote: 'outra', writer, group })
+  const g = await decide(r2.body.id, 'grupo')
+  t.is(g.status, 200, g.text)
+  t.is(g.body.change.member, group)
+  t.is(g.body.change.kind, 'grupo')
+
+  // A sealed answer for a root the index does not show as private.
+  const w2 = keys().hex
+  const pub = keys().hex
+  seeder.groups[pub] = [{ key: w2, diary: s.bia.hex }]
+  seeder.state.sealed.add(w2)
+  const r3 = await sendReport(s, s.ana, s.bia.hex, { seq: 3, writer: w2, group: pub })
+  t.alike((await decide(r3.body.id, 'grupo')).body, { error: 'grupo-nao-confirmado' }, 'public root')
+  t.alike((await decide(r3.body.id, 'diario')).body, { error: 'grupo-nao-confirmado' })
+  // A sealed answer that names another seq.
+  const w3 = keys().hex
+  seeder.groups[group].push({ key: w3, diary: s.bia.hex })
+  seeder.state.sealed.add(w3)
+  seeder.state.sealedWrong.add(w3)
+  const r4 = await sendReport(s, s.ana, s.bia.hex, { seq: 4, writer: w3, group })
+  t.alike((await decide(r4.body.id, 'diario')).body, { error: 'grupo-nao-confirmado' }, 'seq mismatch')
+  t.alike((await decide(r4.body.id, 'grupo')).body, { error: 'grupo-nao-confirmado' })
+  const drop = await s.api('POST', '/account/mod/api/reports/' + r4.body.id + '/decide', { cookie, body: { decision: 'descartar' } })
+  t.is(drop.status, 200, 'Descartar always works')
   noLeak(t, s)
 })
 

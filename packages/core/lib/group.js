@@ -16,7 +16,9 @@
 // that orders after the leave, needs a new admit in approval groups and
 // stays under any ban.
 //
-// Pure: b4a and ./records only, so it runs in Node, Bare and the browser.
+// Pure: b4a, ./records and ./group-crypto (sodium-universal, which loads in
+// Node, Bare and the browser) only. The fold opens envelopes itself; the
+// device's box secret stays with the caller, behind `keys.unseal`.
 
 const b4a = require('b4a')
 const {
@@ -25,6 +27,7 @@ const {
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
   charLength, plainCopy, validRecordCopy
 } = require('./records')
+const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -41,13 +44,49 @@ const RECORD_KEYS = {
   'group-admin': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-leave': ['type', 'seen', 'cuts', 'at'],
   'group-link': ['type', 'group', 'on', 'cuts', 'at'],
-  'community-link': ['type', 'community', 'on', 'cuts', 'at']
+  'community-link': ['type', 'community', 'on', 'cuts', 'at'],
+  'group-key': ['type', 'kid', 'basis', 'keys', 'at'],
+  'group-sealed': ['type', 'kid', 'nonce', 'box', 'at']
 }
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
+// A first `group-key` block (kid null) also commits to its key.
+const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'commit', 'at']
 const ROOT_ONLY = new Set(['group-meta', 'group-admin', 'group-link', 'community-link'])
 // A community root (header kind `community`) is a set of groups: it carries
 // no posts or moderation of its own.
 const COMMUNITY_TYPES = new Set(['group-meta', 'group-admin', 'group-link'])
+// A private group carries these sealed, and only there.
+const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta'])
+const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
+const MAX_KEY_BASIS = 16
+const KEY_ENTRY_KEYS = ['writer', 'sealed']
+const INNER_BINDING = ['writer', 'group', 'kid']
+const HEX_NONCE = /^[0-9a-f]{48}$/
+const HEX_KEY_RE = /^[0-9a-f]{64}$/
+// crypto_box_seal of key(32) || tag(16): 96 bytes, 128 base64 characters
+// without padding, so the pattern alone is canonical.
+const SEALED_KEY = /^[A-Za-z0-9+/]{128}$/
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+const SECRETBOX_MAC_BYTES = 16
+
+// X25519 points of small order (libsodium's blocklist, compared with the top
+// bit of the last byte cleared, as libsodium does): sealing to one throws in
+// sodium-native and gives a constant shared secret elsewhere.
+const WEAK_BOX_KEYS = new Set([
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  '0100000000000000000000000000000000000000000000000000000000000000',
+  'e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800',
+  '5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157',
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f'
+])
+
+function isWeakBoxKey (hex) {
+  if (!isHex64(hex)) return false
+  const last = (parseInt(hex.slice(62), 16) & 0x7f).toString(16).padStart(2, '0')
+  return WEAK_BOX_KEYS.has(hex.slice(0, 62) + last)
+}
 
 function cmp (a, b) {
   return a < b ? -1 : a > b ? 1 : 0
@@ -77,6 +116,40 @@ function nameReason (name) {
   return hasControlChars(name, false) ? 'control-chars' : null
 }
 
+// Canonical base64 (standard alphabet, padded, the exact re-encoding) of
+// minBytes..maxBytes.
+function canonicalBase64 (s, minBytes, maxBytes) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > Math.ceil(maxBytes / 3) * 4 || !BASE64.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= minBytes && buf.byteLength <= maxBytes && b4a.toString(buf, 'base64') === s
+}
+
+function validBasis (basis) {
+  if (!Array.isArray(basis) || basis.length > MAX_KEY_BASIS) return false
+  const seen = new Set()
+  for (let i = 0; i < basis.length; i++) {
+    const r = basis[i]
+    if (!validRef(r, 1)) return false
+    const k = r.writer + ':' + r.seq
+    if (seen.has(k)) return false
+    seen.add(k)
+  }
+  return true
+}
+
+function validKeyEntries (keys) {
+  if (!Array.isArray(keys) || keys.length < 1 || keys.length > MAX_KEY_RECIPIENTS) return false
+  const writers = new Set()
+  for (let i = 0; i < keys.length; i++) {
+    const e = keys[i]
+    if (!isPlainObject(e) || !hasExactKeys(e, KEY_ENTRY_KEYS) || !isHex64(e.writer) || writers.has(e.writer)) return false
+    if (typeof e.sealed !== 'string' || !SEALED_KEY.test(e.sealed)) return false
+    writers.add(e.writer)
+  }
+  return true
+}
+
 function tooLarge (record) {
   return b4a.byteLength(JSON.stringify(record)) > MAX_BLOCK_BYTES
 }
@@ -96,7 +169,7 @@ function checkHeader (h) {
   } else if (h.visibility === 'private') {
     // The title of a private group travels sealed; the root must publish a
     // recipient key because it is the creator's first writer.
-    if (h.join !== 'approval' || h.name !== null || !isHex64(h.box)) return 'malformed'
+    if (h.join !== 'approval' || h.name !== null || !isHex64(h.box) || isWeakBoxKey(h.box)) return 'malformed'
   } else {
     return 'malformed'
   }
@@ -107,23 +180,27 @@ function checkWriterHeader (h) {
   if (!isPlainObject(h)) return 'malformed'
   if (tooLarge(h)) return 'too-large'
   if (!hasExactKeys(h, WRITER_KEYS) || h.type !== 'group-writer' || h.v !== 1) return 'malformed'
-  if (!isHex64(h.group) || !isHex64(h.diary) || h.box !== null) return 'malformed'
+  // `box` must match the root's visibility, which only the fold and member
+  // sync know (header-invalid there).
+  if (!isHex64(h.group) || !isHex64(h.diary) || (h.box !== null && (!isHex64(h.box) || isWeakBoxKey(h.box)))) return 'malformed'
   // A rejoin names the group-leave of the same diary it follows (checked by
   // buildGroup, which knows the other writers).
   if (h.rejoin !== null && !validRef(h.rejoin, 1)) return 'malformed'
   return isCanonicalIso(h.at) ? null : 'date-invalid'
 }
 
-function checkRecord (record, seq, root, community) {
+function checkRecord (record, seq, root, community, priv) {
   if (!Number.isSafeInteger(seq) || seq < 0) return 'malformed'
   if (seq === 0) return root ? checkHeader(record) : checkWriterHeader(record)
   if (!isPlainObject(record)) return 'malformed'
   const type = record.type
   if (typeof type !== 'string' || !Object.prototype.hasOwnProperty.call(RECORD_KEYS, type)) return 'malformed'
-  if (!hasExactKeys(record, RECORD_KEYS[type])) return 'malformed'
+  if (!hasExactKeys(record, type === 'group-key' && record.kid === null ? FIRST_KEY_KEYS : RECORD_KEYS[type])) return 'malformed'
   if (ROOT_ONLY.has(type) && !root) return 'root-only'
   if (community && !COMMUNITY_TYPES.has(type)) return 'group-only'
   if (!community && type === 'group-link') return 'community-only'
+  if (priv && SEALED_TYPES.has(type)) return 'sealed-only'
+  if (!priv && PRIVATE_TYPES.has(type)) return 'private-only'
   // Every writer record may name the newest node its author had seen (seq 0
   // names a rejoining writer's block 0), so it orders after a rejoin.
   if (Object.prototype.hasOwnProperty.call(record, 'seen') && record.seen !== null && !validRef(record.seen, 0)) return 'seen-invalid'
@@ -152,6 +229,17 @@ function checkRecord (record, seq, root, community) {
   } else if (type === 'group-link' || type === 'community-link') {
     if (!isHex64(type === 'group-link' ? record.group : record.community) || typeof record.on !== 'boolean') return 'malformed'
     if (!validCuts(record.cuts)) return 'cuts-invalid'
+  } else if (type === 'group-key') {
+    if (record.kid !== null && !validRef(record.kid, 1)) return 'malformed'
+    if (record.kid === null && (typeof record.commit !== 'string' || !HEX_KEY_RE.test(record.commit))) return 'malformed'
+    if (!validBasis(record.basis)) return 'basis-invalid'
+    if (!validKeyEntries(record.keys)) return 'keys-invalid'
+    if (tooLarge(record)) return 'too-large'
+  } else if (type === 'group-sealed') {
+    if (!validRef(record.kid, 1)) return 'malformed'
+    if (typeof record.nonce !== 'string' || !HEX_NONCE.test(record.nonce)) return 'malformed'
+    if (!canonicalBase64(record.box, SECRETBOX_MAC_BYTES + 2, MAX_SEALED_INNER_BYTES + SECRETBOX_MAC_BYTES)) return 'box-invalid'
+    if (tooLarge(record)) return 'too-large'
   }
   return isCanonicalIso(record.at) ? null : 'date-invalid'
 }
@@ -174,17 +262,19 @@ function validateWriterHeader (record) {
 }
 
 // Seq 0 is the header (group-header in the root, group-writer elsewhere).
-// `community` marks the root of a community (its header kind).
-function validateGroupRecord (record, seq, { root = false, community = false } = {}) {
+// `community` marks the root of a community (its header kind), `private` a
+// private group: posts, hides and meta travel only sealed there, and keys and
+// envelopes only there.
+function validateGroupRecord (record, seq, { root = false, community = false, private: priv = false } = {}) {
   try {
-    return checkRecord(record, seq, root === true, root === true && community === true)
+    return checkRecord(record, seq, root === true, root === true && community === true, priv === true)
   } catch {
     return 'malformed'
   }
 }
 
-function build (record, seq, root, community = false) {
-  const reason = validateGroupRecord(record, seq, { root, community })
+function build (record, seq, root, community = false, priv = false) {
+  const reason = validateGroupRecord(record, seq, { root, community, private: priv })
   if (reason) throw new TypeError(reason)
   return record
 }
@@ -203,8 +293,8 @@ function groupHeader ({ kind = 'group', diary, visibility = 'public', join = 'op
   return build({ type: 'group-header', v: 1, kind, diary, visibility, join, name, box, at }, 0, true)
 }
 
-function writerHeader ({ group, diary, rejoin = null, at = nowIso() } = {}) {
-  return build({ type: 'group-writer', v: 1, group, diary, box: null, rejoin: copyRef(rejoin), at }, 0, false)
+function writerHeader ({ group, diary, box = null, rejoin = null, at = nowIso() } = {}) {
+  return build({ type: 'group-writer', v: 1, group, diary, box, rejoin: copyRef(rejoin), at }, 0, false)
 }
 
 function groupPost ({ text, replyTo = null, seen = null, at = nowIso() } = {}) {
@@ -246,6 +336,27 @@ function groupLink ({ group, on, cuts = [], at = nowIso() } = {}) {
 
 function communityLink ({ community, on, cuts = [], at = nowIso() } = {}) {
   return build({ type: 'community-link', community, on, cuts: copyCuts(cuts), at }, 1, true)
+}
+
+// `keys`: [{ writer, sealed }], `sealed` the base64 of a sealed epoch key.
+// `commit` (first blocks only, kid null): the hex of keyCommit(key, G, kid)
+// from group-crypto, kid being the block's own { writer, seq }.
+function groupKey ({ kid = null, basis = [], keys, commit, at = nowIso() } = {}) {
+  const entries = Array.isArray(keys) ? keys.map((e) => isPlainObject(e) ? { writer: e.writer, sealed: e.sealed } : e) : keys
+  const record = kid === null
+    ? { type: 'group-key', kid: null, basis: copyCuts(basis), keys: entries, commit, at }
+    : { type: 'group-key', kid: copyRef(kid), basis: copyCuts(basis), keys: entries, at }
+  return build(record, 1, false, false, true)
+}
+
+function groupSealed ({ kid, nonce, box, at = nowIso() } = {}) {
+  return build({ type: 'group-sealed', kid: copyRef(kid), nonce, box, at }, 1, false, false, true)
+}
+
+// The inner record of an envelope: a group-post, group-hide or group-meta
+// (built and validated as such) plus its binding fields.
+function sealedInner (record, { writer, group, kid }) {
+  return { ...record, writer, group, kid: copyRef(kid) }
 }
 
 // Stands in for a record too deep (or otherwise unfit) to copy: it is never
@@ -370,7 +481,9 @@ class Heap {
 // kind (`fallback` stands in for a header the entries lack). `raw` maps every
 // seq held, valid or not, to a canonical text of its block (the one chosen,
 // else the first), so mergeCopies sees any difference as a fork.
-function readLog (entries, root, fallback = null) {
+// A writer's records are checked against the group's visibility (`priv`); a
+// root's against its own header.
+function readLog (entries, root, fallback = null, priv = false) {
   const copies = new Map()
   const firstRaw = new Map()
   eachEntry(entries, (seq, record) => {
@@ -385,10 +498,11 @@ function readLog (entries, root, fallback = null) {
     if (copy !== null && validateGroupHeader(copy) === null) header = copy
   }
   const community = root && header !== null && header.kind === 'community'
+  const isPrivate = root ? header !== null && header.kind === 'group' && header.visibility === 'private' : priv === true
   const bySeq = new Map()
   for (const seq of copies.keys()) {
     if (seq === 0) continue
-    const copy = first(seq, { root, community })
+    const copy = first(seq, { root, community, private: isPrivate })
     if (copy) bySeq.set(seq, copy)
   }
   const records = [...bySeq.keys()].sort((a, b) => a - b).map((seq) => ({ seq, record: bySeq.get(seq) }))
@@ -496,6 +610,11 @@ function emptyGroup () {
     bans: new Map(),
     leaves: new Map(),
     writers: new Set(),
+    sealed: 0,
+    epoch: null,
+    rekeyPending: false,
+    entitled: [],
+    removals: [],
     incomplete: true
   }
 }
@@ -571,6 +690,13 @@ function referencesOf (record, root) {
   } else if (t === 'group-admit' || t === 'group-ban' || t === 'group-admin' || t === 'community-link') {
     for (const c of record.cuts) if (c.seq >= 1) refs.push({ writer: c.writer, seq: c.seq - 1 })
     if (t === 'group-ban' && record.lifts) refs.push(record.lifts)
+  } else if (t === 'group-key') {
+    // Plaintext edges only: the removals it answers and the epoch it
+    // continues name blocks, not observed lengths.
+    for (const b of record.basis) refs.push(b)
+    if (record.kid) refs.push(record.kid)
+  } else if (t === 'group-sealed') {
+    refs.push(record.kid)
   }
   return refs
 }
@@ -590,11 +716,12 @@ function causalOrder (logs, root) {
     const records = log.rejoin
       ? [{ seq: 0, record: { type: 'group-rejoin', rejoin: log.rejoin, at: log.at } }, ...log.records]
       : log.records
-    const list = records.map(({ seq, record }) => ({
+    const list = records.map(({ seq, record, kid }) => ({
       writer: log.key,
       diary: log.diary,
       seq,
       record,
+      kid: kid || null,
       key: orderKey(record.at, log.key, seq),
       succ: [],
       indeg: 0,
@@ -625,7 +752,11 @@ function causalOrder (logs, root) {
       const n = list[i]
       const preds = new Set()
       if (i > 0) preds.add(list[i - 1])
-      for (const ref of referencesOf(n.record, root)) {
+      // An opened record keeps its envelope's kid edge, so it never sorts
+      // before the epoch it was sealed under.
+      const refs = referencesOf(n.record, root)
+      if (n.kid !== null) refs.push(n.kid)
+      for (const ref of refs) {
         if (ref.writer === n.writer && ref.seq >= n.seq) continue
         const p = resolve(ref)
         if (p !== null && p !== n) preds.add(p)
@@ -873,9 +1004,13 @@ function oneAtATime (records) {
 function pushLink (map, k, r) {
   let side = map.get(k)
   if (!side) {
-    side = { strict: [], open: [], closed: false, starts: null }
+    side = { strict: [], open: [], closed: false, starts: null, records: [] }
     map.set(k, side)
   }
+  // Each record also as its own event with only its own cuts: the check
+  // that a link saw every leave of the community creator must never borrow
+  // a cut another record of the same period added.
+  side.records.push({ on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 })
   if (!r.on) {
     const cuts = cutsMap(r.cuts)
     side.strict.push({ on: false, cuts, unlisted: 0 })
@@ -950,26 +1085,38 @@ function communityState (c, G) {
   const admins = new Map()
   const on = new Set()
   const sides = new Map()
+  // Its records that take power in G away (private groups, "Removals"):
+  // only while its link to G is on, and a demotion only of a grant on then.
+  const removals = []
+  let linkedG = false
   let name = c.header.visibility === 'public' ? c.header.name : null
-  for (const { record: r } of c.records) {
+  for (const { seq, record: r } of c.records) {
     if (r.type === 'group-admin') {
-      if (r.member !== creator) pushTo(admins, r.member, { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 })
+      if (r.member === creator) continue
+      if (!r.on && linkedG && lastOn(admins.get(r.member))) removals.push({ writer: c.key, seq, subject: r.member })
+      pushTo(admins, r.member, { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 })
     } else if (r.type === 'group-link') {
       if (r.on) {
         if (!on.has(r.group) && on.size >= MAX_GROUPS_PER_COMMUNITY) continue
         on.add(r.group)
+        if (r.group === G) linkedG = true
       } else {
         // An unlink of a link that is not on (ignored at the cap, or
         // already off) changes nothing.
         if (!on.has(r.group)) continue
         on.delete(r.group)
+        if (r.group === G) {
+          removals.push({ writer: c.key, seq, subject: null })
+          linkedG = false
+        }
       }
       if (r.group === G) pushLink(sides, G, r)
     } else if (r.type === 'group-meta' && c.header.visibility === 'public') {
       name = r.name
     }
   }
-  return { key: c.key, creator, name, admins, on, side: sides.get(G) || null }
+  const last = c.records.length ? c.records[c.records.length - 1].seq : 0
+  return { key: c.key, creator, name, admins, on, side: sides.get(G) || null, removals, last }
 }
 
 // The communities given to buildGroup, keyed by root, the copies of a root
@@ -1002,7 +1149,7 @@ function linkedCommunities (links, byKey) {
   const out = []
   for (const [k, groupSide] of groupSideEvents(links)) {
     const c = byKey.get(k)
-    if (c && c.side !== null) out.push({ key: k, creator: c.creator, admins: c.admins, groupSide, side: c.side })
+    if (c && c.side !== null) out.push({ key: k, creator: c.creator, admins: c.admins, groupSide, side: c.side, removals: c.removals, last: c.last })
   }
   return out
 }
@@ -1012,6 +1159,21 @@ function linkedNow (c) {
 }
 
 // Whether diary d acts through community c at (w, s), by the rule above.
+// A layer for reading: an `on: false` event cuts only the writers it lists.
+function lenient (events) {
+  return events.map((e) => e.on || e.unlisted === Infinity ? e : { ...e, unlisted: Infinity })
+}
+
+function lenientCommunity (c) {
+  const admins = new Map([...c.admins].map(([d, list]) => [d, lenient(list)]))
+  return {
+    ...c,
+    admins,
+    groupSide: { ...c.groupSide, strict: lenient(c.groupSide.strict), open: lenient(c.groupSide.open) },
+    side: { ...c.side, strict: lenient(c.side.strict), open: lenient(c.side.open) }
+  }
+}
+
 function communityPower (c, d, w, s) {
   if (!layerAt(c.groupSide.open, w, s)) return false
   if (d === c.creator) return layerAt(c.side.strict, w, s)
@@ -1048,6 +1210,7 @@ function fold (input) {
   const header = rootLog.header
   if (header === null) return emptyGroup()
   const creator = header.diary
+  const priv = header.kind === 'group' && header.visibility === 'private'
   const { bound, named, joinSeq } = readJoins(joins)
   const rootBound = bound.has(creator + ':' + G)
   let incomplete = !rootBound
@@ -1059,7 +1222,7 @@ function fold (input) {
       if (!isPlainObject(w)) continue
       const key = w.key
       if (!isHex64(key) || key === G) continue
-      const log = readLog(w.entries, false)
+      const log = readLog(w.entries, false, null, priv)
       if (log.header === null && !log.raw.has(0)) continue
       pushTo(copies, key, { log, diary: w.diary })
     }
@@ -1076,6 +1239,8 @@ function fold (input) {
     if (log === null || log.header === null) continue
     const h = log.header
     if (h.group !== G || !bound.has(h.diary + ':' + key) || !list.some((x) => x.diary === h.diary)) continue
+    // header-invalid: a writer's recipient key must match the visibility.
+    if ((h.box !== null) !== priv) continue
     candidates.set(key, { key, diary: h.diary, rejoin: h.rejoin, at: h.at, records: log.records })
   }
   // A root its creator's diary never bound carries no authority and no
@@ -1131,7 +1296,7 @@ function fold (input) {
     sel = select(new Set(first.bans.keys()), first.admins)
   }
   if (over || sel.dropped) incomplete = true
-  const result = foldLogs(ctx, sel.kept)
+  const result = priv ? foldPrivate(ctx, sel.kept, input.keys) : { ...foldLogs(ctx, sel.kept), sealed: 0, epoch: null, rekeyPending: false, entitled: [], removals: [] }
   result.incomplete = incomplete
   return result
 }
@@ -1194,7 +1359,14 @@ function observedLeaves (order, logs) {
   }
 }
 
-function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities }, kept) {
+function foldLogs (ctx, kept) {
+  return foldCore(ctx, kept).result
+}
+
+// `auth`, in the opened pass of a private group, is the plaintext pass's
+// authority: moderation and membership come from it alone, so decrypted
+// edges only place content.
+function foldCore ({ G, header, creator, rootBound, rootEntry, now, communities }, kept, auth = null) {
   const logs = [rootEntry, ...kept]
   const writerDiary = new Map(logs.map((l) => [l.key, l.diary]))
   // The header names any diary it likes: creator powers come only from a
@@ -1204,20 +1376,51 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
   const withdrawn = leaveWithdrawal(order, logs, G)
   const admitGen = observedLeaves(order, logs)
 
-  const rootAdmin = new Map()
+  const rootAdmin = auth ? auth.rootAdmin : new Map()
+  // The same layers without leave withdrawal: who could distribute keys for
+  // reading (a creator's leave never takes handed-out history back).
+  const rawAdmin = new Map()
+  // Counted records that take reading rights away (private groups), and the
+  // group-key blocks with whether their writer could distribute there.
+  const removals = []
+  const keyNodes = []
+  // Leaves with the generation and the rejoins of their diary before them,
+  // judged after the loop ("Removals").
+  const leaveNodes = []
+  const rejoinCount = new Map()
+  // Positions of the records that hand a diary power or keys (an applied
+  // admit or root grant on, a counted group-key listing one of its writers):
+  // a later leave set of that diary counts only past one of them.
+  const authPos = new Map()
+  // Per envelope (plaintext pass): whether its author acted with authority
+  // there and whether a leave withdraws it.
+  const sealedAuth = new Map()
+  const sealedOut = new Map()
+  const sealedGen = new Map()
+  // And whether its author acted as an admin there (posting without an
+  // admit), from the envelope's plaintext position.
+  const sealedAdmin = new Map()
+  // The kids that counted envelopes name: a reading-only epoch nothing
+  // counted is sealed under has nothing to read, so it is never opened.
+  const sealedKids = new Set()
   for (const n of order) {
     const r = n.record
-    if (n.writer !== G || r.type !== 'group-admin' || r.member === creator || withdrawn(n)) continue
+    if (auth || n.writer !== G || r.type !== 'group-admin' || r.member === creator) continue
     // A grant gives nothing to a writer missing from its cuts (a hidden or
     // forgotten device would otherwise gain authority over its whole past,
     // which a later demotion could not undo), so an admin's new device needs
     // a new grant. A demotion still covers every writer.
-    pushTo(rootAdmin, r.member, { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 })
+    const event = { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 }
+    pushTo(rawAdmin, r.member, { ...event, pos: n.pos })
+    if (withdrawn(n)) continue
+    if (!r.on) removals.push(n)
+    else pushTo(authPos, r.member, n.pos)
+    pushTo(rootAdmin, r.member, event)
   }
-  const bans = new Map()
+  const bans = auth ? auth.bans : new Map()
   const latestBan = new Map()
   const latestLeave = new Map()
-  const admits = new Map()
+  const admits = auth ? auth.admits : new Map()
   const left = new Set()
   // Leaves per diary so far, the generation of each post: an admit counts
   // only for posts of a generation its cuts observed, so a rejoin needs a
@@ -1230,17 +1433,138 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
 
   // The root's community links in causal order: a creator's leave withdraws
   // the links after its cut like any other root record.
-  const links = order.filter((n) => n.writer === G && n.record.type === 'community-link').map((n) => ({ record: n.record, out: withdrawn(n) }))
-  const linked = linkedCommunities(links, communities)
+  const links = order.filter((n) => n.writer === G && n.record.type === 'community-link').map((n) => ({ record: n.record, out: withdrawn(n), n }))
+  const linked = auth ? auth.linked : linkedCommunities(links, communities)
+  const rawLinked = auth ? [] : linkedCommunities(links.map((x) => ({ record: x.record, out: false })), communities)
+  // Sending uses the authority the fold counts (a grant or link a
+  // creator's leave withdrew gives none); the raw and lenient layers below
+  // decide only what may be read.
+  const distributes = (n) => n.diary === owner || ((layerAt(rootAdmin.get(n.diary), n.writer, n.seq) ||
+    linked.some((c) => communityPower(c, n.diary, n.writer, n.seq))) && !layerAt(bans.get(n.diary), n.writer, n.seq))
+  // For reading, a demotion or unlink cuts only the writers it lists (a
+  // writer it omits, cut at 0 for sending, keeps the epochs it handed out
+  // readable), and a root demotion never reaches a block that sorts before
+  // it, whatever its cuts. Grants still give nothing to unlisted writers and
+  // bans still apply by their cuts.
+  const readAdmin = new Map([...rawAdmin].map(([d, list]) => [d, lenient(list)]))
+  const readLinked = rawLinked.map(lenientCommunity)
+  const adminBefore = (n) => layerAt((rawAdmin.get(n.diary) || []).filter((e) => e.pos < n.pos), n.writer, n.seq)
+  const readable = (n) => n.diary === owner || ((layerAt(readAdmin.get(n.diary), n.writer, n.seq) || adminBefore(n) ||
+    readLinked.some((c) => communityPower(c, n.diary, n.writer, n.seq))) && !layerAt(bans.get(n.diary), n.writer, n.seq))
+  const envelopeId = (n) => n.writer + ':' + n.seq
+  // An opened record keeps the withdrawal its envelope had in the plaintext
+  // pass.
+  const outOf = (n) => auth && auth.sealedOut.has(envelopeId(n)) ? auth.sealedOut.get(envelopeId(n)) : withdrawn(n)
+  // And the membership generation of its envelope: the opened position must
+  // not move a post into a generation whose admit covers it.
+  const adminOf = (n) => auth && auth.sealedAdmin.has(envelopeId(n)) ? auth.sealedAdmin.get(envelopeId(n)) : adminAt(n.diary, n.writer, n.seq, n.pos)
+  const genOf = (n) => auth && auth.sealedGen.has(envelopeId(n)) ? auth.sealedGen.get(envelopeId(n)) : leaves.get(n.diary) || 0
+  if (!auth) {
+    const raw = new Set(oneAtATime(links.map((x) => x.record)))
+    const counted = new Set(oneAtATime(links.filter((x) => !x.out && raw.has(x.record)).map((x) => x.record)))
+    for (const x of links) if (!x.record.on && counted.has(x.record)) removals.push(x.n)
+  }
   const communityAt = (d, w, s) => linked.some((c) => communityPower(c, d, w, s))
   const communityNow = (d) => linked.some((c) => linkedNow(c) && (d === c.creator || lastOn(c.admins.get(d))))
+  // Leaving ends the nomination and the admission (owner decision): for a
+  // diary with leaves, a grant, community grant or admit counts only when
+  // its cuts prove it saw every leave of that diary (the leave's writer cut
+  // past it, or a writer whose rejoin names it cut at 1 or more). Cuts are
+  // the admin's, so no `at`, `seen`, join order or extra writer the leaver
+  // picks makes an earlier event look later.
+  // Every leave per diary in causal order; a record's own view is the
+  // prefix before its position (leavesBefore).
+  const leavesOf = new Map()
+  for (const n of order) if (n.record.type === 'group-leave') pushTo(leavesOf, n.diary, n)
+  const rejoinRef = new Map()
+  const rejoiners = new Map()
+  for (const l of logs) {
+    if (!l.rejoin) continue
+    rejoinRef.set(l.key, l.rejoin)
+    pushTo(rejoiners, l.rejoin.writer + ':' + l.rejoin.seq, l.key)
+  }
+  const names = (w, L) => {
+    const r = rejoinRef.get(w)
+    return r !== undefined && r.writer === L.writer && r.seq === L.seq
+  }
+  const sawOne = (cuts, L) => {
+    const c = cuts.get(L.writer)
+    if (c !== undefined && c > L.seq) return true
+    return (rejoiners.get(L.writer + ':' + L.seq) || []).some((w) => (cuts.get(w) || 0) >= 1)
+  }
+  // Leaves of a diary are kept in causal order, so "saw every leave before
+  // position p" is "saw the first m of them": each event's count of leading
+  // leaves it saw is computed once per diary and reused, keeping thousands
+  // of leaves and key blocks linear.
+  const seenCount = new Map()
+  const sawPrefix = (e, d) => {
+    let byDiary = seenCount.get(e)
+    if (!byDiary) {
+      byDiary = new Map()
+      seenCount.set(e, byDiary)
+    }
+    // Resumed when the loop has met more leaves since: a count that stopped
+    // at an unseen leave never moves.
+    const list = leavesOf.get(d) || []
+    let x = byDiary.get(d)
+    if (!x) {
+      x = { i: 0, stopped: false }
+      byDiary.set(d, x)
+    }
+    while (!x.stopped && x.i < list.length) {
+      if (sawOne(e.cuts, list[x.i])) x.i++
+      else x.stopped = true
+    }
+    return x.i
+  }
+  // An event its subject wrote itself never proves anything (`by`, the
+  // author's diary, is kept on admits; grants come from the root or a
+  // community root, never from their subject). `m`: how many of d's first
+  // leaves the event must have seen.
+  const sawLayer = (events, d, m, ex) => events ? events.filter((e) => !e.on || (e.by !== ex && sawPrefix(e, d) >= m)) : events
+  const communitySaw = (c, d, w, s, m) => {
+    if (!layerAt(c.groupSide.open, w, s)) return false
+    if (d === c.creator) return layerAt(c.side.strict, w, s) && layerAt(sawLayer(c.side.records, d, m, null), w, s)
+    return layerAt(c.side.open, w, s) && layerAt(sawLayer(c.admins.get(d), d, m, d), w, s)
+  }
+  // In a private group, authority after its holder's leave needs a grant
+  // that saw every leave of that diary sorting before the record (the
+  // creator: a writer whose rejoin names its latest such leave), as for
+  // keys: a departed admin's old grant moderates nothing, whatever `seen`
+  // or rejoin it uses.
+  const priv = header.visibility === 'private'
+  const leavePosOf = (L) => L.pos
+  const leavesBefore = (d, pos) => {
+    const list = leavesOf.get(d)
+    return list ? firstAbove(list, pos - 1, leavePosOf) : 0
+  }
   const isAdmin = (d, w, s) => layerAt(rootAdmin.get(d), w, s) || communityAt(d, w, s)
-  const authorized = (n) => !withdrawn(n) && (n.diary === owner ||
-    (isAdmin(n.diary, n.writer, n.seq) && !layerAt(bans.get(n.diary), n.writer, n.seq)))
+  const adminAt = (d, w, s, pos) => {
+    const m = priv ? leavesBefore(d, pos) : 0
+    if (m === 0) return isAdmin(d, w, s)
+    return layerAt(sawLayer(rootAdmin.get(d), d, m, d), w, s) || linked.some((c) => communitySaw(c, d, w, s, m))
+  }
+  const ownerAt = (n) => {
+    const m = priv ? leavesBefore(n.diary, n.pos) : 0
+    return m === 0 || names(n.writer, leavesOf.get(n.diary)[m - 1])
+  }
+  const authorized = (n) => {
+    if (withdrawn(n)) return false
+    if (n.diary === owner) return ownerAt(n)
+    return adminAt(n.diary, n.writer, n.seq, n.pos) && !layerAt(bans.get(n.diary), n.writer, n.seq)
+  }
   // From the final root state, never from the causal position: shielding by
   // position would let clock skew decide whether two admins can ban each
   // other. A demoted admin loses the shield entirely.
-  const adminNow = (d) => lastOn(rootAdmin.get(d)) || communityNow(d)
+  // The final state; in a private group, after a leave only grants that
+  // saw every leave of that diary count, as for keys and moderation.
+  const adminNow = (d) => {
+    const list = priv ? leavesOf.get(d) : null
+    if (!list) return lastOn(rootAdmin.get(d)) || communityNow(d)
+    const m = list.length
+    return lastOn(sawLayer(rootAdmin.get(d), d, m, d)) || linked.some((c) => linkedNow(c) &&
+      (d === c.creator ? lastOn(sawLayer(c.side.records, d, m, null)) : lastOn(sawLayer(c.admins.get(d), d, m, d))))
+  }
   const shielded = (d) => d === owner || adminNow(d)
 
   // The newest node in causal order, a rejoin's block 0 included: a new post
@@ -1252,7 +1576,7 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
     if (n.seq >= 1 || r.type === 'group-rejoin') last = { writer: n.writer, seq: n.seq }
     switch (r.type) {
       case 'group-post':
-        postNodes.push({ n, withdrawn: withdrawn(n), gen: leaves.get(n.diary) || 0 })
+        postNodes.push({ n, withdrawn: outOf(n), gen: genOf(n) })
         break
       case 'group-hide': {
         // A leave does not withdraw an author's hide of their own post: it
@@ -1261,7 +1585,7 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
         const ref = r.target.writer + ':' + r.target.seq
         const state = hides.get(ref) || { author: false, admin: false }
         if (writerDiary.get(r.target.writer) === n.diary) state.author = r.on
-        else if (authorized(n)) state.admin = r.on
+        else if (auth ? auth.sealedAuth.get(envelopeId(n)) === true : authorized(n)) state.admin = r.on
         else break
         hides.set(ref, state)
         break
@@ -1269,16 +1593,20 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
       case 'group-admit': {
         // Only withdrawing an admission is shielded: a member promoted later
         // keeps the admission that covers the posts before the promotion.
-        if ((!r.on && shielded(r.member)) || !authorized(n)) break
+        // Nobody admits its own diary: a self-admit an admin writes before
+        // leaving could otherwise prove it saw that leave after a rejoin.
+        if (auth || (r.on && n.diary === r.member) || (!r.on && shielded(r.member)) || !authorized(n)) break
         const cuts = cutsMap(r.cuts)
         // A positive admit skips writers its cuts do not list: a backlog
         // writer the admin never saw must not become admitted from seq 0. A
         // withdrawal still covers every writer.
-        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i) })
+        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i), by: n.diary })
+        if (!r.on) removals.push(n)
+        else pushTo(authPos, r.member, n.pos)
         break
       }
       case 'group-ban': {
-        if (shielded(r.member) || !authorized(n)) break
+        if (auth || shielded(r.member) || !authorized(n)) break
         if (r.on) {
           latestBan.set(r.member, n)
         } else {
@@ -1289,21 +1617,40 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
         // during the ban must not become visible through an unban that never
         // saw it. A ban still covers every writer.
         pushTo(bans, r.member, { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? 0 : Infinity })
+        if (r.on) removals.push(n)
         break
       }
       case 'group-meta':
         if (header.visibility === 'public' && !withdrawn(n)) {
           name = r.name
           join = r.join
+        } else if (header.visibility === 'private' && n.writer === G && !outOf(n) && r.join === 'approval') {
+          // An opened meta (root only, where causal order is seq order); a
+          // private group always asks for approval.
+          name = r.name
         }
         break
+      case 'group-key':
+        // Leave withdrawal does not apply to reading: an admin who later
+        // leaves keeps the history it handed out readable.
+        keyNodes.push({ n, dist: readable(n), send: distributes(n), out: withdrawn(n) })
+        break
+      case 'group-sealed':
+        sealedAuth.set(envelopeId(n), authorized(n))
+        sealedOut.set(envelopeId(n), withdrawn(n))
+        sealedGen.set(envelopeId(n), leaves.get(n.diary) || 0)
+        sealedAdmin.set(envelopeId(n), adminAt(n.diary, n.writer, n.seq, n.pos))
+        if (!withdrawn(n)) sealedKids.add(r.kid.writer + ':' + r.kid.seq)
+        break
       case 'group-leave':
+        leaveNodes.push({ n, gen: leaves.get(n.diary) || 0, rejoins: rejoinCount.get(n.diary) || 0 })
         latestLeave.set(n.diary, { writer: n.writer, seq: n.seq })
         left.add(n.diary)
         leaves.set(n.diary, (leaves.get(n.diary) || 0) + 1)
         break
       case 'group-rejoin':
         left.delete(n.diary)
+        rejoinCount.set(n.diary, (rejoinCount.get(n.diary) || 0) + 1)
         break
     }
   }
@@ -1338,7 +1685,7 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
     const hide = hides.get(n.writer + ':' + n.seq)
     const hidden = out || (hide !== undefined && (hide.author || hide.admin)) ||
       (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
-        (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq) && !isAdmin(d, n.writer, n.seq))))
+        (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq) && !adminOf(n))))
     posts.push({
       writer: n.writer,
       diary: d,
@@ -1400,7 +1747,176 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
     if (lastOn(bans.get(d)) || bannedNow(d)) banRefs.set(d, { writer: n.writer, seq: n.seq })
   }
 
-  return {
+  const counted = new Set(logs.filter((l) => l.key !== G || rootBound).map((l) => l.key))
+  // Writers outside their diary's current generation: a leave was written
+  // on them, a leave withdraws their newest record, they wrote nothing since
+  // their diary's latest leave (superseded, e.g. by a rejoining writer), or,
+  // with no record at all, their diary has left before and no admit of its
+  // current generation lists them.
+  const retired = new Set()
+  const newest = new Map()
+  const lastLeave = new Map()
+  for (const n of order) {
+    if (n.record.type === 'group-leave') {
+      retired.add(n.writer)
+      lastLeave.set(n.diary, n.pos)
+    }
+    newest.set(n.writer, n)
+  }
+  for (const l of logs) {
+    const n = newest.get(l.key)
+    const gen = leaves.get(l.diary) || 0
+    const old = n !== undefined && lastLeave.has(l.diary) && n.pos < lastLeave.get(l.diary)
+    if (n !== undefined ? withdrawn(n) || old : gen > 0 && !layerNow(admitsFrom(l.diary, gen), l.key)) retired.add(l.key)
+  }
+  // "Entitled writers": keys go to writers, never to a diary as a whole, so
+  // a pending device of a member diary gets nothing, and a retired device
+  // never keeps receiving through an earlier grant. After a leave, only
+  // events that saw every leave count, and the creator only on a writer
+  // whose rejoin names its latest leave.
+  const entitled = (w) => {
+    const d = writerDiary.get(w)
+    if (d === undefined || !counted.has(w) || retired.has(w) || left.has(d) || layerNow(bans.get(d), w)) return false
+    const list = leavesOf.get(d)
+    if (!list) {
+      if (d === owner) return true
+      if (layerNow(rootAdmin.get(d), w) || linked.some((c) => communityPower(c, d, w, Number.MAX_SAFE_INTEGER))) return true
+      return layerNow(admitsFrom(d, 0), w)
+    }
+    if (d === owner) return names(w, list[list.length - 1])
+    const m = list.length
+    if (layerNow(sawLayer(rootAdmin.get(d), d, m, d), w) || linked.some((c) => communitySaw(c, d, w, Number.MAX_SAFE_INTEGER, m))) return true
+    return layerNow(sawLayer(admits.get(d), d, m, d), w)
+  }
+  // Community removals: only while G's own root keeps the link on (its
+  // unlink is a removal of G's root that already forces a fresh epoch
+  // without the community's powers), and only the latest per community
+  // root: a distributor that saw it saw every earlier record of that
+  // single-writer root, so covering it covers them.
+  const holdsInG = (d) => {
+    if (left.has(d)) return false
+    if (d === owner) return true
+    const list = leavesOf.get(d)
+    return list ? lastOn(sawLayer(rootAdmin.get(d), d, list.length, d)) : lastOn(rootAdmin.get(d))
+  }
+  const extRemovals = []
+  for (const c of linked) {
+    if (!lastOn(c.groupSide.strict)) continue
+    let latest = null
+    for (const r of c.removals) {
+      // A demotion of a diary that still holds key power through G itself
+      // (its creator, or a root grant that counts now) takes nothing away.
+      if (r.subject !== null && holdsInG(r.subject)) continue
+      if (latest === null || r.seq > latest.seq) latest = r
+    }
+    if (latest !== null) extRemovals.push({ ...latest, last: c.last })
+  }
+  // A removal counts only when it can take keys away: its subject diary was
+  // the creator, granted, admitted, empowered by a linked community or a
+  // recipient of a counted epoch. Then only the latest per writer matters:
+  // the writer chain makes the earlier ones its ancestors, and coverage of a
+  // removal of G's cores is ancestry (a basis ref is an edge too).
+  // A block valid for sending after leaves of its diary that sort before it
+  // needs authority from an event that saw all of them (the creator: a
+  // writer whose rejoin names the latest). A block before any leave keeps
+  // its authority, so a departed admin's earlier epochs stay history.
+  // A withdrawn block is never valid for sending anyway (every use of
+  // `send` also requires it not withdrawn), so it is skipped unscanned.
+  const leavePos = (L) => L.pos
+  for (const kn of keyNodes) {
+    if (!kn.send || kn.out) continue
+    const n = kn.n
+    const all = leavesOf.get(n.diary)
+    const m = all ? firstAbove(all, n.pos - 1, leavePos) : 0
+    if (m === 0) continue
+    if (n.diary === owner) kn.send = names(n.writer, all[m - 1])
+    else kn.send = layerAt(sawLayer(rootAdmin.get(n.diary), n.diary, m, n.diary), n.writer, n.seq) || linked.some((c) => communitySaw(c, n.diary, n.writer, n.seq, m))
+  }
+  const recipientDiaries = new Set()
+  // Only blocks valid for sending: a reading-only block (a demoted
+  // distributor's) neither makes a diary hold keys nor hands it power.
+  for (const { n, send, out } of keyNodes) {
+    // A block written after its author's leave (still valid for reading)
+    // hands nothing, and a diary never hands power or keys to itself.
+    if (!send || out) continue
+    for (const k of n.record.keys) {
+      const d = writerDiary.get(k.writer)
+      if (d === undefined || d === n.diary) continue
+      recipientDiaries.add(d)
+      pushTo(authPos, d, n.pos)
+    }
+  }
+  const everHeld = (d) => d === owner || recipientDiaries.has(d) ||
+    (rootAdmin.get(d) || []).some((e) => e.on) || (admits.get(d) || []).some((e) => e.on) ||
+    linked.some((c) => c.creator === d || c.admins.has(d))
+  const latestRemoval = new Map()
+  for (const n of removals) {
+    if (n.record.type !== 'community-link' && !everHeld(n.record.member)) continue
+    const prev = latestRemoval.get(n.writer)
+    if (prev === undefined || n.seq > prev.seq) latestRemoval.set(n.writer, n)
+  }
+  // A leave takes keys away only when it ends a generation that could hold
+  // them: the creator's, or one neither banned at the leave's writer and seq
+  // (by cuts, so no `seen` or `at` the leaver picks can dodge it) nor without
+  // power or admission for its generation. The leaves of one diary between
+  // two rejoins form one requirement, met by covering any of them: a second
+  // leave (repeated, or backdated before the first on another writer) never
+  // adds one.
+  const byClass = new Map()
+  for (const x of leaveNodes) pushTo(byClass, x.n.diary + ':' + x.rejoins, x)
+  const leaveClasses = new Map()
+  // Per diary, the first leave position of the previous leave set.
+  const prevFirst = new Map()
+  const classKeys = [...byClass.keys()].sort((a, b) => {
+    const [da, ra] = a.split(':')
+    const [db, rb] = b.split(':')
+    return cmp(da, db) || Number(ra) - Number(rb)
+  })
+  for (const k of classKeys) {
+    const list = byClass.get(k)
+    const d = list[0].n.diary
+    // The generation the class ends is the one of its first leave in causal
+    // order, whichever writer the leaver backdated it on.
+    const gen = list.reduce((m, x) => Math.min(m, x.gen), Infinity)
+    const first = list.reduce((m, x) => Math.min(m, x.n.pos), Infinity)
+    const last = list.reduce((m, x) => Math.max(m, x.n.pos), -1)
+    const unbanned = list.some(({ n }) => !layerAt(bans.get(d), n.writer, n.seq))
+    let held
+    if (d === owner) {
+      held = true
+    } else if (!prevFirst.has(d)) {
+      held = unbanned && (list.some(({ n }) => isAdmin(d, n.writer, n.seq)) || adminNow(d) || lastOn(admitsFrom(d, gen)))
+    } else {
+      // A later set needs power or keys handed to the diary after the last
+      // counted set began (an admit or grant on, or a counted key block for
+      // one of its writers): a standing grant, an old admit or a generation
+      // count shifted by a backdated rejoin never makes one.
+      const from = prevFirst.get(d)
+      held = unbanned && (authPos.get(d) || []).some((p) => p > from && p < last)
+    }
+    if (!held) continue
+    prevFirst.set(d, first)
+    leaveClasses.set(k, list.map((x) => x.n))
+  }
+  const state = {
+    owner,
+    admins,
+    left,
+    keyNodes,
+    removals: [...latestRemoval.values()],
+    leaveClasses: [...leaveClasses.values()],
+    extRemovals,
+    sealedKids,
+    // The last seq held per counted core: a basis ref past it names nothing.
+    lastSeq: new Map(logs.map((l) => [l.key, l.records.length ? l.records[l.records.length - 1].seq : 0])),
+    entitled,
+    counted,
+    retired,
+    withdrawn,
+    auth: { rootAdmin, bans, admits, linked, sealedAuth, sealedOut, sealedGen, sealedAdmin }
+  }
+
+  const result = {
     kind: header.kind,
     name,
     join,
@@ -1418,9 +1934,269 @@ function foldLogs ({ G, header, creator, rootBound, rootEntry, now, communities 
     leaves: leaveRefs,
     // The writers the fold counted (root included when bound): a record in
     // any other core, even one bound by the diary, is not part of the group.
-    writers: new Set(logs.filter((l) => l.key !== G || rootBound).map((l) => l.key)),
+    writers: counted,
     incomplete: false
   }
+  return { result, state }
+}
+
+// Private groups ("Private groups"). Everything about authority (members,
+// requests, admins, bans, leaves) and the epoch machinery (distributors,
+// removals, eligibility, entitled writers) comes from a first fold in which
+// every envelope stays sealed, so it follows plaintext ordering edges only
+// and every reader of the same blocks agrees on it whatever keys it holds.
+// A second fold over the opened envelopes, under that same authority, only
+// places content: posts, hides and the private name. Epoch keys live in
+// `held` only and are wiped before returning.
+function foldPrivate (ctx, kept, keys) {
+  const plain = foldCore(ctx, kept)
+  const held = new Map()
+  try {
+    const mine = isPlainObject(keys) && keys.writers instanceof Set ? keys.writers : new Set()
+    const unseal = isPlainObject(keys) && typeof keys.unseal === 'function' ? keys.unseal : null
+    const epochs = readEpochs(ctx.G, plain.state, mine, unseal, held)
+    // The keys a node may hand on (history, rotation) are exactly the ones
+    // the fold accepted: each epoch once, in causal order of its first
+    // block, as a copy the caller owns and must wipe.
+    const onKey = isPlainObject(keys) && typeof keys.onKey === 'function' ? keys.onKey : null
+    if (onKey !== null) {
+      // Only epochs valid for sending: a reading-only epoch (a departed or
+      // demoted distributor's) stays readable here but is never handed on,
+      // so a flood of them never reaches history hand-off.
+      const accepted = [...epochs.entries()].filter(([id, e]) => held.has(id) && e.full).sort((a, b) => a[1].node.pos - b[1].node.pos)
+      for (const [id, e] of accepted) {
+        const copy = b4a.from(held.get(id))
+        try {
+          onKey({ writer: e.kid.writer, seq: e.kid.seq }, copy, [...e.recipients].sort(cmp))
+        } catch {}
+      }
+    }
+    let sealed = 0
+    const open = (log) => {
+      let changed = false
+      const records = log.records.map((x) => {
+        if (x.record.type !== 'group-sealed') return x
+        const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
+        if (inner === null) {
+          sealed++
+          return x
+        }
+        changed = true
+        return { seq: x.seq, record: inner, kid: x.record.kid }
+      })
+      return changed ? { ...log, records } : log
+    }
+    const rootEntry = open(ctx.rootEntry)
+    const content = foldCore({ ...ctx, rootEntry }, kept.map(open), plain.state.auth).result
+    const pick = chooseEpoch(plain.state, epochs, held, mine)
+    const st = plain.state
+    return {
+      ...plain.result,
+      name: content.name,
+      posts: content.posts,
+      future: content.future,
+      sealed,
+      epoch: pick.epoch,
+      rekeyPending: pick.rekeyPending,
+      entitled: [...st.counted].filter(st.entitled).sort(cmp),
+      // The refs a new epoch's basis must cover: the latest counted removal
+      // per writer core and the counted community removals.
+      removals: [...st.removals, ...st.leaveClasses.map((c) => c[0]), ...st.extRemovals].map((r) => ({ writer: r.writer, seq: r.seq }))
+        .sort((a, b) => cmp(a.writer, b.writer) || a.seq - b.seq)
+    }
+  } finally {
+    for (const k of held.values()) wipe(k)
+  }
+}
+
+const refId = (r) => r.writer + ':' + r.seq
+const EPOCH_PLAIN_BYTES = 48
+const EPOCH_KEY_BYTES = 32
+
+// The counted epochs by kid id ({ kid, node, recipients }) and, in `held`,
+// the key of each epoch the reader opens, from the first counted block in
+// causal order that opens for one of its writers.
+function readEpochs (G, state, mine, unseal, held) {
+  const epochs = new Map()
+  for (const { n, dist, send, out } of state.keyNodes) {
+    // `full`: valid for sending and not withdrawn, the only epochs onKey
+    // reports and anyone may send under.
+    if (dist && n.record.kid === null) epochs.set(refId(n), { kid: { writer: n.writer, seq: n.seq }, node: n, send, full: send && !out, recipients: new Set() })
+  }
+  for (const { n, dist, send, out } of state.keyNodes) {
+    if (!dist) continue
+    const r = n.record
+    const id = r.kid === null ? refId(n) : refId(r.kid)
+    const e = epochs.get(id)
+    if (!e) continue
+    // Only blocks valid for sending (and not withdrawn) decide rule 4 and
+    // what onKey reports: a reading-only block decides only which entries
+    // this reader tries to open.
+    if (send && !out) for (const k of r.keys) e.recipients.add(k.writer)
+    if (held.has(id) || unseal === null || (!e.full && !state.sealedKids.has(id))) continue
+    for (const k of r.keys) {
+      if (!mine.has(k.writer)) continue
+      const key = tryUnseal(unseal, k.sealed, G, e.kid, e.node.record.commit)
+      if (key !== null) {
+        held.set(id, key)
+        break
+      }
+    }
+  }
+  return epochs
+}
+
+// `unseal(sealed)` is the caller's: crypto_box_seal_open with the device's
+// box secret, returning the 48-byte plaintext (key || tag) or null. The fold
+// checks the context tag itself (protocol "`group-key`"), so a blob copied
+// from another group or epoch never yields a key whatever the caller does.
+// The key must also match the first block's commitment, so a continuation
+// from anyone (a departed admin included) can only hand the epoch's one key.
+function tryUnseal (unseal, sealed, G, kid, commit) {
+  let out = null
+  try {
+    out = unseal(sealed)
+    if (!(out instanceof Uint8Array) || out.byteLength !== EPOCH_PLAIN_BYTES) return null
+    const tag = keyTag(G, kid.writer, kid.seq)
+    let diff = 0
+    for (let i = 0; i < tag.byteLength; i++) diff |= out[EPOCH_KEY_BYTES + i] ^ tag[i]
+    if (diff !== 0) return null
+    const key = b4a.from(out.subarray(0, EPOCH_KEY_BYTES))
+    const expected = b4a.from(commit, 'hex')
+    const got = keyCommit(key, G, kid)
+    let c = 0
+    for (let i = 0; i < got.byteLength; i++) c |= got[i] ^ expected[i]
+    if (c !== 0 || got.byteLength !== expected.byteLength) {
+      wipe(key)
+      return null
+    }
+    return key
+  } catch {
+    return null
+  } finally {
+    if (out instanceof Uint8Array) {
+      try {
+        wipe(out)
+      } catch {}
+    }
+  }
+}
+
+// An envelope's inner record, or null when it stays sealed: decrypted, copied
+// on the safe path, bound to this writer, group, kid and `at`, then validated
+// as a group-post, group-hide or (root only) group-meta.
+function openEnvelope (env, writer, seq, G, held) {
+  const key = held.get(refId(env.kid))
+  if (!key) return null
+  const value = plainCopy(openRecord({ nonce: env.nonce, box: env.box }, key))
+  if (value === null || !SEALED_TYPES.has(value.type)) return null
+  const kid = value.kid
+  if (value.writer !== writer || value.group !== G || value.at !== env.at) return null
+  if (!isPlainObject(kid) || !hasExactKeys(kid, REF_KEYS) || kid.writer !== env.kid.writer || kid.seq !== env.kid.seq) return null
+  const record = {}
+  for (const k of Object.keys(value)) if (!INNER_BINDING.includes(k)) record[k] = value[k]
+  return validateGroupRecord(record, seq, { root: writer === G }) === null ? record : null
+}
+
+// How many coverage requirements ("Eligibility" 3) each candidate first
+// block meets. A removal of G's cores is covered by its descendants (the
+// nodes it is an ancestor of; a basis ref or an ancestor first block's basis
+// is an ancestry edge too), a community record only by a counted first block
+// whose basis lists it and that block's descendants. One forward walk per
+// requirement, its visited set dropped right after, so memory stays linear
+// in the nodes whatever the number of removals.
+function coverCounts (state, epochs, cands) {
+  // Requirements: the latest counted removal per writer core of G, each
+  // leave set, the latest counted removal per community root. A ref names
+  // one when it is a leave of the set, or a ref at or past the latest
+  // removal on that writer or community root (seeing a later block of a
+  // single-writer chain is seeing everything before it).
+  const reqs = []
+  const byWriter = new Map()
+  const byLeave = new Map()
+  for (const R of state.removals) {
+    const t = R.record.type
+    const req = { members: [R], subject: t === 'community-link' ? null : R.record.member }
+    reqs.push(req)
+    byWriter.set(R.writer, { seq: R.seq, req })
+  }
+  for (const c of state.leaveClasses) {
+    const req = { members: c, subject: c[0].diary }
+    reqs.push(req)
+    for (const L of c) byLeave.set(refId(L), req)
+  }
+  const byRoot = new Map()
+  for (const R of state.extRemovals) {
+    const req = { members: [], subject: R.subject === undefined ? null : R.subject }
+    reqs.push(req)
+    byRoot.set(R.writer, { seq: R.seq, last: R.last, req })
+  }
+  // A counted first block (valid for sending, not withdrawn) whose basis
+  // names a requirement covers it and its descendants, wherever it sorts:
+  // naming it proves the distributor saw it, so no forward reference or
+  // cycle the subject builds can hide it. A block of the subject's own
+  // diary never covers that diary's removal.
+  const listers = new Map()
+  for (const e of epochs.values()) {
+    if (!e.full) continue
+    const K = e.node
+    for (const b of K.record.basis) {
+      const hits = []
+      // Only a ref to a real block, never one past the core's end or a
+      // forward ref into the lister's own writer: those make no ordering
+      // edge and would name removals that do not exist yet.
+      const real = !(b.writer === K.writer && b.seq >= K.seq)
+      const w = byWriter.get(b.writer)
+      if (w !== undefined && real && b.seq >= w.seq && b.seq <= (state.lastSeq.get(b.writer) || 0)) hits.push(w.req)
+      const r = byRoot.get(b.writer)
+      if (r !== undefined && b.seq >= r.seq && b.seq <= r.last) hits.push(r.req)
+      const l = byLeave.get(refId(b))
+      if (l !== undefined) hits.push(l)
+      for (const req of hits) if (req.subject !== K.diary) pushTo(listers, req, K)
+    }
+  }
+  const counts = new Map()
+  for (const F of cands) counts.set(F, 0)
+  const walk = (sources) => {
+    const seen = new Set()
+    const stack = sources.slice()
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (seen.has(n)) continue
+      seen.add(n)
+      if (counts.has(n)) counts.set(n, counts.get(n) + 1)
+      // Only edges the final order honors: a forged cycle the order broke
+      // never makes a block a descendant of what it sorts before.
+      for (const s of n.succ) if (!seen.has(s) && s.pos > n.pos) stack.push(s)
+    }
+  }
+  const after = (R) => R.succ.filter((x) => x.pos > R.pos)
+  for (const req of reqs) walk([...req.members.flatMap(after), ...(listers.get(req) || [])])
+  return { counts, required: reqs.length }
+}
+
+// The newest eligible epoch in causal order of its first block
+// ("Eligibility"), else rekeyPending when the reader holds a counted epoch.
+// Rule 4 exempts only the reader's earlier writers (not counted any more, or
+// retired), never a current writer that is not entitled.
+function chooseEpoch (state, epochs, held, mine) {
+  const cands = [...epochs.entries()].filter(([id]) => held.has(id)).map(([, e]) => e).sort((a, b) => b.node.pos - a.node.pos)
+  if (cands.length === 0) return { epoch: null, rekeyPending: false }
+  const earlier = (w) => mine.has(w) && (!state.counted.has(w) || state.retired.has(w))
+  const passing = cands.filter((e) => {
+    const F = e.node
+    const d = F.diary
+    // Sending keeps the strict distributor layer.
+    if (!e.send || state.withdrawn(F) || state.left.has(d) || (d !== state.owner && !state.admins.has(d))) return false
+    for (const w of e.recipients) if (!earlier(w) && !state.entitled(w)) return false
+    return true
+  })
+  if (passing.length === 0) return { epoch: null, rekeyPending: true }
+  const { counts, required } = coverCounts(state, epochs, new Set(passing.map((e) => e.node)))
+  for (const e of passing) {
+    if (counts.get(e.node) === required) return { epoch: { writer: e.kid.writer, seq: e.kid.seq }, rekeyPending: false }
+  }
+  return { epoch: null, rekeyPending: true }
 }
 
 function emptyCommunity () {
@@ -1513,6 +2289,10 @@ module.exports = {
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   GROUP_TYPES,
+  MAX_KEY_RECIPIENTS,
+  MAX_KEY_BASIS,
+  MAX_SEALED_INNER_BYTES,
+  isWeakBoxKey,
   validateGroupHeader,
   validateWriterHeader,
   validateGroupRecord,
@@ -1528,6 +2308,9 @@ module.exports = {
   communityAdmin,
   groupLink,
   communityLink,
+  groupKey,
+  groupSealed,
+  sealedInner,
   groupJoins,
   groupJoinHistory,
   orderKey,

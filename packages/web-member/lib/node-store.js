@@ -447,8 +447,8 @@ function appendRecord (core, record, limits) {
 // The same queue and limits for a group core: block 0 is its header, the
 // root (`root: true`) alone may hold root-only records, and a community root
 // (`community: true`) only its own set of them.
-function appendGroupRecord (core, record, { root = false, community = false, limits } = {}) {
-  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: root === true && community === true })
+function appendGroupRecord (core, record, { root = false, community = false, private: priv = false, limits } = {}) {
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: root === true && community === true, private: priv === true })
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
@@ -698,6 +698,42 @@ async function readMediaDevice (storage) {
 function writeMediaDevice (storage, nonceHex) {
   if (typeof nonceHex !== 'string' || !HEX64.test(nonceHex)) throw new TypeError('nonce inválido')
   return storage.writeJson('mediaDevice', { v: 1, nonce: nonceHex.toLowerCase() })
+}
+
+// kv groupBoxDevice = { v: 1, nonce: hex64 }: the random per-device nonce
+// the group box key pair is derived with (passkey.js). Nothing secret: the
+// pair itself only lives in memory while unlocked (./group-keys.js).
+async function readGroupBoxDevice (storage) {
+  const data = await readKv(storage, 'groupBoxDevice')
+  return isVersioned(data) && isHex64(data.nonce) ? { v: 1, nonce: data.nonce.toLowerCase() } : null
+}
+
+function writeGroupBoxDevice (storage, nonceHex) {
+  if (typeof nonceHex !== 'string' || !HEX64.test(nonceHex)) throw new TypeError('nonce inválido')
+  return storage.writeJson('groupBoxDevice', { v: 1, nonce: nonceHex.toLowerCase() })
+}
+
+// The stored nonce, else `fresh` (hex64) written once. Queued per storage:
+// two unlocks racing on an empty kv must not derive from two nonces, and a
+// nonce once written is never replaced (every epoch key this device holds
+// is sealed to the pair it derives).
+const groupBoxLocks = new WeakMap()
+
+function withGroupBoxLock (storage, fn) {
+  const prev = groupBoxLocks.get(storage) || Promise.resolve()
+  const p = prev.then(fn)
+  groupBoxLocks.set(storage, p.catch(() => {}))
+  return p
+}
+
+function ensureGroupBoxDevice (storage, fresh) {
+  if (typeof fresh !== 'string' || !HEX64.test(fresh)) return Promise.reject(new TypeError('nonce inválido'))
+  return withGroupBoxLock(storage, async () => {
+    const have = await readGroupBoxDevice(storage)
+    if (have !== null) return have.nonce
+    await writeGroupBoxDevice(storage, fresh)
+    return fresh.toLowerCase()
+  })
 }
 
 // kv mediaCores = { v: 1, keys: [hex64...] }: this device's media cores,
@@ -1030,6 +1066,9 @@ async function deleteGroupData (storage) {
   }
   await storage.writeJson('groupWriters', null)
   await storage.writeJson('groupReplicas', null)
+  // A new identity on this storage derives a new box key pair: the old
+  // nonce would only tie it to the cores just deleted.
+  await withGroupBoxLock(storage, () => storage.writeJson('groupBoxDevice', null))
   await storage.writeJson('groupDiaries', null)
   await withGroupCoreLock(storage, () => storage.writeJson('groupCores', null))
   await withGroupCoreLock(storage, () => storage.writeJson('groupCerts', null))
@@ -1178,6 +1217,9 @@ module.exports = {
   clearMediaRanges,
   readMediaDevice,
   writeMediaDevice,
+  readGroupBoxDevice,
+  writeGroupBoxDevice,
+  ensureGroupBoxDevice,
   readMediaCores,
   addMediaCore,
   deleteMediaCores,

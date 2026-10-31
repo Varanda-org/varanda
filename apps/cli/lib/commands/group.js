@@ -4,7 +4,7 @@ const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
 const { validateParams, GROUP_MEMBERS_LIMIT_MAX, GROUP_LIMIT_MAX } = require('@varanda/rpc')
 
-const USAGE_TEXT = 'node bin/varanda.js group create|join|leave|post|read|list|info|members|requests|admit|ban|admin|hide|meta'
+const USAGE_TEXT = 'node bin/varanda.js group create|join|leave|post|read|list|info|members|requests|admit|ban|admin|hide|meta|rekey'
 const HEX64 = /^[0-9a-fA-F]{64}$/
 
 function usage (message) {
@@ -31,7 +31,7 @@ function groupKey (flags) {
 
 function joinOf (flags) {
   if (flags.join === null) return null
-  if (flags.join === 'private') throw usage('grupos privados ainda não existem: use --join open ou approval')
+  if (flags.join === 'private') throw usage('para um grupo privado use --private')
   if (flags.join !== 'open' && flags.join !== 'approval') throw usage('join inválido: use open ou approval')
   return flags.join
 }
@@ -76,6 +76,13 @@ function groupLine (g) {
 async function createRun (flags) {
   if (flags.name === null) throw usage('informe --name <nome>')
   const join = joinOf(flags)
+  if (flags.private) {
+    // A private group always admits by approval (docs/rpc.md 5.36).
+    if (join === 'open') throw usage('grupo privado é sempre por aprovação: tire --join open')
+    const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join: 'approval', visibility: 'private' }))
+    print(flags, result, 'grupo privado criado: ' + result.group)
+    return
+  }
   if (join === null) throw usage('informe --join open|approval')
   const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join }))
   print(flags, result, 'grupo criado: ' + result.group)
@@ -117,6 +124,17 @@ async function readRun (flags) {
     process.stdout.write('mais antigas: --before ' + result.next.at + ',' + result.next.writer + ',' + result.next.seq + '\n')
   }
   if (result.incomplete) process.stderr.write('aviso: alguns escritores do grupo ainda não chegaram\n')
+  const sealed = sealedLine(result)
+  if (sealed !== null) process.stderr.write('aviso: ' + sealed + '\n')
+}
+
+// Private groups: what this device cannot open yet. Never names a key.
+function sealedLine (result) {
+  const parts = []
+  if (result.sealed > 0) parts.push(result.sealed + (result.sealed === 1 ? ' mensagem cifrada' : ' mensagens cifradas') + ' sem chave neste aparelho')
+  if (result.state === 'rekey-pending') parts.push('aguardando nova chave')
+  if (result.state === 'locked') parts.push('chaves trancadas: desbloqueie para ler')
+  return parts.length === 0 ? null : parts.join('; ')
 }
 
 async function listRun (flags) {
@@ -128,7 +146,8 @@ async function listRun (flags) {
 async function infoRun (flags) {
   const result = await member.groupInfo(ctxOf(flags), { group: groupKey(flags) })
   const creator = result.creator === null ? 'desconhecido até a sincronização' : result.creator
-  print(flags, result, groupLine(result) + '\ncriador: ' + creator + '\nsua situação: ' + safe(String(result.state)))
+  const visibility = result.visibility === 'private' ? 'privado (cifrado)' : 'público'
+  print(flags, result, groupLine(result) + '\nvisibilidade: ' + visibility + '\ncriador: ' + creator + '\nsua situação: ' + safe(String(result.state)))
 }
 
 function personLabel (p) {
@@ -194,6 +213,11 @@ async function metaRun (flags) {
   print(flags, result, 'grupo atualizado')
 }
 
+async function rekeyRun (flags) {
+  const result = await mutate(() => member.groupRekey(ctxOf(flags), { group: groupKey(flags) }))
+  print(flags, result, 'nova chave do grupo gerada e entregue aos membros')
+}
+
 const subs = {
   create: createRun,
   join: joinRun,
@@ -208,7 +232,8 @@ const subs = {
   ban: moderateRun(member.groupBan, 'membro banido', 'banimento retirado'),
   admin: moderateRun(member.groupAdmin, 'administrador nomeado', 'administração retirada'),
   hide: hideRun,
-  meta: metaRun
+  meta: metaRun,
+  rekey: rekeyRun
 }
 
 async function groupRun (flags) {
@@ -220,6 +245,6 @@ async function groupRun (flags) {
 module.exports = {
   allPages,
   commands: {
-    group: { summary: 'grupos públicos', run: groupRun }
+    group: { summary: 'grupos públicos e privados', run: groupRun }
   }
 }

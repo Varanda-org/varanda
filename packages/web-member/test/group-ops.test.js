@@ -130,7 +130,7 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', communities: [] })
+  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', communities: [], visibility: 'public' })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1 }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
@@ -886,9 +886,9 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(b.derived.length, 1)
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
   t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0 }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [] })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [] }, 'reads work locked')
-  t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true })
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [], visibility: 'public' })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [], visibility: 'public' }, 'reads work locked')
+  t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
   t.is((await ops.groupInfo(b.ctx, { group })).state, 'member')
@@ -1090,27 +1090,6 @@ test('an admit waits for every counted writer of the member', async (t) => {
   await shareDiary(b, a)
   await t.exception(() => ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true }), /aguarde a sincronização do grupo para admitir/)
   t.is((await lastRecord(a, group)).type, 'group-header', 'no admit written')
-})
-
-test('a private root never folds and its entry gives up its slot', async (t) => {
-  const { b } = await pair()
-  for (let i = 0; i < MAX_GROUPS_PER_DIARY - 1; i++) await ops.groupCreate(b.ctx, { name: 'G' + i, join: 'open' })
-  const rootKp = crypto.keyPair()
-  const root = await store.openGroupWriter(b.storage, rootKp)
-  await root.append({ type: 'group-header', v: 1, kind: 'group', diary: 'ef'.repeat(32), visibility: 'private', join: 'approval', name: null, box: 'ab'.repeat(32), at: new Date().toISOString() })
-  await root.close()
-  const group = hex(rootKp.publicKey)
-  const nonce = crypto.randomBytes(32)
-  const kp = await groupKeyPairFromPrf(b.prf, new Uint8Array(nonce))
-  const own = await store.openGroupWriter(b.storage, kp)
-  await store.appendGroupRecord(own, grp.writerHeader({ group, diary: b.ownHex }), { root: false })
-  await own.close()
-  await store.putGroupWriter(b.storage, { group, key: hex(kp.publicKey), nonce: hex(nonce), rootNonce: null })
-  await t.exception(() => ops.groupInfo(b.ctx, { group }), /grupo não encontrado/, 'never folds')
-  const { group: last } = await ops.groupCreate(b.ctx, { name: 'Nova', join: 'open' })
-  const groups = (await store.readGroupWriters(b.storage)).map((e) => e.group)
-  t.ok(groups.includes(last), 'the new group has a slot')
-  t.absent(groups.includes(group), 'the private root gave it up')
 })
 
 test('an admitted member with a writer the admit did not list is requested again and can be admitted again', async (t) => {

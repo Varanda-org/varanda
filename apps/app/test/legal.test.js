@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 8)
-  t.is(LEGAL_DATE, '30/10/2026')
-  t.is(REVIEW_NOTE, 'Versão 8, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 9)
+  t.is(LEGAL_DATE, '31/10/2026')
+  t.is(REVIEW_NOTE, 'Versão 9, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -43,6 +43,16 @@ test('legal: profile photo disclosures', async (t) => {
   t.ok(text(TERMS).includes('imagem parada'))
 })
 
+test('legal: appeals are disclosed in the terms and in the privacy policy', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('o recurso'))
+  t.ok(text(TERMS).includes('depois de 30 dias'))
+  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'Só moderadores que não decidiram o bloqueio', 'Denúncias, recursos e decisões não são apagados automaticamente']) {
+    t.ok(text(PRIVACY).includes(required), required)
+  }
+})
+
 test('legal: privacy identifies unresolved retention and contact', async (t) => {
   const { PRIVACY } = await load()
   const text = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -56,7 +66,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'cdbc8df392c2cecdbd2c2c9ca2ff18344d9fb97ce53273d98b184724ef060075', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '47667f02fd0116854ec8586d58ee0c33f11df37e0cbbb66f5bea14e05dbbd089', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: privacy names the third-party CPF and the ledger cap', async (t) => {

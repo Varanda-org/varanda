@@ -126,6 +126,7 @@ function isGroupRef (v) {
 
 const GROUP_JOINS = ['open', 'approval']
 const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
+const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
@@ -542,7 +543,12 @@ const SPECS = {
   },
   // Public groups (docs/rpc.md 5.36 to 5.49). Every method names the group by
   // its root key; the node fills in everything else.
-  'group.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
+  // `visibility` is fixed at creation (docs/rpc.md 5.36); a private group forces
+  // join 'approval'. No method changes it afterwards.
+  'group.create': {
+    fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin), visibility: opt(isGroupVisibility, 'public') },
+    mutating: true
+  },
   'group.join': { fields: { group: req(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
@@ -581,6 +587,8 @@ const SPECS = {
   'group.admit': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.ban': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'group.admin': { fields: { group: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  // Private groups (docs/rpc.md 5.61): a new epoch key for the group, never returned.
+  'group.rekey': { fields: { group: req(isKey) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
   // Communities (docs/rpc.md 5.57 to 5.60): sets of groups, named by their root key.
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)) }, mutating: true },

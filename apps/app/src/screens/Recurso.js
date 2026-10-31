@@ -1,6 +1,6 @@
 // Recorrer de um bloqueio (Ajustes): a blocked member asks the association's
 // moderation to review the block. Only the hosted browser node can sign the
-// statement (RPC appeal.sign, docs/rpc.md 5.61), and only a member whose
+// statement (RPC appeal.sign, docs/rpc.md 5.62), and only a member whose
 // Google account is linked may appeal (the account service refuses
 // 'nao-vinculado'); a key that is not blocked is refused too
 // ('nao-bloqueado').

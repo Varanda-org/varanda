@@ -1,6 +1,6 @@
 'use strict'
 
-// A blocked member's appeal (docs/rpc.md 5.61): the diary key signs a
+// A blocked member's appeal (docs/rpc.md 5.62): the diary key signs a
 // domain-separated statement that binds one account-service step
 // (single-use nonce) to the appellant, the association and the appellant's
 // own words. The text enters the payload as a digest, so a LF inside it can

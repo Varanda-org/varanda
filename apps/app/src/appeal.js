@@ -3,7 +3,7 @@
 // it and Node's import() loads it in tests. Same flow and same-origin account
 // service as ./report.js (whose request builder and JSON reader it shares);
 // the statement itself is signed by the browser node (RPC appeal.sign,
-// docs/rpc.md 5.61, @varanda/core lib/appeal.js).
+// docs/rpc.md 5.62, @varanda/core lib/appeal.js).
 
 import { buildPost, readJson, wellFormed } from './report.js'
 

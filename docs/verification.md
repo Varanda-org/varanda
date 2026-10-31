@@ -3409,16 +3409,90 @@ Nenhuma verificação foi feita ainda. No PWA:
 - Uma partida presa num `await` que nunca termina ainda trava a preempção da leitura: parar a rodada espera ela terminar. O aviso de partida demorada diz em que etapa ela parou.
 - A etapa `conexão` aparece uma vez só no aviso `partida demorada`; um semeador que não responde já tem os próprios avisos (`sem conexão com o semeador`, nova tentativa).
 
+## 62. Grupos privados cifrados de ponta a ponta (PR feat/groups-private)
 
-## 62. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+Terceira parte de Cadeiras de Praia: um grupo privado (`visibility: 'private'` no cabeçalho da raiz) leva publicações, ocultações e metadados cifrados (`group-sealed`); só os aparelhos com a chave da época leem. Normas em `docs/protocol.md` seção 10 ("Private groups") e `docs/rpc.md` 5.36 (visibilidade), 5.40 (`sealed`, `epoch`, `state`) e 5.61 (`group.rekey`). Membros, moderação e a distribuição de chaves (`group-key`) continuam em claro e seguem todas as regras das seções 49 e 59. Grupos privados podem entrar em comunidades (decisão da pessoa dona do produto): quem cria ou administra a comunidade com poder no grupo recebe as chaves, e perder esse poder gera uma época nova.
+
+### Como verificar
+
+Do repositório, cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `npm test`.
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/group-crypto.test.js` | primitivas: chave de época de 32 bytes aleatórios, `sealRecord`/`openRecord` (JSON compacto, `null` em adulteração, chave errada, truncamento, base64 não canônico, texto que não é objeto), pares de caixa (vetor fixo), `sealTo`/`openFrom`, `keyTag` (vetores fixos), `sealEpochKey`/`openEpochKey` presos ao grupo e ao `kid`, `keyCommit` (vetor fixo), 48 destinatários cabem num bloco, `wipe` |
+| `packages/core/test/group-private.test.js` | dobra: formatos e limites de `group-key` e `group-sealed`, `box` conforme a visibilidade, ordem pelo envelope, envelope adulterado ou transplantado conta como cifrado, distribuidor sem poder ignorado, rotações concorrentes, `rekey-pending`, época anterior a um banimento nunca elegível, aparelho novo pendente nunca recebe, administração de comunidade, propriedade de ordem de entrega, desempenho da cobertura (4000 épocas), registro aberto com a geração e a aresta `kid` do envelope (volta pendente não publica por um escritor antigo), remoções da comunidade reduzidas à mais recente e só enquanto o grupo mantém o vínculo, saídas repetidas de quem foi banido, já saiu ou voltou sem aprovação não geram remoção nova (uma exigência por diário entre voltas, e uma saída depois da primeira só conta com nova admissão, nomeação ou entrega de chave no meio), rebaixamento com cortes vazios ou acima do teto não apaga o histórico (leitura separada do envio), bloco só de leitura nunca muda a época de envio, compromisso da chave no primeiro bloco (continuação forjada só entrega a chave comprometida) |
+| `packages/core/test/private-member.test.js` | nó do núcleo: criação privada nunca pública, não membro só conta mensagens cifradas, admitido lê o histórico, banimento gera época nova, reinício mantém as chaves, nada em claro no disco, `group.rekey`, comunidade, entrega recuperada por `group.rekey`, rotação em vários blocos com as épocas intermediárias só para quem distribui, remoção da comunidade listada de novo na `basis`, entrega do histórico recusada inteira quando não cabe no diário, religar uma comunidade gera época nova quando falta, primeiro bloco de cada época com `commit` igual à chave entregue |
+| `packages/web-member/test/private-ops.test.js` | os mesmos métodos no nó do navegador (`member-ops.js`) |
+| `packages/core/test/sync-private.test.js` | sincronização do núcleo: escritor sem `box` num grupo privado (ou com `box` num público) recusado e nunca guardado, grupo privado de ponta a ponta por um semeador |
+| `packages/web-member/test/sync-private.test.js` | portão do navegador: raiz privada aceita, comunidade privada inválida, `box` conforme a visibilidade |
+| `packages/core/test/seeder-private.test.js` | semeador: admite e serve blocos como estão, índice sem nome, `box` divergente recusado, denúncia cifrada só num grupo privado |
+| `apps/cli/test/seed-ws.test.js`, `apps/cli/test/account-mod.test.js`, `apps/cli/test/panel.test.js` | denúncia cifrada: `/moderation-group-post` responde só a estrutura, o serviço de conta confere sem texto, o painel mostra `cifrada: citação do denunciante` |
+| `packages/web-member/test/group-keys.test.js` | guarda das chaves no navegador: só em memória, apagadas em `lock`, `signOut` e `close`, geração segura |
+| `packages/web-member/test/passkey.test.js` | par de caixa derivado da PRF (vetor fixo, separado das outras chaves, buffers zerados) |
+| `packages/core/test/store.test.js` | `group-box.json`: criado uma vez, 0600, nunca substituído, arquivo ruim recusado e deixado como está |
+| `apps/cli/test/group-commands.test.js` | `group create --private`, `group info` com a visibilidade, `group read` e `--json` (`sealed`, `epoch`, `state`), `group rekey`, nenhuma saída com a chave de caixa |
+| `packages/web-member/test/private-e2e.test.js` | ponta a ponta em loopback (cerca de 70 s sozinho, quase todo nas duas esperas de envio dos escritores sem `box`): semeador real atrás de WebSocket e na DHT local; o criador (núcleo) cria o grupo privado; um membro do navegador entra pela chave antes de a raiz chegar (escritor sem `box`, que o semeador nunca aceita: a execução relata só o envio dele como tempo esgotado), entra de novo com a raiz guardada (escritor com `box`), é admitido pelo semeador real, lê o histórico e publica cifrado (o criador lê); um terceiro nó (núcleo), que também entra antes da raiz (a primeira execução relata só o tempo esgotado do escritor sem `box`), nunca é admitido, só conta mensagens cifradas e não vê o nome; um banimento gera época nova e o banido não lê a publicação seguinte; o armazenamento do semeador não tem o texto de nenhuma publicação |
+
+### Revisão de criptografia (checklist)
+
+- Destinatários: cada época vai a exatamente os escritores com direito (membros admitidos e administradores, o criador pela `box` da raiz, administradores de comunidade com poder), por escritor e não por diário; nunca a um escritor pendente, banido ou que saiu. Banir, sair, retirar administração, desvincular ou rebaixar na comunidade gera época nova; `basis` lista as remoções que ela cobre e quem envia usa só uma época que cobre todas as remoções vistas (senão `aguardando nova chave`).
+- Contexto (R1/R2): a chave selada carrega o `keyTag` de grupo e `kid` ({escritor, seq} do primeiro bloco da época), então uma entrada transplantada para outro grupo, outro bloco ou outra época não abre; o registro interno é preso a escritor, grupo e `kid` (`sealedInner`) e validado como `group-post`, `group-hide` ou `group-meta` com o `at` do envelope.
+- Compromisso: o primeiro bloco de cada época publica `commit` (BLAKE2b de 32 bytes sobre o domínio `varanda/group-key-commit/v1`, o grupo, o `kid` e a chave); quem lê só aceita uma chave que bata com ele, então nenhuma continuação troca a chave de uma época, nem a de quem distribui sem poder.
+- Nonces: `crypto_secretbox_easy` com nonce aleatório de 24 bytes por envelope (`randombytes_buf`); `crypto_box_seal` usa chave efêmera por destinatário. Nenhum contador, nada reaproveitado.
+- Persistência: no nó do núcleo, só `group-box.json` (0600) guarda segredo (a chave de caixa do aparelho); as chaves de época são reabertas dos blocos `group-key` a cada leitura e nunca vão ao disco em claro. No navegador nada secreto fica no armazenamento: o par de caixa vem da PRF da passkey e de um nonce (`groupBoxDevice`), e as chaves de época ficam só em memória.
+- Limpeza: buffers de chave são zerados com `wipe` depois do uso; no navegador as chaves somem em trancar, sair (`signOut`) e fechar. Nenhum método RPC, evento, log ou erro devolve chave.
+
+### Checagens humanas (a fazer)
+
+- CLI: `varanda group create --private --name <nome>` imprime `grupo privado criado: <chave>`; `group info <chave>` mostra `visibilidade: privado (cifrado)` e `por aprovação`.
+- Outra pessoa entra (`group join <chave>`) e, antes da admissão, `group read` avisa `N mensagens cifradas sem chave neste aparelho`; depois de `group admit` e de uma sincronização, ela lê as mensagens antigas e novas.
+- Banir (`group ban <chave> --member <diário>`) e publicar de novo: a pessoa banida não lê a publicação nova (vê a contagem cifrada subir).
+- `group rekey <chave>` imprime `nova chave do grupo gerada e entregue aos membros`; os membros continuam lendo e publicando.
+- Semeador: procurar no diretório de dados do semeador (`grep -r` pelo texto de uma publicação) não acha nada; `curl /index/group/<G>` mostra `visibility: 'private'` e `name: null`; `/index/group-search` nunca lista o grupo.
+- Navegador: trancar e destrancar a sessão; antes de destrancar, `group.read` responde `state: 'locked'`, e depois lê de novo sem nova entrada.
+- Nenhuma saída da CLI ou log do semeador mostra chave (conferir `--json` de `group read` e `group rekey`: só a referência `epoch`).
+
+### Não verificado / limites conhecidos
+
+- Sem catraca nem sigilo futuro dentro de uma época: quem tem a chave lê tudo daquela época, inclusive o que já passou.
+- Metadados continuam visíveis: quem é membro, quem publica, quando, o tamanho aproximado de cada mensagem e a moderação.
+- Quem foi removido guarda o que já leu; a época nova só protege o que vem depois.
+- Um aparelho que entrou antes de a raiz privada chegar (entrada pendente, sem `box`) precisa entrar de novo. O semeador nunca aceita esse escritor sem `box`, e a sincronização relata o envio dele como tempo esgotado até a nova entrada. A nova entrada com `box` desvincula o escritor sem `box` nos dois nós, e a checagem de admissão de grupo privado ignora escritores desvinculados, então a admissão funciona pelo semeador (teste ponta a ponta).
+- Um aparelho novo depois de sair e voltar só recebe chaves depois de uma admissão que o liste.
+- A rotação do navegador confere na dobra os blocos que planeja; o nó do núcleo grava a `basis` direto, sem essa pré-checagem.
+- A entrega do histórico depois de uma admissão, nomeação, desbanimento ou vínculo não é fatal: se falhar, é tentada de novo no próximo gatilho ou em `group.rekey`.
+- A sincronização privada do navegador só tem testes de veredito puros: não há teste em rede da recusa de um escritor sem `box` nem da reconferência quando a visibilidade chega depois.
+- A reconferência do núcleo que julga a `box` de um escritor pelo bloco 0 do portão (escritor ativo antes de o bloco 0 local chegar) e a regra do navegador que mantém os blocos de um escritor guardado restaurado numa divergência tardia não têm teste de regressão que falhe sem a correção (os fixtures não controlam o tempo).
+- O caso "época de um administrador depois rebaixado ainda é entregue" tem teste no núcleo, mas não no navegador que falhe sem a correção.
+- Quem saiu de um grupo privado não consegue mais ocultar a própria publicação antiga: a ocultação vai cifrada e, depois da saída, não há época elegível para ela (`aguardando nova chave`).
+- O nó do núcleo cria `group-box.json` na primeira leitura de um grupo privado, mesmo para quem não é membro.
+- Um destinatário cuja `box` o libsodium recusa (ponto de ordem baixa) é pulado na rotação e no histórico; os outros recebem a chave normalmente.
+- `packages/core/test/seeder-groups.test.js` leva cerca de 115 s sozinho, perto do limite de 180 s por arquivo.
+- O teste de desempenho da cobertura (`group-private.test.js`, 4000 épocas) mede uma razão de tempos e depende da carga da máquina.
+- A denúncia de uma mensagem cifrada só confere a estrutura: quem modera vê a citação do denunciante, não o texto conferido.
+- O teste da geração pelo envelope só falha sem as duas defesas (geração tirada do envelope e aresta `kid` mantida no registro aberto): cada uma sozinha corrige o caso, e não achamos ordem em que só a geração faça diferença.
+- A recusa de uma rotação grande demais para o diário no nó do núcleo não tem teste próprio (a mesma checagem de espaço tem teste na entrega do histórico), e o teste das 5000 remoções falsas no núcleo não foi conferido falhando sem a correção.
+- Uma entrega de histórico que não cabe no diário de quem distribui é recusada inteira, sem gravar nada: quem entrou fica sem as épocas antigas até outro aparelho que distribui entregar ou até `group.rekey` caber.
+- Enquanto o grupo mantém uma comunidade desligada, as remoções dela não contam; ao religar, a mais recente volta a contar, e o aparelho que religa gera época nova se a dobra pedir. Se essa rotação falhar, o grupo fica `aguardando nova chave` até `group.rekey`.
+- Para não apagar o histórico, a leitura aceita blocos de chave de um escritor que um rebaixamento ou desvínculo não listou; as épocas que esse escritor gravar depois também ficam legíveis, mas nunca viram época de envio. Épocas só legíveis não entram na entrega do histórico: quem já tinha a chave continua lendo, quem entra depois não recebe esse trecho.
+- Quem ainda tem a chave de uma época (por exemplo, um admin rebaixado que continua membro) pode entregá-la a outro escritor, fora do protocolo ou num bloco só de leitura; esse bloco não muda a época de envio nem marca `aguardando nova chave`, porque deixar um bloco só de leitura mexer na elegibilidade permitiria travar o envio do grupo.
+- Sair encerra a nomeação e a admissão (decisão da pessoa dona do produto): quem sai e volta só recebe chaves ou distribui depois de uma nova admissão ou nomeação feita depois da saída (os cortes do registro provam que ela viu a saída). Um administrador que volta precisa ser nomeado de novo. Ninguém se admite, e um registro escrito pelo próprio diário nunca prova que viu a saída; a exceção é o vínculo do lado da comunidade escrito por quem criou a comunidade, que vale para o próprio poder dela (é tão confiável quanto a raiz de quem criou o grupo). No caminho da admissão, a nova regra e a anterior (geração contada pelas saídas) deram o mesmo resultado em todos os casos que montamos, então nenhum teste falha só sem ela.
+- Se quem criou o grupo sai e volta, recebe as chaves só pelo aparelho da volta; a raiz continua com a autoridade do grupo, mas deixa de receber chaves (decisão da pessoa dona do produto).
+- Ocultar e reexibir uma publicação seguem a ordem decifrada (o último vale, como nos grupos públicos): um administrador que saiu pode deixar uma publicação visível de novo com um registro preparado antes de sair, até outro administrador ocultá-la outra vez.
+- Não verificado: um administrador, enquanto tem poder, talvez consiga deixar pré-aprovada a volta de um membro listando de antemão o escritor da volta numa admissão; a admissão valeria mesmo se ele perdesse o poder depois. Exige um administrador agindo de má-fé enquanto ainda pode admitir.
+- Sem interface nativa; as telas da web vêm na PR4.
+
+
+## 63. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
 
 ### O que mudou
 
-- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.61) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.62) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/mod-routes.js`): `POST /account/appeal/start` (só membro com conta Google vinculada; nonce sem estado, domínio `varanda-appeal-nonce`, 600 s) e `POST /account/appeal` (confere o nonce, a assinatura e grava; o nonce só é gasto depois de a assinatura valer). Respostas `{ id, duplicate }`; `nao-bloqueado` (403) se a chave não está na lista publicada nem tem bloqueio pendente; `limite-recursos` (429) para um novo recurso em 30 dias depois de um recurso negado; `limite` (503) com 2000 abertos ou 20000 guardados.
 - `moderation.json` passa a `v: 3` com `appeals` (linha: `id`, `at`, `member`, `text`, `nonce`, `signature`, `status` `aberta`/`aceito`/`negado`/`encerrado`, `decidedBy`, `decidedAt`, `note`). Um `v: 1` ou `v: 2` é lido sem recursos e regravado como `v: 3`. Linha malformada deixa o armazém `indisponivel`, como as denúncias. Eventos novos: `recurso-aceito`, `recurso-negado` e `recurso-encerrado` (a chave deixou de estar bloqueada com o recurso aberto: desbloqueio, bloqueio cancelado ou lista publicada sem ela), com `appealId`; nunca o texto, a assinatura, o nonce nem a nota.
 - Painel: `GET api/appeals?estado=aberta|decidida` (a decidida aceita `antes=<id>`, como `api/reports`, e a aba tem "mostrar mais") e `POST api/appeals/<id>/decide { decision: 'aceitar'|'negar', note }`. O recurso fica fora da lista e responde `nao-encontrado` para a própria pessoa recorrente e para quem decidiu (por e-mail) uma denúncia `bloquear` daquela chave; a IA não conta como pessoa. `api/me` ganha `appeals` (abertos que a pessoa pode julgar). Aceitar acrescenta uma mudança `unblock` como o botão Desbloquear (se havia um bloqueio pendente ainda não enviado, as duas se anulam), e conta como reversão humana para a triagem por IA; negar não mexe em Pendentes.
 - App: Ajustes › Recorrer de um bloqueio (`apps/app/src/screens/Recurso.js`, `apps/app/src/appeal.js`).
+- Termos de Uso e Política de Privacidade versão 9, com novo aceite (`LEGAL_VERSION` e `TERMS_VERSION` 9): os Termos descrevem o recurso e a Política diz o que o serviço de conta guarda dele (chave pública, texto opcional, assinatura, data, estado, decisão e nota de quem julgou), quem o lê e que não é apagado automaticamente (issue #38).
 
 ### Testes automatizados
 
@@ -3426,12 +3500,13 @@ Nenhuma verificação foi feita ainda. No PWA:
 - `packages/rpc/test/methods.test.js`, `packages/core/test/session.test.js`, `packages/web-member/test/session.test.js`: validação do método, recusa no nó core e assinatura no navegador (bloqueado, sem identidade, sem chave).
 - `apps/cli/test/moderation-store.test.js`: só chave bloqueada recorre, repetição devolve a mesma linha, janela de 30 dias só depois de recurso negado, recurso encerrado quando a chave é desbloqueada, teto de 2000, aceitar e negar, listagem com exclusões, trilha sem dado privado, leitura de `v: 2` e de linha malformada.
 - `apps/cli/test/account-mod.test.js`: rotas do membro (não vinculado, não bloqueado, nonce de denúncia recusado, assinatura de outra chave, texto adulterado, Origin, repetição), painel (quem decidiu o bloqueio e a própria pessoa não veem nem decidem, aceitar vira desbloqueio pendente, negar mantém o bloqueio, limite de 30 dias).
-- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos.
+- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos. `apps/app/test/legal.test.js`: o recurso nos Termos e na Política, versão 9 e o digest do texto.
 
 ### Verificação humana
 
 Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
 
+- [ ] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8 (não realizada ainda).
 - [ ] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto" (não realizada ainda).
 - [ ] Conta não bloqueada: "esta conta não está bloqueada" (não realizada ainda).
 - [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda).
