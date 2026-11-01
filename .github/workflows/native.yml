@@ -1,0 +1,53 @@
+# Bundles the Android JavaScript of the app on every pull request and on
+# pushes to main.
+#
+# No other step builds the native app, so a web-only import in shared code
+# would break the phone without any check turning red. `expo export` runs the
+# Metro resolver for the android platform, which fails when a module cannot
+# be resolved there. It needs no Android SDK or NDK.
+#
+# Limit: this proves the native bundle resolves, not that a screen avoids
+# browser APIs at run time. apps/app/test/platformGate.test.js is that check.
+#
+# Kept apart from ci.yml on purpose: ci.test.js pins that file's steps, and
+# this check is not one of the required `test (20)` / `test (24)` names.
+name: native
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # --ignore-scripts: no dependency install script runs in CI (supply chain).
+      - run: npm ci --ignore-scripts
+      # apps/app/src/client/native.js imports the generated worklet bundle,
+      # which is gitignored. bare-pack needs Node 24.9 or newer.
+      - run: npm run pack:worklet -w apps/app
+      - name: Export the Android bundle
+        working-directory: apps/app
+        env:
+          CI: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: npx expo export --platform android --output-dir /tmp/varanda-native-export
+      # An export that exits 0 with no output would still be a broken bundle.
+      - name: Check the bundle exists
+        run: find /tmp/varanda-native-export -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
