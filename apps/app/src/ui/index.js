@@ -17,9 +17,9 @@ export const UNCERTAIN = 'incerto: pode ter sido aplicado; confira antes de repe
 // Plain words for the technical messages the node and the app raise. Display
 // only: the logic keeps matching the original messages and codes.
 const PLAIN = {
-  'aguardando nova chave': 'Aguarde a atualização de acesso desta cadeira.',
-  'grupo não encontrado': 'Não encontramos essa cadeira.',
-  'grupo privado exige aprovação': 'Esta cadeira privada precisa de aprovação para entrar.',
+  'aguardando nova chave': 'Aguarde a atualização de acesso deste grupo.',
+  'grupo não encontrado': 'Não encontramos esse grupo.',
+  'grupo privado exige aprovação': 'Este grupo privado precisa de aprovação para entrar.',
   'sincronize com o semeador antes de publicar': 'Sem conexão com o servidor agora. Tente de novo em instantes.',
   'identidade bloqueada: entre com a passkey': 'Entre com sua passkey para continuar.',
   'grave o certificado de membro antes de publicar': 'Sua conta ainda está sendo preparada. Tente de novo em instantes.',

@@ -115,7 +115,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Cadeiras' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Comunidades' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -1056,10 +1056,10 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
-  // --- Cadeiras de Praia (hosted web only) ---
+  // --- Comunidades (hosted web only) ---
   // Versions restart at 0 with every epoch, so what was seen is kept with its
   // epoch and compared with !==. The dot shows when a group the node follows
-  // moved since the Cadeiras tab (or that group) was last on screen.
+  // moved since the Comunidades tab (or that group) was last on screen.
   const nodeEpoch = node.epoch
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}

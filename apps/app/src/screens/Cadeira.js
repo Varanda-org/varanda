@@ -7,7 +7,7 @@
 // `before` cursor (groups.js applyPage). The screen re-reads when the
 // node's version of the group moves (groups.changed) and on pull to refresh.
 // Someone who has not joined (opened from a /g/<hex> link) sees what
-// group.info knows and an "Entrar na cadeira" button; a private group never
+// group.info knows and an "Entrar no grupo" button; a private group never
 // shows a message to them. The draft lives only in this component's state:
 // never queued, never persisted (for a private group that would leak the
 // plaintext). A mutation answered UNCERTAIN is never resent: the screen
@@ -32,14 +32,14 @@ import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { CadeiraAjustes } from './CadeiraAjustes'
 
-export const WEB_ONLY_TEXT = 'Cadeiras de Praia só na versão web'
-const LOCKED_TEXT = 'Desbloqueie para ler esta cadeira.'
+export const WEB_ONLY_TEXT = 'Comunidades só na versão web'
+const LOCKED_TEXT = 'Desbloqueie para ler este grupo.'
 const INCOMPLETE_TEXT = 'Algumas mensagens ainda não chegaram a este aparelho.'
 const OFFLINE_POST_TEXT = 'Sem conexão: a mensagem só pode ser enviada com internet.'
 const WAITING_TEXT = 'Pedido enviado: aguardando aprovação de um administrador.'
-const BANNED_TEXT = 'Você não pode mais participar desta cadeira.'
-const PENDING_TEXT = 'Aguardando sincronização desta cadeira.'
-const PRIVATE_OUTSIDE_TEXT = 'As mensagens desta cadeira são cifradas de ponta a ponta. Só quem entra consegue ler.'
+const BANNED_TEXT = 'Você não pode mais participar deste grupo.'
+const PENDING_TEXT = 'Aguardando sincronização deste grupo.'
+const PRIVATE_OUTSIDE_TEXT = 'As mensagens deste grupo são cifradas de ponta a ponta. Só quem entra consegue ler.'
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
 const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 
@@ -290,7 +290,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
-    : (isPrivate || info === null ? PRIVATE_LABEL : 'cadeira')
+    : (isPrivate || info === null ? PRIVATE_LABEL : 'grupo')
   const subtitle = info
     ? [visibilityLabel(info.visibility), joinLabel(info.join), membersLabel(info.members)].filter(Boolean).join(' · ')
     : ''
@@ -299,7 +299,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
   if (!hosted) {
     return (
       <View style={styles.root}>
-        <TopBar title='Cadeira' onBack={onBack} />
+        <TopBar title='Grupo' onBack={onBack} />
         <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_TEXT} />
       </View>
     )
@@ -314,7 +314,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
         ? (
           <Pressable
             accessibilityRole='button'
-            accessibilityLabel='ajustes da cadeira'
+            accessibilityLabel='ajustes do grupo'
             hitSlop={10}
             onPress={() => setSettingsOpen(true)}
             style={({ pressed }) => [styles.gear, pressed && styles.pressed]}
@@ -343,7 +343,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
   const banNote = banTarget
     ? (
       <View style={styles.note}>
-        <Soft>Banir {banTarget.author} desta cadeira? A pessoa não poderá mais escrever aqui.</Soft>
+        <Soft>Banir {banTarget.author} deste grupo? A pessoa não poderá mais escrever aqui.</Soft>
         <View style={styles.inline}>
           <Pill label='banir' danger onPress={() => ban(banTarget)} pending={act.pending} />
           <Pill label='cancelar' onPress={() => setBanTarget(null)} />
@@ -364,7 +364,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
           {role === 'pending' ? <Soft>{PENDING_TEXT}</Soft> : null}
           {isPrivate ? <Soft>{PRIVATE_OUTSIDE_TEXT}</Soft> : null}
           {infoError && info === null ? <Soft>{infoError}</Soft> : null}
-          <Btn label='Entrar na cadeira' onPress={enter} pending={join.pending} disabled={!node.online} />
+          <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online} />
           {!node.online ? <Soft>Sem conexão agora.</Soft> : null}
           <ErrorText>{join.error}</ErrorText>
         </View>
@@ -469,7 +469,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
                 editable={canPost}
                 placeholder={meta.state === 'rekey-pending' ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
                 placeholderTextColor={colors.placeholder}
-                accessibilityLabel='mensagem para a cadeira'
+                accessibilityLabel='mensagem para o grupo'
               />
               <Btn
                 label='Enviar'

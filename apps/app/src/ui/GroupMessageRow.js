@@ -1,4 +1,4 @@
-// One message of a Cadeira. Props: { item, name, username, own, canHide,
+// One message of a group. Props: { item, name, username, own, canHide,
 // canBan, canReport, onHide(on), onBan(), onReport(), onOpenMember(), now }.
 // `item` is a row of groups.js rowsOf (text already through displayText,
 // HIDDEN_LABEL when hidden). `name` / `username` are the RAW peer strings the
