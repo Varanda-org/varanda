@@ -9,6 +9,7 @@ import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
 import { isAppClient } from './appClient.js'
 import { KYC_STATES, canonicalJson } from './wallet.js'
+import { sha256Hex } from './sha256.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -758,42 +759,54 @@ export const walletOpStatus = async (args) => {
   return op
 }
 
-function toHex (buf) {
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 // Lowercase hex SHA-256 of the UTF-8 canonical JSON: the signed op carries
 // only this hash, the service recomputes it from the fields it forwards.
 export async function kycHash (kyc) {
-  const bytes = new TextEncoder().encode(canonicalJson(kyc))
-  return toHex(await globalThis.crypto.subtle.digest('SHA-256', bytes))
+  return sha256Hex(canonicalJson(kyc))
 }
 
-// The image goes from the browser straight to the provider's single-use URL,
-// never through the account service; no cookies, no redirects.
-export async function uploadDocument (url, blob) {
+// True when the answer may come from somewhere else than `url` (the same
+// rule as media/fetch.js). Any exception counts as true.
+function leftUploadOrigin (res, url) {
+  try {
+    if (res.redirected === true) return true
+    if (typeof res.url !== 'string' || res.url === '') return false
+    return new URL(res.url).origin !== new URL(url).origin
+  } catch {
+    return true
+  }
+}
+
+// The image goes from the device straight to the provider's single-use URL,
+// never through the account service; no cookies, no redirects. `doc` is a
+// web File or Blob, or { type, size, bytes } from the native picker.
+// deps.fetch: expo/fetch on the phone (deps.native), which has no cache mode.
+export async function uploadDocument (url, doc, deps = {}) {
   if (!isHodleUrl(url, UPLOAD_HOST)) throw toError('indisponivel')
-  if (!blob || typeof blob !== 'object' || !UPLOAD_TYPES.includes(blob.type) ||
-    !Number.isSafeInteger(blob.size) || blob.size < 1 || blob.size > UPLOAD_MAX) {
+  if (!doc || typeof doc !== 'object' || !UPLOAD_TYPES.includes(doc.type) ||
+    !Number.isSafeInteger(doc.size) || doc.size < 1 || doc.size > UPLOAD_MAX) {
     throw new Error('arquivo inválido')
   }
+  const send = (deps && typeof deps.fetch === 'function') ? deps.fetch : globalThis.fetch
+  const init = {
+    method: 'PUT',
+    body: doc.bytes instanceof Uint8Array ? doc.bytes : doc,
+    headers: { 'content-type': doc.type },
+    credentials: 'omit',
+    redirect: 'error'
+  }
+  if (!(deps && deps.native === true)) init.cache = 'no-store'
   const ctl = new AbortController()
+  init.signal = ctl.signal
   const timer = setTimeout(() => ctl.abort(), UPLOAD_TIMEOUT_MS)
   let res
   try {
-    res = await fetch(url, {
-      method: 'PUT',
-      body: blob,
-      headers: { 'content-type': blob.type },
-      credentials: 'omit',
-      redirect: 'error',
-      cache: 'no-store',
-      signal: ctl.signal
-    })
+    res = await send(url, init)
   } catch {
     throw toError('indisponivel')
   } finally {
     clearTimeout(timer)
   }
   if (!res || !(res.status >= 200 && res.status < 300)) throw toError('indisponivel')
+  if (leftUploadOrigin(res, url)) throw toError('indisponivel')
 }
