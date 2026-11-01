@@ -15,11 +15,13 @@ import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
 import { can, joinLink, reconcile, roleOf } from '../groups'
-import { Btn, ErrorText, Field, Label, Mono, Notice, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
+import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { canShare, copyText, shareUrl } from '../share'
+import { shareNav } from '../shareNav'
 
 const PAGE = 100
 const HEX64 = /^[0-9a-f]{64}$/
@@ -61,6 +63,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   const { request } = node
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const version = node.getGroupVersion(group)
+  const [shareNote, setShareNote] = useState('')
   const [info, setInfo] = useState(null)
   const [members, setMembers] = useState({ rows: [], total: 0 })
   const [requests, setRequests] = useState({ rows: [], total: 0 })
@@ -229,6 +232,16 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   const banned = members.rows.filter((m) => m && m.banned === true)
   const communities = info && Array.isArray(info.communities) ? info.communities : []
   const link0 = joinLink(group)
+  // The system share sheet when there is one, else a copy. The link is never
+  // shown as text.
+  const shareInvite = async (path) => {
+    const url = origin() + path
+    const nav = shareNav()
+    setShareNote('')
+    const title = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : 'Varanda'
+    if (canShare(nav) && (await shareUrl(nav, { url, title })) !== 'failed') return
+    setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
+  }
   const typedKey = communityKey.trim().toLowerCase()
   const newName = nameDraft.trim()
   const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && newName !== info?.name
@@ -298,9 +311,11 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
         {link0
           ? (
             <View style={styles.box}>
-              <Label>Link da cadeira</Label>
-              <Mono>{origin() + link0}</Mono>
-              <Soft>{isPrivate ? 'Cadeira privada: quem abrir o link pede para entrar, e um administrador aprova.' : 'Quem abrir o link pode entrar na cadeira.'}</Soft>
+              <Label>Convite</Label>
+              <Soft>Envie o convite desta cadeira para quem você quiser.</Soft>
+              <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
+              {shareNote ? <Soft>{shareNote}</Soft> : null}
+              <Soft>{isPrivate ? 'Cadeira privada: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar na cadeira.'}</Soft>
             </View>
             )
           : null}
