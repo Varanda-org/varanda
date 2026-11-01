@@ -3,9 +3,11 @@
 // { kind } }). The seeder index (src/indexClient.js fetchEngagers) only says
 // where to look; each row is verified with diary.peek (the engager's own
 // signed like or repost of this post, src/engagers.js), so the index can hide
-// people but never add one. Hosted web only: natively and on varanda-serve
-// nothing is requested. Nothing is persisted. No follow pill (the profile has
-// it) and no like timestamp.
+// people but never add one. It requests only when the node is hosted
+// (node.hosted === true: the site and the installed app on an installation);
+// a manual configuration or varanda-serve requests nothing.
+// Nothing is persisted. No follow pill (the profile has it) and no like
+// timestamp.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
