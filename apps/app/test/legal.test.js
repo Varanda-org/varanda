@@ -48,7 +48,7 @@ test('legal: appeals are disclosed in the terms and in the privacy policy', asyn
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('o recurso'))
   t.ok(text(TERMS).includes('depois de 30 dias'))
-  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'Só moderadores que não decidiram o bloqueio', 'Denúncias, recursos e decisões não são apagados automaticamente']) {
+  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta', 'pode ser revisto por qualquer moderador', 'Denúncias, recursos e decisões não são apagados automaticamente']) {
     t.ok(text(PRIVACY).includes(required), required)
   }
 })
@@ -66,7 +66,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '47667f02fd0116854ec8586d58ee0c33f11df37e0cbbb66f5bea14e05dbbd089', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f9bc610567793e91c52f187c5cf5b740e3a9a72fcdaa889f6be6bd099bb96c56', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: privacy names the third-party CPF and the ledger cap', async (t) => {
