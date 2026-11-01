@@ -3556,3 +3556,46 @@ Duas janelas com perfis do navegador diferentes (A e B, cada uma com a própria 
 - A cadeira privada continua sem catraca nem sigilo futuro dentro de uma época, com metadados visíveis, e as demais limitações da seção 62 valem.
 - Fora das telas, por não terem sido feitos: responder a uma mensagem (`groups.js` lê `replyTo`, mas as telas não o mostram nem o enviam), remover um administrador da comunidade e desvincular pelo lado da comunidade. Renomear (a criadora, na administração) e criar comunidade (na aba) estão nas telas; vale conferir os dois à mão.
 - O que mais as telas não conseguirem fazer fica registrado na descrição do PR.
+
+## 65. App no Android arm64: build de debug, Metro e links (pilha "celular primeiro", 2026-11-01)
+
+Verificação do app nativo com todas as mudanças da pilha "celular primeiro" aplicadas sobre `main@a0303c2` (links de grupo e comunidade, origem dos links compartilhados, `expo-clipboard`, visibilidade nativa, textos do nó hospedado, Carteira, trava `platformGate`). É a primeira execução do ciclo local no Mac Apple Silicon descrito em [development.md](development.md) ("macOS setup").
+
+- Aparelho: emulador AVD `varanda-api36`, ABI `arm64-v8a`, API 36, imagem `google_apis`, sem janela (`-no-window -no-audio -no-snapshot`). Evidência por `adb exec-out screencap -p` (as imagens ficaram fora do repositório).
+- Versões: JDK 17 (Homebrew `openjdk@17`), Gradle 9.0.0, Expo 55.0.31 (o Metro avisou que o esperado é ~55.0.32), id da aplicação `app.varanda.debug`.
+
+### Comandos e resultados
+
+1. `npm run prepare:native -w apps/app -- android`: saiu com 0. Gerou o bundle do worklet (3767580 bytes, 517 arquivos, 50 entradas de addons), "node scan: clean" e "prepare-native: ready (android)".
+2. `(cd apps/app/android && ./gradlew assembleDebug)`: saiu com 0, `BUILD SUCCESSFUL in 10m 28s` (372 tarefas, primeira compilação). O Gradle não pediu SDK, NDK nem build-tools além dos já instalados.
+3. `emulator -avd varanda-api36 -no-snapshot -no-window`: iniciou; `ro.product.cpu.abi` = `arm64-v8a`, `ro.build.version.sdk` = 36.
+4. `adb install -r .../app-debug.apk`: `Success`. `adb reverse tcp:8081 tcp:8081`: 8081.
+5. `npx expo start --port 8081 --clear` em `apps/app` (com `CI=1`): `Android Bundled 3453ms apps/app/index.js (989 modules)`. Nenhum `EXPO_PUBLIC_VARANDA_INSTALLATION` definido.
+6. Abertura: `adb shell monkey -p app.varanda.debug 1` não abriu a tela (saiu com 251). A abertura foi por `adb shell am start -n app.varanda.debug/app.varanda.MainActivity` (MAIN/LAUNCHER) e funcionou.
+
+### Observado
+
+- O bundle JS carregou do Metro e o logcat mostrou `ReactNativeJS: Running "main"` (Fabric ligado).
+- Sem instalação configurada, a sequência na tela foi: introdução ("Seu diário, perto de você", Pular/Próximo), depois "Termos de Uso e Política de Privacidade" (versão 8) e, depois de aceitar os termos neste aparelho de teste, **Conectar** ("Informe o endereço da instalação do Varanda", campo `https://varanda.exemplo`, botões conectar e Avançado). Não digitei endereço nem conectei.
+- Links: `adb shell am start -a android.intent.action.VIEW -d 'varanda:///g/<64 hex minúsculos>' app.varanda.debug` e a forma `/c/` (chave de teste `ab` repetido 32 vezes, sem relação com nenhuma cadeira real) foram entregues à instância em execução ("intent has been delivered to currently running top-most instance"). O processo continuou vivo (mesmo pid antes e depois) e a tela seguiu em Conectar, porque ainda não há instalação nem sessão para resolver o link.
+- HOME e retorno: o processo continuou vivo (mesmo pid) e a tarefa voltou à frente. Não foi observada a pausa de sincronização, que só aparece em Ajustes > Sincronização com sessão.
+- logcat filtrado (`-s ReactNativeJS:* AndroidRuntime:E`): só a linha `Running "main"`; `FATAL EXCEPTION` ocorreu 0 vezes.
+- `git status --short apps/app/android apps/app/ios` vazio ao final (saídas do Gradle ignoradas pelo git).
+
+### O que não foi executado
+
+- Aparelho real, emulador x86_64, build de release.
+- Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
+- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
+- Pagamentos e KYC, push do sistema, login no iOS.
+- O workflow `native.yml` não foi disparado.
+
+### CI local
+
+Na mesma árvore, no Mac (Node 24.22.1), na ordem da CI:
+
+- `npm ci --ignore-scripts`, depois `npm run lint`: saiu com 0.
+- `VARANDA_TEST_CONCURRENCY=6 npm test`: falharam 2 arquivos de `packages/core`, pacote que esta pilha não altera. `private-member.test.js` estourou o tempo de 30 s num teste sob a carga do pool e passou sozinho (207/207). `sync-groups.test.js` #34 ("a writer evicted by an earlier proven join is still purged when its diary forks", asserção "it was held before the eviction") falhou também sozinho na primeira vez (142/143) e passou sozinho na segunda: é o teste instável já conhecido. Os demais workspaces passaram (app: 94 arquivos, 0 falhas).
+- `npm run demo`: `DEMO OK`.
+- `npm run pack:worklet -w apps/app` ("node scan: clean") e `npx expo export --platform android` em `apps/app`: saíram com 0 (os comandos do workflow `native.yml`).
+- O primeiro build local mostrou que a saída do Gradle dos módulos locais (`apps/app/modules/*/android/build/`) não estava no `.gitignore`; agora está.
