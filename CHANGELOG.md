@@ -137,6 +137,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- A aba Cadeiras de Praia passa a se chamar Comunidades, e cada cadeira passa a se chamar grupo, nas telas da web hospedada.
 - Na web hospedada, numa visita de volta, cada conta seguida baixa primeiro toda a ponta nova (até 256 blocos) quando a janela de posts guardada antes está perto dela, e A Rua não perde mais essa janela enquanto os posts novos chegam (PR `perf/newest-window-signal`). O nó avisa (`newest`) quando os posts mais novos chegam, antes do histórico, e `log.read` de uma conta seguida pagina pelos blocos que A Rua mostra.
   Detalhes em `docs/verification.md`, seção 58.
 - Web hospedada: a conexão com o semeador fica aberta enquanto a aba está visível, em vez de ser liberada depois de 8 s e só voltar após 45 s; publicações de outros aparelhos chegam em segundos. Cada aba visível ocupa uma vaga externa: dimensione `VARANDA_MAX_EXTERNAL` para as abas visíveis ao mesmo tempo. A aba oculta continua parando a sincronização.

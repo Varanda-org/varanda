@@ -1,7 +1,7 @@
-// Cadeiras: the tab of the "Cadeiras de Praia" (docs/app.md). Minhas cadeiras
+// Cadeiras: the tab of the "Comunidades" (docs/app.md). Meus grupos
 // from group.list, a search of public groups through the index
 // (/index/group-search; private groups never appear there), "Entrar por link"
-// (a /g/<hex> link or a bare key, then group.join) and the Nova cadeira sheet.
+// (a /g/<hex> link or a bare key, then group.join) and the Novo grupo sheet.
 // Hosted web only: elsewhere the tab shows the "só na versão web" note, like
 // Avisos, and calls nothing. App.js draws the top bar.
 // Minhas comunidades (community.list) sits under the groups; an older node
@@ -26,7 +26,7 @@ import { Sheet } from '../ui/Sheet'
 
 const { displayText } = rpc
 
-export const WEB_ONLY_MESSAGE = 'Cadeiras de Praia só na versão web'
+export const WEB_ONLY_MESSAGE = 'Comunidades só na versão web'
 const PAGE = rpc.GROUP_LIMIT_MAX
 const SEARCH_DELAY_MS = 400
 const LIST_DELAY_MS = 800
@@ -54,11 +54,11 @@ function communityTitle (row) {
 function communitySubtitle (row) {
   const parts = []
   if (row.creator === true) parts.push('criada por você')
-  if (row.linked === true) parts.push('ligada às suas cadeiras')
+  if (row.linked === true) parts.push('ligada aos seus grupos')
   return parts.join(' · ')
 }
 
-function GroupRow ({ title, subtitle, dot, hint = 'abre a cadeira', onPress }) {
+function GroupRow ({ title, subtitle, dot, hint = 'abre o grupo', onPress }) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -149,10 +149,10 @@ function NovaComunidade ({ visible, onClose, onCreated }) {
           placeholder='Nome da comunidade'
         />
         {tooLong ? <ErrorText>{'O nome pode ter até ' + NAME_MAX + ' caracteres.'}</ErrorText> : null}
-        <Soft>Uma comunidade reúne até 32 cadeiras sob a mesma moderação. Depois de criar, vincule as cadeiras na tela da comunidade.</Soft>
+        <Soft>Uma comunidade reúne até 32 grupos sob a mesma moderação. Depois de criar, vincule os grupos na tela da comunidade.</Soft>
         {offline ? <Soft>Sem internet: conecte-se para criar a comunidade.</Soft> : null}
         {uncertain
-          ? <ErrorText>{UNCERTAIN + '. Talvez ela já tenha sido criada. Espere um pouco e abra a aba Cadeiras de novo antes de tentar outra vez, para não ficar com duas.'}</ErrorText>
+          ? <ErrorText>{UNCERTAIN + '. Talvez ela já tenha sido criada. Espere um pouco e abra a aba Comunidades de novo antes de tentar outra vez, para não ficar com duas.'}</ErrorText>
           : <ErrorText>{action.error}</ErrorText>}
         <Btn label='Criar comunidade' onPress={create} disabled={!ready} pending={action.pending} />
       </View>
@@ -334,15 +334,15 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
     <View>
       <View style={styles.block}>
         <Field
-          label='Buscar cadeiras públicas'
+          label='Buscar grupos públicos'
           value={query}
           onChangeText={setQuery}
-          placeholder='Nome da cadeira'
+          placeholder='Nome do grupo'
           returnKeyType='search'
         />
         {search.status === 'loading' ? <Soft>Buscando…</Soft> : null}
         {search.status === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
-        {search.status === 'done' && search.groups.length === 0 ? <Soft>Nenhuma cadeira pública encontrada.</Soft> : null}
+        {search.status === 'done' && search.groups.length === 0 ? <Soft>Nenhum grupo público encontrado.</Soft> : null}
         {search.status === 'done' && search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : null}
       </View>
       {hits.length > 0 ? <View>{hits}</View> : null}
@@ -357,17 +357,17 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
           onSubmitEditing={doJoin}
           returnKeyType='go'
         />
-        {link.trim() !== '' && !linkKey ? <Soft>Cole um link de cadeira (/g/…).</Soft> : null}
+        {link.trim() !== '' && !linkKey ? <Soft>Cole um link de grupo (/g/…).</Soft> : null}
         {offline ? <Soft>Sem internet: conecte-se para entrar.</Soft> : null}
         {joinStatus}
         {joinNote ? <Soft>{joinNote}</Soft> : null}
         <View style={styles.actions}>
           <Btn label='Entrar' onPress={doJoin} disabled={!linkKey || offline || joinCheck !== null} pending={join.pending} secondary />
-          <Btn label='Nova cadeira' onPress={() => setCreating(true)} />
+          <Btn label='Novo grupo' onPress={() => setCreating(true)} />
           <Btn label='Nova comunidade' onPress={() => setCreatingCommunity(true)} secondary />
         </View>
       </View>
-      <SectionHeader>Minhas cadeiras</SectionHeader>
+      <SectionHeader>Meus grupos</SectionHeader>
       {list.error && list.groups.length > 0 ? <ErrorState message={list.error} onRetry={loadFirst} pending={list.loading} /> : null}
     </View>
   )
@@ -378,7 +378,7 @@ export function Cadeiras ({ onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <Skeleton />
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma cadeira ainda' body='Crie uma cadeira, busque uma pública ou entre por um link.' />
+    empty = <EmptyState icon='cadeira' title='Nenhum grupo ainda' body='Crie um grupo, busque um público ou entre por um link.' />
   }
 
   const renderItem = ({ item }) => {

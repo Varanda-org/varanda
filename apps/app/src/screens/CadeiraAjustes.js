@@ -1,9 +1,9 @@
-// CadeiraAjustes: the administration sheet of one Cadeira, opened from
+// CadeiraAjustes: the administration sheet of one group, opened from
 // Cadeira. Props: { group, visible, onClose, onLeft(), onOpenMember(diary),
 // onOpenCommunity(community) }. Sections by role (groups.js can): the join
 // link, Nome (creator only, group.meta), Membros (paged), Pedidos (admit or refuse), Administradores (creator
 // only grants or revokes), Banidos, the community link (creator only), Gerar
-// nova chave (private groups) and Sair da cadeira, with a confirm that says a
+// nova chave (private groups) and Sair do grupo, with a confirm that says a
 // group with approval needs a new approval to come back. Names come from the
 // node's rows through displayText; a key is only ever an 8-hex short key,
 // except the /g/<hex> link the person copies on purpose. A mutation answered
@@ -27,9 +27,9 @@ const PAGE = 100
 const HEX64 = /^[0-9a-f]{64}$/
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
 const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
-const LEAVE_PRIVATE = 'Ao sair de uma cadeira privada, você deixa de receber as novas mensagens. Para voltar, um administrador precisa aprovar você de novo.'
-const LEAVE_APPROVAL = 'Esta cadeira tem entrada com aprovação: para voltar, um administrador precisa aprovar você de novo.'
-const LEAVE_OPEN = 'Você pode voltar quando quiser pelo link da cadeira.'
+const LEAVE_PRIVATE = 'Ao sair de um grupo privado, você deixa de receber as novas mensagens. Para voltar, um administrador precisa aprovar você de novo.'
+const LEAVE_APPROVAL = 'Este grupo tem entrada com aprovação: para voltar, um administrador precisa aprovar você de novo.'
+const LEAVE_OPEN = 'Você pode voltar quando quiser pelo link do grupo.'
 
 function nameOf (row) {
   const n = typeof row.name === 'string' ? displayText(row.name).trim() : ''
@@ -284,7 +284,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
       <>
         {can('admin', role) ? <Pill label={m.admin ? 'tirar admin' : 'tornar admin'} onPress={() => admin(m.member, !m.admin)} pending={act.pending} /> : null}
         {staff && !m.admin
-          ? <Pill label='banir' danger pending={act.pending} onPress={() => setConfirm({ text: 'Banir ' + nameOf(m) + ' desta cadeira?', label: 'Banir', run: () => ban(m.member, true) })} />
+          ? <Pill label='banir' danger pending={act.pending} onPress={() => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) })} />
           : null}
       </>
     )
@@ -312,10 +312,10 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
           ? (
             <View style={styles.box}>
               <Label>Convite</Label>
-              <Soft>Envie o convite desta cadeira para quem você quiser.</Soft>
+              <Soft>Envie o convite deste grupo para quem você quiser.</Soft>
               <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
               {shareNote ? <Soft>{shareNote}</Soft> : null}
-              <Soft>{isPrivate ? 'Cadeira privada: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar na cadeira.'}</Soft>
+              <Soft>{isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'}</Soft>
             </View>
             )
           : null}
@@ -394,7 +394,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
                 {can('link', role) && communities.length === 0
                   ? (
                     <>
-                      <Soft>O vínculo só vale quando a cadeira e a comunidade concordam: os dois lados precisam vincular.</Soft>
+                      <Soft>O vínculo só vale quando o grupo e a comunidade concordam: os dois lados precisam vincular.</Soft>
                       <Field label='Chave da comunidade' value={communityKey} onChangeText={setCommunityKey} mono />
                       <Btn label='Vincular' onPress={() => link(typedKey, true)} disabled={!HEX64.test(typedKey) || !node.online} pending={act.pending} />
                     </>
@@ -410,7 +410,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
             <View>
               <SectionHeader>Chave</SectionHeader>
               <View style={styles.box}>
-                <Soft>Gerar nova chave abre uma nova época: as próximas mensagens só podem ser lidas por quem está na cadeira agora.</Soft>
+                <Soft>Gerar nova chave abre uma nova época: as próximas mensagens só podem ser lidas por quem está no grupo agora.</Soft>
                 <Btn label='Gerar nova chave' secondary onPress={rekey} pending={act.pending} disabled={!node.online} />
               </View>
             </View>
@@ -421,7 +421,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
           ? (
             <View style={styles.box}>
               <Btn
-                label='Sair da cadeira'
+                label='Sair do grupo'
                 danger
                 pending={act.pending}
                 onPress={() => setConfirm({
@@ -438,7 +438,7 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   }
 
   return (
-    <Sheet open={visible} onClose={onClose} title='Ajustes da cadeira'>
+    <Sheet open={visible} onClose={onClose} title='Ajustes do grupo'>
       <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.content}>{body}</ScrollView>
     </Sheet>
   )

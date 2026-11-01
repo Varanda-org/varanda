@@ -1,5 +1,5 @@
 // The bottom tabs per mode: five everywhere, six on the hosted web, the only
-// mode with Cadeiras de Praia.
+// mode with Comunidades.
 export const TABS = [
   { id: 'rua', label: 'A Rua', icon: 'casa' },
   { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
@@ -10,7 +10,7 @@ export const TABS = [
 
 const HOSTED_TABS = [
   ...TABS.slice(0, 2),
-  { id: 'cadeiras', label: 'Cadeiras', icon: 'cadeira' },
+  { id: 'cadeiras', label: 'Comunidades', icon: 'cadeira' },
   ...TABS.slice(2)
 ]
 

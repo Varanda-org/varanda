@@ -1,5 +1,5 @@
 // Comunidade: one community (community.info, docs/rpc.md 5.59): its name,
-// the groups linked two-way (each opens its Cadeira) and how many admins it
+// the groups linked two-way (each opens its group) and how many admins it
 // has. The community creator also adds an admin (community.admin, 5.60) and
 // links a group (community.link, 5.58). Hosted web only, like the Cadeiras
 // tab. A mutation that comes back uncertain is never resent: the screen
@@ -56,7 +56,7 @@ function GroupRow ({ title, detail, onPress }) {
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
       accessibilityLabel={title}
-      accessibilityHint='abre a cadeira'
+      accessibilityHint='abre o grupo'
       onPress={onPress}
     >
       <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
@@ -262,7 +262,7 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
       setLinkCheck(verdict === 'landed' ? null : { group, verdict })
       if (verdict === 'landed') {
         setLinkInput('')
-        setLinkNote('Cadeira vinculada.')
+        setLinkNote('Grupo vinculado.')
       }
     } catch {
       setLinkCheck({ group, verdict: 'unknown' })
@@ -280,8 +280,8 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
       const sides = res.value && Array.isArray(res.value.sides) ? res.value.sides : []
       setLinkInput('')
       setLinkNote(sides.includes('group')
-        ? 'Cadeira vinculada.'
-        : 'Vínculo pedido. A cadeira aparece aqui quando a criadora dela também vincular esta comunidade.')
+        ? 'Grupo vinculado.'
+        : 'Vínculo pedido. O grupo aparece aqui quando quem o criou também vincular esta comunidade.')
       load()
       return
     }
@@ -313,21 +313,21 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
     body = (
       <View>
         <View style={styles.block}>
-          <Soft>Pelo índice do servidor; abra uma cadeira para entrar.</Soft>
+          <Soft>Pelo índice do servidor; abra um grupo para entrar.</Soft>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
           <View style={styles.inline}>
             <Btn label='Compartilhar' onPress={shareCommunity} secondary />
           </View>
           {shareNote ? <Soft>{shareNote}</Soft> : null}
         </View>
-        <SectionHeader>Cadeiras</SectionHeader>
+        <SectionHeader>Grupos</SectionHeader>
         {idx.groups.length === 0
-          ? <View style={styles.block}><Soft>Nenhuma cadeira vinculada ainda.</Soft></View>
+          ? <View style={styles.block}><Soft>Nenhum grupo vinculado ainda.</Soft></View>
           : idx.groups.map((g) => (
             <GroupRow
               key={g.group}
               title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
-              detail={Number.isSafeInteger(g.writerCount) ? (g.writerCount === 1 ? '1 membro' : g.writerCount + ' membros') : 'cadeira privada'}
+              detail={Number.isSafeInteger(g.writerCount) ? (g.writerCount === 1 ? '1 membro' : g.writerCount + ' membros') : 'grupo privado'}
               onPress={() => { if (typeof onOpenGroup === 'function') onOpenGroup(g.group) }}
             />
           ))}
@@ -349,12 +349,12 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
           </View>
           {shareNote ? <Soft>{shareNote}</Soft> : null}
           {pending ? <Soft>Aguardando a sincronização desta comunidade.</Soft> : null}
-          {!pending && info.incomplete === true ? <Soft>Algumas cadeiras ainda não chegaram a este aparelho; a lista pode estar incompleta.</Soft> : null}
+          {!pending && info.incomplete === true ? <Soft>Alguns grupos ainda não chegaram a este aparelho; a lista pode estar incompleta.</Soft> : null}
           {loadError ? <ErrorText>{loadError}</ErrorText> : null}
         </View>
-        <SectionHeader>Cadeiras</SectionHeader>
+        <SectionHeader>Grupos</SectionHeader>
         {groups.length === 0
-          ? <View style={styles.block}><Soft>Nenhuma cadeira vinculada ainda.</Soft></View>
+          ? <View style={styles.block}><Soft>Nenhum grupo vinculado ainda.</Soft></View>
           : groups.map((g) => (
             <GroupRow
               key={g.group}
@@ -368,13 +368,13 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
               <SectionHeader>Administração</SectionHeader>
               <View style={styles.block}>
                 <Field
-                  label='Vincular uma cadeira'
+                  label='Vincular um grupo'
                   value={linkInput}
                   onChangeText={(t) => { setLinkInput(t); setLinkCheck(null); setLinkNote(''); link.clearError() }}
                   placeholder='/g/…'
                   mono
                 />
-                <Soft>O vínculo vale quando os dois lados aceitam: a comunidade e a cadeira.</Soft>
+                <Soft>O vínculo vale quando os dois lados aceitam: a comunidade e o grupo.</Soft>
                 {linkStatus}
                 {linkNote ? <Soft>{linkNote}</Soft> : null}
                 <Btn label='Vincular' onPress={doLink} disabled={!linkKey || offline || linkCheck !== null} pending={link.pending} />
@@ -388,7 +388,7 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
                   maxLength={80}
                   mono
                 />
-                <Soft>Administradores da comunidade podem banir, admitir e ocultar nas cadeiras vinculadas.</Soft>
+                <Soft>Administradores da comunidade podem banir, admitir e ocultar nos grupos vinculados.</Soft>
                 {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
                 {cls.kind === 'key' || cls.kind === 'handle'
                   ? <Btn label={cls.kind === 'key' ? 'Conferir pessoa' : 'Procurar @nome'} onPress={findPerson} pending={resolving} disabled={offline || adminUncertain} secondary />

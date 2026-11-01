@@ -17,14 +17,14 @@ test('tabsFor: native and serve keep the five existing tabs', async (t) => {
   t.alike(tabsFor('serve'), TABS)
 })
 
-test('tabsFor: hosted adds Cadeiras right after Espiadinha', async (t) => {
+test('tabsFor: hosted adds Comunidades right after Espiadinha', async (t) => {
   const { TABS, tabsFor } = await load()
   const tabs = tabsFor('hosted')
   t.is(tabs.length, 6)
   t.alike(tabs, [
     TABS[0],
     TABS[1],
-    { id: 'cadeiras', label: 'Cadeiras', icon: 'cadeira' },
+    { id: 'cadeiras', label: 'Comunidades', icon: 'cadeira' },
     ...TABS.slice(2)
   ])
   t.is(TABS.length, 5)

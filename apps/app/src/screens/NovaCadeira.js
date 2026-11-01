@@ -1,4 +1,4 @@
-// Nova cadeira: the sheet that creates a group (group.create, docs/rpc.md
+// Novo grupo: the sheet that creates a group (group.create, docs/rpc.md
 // 5.36) and hands the new group to the caller.
 // Props: visible, onClose(), onCreated(group) where group is the hex64 root
 // key. A create that comes back uncertain is never resent: the sheet asks the
@@ -128,7 +128,7 @@ export function NovaCadeira ({ visible, onClose, onCreated }) {
   const confirm = async () => {
     if (uncertain === null) return
     if (uncertain.before === null) {
-      setCheckNote('Não dá para conferir daqui. Confira em Minhas cadeiras antes de tentar de novo.')
+      setCheckNote('Não dá para conferir daqui. Confira em Meus grupos antes de tentar de novo.')
       return
     }
     const res = await check.run(() => createdGroups(node.request))
@@ -139,18 +139,18 @@ export function NovaCadeira ({ visible, onClose, onCreated }) {
       return
     }
     setUncertain(null)
-    setCheckNote('A cadeira não foi criada. Você pode tentar de novo.')
+    setCheckNote('O grupo não foi criado. Você pode tentar de novo.')
   }
 
   return (
-    <Sheet open={!!visible} onClose={onClose} title='Nova cadeira'>
+    <Sheet open={!!visible} onClose={onClose} title='Novo grupo'>
       <View style={styles.body}>
         <Field
           label='Nome'
           value={name}
           onChangeText={setName}
           maxLength={NAME_MAX * 2}
-          placeholder='Nome da cadeira'
+          placeholder='Nome do grupo'
         />
         {tooLong ? <ErrorText>{'O nome pode ter até ' + NAME_MAX + ' caracteres.'}</ErrorText> : null}
         <Choice
@@ -160,8 +160,8 @@ export function NovaCadeira ({ visible, onClose, onCreated }) {
           options={[{ value: 'public', label: 'Pública' }, { value: 'private', label: 'Privada' }]}
         />
         {priv
-          ? <Soft>As mensagens de uma cadeira privada são cifradas de ponta a ponta: só os membros leem. Ela não aparece na busca e sempre pede aprovação para entrar.</Soft>
-          : <Soft>Qualquer pessoa pode encontrar uma cadeira pública na busca e ler as mensagens.</Soft>}
+          ? <Soft>As mensagens de um grupo privado são cifradas de ponta a ponta: só os membros leem. Ele não aparece na busca e sempre pede aprovação para entrar.</Soft>
+          : <Soft>Qualquer pessoa pode encontrar um grupo público na busca e ler as mensagens.</Soft>}
         <Choice
           label='Entrada'
           value={priv ? 'approval' : join}
@@ -169,18 +169,18 @@ export function NovaCadeira ({ visible, onClose, onCreated }) {
           disabled={priv}
           options={[{ value: 'open', label: 'Aberta' }, { value: 'approval', label: 'Com aprovação' }]}
         />
-        {offline ? <Text style={styles.note}>Sem internet: conecte-se para criar a cadeira.</Text> : null}
+        {offline ? <Text style={styles.note}>Sem internet: conecte-se para criar o grupo.</Text> : null}
         {uncertain !== null
           ? (
             <View style={styles.check}>
-              <ErrorText>{UNCERTAIN + '. Confira se a cadeira já foi criada antes de tentar de novo.'}</ErrorText>
+              <ErrorText>{UNCERTAIN + '. Confira se o grupo já foi criado antes de tentar de novo.'}</ErrorText>
               <ErrorText>{check.error}</ErrorText>
               <Btn label='Conferir' onPress={confirm} pending={check.pending} secondary />
             </View>
             )
           : <ErrorText>{action.error}</ErrorText>}
         {checkNote ? <Soft>{checkNote}</Soft> : null}
-        <Btn label='Criar cadeira' onPress={create} disabled={!ready} pending={action.pending} />
+        <Btn label='Criar grupo' onPress={create} disabled={!ready} pending={action.pending} />
       </View>
     </Sheet>
   )
