@@ -6,7 +6,7 @@
 // then the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar (an info button
+// and then the tabs (src/tabs.js) with the top bar (an info button
 // that opens the screen's 'Como funciona' sheet), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
@@ -25,10 +25,11 @@
 // Back: the browser Back button (src/history.web.js; an in-app back calls
 // history.back() so the history and the stack never drift), Escape on the
 // web, the Android Back button (BackHandler); an open sheet closes first.
-// A profile link (/@ana, /m/<key>; hosted web only, src/profileLink.js) is
-// captured at load: Entrar shows the invite, a passkey ceremony from that card
-// records consent, and once the tabs show the inviter is followed when that
-// consent was given in this page load; after a reload (the Google return) the
+// A profile link (/@ana, /m/<key>; a hosted node, src/profileLink.js) is
+// captured at load on the site and through Linking in the app: Entrar shows
+// the invite, a passkey ceremony from that card records consent, and once the
+// tabs show the inviter is followed when that consent was given in this page
+// load; after a reload (the Google return) the
 // profile opens for one tap on Seguir, and a visitor already signed in only
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
@@ -38,7 +39,8 @@
 // A splash holds a short minimum while the app loads and, on the web, covers
 // the node's connection; the intro cards (src/intro.js) follow once per device,
 // before the Termos.
-// The age gate (hosted web only, src/age.js) holds every member, linked or
+// The age gate (a hosted node, on the site or in the app on an installation;
+// src/age.js) holds every member, linked or
 // not, at 'Confirme sua idade' until the account service answers
 // 'verificado'; it fails closed while the policy or the result is unknown,
 // and nothing about it is stored on the device.
@@ -103,7 +105,7 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppReturn } from './src/linkReturn'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -177,12 +179,13 @@ const CAPTURED_INVITE = captureInvite()
 // then lives only in this page's memory, which still opens the profile now.
 const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // A group link (/g/<hex>) is read and cleaned the same way, once, before any
-// render; it only lives in memory and opens the group on the hosted web.
-const CAPTURED_GROUP = hostedPage === true && Platform.OS === 'web'
+// render; it only lives in memory, so a reload never opens it again. The
+// native app has no page load: its varanda:///g/ link comes through Linking.
+const CAPTURED_GROUP = hostedPage === true
   ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
   : null
 // A community link (/c/<hex>) works the same way and opens the community.
-const CAPTURED_COMMUNITY = hostedPage === true && Platform.OS === 'web'
+const CAPTURED_COMMUNITY = hostedPage === true
   ? captureCommunityLink({ location: globalThis.location, history: globalThis.history })
   : null
 // The native app reads Linking's initial URL once per process: it stays the
@@ -415,21 +418,39 @@ function Member () {
   const recovering = passkey !== null && passkey.recovering === true
   const onceSync = !!(node.sync.active && node.sync.active.once) || node.sync.starting === true
 
-  // --- the age gate (src/age.js; hosted web only) ---
+  // --- the age gate (src/age.js; a hosted node) ---
   // The policy is read once the node is ready; a failed read (null) keeps
   // everyone blocked and is tried again with a backoff and when the
   // connection comes back.
-  const [agePolicy, setAgePolicy] = useState(undefined)
+  // The setup footer can switch installation, and each installation has its
+  // own policy: one read on another installation counts as not read here
+  // (undefined), so the gate stays closed until this installation answers.
+  // On the hosted website installationOrigin() is null and the page is the
+  // installation.
+  const ageOrigin = installationOrigin() || globalThis.location?.origin || ''
+  const [agePolicyEntry, setAgePolicyEntry] = useState(null)
+  const agePolicy = agePolicyEntry !== null && agePolicyEntry.origin === ageOrigin ? agePolicyEntry.policy : undefined
   const [agePolicyTick, setAgePolicyTick] = useState(0)
   const agePolicyTries = useRef(0)
+  const agePolicyTriesOrigin = useRef(ageOrigin)
   const agePolicyKnown = agePolicy !== undefined && agePolicy !== null
   useEffect(() => {
+    // A new installation starts its own backoff.
+    if (agePolicyTriesOrigin.current !== ageOrigin) {
+      agePolicyTriesOrigin.current = ageOrigin
+      agePolicyTries.current = 0
+    }
     if (!ageHosted || !ready || agePolicyKnown) return
+    // The answer is labelled with the installation it was asked of. Should the
+    // installation have changed since this render, the next render runs this
+    // again with the new origin, so nothing is asked under a stale label.
+    const origin = ageOrigin
+    if (origin !== (installationOrigin() || globalThis.location?.origin || '')) return
     let cancelled = false
     let timer = null
     readAgePolicy().then((p) => {
       if (cancelled) return
-      setAgePolicy(p)
+      setAgePolicyEntry({ origin, policy: p })
       if (p !== null) return
       timer = setTimeout(() => setAgePolicyTick((n) => n + 1), agePolicyDelay(agePolicyTries.current))
       agePolicyTries.current += 1
@@ -438,7 +459,7 @@ function Member () {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [ageHosted, ready, agePolicyKnown, agePolicyTick])
+  }, [ageHosted, ready, agePolicyKnown, agePolicyTick, ageOrigin])
   const agePolicyOnlineRef = useRef(node.online)
   useEffect(() => {
     const was = agePolicyOnlineRef.current
@@ -736,7 +757,13 @@ function Member () {
   // web's ?idade= load, and the outcome is always asked of the service again;
   // invite and profile links go to their stores. varanda://conta is not a
   // return (the Google step comes back only through the auth session). A
-  // link is never consent to follow.
+  // link is never consent to follow or to join.
+  // A state, not a ref: a group or community link that arrives while the tabs
+  // already show must run the effect that opens it. It carries the
+  // installation it arrived on: a key never opens on another installation.
+  const [pendingLink, setPendingLink] = useState(() => CAPTURED_GROUP !== null
+    ? { kind: 'grupo', key: CAPTURED_GROUP, origin: ageOrigin }
+    : CAPTURED_COMMUNITY !== null ? { kind: 'comunidade', key: CAPTURED_COMMUNITY, origin: ageOrigin } : null)
   const appUrlRef = useRef(null)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
@@ -761,6 +788,10 @@ function Member () {
       setCardShown(false)
       setAcceptedHere(false)
       setInviteTick((n) => n + 1)
+    }
+    const link = parseAppLink(url)
+    if (link !== null && (link.kind === 'grupo' || link.kind === 'comunidade')) {
+      setPendingLink({ kind: link.kind, key: link.key, origin: ageOrigin })
     }
   }
   useEffect(() => {
@@ -1056,7 +1087,7 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
-  // --- Comunidades (hosted web only) ---
+  // --- Comunidades (a hosted node: the site or the app on an installation) ---
   // Versions restart at 0 with every epoch, so what was seen is kept with its
   // epoch and compared with !==. The dot shows when a group the node follows
   // moved since the Comunidades tab (or that group) was last on screen.
@@ -1095,21 +1126,26 @@ function Member () {
   // request now would preempt the recovery run.
   const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
-  // A /g/<hex> link opens its group once the tabs are on screen.
-  const pendingGroup = useRef(CAPTURED_GROUP)
+  // A group or community link opens once the tabs are on screen and the node
+  // is hosted (only a hosted node has Comunidades). It waits, in memory only,
+  // through a reconnect, when the native node is briefly not hosted. A switch
+  // to another installation drops it. On a cold start the link can arrive
+  // before the saved installation loads: it then belongs to the first one
+  // that does, and while no installation is known it waits.
   useEffect(() => {
-    if (pendingGroup.current === null || mode !== 'hosted' || !atTabs) return
-    const key = pendingGroup.current
-    pendingGroup.current = null
-    pushScreen({ screen: 'cadeira', key, params: {} })
-  }, [mode, atTabs, pushScreen])
-  const pendingCommunity = useRef(CAPTURED_COMMUNITY)
-  useEffect(() => {
-    if (pendingCommunity.current === null || mode !== 'hosted' || !atTabs) return
-    const key = pendingCommunity.current
-    pendingCommunity.current = null
-    pushScreen({ screen: 'comunidade', key, params: {} })
-  }, [mode, atTabs, pushScreen])
+    if (pendingLink === null || ageOrigin === '') return
+    if (pendingLink.origin === '') {
+      setPendingLink({ ...pendingLink, origin: ageOrigin })
+      return
+    }
+    if (pendingLink.origin !== ageOrigin) {
+      setPendingLink(null)
+      return
+    }
+    if (!atTabs || mode !== 'hosted') return
+    pushScreen({ screen: pendingLink.kind === 'grupo' ? 'cadeira' : 'comunidade', key: pendingLink.key, params: {} })
+    setPendingLink(null)
+  }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
