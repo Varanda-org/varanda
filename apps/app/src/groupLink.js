@@ -9,6 +9,7 @@ import { isAuthorKey } from './nav.js'
 
 const MAX_PATH = 80
 const GROUP_PATH = /^\/g\/([0-9a-f]{64})\/?$/
+const COMMUNITY_PATH = /^\/c\/([0-9a-f]{64})\/?$/
 
 // Cheap prefix test: any path under /g/ is a group link attempt and gets
 // cleaned from the address bar, valid or not.
@@ -26,11 +27,37 @@ export function parseGroupPath (p) {
 // Runs once at startup. A /g/ path is cleaned to '/' keeping search and hash
 // byte for byte (?conta= and #token= are read later by the account flow);
 // returns the key to open, or null. Any other path touches nothing.
-export function captureGroupLink ({ location, history } = {}) {
+export function captureGroupLink (env) {
+  return capture(env, isGroupPath, parseGroupPath)
+}
+
+// Community links (https://<origin>/c/<hex64>) follow the same rules.
+export function isCommunityPath (p) {
+  return typeof p === 'string' && p.startsWith('/c/')
+}
+
+export function parseCommunityPath (p) {
+  if (typeof p !== 'string' || p.length > MAX_PATH) return null
+  const m = COMMUNITY_PATH.exec(p)
+  return m && isAuthorKey(m[1]) ? m[1] : null
+}
+
+export function captureCommunityLink (env) {
+  return capture(env, isCommunityPath, parseCommunityPath)
+}
+
+// The path a person shares for a community, or null for a bad key.
+export function communityLink (community) {
+  if (typeof community !== 'string') return null
+  const c = community.toLowerCase()
+  return isAuthorKey(c) ? '/c/' + c : null
+}
+
+function capture ({ location, history } = {}, isPath, parse) {
   try {
     const pathname = location && location.pathname
-    if (!isGroupPath(pathname)) return null
-    const key = parseGroupPath(pathname)
+    if (!isPath(pathname)) return null
+    const key = parse(pathname)
     try {
       history.replaceState(history.state, '', '/' + (location.search || '') + (location.hash || ''))
     } catch {}

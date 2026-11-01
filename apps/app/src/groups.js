@@ -1,4 +1,4 @@
-// Pure group logic for the "Cadeiras de Praia" screens: page merging,
+// Pure group logic for the "Comunidades" screens: page merging,
 // message rows, roles and permissions, pt-BR labels, join links, the
 // reconciliation of an UNCERTAIN mutation and the invalidation of read
 // pages. No React, react-native or Node built-ins: the Node tests import it.

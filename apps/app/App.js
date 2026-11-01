@@ -58,7 +58,7 @@ import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureGroupLink } from './src/groupLink'
+import { captureCommunityLink, captureGroupLink } from './src/groupLink'
 import { tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
@@ -115,7 +115,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Cadeiras' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Comunidades' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -180,6 +180,10 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // render; it only lives in memory and opens the group on the hosted web.
 const CAPTURED_GROUP = hostedPage === true && Platform.OS === 'web'
   ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
+  : null
+// A community link (/c/<hex>) works the same way and opens the community.
+const CAPTURED_COMMUNITY = hostedPage === true && Platform.OS === 'web'
+  ? captureCommunityLink({ location: globalThis.location, history: globalThis.history })
   : null
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
@@ -1052,10 +1056,10 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
-  // --- Cadeiras de Praia (hosted web only) ---
+  // --- Comunidades (hosted web only) ---
   // Versions restart at 0 with every epoch, so what was seen is kept with its
   // epoch and compared with !==. The dot shows when a group the node follows
-  // moved since the Cadeiras tab (or that group) was last on screen.
+  // moved since the Comunidades tab (or that group) was last on screen.
   const nodeEpoch = node.epoch
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
@@ -1098,6 +1102,13 @@ function Member () {
     const key = pendingGroup.current
     pendingGroup.current = null
     pushScreen({ screen: 'cadeira', key, params: {} })
+  }, [mode, atTabs, pushScreen])
+  const pendingCommunity = useRef(CAPTURED_COMMUNITY)
+  useEffect(() => {
+    if (pendingCommunity.current === null || mode !== 'hosted' || !atTabs) return
+    const key = pendingCommunity.current
+    pendingCommunity.current = null
+    pushScreen({ screen: 'comunidade', key, params: {} })
   }, [mode, atTabs, pushScreen])
   const action = inviteAction({
     invite,
