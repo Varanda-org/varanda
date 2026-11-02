@@ -1,6 +1,30 @@
 'use strict'
 
+const { register } = require('node:module')
 const test = require('brittle')
+
+const reactNative = `
+const box = globalThis.__appState = globalThis.__appState || { listeners: new Set(), currentState: undefined }
+export const AppState = {
+  get currentState () { return box.currentState },
+  set currentState (state) { box.currentState = state },
+  addEventListener (type, fn) {
+    if (type !== 'change') throw new Error('type')
+    box.listeners.add(fn)
+    return { remove: () => box.listeners.delete(fn) }
+  }
+}
+`
+const hooks = `
+const stubs = {
+  'react-native': 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(reactNative)})
+}
+export async function resolve (specifier, context, next) {
+  if (stubs[specifier]) return { url: stubs[specifier], shortCircuit: true }
+  return next(specifier, context)
+}
+`
+register('data:text/javascript,' + encodeURIComponent(hooks))
 
 const load = () => import('../src/autoSyncPolicy.js')
 
@@ -34,9 +58,8 @@ test('shouldStopForHidden: only a continuous run while hidden', async (t) => {
   }
 })
 
-test('visibility: web events, missing browser globals and native no-op', async (t) => {
+test('visibility: web events and missing browser globals', async (t) => {
   const web = await import('../src/visibility.web.js')
-  const native = await import('../src/visibility.native.js')
   const saved = ['document', 'window'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)])
   t.teardown(() => {
     for (const [key, descriptor] of saved) {
@@ -59,23 +82,81 @@ test('visibility: web events, missing browser globals and native no-op', async (
   globalThis.window = new EventTarget()
   const changes = []
   const unsubscribe = web.subscribeVisible((visible) => changes.push(visible))
-  const unsubscribeNative = native.subscribeVisible(() => t.fail('native does not subscribe'))
   globalThis.window.dispatchEvent(new Event('pagehide'))
   globalThis.window.dispatchEvent(new Event('pageshow'))
   globalThis.document.visibilityState = 'hidden'
   t.is(web.isVisible(), false)
-  t.is(native.isVisible(), true)
   globalThis.window.dispatchEvent(new Event('visibilitychange'))
   globalThis.window.dispatchEvent(new Event('pageshow'))
   globalThis.document.visibilityState = 'visible'
   globalThis.window.dispatchEvent(new Event('visibilitychange'))
   t.alike(changes, [false, true, false, false, true])
   unsubscribe()
-  unsubscribeNative()
   for (const name of ['visibilitychange', 'pagehide', 'pageshow']) {
     globalThis.window.dispatchEvent(new Event(name))
   }
   t.alike(changes, [false, true, false, false, true])
+})
+
+test('visibility: native AppState changes only, with unknown states visible', async (t) => {
+  const native = await import('../src/visibility.native.js')
+  const { AppState } = await import('react-native')
+  const box = globalThis.__appState
+  const emit = (state) => {
+    AppState.currentState = state
+    for (const fn of [...box.listeners]) fn(state)
+  }
+  const changes = []
+  AppState.currentState = undefined
+  t.is(native.isVisible(), true, 'first paint stays visible')
+  const unsubscribe = native.subscribeVisible((visible) => changes.push(visible))
+  t.teardown(unsubscribe)
+  t.is(box.listeners.size, 1, 'subscribes to AppState')
+  t.alike(changes, [], 'no call at registration')
+  for (const [state, visible, expected] of [
+    [undefined, true, []],
+    ['active', true, []],
+    ['background', false, [false]],
+    ['background', false, [false]],
+    ['inactive', false, [false]],
+    ['unknown', true, [false, true]],
+    ['active', true, [false, true]],
+    [null, true, [false, true]],
+    ['inactive', false, [false, true, false]],
+    ['active', true, [false, true, false, true]]
+  ]) {
+    emit(state)
+    t.is(native.isVisible(), visible, String(state))
+    t.alike(changes, expected, 'only boolean changes: ' + state)
+  }
+  unsubscribe()
+  t.is(box.listeners.size, 0, 'removes the AppState listener')
+  emit('background')
+  t.is(native.isVisible(), false)
+  t.alike(changes, [false, true, false, true], 'nothing after unsubscribe')
+
+  const hiddenChanges = []
+  const unsubscribeHidden = native.subscribeVisible((visible) => hiddenChanges.push(visible))
+  t.teardown(unsubscribeHidden)
+  t.alike(hiddenChanges, [], 'no call when subscribing while hidden')
+  emit('inactive')
+  t.alike(hiddenChanges, [], 'compares with the initial hidden state')
+  emit('active')
+  t.alike(hiddenChanges, [true])
+  unsubscribeHidden()
+})
+
+test('visibility: the shell pauses on web always, on native only the hosted node', async (t) => {
+  const web = await import('../src/visibility.web.js')
+  const native = await import('../src/visibility.native.js')
+  for (const hosted of [true, false, undefined, null]) {
+    t.is(web.pausesWhenHidden(hosted), true, 'web ' + hosted)
+    t.is(native.pausesWhenHidden(hosted), hosted === true, 'native ' + hosted)
+    for (const visible of [true, false]) {
+      t.is(web.effectiveVisible(visible, hosted), visible, 'web ' + visible + ' ' + hosted)
+      t.is(native.effectiveVisible(visible, hosted), visible || hosted !== true, 'native ' + visible + ' ' + hosted)
+    }
+  }
 })
 
 test('wantsStart: no start while awaiting the node restart', async (t) => {
