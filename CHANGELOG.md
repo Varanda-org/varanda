@@ -19,7 +19,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 - Celular primeiro: o app instalado é o alvo principal, a web e a PWA vêm depois. Um bloco "Celular primeiro" em `AGENTS.md` e `CONTRIBUTING.md`, o item Android no modelo de PR e `apps/app/test/platformGate.test.js`, que falha se uma tela compartilhada chamar o navegador. Sem mudança: o aviso do sistema (push) continua só na web, não há publicação nas lojas e não há App Links nem Universal Links (links https não abrem o app).
 - O app instalado abre links `varanda:///g/<chave>` e `varanda:///c/<chave>`; um link que chega antes de as abas aparecerem espera na memória até elas aparecerem num nó hospedado (num nó manual não é descartado). Os links de grupo e de comunidade compartilhados pelo celular levam o endereço https da instalação.
-- Copiar texto funciona no app (`expo-clipboard` 55.0.17; o `Podfile.lock` do iOS ainda não o traz e o próximo `pod install` o adiciona).
+- Copiar texto funciona no app (`expo-clipboard` 55.0.17, também no `Podfile.lock` do iOS).
+- iOS no fluxo "celular primeiro": a regra e o modelo de PR pedem também o simulador iOS; `apps/app/scripts/check-pods-lock.js` compara o `Podfile.lock` commitado com o que o `pod install` gera, sem as duas linhas que dependem da máquina, e acusa um pod esquecido (como aconteceu com o `expo-clipboard`).
 - A Conta de pagamentos funciona no app instalado: a foto do documento vem da galeria, gravada de novo sem redimensionar (JPEG 0,92, ou PNG quando a foto é PNG, WebP ou GIF; sem EXIF nem GPS), a página de verificação abre no navegador do sistema, o código Pix é copiado, e o envio recusa resposta redirecionada ou outra origem final.
 - A CI exporta o bundle Android (`.github/workflows/native.yml`), só como checagem de que ele resolve.
 - Cadeiras de Praia e Comunidades aparecem no app instalado: são seis abas onde o nó é hospedado e cinco na configuração manual e no `varanda-serve`.

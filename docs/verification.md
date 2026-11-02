@@ -3599,3 +3599,23 @@ Na mesma árvore, no Mac (Node 24.22.1), na ordem da CI:
 - `npm run demo`: `DEMO OK`.
 - `npm run pack:worklet -w apps/app` ("node scan: clean") e `npx expo export --platform android` em `apps/app`: saíram com 0 (os comandos do workflow `native.yml`).
 - O primeiro build local mostrou que a saída do Gradle dos módulos locais (`apps/app/modules/*/android/build/`) não estava no `.gitignore`; agora está.
+
+## 66. App no simulador iOS depois da pilha "celular primeiro" (PR fix/ios-native-loop, 2026-11-02)
+
+Mesmo roteiro da seção 65, agora no iOS, sobre `main@bc56143` (a pilha inteira já na `main`). Mac Apple Silicon, Xcode 26.2 (17C52), runtime iOS 26.2, simulador iPhone 17 Pro, CocoaPods 1.16.2. As capturas ficaram fora do repositório.
+
+### Comandos e resultados
+
+1. `npm ci --ignore-scripts`, depois `npm run prepare:native -w apps/app -- ios`: saiu com 0, "Pod installation complete! There are 95 dependencies from the Podfile and 97 total pods installed." e "prepare-native: ready (ios)".
+2. O `pod install` acrescentou o pod `ExpoClipboard` (55.0.17), que faltava no `Podfile.lock` desde a entrada do `expo-clipboard`, e mudou as duas linhas de `SPEC CHECKSUMS` que dependem do caminho (`React-Core-prebuilt`, `ReactNativeDependencies`; veja a seção 7) e a indentação de `PrivacyInfo.xcprivacy`. Só o `ExpoClipboard` foi commitado. `node apps/app/scripts/check-pods-lock.js` acusou o lock antigo (as seis linhas do `ExpoClipboard` como "not committed", saída 1) e aceitou o novo contra o lock gerado (saída 0).
+3. `xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator -destination 'name=iPhone 17 Pro' -derivedDataPath build build`: `** BUILD SUCCEEDED **`.
+4. `xcrun simctl install` no iPhone 17 Pro, Metro com `npx expo start --port 8081 --clear` (`iOS Bundled 5108ms apps/app/index.js (988 modules)`) e `xcrun simctl launch ... app.varanda`.
+
+### Observado
+
+- O app abriu do Metro na introdução ("Seu diário, perto de você", Pular/Próximo). O aparelho de teste já tinha uma instalação anterior do app, que foi substituída sem apagar os dados.
+- `xcrun simctl openurl ... 'varanda:///g/<64 hex>'` e a forma `/c/` (chave de teste `ab` repetido 32 vezes) foram entregues, o processo seguiu vivo e a tela continuou na introdução, porque não há instalação nem sessão para abrir o link. O Metro não registrou erro.
+
+### O que não foi executado
+
+- Entrar com passkey (depende do domínio associado da conta Apple Developer), telas que exigem conta, aparelho real, build de release.
