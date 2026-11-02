@@ -127,6 +127,23 @@ cd apps/app
 npm run ios                          # expo run:ios
 ```
 
+Phone first means the iOS simulator too: a screen change is checked on the Android debug build and on the simulator. On this kind of Mac (Xcode 26.2, iOS 26.2 simulator runtime, CocoaPods 1.16.2) the build and a run without `expo run:ios`:
+
+```sh
+npm ci --ignore-scripts
+npm run prepare:native -w apps/app -- ios
+(cd apps/app/ios && xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug \
+  -sdk iphonesimulator -destination 'name=iPhone 17 Pro' -derivedDataPath build build)
+xcrun simctl install booted apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
+(cd apps/app && npx expo start --port 8081)                       # in another terminal
+xcrun simctl launch booted app.varanda
+xcrun simctl openurl booted 'varanda:///g/<64 lowercase hex>'     # a group link, as Linking delivers it
+```
+
+- `pod install` always rewrites two `SPEC CHECKSUMS` lines of `apps/app/ios/Podfile.lock`: `React-Core-prebuilt` and `ReactNativeDependencies` point at prebuilt tarballs under `Pods/`, and their podspec carries that absolute path, so the checksum depends on where the repository lives (section 7 of [verification.md](verification.md)). Do not commit those two lines; commit every other change, for example a new Expo module. `node apps/app/scripts/check-pods-lock.js <committed lock> <generated lock>` compares two locks without those lines and the `COCOAPODS:` version, and fails on a pod that is missing, extra or at another version (`git show HEAD:apps/app/ios/Podfile.lock > /tmp/Podfile.lock.committed` gives the committed one). After you put the committed lines back, the next Xcode build fails its "Check Pods Manifest.lock" phase until `pod install` runs again; that is expected on the machine that just ran it.
+- `pod install` also rewrites `ios/Varanda/PrivacyInfo.xcprivacy` with other indentation only; revert it (`test/hardening.test.js` compares it without whitespace anyway).
+- Signing in with a passkey on iOS waits for the Apple Developer associated domain, so the simulator covers everything up to Conectar and the screens that need no account.
+
 - `prepare:native` runs `scripts/prepare-native.sh [ios|android|all]`: the three steps below in order, then checks again that every addon is linked. `npm run ios` and `npm run android` run the same check (`scripts/link-addons.sh check`) before `expo run:*`, so a build without the addons fails with a message instead of producing an app whose worklet cannot load them.
 - `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native, bare-fs, fs-native-extensions, bare-crypto and bare-tls are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
 - `pack:worklet` runs `scripts/pack-worklet.sh` and writes `apps/app/assets/worklet/main.bundle.js` (generated and ignored by version control).
@@ -176,7 +193,7 @@ adb reverse tcp:8081 tcp:8081
 cd apps/app && npx expo start --port 8081 --clear
 ```
 
-Open the installed Varanda debug app on the emulator; it loads the JavaScript from Metro through the reverse tunnel. Never run `expo prebuild` (`ios/` and `android/` are hand-maintained and carry security edits; see the bullet above on `plugins/with-hardening.js`). `npm ci` wipes the linked addons, so run `prepare:native` again after every install. The Android build needs no pod install. The iOS side needs one: `expo-clipboard` is pinned at 55.0.17 but `apps/app/ios/Podfile.lock` was not updated (a local `pod install` also changed two unrelated prebuilt checksums, so it was reverted). The next `pod install` (`prepare:native` for iOS, or EAS's post-install) adds ExpoClipboard.
+Open the installed Varanda debug app on the emulator; it loads the JavaScript from Metro through the reverse tunnel. Never run `expo prebuild` (`ios/` and `android/` are hand-maintained and carry security edits; see the bullet above on `plugins/with-hardening.js`). `npm ci` wipes the linked addons, so run `prepare:native` again after every install. The Android build needs no pod install. The iOS side needs one (see "iOS" above).
 
 What the local loop cannot do: the debug build is `app.varanda.debug`, signed with the public debug key (`apps/app/android/app/build.gradle:124`), while the installation's `assetlinks.json` associates only `app.varanda` (`deploy/seeder/well-known.sh:61`). A debug build therefore cannot sign in with a passkey on a production installation. The local loop covers everything up to Conectar and the screens that need no account; signed-in phone checks use the EAS preview APK (release key, `app.varanda`) for now. Never add the public debug key to a production `assetlinks.json`: anyone could then build an app that uses the domain's passkeys. A development installation with its own debug association is a maintainer decision, not part of this change.
 
