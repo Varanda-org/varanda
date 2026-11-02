@@ -235,8 +235,10 @@ async function startFakeHodle () {
           }
         })
       }
-      const data = { documentId, uploadUrlFront: 'https://uploads.hodle.com.br/' + documentId + '/front' }
-      if (isDoubleSided) data.uploadUrlBack = 'https://uploads.hodle.com.br/' + documentId + '/back'
+      // As production answers (2026-11-02), not as the docs show it.
+      const s3 = 'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/'
+      const data = { documentId, uploadUrlFront: s3 + documentId + '/front?X-Amz-Signature=fake' }
+      if (isDoubleSided) data.uploadUrlBack = s3 + documentId + '/back?X-Amz-Signature=fake'
       json(res, 201, { success: true, data })
     },
     documentReady (req, res, ctx) {

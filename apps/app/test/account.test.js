@@ -912,12 +912,49 @@ test('uploadDocument: PUT raw bytes to the exact upload host, no credentials, no
   t.is(calls[0].init.method, 'PUT')
   t.is(calls[0].init.body, blob)
   t.is(calls[0].init.headers['content-type'], 'image/jpeg')
+  t.is(calls[0].init.headers['if-none-match'], '*')
   t.is(calls[0].init.credentials, 'omit')
   t.is(calls[0].init.redirect, 'error')
   t.ok(calls[0].init.signal)
   const png = new Blob([new Uint8Array([0x89])], { type: 'image/png' })
   await uploadDocument(UP_FRONT, png)
   t.is(calls[1].init.headers['content-type'], 'image/png')
+})
+
+// Production's upload URLs (2026-11-02) live on BRLA's S3 bucket.
+const S3 = 'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+const S3_LOOKALIKES = [
+  'https://another-bucket.s3.eu-west-1.amazonaws.com/u',
+  'https://s3.eu-west-1.amazonaws.com/brla4platforms-production-uploaded-documents/u',
+  S3 + '.evil.test/u',
+  'https://evil.brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/u',
+  S3.replace('https:', 'http:') + '/u',
+  S3 + ':8443/u',
+  S3.replace('https://', 'https://u:p@') + '/u'
+]
+
+test('walletKycDocument and uploadDocument: the production S3 upload host, and only that bucket', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: NONCE, signature: SIG }
+  const front = S3 + '/kyc/d1/front?X-Amz-Signature=' + 'a'.repeat(1900)
+  const back = S3 + '/kyc/d1/back?X-Amz-Signature=' + 'b'.repeat(1900)
+  stub(t, json(200, { documentId: 'd1', uploadUrlFront: front, uploadUrlBack: back }))
+  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'ID', isDoubleSided: 1 } }), { uploadUrlFront: front, uploadUrlBack: back })
+  for (const url of S3_LOOKALIKES) {
+    stub(t, json(200, { uploadUrlFront: url }))
+    await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'PASSPORT' } }), 'indisponivel', true, url)
+  }
+  stub(t, json(200, { livenessUrl: S3 + '/l' }))
+  await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), 'indisponivel', true, 'not a liveness host')
+
+  const jpeg = new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' })
+  const calls = stub(t, { ok: true, status: 200, headers: { get: () => '' }, text: async () => '' })
+  await a.uploadDocument(front, jpeg)
+  t.is(calls.length, 1)
+  t.is(calls[0].url, front)
+  t.is(calls[0].init.headers['if-none-match'], '*')
+  for (const url of S3_LOOKALIKES) await t.exception(a.uploadDocument(url, jpeg), url)
+  t.is(calls.length, 1, 'fetch never called for a lookalike')
 })
 
 test('uploadDocument: refuses types, sizes and hosts without calling fetch; non-2xx fails', async (t) => {

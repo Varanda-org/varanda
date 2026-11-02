@@ -188,7 +188,7 @@ test('kycDocument: double-sided ID and liveness selfie', async (t) => {
   const id = await h.kycDocument({ subAccountId: sub, documentType: 'ID', isDoubleSided: true })
   t.is(id.ok, true)
   t.alike(Object.keys(id).sort(), ['documentId', 'ok', 'uploadUrlBack', 'uploadUrlFront'])
-  t.ok(id.uploadUrlFront.startsWith('https://uploads.hodle.com.br/'))
+  t.ok(id.uploadUrlFront.startsWith('https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/'))
   checkRequest(t, fake.seen[1], 'POST', '/api/kyc/document')
   t.alike(fake.seen[1].body, { subAccountId: sub, documentType: 'ID', isDoubleSided: true })
 
@@ -229,6 +229,35 @@ test('kycDocument: hosted urls outside the exact hodle hosts are refused', async
   fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data: { documentId: 'doc_1', uploadUrlFront: 'https://uploads.hodle.com.br/f' } }) } })
   const missingBack = await h.kycDocument({ subAccountId: 'sub1', documentType: 'ID', isDoubleSided: true })
   t.is(missingBack.reason, 'formato', 'a double-sided document needs its back url')
+})
+
+// Production's answer (2026-11-02): presigned S3 URLs of about 2000 characters.
+test('kycDocument: the production S3 upload host is accepted, and only that bucket', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const S3 = 'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+  const presigned = (side) => S3 + '/kyc/doc_1/' + side + '?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=' + 'a'.repeat(1900)
+  fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data: { documentId: 'doc_1', uploadUrlFront: presigned('front'), uploadUrlBack: presigned('back') } }) } })
+  const ok = await h.kycDocument({ subAccountId: 'sub1', documentType: 'ID', isDoubleSided: true })
+  t.is(ok.ok, true)
+  t.is(ok.uploadUrlFront, presigned('front'))
+  t.is(ok.uploadUrlBack, presigned('back'))
+  for (const url of [
+    'https://another-bucket.s3.eu-west-1.amazonaws.com/x',
+    'https://s3.eu-west-1.amazonaws.com/brla4platforms-production-uploaded-documents/x',
+    'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com.evil.test/x',
+    'https://evil.brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/x',
+    'http://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/x',
+    'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com:8443/x',
+    'https://u:p@brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/x'
+  ]) {
+    fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data: { documentId: 'doc_1', uploadUrlFront: url } }) } })
+    const result = await h.kycDocument({ subAccountId: 'sub1', documentType: 'PASSPORT' })
+    t.is(result.reason, 'formato', 'refused: ' + url)
+  }
+  fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data: { documentId: 'doc_1', livenessUrl: S3 + '/l' } }) } })
+  const selfie = await h.kycDocument({ subAccountId: 'sub1', documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(selfie.reason, 'formato', 'the upload bucket is never a liveness page')
 })
 
 test('kycDocumentReady: GET with the subaccount in the query', async (t) => {

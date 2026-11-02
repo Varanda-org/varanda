@@ -11,7 +11,8 @@ const lines = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s
 const code = lines.join('\n')
 
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br; " +
+  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br " +
+  'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com; ' +
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
