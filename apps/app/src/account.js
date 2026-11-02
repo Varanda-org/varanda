@@ -382,8 +382,14 @@ export const ageResult = async ({ member, nonce, signature }) => {
 const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const NETWORK_RE = /^[a-z]{1,16}$/
 const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
-const UPLOAD_HOST = 'uploads.hodle.com.br'
-const LIVENESS_HOST = 'app.hodle.com.br'
+// The same exact hosts as apps/cli/lib/account/hodle.js; production's upload
+// URLs come from BRLA's S3 bucket and its selfie link is a Sumsub page, not
+// the documented hosts.
+const UPLOAD_HOSTS = Object.freeze([
+  'uploads.hodle.com.br',
+  'brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+])
+const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
 const UPLOAD_MAX = 10 * 1024 * 1024
 const UPLOAD_TIMEOUT_MS = 30000
@@ -405,10 +411,10 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
 
-function isHodleUrl (v, host) {
+function isHodleUrl (v, hosts) {
   if (!isVerificationUrl(v)) return false
   const u = new URL(v)
-  return u.hostname === host && u.port === ''
+  return hosts.includes(u.hostname) && u.port === ''
 }
 
 function uncertainError () {
@@ -518,13 +524,13 @@ export const walletOptin = async ({ member, nonce, signature, op }) => {
 export const walletKycDocument = async ({ member, nonce, signature, op }) => {
   const data = await walletCall('/account/wallet/kyc-document', { member, nonce, action: 'kyc-document', op, signature }, { uncertain: true, definite: true })
   if (isObject(op) && op.documentType === 'SELFIE-FROM-LIVENESS') {
-    if (isHodleUrl(data.livenessUrl, LIVENESS_HOST)) return { livenessUrl: data.livenessUrl }
+    if (isHodleUrl(data.livenessUrl, LIVENESS_HOSTS)) return { livenessUrl: data.livenessUrl }
     throw uncertainError()
   }
-  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOST)) throw uncertainError()
+  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOSTS)) throw uncertainError()
   const out = { uploadUrlFront: data.uploadUrlFront }
   if (isObject(op) && op.isDoubleSided === 1) {
-    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOST)) throw uncertainError()
+    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOSTS)) throw uncertainError()
     out.uploadUrlBack = data.uploadUrlBack
   }
   return out
@@ -782,16 +788,19 @@ function leftUploadOrigin (res, url) {
 // web File or Blob, or { type, size, bytes } from the native picker.
 // deps.fetch: expo/fetch on the phone (deps.native), which has no cache mode.
 export async function uploadDocument (url, doc, deps = {}) {
-  if (!isHodleUrl(url, UPLOAD_HOST)) throw toError('indisponivel')
+  if (!isHodleUrl(url, UPLOAD_HOSTS)) throw toError('indisponivel')
   if (!doc || typeof doc !== 'object' || !UPLOAD_TYPES.includes(doc.type) ||
     !Number.isSafeInteger(doc.size) || doc.size < 1 || doc.size > UPLOAD_MAX) {
     throw new Error('arquivo inválido')
   }
   const send = (deps && typeof deps.fetch === 'function') ? deps.fetch : globalThis.fetch
+  // Production's presigned URLs sign host;if-none-match, so S3 refuses the
+  // upload without it. It also keeps the single-use URL from being written
+  // twice, and the bucket's CORS allows it.
   const init = {
     method: 'PUT',
     body: doc.bytes instanceof Uint8Array ? doc.bytes : doc,
-    headers: { 'content-type': doc.type },
+    headers: { 'content-type': doc.type, 'if-none-match': '*' },
     credentials: 'omit',
     redirect: 'error'
   }

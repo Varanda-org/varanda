@@ -75,6 +75,7 @@ test('uploadDocument: native bytes go through deps.fetch with no cache mode', as
   t.is(init.method, 'PUT')
   t.is(init.body, bytes)
   t.is(init.headers['content-type'], 'image/jpeg')
+  t.is(init.headers['if-none-match'], '*')
   t.absent('cache-control' in init.headers || 'Cache-Control' in init.headers)
   t.absent('cache' in init)
   t.is(init.credentials, 'omit')
@@ -85,6 +86,31 @@ test('uploadDocument: native bytes go through deps.fetch with no cache mode', as
   await uploadDocument(UP, blob, { fetch: web.fetch })
   t.is(web.calls[0].init.body, blob)
   t.is(web.calls[0].init.cache, 'no-store')
+})
+
+// Android and iOS go through expo/fetch with the picker's bytes; production's
+// upload URLs (2026-11-02) live on BRLA's S3 bucket.
+test('uploadDocument: native bytes reach the production S3 upload host, and only that bucket', async (t) => {
+  const { uploadDocument } = await import('../src/account.js')
+  const S3 = 'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+  const url = S3 + '/kyc/d1/front?X-Amz-Signature=' + 'a'.repeat(1900)
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+  const doc = { type: 'image/png', size: bytes.byteLength, bytes }
+  const f = fakeFetch({ ok: true, status: 200, redirected: false, url })
+  await uploadDocument(url, doc, { fetch: f.fetch, native: true })
+  t.is(f.calls.length, 1)
+  t.is(f.calls[0].url, url)
+  t.is(f.calls[0].init.body, bytes)
+  t.is(f.calls[0].init.headers['content-type'], 'image/png')
+  t.is(f.calls[0].init.headers['if-none-match'], '*')
+  t.absent('cache' in f.calls[0].init)
+  for (const bad of ['https://another-bucket.s3.eu-west-1.amazonaws.com/u', S3 + '.evil.test/u', S3 + ':8443/u']) {
+    const g = fakeFetch({ ok: true, status: 200, redirected: false, url: bad })
+    try { await uploadDocument(bad, doc, { fetch: g.fetch, native: true }); t.fail(bad) } catch (e) {
+      t.is(e.code, 'indisponivel', bad)
+    }
+    t.is(g.calls.length, 0, 'never sent: ' + bad)
+  }
 })
 
 test('uploadDocument: a redirected answer or one from another origin fails', async (t) => {

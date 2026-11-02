@@ -283,7 +283,7 @@ test('TEXTS: frozen disclosures, no em dash or yield promises', async (t) => {
   t.is(TEXTS.OPTIN_FEES, 'Em alguns envios a Varanda cobra uma taxa própria, sempre mostrada antes de você confirmar, junto com a taxa do parceiro e o total.')
   t.is(TEXTS.OPTIN_SKIP, 'Deixar para depois')
   t.is(TEXTS.OPTIN_START, 'Quero abrir a conta')
-  t.is(TEXTS.LIVENESS_OPEN, 'A selfie é feita numa página da Hodle, que abre em outra janela. Quando terminar, volte aqui e toque em Já terminei.')
+  t.is(TEXTS.LIVENESS_OPEN, 'A selfie é feita numa página da Sumsub, a empresa que faz a prova de vida para a Hodle, e abre em outra janela. Quando terminar, volte aqui e toque em Já terminei.')
   t.is(TEXTS.UNCERTAIN_CREATE, 'Não deu para confirmar se a conta ou a carteira foi criada. Aguarde e toque em Conferir; nada é refeito sozinho.')
   for (const fragment of ['6 dígitos', 'toda vez que enviar', 'Ninguém na Varanda pode ver ou recuperar', 'Três erros', '24 horas']) {
     t.ok(TEXTS.PIN_HINT.includes(fragment))
