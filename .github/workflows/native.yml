@@ -1,16 +1,23 @@
-# Bundles the Android JavaScript of the app on every pull request and on
-# pushes to main.
+# Builds the native app on every pull request that touches it and on pushes
+# to main: the Android debug APK (Gradle), the iOS app for the simulator
+# (xcodebuild, unsigned) and the JavaScript bundles of both platforms
+# (expo export). A change that only works on the web, a pod or Expo module
+# left out of the lock, or a Kotlin, Swift or CMake error turns this red
+# before merge.
 #
-# No other step builds the native app, so a web-only import in shared code
-# would break the phone without any check turning red. `expo export` runs the
-# Metro resolver for the android platform, which fails when a module cannot
-# be resolved there. It needs no Android SDK or NDK.
+# The debug builds load JavaScript from Metro and bundle none, so the export
+# job is what proves the bundles resolve. None of it proves a screen avoids
+# browser APIs at run time: apps/app/test/platformGate.test.js does.
 #
-# Limit: this proves the native bundle resolves, not that a screen avoids
-# browser APIs at run time. apps/app/test/platformGate.test.js is that check.
+# `changes` decides whether the app is affected; when it is not, the build
+# jobs are skipped and the `native` gate still reports success, so the gate
+# can become a required check later. No secret is used: the debug APK is
+# signed with the committed public debug key and the simulator build is not
+# signed.
 #
-# Kept apart from ci.yml on purpose: ci.test.js pins that file's steps, and
-# this check is not one of the required `test (20)` / `test (24)` names.
+# Kept apart from ci.yml on purpose: ci.test.js pins that file's steps, and no
+# job here takes the required `test (20)` / `test (24)` names.
+# apps/cli/test/native.test.js pins the shape of this file.
 name: native
 
 on:
@@ -26,7 +33,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  android-bundle:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The commit ids come in through env, never spliced into the script.
+      # Fail closed: the builds are skipped only when every changed path is
+      # known to stay outside the native app (docs, the site, the CLI, the
+      # deploy files, the other workflows). Paths are listed NUL-separated,
+      # unquoted and without rename detection, so a non-ASCII name or the old
+      # side of a rename cannot slip past. Anything unexpected (a first push,
+      # a force push, a missing commit) builds everything.
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then range="$PR_BASE...$PR_HEAD"; from="$PR_BASE"; else range="$PUSH_BEFORE..$PUSH_AFTER"; from="$PUSH_BEFORE"; fi
+          case "$from" in ''|0000000000000000000000000000000000000000) echo "app=true" >> "$GITHUB_OUTPUT"; exit 0 ;; esac
+          list="$RUNNER_TEMP/changed-files"
+          if ! git -c core.quotePath=false diff --name-only --no-renames -z "$range" > "$list"; then echo "app=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if grep -Ezvq '^(docs/|apps/(site|cli)/|deploy/|[^/]+\.md$|LICENSE$|\.dockerignore$|\.github/(ISSUE_TEMPLATE/|pull_request_template\.md$|CODEOWNERS$|workflows/(ci|deploy|site)\.yml$))' "$list"; then app=true; else app=false; fi
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "app=$app"
+
+  js-bundles:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -42,12 +84,102 @@ jobs:
       # apps/app/src/client/native.js imports the generated worklet bundle,
       # which is gitignored. bare-pack needs Node 24.9 or newer.
       - run: npm run pack:worklet -w apps/app
-      - name: Export the Android bundle
+      - name: Export the Android and iOS bundles
         working-directory: apps/app
         env:
           CI: '1'
           EXPO_NO_TELEMETRY: '1'
-        run: npx expo export --platform android --output-dir /tmp/varanda-native-export
+        run: |
+          npx expo export --platform android --output-dir /tmp/varanda-export-android
+          npx expo export --platform ios --output-dir /tmp/varanda-export-ios
       # An export that exits 0 with no output would still be a broken bundle.
-      - name: Check the bundle exists
-        run: find /tmp/varanda-native-export -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
+      - name: Check both bundles exist
+        run: |
+          find /tmp/varanda-export-android -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
+          find /tmp/varanda-export-ios -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
+
+  android-build:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # The NDK and CMake React Native 0.83 and react-native-bare-kit build
+      # with (docs/development.md, "macOS setup"); the image has other ones.
+      # Licenses first, in a step of their own: `yes` ends with SIGPIPE when
+      # sdkmanager stops reading, which must not decide the install's status.
+      - name: Accept the Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+      - name: Install the Android packages the build pins
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install "ndk;27.1.12297006" "cmake;3.22.1" "platforms;android-36" "build-tools;36.0.0"'
+      - run: npm run prepare:native -w apps/app -- android
+      # JDK 17 from the image: the React Native Gradle plugin targets 17.
+      - name: Build the debug APK
+        working-directory: apps/app/android
+        run: JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew assembleDebug --no-daemon
+      - name: Check the APK exists
+        run: test -s apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+
+  ios-build:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # The Xcode the app is built and checked with (docs/verification.md).
+      - name: Select Xcode 26.2
+        run: sudo xcode-select -s /Applications/Xcode_26.2.app
+      - run: npm ci --ignore-scripts
+      # Links the addons (ad-hoc signed, no identity), packs the worklet and
+      # runs pod install with the image's CocoaPods.
+      - run: npm run prepare:native -w apps/app -- ios
+      # A pod that pod install adds but the commit lacks fails here, without
+      # the two lines that depend on the checkout path.
+      - name: Check the committed Podfile.lock
+        run: |
+          git show HEAD:apps/app/ios/Podfile.lock > "$RUNNER_TEMP/Podfile.lock.committed"
+          node apps/app/scripts/check-pods-lock.js "$RUNNER_TEMP/Podfile.lock.committed" apps/app/ios/Podfile.lock
+      # The build phases run node through ios/.xcode.env; this pins the one
+      # setup-node installed.
+      - name: Point Xcode at this node
+        run: echo "export NODE_BINARY=$(command -v node)" > apps/app/ios/.xcode.env.local
+      - name: Build for the simulator
+        working-directory: apps/app/ios
+        run: xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+      - name: Check the app exists
+        run: test -d apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
+
+  # The one name to make required: green when every build passed, or when the
+  # app was not touched and the builds were skipped.
+  native:
+    if: always()
+    needs: [changes, js-bundles, android-build, ios-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every native build passed or was not needed
+        env:
+          APP: ${{ needs.changes.outputs.app }}
+          CHANGES: ${{ needs.changes.result }}
+          BUILDS: ${{ needs.js-bundles.result }} ${{ needs.android-build.result }} ${{ needs.ios-build.result }}
+        run: |
+          echo "changes=$CHANGES app=$APP builds=$BUILDS"
+          [ "$CHANGES" = success ] || exit 1
+          for r in $BUILDS; do
+            if [ "$APP" = true ]; then [ "$r" = success ] || exit 1; else [ "$r" = skipped ] || [ "$r" = success ] || exit 1; fi
+          done
