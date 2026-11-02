@@ -1,9 +1,10 @@
 // Comunidade: one community (community.info, docs/rpc.md 5.59): its name,
 // the groups linked two-way (each opens its group) and how many admins it
 // has. The community creator also adds an admin (community.admin, 5.60) and
-// links a group (community.link, 5.58). Hosted web only, like the Cadeiras
-// tab. A mutation that comes back uncertain is never resent: the screen
-// re-reads and only then lets the person try again.
+// links a group (community.link, 5.58). The screen runs wherever the node is
+// hosted (site and installed app with an installation). A mutation that comes
+// back uncertain is never resent: the screen re-reads and only then lets the
+// person try again.
 // Props: community (hex64 root key), onBack(), onOpenGroup(group),
 // onOpenMember(diary).
 
@@ -14,6 +15,7 @@ import { useNode } from '../node'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
 import { communityLink } from '../groupLink'
+import { installationOrigin } from '../installation'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { fetchCommunity } from '../indexClient'
@@ -34,8 +36,9 @@ const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
 const NOT_FOUND = '@nome não encontrado.'
 
+// Native has no document origin. The hosted site never stores an installation.
 function origin () {
-  return typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string' ? window.location.origin : ''
+  return installationOrigin() || globalThis.location?.origin || ''
 }
 
 function keyOf (text) {
@@ -247,7 +250,13 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   const shareCommunity = async () => {
     const path = communityLink(community)
     if (path === null) return
-    const url = origin() + path
+    const base = origin()
+    // An empty origin would hand the share sheet a relative path.
+    if (base === '') {
+      setShareNote('Não foi possível copiar o link.')
+      return
+    }
+    const url = base + path
     const nav = shareNav()
     setShareNote('')
     if (canShare(nav) && (await shareUrl(nav, { url, title: title === 'Comunidade' ? 'Varanda' : title })) !== 'failed') return
