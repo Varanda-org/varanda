@@ -134,6 +134,7 @@ npm ci --ignore-scripts
 npm run prepare:native -w apps/app -- ios
 (cd apps/app/ios && xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug \
   -sdk iphonesimulator -destination 'name=iPhone 17 Pro' -derivedDataPath build build)
+xcrun simctl boot "iPhone 17 Pro"; open -a Simulator              # the build does not boot it; skip if booted
 xcrun simctl install booted apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
 (cd apps/app && npx expo start --port 8081)                       # in another terminal
 xcrun simctl launch booted app.varanda

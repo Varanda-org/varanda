@@ -9,7 +9,9 @@
 // React-Core-prebuilt and ReactNativeDependencies podspecs carry the absolute
 // path of the downloaded tarball in Pods/, so their checksum depends on where
 // the repository is checked out (docs/verification.md section 7). Those two
-// lines and the CocoaPods version line are left out of the comparison.
+// lines and the CocoaPods version line are left out of the comparison. The
+// rest is compared line by line, in order: the lock is a tree, so a
+// dependency moved under another pod is drift even when no line is added.
 // Usage: node scripts/check-pods-lock.js <committed lock> <generated lock>
 
 const fs = require('fs')
@@ -38,11 +40,18 @@ function onlyIn (a, b) {
 }
 
 function lockDrift (committed, generated) {
-  const a = counts(comparable(committed))
-  const b = counts(comparable(generated))
-  const missing = onlyIn(b, a)
-  const extra = onlyIn(a, b)
-  return { ok: missing.length === 0 && extra.length === 0, missing, extra }
+  const a = comparable(committed)
+  const b = comparable(generated)
+  const missing = onlyIn(counts(b), counts(a))
+  const extra = onlyIn(counts(a), counts(b))
+  // The same lines in another order: report where the generated lock first
+  // differs, since no line is missing or extra.
+  const moved = []
+  if (missing.length === 0 && extra.length === 0) {
+    const i = b.findIndex((line, k) => line !== a[k])
+    if (i !== -1) moved.push(b[i])
+  }
+  return { ok: missing.length === 0 && extra.length === 0 && moved.length === 0, missing, extra, moved }
 }
 
 module.exports = { lockDrift }
@@ -61,5 +70,6 @@ if (require.main === module) {
   console.error('Podfile.lock is out of date: run `npm run prepare:native -w apps/app -- ios` and commit the lock.')
   for (const line of drift.missing) console.error('  not committed: ' + line)
   for (const line of drift.extra) console.error('  only committed: ' + line)
+  for (const line of drift.moved) console.error('  order differs from: ' + line)
   process.exit(1)
 }

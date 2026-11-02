@@ -18,7 +18,17 @@ function replaceLine (text, from, to) {
 }
 
 test('the same lock has no drift', (t) => {
-  t.alike(lockDrift(committed, committed), { ok: true, missing: [], extra: [] })
+  t.alike(lockDrift(committed, committed), { ok: true, missing: [], extra: [], moved: [] })
+})
+
+test('a dependency moved under another pod is drift although no line changes', (t) => {
+  const committedTree = '  - ExpoAsset (55.0.20):\n    - ExpoModulesCore\n    - SDWebImageWebPCoder\n  - ExpoImageManipulator (55.0.21):\n    - ExpoModulesCore\n'
+  const generatedTree = '  - ExpoAsset (55.0.20):\n    - ExpoModulesCore\n  - ExpoImageManipulator (55.0.21):\n    - ExpoModulesCore\n    - SDWebImageWebPCoder\n'
+  const drift = lockDrift(committedTree, generatedTree)
+  t.is(drift.ok, false)
+  t.alike(drift.missing, [])
+  t.alike(drift.extra, [])
+  t.alike(drift.moved, ['  - ExpoImageManipulator (55.0.21):'])
 })
 
 test('the path-dependent checksums and the CocoaPods version are ignored', (t) => {
