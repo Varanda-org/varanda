@@ -2501,16 +2501,20 @@ Resultados (2026-10-29, macOS): `node packages/core/test/delete-e2e.test.js` com
 
 ### Verificação humana
 
-Marcar só o que for de fato executado, com a saída.
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
 
-Execução de 2026-11-01 (itens 1, 2, 3, 5 e 6), num ambiente local montado só para isso, fora do repositório: a web exportada (`expo export`) servida em `https://varanda.localhost:8800` com certificado autoassinado, junto do `/varanda.json`, do WebSocket do semeador e do serviço de conta com o painel, atrás de um proxy que reescreve o `Host` como o Caddy. Chrome sem interface com passkey virtual (PRF), semeador, serviço de conta, painel e `mod apply` reais, DHT local presa a `127.0.0.1`. O Google é falso: um servidor local com tela de escolha de conta, injetado pelos `endpoints` do `createGoogle`. O OAuth real do Google não foi exercitado. Dois moderadores com e-mails diferentes (`moda` decidiu o bloqueio, `modb` julgou); o `mod apply` rodou no processo com a revisão no terminal respondida `s`.
-
-- [x] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8. Executado em 2026-11-01: depois de aceitar a versão 9, o registro local `varanda-terms` foi regravado com `version: 8` (mesmo formato que a versão 8 gravava) e a página recarregada. A tela mostrou "Os Termos de Uso e a Política de Privacidade mudaram. Leia e aceite a versão 9 para continuar." com "Li e aceito". O registro de uma versão 8 de verdade não foi usado.
-- [x] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto". Executado em 2026-11-01 com a conta bloqueada pelo painel e publicada pelo `mod apply` (seq 2).
-- [x] Conta não bloqueada: "esta conta não está bloqueada". Executado em 2026-11-01.
-- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda). Tentada em 2026-11-01 e não concluída: o emulador `LembraApi36` (API 36, `google_apis`) tem 0 contas Google, então o Credential Manager não tem provedor de passkey para criar a identidade com PRF; a passkey de um domínio só vale no Android com o `assetlinks.json` conferido pelo Google, o que um domínio local com certificado autoassinado não passa; e o app nativo só aceita uma instalação em https com certificado confiável. Também não há APK de debug compilado.
-- [x] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista. Executado em 2026-11-01: `moda` viu "Nenhum recurso aberto."; `modb` viu o recurso, aceitou (confirmação do painel) e o desbloqueio apareceu em Pendentes; o `mod apply` fez uma pergunta ("Assinar e publicar estas mudanças? [s/N]"), publicou `seq 3` e a chave saiu da lista do semeador, com a outra chave bloqueada mantida.
-- [x] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo. Executado em 2026-11-01: `modb` negou (confirmação do painel), a nova tentativa mostrou a mensagem e a chave continuou na lista do semeador.
+- [ ] Diário: a lixeira aparece só nas publicações próprias; tocar abre a folha "Apagar publicação"; Cancelar, o toque no fundo, Escape e o Voltar do Android fecham sem gravar nada (não realizada ainda).
+- [ ] Diário: confirmar apaga, a publicação some da lista e o diário mostra uma lápide a mais em Ajustes › Avançado (não realizada ainda).
+- [ ] A Rua e Conversa: a mesma ação numa publicação, numa resposta e numa citação próprias; a republicação de um post de outra pessoa nunca oferece a lixeira (não realizada ainda).
+- [ ] Falha incerta (semeador derrubado durante o pedido): aparece a mensagem de incerteza, o app relê o diário antes de oferecer o botão de novo e nunca reenvia o pedido sozinho (não realizada ainda).
+- [ ] Perfil: com três versões, "Apagar versão" na mais nova faz valer a anterior (nome e bio); confirmar e cancelar se comportam como no Diário (não realizada ainda).
+- [ ] Perfil: uma versão com foto (par de compatibilidade) aparece como uma versão só e some inteira com um toque; a foto deixa de carregar em `/media` (não realizada ainda).
+- [ ] Perfil: apagar a última versão deixa a conta sem nome nem bio; quem segue vê as iniciais (não realizada ainda).
+- [ ] CLI: `varanda delete --to <chave>:<seq>` imprime `apagado #<seq>`; repetir imprime `já apagado` sem gravar; outro autor, o bloco 0, uma curtida e uma lápide são recusados com a mensagem em pt-BR (não realizada ainda).
+- [ ] CLI: `varanda log` mostra `#<seq> apagado` no lugar do texto, e `--json` traz `record: null, deleted: true` (não realizada ainda).
+- [ ] Semeador de produção: depois da sincronização, `/index/counts/<ref>` e `/index/member/<chave>` não trazem a publicação, `/media/...` da foto dá 404 e `/moderation-post/<chave>/<seq>` com o token dá 404 (não realizada ainda).
+- [ ] Um segundo aparelho que segue o autor deixa de ver a publicação em A Rua depois de sincronizar, e uma pessoa que não segue deixa de vê-la na Espiadinha (não realizada ainda).
+- [ ] O aceite dos Termos versão 5 aparece de novo para quem aceitou a versão 4 (não realizada ainda).
 
 ### Limites
 
@@ -3574,14 +3578,16 @@ Duas janelas com perfis do navegador diferentes (A e B, cada uma com a própria 
 
 ### Verificação humana
 
-Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+Marcar só o que for de fato executado, com a saída.
 
-- [ ] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8 (não realizada ainda).
-- [ ] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto" (não realizada ainda).
-- [ ] Conta não bloqueada: "esta conta não está bloqueada" (não realizada ainda).
-- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda).
-- [ ] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista (não realizada ainda).
-- [ ] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo (não realizada ainda).
+Execução de 2026-11-01 (itens 1, 2, 3, 5 e 6), num ambiente local montado só para isso, fora do repositório: a web exportada (`expo export`) servida em `https://varanda.localhost:8800` com certificado autoassinado, junto do `/varanda.json`, do WebSocket do semeador e do serviço de conta com o painel, atrás de um proxy que reescreve o `Host` como o Caddy. Chrome sem interface com passkey virtual (PRF), semeador, serviço de conta, painel e `mod apply` reais, DHT local presa a `127.0.0.1`. O Google é falso: um servidor local com tela de escolha de conta, injetado pelos `endpoints` do `createGoogle`. O OAuth real do Google não foi exercitado. Dois moderadores com e-mails diferentes (`moda` decidiu o bloqueio, `modb` julgou); o `mod apply` rodou no processo com a revisão no terminal respondida `s`.
+
+- [x] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8. Executado em 2026-11-01: depois de aceitar a versão 9, o registro local `varanda-terms` foi regravado com `version: 8` (mesmo formato que a versão 8 gravava) e a página recarregada. A tela mostrou "Os Termos de Uso e a Política de Privacidade mudaram. Leia e aceite a versão 9 para continuar." com "Li e aceito". O registro de uma versão 8 de verdade não foi usado.
+- [x] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto". Executado em 2026-11-01 com a conta bloqueada pelo painel e publicada pelo `mod apply` (seq 2).
+- [x] Conta não bloqueada: "esta conta não está bloqueada". Executado em 2026-11-01.
+- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda). Tentada em 2026-11-01 e não concluída: o emulador `LembraApi36` (API 36, `google_apis`) tem 0 contas Google, então o Credential Manager não tem provedor de passkey para criar a identidade com PRF; a passkey de um domínio só vale no Android com o `assetlinks.json` conferido pelo Google, o que um domínio local com certificado autoassinado não passa; e o app nativo só aceita uma instalação em https com certificado confiável. Também não há APK de debug compilado.
+- [x] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista. Executado em 2026-11-01: `moda` viu "Nenhum recurso aberto."; `modb` viu o recurso, aceitou (confirmação do painel) e o desbloqueio apareceu em Pendentes; o `mod apply` fez uma pergunta ("Assinar e publicar estas mudanças? [s/N]"), publicou `seq 3` e a chave saiu da lista do semeador, com a outra chave bloqueada mantida.
+- [x] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo. Executado em 2026-11-01: `modb` negou (confirmação do painel), a nova tentativa mostrou a mensagem e a chave continuou na lista do semeador.
 
 ### Limites
 
