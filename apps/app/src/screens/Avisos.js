@@ -9,7 +9,7 @@
 // localStorage, or a file in the app's document dir on native). Hosted only:
 // on a manually configured node and varanda-serve the tab says so and never
 // calls notices.list. The screen stays mounted, so it polls
-// while the page is visible and online (that is how the dot lights up).
+// while node.visible and online (that is how the dot lights up).
 // Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -93,10 +93,6 @@ function writeSeen (ownKey, ids) {
 function prependNew (currentItems, pageItems) {
   const { items } = mergePage(currentItems, pageItems)
   return items.slice().sort(compareNotices)
-}
-
-function pageVisible () {
-  return typeof document === 'undefined' || document.visibilityState === 'visible'
 }
 
 // A follow row opens the person's profile. A reply, quote or mention opens
@@ -420,14 +416,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }, [generation, commit])
 
   // The poll runs even when the tab is not active (the screen stays mounted).
-  const [visible, setVisible] = useState(pageVisible)
-  useEffect(() => {
-    if (typeof document === 'undefined') return
-    const onChange = () => setVisible(pageVisible())
-    document.addEventListener('visibilitychange', onChange)
-    return () => document.removeEventListener('visibilitychange', onChange)
-  }, [])
-  const polling = shouldPoll({ hosted, online: node.online, visible }) && !unsupported && !locked
+  const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
   useEffect(() => {
     if (!polling) return
     const timer = setInterval(() => {
@@ -449,9 +438,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     stateRef.current = { ...stateRef.current, loading: false, loadingMore: false, refreshing: false }
   }, [])
 
-  const notice = unsupported
-    ? 'web-only'
-    : noticesNotice({ hosted, supported: !notSupportedByNode, online: node.online, loadedAt })
+  const notice = noticesNotice({ hosted, supported: !(unsupported || notSupportedByNode), online: node.online, loadedAt })
 
   const footer = (
     <View>

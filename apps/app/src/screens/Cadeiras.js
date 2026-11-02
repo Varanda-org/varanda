@@ -2,8 +2,8 @@
 // from group.list, a search of public groups through the index
 // (/index/group-search; private groups never appear there), "Entrar por link"
 // (a /g/<hex> link or a bare key, then group.join) and the Novo grupo sheet.
-// Hosted web only: elsewhere the tab shows the "só na versão web" note, like
-// Avisos, and calls nothing. App.js draws the top bar.
+// Hosted node only: a node that is not hosted shows the "só na versão web"
+// note, like Avisos, and calls nothing. App.js draws the top bar.
 // Minhas comunidades (community.list) sits under the groups; an older node
 // that does not know the method hides it. Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
 // root key. onOpenCommunity opens a community just made in Nova comunidade.

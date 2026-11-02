@@ -91,6 +91,8 @@ fix: release closed sockets from quarantine fetches
 docs: explain the installation
 ```
 
+**Celular primeiro.** `apps/app` é um só código (Expo, React Native e react-native-web) para Android, iOS, web e PWA: uma tela em `apps/app/src/screens` ou `src/ui` chega a todas as plataformas. Uma funcionalidade ou correção é feita e conferida primeiro no build de debug do Android (emulador ou aparelho), e só depois na web e no PWA. Decida o comportamento pela capacidade (`node.hosted`, `node.online`, uma sonda), nunca por `Platform.OS`, que fica só para uma API de plataforma que não existe nas outras ou para um ajuste visual, com o motivo num comentário. API que só o navegador tem vai num módulo `*.web.js`, com um irmão `*.native.js`; `apps/app/test/platformGate.test.js` falha se uma tela compartilhada chamar o navegador. Nunca mostre "Só na versão web" num celular com a instalação. Limite: o build de debug (`app.varanda.debug`, chave de debug pública) não entra com passkey numa instalação de produção; o que exige conta se confere com o APK de preview do EAS (veja `docs/development.md`).
+
 Nomeie a branch como `<tipo>/<slug>`, por exemplo `fix/fetch-socket-retention`.
 
 Toda dependência deve ter versão exata, sem `^`, `~` ou intervalos.

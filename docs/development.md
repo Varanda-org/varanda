@@ -6,7 +6,7 @@ How to work in this repository. Normative facts about formats and the wire are i
 
 - Node.js 20 or newer (`engines.node` is `>=20`) and npm. On the Mac this was written on: Node v26.10.0 and npm 11.19.1 (an example, not a requirement).
 - For the iOS app only: Xcode and CocoaPods. The gate passed with Xcode 26.2, CocoaPods 1.16.2 and an iPhone 17 Pro simulator (iOS 26.2). These are examples from [ios-gate.md](ios-gate.md).
-- For a native Android build: an Android SDK and JDK 17 or 21. The debug build has run on an x86_64 emulator (see "Android"); a real device, arm64-v8a and a release build have not.
+- For a native Android build: an Android SDK and JDK 17 or 21. On an Apple Silicon Mac, "Android" below has the exact setup (JDK 17, SDK root, an arm64-v8a emulator). The debug build has run on an x86_64 emulator on another machine; a real device and a release build have not.
 
 ## Layout (npm workspaces)
 
@@ -139,6 +139,48 @@ npm run ios                          # expo run:ios
 Status: the debug build runs on an x86_64 emulator (API 36) and passes the worklet gate (steps a to i of [ios-gate.md](ios-gate.md), 2026-10-28; the `.so` addons are packed in `lib/x86_64` and loaded). Not run: a real device, arm64-v8a and a release build. `npm run android` is `expo run:android`. Gradle needs JDK 17 or 21; the commands for the gate are in the "Android emulator" section of ios-gate.md.
 
 Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. Signing was not exercised in the emulator run (debug build only). See "Residual risks" in [ios-gate.md](ios-gate.md).
+
+### macOS setup (Apple Silicon)
+
+The practical phone today is Android: iOS passkey sign-in waits on the Apple Developer associated domain (see [app.md](app.md), "No app instalado com a instalação"). This host runs arm64 images, so use `arm64-v8a`; the earlier x86_64 run was another machine.
+
+```sh
+brew install openjdk@17
+brew install --cask android-commandlinetools
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+mkdir -p "$ANDROID_HOME"
+yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+sdkmanager --sdk_root="$ANDROID_HOME" "cmdline-tools;latest"
+sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "emulator" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1" "system-images;android-36;google_apis;arm64-v8a"
+yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+echo no | avdmanager create avd -n varanda-api36 -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
+```
+
+Accept the licenses before the first install: without them `sdkmanager` stops at the prompt and installs nothing. Installed on 2026-11-01: openjdk 17.0.21, cmdline-tools 23.0.0, build-tools 36.0.0, platforms android-36 2.0.0, NDK 27.1.12297006, CMake 3.22.1, emulator 37.2.13, platform-tools 37.0.1, system image 7.0.0.
+
+- JDK: the Homebrew formula `openjdk@17` (no sudo) at the `JAVA_HOME` above, not a cask. There is one SDK root, `~/Library/Android/sdk`, with `cmdline-tools;latest` installed into it; pass `--sdk_root` on every `sdkmanager` call so nothing lands in the cask's own directory. Put the exports in your shell profile.
+- The versions after `platforms;` and `build-tools;` are the ones this setup used; Gradle downloads anything else it needs (such as the NDK) once the licenses are accepted. If your Gradle run asks for different versions, install those.
+
+Build and run, from the repo root:
+
+```sh
+npm ci --ignore-scripts
+npm run prepare:native -w apps/app -- android
+cd apps/app/android && ./gradlew assembleDebug && cd ../../..
+emulator -avd varanda-api36 -no-snapshot
+adb install -r apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8081 tcp:8081
+cd apps/app && npx expo start --port 8081 --clear
+```
+
+Open the installed Varanda debug app on the emulator; it loads the JavaScript from Metro through the reverse tunnel. Never run `expo prebuild` (`ios/` and `android/` are hand-maintained and carry security edits; see the bullet above on `plugins/with-hardening.js`). `npm ci` wipes the linked addons, so run `prepare:native` again after every install. The Android build needs no pod install. The iOS side needs one: `expo-clipboard` is pinned at 55.0.17 but `apps/app/ios/Podfile.lock` was not updated (a local `pod install` also changed two unrelated prebuilt checksums, so it was reverted). The next `pod install` (`prepare:native` for iOS, or EAS's post-install) adds ExpoClipboard.
+
+What the local loop cannot do: the debug build is `app.varanda.debug`, signed with the public debug key (`apps/app/android/app/build.gradle:124`), while the installation's `assetlinks.json` associates only `app.varanda` (`deploy/seeder/well-known.sh:61`). A debug build therefore cannot sign in with a passkey on a production installation. The local loop covers everything up to Conectar and the screens that need no account; signed-in phone checks use the EAS preview APK (release key, `app.varanda`) for now. Never add the public debug key to a production `assetlinks.json`: anyone could then build an app that uses the domain's passkeys. A development installation with its own debug association is a maintainer decision, not part of this change.
+
+Phone first: `apps/app` is one codebase and a screen is checked on the phone before the web. `apps/app/test/platformGate.test.js` fails a shared screen that calls a browser API, and `.github/workflows/native.yml` exports the Android bundle on every pull request. That workflow is a bundle check only: it proves the native bundle resolves, not that a screen works on a device.
 
 ## Builds de teste (EAS)
 

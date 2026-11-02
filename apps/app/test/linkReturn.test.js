@@ -93,6 +93,52 @@ test('parseAppLink: no https link while the installation is a loopback http one'
   t.is(parseAppLink('http://127.0.0.1:8790/convite/' + CODE), null)
 })
 
+test('parseAppLink: group and community links', async (t) => {
+  const { parseAppLink } = await load()
+  t.alike(parseAppLink('varanda:///g/' + KEY), { kind: 'grupo', key: KEY })
+  t.alike(parseAppLink('varanda:///c/' + KEY), { kind: 'comunidade', key: KEY })
+  t.alike(parseAppLink('varanda:///g/' + KEY + '?x=1'), { kind: 'grupo', key: KEY })
+  for (const bad of [
+    'varanda:///g/' + KEY.toUpperCase(), 'varanda:///c/' + KEY.toUpperCase(),
+    'varanda:///g/' + KEY.slice(1), 'varanda:///c/' + KEY.slice(1),
+    'varanda:///g/' + KEY + '/x', 'varanda:///c/' + KEY + '/x',
+    'varanda://g/' + KEY, 'varanda://c/' + KEY, 'varanda:////g/' + KEY,
+    'https://varanda.example/g/' + KEY, 'https://varanda.example/c/' + KEY
+  ]) {
+    t.is(parseAppLink(bad), null, bad)
+  }
+})
+
+test('parseAppLink: https group and community links only on the installation origin', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  t.alike(parseAppLink('https://varanda.example/g/' + KEY), { kind: 'grupo', key: KEY })
+  t.alike(parseAppLink('https://varanda.example/c/' + KEY + '#x'), { kind: 'comunidade', key: KEY })
+  for (const bad of [
+    'https://evil.example/g/' + KEY, 'https://varanda.example.evil/c/' + KEY,
+    'http://varanda.example/g/' + KEY, 'https://varanda.example//g/' + KEY,
+    'https://varanda.example/g/' + KEY.toUpperCase()
+  ]) {
+    t.is(parseAppLink(bad), null, bad)
+  }
+})
+
+test('parseAppLink: no https group link while the installation is a loopback http one', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'http://127.0.0.1:8790')
+  t.is(parseAppLink('http://127.0.0.1:8790/g/' + KEY), null)
+  t.is(parseAppLink('http://127.0.0.1:8790/c/' + KEY), null)
+})
+
+test('parseInviteInput: a group or community link is not an invite', async (t) => {
+  const { parseInviteInput, parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const url of ['https://varanda.example/g/' + KEY, 'varanda:///g/' + KEY, 'varanda:///c/' + KEY]) {
+    t.ok(parseAppLink(url), url + ' parses as a link')
+    t.is(parseInviteInput(url), null, url)
+  }
+})
+
 test('parseInviteInput: bare code or a full invite link', async (t) => {
   const { parseInviteInput } = await load()
   await withOrigin(t, 'https://varanda.example')

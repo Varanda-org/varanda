@@ -122,7 +122,8 @@ test('listView branches, first match wins', async (t) => {
   const base = { hosted: true, online: true, phase: 'done', rows: [], next: null, unconfirmed: 0, kind: 'likes', total: 0 }
   const view = (o) => listView({ ...base, ...o }).view
   t.is(view({ hosted: false }), 'web-only')
-  t.is(view({ unsupported: true, rows: [{ author: B }] }), 'web-only')
+  t.is(view({ unsupported: true, rows: [{ author: B }] }), 'unavailable')
+  t.alike(listView({ ...base, unsupported: true, rows: [{ author: B }] }), { view: 'unavailable', title: 'Lista indisponível', body: 'Quem curtiu e quem republicou não está disponível nesta conexão.' })
   t.alike(listView({ ...base, online: false }), { view: 'offline', title: 'Sem conexão', body: 'A lista precisa de internet.', action: 'tentar de novo' })
   t.is(view({ online: false, rows: [{ author: B }] }), 'ready')
   t.is(view({ rows: [{ author: B }], phase: 'error' }), 'ready')
@@ -203,7 +204,7 @@ test('constants and no exported string has an em dash', async (t) => {
   }
   collect(Object.values(mod).filter((v) => typeof v !== 'function'))
   for (const kind of [...mod.KINDS, 'x']) {
-    for (const o of [{}, { hosted: true, online: false }, { hosted: true, phase: 'error' }, { hosted: true, next: 'x' }, { hosted: true, unconfirmed: 1 }, { hosted: true, total: 0 }, { hosted: true, indexing: true }]) {
+    for (const o of [{}, { hosted: true, online: false }, { hosted: true, phase: 'error' }, { hosted: true, next: 'x' }, { hosted: true, unconfirmed: 1 }, { hosted: true, total: 0 }, { hosted: true, indexing: true }, { hosted: true, unsupported: true }]) {
       collect(mod.listView({ ...o, kind }))
     }
     collect(mod.countLabel(kind, 1))

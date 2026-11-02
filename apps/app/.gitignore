@@ -41,6 +41,10 @@ yarn-error.*
 # plugin exists); their own .gitignore files drop Pods, builds,
 # .xcode.env.local and local.properties.
 
+# Gradle output of the local Expo modules (npm run android, assembleDebug)
+/modules/*/android/build/
+/modules/*/android/.cxx/
+
 # the packed worklet (scripts/pack-worklet.sh)
 /assets/worklet/
 
