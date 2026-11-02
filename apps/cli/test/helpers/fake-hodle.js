@@ -228,7 +228,8 @@ async function startFakeHodle () {
           data: {
             documentId,
             sessionId,
-            livenessUrl: 'https://app.hodle.com.br/liveness/' + documentId + '#sessionId=' + sessionId + '&token=eyJfake',
+            // Production's selfie link is a Sumsub page (2026-11-02).
+            livenessUrl: 'https://in.sumsub.com/websdk/p/' + documentId,
             validateLivenessToken: 'eyJfake',
             livenessIdentityPoolId: 'eu-west-1:fake',
             livenessRegion: 'eu-west-1'

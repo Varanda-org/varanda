@@ -116,7 +116,8 @@ const UPLOAD_HOSTS = Object.freeze([
   'uploads.hodle.com.br',
   'brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
 ])
-const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br'])
+// Production's selfie link is a Sumsub page (seen 2026-11-02).
+const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const DOCUMENT_TYPES = new Set(['ID', 'DRIVERS-LICENSE', 'PASSPORT', 'SELFIE-FROM-LIVENESS'])
 
 const KYC_OUTCOMES = Object.freeze({

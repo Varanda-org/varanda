@@ -383,12 +383,13 @@ const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const NETWORK_RE = /^[a-z]{1,16}$/
 const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
 // The same exact hosts as apps/cli/lib/account/hodle.js; production's upload
-// URLs come from BRLA's S3 bucket, not the documented host.
+// URLs come from BRLA's S3 bucket and its selfie link is a Sumsub page, not
+// the documented hosts.
 const UPLOAD_HOSTS = Object.freeze([
   'uploads.hodle.com.br',
   'brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
 ])
-const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br'])
+const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
 const UPLOAD_MAX = 10 * 1024 * 1024
 const UPLOAD_TIMEOUT_MS = 30000
@@ -793,8 +794,9 @@ export async function uploadDocument (url, doc, deps = {}) {
     throw new Error('arquivo inválido')
   }
   const send = (deps && typeof deps.fetch === 'function') ? deps.fetch : globalThis.fetch
-  // if-none-match as in Hodle's upload example: the single-use URL is never
-  // written twice. The bucket's CORS allows it.
+  // Production's presigned URLs sign host;if-none-match, so S3 refuses the
+  // upload without it. It also keeps the single-use URL from being written
+  // twice, and the bucket's CORS allows it.
   const init = {
     method: 'PUT',
     body: doc.bytes instanceof Uint8Array ? doc.bytes : doc,

@@ -957,6 +957,24 @@ test('walletKycDocument and uploadDocument: the production S3 upload host, and o
   t.is(calls.length, 1, 'fetch never called for a lookalike')
 })
 
+// Production's selfie link (2026-11-02) is a Sumsub page.
+test('walletKycDocument: the production Sumsub selfie host, and only that host', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: NONCE, signature: SIG }
+  const sumsub = 'https://in.sumsub.com/websdk/p/sbx_AbCdEf123456'
+  stub(t, json(200, { documentId: 'd1', livenessUrl: sumsub }))
+  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), { livenessUrl: sumsub })
+  for (const url of ['https://sumsub.com/l', 'https://api.sumsub.com/l', 'https://evil.in.sumsub.com/l',
+    'https://in.sumsub.com.evil.test/l', 'http://in.sumsub.com/l', 'https://in.sumsub.com:8443/l', 'https://u:p@in.sumsub.com/l']) {
+    stub(t, json(200, { livenessUrl: url }))
+    await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), 'indisponivel', true, url)
+  }
+  stub(t, json(200, { uploadUrlFront: sumsub }))
+  await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'PASSPORT' } }), 'indisponivel', true, 'not an upload host')
+  const jpeg = new Blob([new Uint8Array([0xff])], { type: 'image/jpeg' })
+  await t.exception(a.uploadDocument(sumsub, jpeg), 'never an upload target')
+})
+
 test('uploadDocument: refuses types, sizes and hosts without calling fetch; non-2xx fails', async (t) => {
   const { uploadDocument } = await load()
   const calls = stub(t, { ok: true, status: 200, headers: { get: () => '' }, text: async () => '' })

@@ -447,8 +447,12 @@ export default function Carteira ({ open, active, member, node, onBack }) {
     }
     const urls = await signed('kyc-document', { documentType: docType, isDoubleSided: sides ? 1 : 0 }, walletKycDocument)
     if (gen !== genRef.current) return
-    await uploadDocument(urls.uploadUrlFront, front, uploadDeps())
-    if (sides) await uploadDocument(urls.uploadUrlBack, back, uploadDeps())
+    // The upload URLs expire 30 s after they are made (X-Amz-Expires), so
+    // the back starts with the front instead of waiting for it to finish.
+    await Promise.all([
+      uploadDocument(urls.uploadUrlFront, front, uploadDeps()),
+      sides ? uploadDocument(urls.uploadUrlBack, back, uploadDeps()) : null
+    ])
     if (gen !== genRef.current) return
     setFront(null)
     setBack(null)

@@ -338,7 +338,7 @@ test('wallet: kyc-document URLs go only to the prover', async (t) => {
   t.ok(doc.body.uploadUrlBack.startsWith('https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/'))
   t.is(s.seen('POST', '/api/kyc/document')[0].body.isDoubleSided, true)
   const selfie = await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
-  t.ok(selfie.body.livenessUrl.startsWith('https://app.hodle.com.br/'))
+  t.ok(selfie.body.livenessUrl.startsWith('https://in.sumsub.com/'))
   const e = s.entry()
   t.is(e.kyc.documentId, doc.body.documentId)
   t.is(e.kyc.selfieId, selfie.body.documentId)
