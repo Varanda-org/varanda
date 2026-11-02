@@ -169,6 +169,7 @@ module.exports = {
   SEQ_MAX,
   NONCE_RE,
   isCleanText,
+  isWellFormed,
   digest,
   isGroupReport,
   reportPayload,

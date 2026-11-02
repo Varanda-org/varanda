@@ -75,7 +75,7 @@ export function toError (code) {
   return err
 }
 
-async function readJson (res) {
+export async function readJson (res) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
   let text
@@ -84,7 +84,7 @@ async function readJson (res) {
   try { return JSON.parse(text) } catch { return null }
 }
 
-function buildPost (path, body) {
+export function buildPost (path, body) {
   const app = isAppClient()
   const headers = { accept: 'application/json', 'content-type': 'application/json' }
   if (app) headers['x-varanda-client'] = 'app'

@@ -2501,20 +2501,16 @@ Resultados (2026-10-29, macOS): `node packages/core/test/delete-e2e.test.js` com
 
 ### Verificação humana
 
-Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+Marcar só o que for de fato executado, com a saída.
 
-- [ ] Diário: a lixeira aparece só nas publicações próprias; tocar abre a folha "Apagar publicação"; Cancelar, o toque no fundo, Escape e o Voltar do Android fecham sem gravar nada (não realizada ainda).
-- [ ] Diário: confirmar apaga, a publicação some da lista e o diário mostra uma lápide a mais em Ajustes › Avançado (não realizada ainda).
-- [ ] A Rua e Conversa: a mesma ação numa publicação, numa resposta e numa citação próprias; a republicação de um post de outra pessoa nunca oferece a lixeira (não realizada ainda).
-- [ ] Falha incerta (semeador derrubado durante o pedido): aparece a mensagem de incerteza, o app relê o diário antes de oferecer o botão de novo e nunca reenvia o pedido sozinho (não realizada ainda).
-- [ ] Perfil: com três versões, "Apagar versão" na mais nova faz valer a anterior (nome e bio); confirmar e cancelar se comportam como no Diário (não realizada ainda).
-- [ ] Perfil: uma versão com foto (par de compatibilidade) aparece como uma versão só e some inteira com um toque; a foto deixa de carregar em `/media` (não realizada ainda).
-- [ ] Perfil: apagar a última versão deixa a conta sem nome nem bio; quem segue vê as iniciais (não realizada ainda).
-- [ ] CLI: `varanda delete --to <chave>:<seq>` imprime `apagado #<seq>`; repetir imprime `já apagado` sem gravar; outro autor, o bloco 0, uma curtida e uma lápide são recusados com a mensagem em pt-BR (não realizada ainda).
-- [ ] CLI: `varanda log` mostra `#<seq> apagado` no lugar do texto, e `--json` traz `record: null, deleted: true` (não realizada ainda).
-- [ ] Semeador de produção: depois da sincronização, `/index/counts/<ref>` e `/index/member/<chave>` não trazem a publicação, `/media/...` da foto dá 404 e `/moderation-post/<chave>/<seq>` com o token dá 404 (não realizada ainda).
-- [ ] Um segundo aparelho que segue o autor deixa de ver a publicação em A Rua depois de sincronizar, e uma pessoa que não segue deixa de vê-la na Espiadinha (não realizada ainda).
-- [ ] O aceite dos Termos versão 5 aparece de novo para quem aceitou a versão 4 (não realizada ainda).
+Execução de 2026-11-01 (itens 1, 2, 3, 5 e 6), num ambiente local montado só para isso, fora do repositório: a web exportada (`expo export`) servida em `https://varanda.localhost:8800` com certificado autoassinado, junto do `/varanda.json`, do WebSocket do semeador e do serviço de conta com o painel, atrás de um proxy que reescreve o `Host` como o Caddy. Chrome sem interface com passkey virtual (PRF), semeador, serviço de conta, painel e `mod apply` reais, DHT local presa a `127.0.0.1`. O Google é falso: um servidor local com tela de escolha de conta, injetado pelos `endpoints` do `createGoogle`. O OAuth real do Google não foi exercitado. Dois moderadores com e-mails diferentes (`moda` decidiu o bloqueio, `modb` julgou); o `mod apply` rodou no processo com a revisão no terminal respondida `s`.
+
+- [x] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8. Executado em 2026-11-01: depois de aceitar a versão 9, o registro local `varanda-terms` foi regravado com `version: 8` (mesmo formato que a versão 8 gravava) e a página recarregada. A tela mostrou "Os Termos de Uso e a Política de Privacidade mudaram. Leia e aceite a versão 9 para continuar." com "Li e aceito". O registro de uma versão 8 de verdade não foi usado.
+- [x] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto". Executado em 2026-11-01 com a conta bloqueada pelo painel e publicada pelo `mod apply` (seq 2).
+- [x] Conta não bloqueada: "esta conta não está bloqueada". Executado em 2026-11-01.
+- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda). Tentada em 2026-11-01 e não concluída: o emulador `LembraApi36` (API 36, `google_apis`) tem 0 contas Google, então o Credential Manager não tem provedor de passkey para criar a identidade com PRF; a passkey de um domínio só vale no Android com o `assetlinks.json` conferido pelo Google, o que um domínio local com certificado autoassinado não passa; e o app nativo só aceita uma instalação em https com certificado confiável. Também não há APK de debug compilado.
+- [x] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista. Executado em 2026-11-01: `moda` viu "Nenhum recurso aberto."; `modb` viu o recurso, aceitou (confirmação do painel) e o desbloqueio apareceu em Pendentes; o `mod apply` fez uma pergunta ("Assinar e publicar estas mudanças? [s/N]"), publicou `seq 3` e a chave saiu da lista do semeador, com a outra chave bloqueada mantida.
+- [x] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo. Executado em 2026-11-01: `modb` negou (confirmação do painel), a nova tentativa mostrou a mensagem e a chave continuou na lista do semeador.
 
 ### Limites
 
@@ -3556,3 +3552,44 @@ Duas janelas com perfis do navegador diferentes (A e B, cada uma com a própria 
 - A cadeira privada continua sem catraca nem sigilo futuro dentro de uma época, com metadados visíveis, e as demais limitações da seção 62 valem.
 - Fora das telas, por não terem sido feitos: responder a uma mensagem (`groups.js` lê `replyTo`, mas as telas não o mostram nem o enviam), remover um administrador da comunidade e desvincular pelo lado da comunidade. Renomear (a criadora, na administração) e criar comunidade (na aba) estão nas telas; vale conferir os dois à mão.
 - O que mais as telas não conseguirem fazer fica registrado na descrição do PR.
+
+## 65. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+
+### O que mudou
+
+- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.63) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- Serviço de conta (`apps/cli/lib/account/mod-routes.js`): `POST /account/appeal/start` (só membro com conta Google vinculada; nonce sem estado, domínio `varanda-appeal-nonce`, 600 s) e `POST /account/appeal` (confere o nonce, a assinatura e grava; o nonce só é gasto depois de a assinatura valer). Respostas `{ id, duplicate }`; `nao-bloqueado` (403) se a chave não está na lista publicada nem tem bloqueio pendente; `limite-recursos` (429) para um novo recurso em 30 dias depois de um recurso negado; `limite` (503) com 2000 abertos ou 20000 guardados.
+- `moderation.json` passa a `v: 3` com `appeals` (linha: `id`, `at`, `member`, `text`, `nonce`, `signature`, `status` `aberta`/`aceito`/`negado`/`encerrado`, `decidedBy`, `decidedAt`, `note`). Um `v: 1` ou `v: 2` é lido sem recursos e regravado como `v: 3`. Linha malformada deixa o armazém `indisponivel`, como as denúncias. Eventos novos: `recurso-aceito`, `recurso-negado` e `recurso-encerrado` (a chave deixou de estar bloqueada com o recurso aberto: desbloqueio, bloqueio cancelado ou lista publicada sem ela), com `appealId`; nunca o texto, a assinatura, o nonce nem a nota.
+- Painel: `GET api/appeals?estado=aberta|decidida` (a decidida aceita `antes=<id>`, como `api/reports`, e a aba tem "mostrar mais") e `POST api/appeals/<id>/decide { decision: 'aceitar'|'negar', note }`. O recurso fica fora da lista e responde `nao-encontrado` para a própria pessoa recorrente e para quem decidiu (por e-mail) uma denúncia `bloquear` daquela chave; a IA não conta como pessoa. `api/me` ganha `appeals` (abertos que a pessoa pode julgar). Aceitar acrescenta uma mudança `unblock` como o botão Desbloquear (se havia um bloqueio pendente ainda não enviado, as duas se anulam), e conta como reversão humana para a triagem por IA; negar não mexe em Pendentes.
+- App: Ajustes › Recorrer de um bloqueio (`apps/app/src/screens/Recurso.js`, `apps/app/src/appeal.js`).
+- Termos de Uso e Política de Privacidade versão 9, com novo aceite (`LEGAL_VERSION` e `TERMS_VERSION` 9): os Termos descrevem o recurso e a Política diz o que o serviço de conta guarda dele (chave pública, texto opcional, assinatura, data, estado, decisão e nota de quem julgou), quem o lê e que não é apagado automaticamente (issue #38).
+
+### Testes automatizados
+
+- `packages/core/test/appeal.test.js`: bytes do payload, todos os campos ligados pela assinatura, separação de domínio de denúncia e termos, limites do texto.
+- `packages/rpc/test/methods.test.js`, `packages/core/test/session.test.js`, `packages/web-member/test/session.test.js`: validação do método, recusa no nó core e assinatura no navegador (bloqueado, sem identidade, sem chave).
+- `apps/cli/test/moderation-store.test.js`: só chave bloqueada recorre, repetição devolve a mesma linha, janela de 30 dias só depois de recurso negado, recurso encerrado quando a chave é desbloqueada, teto de 2000, aceitar e negar, listagem com exclusões, trilha sem dado privado, leitura de `v: 2` e de linha malformada.
+- `apps/cli/test/account-mod.test.js`: rotas do membro (não vinculado, não bloqueado, nonce de denúncia recusado, assinatura de outra chave, texto adulterado, Origin, repetição), painel (quem decidiu o bloqueio e a própria pessoa não veem nem decidem, aceitar vira desbloqueio pendente, negar mantém o bloqueio, limite de 30 dias).
+- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos. `apps/app/test/legal.test.js`: o recurso nos Termos e na Política, versão 9 e o digest do texto.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8 (não realizada ainda).
+- [ ] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto" (não realizada ainda).
+- [ ] Conta não bloqueada: "esta conta não está bloqueada" (não realizada ainda).
+- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda).
+- [ ] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista (não realizada ainda).
+- [ ] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo (não realizada ainda).
+
+### Limites
+
+- Sem recurso pela CLI nem pelo nó nativo sem instalação (Hypercore 11, cuja chave não assina, `docs/protocol.md`): a CLI de membro também não tem cliente do serviço de conta (issue #142). O app com a instalação (tipo `web`) roda o nó do site e usa a mesma tela e as mesmas rotas, com o cabeçalho `x-varanda-client: app`; só os testes de pedido cobrem isso, a tela não foi exercitada em aparelho.
+- `account reports` não exporta recursos; um pedido legal de acesso a esses dados ainda é manual (`moderation.json`).
+- A independência de quem julga compara o e-mail de quem decidiu a denúncia. Um bloqueio feito fora do painel (`mod block`) ou pela IA não tem esse e-mail, e um segundo diário ligado a outra conta Google não é detectável (seção 14). Com um só moderador, o recurso de um bloqueio dele fica sem quem decida.
+- O recurso vale para a chave do diário; bloqueio de chave de grupo (raiz) não tem recurso.
+- O recurso também vale para um bloqueio ainda pendente (não publicado): a pessoa fica sabendo de uma decisão antes de o operador assinar a lista. É intencional: só quem prova a chave do diário envia, e o recurso aceito cancela o bloqueio pendente sem esperar o `mod apply`.
+- A janela de 30 dias conta da negação, não do bloqueio: negado o recurso, uma chave desbloqueada por outro caminho e bloqueada de novo dentro de 30 dias só recorre depois dela.
+- Não há aviso à pessoa quando o recurso é decidido: ela só vê o resultado pela própria conta (desbloqueada ou não) ou ao tentar de novo.
+- Retenção das linhas de recurso é a mesma pendência das denúncias (issue #38).

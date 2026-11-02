@@ -113,6 +113,9 @@ const ERROR_STATUS = Object.freeze({
   'nao-vinculado': 403,
   'nao-autorizado': 401,
   'limite-denuncias': 429,
+  // An appeal (./mod-routes.js): only a blocked key appeals, once per window.
+  'nao-bloqueado': 403,
+  'limite-recursos': 429,
   limite: 503,
   defasado: 409,
   // A group block whose key the seeder did not confirm as a group root.
