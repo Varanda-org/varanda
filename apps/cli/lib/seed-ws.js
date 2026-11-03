@@ -90,8 +90,10 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   are null until the seeder has verified the root's header (they stay
 //   while a writer of G is served after the root was purged or refused, with
 //   rootServed false and creator null), `name` stays null for a private root.
-//   `community` is the community the group is linked with from both sides
-//   (hex64), or null.
+//   `community` is the parent community the header names (hex64; null for a
+//   community root or an unverified header) and `attached` whether that
+//   community's catalogue hints attach the group. A community's writers are
+//   its root and its community writers.
 //   /index/groups/<D> -> indexGroups: `{ groups: [{ group, writer, seq,
 //   left }] (one per group, at most 64), indexing, complete }`.
 //   /index/group-search/<segment> (the segment as in /index/search) ->
@@ -100,11 +102,14 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
-// - /index/community/<C> -> Seeder#indexCommunity: `{ name, groups: [{ group,
-//   name, writerCount }] (linked from both sides, at most 32; a private
-//   group is only { group, visibility: 'private' }), indexing,
-//   complete }`; a blocked key or one that is no community root here is
-//   the generic 404.
+// - /index/community/<C> -> Seeder#indexCommunity: `{ name, join, creator,
+//   members, groups: [{ group, visibility, join, name, writerCount }]
+//   (attached groups, key order, at most 32; name and writerCount null for
+//   a private group), next, indexing, complete }`; `next` is null or the
+//   last row's key. /index/community/<C>/groups/<cursor> ->
+//   indexCommunityGroups: `{ groups, next, indexing, complete }`, the rows
+//   after the cursor. A blocked key or one that is no community root here
+//   is the generic 404.
 // - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
 //   (at most 20 like/repost record refs, newest first by the engager's at).
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
@@ -204,6 +209,7 @@ const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
+const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
@@ -496,12 +502,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexGroupSearch', [m[1]], searchBody]
     m = INDEX_COMMUNITY_RE.exec(url)
     if (m) return ['indexCommunity', [m[1]], communityBody]
+    m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
+    if (m) return ['indexCommunityGroups', [m[1], m[2]], communityGroupsBody]
     return null
   }
 
   // The seeder's group answers flattened into the wire shape. The root
   // header is null until the root is served.
-  function groupBody ({ header, rootServed, community, writers, next, indexing, complete }) {
+  function groupBody ({ header, rootServed, community, attached, writers, next, indexing, complete }) {
     const h = header || {}
     return {
       kind: h.kind ?? null,
@@ -511,6 +519,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       creator: h.diary ?? null,
       rootServed: rootServed === true,
       community: typeof community === 'string' && HEX64_RE.test(community) ? community : null,
+      attached: attached === true,
       writers,
       next,
       indexing,
@@ -527,15 +536,35 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
-  function communityBody ({ name, groups, indexing, complete }) {
+  // A private group's row carries no name and no count. `next` is the last
+  // row's key or null: readers reject any other cursor.
+  function communityRows (groups) {
+    return groups.map(({ group, visibility, join, name, writerCount }) => visibility === 'private'
+      ? { group, visibility: 'private', join, name: null, writerCount: null }
+      : { group, visibility: 'public', join, name: name ?? null, writerCount })
+  }
+
+  function communityNext (next, rows) {
+    return next !== null && rows.length > 0 && next === rows[rows.length - 1].group ? next : null
+  }
+
+  function communityBody ({ name, join, creator, members, groups, next, indexing, complete }) {
+    const rows = communityRows(groups)
     return {
       name: name ?? null,
-      groups: groups.map(({ group, visibility, name, members }) => visibility === 'private'
-        ? { group, visibility: 'private' }
-        : { group, name: name ?? null, writerCount: members }),
+      join: join === 'open' || join === 'approval' ? join : null,
+      creator: typeof creator === 'string' && HEX64_RE.test(creator) ? creator : null,
+      members,
+      groups: rows,
+      next: communityNext(next, rows),
       indexing,
       complete
     }
+  }
+
+  function communityGroupsBody ({ groups, next, indexing, complete }) {
+    const rows = communityRows(groups)
+    return { groups: rows, next: communityNext(next, rows), indexing, complete }
   }
 
   // A null or non-object answer, a missing method, a throw or a rejection,
@@ -916,6 +945,7 @@ module.exports = {
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
   INDEX_COMMUNITY_RE,
+  INDEX_COMMUNITY_GROUPS_RE,
   INDEX_ENGAGERS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,

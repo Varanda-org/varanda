@@ -18,6 +18,79 @@ const { connectClient, errorOf } = require('./helpers/session')
 const hex = (buf) => b4a.toString(buf, 'hex')
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
+// Protocol v2: every group lives in a community. Each group creator gets one
+// open community (made through community.create with its first group); a
+// member enters the group's community before group.join (its root and the
+// creator's diary copied in, as a sync would bring them, then
+// ops.communityJoin on the member's storage). Community cores go along with
+// every shared group core.
+const ownCommunity = new Map() // storage -> community
+const owners = new Map() // community -> setup object
+const groupCommunity = new Map() // group -> community
+
+async function copyCore (fromStorage, toStorage, key, diary = null) {
+  const source = diary !== null ? await store.openDiary(fromStorage) : await store.openGroupCoreReadOnly(fromStorage, key)
+  if (source === null) return
+  const target = diary !== null ? await store.openReplica(toStorage, diary) : await store.openGroupReplica(toStorage, key)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    if (source.length > 0) await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+  if (diary === null) await store.addGroupReplica(toStorage, key)
+}
+
+async function copyCommunityCores (fromStorage, toStorage) {
+  for (const e of await store.readGroupWriters(fromStorage)) {
+    if (e.kind !== 'community') continue
+    await copyCore(fromStorage, toStorage, e.key)
+    if (e.key !== e.group) await copyCore(fromStorage, toStorage, e.group)
+  }
+}
+
+async function enterCommunity (m, community) {
+  const owner = owners.get(community)
+  if (owner === undefined || owner.storage === m.storage) return
+  await copyCore(owner.storage, m.storage, community)
+  await copyCore(owner.storage, m.storage, null, owner.key)
+  await store.addGroupDiary(m.storage, owner.key)
+  if ((await store.readGroupWriters(m.storage)).some((e) => e.group === community)) return
+  const ctx = { storage: m.storage, association: hex(m.assoc.publicKey), keyPair: m.keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(m.prf, nonce) }
+  await ops.communityJoin(ctx, { community })
+}
+
+// group.create and group.join through the session, in the fixture's
+// community.
+function inCommunity (m) {
+  const request = m.web.request
+  m.web.request = async (method, params = {}) => {
+    if (method === 'group.create' && params.community === undefined) {
+      if (!ownCommunity.has(m.storage)) {
+        const { community } = await request('community.create', { name: 'Bairro', join: 'open' })
+        ownCommunity.set(m.storage, community)
+        owners.set(community, m)
+      }
+      const community = ownCommunity.get(m.storage)
+      const res = await request(method, { ...params, community })
+      groupCommunity.set(res.group, community)
+      return res
+    }
+    if (method === 'group.join' && groupCommunity.has(params.group)) {
+      const community = groupCommunity.get(params.group)
+      await enterCommunity(m, community)
+      return request(method, { community, ...params })
+    }
+    return request(method, params)
+  }
+  return m
+}
+
 // A memory storage that remembers every core and kv key it was asked for,
 // so a test can scan all of it.
 function recordingStorage () {
@@ -77,7 +150,7 @@ async function setup (t, { assoc = generateAssociationKeyPair(), storage = recor
   t.teardown(() => node.close(), { force: true })
   await node.setKeyPair(keyPair, { prf })
   const web = await connectClient(node)
-  return { node, web, key, keyPair, prf, assoc, storage, internal }
+  return inCommunity({ node, web, key, keyPair, prf, assoc, storage, internal })
 }
 
 // Copies `from`'s diary and the group core `core` into `to`.
@@ -100,6 +173,7 @@ async function share (from, to, core) {
   }
   await store.addGroupDiary(to.storage, from.key)
   await store.addGroupReplica(to.storage, core)
+  await copyCommunityCores(from.storage, to.storage)
 }
 
 async function writerOf (m, group) {
@@ -490,10 +564,14 @@ test('a community ref in an earlier own basis is listed again in the next rotati
   const a = await setup(t)
   const b = await setup(t, { assoc: a.assoc })
   const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
-  const { community } = await a.web.request('community.create', { name: 'Bairro' })
-  await a.web.request('community.link', { community, group, on: true })
-  await a.web.request('community.admin', { community, member: b.key, on: true })
-  await a.web.request('community.admin', { community, member: b.key, on: false })
+  const community = groupCommunity.get(group)
+  await enterCommunity(b, community)
+  await share(b, a, await writerOf(b, community))
+  // A demotion in the community root is a removal of the group (b held key
+  // power only through the community).
+  const actx = await opsCtx(t, a)
+  await ops.communitySetAdmin(actx, { community, member: b.key, on: true })
+  await ops.communitySetAdmin(actx, { community, member: b.key, on: false })
   const lastBasis = async () => (await coreRecords(a, group)).filter((r) => r.type === 'group-key' && r.kid === null).pop().basis
   await a.web.request('group.rekey', { group })
   const first = (await lastBasis()).filter((r) => r.writer === community)
@@ -549,15 +627,13 @@ test('every first key block commits to the key its members open', async (t) => {
   t.ok(texts(await a.web.request('group.read', { group })).includes('sob a chave comprometida'), 'members still read and send')
 })
 
-test('relinking a community whose admin was demoted while unlinked leaves no rekey-pending', async (t) => {
+test('demoting a community admin rotates the community\'s private groups: no rekey-pending', async (t) => {
   const { a, b, group, bw } = await admitted(t)
-  const { community } = await a.web.request('community.create', { name: 'Bairro' })
-  await a.web.request('community.link', { community, group, on: true })
-  await a.web.request('community.admin', { community, member: b.key, on: true })
-  await a.web.request('community.link', { community, group, on: false })
-  await a.web.request('community.admin', { community, member: b.key, on: false })
-  await a.web.request('community.link', { community, group, on: true })
-  t.is((await a.web.request('group.read', { group })).state, 'ok', 'not rekey-pending after the relink')
+  const community = groupCommunity.get(group)
+  const actx = await opsCtx(t, a)
+  await ops.communitySetAdmin(actx, { community, member: b.key, on: true })
+  await ops.communitySetAdmin(actx, { community, member: b.key, on: false })
+  t.is((await a.web.request('group.read', { group })).state, 'ok', 'not rekey-pending after the demotion')
   await share(a, b, group)
   await b.web.request('group.post', { group, text: 'depois do religamento' })
   await share(b, a, bw)

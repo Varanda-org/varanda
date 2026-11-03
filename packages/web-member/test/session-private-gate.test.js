@@ -38,7 +38,7 @@ async function setup (t, { assoc = generateAssociationKeyPair(), factory = creat
   t.teardown(() => node.close(), { force: true })
   await node.setKeyPair(keyPair, { prf })
   const web = await connectClient(node)
-  return { node, web, key, assoc, storage, internal }
+  return { node, web, ctx, key, assoc, storage, internal }
 }
 
 async function share (from, to, core) {
@@ -107,9 +107,13 @@ test('a boxless writer of a private group never holds the gate of the rejoin tha
   const a = await setup(t)
   const sync = controlledSync()
   const b = await setup(t, { assoc: a.assoc, factory: sync.factory, writeGate: true })
-  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { community, group: general } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private', community })
+  await share(a, b, community)
+  await share(a, b, general)
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'B is in the community before the private root arrives')
 
-  const first = b.web.request('group.join', { group })
+  const first = b.web.request('group.join', { group, community })
   const gate = await sync.next(0)
   gate.emit({ event: 'own-synced', length: 1 })
   const push = await sync.next(1)

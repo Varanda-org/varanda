@@ -190,6 +190,21 @@
 //                'groupReplicas' with nothing stored yet (a root asked for
 //                before a join: list it with store.addGroupReplica and the
 //                next run fetches it through the writer pages).
+//   communities  (protocol v2) the communities of kv 'groupWriters' (kind
+//                'community') and, parent paging, the community each held
+//                local group root names in its header (at most
+//                MAX_SYNCED_COMMUNITIES per run, 'community-parent { key,
+//                group }' the first time one is not held) are paged in full:
+//                root and community writers (CWs), each CW gated like a
+//                group writer (`member` null; a group writer names one) with
+//                its binding diary. Its catalogue (the fold's once C's held
+//                cores fold, else the group-create records of its root:
+//                only the creator creates groups) names roots paged root
+//                only, which must name the community. A key reached as a
+//                parent whose root is a group header fails 'not-community';
+//                a protocol v1 header is 'header-invalid', and at run start
+//                every stored v1 core is purged ('group-skipped' reason
+//                'legacy', store.purgeLegacyGroupCores).
 //   pages        once the link verified, the writer set of every group is
 //                asked page by page on 'varanda/groups/1' (the groups-net
 //                member handle on this link's muxer), again every
@@ -280,7 +295,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, groupJoinHistory, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, buildCommunity, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -324,12 +339,8 @@ const MAX_GROUP_GATE_ATTEMPTS = 4
 // Growth of a group's cores within this window makes one 'groups-changed'.
 const GROUPS_CHANGED_MS = 50
 // A group's root and writers together: at most MAX_GROUP_WRITERS cores.
-// The communities a group root's community-link records name (on or off),
-// in root order of first appearance, that a run pages: the same bound the
-// group fold loads, since an earlier community's admin acts still count.
-const MAX_LINKED_COMMUNITIES = 32
-// The linked communities (not this device's own) one run pages at most,
-// over every group root.
+// The parent communities (named by a held group root's header, not in the
+// own list) one run pages at most, over every group root.
 const MAX_SYNCED_COMMUNITIES = 32
 const MAX_GROUP_PAGES = Math.ceil((MAX_GROUP_WRITERS + 1) / GROUPS_LIMIT_MAX) + 1
 
@@ -509,8 +520,9 @@ function gateVerdict (raw, keyHex, associationHex, opts) {
 }
 
 // Block 0 of group core `key` -> { group, diary } (a root names itself, with
-// its visibility; a writer carries its `box`), or null when it is neither
-// header.
+// its kind, visibility and parent community; a writer carries its `box` and
+// `member`), or null when it is neither header (a protocol v1 header
+// included: the validators answer 'legacy').
 function groupHeaderOf (raw, key) {
   try {
     const h = decodeBlock(raw)
@@ -521,30 +533,40 @@ function groupHeaderOf (raw, key) {
     // root of its own key.
     if (validateGroupHeader(h) === null) {
       if (h.kind === 'community' && h.visibility !== 'public') return null
-      return { group: key, diary: h.diary, community: h.kind === 'community', visibility: h.visibility }
+      return { group: key, diary: h.diary, community: h.kind === 'community', parent: h.kind === 'group' ? h.community : null, visibility: h.visibility }
     }
-    if (validateWriterHeader(h) === null && h.group !== key) return { group: h.group, diary: h.diary, box: h.box }
+    if (validateWriterHeader(h) === null && h.group !== key) return { group: h.group, diary: h.diary, box: h.box, member: h.member }
     return null
   } catch {
     return null
   }
 }
 
+// What a paged key's root must be (see roleOf in runSync): `root` 'group',
+// 'community' or null (a key asked for before a join: either kind);
+// `parent` marks a community reached only as a group root's parent (a
+// group header there is this device's own verdict 'not-community');
+// `within` the communities whose catalogue named a root paged root-only
+// (its header must name one of them, else the hint was bad).
+const ANY_ROOT = Object.freeze({ root: null, parent: false, within: null })
+
 // Block-0 verdict of group core `key` listed for `group` under diary D, as
-// the seeder's: null = accepted. `linkedOnly` marks a `group` paged only
-// because a group root names it as a community: its root must be a
-// community header (a group header there is this device's own verdict
-// 'not-community'); any other paged root must be a group header.
+// the seeder's: null = accepted. `expect` is the key's role (ANY_ROOT).
 // `visibility` is the root's verified visibility when known (else null): a
 // writer's `box` must match it, hex64 in a private group and null in a
-// public one, else 'header-invalid' as in the fold and the seeder.
-function groupVerdict (raw, key, group, diary, linkedOnly = false, visibility = null) {
+// public one, else 'header-invalid' as in the fold and the seeder. `kind`
+// is the root's kind when known: a group writer names its community writer
+// (`member` hex64), a community writer names none.
+function groupVerdict (raw, key, group, diary, expect = ANY_ROOT, visibility = null, kind = null) {
   const h = groupHeaderOf(raw, key)
   if (h === null) return 'header-invalid'
   if (h.group !== group) return key === group ? 'header-invalid' : 'wrong-group'
   if (key === group) {
-    if (linkedOnly && !h.community) return 'not-community'
-    if (h.community !== linkedOnly) return 'header-invalid'
+    if (expect.root === 'community' && !h.community) return expect.parent ? 'not-community' : 'header-invalid'
+    if (expect.root === 'group' && h.community) return 'header-invalid'
+    if (expect.within !== null && !expect.within.has(h.parent)) return 'wrong-group'
+  } else if (kind !== null && (kind === 'community') !== (h.member === null)) {
+    return 'header-invalid'
   }
   if (h.diary !== diary) return 'wrong-diary'
   return boxMismatch(raw, key, group, visibility) ? 'header-invalid' : null
@@ -1316,10 +1338,18 @@ async function syncRun ({
   let gateOrder = 0 // the fair queue of group gates (lastAttempt)
   let groupKvChain = Promise.resolve() // kv groupReplicas changes, one at a time
   const changedGroups = new Set()
-  const linkedGroups = new Map() // community -> Set of groups whose root links it
-  const linkedCommunities = new Set() // communities paged because a group root links them
-  const ownCommunities = new Set() // communities whose root this device holds
-  const notCommunities = new Set() // linked keys whose root is a group header: never paged again this run
+  const ownCommunities = new Set() // kv groupWriters entries of kind 'community'
+  const localGroups = new Set() // kv groupWriters entries of kind 'group'
+  const parentCommunities = new Set() // communities paged because a held group root names them
+  const childrenOf = new Map() // community -> Set of held group roots whose header names it
+  const parentNamed = new Set() // groups whose root header was read for its parent
+  const parentAnnounced = new Set() // communities a 'community-parent' was emitted for
+  const catalogueOf = new Map() // root paged root-only -> Set of communities whose catalogue names it
+  const catalogueScans = new Map() // community -> { running, again }
+  const createsCache = new Map() // community core key -> { next, creates, grants } (scanCreates)
+  const rootKind = new Map() // group -> 'group' | 'community', from its verified root header
+  const heldAtStart = new Set() // group cores stored when the run started
+  const notCommunities = new Set() // parent keys whose root is a group header: never paged again this run
   let changedTimer = null
   const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
@@ -2948,8 +2978,6 @@ async function syncRun ({
       stopQuota: null,
       retryTimer: null,
       reason: null, // why it failed
-      scanning: false, // a scan of a root's community links runs
-      rescan: false,
       hints: new Set() // 'group:diary:seq' listings whose gate failed on the hint
     }
   }
@@ -2965,6 +2993,15 @@ async function syncRun ({
   async function openGroups () {
     let writers
     let replicas
+    // The legacy sweep: protocol v1 cores no seeder or fold takes any more.
+    try {
+      for (const ev of await store.purgeLegacyGroupCores(storage)) {
+        log('aviso: núcleo de grupo ' + key8(ev.key) + ' ignorado (legacy)')
+        emit(ev)
+      }
+    } catch {
+      log('aviso: falha ao limpar os grupos antigos')
+    }
     try {
       writers = await store.readGroupWriters(storage)
       replicas = await store.readGroupReplicas(storage)
@@ -2983,6 +3020,7 @@ async function syncRun ({
     for (const e of writers) {
       if (ending) return
       if (e.kind === 'community') ownCommunities.add(e.group)
+      else localGroups.add(e.group)
       if (!isBlockedKey(e.group)) ensureGroup(e.group)
       await openOwnGroupCore(e.key, e.group)
       if (e.rootNonce !== null) await openOwnGroupCore(e.group, e.group)
@@ -3007,6 +3045,7 @@ async function syncRun ({
           // pass whose pages hold no root of that key, so a stray key is
           // never paged forever nor keeps once runs unmet.
           if (!writers.some((e) => e.group === key)) groups.get(key).probe = true
+          groups.get(key).replica = true
         }
         continue
       }
@@ -3021,32 +3060,59 @@ async function syncRun ({
         continue
       }
       stored.push({ key, core, raw, ...h })
+      heldAtStart.add(key)
       if (key === h.group) noteRootVisibility(key, h.visibility)
     }
-    for (const e of writers) {
-      if (e.rootNonce === null || e.kind === 'community') continue
-      const m = groupOwn.find((x) => x.key === e.group)
-      if (m !== undefined) await scanCommunityLinks(e.group, m.core)
+    // Parent paging: the community each held local group root names.
+    for (const m of groupOwn) {
+      if (m.key !== m.group) continue
+      let raw = null
+      try {
+        raw = await m.core.get(0, { wait: false, raw: true })
+      } catch {}
+      const h = raw === null ? null : groupHeaderOf(raw, m.key)
+      if (h === null) continue
+      rootKind.set(m.key, h.community ? 'community' : 'group')
+      noteParent(m.key, h.parent)
     }
     for (const s of stored) {
-      if (s.key === s.group && !s.community && groups.has(s.group) && !linkedCommunities.has(s.group)) await scanCommunityLinks(s.group, s.core)
+      if (s.key !== s.group || !groups.has(s.group) || isCommunityKey(s.group)) continue
+      if (!s.community) noteParent(s.group, s.parent)
     }
-    // The role of each paged key holds for stored cores too: under a
-    // linked-only community only its community root is restored, and a
-    // joined group's root must be a group header, as at the gate.
+    // The catalogue of every community paged, from what is stored.
+    for (const c of [...ownCommunities, ...parentCommunities]) {
+      const root = rootSource(c, stored)
+      if (root === null) continue
+      const ws = stored.filter((x) => x.group === c && x.key !== c).map((x) => ({ key: x.key, core: x.core, diary: x.diary }))
+      for (const m of groupOwn) if (m.group === c && m.key !== c) ws.push({ key: m.key, core: m.core, diary: ownHex })
+      const cache = new Map()
+      addCatalogue(c, await communityCatalogue(c, root, ws, (d) => bindingEntries(d, cache)))
+    }
+    // The role of each paged key holds for stored cores too, as at the gate.
     for (const s of stored) {
-      const linkedOnly = linkedCommunities.has(s.group)
-      if (linkedOnly && s.key === s.group && !s.community) {
-        emit({ event: 'group-skipped', key: s.key, group: s.group, reason: 'not-community' })
-        notCommunities.add(s.group)
-        groups.delete(s.group)
-      } else if (!linkedOnly && s.key === s.group && s.community && groups.has(s.group) && !ownCommunities.has(s.group)) {
-        s.invalid = true
-      } else if (linkedOnly && s.key !== s.group) {
+      const expect = expectFor(s.group)
+      if (s.key === s.group) {
+        if (expect.root === 'community' && !s.community) {
+          if (expect.parent) {
+            emit({ event: 'group-skipped', key: s.key, group: s.group, reason: 'not-community' })
+            notCommunities.add(s.group)
+            parentCommunities.delete(s.group)
+            groups.delete(s.group)
+          } else {
+            s.invalid = true
+          }
+        } else if (expect.root === 'group' && s.community) {
+          s.invalid = true
+        } else if (expect.within !== null && !expect.within.has(s.parent)) {
+          s.rest = true
+        } else {
+          rootKind.set(s.key, s.community ? 'community' : 'group')
+        }
+      } else if (rootOnly(s.group)) {
         s.rest = true
-      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null)) {
-        // A writer whose box does not match its root's visibility, as at
-        // the gate.
+      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null) || memberMismatch(s.raw, s.key, s.group)) {
+        // A writer whose box does not match its root's visibility, or whose
+        // member does not match its root's kind, as at the gate.
         s.invalid = true
       }
     }
@@ -3226,7 +3292,10 @@ async function syncRun ({
         if (gd.core !== core) return
         judge()
         for (const ge of groupCores.values()) {
-          if (ge.diary === gd.key && ge.state === 'active') markGroupChanged(ge.group)
+          if (ge.diary !== gd.key || ge.state !== 'active') continue
+          markGroupChanged(ge.group)
+          // A join arriving may let C fold: its catalogue is read again.
+          if (isCommunityKey(ge.group)) rescanCatalogue(ge.group)
         }
         evaluate()
       },
@@ -3600,85 +3669,228 @@ async function syncRun ({
       return
     }
     if (ge.state !== 'active') return
-    if (ge.key === ge.group) rescanCommunityLinks(ge)
+    if (isCommunityKey(ge.group)) rescanCatalogue(ge.group)
     markGroupChanged(ge.group)
     evaluate()
   }
 
-  // ---- groups: the communities linked from group roots ----
+  // ---- groups: parent communities and catalogues ----
 
-  // The communities named by the community-link records of group root
-  // `core` (root order of first appearance, at most MAX_LINKED_COMMUNITIES)
-  // are paged as
-  // roots of their own key, through the same gate, caps and probe as a
-  // root asked for before a join: unlisted after a complete pass whose
-  // pages hold no root of that key. Never throws.
-  async function scanCommunityLinks (group, core) {
-    const keys = []
-    try {
-      const h = decodeBlock(await core.get(0, { wait: false, raw: true }))
-      if (validateGroupHeader(h) !== null || h.kind !== 'group') return
-      for (let i = 1; i < core.contiguousLength && keys.length < MAX_LINKED_COMMUNITIES; i++) {
-        const r = decodeBlock(await core.get(i, { wait: false, raw: true }))
-        if (r === null || typeof r !== 'object' || r.type !== 'community-link' || typeof r.community !== 'string' || !HEX64.test(r.community)) continue
-        const key = r.community.toLowerCase()
-        if (!keys.includes(key)) keys.push(key)
-      }
-    } catch {
-      return
-    }
-    linkCommunities(group, keys)
+  // A community key: in the own list, paged as a parent, or a key asked
+  // for before a join whose verified root is a community.
+  function isCommunityKey (key) {
+    return ownCommunities.has(key) || parentCommunities.has(key) || rootKind.get(key) === 'community'
   }
 
-  // A linked key whose root is a group header: this device's own view of
+  // A root named only by a community's catalogue: its root is paged, no
+  // writer under it is ever gated (community.info names it, nothing more).
+  function rootOnly (key) {
+    if (!catalogueOf.has(key) || localGroups.has(key) || isCommunityKey(key)) return false
+    const g = groups.get(key)
+    return g === undefined || g.replica !== true
+  }
+
+  // What a paged key's root must be (ANY_ROOT).
+  function expectFor (key) {
+    if (ownCommunities.has(key) || parentCommunities.has(key)) return { root: 'community', parent: !ownCommunities.has(key), within: null }
+    if (localGroups.has(key)) return { root: 'group', parent: false, within: null }
+    if (rootOnly(key)) return { root: 'group', parent: false, within: catalogueOf.get(key) }
+    return ANY_ROOT
+  }
+
+  // The kind a writer of `group` must match: its verified root, else its role.
+  function writerKind (group) {
+    if (rootKind.has(group)) return rootKind.get(group)
+    if (ownCommunities.has(group) || parentCommunities.has(group)) return 'community'
+    if (localGroups.has(group)) return 'group'
+    return null
+  }
+
+  function memberMismatch (raw, key, group) {
+    const kind = writerKind(group)
+    if (key === group || kind === null) return false
+    const h = groupHeaderOf(raw, key)
+    return h !== null && h.group === group && (kind === 'community') !== (h.member === null)
+  }
+
+  function rootHeld (key) {
+    if (ownGroupKeys.has(key) || heldAtStart.has(key) || restingCores.has(key)) return true
+    const ge = groupCores.get(key)
+    return ge !== undefined && (ge.state === 'active' || ge.state === 'regate')
+  }
+
+  // Held group root `group` names community `c` (its header, immutable):
+  // the community of a local group (or of a key asked for before a join) is
+  // paged in full, root and community writers, through the same gate, caps
+  // and probe as a root asked for before a join.
+  function noteParent (group, c) {
+    if (typeof c !== 'string' || c === group || parentNamed.has(group)) return
+    parentNamed.add(group)
+    if (!childrenOf.has(c)) childrenOf.set(c, new Set())
+    childrenOf.get(c).add(group)
+    if (rootOnly(group) || ending || isBlockedKey(c)) return
+    if (!ownCommunities.has(c) && !rootHeld(c) && !parentAnnounced.has(c)) {
+      parentAnnounced.add(c)
+      emit({ event: 'community-parent', key: c, group })
+    }
+    if (notCommunities.has(c) || ownCommunities.has(c) || parentCommunities.has(c) || localGroups.has(c)) return
+    if (parentCommunities.size >= MAX_SYNCED_COMMUNITIES) return
+    parentCommunities.add(c)
+    const known = groups.has(c)
+    ensureGroup(c)
+    if (!known) groups.get(c).probe = true
+    const l = seederLink()
+    if (l !== null && l.groups !== null) pageGroups(l)
+  }
+
+  // A parent key whose root is a group header: this device's own view of
   // which keys are communities, so nothing under it is gated or stored and
   // the key is not paged again this run.
   function refuseNotCommunity (ge) {
     failGroupEntry(ge, 'not-community', { purge: false })
-    dropNotCommunity(ge.group)
-  }
-
-  function dropNotCommunity (c) {
-    notCommunities.add(c)
-    if (!groups.delete(c)) return
-    track(groupKv(() => store.removeGroupReplica(storage, forgetListed(listedAtStart, c))), noop, noop)
+    notCommunities.add(ge.group)
+    parentCommunities.delete(ge.group)
+    if (!groups.delete(ge.group)) return
+    track(groupKv(() => store.removeGroupReplica(storage, forgetListed(listedAtStart, ge.group))), noop, noop)
     evaluate()
   }
 
-  function rescanCommunityLinks (ge) {
-    if (ge.scanning) {
-      ge.rescan = true
-      return
-    }
-    ge.scanning = true
-    const core = ge.core
-    track(scanCommunityLinks(ge.group, core), () => {
-      ge.scanning = false
-      if (ge.rescan && !ending && ge.core === core) {
-        ge.rescan = false
-        rescanCommunityLinks(ge)
-      }
-    }, () => { ge.scanning = false })
+  // The root of community c among the run's cores -> { key, core, diary }.
+  function rootSource (c, stored = []) {
+    const m = groupOwn.find((x) => x.key === c)
+    if (m !== undefined) return { key: c, core: m.core, diary: ownHex }
+    const ge = groupCores.get(c)
+    if (ge !== undefined && ge.state === 'active' && ge.core) return { key: c, core: ge.core, diary: ge.diary }
+    const s0 = stored.find((x) => x.key === c && x.community === true)
+    return s0 === undefined ? null : { key: c, core: s0.core, diary: s0.diary }
   }
 
-  function linkCommunities (group, keys) {
+  // The group-create records of C's root (only the community's creator
+  // creates groups), each block read once across scans. Never throws.
+  async function scanCreates (key, core) {
+    let c = createsCache.get(key)
+    if (c === undefined) {
+      c = { next: 1, creates: [] }
+      createsCache.set(key, c)
+    }
+    try {
+      const end = Math.min(core.contiguousLength, maxLogBlocks)
+      for (; c.next < end; c.next++) {
+        const r = decodeBlock(await core.get(c.next, { wait: false, raw: true }))
+        if (r === null || validateGroupRecord(r, c.next, { root: true, community: true }) !== null) continue
+        if (r.type === 'group-create') c.creates.push(r.group)
+      }
+    } catch {}
+    return c
+  }
+
+  // C's catalogue: once C's held cores fold (bound, complete), exactly the
+  // fold's groups, in its causal order (at most MAX_GROUPS_PER_COMMUNITY);
+  // until then the hint, up to twice that (a creator's leave may withdraw
+  // root creates the hint still counts). `entriesOf(d)` -> d's diary
+  // entries or null. Never throws.
+  async function communityCatalogue (c, root, writers, entriesOf) {
+    try {
+      const ws = []
+      for (const w of writers) ws.push({ key: w.key, entries: await store.readBlocks(w.core), diary: w.diary })
+      const joins = new Map()
+      // A creator's confirmed leave bounds the root's creates.
+      const confirms = new Map()
+      for (const d of new Set([root.diary, ...writers.map((w) => w.diary)])) {
+        const entries = await entriesOf(d)
+        if (!entries) continue
+        joins.set(d, groupJoinHistory(entries, c))
+        confirms.set(d, groupConfirmHistory(entries, c))
+      }
+      const built = buildCommunity({ root: { key: c, entries: await store.readBlocks(root.core) }, writers: ws, joins, confirms, now: Date.now() })
+      if (built.creator !== null && !built.incomplete) {
+        const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
+        return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
+      }
+    } catch {}
+    return catalogueKeys(c, root, 2 * MAX_GROUPS_PER_COMMUNITY)
+  }
+
+  // C's catalogue as a hint (the fold judges it): the creates of C's root
+  // in root order, at most `max` distinct keys.
+  async function catalogueKeys (c, root, max) {
+    const keys = []
+    for (const g of (await scanCreates(root.key, root.core)).creates) {
+      if (keys.length < max && g !== c && !keys.includes(g)) keys.push(g)
+    }
+    return keys
+  }
+
+  function addCatalogue (c, keys) {
     let added = false
-    for (const c of keys) {
-      if (ending || c === group || isBlockedKey(c)) continue
-      if (!linkedGroups.has(c)) linkedGroups.set(c, new Set())
-      linkedGroups.get(c).add(group)
-      // A key asked for before a join (probe, no own writer) has no role
-      // yet: named as a community, it is paged as one, as the core node does.
-      const g0 = groups.get(c)
-      if (notCommunities.has(c) || ownCommunities.has(c) || (g0 !== undefined && (g0.probe !== true || linkedCommunities.has(c)))) continue
-      if (linkedCommunities.size >= MAX_SYNCED_COMMUNITIES) continue
-      linkedCommunities.add(c)
-      ensureGroup(c)
-      groups.get(c).probe = true
+    for (const g of keys) {
+      if (ending || isBlockedKey(g) || isCommunityKey(g)) continue
+      if (!catalogueOf.has(g)) catalogueOf.set(g, new Set())
+      const set = catalogueOf.get(g)
+      if (set.has(c)) continue
+      set.add(c)
+      if (groups.has(g)) continue
+      ensureGroup(g)
+      groups.get(g).probe = true
       added = true
     }
     const l = seederLink()
     if (added && l !== null && l.groups !== null) pageGroups(l)
+  }
+
+  async function scanCatalogue (c) {
+    const root = rootSource(c)
+    if (root === null) return
+    const writers = []
+    for (const m of groupOwn) if (m.group === c && m.key !== c) writers.push({ key: m.key, core: m.core, diary: ownHex })
+    for (const ge of groupCores.values()) {
+      if (ge.group === c && ge.key !== c && ge.state === 'active' && ge.core) writers.push({ key: ge.key, core: ge.core, diary: ge.diary })
+    }
+    addCatalogue(c, await communityCatalogue(c, root, writers, async (d) => {
+      const core = openBinding(d)
+      return core === null ? null : store.readAll(core)
+    }))
+  }
+
+  function rescanCatalogue (c) {
+    if (ending || !isCommunityKey(c)) return
+    let st = catalogueScans.get(c)
+    if (st === undefined) {
+      st = { running: false, again: false }
+      catalogueScans.set(c, st)
+    }
+    if (st.running) {
+      st.again = true
+      return
+    }
+    st.running = true
+    track(scanCatalogue(c), () => {
+      st.running = false
+      if (st.again && !ending) {
+        st.again = false
+        rescanCatalogue(c)
+      }
+      evaluate()
+    }, () => {
+      st.running = false
+      evaluate()
+    })
+  }
+
+  // An accepted core: a group root's parent community is paged, a community
+  // core's catalogue looked at again.
+  function noteAcceptedGroupCore (ge) {
+    if (ge.key === ge.group && ge.raw0 !== null) {
+      const h = groupHeaderOf(ge.raw0, ge.key)
+      if (h !== null) {
+        rootKind.set(ge.key, h.community ? 'community' : 'group')
+        if (!h.community && !rootOnly(ge.group)) noteParent(ge.key, h.parent)
+        // A parent verified a community: its writers are paged now.
+        const l = seederLink()
+        if (h.community && parentCommunities.has(ge.key) && l !== null && l.groups !== null) pageGroups(l)
+      }
+    }
+    if (isCommunityKey(ge.group)) rescanCatalogue(ge.group)
   }
 
   // Block 0 arrived in the storage: it must be the one the gate accepted.
@@ -3715,7 +3927,7 @@ async function syncRun ({
         track(groupKv(() => store.putGroupCert(storage, ge.diary, ge.diaryRaw0)), noop, noop)
       }
       ensureGroupDiary(ge.diary, ge.seq + 1)
-      if (ge.key === ge.group) rescanCommunityLinks(ge)
+      noteAcceptedGroupCore(ge)
       markGroupChanged(ge.group)
       evaluate()
     }, () => {
@@ -3747,9 +3959,9 @@ async function syncRun ({
   function markGroupChanged (group) {
     if (ending) return
     changedGroups.add(group)
-    // A community root changed: every group linking it re-reads its admins.
-    const linked = linkedGroups.get(group)
-    if (linked !== undefined) for (const g of linked) changedGroups.add(g)
+    // A community core changed: every local group naming it re-reads its gate.
+    const children = childrenOf.get(group)
+    if (children !== undefined) for (const g of children) if (localGroups.has(g)) changedGroups.add(g)
     if (changedTimer !== null) return
     changedTimer = later(() => {
       changedTimer = null
@@ -3852,7 +4064,7 @@ async function syncRun ({
   }
 
   async function pageGroup (l, g) {
-    const community = ownCommunities.has(g.group) || linkedCommunities.has(g.group)
+    const onlyRoot = rootOnly(g.group)
     const items = new Map()
     let after = null
     let incomplete = false
@@ -3879,15 +4091,22 @@ async function syncRun ({
       if (ending || link !== l) return
       if (page.incomplete) incomplete = true
       for (const it of page.items) {
-        // A community has no writers: only its root is ever gated under it,
-        // and another listing is ignored before it can take a slot.
-        if (community && it.key !== g.group) continue
+        // A catalogue root is paged alone: another listing is ignored before
+        // it can take a slot.
+        if (onlyRoot && it.key !== g.group) continue
         if (items.size >= MAX_GROUP_WRITERS) break
         if (!items.has(it.key)) items.set(it.key, it)
       }
       // A cursor that does not advance ends the pass with what came.
       if (page.next === null || (after !== null && page.next <= after)) break
       after = page.next
+    }
+    // A parent's writers wait for its root: until that header is verified a
+    // community the key may be a group root ('not-community'), and nothing
+    // listed under it is gated. The pass stays incomplete meanwhile.
+    if (parentCommunities.has(g.group) && !ownCommunities.has(g.group) && rootKind.get(g.group) !== 'community') {
+      for (const key of [...items.keys()]) if (key !== g.group) items.delete(key)
+      if (items.has(g.group)) incomplete = true
     }
     if (incomplete) {
       // The seeder does not know the whole set yet: what came is gated, but
@@ -4145,7 +4364,7 @@ async function syncRun ({
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
     const vis = rootVis.get(ge.group) || null
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, linkedCommunities.has(ge.group), vis)
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), vis, writerKind(ge.group))
     if (verdict === 'not-community') return refuseNotCommunity(ge)
     if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
     if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
@@ -4262,6 +4481,8 @@ async function syncRun ({
       const want = Math.max(ge.core.length, advertised)
       if (ge.core.contiguousLength < want) unmet.push(ge.key + ':' + ge.core.contiguousLength + '/' + want)
     }
+    // A community's catalogue scan in flight may still add roots to page.
+    for (const [c, st] of catalogueScans) if (st.running || st.again) unmet.push(c + ':catalogue')
     // A binding diary is a goal from ensureGroupDiary on: still opening,
     // waiting to attach, or downloading up to its join.
     for (const gd of groupDiaries.values()) {

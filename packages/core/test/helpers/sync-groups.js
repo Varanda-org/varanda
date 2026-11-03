@@ -24,6 +24,11 @@ const member = require('../../lib/member')
 
 const hex = (key) => b4a.toString(key, 'hex')
 
+// The community every fixture group root and writer names (protocol v2
+// headers): never served, so the member pages it as a parent and finds
+// nothing. A fixture that needs the community folded creates a real one.
+const PARENT = hex(crypto.randomBytes(32))
+
 async function person (t, kp, name) {
   const ctx = { dataDir: tmpDir(t, 'varanda-gsync-'), association: hex(kp.publicKey) }
   const { publicKey } = await member.idCreate(ctx)
@@ -123,6 +128,9 @@ async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, ans
   const page = ({ group, after, limit }) => {
     requests.push({ group, after, limit })
     if (answer) return answer({ group, after, limit }, requests.length - 1)
+    // The fixture parent is never served (a page of every item under it
+    // would list group writers as its CWs).
+    if (group === PARENT) return { items: [], next: null, incomplete: false }
     const rest = items.filter((it) => after === null || it.key > after)
     const out = rest.slice(0, limit)
     return { items: out, next: rest.length > limit ? out[out.length - 1].key : null, incomplete: false }
@@ -154,7 +162,7 @@ async function diaryAndWriter (cs, group, cert, posts = 0) {
   const wkey = hex(w.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(cert(dkey)))))
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: wkey, on: true }))))
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   for (let i = 0; i < posts; i++) await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' + i }))))
   return { d, dkey, w, wkey }
 }
@@ -240,7 +248,7 @@ async function joinedRoot (t, kp, named) {
   const root = cs.get({ name: 'root' })
   await root.ready()
   const rkey = hex(root.key)
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: named, name: 'Comunidade', join: 'open' }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: named, name: 'Comunidade', join: 'open' }))))
   const m = await groupMember(t, kp, rkey)
   await copyInto(cs, m, [root])
   return { m, rkey }
@@ -265,6 +273,7 @@ function revokeIssuer (m, kp, issuerHex) {
 }
 
 module.exports = {
+  PARENT,
   hex,
   person,
   exchange,

@@ -1,4 +1,4 @@
-// The bottom tab bar, with Cadeiras added in hosted mode. Pressing
+// The bottom tab bar, with Comunidades added in hosted mode. Pressing
 // the tab that is already current calls onReselect (scroll to top / refresh),
 // not onSelect. `badges` maps a tab id to true to show a plain dot on its icon
 // (never a count).

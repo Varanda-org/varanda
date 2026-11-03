@@ -36,7 +36,7 @@ import { resolveUrl } from './installation.js'
 // Result convention (never throws): `{ ok: true, value }` or
 // `{ ok: false, reason }`, reason one of 'invalid-input', 'network',
 // 'timeout', 'not-found' (404: not indexed, or author not served; on the
-// topic route: a seeder without that route, or a malformed path — an
+// topic route: a seeder without that route, or a malformed path: an
 // unknown word is a 200 with an empty list), 'status', 'too-large',
 // 'malformed', or 'rate-limited' (then with a numeric `retryAfterMs`: the
 // cooldown still left). The URL builders return null for bad input. Every
@@ -93,7 +93,7 @@ const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
-const GROUP_KEYS = ['community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
+const GROUP_KEYS = ['attached', 'community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
 const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
 // An older seeder sends no `signed`.
 const WRITER_KEYS_OLD = ['diary', 'key', 'left', 'length', 'seq']
@@ -101,8 +101,9 @@ const GROUPS_KEYS = ['complete', 'groups', 'indexing']
 const GROUPS_ROW_KEYS = ['group', 'left', 'seq', 'writer']
 const GROUP_SEARCH_KEYS = ['complete', 'groups', 'indexing', 'more']
 const GROUP_HIT_KEYS = ['group', 'name', 'writerCount']
-const COMMUNITY_KEYS = ['complete', 'groups', 'indexing', 'name']
-const COMMUNITY_PRIVATE_KEYS = ['group', 'visibility']
+const COMMUNITY_KEYS = ['complete', 'creator', 'groups', 'indexing', 'join', 'members', 'name', 'next']
+const COMMUNITY_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'next']
+const COMMUNITY_ROW_KEYS = ['group', 'join', 'name', 'visibility', 'writerCount']
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 
 // --- strict checks (response values are never lowercased or coerced) ---
@@ -243,6 +244,12 @@ export function groupsUrl (diary) {
 export function communityUrl (community) {
   const c = inputAuthor(community)
   return c === null ? null : resolveUrl('/index/community/' + c)
+}
+
+export function communityGroupsUrl (community, cursor) {
+  const c = inputAuthor(community)
+  const after = inputAuthor(cursor)
+  return c === null || after === null ? null : resolveUrl('/index/community/' + c + '/groups/' + after)
 }
 
 // The segment is built and checked exactly as for the member search.
@@ -730,7 +737,7 @@ const isFlags = (body) => typeof body.indexing === 'boolean' && typeof body.comp
 // `after`: the cursor asked for; every key must come after it. Writers:
 // <= 64, distinct, ascending by key, exact keys. A private group has no name.
 export function validGroup (body, after = null) {
-  if (!hasExactKeys(body, GROUP_KEYS) || !isFlags(body) || typeof body.rootServed !== 'boolean') return null
+  if (!hasExactKeys(body, GROUP_KEYS) || !isFlags(body) || typeof body.rootServed !== 'boolean' || typeof body.attached !== 'boolean') return null
   if (body.kind !== null && body.kind !== 'group' && body.kind !== 'community') return null
   if (body.visibility !== null && body.visibility !== 'public' && body.visibility !== 'private') return null
   if (body.join !== null && body.join !== 'open' && body.join !== 'approval') return null
@@ -758,6 +765,7 @@ export function validGroup (body, after = null) {
     creator: body.creator,
     rootServed: body.rootServed,
     community: body.community,
+    attached: body.attached,
     writers,
     next: body.next,
     indexing: body.indexing,
@@ -800,28 +808,44 @@ export function validGroupSearch (body) {
   return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
-// <= 32 groups; a private one is only { group, visibility: 'private' }.
-export function validCommunity (body) {
-  if (!hasExactKeys(body, COMMUNITY_KEYS) || !isFlags(body) || !isName(body.name)) return null
-  const list = body.groups
+// `next` must name the page's last row: a cursor that pointed anywhere else
+// could send the reader backwards and page forever.
+function nextOk (next, groups) {
+  return next === null || (groups.length > 0 && next === groups[groups.length - 1].group)
+}
+
+function communityRows (list, cursor = null) {
   if (!Array.isArray(list) || list.length > COMMUNITY_GROUPS_MAX) return null
-  const seen = new Set()
+  let prev = cursor
   const groups = []
   for (const r of list) {
-    let row
-    if (hasExactKeys(r, COMMUNITY_PRIVATE_KEYS)) {
-      if (!isHex64(r.group) || r.visibility !== 'private') return null
-      row = { group: r.group, visibility: 'private' }
-    } else {
-      const one = hitRows([r], 1)
-      if (one === null) return null
-      row = one[0]
-    }
-    if (seen.has(row.group)) return null
-    seen.add(row.group)
-    groups.push(row)
+    if (!hasExactKeys(r, COMMUNITY_ROW_KEYS) || !isHex64(r.group)) return null
+    if (prev !== null && r.group <= prev) return null
+    if (r.join !== 'open' && r.join !== 'approval') return null
+    if (r.visibility === 'private') {
+      if (r.name !== null || r.writerCount !== null) return null
+    } else if (r.visibility !== 'public' || !isName(r.name) || !isCount(r.writerCount)) return null
+    prev = r.group
+    groups.push({ group: r.group, join: r.join, name: r.name, visibility: r.visibility, writerCount: r.writerCount })
   }
-  return { name: body.name, groups, indexing: body.indexing, complete: body.complete }
+  return groups
+}
+
+export function validCommunity (body) {
+  if (!hasExactKeys(body, COMMUNITY_KEYS) || !isFlags(body) || !isName(body.name)) return null
+  if (body.join !== null && body.join !== 'open' && body.join !== 'approval') return null
+  if (body.creator !== null && !isHex64(body.creator)) return null
+  if (!isCount(body.members) || (body.next !== null && !isHex64(body.next))) return null
+  const groups = communityRows(body.groups)
+  if (groups === null || !nextOk(body.next, groups)) return null
+  return { name: body.name, join: body.join, creator: body.creator, members: body.members, groups, next: body.next, indexing: body.indexing, complete: body.complete }
+}
+
+export function validCommunityGroups (body, cursor) {
+  if (!isHex64(cursor) || !hasExactKeys(body, COMMUNITY_GROUPS_KEYS) || !isFlags(body)) return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  const groups = communityRows(body.groups, cursor)
+  return groups === null || !nextOk(body.next, groups) ? null : { groups, next: body.next, indexing: body.indexing, complete: body.complete }
 }
 
 // --- fetchers ---
@@ -931,6 +955,12 @@ export function fetchGroups (diary, deps = {}) {
 
 export function fetchCommunity (community, deps = {}) {
   return run(communityUrl(community), validCommunity, deps)
+}
+
+export function fetchCommunityGroups (community, cursor, deps = {}) {
+  const url = communityGroupsUrl(community, cursor)
+  const after = url === null ? null : inputAuthor(cursor)
+  return run(url, (body) => validCommunityGroups(body, after), deps)
 }
 
 export function fetchGroupSearch (segment, deps = {}) {

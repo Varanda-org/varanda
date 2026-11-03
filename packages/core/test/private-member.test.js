@@ -23,6 +23,36 @@ async function person (t, kp, name) {
   return { ...ctx, key: publicKey }
 }
 
+// Protocol v2: every group lives in a community. Each creator gets one open
+// community (and its Geral) on first use; a joiner enters the group's
+// community first.
+const communityOfGroup = new Map()
+
+async function communityFor (ctx) {
+  const own = store.readGroups(ctx.dataDir).find((g) => g.kind === 'community' && g.writer === g.group)
+  if (own) return own.group
+  return (await member.communityCreate(ctx, { name: 'Bairro', join: 'open' })).community
+}
+
+// The CW of `ctx` in the community of `group`, or null.
+function cwOf (ctx, group) {
+  const entry = store.readGroups(ctx.dataDir).find((g) => g.kind === 'community' && g.group === communityOfGroup.get(group))
+  return entry ? entry.writer : null
+}
+
+async function createGroup (ctx, params) {
+  const community = await communityFor(ctx)
+  const r = await member.groupCreate(ctx, { ...params, community })
+  communityOfGroup.set(r.group, community)
+  return r
+}
+
+async function joinGroup (ctx, params) {
+  const community = communityOfGroup.get(params.group)
+  if (community !== undefined) await member.communityJoin(ctx, { community })
+  return member.groupJoin(ctx, community === undefined ? params : { ...params, community })
+}
+
 // Corestore replication in process, without sockets or a DHT.
 async function exchange (from, to, skip = null) {
   const a = await store.openStore(from.dataDir)
@@ -103,7 +133,7 @@ async function plantWriter (ctx, group, box, bind) {
   const key = await member.withIdentity(ctx, async ({ store: s, diary }) => {
     const writer = await store.openGroupWriter(s, nonce)
     // Built raw: the builder refuses a low-order box.
-    const header = { type: 'group-writer', v: 1, group, diary: ctx.key, box, rejoin: null, at: new Date().toISOString() }
+    const header = { type: 'group-writer', v: 2, group, diary: ctx.key, member: cwOf(ctx, group), box, rejoin: null, at: new Date().toISOString() }
     await store.appendRecord(writer, header, { validator: () => null })
     const k = hex(writer.key)
     if (bind) await store.appendRecord(diary, groupJoinRecord({ group, writer: k, on: true }))
@@ -125,9 +155,9 @@ async function privateGroup (t) {
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
   await exchange(a, b)
-  await member.groupJoin(b, { group })
+  await joinGroup(b, { group })
   await exchange(b, a)
   return { kp, a, b, group }
 }
@@ -135,7 +165,7 @@ async function privateGroup (t) {
 test('private create: sealed root, never public, creator reads its name', async (t) => {
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
   const entries = await rootEntries(a, group)
   const header = entries[0].record
   t.is(header.visibility, 'private', 'header is private')
@@ -153,7 +183,7 @@ test('private create: sealed root, never public, creator reads its name', async 
   t.is(read.state, 'ok')
   t.alike(read.epoch, { writer: group, seq: 1 })
   t.is(read.sealed, 0)
-  const pub = await member.groupCreate(a, { name: 'Praça', join: 'open' })
+  const pub = await createGroup(a, { name: 'Praça', join: 'open' })
   t.is((await member.groupInfo(a, { group: pub.group })).visibility, 'public')
   t.alike((await member.groupRead(a, { group: pub.group })).epoch, null)
 })
@@ -225,11 +255,11 @@ test('private: rekey-pending refuses posts until a distributor rotates; group.re
   await member.groupPost(a, { group, text: 'de novo' })
   t.alike(texts(await member.groupRead(a, { group })), ['de novo'])
 
-  const pub = await member.groupCreate(a, { name: 'Praça', join: 'open' })
+  const pub = await createGroup(a, { name: 'Praça', join: 'open' })
   await t.exception(member.groupRekey(a, { group: pub.group }), /grupo público não usa chave/)
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await t.exception(member.groupRekey(c, { group }), /sem permissão no grupo/)
 })
 
@@ -243,7 +273,7 @@ test('private: pending new device gets no key; concurrent admin rotations both d
 
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await sync(a, b, c)
   // Both admins rotate from the same state.
   const ra = await member.groupRekey(a, { group })
@@ -270,7 +300,7 @@ test('private: pending new device gets no key; concurrent admin rotations both d
 test('private: the epoch key never lands on disk in the clear', async (t) => {
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
   await member.groupPost(a, { group, text: 'texto secreto' })
   const entries = await rootEntries(a, group)
   const box = store.ensureBoxKeyPair(a.dataDir)
@@ -290,19 +320,18 @@ test('private: community admins with power get keys; demotion rotates them out',
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
-  const { community } = await member.communityCreate(a, { name: 'Bairro' })
-  await member.communityLink(a, { community, group, on: true })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const community = communityOfGroup.get(group)
   await member.groupPost(a, { group, text: 'antes' })
   await exchange(a, b)
-  await member.groupJoin(b, { group })
+  await joinGroup(b, { group })
   await exchange(b, a)
   t.is((await member.groupRead(b, { group })).items.length, 0, 'requested: no key')
-  await member.communityAdmin(a, { community, member: b.key, on: true })
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
   await exchange(a, b)
   t.alike(texts(await member.groupRead(b, { group })), ['antes'], 'community admin reads history')
   t.is((await member.groupRead(b, { group })).state, 'ok')
-  await member.communityAdmin(a, { community, member: b.key, on: false })
+  await member.communitySetAdmin(a, { community, member: b.key, on: false })
   t.is((await member.groupRead(a, { group })).state, 'ok', 'demotion rotated')
   await member.groupPost(a, { group, text: 'depois' })
   await exchange(a, b)
@@ -320,7 +349,7 @@ test('private: an epoch from an admin later demoted still goes to a newly admitt
   await member.groupAdmin(a, { group, member: b.key, on: false })
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await exchange(c, a)
   await member.groupAdmit(a, { group, member: c.key, on: true })
   await exchange(a, c)
@@ -351,7 +380,7 @@ test('private: a malformed group-key in a counted writer breaks neither admissio
   await exchange(b, a)
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await exchange(c, a)
   t.alike(await member.groupAdmit(a, { group, member: c.key, on: true }), { ok: true })
   await exchange(a, c)
@@ -384,7 +413,7 @@ test('private: fake bans from an unadmitted writer never inflate a rotation', as
   await member.groupAdmit(a, { group, member: b.key, on: true })
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   const s = await store.openStore(c.dataDir)
   try {
     const local = store.readGroups(c.dataDir).find((g) => g.group === group)
@@ -410,9 +439,10 @@ test('private: an own writer created but never bound is rebound, not replaced', 
   const { kp, a, group } = await privateGroup(t)
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
+  await member.communityJoin(c, { community: communityOfGroup.get(group) })
   const box = hex(store.ensureBoxKeyPair(c.dataDir).publicKey)
   const writer = await plantWriter(c, group, box, false)
-  t.alike(await member.groupJoin(c, { group }), { state: 'requested' })
+  t.alike(await joinGroup(c, { group }), { state: 'requested' })
   t.is(ownWriter(c, group), writer, 'same writer kept in groups.json')
   const { entries } = await member.logRead(c)
   t.alike(groupLib.groupJoinHistory(entries, group).map((j) => [j.writer, j.on]), [[writer, true]], 'bound once')
@@ -422,11 +452,16 @@ test('private: a join by key before the root arrives is replaced by a writer wit
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
-  t.alike(await member.groupJoin(b, { group }), { state: 'pending' })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  // b holds the community, not the group root.
+  await exchange(a, b)
+  const s = await store.openStore(b.dataDir)
+  await store.purgeReplica(s, group)
+  await s.close()
+  t.alike(await joinGroup(b, { group }), { state: 'pending' })
   const boxless = ownWriter(b, group)
   await exchange(a, b)
-  t.alike(await member.groupJoin(b, { group }), { state: 'requested' })
+  t.alike(await joinGroup(b, { group }), { state: 'requested' })
   t.not(ownWriter(b, group), boxless, 'a new writer')
   const { entries } = await member.logRead(b)
   t.alike(groupLib.groupJoinHistory(entries, group).filter((j) => j.writer === boxless).map((j) => j.on), [true, false], 'boxless writer unbound')
@@ -439,16 +474,19 @@ test('private: a join by key before the root arrives is replaced by a writer wit
 })
 
 test('private: a multi-chunk rotation seals earlier epochs to the distributor only, the last to every entitled writer', async (t) => {
+  // MAX_KEY_BASIS + 1 people each join the community, Geral and the group:
+  // about 15 s alone, more under the parallel suite.
+  t.timeout(120000)
   const { kp, a, b, group } = await privateGroup(t)
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await exchange(c, a)
   const leavers = []
   for (let i = 0; i <= groupLib.MAX_KEY_BASIS; i++) {
     const x = await person(t, kp, 'Pessoa ' + i)
     await exchange(a, x)
-    await member.groupJoin(x, { group })
+    await joinGroup(x, { group })
     await exchange(x, a)
     leavers.push(x)
   }
@@ -481,11 +519,13 @@ test('private: a community ref in an earlier own basis is listed again in the ne
   const kp = crypto.keyPair()
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
-  const { community } = await member.communityCreate(a, { name: 'Bairro' })
-  await member.communityLink(a, { community, group, on: true })
-  await member.communityAdmin(a, { community, member: b.key, on: true })
-  await member.communityAdmin(a, { community, member: b.key, on: false })
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const community = communityOfGroup.get(group)
+  await exchange(a, b)
+  await member.communityJoin(b, { community })
+  await exchange(b, a)
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
+  await member.communitySetAdmin(a, { community, member: b.key, on: false })
   const lastBasis = async () => (await rootEntries(a, group)).filter((e) => e.seq >= 1 && e.record.type === 'group-key' && e.record.kid === null).pop().record.basis
   await member.groupRekey(a, { group })
   const first = (await lastBasis()).filter((r) => r.writer === community)
@@ -502,7 +542,7 @@ test('private: a history hand-off that does not fit the log appends nothing', as
   await member.groupRekey(a, { group })
   const c = await person(t, kp, 'Caio')
   await exchange(a, c)
-  await member.groupJoin(c, { group })
+  await joinGroup(c, { group })
   await exchange(c, a)
   const before = (await rootEntries(a, group)).length
   // Room for the admit and one more block; three epochs to hand.
@@ -542,18 +582,16 @@ test('private: every first key block commits to the key its members open', async
   t.ok(texts(await member.groupRead(a, { group })).includes('sob a chave comprometida'), 'members still read and send')
 })
 
-test('private: relinking a community whose admin was demoted while unlinked leaves no rekey-pending', async (t) => {
+test('private: an admin promoted again after a demotion leaves no rekey-pending', async (t) => {
   const { a, b, group } = await privateGroup(t)
   await member.groupAdmit(a, { group, member: b.key, on: true })
-  const { community } = await member.communityCreate(a, { name: 'Bairro' })
-  await member.communityLink(a, { community, group, on: true })
-  await member.communityAdmin(a, { community, member: b.key, on: true })
-  await member.communityLink(a, { community, group, on: false })
-  await member.communityAdmin(a, { community, member: b.key, on: false })
-  await member.communityLink(a, { community, group, on: true })
-  t.is((await member.groupRead(a, { group })).state, 'ok', 'not rekey-pending after the relink')
+  const community = communityOfGroup.get(group)
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
+  await member.communitySetAdmin(a, { community, member: b.key, on: false })
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
+  t.is((await member.groupRead(a, { group })).state, 'ok', 'not rekey-pending after the new grant')
   await exchange(a, b)
-  await member.groupPost(b, { group, text: 'depois do religamento' })
+  await member.groupPost(b, { group, text: 'depois da nova promoção' })
   await exchange(b, a)
-  t.ok(texts(await member.groupRead(a, { group })).includes('depois do religamento'), 'a member sends')
+  t.ok(texts(await member.groupRead(a, { group })).includes('depois da nova promoção'), 'a member sends')
 })

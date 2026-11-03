@@ -66,7 +66,7 @@ test('roleOf: from info.role, pending state, creator or writers', async (t) => {
 test('can: every action per role', async (t) => {
   const { can, ROLES } = await load()
   const table = {
-    creator: { post: 1, hide: 1, ban: 1, admit: 1, admin: 1, meta: 1, rekey: 1, leave: 1, link: 1 },
+    creator: { post: 1, hide: 1, ban: 1, admit: 1, admin: 1, meta: 1, rekey: 1, leave: 1, create: 1 },
     admin: { post: 1, hide: 1, ban: 1, admit: 1, rekey: 1, leave: 1 },
     member: { post: 1, leave: 1 },
     requested: { leave: 1 },
@@ -75,7 +75,7 @@ test('can: every action per role', async (t) => {
     pending: { leave: 1 }
   }
   for (const role of ROLES) {
-    for (const action of ['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'link']) {
+    for (const action of ['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'link']) {
       t.is(can(action, role), table[role][action] === 1, role + ' ' + action)
     }
   }
@@ -98,11 +98,15 @@ test('can: own messages and community admins', async (t) => {
   }
   t.absent(can('admin', 'member', { communityAdmin: true }), 'creator only')
   t.absent(can('meta', 'admin', { communityAdmin: true }))
+  t.absent(can('create', 'member', { communityAdmin: true }), 'creation uses the community role')
   t.absent(can('post', 'left', { communityAdmin: true }))
 })
 
 test('labels in pt-BR', async (t) => {
-  const { roleLabel, stateLabel, sealedLabel, visibilityLabel, joinLabel, membersLabel, REKEY_PENDING_LABEL } = await load()
+  const { roleLabel, stateLabel, sealedLabel, visibilityLabel, joinLabel, membersLabel, REKEY_PENDING_LABEL, GENERAL_LABEL, ORPHAN_LABEL, COMMUNITY_JOIN_LABELS } = await load()
+  t.is(GENERAL_LABEL, 'Geral')
+  t.is(ORPHAN_LABEL, 'grupo sem comunidade')
+  t.alike(COMMUNITY_JOIN_LABELS, { open: 'aberta a todos', approval: 'entrada com aprovação' })
   t.is(roleLabel('creator'), 'criador')
   t.is(roleLabel('admin'), 'administrador')
   t.is(roleLabel('requested'), 'pedido enviado')
@@ -127,7 +131,7 @@ test('labels in pt-BR', async (t) => {
 
 test('no em dash in any label', async (t) => {
   const g = await load()
-  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL]
+  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL]
   t.absent(all.some((s) => s.includes('\u2014')))
 })
 
@@ -220,9 +224,9 @@ test('reconcile: meta, rekey, link and bad input', async (t) => {
   t.is(reconcile({ action: 'rekey', epoch: before }, { epoch: null, state: 'locked', incomplete: false }), 'unknown', 'a locked node reads no epoch')
   t.is(reconcile({ action: 'rekey', epoch: before }, { epoch: { writer: A, seq: 9 }, state: 'locked' }), 'unknown')
   t.is(reconcile({ action: 'rekey', epoch: before }, {}), 'unknown')
-  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [C] } }), 'landed')
-  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [] } }), 'unknown', 'a one-sided success never shows')
-  t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [] } }), 'landed')
+  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [C] } }), 'unknown')
+  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [] } }), 'unknown', 'link is no longer supported')
+  t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [] } }), 'unknown')
   t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [C] } }), 'unknown')
   t.is(reconcile({ action: 'rekey', epoch: undefined }, { epoch: { writer: A, seq: 9 }, state: 'ok' }), 'unknown', 'no epoch seen before')
   t.is(reconcile({ action: 'rekey', epoch: null }, { epoch: { writer: A, seq: 9 }, state: 'ok' }), 'unknown')
@@ -283,4 +287,46 @@ test('groups.js stays pure: no React, react-native or Node built-ins', async (t)
   t.alike(imports.sort(), ['./format.js', '@varanda/rpc'])
   t.absent(/\b(require|process|Buffer)\b/.test(src.replace(/\/\/.*$/gm, '')))
   t.absent(src.includes('\u2014'))
+})
+
+test('parseCommunityJoinLink mirrors group links for community paths', async (t) => {
+  const { parseCommunityJoinLink, parseJoinLink } = await load()
+  for (const text of ['/c/' + A, ' /c/' + A.toUpperCase() + '/ ', 'https://varanda.example/c/' + A + '?x=1#y', 'http://example.test/c/' + A + '#x']) {
+    t.is(parseCommunityJoinLink(text), A, text)
+    t.is(parseJoinLink(text), null, 'a community link is not a group link')
+  }
+  for (const bad of ['/c/' + A + 'a', '/c/ab', '/g/' + A, 'c/' + A, '/c/' + A + '/extra', '//evil.example/c/' + A, 'javascript:/c/' + A, '/c/' + 'zz'.repeat(32), '', null, 3]) {
+    t.is(parseCommunityJoinLink(bad), null, String(bad))
+  }
+})
+
+test('reconcile: community join uses the role from community.info', async (t) => {
+  const { reconcile } = await load()
+  for (const role of ['member', 'requested', 'pending']) {
+    t.is(reconcile({ action: 'community-join' }, { role }), 'landed', role)
+    t.is(reconcile({ action: 'community-join' }, { role, incomplete: true }), 'unknown', 'incomplete ' + role)
+  }
+  for (const role of ['left', 'banned', 'creator', 'admin']) t.is(reconcile({ action: 'community-join' }, { role }), 'not-landed', role)
+  t.is(reconcile({ action: 'community-join' }, { state: 'member' }), 'unknown')
+  t.is(reconcile({ action: 'community-join' }, { role: null }), 'unknown')
+})
+
+test('reconcile: create matches the community, name and creator role', async (t) => {
+  const { reconcile } = await load()
+  const change = { action: 'create', community: C, name: 'Praia' }
+  const row = { group: A, name: 'Praia', role: 'creator' }
+  const view = { community: C, groups: [row], incomplete: false }
+  t.is(reconcile(change, view), 'landed')
+  t.is(reconcile(change, { ...view, groups: [null, { ...row, role: 'member' }, row] }), 'landed')
+  t.is(reconcile(change, { ...view, incomplete: true }), 'unknown')
+  t.is(reconcile(change, { ...view, community: B }), 'unknown', 'another catalogue proves nothing')
+  t.is(reconcile(change, { ...view, groups: [] }), 'not-landed')
+  t.is(reconcile(change, { ...view, groups: [{ ...row, name: 'Outra' }] }), 'not-landed')
+  for (const role of ['admin', 'member', 'requested', 'banned', 'left', 'pending', null]) {
+    t.is(reconcile(change, { ...view, groups: [{ ...row, role }] }), 'not-landed', String(role))
+  }
+  t.is(reconcile(change, { ...view, groups: null }), 'unknown')
+  t.is(reconcile(change, {}), 'unknown')
+  t.is(reconcile({ action: 'create', community: C }, view), 'unknown')
+  t.is(reconcile({ action: 'create', name: 'Praia' }, view), 'unknown')
 })

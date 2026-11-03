@@ -163,21 +163,31 @@ test('public groups end to end: core creator, browser member, real seeder', asyn
   const c = await coreNode(t, assocKp, 'Caio')
   const b = await browserMember(assocKp, 'Bia')
 
-  // 1. The creator makes an approval group and posts; a once run pushes it.
-  const { group } = await coreMember.groupCreate(c, { name: 'Horta', join: 'approval' })
+  // 1. The creator makes an open community and an approval group in it,
+  // and posts; a once run pushes it.
+  const { community, group: general } = await coreMember.communityCreate(c, { name: 'Bairro', join: 'open' })
+  const { group } = await coreMember.groupCreate(c, { name: 'Horta', join: 'approval', community })
   await coreMember.groupPost(c, { group, text: 'c1' })
   const r1 = await onceC(bootstrap, c)
   t.ok(r1.res.ok, 'creator push ok ' + r1.res.errors.join('; '))
-  await until(() => indexed(sd.seeder, group, group), { name: 'root indexed' })
+  await until(() => indexed(sd.seeder, group, group) && indexed(sd.seeder, community, community) && indexed(sd.seeder, general, general), { name: 'roots indexed' })
 
-  // 2. The browser joins by key without the root: pending, then requested.
-  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'join before the root is pending')
+  // 2. The browser opens the community link: the community root and its
+  // catalogue roots come; it joins the community (and Geral), then asks to
+  // join the group.
+  await store.addGroupReplica(b.storage, community)
   const r2 = await onceB(b, sd.url)
   t.ok(r2.res.ok, 'browser fetch ok ' + JSON.stringify(r2.res.errors))
-  t.ok(await store.groupCoreExists(b.storage, group), 'the root is stored')
-  t.is((await ops.groupInfo(b.ctx, { group })).state, 'requested', 'B reads requested')
+  for (const key of [community, general, group]) t.ok(await store.groupCoreExists(b.storage, key), 'root stored ' + key.slice(0, 8))
+  t.alike(await ops.communityJoin(b.ctx, { community }), { state: 'member', group: general }, 'B joins the community and Geral')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'requested' }, 'B asks to join the group')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes its writers')
   const bWriter = (await store.readGroupWriters(b.storage)).find((w) => w.group === group).key
-  await until(() => indexed(sd.seeder, group, bWriter), { name: 'B writer indexed' })
+  const bCw = (await store.readGroupWriters(b.storage)).find((w) => w.group === community).key
+  await until(() => indexed(sd.seeder, group, bWriter) && indexed(sd.seeder, community, bCw), { name: 'B writers indexed' })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches B')
+  t.is((await coreMember.communityInfo(c, { community })).members, 2, 'C counts B in the community')
+  t.ok((await coreMember.groupMembers(c, { group: general })).members.some((m) => m.member === b.ownHex), 'B is in Geral for C')
 
   // 3. C sees the request and admits; B posts; both read each other.
   const r3 = await onceC(bootstrap, c)
@@ -275,11 +285,12 @@ function writerLength (seeder, group, key) {
   return item ? item.length : 0
 }
 
-// A community admin acting in a linked group, then demoted while acting: the
-// hide written before the demotion's cuts stays for both nodes, the one
-// written after them (the admin's node had not seen the demotion) is void.
-test('communities end to end: community admin hides, then is demoted while acting', async (t) => {
-  t.timeout(180000)
+// Only the community's creator creates groups: an admin is refused, the
+// creator creates one; a browser member reaches it through the community
+// catalogue, joins and posts; a community ban hides the person's posts in
+// the group for everyone, and the unban restores them.
+test('communities end to end: an admin is refused, the creator creates a group, a community ban hides the member\'s posts', async (t) => {
+  t.timeout(240000)
   const started = Date.now()
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
@@ -288,71 +299,62 @@ test('communities end to end: community admin hides, then is demoted while actin
   const a = await coreNode(t, assocKp, 'Ana')
   const b = await browserMember(assocKp, 'Bia')
 
-  // 1. C creates an open group and a community and links both sides.
-  const { group } = await coreMember.groupCreate(c, { name: 'Horta', join: 'open' })
-  const { community } = await coreMember.communityCreate(c, { name: 'Bairro' })
-  const link = await coreMember.communityLink(c, { community, group, on: true })
-  t.alike(link.sides, ['community', 'group'], 'C writes both sides')
+  // 1. C creates an open community; A joins it (pending, then member).
+  const { community, group: general } = await coreMember.communityCreate(c, { name: 'Bairro', join: 'open' })
   t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the roots')
-  await until(() => indexed(sd.seeder, group, group) && sd.seeder._groupServed.has(community), { name: 'roots served' })
+  await until(() => indexed(sd.seeder, community, community) && indexed(sd.seeder, general, general), { name: 'roots served' })
+  t.is((await coreMember.communityJoin(a, { community })).state, 'pending', 'A joins before the root')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the community')
+  t.is((await coreMember.communityJoin(a, { community })).state, 'member', 'A is a member')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A pushes its CW')
+  await until(() => sd.seeder.groupWriters({ group: community, after: null, limit: 64 }).items.length >= 2, { name: 'A CW indexed' })
 
-  // 2. A (core) and B (browser) join; B posts twice.
-  t.alike(await coreMember.groupJoin(a, { group }), { state: 'pending' }, 'A joins before the root')
-  const ra = await onceC(bootstrap, a)
-  t.ok(ra.res.ok, 'A fetch ok ' + ra.res.errors.join('; '))
-  t.is((await coreMember.groupInfo(a, { group })).state, 'member', 'A is a member')
-  const aWriter = coreStore.readGroups(a.dataDir).find((g) => g.group === group).writer
-  await until(() => indexed(sd.seeder, group, aWriter), { name: 'A writer indexed' })
-  await ops.groupJoin(b.ctx, { group })
-  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the root')
-  t.is((await ops.groupInfo(b.ctx, { group })).state, 'member', 'B is a member')
-  const p1 = await ops.groupPost(b.ctx, { group, text: 'b1' })
-  const p2 = await ops.groupPost(b.ctx, { group, text: 'b2' })
-  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes b1 and b2')
-  const bWriter = (await store.readGroupWriters(b.storage)).find((w) => w.group === group).key
-  await until(() => writerLength(sd.seeder, group, bWriter) > p2.seq, { name: 'b2 on the seeder' })
-
-  // 3. C, holding A's writer, appoints A as community admin.
-  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches A and B')
-  t.alike(await coreMember.communityAdmin(c, { community, member: a.key, on: true }), { community, member: a.key, on: true })
-  const infoC = await coreMember.communityInfo(c, { community })
-  t.alike([infoC.groups.map((g) => g.group), infoC.admins, infoC.state], [[group], 2, 'ready'], 'community info on C')
+  // 2. C appoints A; A may not create a group; C creates it and A joins.
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches A')
+  t.alike(await coreMember.communitySetAdmin(c, { community, member: a.key, on: true }), { community, member: a.key, on: true })
   t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the grant')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the grant')
+  await t.exception(() => coreMember.groupCreate(a, { name: 'Outra', join: 'open', community }), /só quem criou a comunidade cria grupos/, 'an admin is refused')
+  const { group } = await coreMember.groupCreate(c, { name: 'Horta', join: 'open', community })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the group and its create')
+  await until(() => indexed(sd.seeder, group, group), { name: 'group root indexed' })
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the group')
+  t.is((await coreMember.groupJoin(a, { group })).state, 'member', 'A joins the group')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A pushes its writer')
 
-  // 4. A acts in the group through the community: hides b1.
-  const aBefore = writerLength(sd.seeder, group, aWriter)
-  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the community root and the grant')
-  t.alike((await coreMember.groupInfo(a, { group })).communities, [community], 'A sees the two-way link')
-  t.alike(await coreMember.groupHide(a, { group, target: { writer: bWriter, seq: p1.seq }, on: true }), { ok: true })
-  t.ok((await onceC(bootstrap, a)).res.ok, 'A pushes the first hide')
-  await until(() => writerLength(sd.seeder, group, aWriter) > aBefore, { name: 'A hide on the seeder' })
-  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches the hide')
-  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the community root and the hide')
-  const hiddenC = await coreMember.groupRead(c, { group })
-  t.ok(hiddenC.items.some((p) => p.diary === b.ownHex && p.hidden), 'C sees b1 hidden ' + JSON.stringify(view(hiddenC)))
-  const hiddenB = await ops.groupRead(b.ctx, { group })
-  t.ok(hiddenB.items.some((p) => p.diary === b.ownHex && p.hidden && p.text === ''), 'B sees b1 hidden ' + JSON.stringify(view(hiddenB)))
-  t.absent(hiddenB.items.some((p) => p.text === 'b1'), 'b1 text gone for B')
-  t.alike((await ops.groupInfo(b.ctx, { group })).communities, [community], 'B sees the two-way link')
+  // 3. B opens the community link, joins it and Geral, finds the group in
+  // the catalogue, joins and posts.
+  await store.addGroupReplica(b.storage, community)
+  const first = await onceB(b, sd.url)
+  t.ok(first.res.ok, 'B fetches the community ' + JSON.stringify(first.res.errors))
+  t.alike(await ops.communityJoin(b.ctx, { community }), { state: 'member', group: general }, 'B joins the community and Geral')
+  const info = await ops.communityInfo(b.ctx, { community })
+  t.alike(info.groups.map((g) => g.group).sort(), [general, group].sort(), 'the catalogue names Geral and the new group')
+  t.is(info.groups.find((g) => g.group === group).name, 'Horta', 'the new group root came')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' }, 'B joins the group')
+  const p1 = await ops.groupPost(b.ctx, { group, text: 'b1' })
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes b1')
+  const bWriter = (await store.readGroupWriters(b.storage)).find((w) => w.group === group).key
+  const bCw = (await store.readGroupWriters(b.storage)).find((w) => w.group === community).key
+  await until(() => writerLength(sd.seeder, group, bWriter) > p1.seq && indexed(sd.seeder, community, bCw), { name: 'b1 and B CW on the seeder' })
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches b1 in one run')
+  const readA = await coreMember.groupRead(a, { group })
+  t.ok(readA.items.some((p) => p.diary === b.ownHex && p.text === 'b1' && !p.hidden), 'A reads b1 ' + JSON.stringify(view(readA)))
 
-  // 5. C demotes A at the writer length it holds; A, not synced, hides b2.
-  const aCut = writerLength(sd.seeder, group, aWriter)
-  t.alike(await coreMember.communityAdmin(c, { community, member: a.key, on: false }), { community, member: a.key, on: false })
-  t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the demotion')
-  t.alike(await coreMember.groupHide(a, { group, target: { writer: bWriter, seq: p2.seq }, on: true }), { ok: true }, 'A, unaware, hides b2')
-  t.ok((await onceC(bootstrap, a)).res.ok, 'A pushes the late hide')
-  await until(() => writerLength(sd.seeder, group, aWriter) > aCut, { name: 'late hide on the seeder' })
-  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches the late hide')
-  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the demotion and the late hide')
+  // 4. C bans B from the community: b1 is hidden in the group for A.
+  t.alike(await coreMember.communityBan(c, { community, member: b.ownHex, on: true }), { ok: true })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the ban')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the ban')
+  t.absent((await coreMember.groupRead(a, { group })).items.some((p) => p.text === 'b1'), 'b1 hidden for A')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the ban')
+  t.is((await ops.communityInfo(b.ctx, { community })).role, 'banned', 'B reads banned in the community')
+  t.absent((await ops.groupRead(b.ctx, { group })).items.some((p) => p.text === 'b1'), 'b1 hidden for B')
 
-  // The hide before the demotion's cut stays; the later one is void.
-  const finalC = await coreMember.groupRead(c, { group })
-  const finalB = await ops.groupRead(b.ctx, { group })
-  for (const [label, read] of [['C', finalC], ['B', finalB]]) {
-    t.ok(read.items.some((p) => p.diary === b.ownHex && p.text === 'b2' && !p.hidden), label + ' sees b2 visible ' + JSON.stringify(view(read)))
-    t.absent(read.items.some((p) => p.text === 'b1'), label + ' keeps b1 hidden')
-  }
-  t.is((await coreMember.communityInfo(c, { community })).admins, 1, 'only the creator administers now')
+  // 5. The unban restores b1.
+  t.alike(await coreMember.communityBan(c, { community, member: b.ownHex, on: false }), { ok: true })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the unban')
+  t.ok((await onceC(bootstrap, a)).res.ok, 'A fetches the unban')
+  t.ok((await coreMember.groupRead(a, { group })).items.some((p) => p.diary === b.ownHex && p.text === 'b1'), 'b1 visible again for A')
 
   t.comment('runtime ' + (Date.now() - started) + ' ms')
 })

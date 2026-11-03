@@ -691,6 +691,10 @@ function createBrowserSession ({
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
                 return
+              case 'group-skipped':
+                // The legacy sweep at sync start (protocol v1 cores purged).
+                if (ev.reason === 'legacy') warning('aviso: grupo ' + key8(ev.key) + ' ignorado (legacy)', epoch)
+                return
               case 'groups-changed':
                 if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
                 return
@@ -1325,14 +1329,42 @@ function createBrowserSession ({
   const GROUP_ROOTS = (params) => [params.group]
   const GROUP_CHANGED = async (c, result, params) => [result.group || params.group]
 
+  // A community write that changes who belongs or acts in C: C and every
+  // local group whose header names C re-read (rpc.md section 6). It may
+  // also append to the device's writers in those groups (a group-leave, or
+  // key blocks of a rotation in a private group), so the gate waits for
+  // them and their new lengths are pushed. Read under withStore: the group
+  // roots are never opened beside a run's instance.
+  const COMMUNITY_WIDE = {
+    roots: async (params) => [params.community, ...await withStore((c) => member.communityGroups(c, { community: params.community }))],
+    changed: async (c, result, params) => [params.community, ...await member.communityGroups(c, { community: params.community })]
+  }
+
+  // The community a group's held root header names, or null. Read under
+  // withStore: the core is never opened beside a run's instance.
+  function communityOfGroup (group) {
+    return withStore((c) => member.groupCommunityOf(c, group))
+  }
+
+  // Moderation a community admin or creator may write through its
+  // community writer (CW): the gate waits for that CW too, and its new
+  // length is pushed.
+  const GROUP_AND_COMMUNITY = {
+    roots: async (params) => {
+      const community = await communityOfGroup(params.group)
+      return community === null ? [params.group] : [params.group, community]
+    }
+  }
+
   function groupWrite (operation, { roots = GROUP_ROOTS, changed = GROUP_CHANGED } = {}) {
     return serial(async (params, epoch, generation) => {
       checkGroupOperation(epoch, generation)
       await requireUnlocked()
       groupWriting = true
       try {
+        const rootKeys = await roots(params)
         const keys = []
-        for (const root of roots(params)) keys.push(...await ownGroupKeys(root))
+        for (const root of rootKeys) keys.push(...await ownGroupKeys(root))
         checkGroupOperation(epoch, generation)
         await ensureCaughtUp(epoch, [...new Set(keys)], generation)
         const result = await withStore(async (c) => {
@@ -1341,7 +1373,7 @@ function createBrowserSession ({
           const groups = [...new Set(await changed(c, result, params))]
           // A join can create a writer after the previous run took its snapshot.
           // The next run opens every own writer from the updated kv list.
-          const written = new Set([...roots(params), result.group, result.community].filter((k) => typeof k === 'string'))
+          const written = new Set([...rootKeys, result.group, result.community].filter((k) => typeof k === 'string'))
           for (const group of written) {
             for (const key of await ownGroupKeys(group)) {
               if (await refusedWriter(key)) continue
@@ -1829,7 +1861,10 @@ function createBrowserSession ({
       }
     },
 
-    'group.create': groupWrite(member.groupCreate),
+    'group.create': groupWrite(member.groupCreate, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [result.group, params.community]
+    }),
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
@@ -1838,26 +1873,40 @@ function createBrowserSession ({
     'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
     'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),
     'group.requests': serial((params) => withStore((c) => member.groupRequests(c, params))),
-    'group.admit': groupWrite(member.groupAdmit),
-    'group.ban': groupWrite(member.groupBan),
+    'group.admit': groupWrite(member.groupAdmit, GROUP_AND_COMMUNITY),
+    'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
-    'group.hide': groupWrite(member.groupHide),
+    'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.meta': groupWrite(member.groupMeta),
     'group.rekey': groupWrite(member.groupRekey),
     'community.create': groupWrite(member.communityCreate, {
-      roots: () => [],
-      changed: async (c, result) => [result.community]
-    }),
-    'community.link': groupWrite(member.communityLink, {
-      roots: (params) => [params.community, params.group],
+      // A resume (kv communityCreate) appends to the roots it already made.
+      roots: async () => {
+        const plan = await store.readCommunityCreate(storage)
+        return plan === null ? [] : [plan.community, plan.group]
+      },
       changed: async (c, result) => [result.community, result.group]
     }),
+    'community.join': groupWrite(member.communityJoin, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community, ...(result.group ? [result.group] : [])]
+    }),
+    'community.leave': groupWrite(member.communityLeave, COMMUNITY_WIDE),
+    'community.admit': groupWrite(member.communityAdmit, COMMUNITY_WIDE),
+    'community.ban': groupWrite(member.communityBan, COMMUNITY_WIDE),
+    'community.admin': groupWrite(member.communitySetAdmin, COMMUNITY_WIDE),
+    'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.removeGroup': groupWrite(member.communityRemoveGroup, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community, String(params.group).toLowerCase()]
+    }),
+    'community.members': serial((params) => withStore((c) => member.communityMembers(c, params))),
+    'community.requests': serial((params) => withStore((c) => member.communityRequests(c, params))),
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
     'community.list': serial(() => withStore((c) => member.communityList(c))),
-    'community.admin': groupWrite(member.communityAdmin, {
-      roots: (params) => [params.community],
-      changed: async (c, result) => [result.community, ...await member.communityGroups(c, { community: result.community })]
-    }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection

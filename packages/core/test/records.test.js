@@ -803,7 +803,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -827,6 +827,71 @@ test('group-join records', async (t) => {
   const hostile = { type: 'group-join', group: K1, on: true, at: AT }
   Object.defineProperty(hostile, 'writer', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 1), 'malformed')
+})
+
+test('group-join records with a rejoin', async (t) => {
+  await testnet(t)
+  const { groupJoinRecord } = records
+  const gj = { type: 'group-join', group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 2 }, at: AT }
+  t.is(validateRecord(gj, 1), null)
+  t.is(validateRecord({ ...gj, rejoin: null }, 1), null, 'a null rejoin')
+  t.is(validateRecord({ ...gj, on: false }, 1), null)
+  for (const rejoin of [{ writer: K1, seq: 0 }, { writer: K1, seq: 1.5 }, { writer: K1, seq: '2' }, { writer: 'A'.repeat(64), seq: 2 }, { writer: K1 }, { writer: K1, seq: 2, extra: 1 }, [K1, 2], 'x', 1, undefined]) {
+    t.is(validateRecord({ ...gj, rejoin }, 1), 'malformed', 'rejoin ' + JSON.stringify(rejoin))
+  }
+  t.is(validateRecord({ ...gj, extra: 1 }, 1), 'malformed', 'exact keys')
+  const noAt = { ...gj }
+  delete noAt.at
+  t.is(validateRecord(noAt, 1), 'malformed')
+  t.is(validateRecord({ ...gj, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 2 }, at: AT }), gj)
+  t.alike(Object.keys(groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: null })), ['type', 'group', 'writer', 'on', 'rejoin', 'at'])
+  t.alike(Object.keys(groupJoinRecord({ group: K1, writer: K2, on: true })), ['type', 'group', 'writer', 'on', 'at'], 'without rejoin as before')
+  await t.exception.all(async () => groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 0 }, at: AT }), /malformed/)
+})
+
+test('group-confirm records', async (t) => {
+  await testnet(t)
+  const { groupConfirmRecord } = records
+  const D = 'd'.repeat(64)
+  const gc = { type: 'group-confirm', group: K1, writer: K2, seq: 3, digest: D, at: AT }
+  t.is(validateRecord(gc, 1), null)
+  t.is(validateRecord(gc, 0), 'genesis-required', 'diary seq >= 1')
+  for (const seq of [0, -1, 1.5, '3', null, undefined]) t.is(validateRecord({ ...gc, seq }, 1), 'malformed', 'seq ' + seq)
+  for (const digest of ['D'.repeat(64), 'd'.repeat(63), 'g'.repeat(64), null, 1]) t.is(validateRecord({ ...gc, digest }, 1), 'malformed', 'digest ' + digest)
+  for (const k of ['A'.repeat(64), K1.slice(1), null]) {
+    t.is(validateRecord({ ...gc, group: k }, 1), 'malformed', 'group ' + k)
+    t.is(validateRecord({ ...gc, writer: k }, 1), 'malformed', 'writer ' + k)
+  }
+  t.is(validateRecord({ ...gc, extra: 1 }, 1), 'malformed', 'exact keys')
+  t.is(validateRecord({ ...gc, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupConfirmRecord({ group: K1, writer: K2, seq: 3, digest: D, at: AT }), gc)
+  t.alike(Object.keys(groupConfirmRecord({ group: K1, writer: K2, seq: 3, digest: D })), ['type', 'group', 'writer', 'seq', 'digest', 'at'])
+  await t.exception.all(async () => groupConfirmRecord({ group: K1, writer: K2, seq: 0, digest: D, at: AT }), /malformed/)
+})
+
+test('group-cut records', async (t) => {
+  await testnet(t)
+  const { groupCutRecord } = records
+  const gc = { type: 'group-cut', group: K1, writer: K1, cut: 5, at: AT }
+  t.is(validateRecord(gc, 1), null)
+  t.is(validateRecord({ ...gc, cut: 0 }, 1), null, 'cut 0')
+  t.is(validateRecord({ ...gc, writer: K2 }, 4), null, 'any writer of the group')
+  t.is(validateRecord(gc, 0), 'genesis-required', 'seq >= 1')
+  for (const cut of [-1, 1.5, '5', null, undefined, Number.MAX_SAFE_INTEGER + 1]) t.is(validateRecord({ ...gc, cut }, 1), 'malformed', 'cut ' + cut)
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...gc, group: k }, 1), 'malformed', 'group ' + k)
+    t.is(validateRecord({ ...gc, writer: k }, 1), 'malformed', 'writer ' + k)
+  }
+  t.is(validateRecord({ ...gc, extra: 1 }, 1), 'malformed', 'exact keys')
+  t.is(validateRecord({ ...gc, on: false }, 1), 'malformed', 'not a group-join variant')
+  const noCut = { ...gc }
+  delete noCut.cut
+  t.is(validateRecord(noCut, 1), 'malformed')
+  t.is(validateRecord({ ...gc, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupCutRecord({ group: K1, writer: K1, cut: 5, at: AT }), gc)
+  t.alike(Object.keys(groupCutRecord({ group: K1, writer: K1, cut: 0 })), ['type', 'group', 'writer', 'cut', 'at'])
+  await t.exception.all(async () => groupCutRecord({ group: K1, writer: K1, cut: -1, at: AT }), /malformed/)
 })
 
 const AVATAR = { core: K2, mime: 'image/webp', start: 3, blocks: 2, bytes: 40000, sha256: 'e'.repeat(64), width: 512, height: 512 }

@@ -3,7 +3,6 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 const { spawnSync } = require('node:child_process')
-const { testnet } = require('./helpers/net')
 const { parseArgs, HELP, UsageError } = require('../lib/cli')
 
 const root = path.resolve(__dirname, '..')
@@ -45,8 +44,8 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo (--name, --join open|approval, --private cifrado)
-  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group create               cria um grupo numa comunidade (--community, --name, --join open|approval, --private cifrado)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community se o grupo ainda não chegou)
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
   group list                 grupos dos quais você participa
@@ -55,10 +54,14 @@ Comandos:
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   group rekey <chave>        gera uma nova chave do grupo privado
-  community create           cria uma comunidade de grupos (--name)
-  community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
-  community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
-  community info <chave>     dados da comunidade e seus grupos
+  community create           cria uma comunidade com o grupo Geral (--name, --join open|approval)
+  community join|leave <chave>         entra na comunidade (e no Geral) e sai dela
+  community leave <chave> --force      quem criou sai sem esperar os grupos que ainda não chegaram
+  community info|list        dados da comunidade e seus grupos; suas comunidades
+  community members|requests <chave>   membros e pedidos de entrada da comunidade
+  community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
+  community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
+  community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -70,7 +73,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private
+  --join --undo --private --community --force
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
@@ -168,7 +171,6 @@ test('CLI push settings are environment only and validate without echoing values
 
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
-  await testnet(t)
 
   t.is(HELP, expectedHelp)
   t.alike(parse(), {
@@ -182,11 +184,13 @@ test('CLI parser, R5 help and command router', async (t) => {
     yes: false,
     undo: false,
     private: false,
+    force: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
     timeoutMs: null,
     member: null,
+    community: null,
     seeder: null,
     issuer: null,
     moderator: null,
@@ -241,6 +245,8 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['mod', 'apply', '--yes']).yes, true)
   t.alike(parse(['mod', 'apply', '--yes']).positionals, ['apply'])
   usage(t, ['--yes=true'], 'opção desconhecida --yes=true')
+  t.is(parse(['community', 'leave', upperKey, '--force']).force, true)
+  usage(t, ['--force=true'], 'opção desconhecida --force=true')
   usage(t, ['--new-list=true'], 'opção desconhecida --new-list=true')
   usage(t, ['--no-publish=true'], 'opção desconhecida --no-publish=true')
   usage(t, ['--reason', 'spam'], 'opção desconhecida --reason')
@@ -250,6 +256,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     association: [upperKey, 'association', lowerKey],
     'timeout-ms': ['12', 'timeoutMs', 12],
     member: [upperKey, 'member', lowerKey],
+    community: [upperKey, 'community', lowerKey],
     seeder: [upperKey, 'seeder', lowerKey],
     issuer: [upperKey, 'issuer', lowerKey],
     moderator: [upperKey, 'moderator', lowerKey],
@@ -304,7 +311,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--association', upperKey], { VARANDA_ASSOCIATION: 'invalid' }).association, lowerKey)
   usage(t, [], 'chave da associação inválida', { VARANDA_ASSOCIATION: 'invalid' })
   for (const invalid of ['', 'g'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), upperKey + '\n']) {
-    for (const name of ['member', 'author', 'seeder', 'moderator']) usage(t, ['--' + name, invalid], 'chave inválida')
+    for (const name of ['member', 'community', 'author', 'seeder', 'moderator']) usage(t, ['--' + name, invalid], 'chave inválida')
     if (invalid) usage(t, ['--association', invalid], 'chave da associação inválida')
   }
 

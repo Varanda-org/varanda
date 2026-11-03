@@ -29,9 +29,9 @@ test('a browser member joins a group through the seeder: pushed, admitted, gated
   await ops.followAdd(b.ctx, a.ownHex)
 
   // The creator: the root is an own core, pushed and confirmed at its length.
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Horta', join: 'open' })
   for (let i = 0; i < 20; i++) await ops.groupPost(a.ctx, { group, text: 'p' + i })
-  const { group: other } = await ops.groupCreate(a.ctx, { name: 'Outra', join: 'open' })
+  const { group: other } = await ops.communityCreate(a.ctx, { name: 'Outra', join: 'open' })
   const evA = []
   const resA = await once(a, url, evA)
   t.ok(resA.ok, 'creator once run ok ' + JSON.stringify(resA.errors))
@@ -59,9 +59,9 @@ test('a browser member joins a group through the seeder: pushed, admitted, gated
   delete seeder.groupWriters
 
   // Join, post, push: the seeder admits the member's writer.
-  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'joined the community and its Geral')
   await ops.groupPost(b.ctx, { group, text: 'oi' })
-  const writer = (await store.readGroupWriters(b.storage))[0].key
+  const writer = (await store.readGroupWriters(b.storage)).find((e) => e.group === group).key
   const evB2 = []
   const resB2 = await once(b, url, evB2)
   t.ok(resB2.ok, 'member push run ok ' + JSON.stringify(resB2.errors))
@@ -109,7 +109,7 @@ test('more than one page of writers is paged in full; unanswered gates keep a on
   const a = await member(assocKp, 'Ana')
   const b = await member(assocKp, 'Bia')
   await ops.followAdd(b.ctx, a.ownHex)
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Muitos', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Muitos', join: 'open' })
   t.ok((await once(a, url, [])).ok)
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
 
@@ -122,7 +122,9 @@ test('more than one page of writers is paged in full; unanswered gates keep a on
   const ev = []
   const ac = new AbortController()
   const run = sync(b, url, ev, { signal: ac.signal, gateTimeoutMs: 300 })
-  await until(() => named(ev, 'group-paged').length > 0 && named(ev, 'groups-changed').some((e) => e.group === group), { name: 'paged, root fetched' })
+  // The community root in full (header and Geral's group-create): a core
+  // stored empty or at its header alone would make the join wait or skip Geral.
+  await until(async () => named(ev, 'group-paged').length > 0 && named(ev, 'groups-changed').some((e) => e.group === group) && ((await held(b, community)) || { contiguous: 0 }).contiguous >= 2, { name: 'paged, root and its community fetched' })
   ac.abort()
   await run
   t.is(named(ev, 'group-paged')[0].count, 71, 'every writer of both pages')
@@ -132,7 +134,7 @@ test('more than one page of writers is paged in full; unanswered gates keep a on
   // A stored root alone is not synced: the member joins, and a once run
   // cannot be met while those writers never answer. It times out naming
   // them, bounded by its deadline.
-  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'joined the community and its Geral')
   const ev2 = []
   const started = Date.now()
   const res = await once(b, url, ev2, { timeoutMs: 4000, gateTimeoutMs: 500 })
@@ -150,7 +152,7 @@ test('an unfollowed author: its binding diary is stored, never followed, and the
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Praça', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Praça', join: 'open' })
   await ops.groupPost(a.ctx, { group, text: 'bom dia' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
@@ -172,7 +174,7 @@ test('gates are fair: every unanswered writer is tried, none more than the cap',
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const b = await member(assocKp, 'Bia')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Fila', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Fila', join: 'open' })
   t.ok((await once(a, url, [])).ok)
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   const extra = []
@@ -194,7 +196,8 @@ test('incomplete pages never complete a pass nor confirm an own core; requests a
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const keys = []
-  for (let i = 0; i < 3; i++) keys.push((await ops.groupCreate(a.ctx, { name: 'G' + i, join: 'open' })).group)
+  const { community } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  for (let i = 0; i < 3; i++) keys.push((await ops.groupCreate(a.ctx, { name: 'G' + i, join: 'open', community })).group)
   const real = seeder.groupWriters.bind(seeder)
   const times = []
   seeder.groupWriters = (q) => {
@@ -221,7 +224,7 @@ test('a reconnect pages again before a once run can end', async (t) => {
   const { seeder, wss, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const b = await member(assocKp, 'Bia')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Volta', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Volta', join: 'open' })
   t.ok((await once(a, url, [])).ok)
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(b.storage, group)
@@ -252,7 +255,7 @@ test('a binding diary still opening keeps a once run open until it holds the joi
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Lenta', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Lenta', join: 'open' })
   await ops.groupPost(a.ctx, { group, text: 'devagar' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
@@ -280,8 +283,8 @@ test('a binding diary waits for a gate still borrowing its key on the link', asy
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group: slow } = await ops.groupCreate(a.ctx, { name: 'Presa', join: 'open' })
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Livre', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Livre', join: 'open' })
+  const { group: slow } = await ops.groupCreate(a.ctx, { name: 'Presa', join: 'open', community })
   await ops.groupPost(a.ctx, { group, text: 'livre' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group) && indexed(seeder, slow, slow), { name: 'roots indexed' })
@@ -314,7 +317,7 @@ test('an issuer revoked in the stored snapshot purges the group cores and bindin
   const issCert = createIssuerCert({ issuer: hex(issKp.publicKey) }, assocKp)
   const a = await member(assocKp, 'Ana', (key) => createIssuedCert({ member: key }, issKp, issCert))
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Revogada', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Revogada', join: 'open' })
   await ops.groupPost(a.ctx, { group, text: 'antes' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
@@ -340,7 +343,7 @@ test('a group core kept after a non-purging failure still binds its diary', asyn
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Cheia', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Cheia', join: 'open' })
   for (let i = 0; i < 12; i++) await ops.groupPost(a.ctx, { group, text: 'q' + i })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
@@ -350,7 +353,7 @@ test('a group core kept after a non-purging failure still binds its diary', asyn
   // Joined, the group is synced at start. The root (13 blocks) is now over
   // the quota, the author's diary is not: the root fails 'quota' and keeps
   // its blocks, so its diary stays.
-  t.alike(await ops.groupJoin(c.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(c.ctx, { community })).state, 'member', 'joined the community and its Geral')
   const ev = []
   await once(c, url, ev, { timeoutMs: 5000, maxLogBlocks: 10 })
   t.ok(named(ev, 'group-skipped').some((e) => e.key === group && e.reason === 'quota'), 'the root failed on quota')
@@ -366,7 +369,7 @@ test('a timed-out page request is retried on the same link', async (t) => {
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const b = await member(assocKp, 'Bia')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Tarde', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Tarde', join: 'open' })
   t.ok((await once(a, url, [])).ok)
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   const real = seeder.groupWriters.bind(seeder)
@@ -394,12 +397,12 @@ test('an advertised length past the quota is skipped as quota, never fetched blo
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Enorme', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Enorme', join: 'open' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(c.storage, group)
   t.ok((await once(c, url, [])).ok, 'reader fetched the root')
-  t.alike(await ops.groupJoin(c.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(c.ctx, { community })).state, 'member', 'joined the community and its Geral')
 
   // The accepted root is now advertised at Number.MAX_SAFE_INTEGER, and a
   // writer nobody gated yet at one block past the quota.
@@ -432,7 +435,7 @@ test('a followed author whose issuer is revoked loses its group cores although t
   const a = await member(assocKp, 'Ana', (key) => createIssuedCert({ member: key }, issKp, issCert))
   const c = await member(assocKp, 'Caio')
   await ops.followAdd(c.ctx, a.ownHex)
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Seguida', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Seguida', join: 'open' })
   await ops.groupPost(a.ctx, { group, text: 'oi' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
@@ -456,13 +459,13 @@ test('the revocation sweep never opens a second handle on an open binding diary'
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
   await ops.followAdd(c.ctx, a.ownHex)
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Antiga', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Antiga', join: 'open' })
   await ops.groupPost(a.ctx, { group, text: 'um' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(c.storage, group)
   t.ok((await once(c, url, [])).ok, 'reader fetched while following')
-  t.alike(await ops.groupJoin(c.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(c.ctx, { community })).state, 'member', 'joined the community and its Geral')
   await ops.followRemove(c.ctx, a.ownHex)
   t.ok((await once(c, url, [])).ok, 'the unfollow is synced; the diary stays as a binding diary')
 
@@ -495,7 +498,7 @@ test('a block adopted during a continuous run purges resting group cores of the 
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Parada', join: 'open' })
+  const { group } = await ops.communityCreate(a.ctx, { name: 'Parada', join: 'open' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(c.storage, group)
@@ -520,12 +523,12 @@ test('an over-quota listing of an active core, then an honest one: the core stay
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
   const c = await member(assocKp, 'Caio')
-  const { group } = await ops.groupCreate(a.ctx, { name: 'Viva', join: 'open' })
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Viva', join: 'open' })
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(c.storage, group)
   t.ok((await once(c, url, [])).ok, 'reader fetched the root')
-  t.alike(await ops.groupJoin(c.ctx, { group }), { state: 'member' })
+  t.is((await ops.communityJoin(c.ctx, { community })).state, 'member', 'joined the community and its Geral')
   const real = seeder.groupWriters.bind(seeder)
   let lying = true
   seeder.groupWriters = (q) => {

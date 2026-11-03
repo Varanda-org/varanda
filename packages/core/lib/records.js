@@ -33,8 +33,6 @@ const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
 const MAX_GROUPS_PER_COMMUNITY = 32
 const MAX_GROUP_CUTS = 16
-// Cuts of a community admin grant or demotion: writers across linked groups.
-const MAX_COMMUNITY_CUTS = 64
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
 const MAX_GROUP_NAME = 80
@@ -58,6 +56,17 @@ const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', '
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 const GROUP_JOIN_KEYS = ['type', 'group', 'writer', 'on', 'at']
+// A community writer created by a rejoin also names, in its join, the leave
+// its header's `rejoin` names (null otherwise): the diary signs the writer's
+// generation, so an old device key cannot rewrite it.
+const GROUP_JOIN_REJOIN_KEYS = ['type', 'group', 'writer', 'on', 'rejoin', 'at']
+const JOIN_REJOIN_KEYS = ['writer', 'seq']
+// The diary vouches that its writer `writer`'s records in group `group` at
+// seq >= `cut` carry no authority (a group root its creator left behind).
+const GROUP_CUT_KEYS = ['type', 'group', 'writer', 'cut', 'at']
+// The diary confirms the EXACT leave at (`writer`, `seq`) in `group` whose
+// record digest (group.js leaveDigest) is `digest`.
+const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 // A tombstone: no author field, the diary signature is the authority, so a
 // tombstone in another diary targets nothing (lib/deletion.js).
 const DELETE_KEYS = ['type', 'seq', 'at']
@@ -184,6 +193,11 @@ function validUsernameShape (record) {
     isCanonicalIso(record.date)
 }
 
+// A group-leave sits at seq >= 1 of its writer (group.js validRef).
+function validJoinRejoin (r) {
+  return isPlainObject(r) && hasExactKeys(r, JOIN_REJOIN_KEYS) && isHex64(r.writer) && Number.isSafeInteger(r.seq) && r.seq >= 1
+}
+
 // A post reference: exactly { author: lowercase hex64, seq: safe int >= 1 }.
 function validTarget (r) {
   if (!isPlainObject(r) || !hasExactKeys(r, TARGET_KEYS)) return false
@@ -256,7 +270,7 @@ function validDeleteRanges (media) {
   return true
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm'])
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -300,7 +314,18 @@ function check (record, seq) {
   }
   // The creator binds the group root itself: writer may equal group.
   if (type === 'group-join') {
-    if (!hasExactKeys(record, GROUP_JOIN_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || typeof record.on !== 'boolean') return 'malformed'
+    const withRejoin = hasExactKeys(record, GROUP_JOIN_REJOIN_KEYS)
+    if ((!withRejoin && !hasExactKeys(record, GROUP_JOIN_KEYS)) || !isHex64(record.group) || !isHex64(record.writer) || typeof record.on !== 'boolean') return 'malformed'
+    if (withRejoin && record.rejoin !== null && !validJoinRejoin(record.rejoin)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'group-confirm') {
+    if (!hasExactKeys(record, GROUP_CONFIRM_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || !Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    if (!isHex64(record.digest)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'group-cut') {
+    if (!hasExactKeys(record, GROUP_CUT_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || !Number.isSafeInteger(record.cut) || record.cut < 0) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'like' || type === 'repost') {
@@ -400,8 +425,19 @@ function followRecord ({ key, on, at = nowIso() } = {}) {
   return build({ type: 'follow', key, on, at }, 1)
 }
 
-function groupJoinRecord ({ group, writer, on, at = nowIso() } = {}) {
-  return build({ type: 'group-join', group, writer, on, at }, 1)
+// `rejoin` is added only when given (null or { writer, seq }).
+function groupJoinRecord ({ group, writer, on, rejoin, at = nowIso() } = {}) {
+  if (rejoin === undefined) return build({ type: 'group-join', group, writer, on, at }, 1)
+  const ref = isPlainObject(rejoin) ? { writer: rejoin.writer, seq: rejoin.seq } : rejoin
+  return build({ type: 'group-join', group, writer, on, rejoin: ref, at }, 1)
+}
+
+function groupConfirmRecord ({ group, writer, seq, digest, at = nowIso() } = {}) {
+  return build({ type: 'group-confirm', group, writer, seq, digest, at }, 1)
+}
+
+function groupCutRecord ({ group, writer, cut, at = nowIso() } = {}) {
+  return build({ type: 'group-cut', group, writer, cut, at }, 1)
 }
 
 // A copy with exactly the range keys (anything else is passed through for
@@ -534,7 +570,6 @@ module.exports = {
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
-  MAX_COMMUNITY_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,
@@ -560,6 +595,8 @@ module.exports = {
   mediaCoreRecord,
   followRecord,
   groupJoinRecord,
+  groupCutRecord,
+  groupConfirmRecord,
   likeRecord,
   repostRecord,
   deleteRecord,

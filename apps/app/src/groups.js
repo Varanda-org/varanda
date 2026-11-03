@@ -28,6 +28,9 @@ export const STATE_LABELS = Object.freeze({
 
 export const PRIVATE_LABEL = 'grupo privado'
 export const PUBLIC_LABEL = 'grupo público'
+export const GENERAL_LABEL = 'Geral'
+export const ORPHAN_LABEL = 'grupo sem comunidade'
+export const COMMUNITY_JOIN_LABELS = Object.freeze({ open: 'aberta a todos', approval: 'entrada com aprovação' })
 export const HIDDEN_LABEL = 'mensagem escondida'
 export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'entrada com aprovação' })
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
@@ -35,7 +38,9 @@ export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
 const HEX64 = /^[0-9a-f]{64}$/
 const LINK = /^(?:https?:\/\/[^/?#\s]+)?\/g\/([0-9a-fA-F]{64})\/?(?:[?#].*)?$/
 
-const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'link'])
+const COMMUNITY_LINK = /^(?:https?:\/\/[^/?#\s]+)?\/c\/([0-9a-fA-F]{64})\/?(?:[?#].*)?$/
+
+const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create'])
 
 // --- merging ---
 
@@ -128,7 +133,7 @@ export function roleOf (info, ownKey) {
 
 // What a role may do. `opts.own`: the message is the caller's (its author may
 // hide it, even after leaving). `opts.communityAdmin`: the caller holds power
-// in the group through a linked community (the fold decides; the node still
+// in the group through its community (the fold decides; the node still
 // refuses what it does not allow).
 export function can (action, role, opts = {}) {
   if (!ACTIONS.includes(action) || !isRole(role)) return false
@@ -141,8 +146,8 @@ export function can (action, role, opts = {}) {
     case 'admit':
     case 'rekey': return staff || delegated
     case 'admin':
-    case 'meta':
-    case 'link': return role === 'creator'
+    case 'meta': return role === 'creator'
+    case 'create': return role === 'creator'
     case 'leave': return role !== 'banned' && role !== 'left'
   }
   return false
@@ -192,6 +197,12 @@ export function parseJoinLink (text) {
   return m ? m[1].toLowerCase() : null
 }
 
+export function parseCommunityJoinLink (text) {
+  if (typeof text !== 'string') return null
+  const m = COMMUNITY_LINK.exec(text.trim())
+  return m ? m[1].toLowerCase() : null
+}
+
 // --- reconciliation of an uncertain mutation ---
 
 // After a mutation answered `uncertain: true`, the screen re-reads and asks
@@ -203,7 +214,8 @@ export function parseJoinLink (text) {
 //     (admit on also needs `writer`, and view.requests and view.writers)
 //   { action: 'meta', name?, join? }                       view.info
 //   { action: 'rekey', epoch }  (the epoch seen before)    view.epoch
-//   { action: 'link', community, on }                      view.info.communities
+//   { action: 'community-join' }                          view.role
+//   { action: 'create', community, name }                  view.community, groups
 // -> 'landed' (do not retry), 'not-landed' (offer a retry) or 'unknown' (the
 // re-read is missing or incomplete: offer another read, never a blind retry).
 export function reconcile (change, view) {
@@ -212,6 +224,10 @@ export function reconcile (change, view) {
     case 'join': {
       if (typeof view.state !== 'string') return 'unknown'
       return ['member', 'requested', 'pending'].includes(view.state) ? 'landed' : 'not-landed'
+    }
+    case 'community-join': {
+      if (typeof view.role !== 'string') return 'unknown'
+      return ['member', 'requested', 'pending'].includes(view.role) ? 'landed' : 'not-landed'
     }
     case 'leave': {
       if (typeof view.state !== 'string') return 'unknown'
@@ -272,12 +288,10 @@ export function reconcile (change, view) {
       const same = epoch.writer === before.writer && epoch.seq === before.seq
       return same ? 'not-landed' : 'landed'
     }
-    case 'link': {
-      const list = view.info && view.info.communities
-      if (!Array.isArray(list)) return 'unknown'
-      // Only two-way links are listed: a one-sided success never shows, so a
-      // missing (or still listed) community proves nothing.
-      return list.includes(change.community) === (change.on === true) ? 'landed' : 'unknown'
+    case 'create': {
+      if (typeof change.community !== 'string' || typeof change.name !== 'string') return 'unknown'
+      if (view.community !== change.community || !Array.isArray(view.groups)) return 'unknown'
+      return view.groups.some((g) => g && g.name === change.name && g.role === 'creator') ? 'landed' : 'not-landed'
     }
   }
   return 'unknown'

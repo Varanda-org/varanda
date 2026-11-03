@@ -17,7 +17,7 @@ const { createSnapshot } = require('../lib/blocklist')
 const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord, postRecord, deleteRecord } = require('../lib/records')
 const store = require('../lib/store')
-const { hex, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember } = require('./helpers/sync-groups')
+const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember } = require('./helpers/sync-groups')
 
 // A divergence without a fork id needs two histories signed with one key
 // served to the quarantine and the main store: the verdict is called
@@ -61,14 +61,14 @@ test('the per-diary cap compares the earliest proven join, not the latest one a 
   const early = fake.store.get({ name: 'early' })
   await early.ready()
   const ekey = hex(early.key)
-  await early.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await early.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: ekey, on: true })))) // seq 1
   const writers = []
   for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true })))) // seq i + 2
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
@@ -168,7 +168,7 @@ test('a join seq past the own diary\'s stored blocks is a timeout, never a dispr
   const w = fake.store.get({ name: 'writer' })
   await w.ready()
   const wkey = hex(w.key)
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: own }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: own, member: PARENT }))))
   items.push({ key: wkey, diary: own, length: 1, seq: 1 })
   const { events } = await syncOnce(bootstrap, m, { pageRetryMs: 100, gateTimeoutMs: 1500, timeoutMs: 8000 })
   const skips = events.filter((ev) => ev.event === 'group-skipped' && ev.key === wkey).map((ev) => ev.reason)
@@ -192,7 +192,7 @@ test('writer cores of a group stored on disk count toward the group-wide cap: a 
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
@@ -227,13 +227,13 @@ test('the group root is fetched even when stored writers fill the group-wide cap
   const group = hex(root.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: group, on: true }))))
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: dkey, name: 'Comunidade', join: 'open' }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: dkey, name: 'Comunidade', join: 'open' }))))
   const writers = []
   for (let i = 0; i < 2; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const m = await groupMember(t, kp, group)
@@ -287,7 +287,7 @@ test('a binding diary another stored writer names stays after a writer it binds 
   await quiet.ready()
   const qkey = hex(quiet.key)
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: qkey, on: true }))))
-  await quiet.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await quiet.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   items.push({ key: wkey, diary: dkey, length: 2, seq: 1 })
   const m = await groupMember(t, kp, group)
   await copyInto(fake.store, m, [quiet])
@@ -322,7 +322,7 @@ test('a writer gated while its binding diary is released reads the diary after t
     const c = fake.store.get({ name })
     await c.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(c.key), on: true }))))
-    await c.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await c.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     later.push({ key: hex(c.key), diary: dkey, length: 1, seq: d.length - 1 })
   }
   const [second, third] = later
@@ -386,7 +386,7 @@ async function deletedBinding (t, bootstrap, kp, group, { cleared }) {
   await d.append(b4a.from(JSON.stringify(deleteRecord({ seq: 1 }))))
   for (const w of ws) await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
   for (const w of ws) {
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
   }
   if (cleared) await d.clear(1)
@@ -485,7 +485,7 @@ test('a writer whose join its author deleted is withdrawn without stalling the r
   for (const w of ws) await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
   await d.append(b4a.from(JSON.stringify(deleteRecord({ seq: 1 }))))
   for (const w of ws) {
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
   }
   items.push(...ws.map((w, i) => ({ key: hex(w.key), diary: dkey, length: 2, seq: 1 + i })).sort((a, b) => a.key < b.key ? -1 : 1))
@@ -519,7 +519,7 @@ test('a member that left its last group keeps its former own writer and the stor
   try {
     const mine = await store.openDiary(s)
     const writer = await store.openGroupWriter(s, m.groups[0].nonce)
-    await writer.append(writerHeader({ group, diary: hex(mine.key) }))
+    await writer.append(writerHeader({ group, diary: hex(mine.key), member: PARENT }))
   } finally {
     await s.close()
   }
