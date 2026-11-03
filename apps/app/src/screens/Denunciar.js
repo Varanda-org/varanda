@@ -14,7 +14,7 @@
 // the group before anything is sent.
 // A private message: `target` = { dm: true, id, text, author } (author = the
 // sender's diary key). Only that message and the sender's key leave the
-// device, signed with dm.reportSign (docs/rpc.md 5.79).
+// device, signed with dm.reportSign (docs/rpc.md 5.81).
 
 import { useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native'

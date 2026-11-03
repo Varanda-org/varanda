@@ -1,6 +1,6 @@
 'use strict'
 
-// Conversas are browser-node only (docs/rpc.md 5.71 to 5.79): the node
+// Conversas are browser-node only (docs/rpc.md 5.73 to 5.81): the node
 // session answers every dm.* with USAGE before anything opens.
 const test = require('brittle')
 const fs = require('node:fs')

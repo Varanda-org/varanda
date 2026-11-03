@@ -195,7 +195,7 @@ export async function submitReport ({ member, sign, isStale, ...fields }) {
   })
 }
 
-// A private message report (docs/rpc.md 5.79, kind 'dm'): the chosen message
+// A private message report (docs/rpc.md 5.81, kind 'dm'): the chosen message
 // as `quote` and its sender's diary key as `target`, nothing else of the
 // conversation. Same account client and header as a post report.
 export function buildDmReportSend ({ member, nonce, target, reason, text, quote, signature }) {

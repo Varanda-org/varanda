@@ -4,7 +4,7 @@
 // Oldest message on top, the composer at the bottom, scrolled to the end on
 // open and on new messages. The header names the peer from the profile
 // cache, never the raw key. Whether the conversation is a request or blocked
-// comes from dm.thread itself (docs/rpc.md 5.76), never from a dm.list page;
+// comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
 // dm.seen runs only while this screen is the top of the stack and the app is
 // visible; it is a local mark, nothing is told to the peer. After every

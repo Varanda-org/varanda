@@ -1,6 +1,6 @@
 'use strict'
 
-// POST /account/report with kind 'dm' (docs/rpc.md 5.79): a private message
+// POST /account/report with kind 'dm' (docs/rpc.md 5.81): a private message
 // report signed with verifyDmReport. The message is on no diary, so intake
 // never asks the seeder; a block decision works like an account report.
 // Loopback only: a fake Google and a stand-in seeder check on 127.0.0.1.

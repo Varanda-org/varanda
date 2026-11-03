@@ -216,7 +216,7 @@
 // reset, setKeyPair and close). The link itself still opens no storage core, and a v1 read
 // never reads the own diary.
 //
-// Direct messages (web only, docs/rpc.md 5.71 to 5.79): ./dm.js holds the
+// Direct messages (web only, docs/rpc.md 5.73 to 5.81): ./dm.js holds the
 // box key pair and the local store key, derived at setKeyPair from the PRF
 // and zeroed with the identity (lock, reset, close). dm.enable publishes the
 // dm-key through the write gate; dm.send and dm.set put over a fresh
@@ -1464,7 +1464,7 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
-  // ---- direct messages (docs/rpc.md 5.71 to 5.79) ----
+  // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
 
   // The identity unlocked AND the dm keys derived (setKeyPair with a prf).
   async function requireDm () {
@@ -1987,6 +1987,8 @@ function createBrowserSession ({
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.meta': groupWrite(member.groupMeta),
+    // Through the caller's CW when it acts for the community, as group.admit.
+    'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
     'community.create': groupWrite(member.communityCreate, {
       // A resume (kv communityCreate) appends to the roots it already made.
@@ -2005,6 +2007,10 @@ function createBrowserSession ({
     'community.ban': groupWrite(member.communityBan, COMMUNITY_WIDE),
     'community.admin': groupWrite(member.communitySetAdmin, COMMUNITY_WIDE),
     'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.invitePolicy': groupWrite(member.communityInvitePolicy, {
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community]
     }),
@@ -2215,7 +2221,7 @@ function createBrowserSession ({
         } catch (err) {
           if (!(err instanceof UsageError)) reportInternal(err)
         }
-        // The dm box pair and the local store key (docs/rpc.md 5.71); the
+        // The dm box pair and the local store key (docs/rpc.md 5.73); the
         // wallet is checked once after an unlock that has a dm-key.
         try {
           await dmEngine.unlock(prfCopy)

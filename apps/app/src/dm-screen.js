@@ -3,7 +3,7 @@
 
 import { threadOf } from './dm.js'
 
-// A message id is unique only per sender (docs/rpc.md 5.76): a row is keyed
+// A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
 export function messageKey (message) {
   const from = message && typeof message.from === 'string' ? message.from : ''

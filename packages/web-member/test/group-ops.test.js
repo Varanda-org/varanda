@@ -16,6 +16,7 @@ const { groupJoinRecord } = require('@varanda/core/lib/records')
 const { GROUP_LIMIT_DEFAULT } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
+const { createGroupKeys } = require('../lib/group-keys')
 
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
@@ -264,7 +265,7 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public' })
+  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
@@ -1054,8 +1055,8 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(b.derived.length, 3, 'still the three writers of the first join')
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
   t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public' })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public' }, 'reads work locked')
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }, 'reads work locked')
   t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
@@ -1346,4 +1347,36 @@ test('a member whose own writer an unban missed can still leave', async (t) => {
   t.is((await ops.groupInfo(b.ctx, { group })).state, 'member')
   t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
   t.is((await ops.groupInfo(b.ctx, { group })).state, 'left')
+})
+
+test('invitePolicy: a private group creator writes a plaintext group-invites; an admin may, a member may not', async (t) => {
+  const { a, b } = await pair()
+  a.ctx.groupKeys = createGroupKeys()
+  await a.ctx.groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const { group: priv } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  t.alike(await ops.groupInvitePolicy(a.ctx, { group: priv, members: true }), { ok: true })
+  const stored = await lastRecord(a, priv)
+  t.alike([stored.type, stored.on], ['group-invites', true], 'plaintext on the root, never sealed')
+  t.is((await ops.groupInfo(a.ctx, { group: priv })).memberInvite, true)
+  await t.exception(() => ops.groupInvitePolicy(a.ctx, { group: priv, members: true }), /nada a alterar/)
+
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Clube', join: 'approval' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  await ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true })
+  await shareGroupCore(a, b, group)
+  const before = await lastRecord(b, w)
+  await t.exception(() => ops.groupInvitePolicy(b.ctx, { group, members: true }), /sem permissão no grupo/, 'a plain member')
+  t.alike(await lastRecord(b, w), before, 'nothing appended')
+  await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
+  await shareGroupCore(a, b, group)
+  t.alike(await ops.groupInvitePolicy(b.ctx, { group, members: true }), { ok: true })
+  const rec = await lastRecord(b, w)
+  t.alike([rec.type, rec.on], ['group-invites', true], 'on the admin\'s own writer')
+  await shareGroupCore(b, a, w)
+  t.is((await ops.groupInfo(a.ctx, { group })).memberInvite, true, 'the creator folds the admin\'s setting')
 })

@@ -591,7 +591,7 @@ function createSession ({
 
     // Conversas seal to an X25519 box key derived from the Ed25519 identity
     // key and talk to the seeder over the browser node's link, so only the
-    // browser node offers them (docs/rpc.md 5.71 to 5.79). Nothing is opened.
+    // browser node offers them (docs/rpc.md 5.73 to 5.81). Nothing is opened.
     'dm.enable': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.lookup': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.send': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
@@ -815,6 +815,14 @@ function createSession ({
       return r
     }),
 
+    // A flag written on a CW changes C's log too, so `affected` names both.
+    'group.invitePolicy': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.groupInvitePolicy(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
     'group.rekey': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupRekey(c, params))
       send('groups.changed', { group: params.group }, epoch)
@@ -862,6 +870,13 @@ function createSession ({
     'community.meta': serial(async (params, epoch) => {
       const affected = new Set()
       const r = await withStore((c) => member.communityMeta(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.invitePolicy': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityInvitePolicy(c, params, { affected }))
       for (const group of affected) send('groups.changed', { group }, epoch)
       return r
     }),

@@ -321,7 +321,7 @@ const isLeaveForce = (v) => isBool(v) ||
 const DM_ID_RE = /^[0-9a-f]{32}$/
 const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
 // Page sizes keep a worst-case page (4-byte code points) far below
-// MAX_MESSAGE (docs/rpc.md 5.75 and 5.76).
+// MAX_MESSAGE (docs/rpc.md 5.77 and 5.78).
 const DM_THREAD_LIMIT_DEFAULT = 30
 const DM_THREAD_LIMIT_MAX = 50
 const DM_LIST_LIMIT_DEFAULT = 30
@@ -330,7 +330,7 @@ const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
 
-// dm.list `before` (docs/rpc.md 5.75): exactly { at, peer }, the list-order
+// dm.list `before` (docs/rpc.md 5.77): exactly { at, peer }, the list-order
 // position of the oldest conversation the caller holds.
 function isDmListCursor (v) {
   if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
@@ -591,6 +591,8 @@ const SPECS = {
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT)
     }
   },
+  // Result adds memberInvite: boolean, whether plain members may invite
+  // (docs/rpc.md 5.71); false on pending objects.
   'group.info': { fields: { group: req(isKey) } },
   'group.members': {
     fields: {
@@ -617,7 +619,8 @@ const SPECS = {
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
   // Success: { community, name, join, creator, role, state, members, admins,
   // groups, general, incomplete, leavePending: boolean, repair: boolean,
-  // dropped: [group key] }.
+  // dropped: [group key], memberInvite: boolean }. memberInvite is whether
+  // plain members may invite (docs/rpc.md 5.72); false on pending objects.
   // leavePending is true only for C's creator whose own leave, noted by this
   // device, is written but not confirmed by the diary yet: community.leave
   // finishes it. repair is true only for C's creator whose root's powers
@@ -660,7 +663,11 @@ const SPECS = {
   // catalogue through its CW (docs/rpc.md 5.70). Geral never leaves. undo:
   // puts a group it dropped back. Success: { ok: true }.
   'community.removeGroup': { fields: { community: req(isKey), group: req(isKey), undo: opt(isBool, false) }, mutating: true },
-  // Conversas, browser node only (docs/rpc.md 5.71 to 5.79). dm.pull and
+  // "Membros podem convidar" (docs/rpc.md 5.71, 5.72). Success: { ok: true }.
+  // The same-value check is the node's.
+  'group.invitePolicy': { fields: { group: req(isKey), members: req(isBool) }, mutating: true },
+  'community.invitePolicy': { fields: { community: req(isKey), members: req(isBool) }, mutating: true },
+  // Conversas, browser node only (docs/rpc.md 5.73 to 5.81). dm.pull and
   // dm.seen write only local state and must survive an uncertain answer, so
   // they are not mutating: the client may repeat them.
   'dm.enable': { fields: none, mutating: true },

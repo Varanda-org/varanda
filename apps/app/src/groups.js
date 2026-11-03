@@ -36,7 +36,7 @@ export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'en
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
 
 const HEX64 = /^[0-9a-f]{64}$/
-const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create'])
+const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
 
 // --- merging ---
 
@@ -144,6 +144,9 @@ export function can (action, role, opts = {}) {
     case 'admin':
     case 'meta': return role === 'creator'
     case 'create': return role === 'creator'
+    case 'invitePolicy': return staff
+    // Members invite only while the community or group allows it.
+    case 'invite': return staff || (role === 'member' && opts.memberInvite === true)
     case 'leave': return role !== 'banned' && role !== 'left'
   }
   return false
@@ -259,6 +262,11 @@ export function reconcile (change, view) {
       const nameOk = change.name === undefined || info.name === change.name
       const joinOk = change.join === undefined || info.join === change.join
       return nameOk && joinOk ? 'landed' : 'not-landed'
+    }
+    case 'invite-policy': {
+      const info = view.info
+      if (!info || typeof info !== 'object' || typeof info.memberInvite !== 'boolean') return 'unknown'
+      return info.memberInvite === change.members ? 'landed' : 'not-landed'
     }
     case 'rekey': {
       const epoch = view.epoch

@@ -2837,7 +2837,7 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 
 ### Captura da selfie dentro da página (feat/in-app-liveness, 2026-11-03)
 
-Quando a resposta da Hodle traz os quatro campos do detector, a selfie é feita na página, com o Amazon Rekognition Face Liveness. Sem eles, tudo segue como antes (página da Sumsub). Termos e Política passam à versão 9. Nada abaixo foi exercitado contra a Hodle, a AWS ou um navegador real: os testes usam só o falso de loopback.
+Quando a resposta da Hodle traz os quatro campos do detector, a selfie é feita dentro do app, com o Amazon Rekognition Face Liveness: no navegador (PR #294) e no app instalado de Android e iOS (módulo `apps/app/modules/face-liveness`, SDKs oficiais da AWS). Sem eles, ou com o módulo nativo indisponível, tudo segue como antes (página da Sumsub). Termos e Política passam à versão 9 (web) e à versão 10 (captura nativa). Nada abaixo foi exercitado contra a Hodle, a AWS, um navegador ou um aparelho reais: os testes usam só o falso de loopback.
 
 Notas de ameaça:
 
@@ -2847,7 +2847,10 @@ Notas de ameaça:
 - O serviço chama as rotas públicas de prova de vida da Hodle sem a chave de API.
 - O CSP lista os hosts exatos, sem curinga: `cdn.liveness.rekognition.amazonaws.com`, as oito regiões de streaming e o Cognito de cada uma. `media-src blob:` e `camera=(self)` valem só nesta origem. O estilo da AWS vem de `/liveness/amplify-ui.css`, no mesmo domínio.
 - O aparelho obtém as credenciais de convidado no Cognito (`apps/app/src/livenessCredentials.js`). A Varanda nunca as vê.
-- O vídeo vai do navegador à AWS. A Varanda e a Hodle não o recebem.
+- O vídeo vai do navegador, ou do app instalado, à AWS. A Varanda e a Hodle não o recebem.
+- No app instalado, as credenciais de convidado são obtidas em JavaScript (`livenessCredentials.js`) e passadas em memória à chamada nativa `start()`. Não vão a arquivo, a registro, a Intent nem a estado do React. O código nativo não registra nada.
+- A câmera é pedida só dentro do `start()` nativo, na tela da selfie. `CAMERA` está em `apps/app/android/app/src/main/AndroidManifest.xml` (`camera.any` não obrigatório) e `NSCameraUsageDescription` em `apps/app/ios/Varanda/Info.plist`.
+- Sem o módulo (simulador do iOS, sem câmera) ou com algum campo ausente, o app cai na página da Sumsub, como antes. O aplicativo instalado deixa de ser só Sumsub quando o módulo está disponível.
 
 Verificação manual no navegador hospedado (a fazer quando a Hodle ligar os campos, Pergunta 5):
 
@@ -2859,11 +2862,29 @@ Verificação manual no navegador hospedado (a fazer quando a Hodle ligar os cam
 6. [ ] Ao terminar, o estado passa a `selfieReady` (não realizada ainda).
 7. [ ] `kyc-submit` segue normalmente depois da selfie (não realizada ainda).
 8. [ ] Sem os campos do detector na resposta, a página da Sumsub abre como antes (não realizada ainda).
-9. [ ] O app instalado continua abrindo a página da Sumsub (não realizada ainda).
-10. [ ] O termo de aceite da versão 9 aparece de novo para quem aceitou a versão 8 (não realizada ainda).
+9. [ ] Num build sem o módulo nativo (ou com ele indisponível), o app instalado abre a página da Sumsub (não realizada ainda).
+10. [ ] O termo de aceite da versão 10 aparece de novo para quem aceitou a versão 9 (não realizada ainda).
 11. [ ] Com o token da selfie vencido ou perdido (por exemplo, depois de reiniciar o serviço de conta ou passados 30 minutos), validar volta `selfie-ausente` e o app oferece uma selfie nova, em vez de travar no passo (não realizada ainda).
 12. [ ] `npm run web` copia o estilo para `apps/app/public/liveness/amplify-ui.css` (fora do git) e o detector abre estilizado no servidor de desenvolvimento, com um indicador de carregamento enquanto o estilo chega (não realizada ainda).
 13. [ ] Se a selfie termina enquanto outra ação da Carteira ainda está em andamento, o app mostra "Confirmar a selfie" e só valida depois desse toque; nada é enviado sozinho (não realizada ainda).
+
+Verificação manual no app instalado (feat/native-liveness; a fazer, nada foi realizado ainda):
+
+1. [ ] Android, build de debug com câmera frontal virtual: o pedido de permissão da câmera só aparece no passo da selfie, nunca antes.
+2. [ ] Android: negar a permissão mostra a dica e o botão "Tentar de novo", e o botão da página da Sumsub continua disponível.
+3. [ ] Simulador do iOS (sem câmera): abre a página da Sumsub, como antes.
+4. [ ] EAS preview em um Android real: captura completa, estado `selfieReady` e `kyc-submit` normal.
+5. [ ] EAS preview em um iPhone real: o mesmo, com o pedido da câmera só no passo da selfie e a mensagem de `NSCameraUsageDescription` correta.
+6. [ ] Logcat (Android) e Console (iOS) durante uma captura: `accessKeyId`, `secretAccessKey`, `sessionToken` e `eyJ` não aparecem (as buscas devem vir vazias).
+7. [ ] O termo de aceite da versão 10 aparece de novo para quem aceitou a versão 9.
+8. [ ] Android, build de debug depois da mudança para Kotlin 2.3.0: o app inteiro funciona (entrar, A Rua, Publicar, Carteira, push).
+9. [ ] O manifesto mesclado (`app/build/intermediates/merged_manifests/debug`) tem `camera`, `camera.any`, `camera.autofocus` e `camera.front` todos com `required` falso.
+10. [ ] No console do Google Play, depois do próximo envio, o catálogo de aparelhos ainda lista aparelhos sem câmera traseira.
+11. [ ] Um build de iOS da EAS passa com as duas chaves (`IDESkipPackagePluginFingerprintValidatation` e `IDESkipMacroFingerprintValidation`).
+12. [ ] `cancel()`: sair da Carteira com a tela nativa aberta a fecha.
+13. [ ] Android com "Não manter atividades" ligado nas opções do desenvolvedor: abrir a selfie, voltar ao app e tentar de novo. A captura fecha com falha (o Expo perde o resultado quando a tela de baixo é destruída) e a próxima tentativa abre normalmente, sem ficar presa em "já está aberta".
+14. [ ] iPhone: o botão "Fechar" sobre a tela da AWS fecha a captura em qualquer etapa, inclusive na tela de carregamento, e a Carteira volta a oferecer a selfie. Na tela de preparação do desafio com luz, o botão cobre o começo do título do aviso: conferir se fica aceitável.
+15. [ ] iPhone com a rede cortada depois de abrir a captura: a tela não fica presa; "Fechar" funciona e, sem toque, a captura termina sozinha com falha 240 s depois de abrir. Os 240 s supõem que a sessão da AWS dura cerca de 3 minutos; esse prazo não foi conferido na documentação da AWS.
 
 ### Limites
 
@@ -3780,7 +3801,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 ## 69. Conversas: mensagens privadas (pilha feat/dm-core ... feat/dm-reports-push)
 
-Mensagens privadas 1:1, só texto, cifradas de ponta a ponta, na aba **Conversas** (id interno `comunidades`, ícone `conversas`). O seletor é Mensagens | Comunidades. Quem a pessoa segue cai em Mensagens; quem ela não segue cai em Pedidos de mensagem, com um ponto e nunca uma contagem. Aceitar, recusar e bloquear não avisam a outra pessoa. Não há confirmação de leitura, fotos nem indicador de digitação. Apagar vale neste aparelho e nos outros aparelhos da mesma pessoa; a outra pessoa fica com a cópia dela. A denúncia (`dm.reportSign`, `varanda-dm-report-v1`) leva a mensagem escolhida e a chave do diário de quem enviou, no campo `target`, para a moderação poder bloquear a conta. Não leva o resto da conversa nem a assinatura de quem enviou. No painel a citação sai com o rótulo "Texto não conferido". Normativo: seção 11 de `docs/protocol.md` e RPC 5.71 a 5.79 de `docs/rpc.md`. A descrição para quem usa o app está em `docs/app.md`, seção Conversas.
+Mensagens privadas 1:1, só texto, cifradas de ponta a ponta, na aba **Conversas** (id interno `comunidades`, ícone `conversas`). O seletor é Mensagens | Comunidades. Quem a pessoa segue cai em Mensagens; quem ela não segue cai em Pedidos de mensagem, com um ponto e nunca uma contagem. Aceitar, recusar e bloquear não avisam a outra pessoa. Não há confirmação de leitura, fotos nem indicador de digitação. Apagar vale neste aparelho e nos outros aparelhos da mesma pessoa; a outra pessoa fica com a cópia dela. A denúncia (`dm.reportSign`, `varanda-dm-report-v1`) leva a mensagem escolhida e a chave do diário de quem enviou, no campo `target`, para a moderação poder bloquear a conta. Não leva o resto da conversa nem a assinatura de quem enviou. No painel a citação sai com o rótulo "Texto não conferido". Normativo: seção 11 de `docs/protocol.md` e RPC 5.73 a 5.81 de `docs/rpc.md`. A descrição para quem usa o app está em `docs/app.md`, seção Conversas.
 
 ### Como verificar
 
@@ -3811,8 +3832,8 @@ Testes desta funcionalidade:
 | `apps/app/test/conversas.test.js` | telas de Conversas |
 | `apps/app/test/help.test.js` | folha "Como funcionam as Conversas" |
 | `apps/app/test/tabBar.test.js` | aba Conversas, id `comunidades`, ícone `conversas`; cinco abas fora do nó hospedado |
-| `apps/app/test/legal.test.js` | `LEGAL_VERSION` 10 |
-| `packages/core/test/terms.test.js` | `TERMS_VERSION` 10 |
+| `apps/app/test/legal.test.js` | `LEGAL_VERSION` 11 |
+| `packages/core/test/terms.test.js` | `TERMS_VERSION` 11 |
 | `packages/core/test/dm-wake.test.js` | o sinal `dm-wake`: formato exato, sem chave nem texto, não é evento de membro |
 | `apps/cli/test/dm-report.test.js` | denúncia de mensagem privada no serviço de conta, com `target` e a citação não conferida |
 | `apps/cli/test/moderation-store.test.js` | a denúncia de mensagem privada no armazém de moderação |

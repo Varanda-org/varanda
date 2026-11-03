@@ -170,7 +170,7 @@ test('create requires a diary genesis and persists a root writer and join', asyn
   const last = entries[entries.length - 1]
   t.alike(last.record, groupJoinRecord({ group, writer: group, on: true, at: last.record.at }))
   t.alike(await member.groupInfo(ctx, { group }), {
-    group, name: 'Horta', join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public'
+    group, name: 'Horta', join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   const list = await member.groupList(ctx)
   t.is(list.total, 2)
@@ -1003,7 +1003,7 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(await heldWriters(b, group), 1, 'no second writer')
   t.is((await groupJoins(b, group)).length, 1, 'no second diary join')
   t.alike((await member.groupList(b)).groups.find((g) => g.group === group), { group, name: null, join: null, role: 'pending', members: 0, community: null })
-  t.alike(await member.groupInfo(b, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public' })
+  t.alike(await member.groupInfo(b, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await member.groupRead(b, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member')
@@ -1379,4 +1379,40 @@ test('loading a group records a root its creator bound, and not one it never bou
   }
   await member.groupInfo(c, { group: unbound })
   t.absent(readBoundRoots(c.dataDir).includes(unbound), 'an unbound root is not')
+})
+
+test('the members invite flag: creator and group admin write it, a member is refused', async (t) => {
+  const { a, b, group } = await pair(t)
+  const before = (await writerEntries(b, group)).length
+  await rejects(t, member.groupInvitePolicy(b, { group, members: true }), 'sem permissão no grupo')
+  t.is((await writerEntries(b, group)).length, before, 'nothing appended')
+  t.is((await member.groupInfo(a, { group })).memberInvite, false)
+  t.alike(await member.groupInvitePolicy(a, { group, members: true }), { ok: true })
+  const info = await member.groupInfo(a, { group })
+  t.is(info.memberInvite, true)
+  t.is(info.name, 'Horta')
+  await rejects(t, member.groupInvitePolicy(a, { group, members: true }), 'nada a alterar')
+  await member.groupAdmin(a, { group, member: b.key, on: true })
+  await exchange(a, b)
+  t.is((await member.groupInfo(b, { group })).memberInvite, true)
+  await member.groupInvitePolicy(b, { group, members: false })
+  const own = await writerEntries(b, group)
+  t.is(own.entries[own.length - 1].record.type, 'group-invites')
+  t.is((await member.groupInfo(b, { group })).memberInvite, false)
+  await exchange(b, a)
+  t.is((await member.groupInfo(a, { group })).memberInvite, false)
+})
+
+test('the members invite flag of a private group is stored in the clear', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp)
+  const { group } = await createGroup(a, { name: 'Horta', join: 'approval', visibility: 'private' })
+  await member.groupInvitePolicy(a, { group, members: true })
+  const root = await writerEntries(a, group)
+  const last = root.entries[root.length - 1].record
+  t.is(last.type, 'group-invites')
+  t.is(last.on, true)
+  const info = await member.groupInfo(a, { group })
+  t.is(info.memberInvite, true)
+  t.is(info.name, 'Horta')
 })

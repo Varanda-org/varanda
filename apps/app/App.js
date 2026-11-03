@@ -1141,7 +1141,7 @@ function Member () {
   // --- Conversas: the tab dot, the foreground pull and the push opener ---
   // dm.changed is only a hint: the dot is re-read from dm.list after every
   // dm.pull attempt (node.bumpDm), on dm.changed and when a pushed screen
-  // closes. inboxUnread and requests cover every page (docs/rpc.md 5.75).
+  // closes. inboxUnread and requests cover every page (docs/rpc.md 5.77).
   const [dmOpenCount, setDmOpenCount] = useState(0)
   const [dmDot, setDmDot] = useState(false)
   const dmReady = mode === 'hosted' && ready && !locked

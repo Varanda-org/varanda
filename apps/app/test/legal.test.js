@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 10)
+  t.is(LEGAL_VERSION, 11)
   t.is(LEGAL_DATE, '03/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 10, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 11, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,16 +56,20 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '8818eafa91cfcce525a4cfd58a8b6ac8f5c82f1fef936c6b6da8c6f68e8d62c0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5e0c2917c83919ffdfd95547963330072752346f1b0e16cdfb92efd3c604e953', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
-test('legal: privacy names the in-page liveness provider and keeps the Sumsub page', async (t) => {
+test('legal: privacy names the in-page liveness provider, the native capture and the Sumsub fallback', async (t) => {
   const { PRIVACY } = await load()
   const text = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text.includes('Amazon Rekognition'), 'Amazon Rekognition')
   t.ok(text.includes('AWS Cognito'), 'AWS Cognito')
   t.ok(text.includes('só na memória, por no máximo 30 minutos'), 'token in memory for 30 minutes')
-  t.ok(text.includes('o aplicativo instalado continua abrindo essa página'), 'installed app keeps the Sumsub page')
+  t.ok(text.includes('no aplicativo instalado (Android e iOS)'), 'installed app captures too')
+  t.ok(text.includes('a câmera só é pedida nessa tela da selfie'), 'camera asked only on the selfie screen')
+  t.ok(text.includes('como alternativa na página do parceiro Sumsub'), 'Sumsub fallback')
+  t.absent(text.includes('existe só na web hospedada'), 'payments account is not web only')
+  t.absent(text.includes('o aplicativo instalado continua abrindo essa página'), 'no stale Sumsub-only app sentence')
 })
 
 test('legal: privacy names the third-party CPF and the ledger cap', async (t) => {

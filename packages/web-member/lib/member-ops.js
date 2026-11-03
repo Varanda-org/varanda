@@ -2121,6 +2121,25 @@ function groupMeta (ctx, { group, name, join }) {
   })
 }
 
+// rpc.md 5.71: the group's creator or an admin on its own writer, or a
+// community creator or admin through its CW naming G (moderatorOf, the
+// same authority the fold checks). Always plaintext, private group too: the
+// setting says nothing about the group's content.
+function groupInvitePolicy (ctx, { group, members }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (g.built.memberInvite === members) throw new UsageError(GROUP_UNCHANGED)
+    const by = moderatorOf(g, ownHex)
+    if (by === null) throw new UsageError(GROUP_FORBIDDEN)
+    if (by.cw !== undefined) {
+      await appendToOwnGroupCore(ctx, by.cw, buildRecord(() => grp.communityInvites({ group: g.group, on: members, seen: g.built.last })))
+    } else {
+      requireCounted(g, by.own.key)
+      await appendToOwnGroupCore(ctx, by.own, buildRecord(() => grp.groupInvites({ on: members, seen: g.built.last })), g.private)
+    }
+    return { ok: true }
+  })
+}
+
 // One page backwards over the causal order, newest first (feed.read's
 // shape); a hidden post keeps its place with an empty text.
 async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null } = {}) {
@@ -2208,10 +2227,11 @@ async function groupInfo (ctx, { group }) {
     state: stateOf(g, ownHex),
     community: g.community,
     orphan: g.built.orphan === true,
-    visibility: g.private ? 'private' : 'public'
+    visibility: g.private ? 'private' : 'public',
+    memberInvite: g.built.memberInvite === true
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public' }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }
   })
 }
 
@@ -3342,6 +3362,21 @@ function communityMeta (ctx, { community, name, join }) {
   })
 }
 
+// rpc.md 5.72: C's creator as for communityMeta (the root, or its live CW
+// once the root's powers ended), or an admin on its own live CW.
+function communityInvitePolicy (ctx, { community, members }) {
+  return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
+    if (c.built.memberInvite === members) throw new UsageError(GROUP_UNCHANGED)
+    const record = buildRecord(() => grp.communityInvites({ group: null, on: members, seen: c.built.last }))
+    let w
+    if (c.built.creator === ownHex) w = cwRepair(c, ownHex) ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
+    else w = communityAuthority(c, ownHex)
+    if (w === null) throw new UsageError(COMMUNITY_FORBIDDEN)
+    await appendToOwnGroupCore(ctx, w, record)
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.70: C's creator, back after its root's powers ended, takes group
 // `group` off C's catalogue through its live community writer, or with
 // `undo` puts a group it dropped back; the root itself keeps the catalogue
@@ -3417,7 +3452,7 @@ async function communityRequests (ctx, { community, offset = 0, limit = GROUP_ME
   })
 }
 
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [] }
+const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -3455,7 +3490,8 @@ async function communityInfo (ctx, { community }) {
       incomplete: c.built.incomplete,
       leavePending: await notedLeavePending(ctx, c, ownHex, base.ownEntries),
       repair: cwRepair(c, ownHex) && statusOf(c, ownHex) === 'member' && liveOwnWriter(c, ownHex) !== null,
-      dropped: [...c.built.dropped]
+      dropped: [...c.built.dropped],
+      memberInvite: c.built.memberInvite === true
     }
   }, (p) => ({ community: p.group, ...PENDING_COMMUNITY }))
 }
@@ -3666,6 +3702,7 @@ module.exports = {
   groupAdmit,
   groupAdmin,
   groupMeta,
+  groupInvitePolicy,
   groupRekey,
   canSealTo,
   groupRead,
@@ -3684,6 +3721,7 @@ module.exports = {
   communityAdmit,
   communityBan,
   communityMeta,
+  communityInvitePolicy,
   communityRemoveGroup,
   communityGroups,
   groupCommunityOf,

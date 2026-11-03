@@ -5,7 +5,7 @@ const {
   GROUP_TYPES, MAX_GROUP_CUTS, MAX_GROUPS_PER_COMMUNITY,
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
-  groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed,
+  groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed, groupInvites, communityInvites,
   buildGroup, buildCommunity
 } = require('../lib/group')
 const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
@@ -130,7 +130,7 @@ test('group-writer v2 shapes', (t) => {
 })
 
 test('record types and community-core shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
   const CW = { community: true }
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })
@@ -503,7 +503,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'members', 'name', 'requests', 'writers', 'dropped'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'members', 'name', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -2777,4 +2777,98 @@ test('a CW generation counts its header rejoin only when the diary earliest on-j
   const list = C.joins.get(Z)
   list.push({ writer: cwZ3, on: true, seq: list.length + 1, rejoin: { writer: C.L.writer, seq: C.L.seq } })
   t.alike(comm(C).groups, sorted([G1, G2]), 'a later on-join naming the rejoin: still generation 0')
+})
+
+test('group-invites community-core shape', async (t) => {
+  const CW = { community: true }
+  const CR = { root: true, community: true }
+  const own = communityInvites({ on: true, at: AT(1) })
+  t.alike(own, { type: 'group-invites', group: null, on: true, seen: null, at: AT(1) })
+  t.is(validateGroupRecord(own, 1, CW), null)
+  t.is(validateGroupRecord(own, 1, CR), null)
+  const inG = communityInvites({ group: G1, on: false, at: AT(1) })
+  t.is(validateGroupRecord(inG, 1, CW), null)
+  t.is(validateGroupRecord(inG, 1, CR), null)
+  t.is(validateGroupRecord({ ...own, group: 'x' }, 1, CW), 'malformed')
+  t.is(validateGroupRecord({ ...own, on: null }, 1, CW), 'malformed')
+  t.is(validateGroupRecord({ ...own, extra: 1 }, 1, CR), 'malformed', 'extra key')
+  const plain = groupInvites({ on: true, at: AT(1) })
+  t.is(validateGroupRecord(plain, 1, CW), 'malformed', 'the group-core shape on a CW')
+  t.is(validateGroupRecord(plain, 1, CR), 'malformed', 'and on the root')
+  t.is(validateGroupRecord(own, 1), 'malformed', 'the community shape on a group core')
+  await t.exception.all(async () => communityInvites({ group: 'x', on: true, at: AT(1) }), /malformed/)
+})
+
+test('memberInvite in C: the creator and C admins set it, a member never', (t) => {
+  const make = () => community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }] })
+  t.is(buildCommunity({}).memberInvite, false, 'the empty result')
+  let C = make()
+  t.is(comm(C).memberInvite, false, 'no record')
+  C.push(C.key, communityInvites({ on: true, at: C.at() }))
+  t.is(comm(C).memberInvite, true, 'the creator on the root')
+  t.is(buildGroup(groupIn(C, { key: G1 }).input()).memberInvite, false, 'C\'s flag never sets a group\'s')
+
+  C = make()
+  C.push(cwX, communityInvites({ on: true, at: AT(20) }))
+  t.is(comm(C).memberInvite, false, 'a member CW record is ignored')
+  C.push(cwA, communityInvites({ on: true, at: AT(21) }))
+  t.is(comm(C).memberInvite, true, 'a C admin CW record counts')
+  C.push(cwX, communityInvites({ on: false, at: AT(22) }))
+  t.is(comm(C).memberInvite, true, 'a member cannot turn it off')
+  C.push(cwA, communityInvites({ on: false, at: AT(23) }))
+  t.is(comm(C).memberInvite, false, 'on: false clears it')
+})
+
+test('memberInvite in a group from C: community staff set it for that group only', (t) => {
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }, { by: Z, group: G2 }] })
+  const g1 = groupIn(C, { key: G1 })
+  const g2 = groupIn(C, { key: G2 })
+  g1.add(X, wX)
+  C.push(cwX, communityInvites({ group: G1, on: true, at: AT(20) }))
+  t.is(buildGroup(g1.input()).memberInvite, false, 'a member CW record naming G is ignored')
+  C.push(cwA, communityInvites({ group: G1, on: true, at: AT(21) }))
+  t.is(buildGroup(g1.input()).memberInvite, true, 'a C admin flips G')
+  t.is(buildGroup(g2.input()).memberInvite, false, 'and no other group')
+  t.is(comm(C).memberInvite, false, 'nor C itself')
+  // The group's own staff and C's interleave in G's causal order.
+  const seen = buildGroup(g1.input()).last
+  g1.push(G1, groupInvites({ on: false, seen, at: AT(22) }))
+  t.is(buildGroup(g1.input()).memberInvite, false, 'G\'s creator turns it off after')
+  C.push(C.key, communityInvites({ group: G1, on: true, seen: { writer: G1, seq: g1.len(G1) - 1 }, at: AT(23) }))
+  t.is(buildGroup(g1.input()).memberInvite, true, 'a C record that saw the off sorts after it and wins')
+})
+
+test('memberInvite: a demoted or departed C admin record stops counting, in C and in its groups', (t) => {
+  const make = () => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }] })
+    return { C, g: groupIn(C, { key: G1 }) }
+  }
+  let { C, g } = make()
+  C.push(C.key, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: C.at() }))
+  C.push(cwA, communityInvites({ on: true, at: AT(30) }))
+  C.push(cwA, communityInvites({ group: G1, on: true, at: AT(31) }))
+  t.is(comm(C).memberInvite, false, 'after the demotion cut, in C')
+  t.is(buildGroup(g.input()).memberInvite, false, 'and in G')
+
+  ;({ C, g } = make())
+  C.push(cwA, communityInvites({ on: true, at: AT(30) }))
+  C.push(cwA, communityInvites({ group: G1, on: true, at: AT(31) }))
+  t.is(comm(C).memberInvite, true, 'control: counts while A is an admin in C')
+  t.is(buildGroup(g.input()).memberInvite, true)
+  cwLeave(C, cwA, 40)
+  t.is(comm(C).memberInvite, false, 'no authority after leaving, earlier records included')
+  t.is(buildGroup(g.input()).memberInvite, false)
+})
+
+test('memberInvite: a returning creator sets it on its CW once the root lost its powers', (t) => {
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, creates: [{ by: Z, group: G1 }] })
+  C.push(C.key, communityInvites({ on: true, at: AT(40) }))
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(50) }))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  t.is(comm(C).memberInvite, true, 'the root record below the leave counts')
+  C.push(C.key, communityInvites({ on: false, at: AT(60) }))
+  t.is(comm(C).memberInvite, true, 'a root record past its cut never counts')
+  C.push(cwZ3, communityInvites({ on: false, at: AT(61) }))
+  t.is(comm(C).memberInvite, false, 'the creator CW of the return does')
 })

@@ -460,7 +460,7 @@ function createModRoutes ({
     if (!duplicate && writer === null) afterAnswer(() => triage.onReport(added))
   }
 
-  // A private message (report kind 'dm', docs/rpc.md 5.79): the message is on
+  // A private message (report kind 'dm', docs/rpc.md 5.81): the message is on
   // no diary, so the seeder is never asked for it and the quote is the
   // reporter's word only. Fields of a diary or group report make it invalid.
   async function reportDm (res, body, { member, nonce, expiresAt, target }) {

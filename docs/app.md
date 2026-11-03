@@ -250,7 +250,7 @@ Só um nó usa um diretório de dados por vez: um segundo worklet no mesmo diret
 
 ## Conversas
 
-Mensagens privadas entre duas pessoas, só texto, cifradas de ponta a ponta. Existem no nó hospedado, no site e no app instalado com a instalação. O protocolo está na seção 11 de [protocol.md](protocol.md); os métodos, em [rpc.md](rpc.md), 5.71 a 5.79 (`dm.enable`, `dm.lookup`, `dm.send`, `dm.pull`, `dm.list`, `dm.thread`, `dm.set`, `dm.seen`, `dm.reportSign`). Todo texto vindo de outra pessoa passa por `displayText`.
+Mensagens privadas entre duas pessoas, só texto, cifradas de ponta a ponta. Existem no nó hospedado, no site e no app instalado com a instalação. O protocolo está na seção 11 de [protocol.md](protocol.md); os métodos, em [rpc.md](rpc.md), 5.73 a 5.81 (`dm.enable`, `dm.lookup`, `dm.send`, `dm.pull`, `dm.list`, `dm.thread`, `dm.set`, `dm.seen`, `dm.reportSign`). Todo texto vindo de outra pessoa passa por `displayText`.
 
 No nó hospedado, a aba **Conversas** fica logo depois da Espiadinha, com o ícone de mensagem (`conversas`, o glifo `message-square`). O id interno da aba não muda: continua `comunidades`. A tela tem o seletor **Mensagens** | **Comunidades**. O lado Comunidades é o dos grupos, na seção seguinte. A cadeira da abertura (`Splash.js`, `assets/cadeira.png`), a cadeira da barra do topo (`TopBar.js`) e o ícone `cadeira` do estado vazio dentro de Comunidades continuam os mesmos. O ícone novo é só o da aba.
 
@@ -291,6 +291,8 @@ No nó hospedado (site e app instalado), **Comunidades** é o lado Comunidades d
 
 A tela da comunidade mostra o botão de participação, os grupos e, para quem modera, os pedidos e os membros.
 
+**Quem pode convidar.** Quem criou a comunidade e os administradores veem o bloco "Quem pode convidar", com **Só administradores** (o padrão) e **Membros podem convidar**; tocar na opção que não está marcada muda a regra (precisa de internet; se a resposta se perder, o app pede para conferir e nunca repete a mudança sozinho). Um convite só avisa a pessoa: quem recebe escolhe se entra. O botão Convidar chega numa mudança seguinte; por ora existe só o ajuste.
+
 - **Cartão de convite.** Quem ainda não participa vê um cartão com o nome, a entrada, o número de membros e, quando a comunidade já está neste aparelho, os administradores, com um só botão: **Entrar** ou **Pedir entrada**, e a frase "Participar é público: sua entrada fica registrada no seu diário.". Abrir um link nunca coloca ninguém na comunidade: só o toque grava a entrada no diário. Quando o aparelho ainda não tem nada da comunidade, o cartão vem do índice do semeador e, quando a resposta da entrada é pendente, mostra "Enviado. Aguardando a comunidade chegar a este aparelho.". Depois de sair, a nota de entrada antiga some. Quem já participa não vê o cartão.
 - **Entrar, Pedir entrada e Sair.** Numa comunidade aberta o botão é **Entrar**; numa com aprovação, **Pedir entrada**, e quem já pediu vê **Desistir do pedido** no lugar de Sair, que retira o pedido (some da lista da administração). Entrar na comunidade leva aos grupos dela; sair, ou ser banido, vale para todos os grupos. Reentrar não ressuscita a participação antiga. Quem criou a comunidade recebe, antes de sair, o aviso: "Você criou esta comunidade: depois de sair, não poderá mais nomear administradores nem criar grupos, mesmo que volte. Ao voltar, ainda poderá mudar o nome e a entrada, tirar grupos da lista e tirar o cargo de administradores."
 - **Concluir saída.** Quando a saída de quem criou a comunidade foi interrompida antes de terminar (`leavePending` em `community.info`), a tela mostra o botão **Concluir saída**. A confirmação diz que a saída foi interrompida e que concluir grava o que falta; confirmar chama `community.leave`, e o botão some quando a saída termina. Concluir saída nunca força a saída.
@@ -319,6 +321,8 @@ A tela de um grupo mostra o selo da comunidade, a conversa, da mensagem mais ant
 ### Novo grupo e Ajustes do grupo
 
 **Novo grupo** (aberto pela comunidade, só para quem a criou, no aparelho que a criou; administradores moderam, mas não criam grupos) pede o nome e a visibilidade **pública** ou **privada**; também oferece a **Entrada** (aberta ou com aprovação; um grupo privado sempre pede aprovação). **Ajustes do grupo** tem **Compartilhar** (o convite), **Nome** (só quem criou a comunidade), **Pedidos**, **Membros**, **Administradores** (só quem criou a comunidade), **Banidos**, **Gerar nova chave** (em grupo privado) e **Sair do grupo**; sair do Geral não tira a pessoa da comunidade. Escape fecha a folha sem sair da tela. Gerar nova chave abre uma nova época para as mensagens seguintes; o app nunca mostra a chave.
+
+**Quem pode convidar** (Ajustes do grupo): o mesmo bloco, visível para quem criou o grupo e para os administradores, com **Só administradores** (o padrão) e **Membros podem convidar**. Um convite só avisa a pessoa, quem recebe escolhe se entra, e o botão Convidar chega numa mudança seguinte.
 
 ### Links de entrada
 

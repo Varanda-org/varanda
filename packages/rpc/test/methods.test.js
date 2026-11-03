@@ -17,9 +17,9 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
     'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
@@ -27,8 +27,8 @@ test('method list and mutating set', (t) => {
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
@@ -714,6 +714,19 @@ test('community.meta', (t) => {
   bad(t, 'community.meta', { community: KEY, join: 'closed' })
   bad(t, 'community.meta', { community: KEY, name: null })
   bad(t, 'community.meta', { community: KEY, name: 'a', visibility: 'private' })
+})
+
+test('group.invitePolicy and community.invitePolicy', (t) => {
+  for (const [m, k] of [['group.invitePolicy', 'group'], ['community.invitePolicy', 'community']]) {
+    t.ok(isMutating(m))
+    ok(t, m, { [k]: KEY, members: true }, { [k]: KEY, members: true })
+    ok(t, m, { [k]: KEY, members: false })
+    bad(t, m, { [k]: KEY }, 'missing members')
+    bad(t, m, { members: true }, 'missing ' + k)
+    bad(t, m, { [k]: KEY, members: true, extra: 1 }, 'extra key')
+    for (const v of ['true', 1, 0, null, undefined]) bad(t, m, { [k]: KEY, members: v }, 'non-boolean members')
+    bad(t, m, { [k]: 'x', members: true }, 'bad key')
+  }
 })
 
 test('community.info', (t) => {

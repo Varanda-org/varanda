@@ -1,6 +1,6 @@
 'use strict'
 
-// Direct messages in the browser node (docs/rpc.md 5.71 to 5.79,
+// Direct messages in the browser node (docs/rpc.md 5.73 to 5.81,
 // docs/protocol.md section 11): the engine behind the dm.* handlers of
 // ./session.js. It holds, in memory and only while unlocked, the identity's
 // box key pair (passkey.js dmBoxKeyPairFromPrf, gen from kv dmKey) and the
