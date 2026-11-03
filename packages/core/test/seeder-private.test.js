@@ -10,7 +10,8 @@ const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until } = require('./helpers/net')
 const { groupJoinRecord } = require('../lib/records')
-const { groupHeader, writerHeader, groupPost, groupSealed, sealedInner, groupLink, communityLink } = require('../lib/group')
+const { groupPost, groupSealed, sealedInner, groupCreateRecord, groupLeave } = require('../lib/group')
+const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const { newEpochKey, sealRecord } = require('../lib/group-crypto')
 const { Seeder } = require('../lib/seeder')
 const { tmpDir } = require('./helpers/tmp')
@@ -37,7 +38,7 @@ function sealed (writer, group, epochKey) {
 }
 
 // Creator A: private root G (box header, a sealed post), public root P and
-// community root C linked two-way with G. Member B: writer W in G with a
+// community root C whose root creates G (both headers name C). Member B: writer W in G with a
 // box (a sealed post, then a plaintext post the fold would not count).
 // Member X: writer N in G without a box and writer Q in P with one, both
 // mismatches.
@@ -51,13 +52,14 @@ async function setup (t) {
   let P = null
   let C = null
   const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
-    G = await make('group', groupHeader({ diary: key, visibility: 'private', join: 'approval', name: null, box: BOX }))
-    P = await make('public', groupHeader({ diary: key, name: 'Cadeiras' }), [groupPost({ text: 'oi' })])
-    C = await make('community', groupHeader({ kind: 'community', diary: key, name: 'Praia' }), [groupLink({ group: G, on: true })])
+    C = await make('community', groupHeader({ kind: 'community', diary: key, name: 'Praia' }))
+    G = await make('group', groupHeader({ diary: key, community: C, member: C, visibility: 'private', join: 'approval', name: null, box: BOX }))
+    P = await make('public', groupHeader({ diary: key, community: C, member: C, name: 'Cadeiras' }), [groupPost({ text: 'oi' })])
     return [groupJoinRecord({ group: G, writer: G, on: true }), groupJoinRecord({ group: P, writer: P, on: true }), groupJoinRecord({ group: C, writer: C, on: true })]
   })
   await A.cores.group.append(encode(sealed(G, G, epochKey)))
-  await A.cores.group.append(encode(communityLink({ community: C, on: true })))
+  await A.cores.group.append(encode(groupLeave({})))
+  await A.cores.community.append(encode(groupCreateRecord({ group: G })))
   let W = null
   const B = await member(t, bootstrap, assoc, async ({ key, make }) => {
     W = await make('w', writerHeader({ group: G, diary: key, box: 'd'.repeat(64) }))
@@ -101,8 +103,8 @@ test('a private group is admitted, served raw and indexed without a name; box mi
   t.ok(g.writers.some((w) => w.key === W && w.diary === B.key), 'the writers as for a public group')
   await until(() => seeder.indexGroupSearch('cadeiras').complete, { name: 'busca completa' })
   t.alike(seeder.indexGroupSearch('cadeiras').groups.map((r) => r.group), [P], 'the search lists only the public group')
-  await until(() => seeder.indexCommunity(C) && seeder.indexCommunity(C).groups.length === 1, { name: 'ligação privada' })
-  t.alike(seeder.indexCommunity(C).groups, [{ group: G, visibility: 'private' }], 'a private group is listed by key and visibility only')
+  await until(() => seeder.indexCommunity(C) && seeder.indexCommunity(C).groups.length === 1, { name: 'grupo privado no catálogo' })
+  t.alike(seeder.indexCommunity(C).groups, [{ group: G, visibility: 'private', join: 'approval', name: null, writerCount: null }], 'a private group is listed without name or count')
 
   // The sealed block reaches a reader over the swarm byte for byte.
   const r = await reader(t, bootstrap, publicKey)
@@ -116,7 +118,7 @@ test('a private group is admitted, served raw and indexed without a name; box mi
   t.alike(Object.keys(answer).sort(), ['diary', 'group', 'sealed', 'seq', 'writer'])
   t.alike(await seeder.groupPostBlock(G, 1), { sealed: true, writer: G, diary: A.key, group: G, seq: 1 }, 'the root as a writer of its creator')
   t.is(await seeder.groupPostBlock(W, 2), null, 'a plaintext post in a private group is no counted record')
-  t.is(await seeder.groupPostBlock(G, 2), null, 'a community-link is no post')
+  t.is(await seeder.groupPostBlock(G, 2), null, 'a leave is no post')
   t.is(await seeder.groupPostBlock(W, 3), null, 'a block past the length')
   t.is(await seeder.groupPostBlock(N, 1), null, 'an unserved writer')
   t.is(await seeder.postBlock(W, 1), null, '/moderation-post never resolves a group ref')

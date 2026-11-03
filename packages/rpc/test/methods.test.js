@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.create', 'community.info', 'community.link', 'community.list', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
@@ -26,7 +26,7 @@ test('method list and mutating set', (t) => {
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.create', 'community.link', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
@@ -573,44 +573,46 @@ test('report.sign: writer and group (a group post)', (t) => {
 
 test('group.create', (t) => {
   t.ok(isMutating('group.create'))
-  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open', visibility: 'public' })
-  ok(t, 'group.create', { name: 'Clube', join: 'approval', visibility: 'private' }, { name: 'Clube', join: 'approval', visibility: 'private' })
-  ok(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'private' })
-  for (const visibility of ['secret', 'Public', '', null, true, 1]) bad(t, 'group.create', { name: 'Clube', join: 'open', visibility }, 'visibility ' + visibility)
-  ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval' })
-  ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open' })
+  ok(t, 'group.create', { name: 'Clube', join: 'open', community: KEY }, { name: 'Clube', join: 'open', visibility: 'public', community: KEY })
+  ok(t, 'group.create', { name: 'Clube', join: 'approval', visibility: 'private', community: KEY }, { name: 'Clube', join: 'approval', visibility: 'private', community: KEY })
+  ok(t, 'group.create', { name: 'Clube', join: 'open', visibility: 'private', community: KEY })
+  for (const visibility of ['secret', 'Public', '', null, true, 1]) bad(t, 'group.create', { name: 'Clube', join: 'open', visibility, community: KEY }, 'visibility ' + visibility)
+  ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval', community: KEY })
+  ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open', community: KEY })
   bad(t, 'group.create', {})
+  bad(t, 'group.create', { name: 'Clube', join: 'open' }, 'community required')
+  for (const community of [KEY.toUpperCase(), KEY.slice(1), 1, null, '']) bad(t, 'group.create', { name: 'Clube', join: 'open', community }, 'community ' + community)
   bad(t, 'group.create', { name: 'Clube' })
-  bad(t, 'group.create', { join: 'open' })
-  bad(t, 'group.create', { name: '', join: 'open' })
-  bad(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open' })
-  for (const join of ['closed', 'Open', '', null, true]) bad(t, 'group.create', { name: 'Clube', join }, 'join ' + join)
-  bad(t, 'group.create', { name: 'Clube', join: 'open', epoch: 1 })
+  bad(t, 'group.create', { join: 'open', community: KEY })
+  bad(t, 'group.create', { name: '', join: 'open', community: KEY })
+  bad(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open', community: KEY })
+  for (const join of ['closed', 'Open', '', null, true]) bad(t, 'group.create', { name: 'Clube', join, community: KEY }, 'join ' + join)
+  bad(t, 'group.create', { name: 'Clube', join: 'open', epoch: 1, community: KEY })
 })
 
 test('community.create', (t) => {
   t.ok(isMutating('community.create'))
-  ok(t, 'community.create', { name: 'Praia' }, { name: 'Praia' })
-  ok(t, 'community.create', { name: '😀'.repeat(MAX_GROUP_NAME) })
+  ok(t, 'community.create', { name: 'Praia', join: 'open' }, { name: 'Praia', join: 'open' })
+  ok(t, 'community.create', { name: 'Praia', join: 'approval' })
+  ok(t, 'community.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open' })
   bad(t, 'community.create', {})
-  bad(t, 'community.create', { name: '' })
-  bad(t, 'community.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1) })
-  bad(t, 'community.create', { name: 'Praia', join: 'open' })
+  bad(t, 'community.create', { name: 'Praia' }, 'join required')
+  bad(t, 'community.create', { join: 'open' })
+  bad(t, 'community.create', { name: '', join: 'open' })
+  bad(t, 'community.create', { name: 'x'.repeat(MAX_GROUP_NAME + 1), join: 'open' })
+  for (const join of ['closed', 'Open', '', null, true]) bad(t, 'community.create', { name: 'Praia', join }, 'join ' + join)
+  bad(t, 'community.create', { name: 'Praia', join: 'open', visibility: 'private' })
 })
 
-test('community.link and community.admin', (t) => {
-  t.ok(isMutating('community.link'))
+test('community.link is gone', (t) => {
+  t.absent(METHODS.includes('community.link'))
+  t.absent(isMutating('community.link'))
+  const r = validateParams('community.link', { community: KEY, group: KEY, on: true })
+  t.is(r.ok, false)
+})
+
+test('community.admin', (t) => {
   t.ok(isMutating('community.admin'))
-  ok(t, 'community.link', { community: KEY, group: KEY, on: true }, { community: KEY, group: KEY, on: true })
-  ok(t, 'community.link', { community: KEY, group: KEY, on: false })
-  bad(t, 'community.link', { community: KEY, group: KEY })
-  bad(t, 'community.link', { community: KEY, on: true })
-  bad(t, 'community.link', { group: KEY, on: true })
-  bad(t, 'community.link', { community: KEY, group: 'x', on: true })
-  bad(t, 'community.link', { community: KEY, group: KEY, on: 1 })
-  bad(t, 'community.link', { community: KEY, group: KEY, on: true, side: 'group' })
-  bad(t, 'community.link', { community: KEY, group: KEY, on: true, sides: ['community', 'group'] })
-  bad(t, 'community.link', { community: KEY, group: KEY, on: true, cuts: [] })
   ok(t, 'community.admin', { community: KEY, member: KEY, on: false }, { community: KEY, member: KEY, on: false })
   bad(t, 'community.admin', { community: KEY, member: KEY })
   bad(t, 'community.admin', { community: KEY, on: true })
@@ -618,6 +620,99 @@ test('community.link and community.admin', (t) => {
   bad(t, 'community.admin', { community: KEY, member: KEY, on: 'true' })
   ok(t, 'community.admin', { community: KEY, member: KEY, on: true })
   bad(t, 'community.admin', { community: KEY, member: KEY, on: true, cuts: [] })
+})
+
+test('community.join and community.leave', (t) => {
+  for (const m of ['community.join', 'community.leave']) {
+    t.ok(isMutating(m))
+    ok(t, m, { community: KEY }, m === 'community.leave' ? { community: KEY, force: false } : { community: KEY })
+    bad(t, m, {})
+    bad(t, m, { community: KEY.toUpperCase() })
+    bad(t, m, { community: KEY.slice(1) })
+    bad(t, m, { community: 1 })
+    bad(t, m, { group: KEY })
+    bad(t, m, { community: KEY, extra: 1 })
+  }
+})
+
+test('community.leave force', (t) => {
+  ok(t, 'community.leave', { community: KEY }, { community: KEY, force: false })
+  ok(t, 'community.leave', { community: KEY, force: true }, { community: KEY, force: true })
+  ok(t, 'community.leave', { community: KEY, force: false }, { community: KEY, force: false })
+  bad(t, 'community.leave', { community: KEY, force: 'true' })
+  bad(t, 'community.leave', { community: KEY, force: 1 })
+  ok(t, 'community.leave', { community: KEY, force: ['root'] }, { community: KEY, force: ['root'] })
+  ok(t, 'community.leave', { community: KEY, force: ['devices', 'groups'] }, { community: KEY, force: ['devices', 'groups'] })
+  ok(t, 'community.leave', { community: KEY, force: ['root', 'devices', 'groups'] }, { community: KEY, force: ['root', 'devices', 'groups'] })
+  bad(t, 'community.leave', { community: KEY, force: [] })
+  bad(t, 'community.leave', { community: KEY, force: ['root', 'root'] })
+  bad(t, 'community.leave', { community: KEY, force: ['other'] })
+  bad(t, 'community.leave', { community: KEY, force: [true] })
+  bad(t, 'community.leave', { community: KEY, force: 'root' })
+  bad(t, 'community.leave', { force: true })
+  bad(t, 'community.join', { community: KEY, force: true })
+})
+
+test('community.members and community.requests', (t) => {
+  for (const m of ['community.members', 'community.requests']) {
+    t.absent(isMutating(m))
+    ok(t, m, { community: KEY }, { community: KEY, offset: 0, limit: GROUP_MEMBERS_LIMIT_MAX })
+    ok(t, m, { community: KEY, offset: 5, limit: 1 }, { community: KEY, offset: 5, limit: 1 })
+    ok(t, m, { community: KEY, limit: GROUP_MEMBERS_LIMIT_MAX })
+    bad(t, m, {})
+    bad(t, m, { community: 'x' })
+    bad(t, m, { community: KEY, limit: 0 })
+    bad(t, m, { community: KEY, limit: GROUP_MEMBERS_LIMIT_MAX + 1 })
+    bad(t, m, { community: KEY, offset: -1 })
+    bad(t, m, { community: KEY, offset: 1.5 })
+    bad(t, m, { community: KEY, group: KEY })
+  }
+})
+
+test('community.admit and community.ban', (t) => {
+  for (const m of ['community.admit', 'community.ban']) {
+    t.ok(isMutating(m))
+    ok(t, m, { community: KEY, member: KEY, on: true }, { community: KEY, member: KEY, on: true })
+    ok(t, m, { community: KEY, member: KEY, on: false })
+    bad(t, m, { community: KEY, member: KEY })
+    bad(t, m, { community: KEY, on: true })
+    bad(t, m, { member: KEY, on: true })
+    bad(t, m, { community: 'x', member: KEY, on: true })
+    bad(t, m, { community: KEY, member: 'x', on: true })
+    bad(t, m, { community: KEY, member: KEY, on: 1 })
+    bad(t, m, { community: KEY, member: KEY, on: true, cuts: [] })
+  }
+})
+
+test('community.removeGroup', (t) => {
+  t.ok(isMutating('community.removeGroup'))
+  ok(t, 'community.removeGroup', { community: KEY, group: KEY }, { community: KEY, group: KEY, undo: false })
+  ok(t, 'community.removeGroup', { community: KEY, group: KEY, undo: true }, { community: KEY, group: KEY, undo: true })
+  bad(t, 'community.removeGroup', { community: KEY, group: KEY, undo: 'yes' }, 'string undo')
+  bad(t, 'community.removeGroup', { community: KEY, group: KEY, undo: null }, 'null undo')
+  bad(t, 'community.removeGroup', {})
+  bad(t, 'community.removeGroup', { community: KEY }, 'missing group')
+  bad(t, 'community.removeGroup', { group: KEY }, 'missing community')
+  bad(t, 'community.removeGroup', { community: KEY, group: KEY.slice(1) }, 'short group')
+  bad(t, 'community.removeGroup', { community: KEY, group: null }, 'null group')
+  bad(t, 'community.removeGroup', { community: KEY, group: KEY, force: true }, 'extra key')
+})
+
+test('community.meta', (t) => {
+  t.ok(isMutating('community.meta'))
+  ok(t, 'community.meta', { community: KEY, name: 'Novo' }, { community: KEY, name: 'Novo' })
+  ok(t, 'community.meta', { community: KEY, join: 'approval' }, { community: KEY, join: 'approval' })
+  ok(t, 'community.meta', { community: KEY, name: 'Novo', join: 'open' })
+  ok(t, 'community.meta', { community: KEY, name: 'x'.repeat(MAX_GROUP_NAME) })
+  bad(t, 'community.meta', {})
+  bad(t, 'community.meta', { community: KEY }, 'nothing to change')
+  t.is(validateParams('community.meta', { community: KEY }).message, 'nada a alterar')
+  bad(t, 'community.meta', { name: 'Novo' })
+  bad(t, 'community.meta', { community: KEY, name: '' })
+  bad(t, 'community.meta', { community: KEY, name: 'x'.repeat(MAX_GROUP_NAME + 1) })
+  bad(t, 'community.meta', { community: KEY, join: 'closed' })
+  bad(t, 'community.meta', { community: KEY, name: null })
+  bad(t, 'community.meta', { community: KEY, name: 'a', visibility: 'private' })
 })
 
 test('community.info', (t) => {
@@ -643,6 +738,12 @@ test('group.rekey', (t) => {
   bad(t, 'group.rekey', { group: 'x' })
   bad(t, 'group.rekey', { group: KEY, epoch: { writer: KEY, seq: 1 } })
   bad(t, 'group.rekey', { group: KEY, key: 'x' })
+})
+
+test('group.join community hint', (t) => {
+  ok(t, 'group.join', { group: KEY, community: KEY }, { group: KEY, community: KEY })
+  for (const community of [KEY.toUpperCase(), KEY.slice(1), 1, null, '']) bad(t, 'group.join', { group: KEY, community }, 'community ' + community)
+  bad(t, 'group.leave', { group: KEY, community: KEY })
 })
 
 test('group.join and group.leave', (t) => {

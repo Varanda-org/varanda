@@ -1,14 +1,16 @@
-// Novo grupo: the sheet that creates a group (group.create, docs/rpc.md
-// 5.36) and hands the new group to the caller.
-// Props: visible, onClose(), onCreated(group) where group is the hex64 root
-// key. A create that comes back uncertain is never resent: the sheet asks the
-// person to check ("conferir") before trying again: group.create always makes
-// a new root, so a resend could leave two groups. Only that check or closing
-// the sheet lifts the lock.
+// Novo grupo: the sheet that creates a group inside a community (group.create,
+// docs/rpc.md 5.36) and hands the new group to the caller.
+// Props: community (hex64 root key), visible, onClose(), onCreated(group)
+// where group is the hex64 root key (null when the check found it already
+// made). A create that comes back uncertain is never resent: the sheet asks
+// the person to check ("conferir") before trying again: group.create always
+// makes a new root, so a resend could leave two groups. Only that check or
+// closing the sheet lifts the lock.
 
 import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
+import { reconcile } from '../groups'
 import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, colors, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -39,7 +41,7 @@ export function useEscapeClose (visible, onClose) {
   }, [visible])
 }
 
-function Choice ({ label, options, value, onChange, disabled }) {
+export function Choice ({ label, options, value, onChange, disabled }) {
   return (
     <View style={styles.choice}>
       <Label>{label}</Label>
@@ -59,25 +61,19 @@ function Choice ({ label, options, value, onChange, disabled }) {
   )
 }
 
-// Every group the caller created, read page by page from the local list.
-async function createdGroups (request) {
-  const out = []
-  for (let offset = 0; ; offset += rpc.GROUP_LIMIT_MAX) {
-    const res = await request('group.list', { offset, limit: rpc.GROUP_LIMIT_MAX })
-    const page = Array.isArray(res && res.groups) ? res.groups : []
-    for (const g of page) if (g && g.role === 'creator') out.push(g)
-    const total = Number.isSafeInteger(res && res.total) ? res.total : 0
-    if (page.length === 0 || offset + page.length >= total) return out
-  }
+// What the community says about its groups, for the reconcile of an
+// uncertain create (community.info lists each group by name and role).
+async function communityView (request, community) {
+  const info = await request('community.info', { community })
+  return { community: info && info.community, groups: info && info.groups, incomplete: !!info && info.incomplete === true }
 }
 
-export function NovaCadeira ({ visible, onClose, onCreated }) {
+export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   const node = useNode()
   const [name, setName] = useState('')
   const [join, setJoin] = useState('open')
   const [visibility, setVisibility] = useState('public')
-  // After an uncertain create: { before }, the set of groups the caller had
-  // created already (null if that read failed).
+  // After an uncertain create: { name }, the name that was sent.
   const [uncertain, setUncertain] = useState(null)
   const [checkNote, setCheckNote] = useState('')
   const action = useAction()
@@ -102,40 +98,37 @@ export function NovaCadeira ({ visible, onClose, onCreated }) {
   const trimmed = name.trim()
   const tooLong = nameLength(trimmed) > NAME_MAX
   const offline = node.online === false
-  const ready = trimmed.length > 0 && !tooLong && !offline && uncertain === null
+  const ready = trimmed.length > 0 && !tooLong && !offline && uncertain === null && typeof community === 'string'
 
   const create = async () => {
     if (!ready) return
-    let before = null
-    try {
-      before = new Set((await createdGroups(node.request)).map((g) => g.group))
-    } catch {}
     setCheckNote('')
     const res = await action.run(() => node.request('group.create', {
       name: trimmed,
       join: priv ? 'approval' : join,
-      visibility
+      visibility,
+      community
     }))
     if (res.ok && res.value && typeof res.value.group === 'string') {
       if (typeof onCreated === 'function') onCreated(res.value.group)
       return
     }
-    if (res.uncertain) setUncertain({ before })
+    if (res.uncertain) setUncertain({ name: trimmed })
   }
 
-  // Names are not compared: a private group's name can read null (locked).
-  // A creator group that was not there before the create is the new one.
+  // A private group's name can read null (locked), so only a group with the
+  // sent name and the caller as creator counts as the new one.
   const confirm = async () => {
     if (uncertain === null) return
-    if (uncertain.before === null) {
-      setCheckNote('Não dá para conferir daqui. Confira em Meus grupos antes de tentar de novo.')
+    const res = await check.run(() => communityView(node.request, community))
+    if (!res.ok) return
+    const verdict = reconcile({ action: 'create', community, name: uncertain.name }, res.value)
+    if (verdict === 'landed') {
+      if (typeof onCreated === 'function') onCreated(null)
       return
     }
-    const res = await check.run(() => createdGroups(node.request))
-    if (!res.ok) return
-    const fresh = res.value.filter((g) => typeof g.group === 'string' && !uncertain.before.has(g.group))
-    if (fresh.length > 0) {
-      if (typeof onCreated === 'function') onCreated(fresh[fresh.length - 1].group)
+    if (verdict === 'unknown') {
+      setCheckNote('Não dá para conferir agora. Espere um pouco e confira a lista de grupos da comunidade antes de tentar de novo.')
       return
     }
     setUncertain(null)

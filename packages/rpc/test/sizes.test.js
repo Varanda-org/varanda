@@ -33,7 +33,9 @@ const {
   FOLLOW_LIMIT_MAX,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
-  MAX_GROUP_NAME
+  MAX_GROUP_NAME,
+  MAX_GROUPS_PER_COMMUNITY,
+  COMMUNITY_LIST_MAX
 } = require('..')
 
 const HEX = 'f'.repeat(64)
@@ -278,17 +280,19 @@ test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
   t.ok(s <= MAX_MESSAGE)
 })
 
-test('community.info: 32 groups with maximal names fit', (t) => {
-  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME) }
-  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), creator: HEX, groups: Array(32).fill(group), admins: SEQ, state: 'ready', incomplete: true })
-  t.comment('community.info worst case at 32 groups: ' + s + ' bytes')
+test('community.info: MAX_GROUPS_PER_COMMUNITY groups with maximal names fit', (t) => {
+  t.is(MAX_GROUPS_PER_COMMUNITY, 32)
+  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), visibility: 'private', join: 'approval', role: 'creator', general: false }
+  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', creator: HEX, role: 'creator', state: 'ready', members: SEQ, admins: SEQ, groups: Array(MAX_GROUPS_PER_COMMUNITY).fill(group), general: HEX, incomplete: true, leavePending: true })
+  t.comment('community.info worst case at ' + MAX_GROUPS_PER_COMMUNITY + ' groups: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
 })
 
-test('community.list: 128 communities with maximal names fit', (t) => {
-  const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), state: 'pending', creator: false, linked: false }
-  const s = size({ communities: Array(128).fill(community) })
-  t.comment('community.list worst case at 128 communities: ' + s + ' bytes')
+test('community.list: COMMUNITY_LIST_MAX communities with maximal names fit', (t) => {
+  t.is(COMMUNITY_LIST_MAX, 64)
+  const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', state: 'pending', role: 'creator', general: HEX }
+  const s = size({ communities: Array(COMMUNITY_LIST_MAX).fill(community) })
+  t.comment('community.list worst case at ' + COMMUNITY_LIST_MAX + ' communities: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
 })
 

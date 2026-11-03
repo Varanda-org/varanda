@@ -24,7 +24,7 @@ test('tabsFor: hosted adds Comunidades right after Espiadinha', async (t) => {
   t.alike(tabs, [
     TABS[0],
     TABS[1],
-    { id: 'cadeiras', label: 'Comunidades', icon: 'cadeira' },
+    { id: 'comunidades', label: 'Comunidades', icon: 'cadeira' },
     ...TABS.slice(2)
   ])
   t.is(TABS.length, 5)

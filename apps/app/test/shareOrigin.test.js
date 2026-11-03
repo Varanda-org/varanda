@@ -1,6 +1,6 @@
 'use strict'
 
-// CadeiraAjustes and Comunidade are JSX, so this reads them as text.
+// GrupoAjustes and Comunidade are JSX, so this reads them as text.
 // window.location is absent on the phone. window.addEventListener (the
 // sheet's Escape handler) is a different use and must stay.
 const fs = require('node:fs')
@@ -8,8 +8,8 @@ const path = require('node:path')
 const test = require('brittle')
 
 const screens = path.join(__dirname, '../src/screens')
-const files = ['CadeiraAjustes.js', 'Comunidade.js']
-const shareFns = { 'CadeiraAjustes.js': 'shareInvite', 'Comunidade.js': 'shareCommunity' }
+const files = ['GrupoAjustes.js', 'Comunidade.js']
+const shareFns = { 'GrupoAjustes.js': 'shareInvite', 'Comunidade.js': 'shareCommunity' }
 
 function read (name) {
   return fs.readFileSync(path.join(screens, name), 'utf8')
@@ -36,5 +36,5 @@ test('group and community share links use the installation origin', (t) => {
     t.ok(guard !== -1 && share !== -1 && guard < share, name + ' refuses an empty origin before sharing')
     t.ok(body.includes('Não foi possível copiar o link.'), name)
   }
-  t.ok(read('CadeiraAjustes.js').includes('window.addEventListener'))
+  t.ok(read('GrupoAjustes.js').includes('window.addEventListener'))
 })

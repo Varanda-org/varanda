@@ -13,7 +13,7 @@ const { writerHeader, groupHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const store = require('../lib/store')
 const member = require('../lib/member')
-const { hex, person, exchange, startSeeder, syncOnce, stored, ownWriter, fakeSeeder, groupMember, runUntil } = require('./helpers/sync-groups')
+const { hex, PARENT, person, exchange, startSeeder, syncOnce, stored, ownWriter, fakeSeeder, groupMember, runUntil } = require('./helpers/sync-groups')
 
 const enc = (record) => b4a.from(JSON.stringify(record))
 const box = () => hex(crypto.randomBytes(32))
@@ -41,13 +41,13 @@ async function fixture (fake, kp, visibility) {
   const group = hex(root.key)
   const r = await bound(fake.store, kp, group, 'root', { root })
   const header = visibility === 'private'
-    ? groupHeader({ diary: r.dkey, visibility: 'private', join: 'approval', name: null, box: box() })
-    : groupHeader({ diary: r.dkey, name: 'Praça', join: 'open' })
+    ? groupHeader({ community: PARENT, member: PARENT, diary: r.dkey, visibility: 'private', join: 'approval', name: null, box: box() })
+    : groupHeader({ community: PARENT, member: PARENT, diary: r.dkey, name: 'Praça', join: 'open' })
   await root.append(enc(header))
   const boxed = await bound(fake.store, kp, group, 'boxed')
-  await boxed.w.append(enc(writerHeader({ group, diary: boxed.dkey, box: box() })))
+  await boxed.w.append(enc(writerHeader({ group, diary: boxed.dkey, box: box(), member: PARENT })))
   const bare = await bound(fake.store, kp, group, 'bare')
-  await bare.w.append(enc(writerHeader({ group, diary: bare.dkey })))
+  await bare.w.append(enc(writerHeader({ group, diary: bare.dkey, member: PARENT })))
   await bare.w.append(enc(groupPost({ text: 'p' })))
   return {
     group,
@@ -118,10 +118,12 @@ test('a private group syncs end to end through a seeder', async (t) => {
   await startSeeder(t, bootstrap, kp)
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private', community })
   await member.groupPost(a, { group, text: 'antes' })
-  // B learns the root out of band; everything after this travels by sync.
+  // B learns the roots out of band; everything after this travels by sync.
   await exchange(a, b)
+  await member.communityJoin(b, { community })
   await member.groupJoin(b, { group })
   const wb = ownWriter(b, group)
   await syncOnce(bootstrap, b)

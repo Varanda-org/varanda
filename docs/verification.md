@@ -3649,3 +3649,82 @@ Mesmo roteiro da seção 65, agora no iOS, sobre `main@bc56143` (a pilha inteira
 ### O que não foi executado
 
 - Entrar com passkey (depende do domínio associado da conta Apple Developer), telas que exigem conta, aparelho real, build de release.
+
+## 67. Comunidades com grupos (PR feat/comunidades-com-grupos)
+
+Uma comunidade passa a conter grupos: toda comunidade nasce com o grupo Geral, e só quem criou a comunidade cria grupos (pelo aparelho que a criou; administradores moderam, não criam). A pessoa entra na comunidade (aberta ou com aprovação) e, por ela, nos grupos. Sair ou ser banido na comunidade vale para todos os grupos dela: as mensagens antigas de quem sai continuam visíveis, mas quem sai não tem mais autoridade de moderação em nenhum grupo da comunidade, e um administrador que sai e volta precisa de nova nomeação. Os grupos privados seguem a comunidade (a chave troca depois de um banimento). Os grupos e comunidades do protocolo v1 são descartados. Normativo: seção 10 de `docs/protocol.md` e RPC 5.36 a 5.69 de `docs/rpc.md`.
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`); a suíte inteira roda com `VARANDA_TEST_CONCURRENCY=1` como na CI. Testes novos e reescritos (número de `test(` antes -> depois):
+
+| Arquivo | Testes | O que cobre |
+|---|---|---|
+| `packages/core/test/community-fold.test.js` | 0 -> 93 | dobra do estado da comunidade: membros, pedidos, banimentos, administradores, Geral |
+| `packages/core/test/records.test.js` | 37 -> 40 | `group-join` com `rejoin` (6 chaves), `group-cut`, `group-confirm` |
+| `packages/core/test/group.test.js` | 101 -> 101 (103 na execução, por testes gerados em laço) | cabeçalho v2 (`community`, `member`) e regras do grupo |
+| `packages/core/test/group-private.test.js` | 76 -> 103 | grupos privados que seguem a comunidade, troca de chave depois do banimento |
+| `packages/core/test/community-member.test.js` | 11 -> 24 | operações de comunidade no nó do núcleo |
+| `packages/core/test/community-member-leave.test.js` | 0 -> 44 | saída da comunidade no nó do núcleo (separado de `community-member.test.js`): confirmação, marcas, nota local, espera pelos grupos |
+| `packages/core/test/group-member.test.js` | 50 -> 50 | grupos no nó, adaptados ao v2 |
+| `packages/core/test/private-member.test.js` | 19 -> 19 | grupos privados no nó, adaptados ao v2 |
+| `packages/core/test/seeder-communities.test.js` | 5 -> 8 | semeador com comunidades |
+| `packages/core/test/group-index.test.js` | 10 -> 12 | índice e rota `/index/community/<C>/groups/<cursor>` |
+| `packages/core/test/sync-communities.test.js` | 5 -> 7 | sincronização de comunidades |
+| `packages/web-member/test/community-ops.test.js` | 12 -> 68 | operações de comunidade no pacote do navegador |
+| `packages/web-member/test/community-sync.test.js` | 2 -> 5 | sincronização de comunidade no navegador |
+| `packages/web-member/test/session-groups.test.js` | 14 -> 18 | sessão de grupos no navegador |
+| `packages/web-member/test/groups-e2e.test.js` | 2 -> 2 | ponta a ponta com semeador na DHT local |
+| `apps/app/test/group-flow.test.js` | 10 -> 30 | fluxos de lógica pura de comunidade e grupo |
+| `apps/app/test/groups.test.js` | 15 -> 18 | linhas, papéis e rótulos |
+| `apps/app/test/indexClient.test.js` | 37 -> 40 | rota de grupos da comunidade no índice |
+| `packages/rpc/test/methods.test.js` | 55 -> 63 | contrato dos métodos `community.*` novos |
+| `apps/cli/test/community-commands.test.js` | 1 -> 6 | `community join|leave|members|requests|admit|ban|meta` |
+| `apps/cli/test/group-commands.test.js` | 2 -> 3 | `group create --community` |
+
+Operador: ao iniciar depois da atualização, cada semeador descarta todos os núcleos de grupo e de comunidade do protocolo v1 (irreversível, eram dados de protótipo), e clientes antigos não enxergam nada do v2.
+
+### Checagens humanas (a fazer)
+
+Na web hospedada, contra um semeador local, como a seção 64 descreve:
+
+1. **Criar uma comunidade.** O grupo Geral aparece.
+2. **Entrar pelo link.** Outra conta entra pelo botão Compartilhar (link `/c/`, nunca mostrado cru) e cai no Geral.
+3. **Novo grupo.** Só quem criou a comunidade vê Novo grupo e cria um grupo; um administrador não vê o botão.
+4. **Banir e desbanir.** Banir alguém na comunidade some com as mensagens dessa pessoa em todos os grupos; desbanir traz de volta.
+5. **Grupo privado.** Num grupo privado da comunidade, depois do banimento, a chave troca: as novas mensagens não chegam para quem saiu.
+6. **Sair.** Sair da comunidade encerra a participação em todos os grupos; reentrar não ressuscita os grupos antigos.
+7. **Pedir entrada.** Numa comunidade com aprovação, "Pedir entrada", desistir com "Desistir do pedido", e o pedido some da lista do administrador.
+8. **Dados antigos.** Os grupos e comunidades antigos (protocolo v1) somem do app depois da atualização.
+9. **Sair depois de um desbanimento parcial.** Uma conta com dois aparelhos na comunidade é banida; o desbanimento lista só um dos aparelhos. Pelo aparelho que continua banido, Sair funciona e a conta fica fora da comunidade e de todos os grupos dela.
+10. **Quem criou sai por outro aparelho.** Quem criou a comunidade entra nela por um segundo aparelho e sai por ele. Depois que a confirmação da saída chega (o registro `group-confirm` daquela saída no diário; desligar o aparelho no diário não confirma nada), pelo aparelho que criou a comunidade (já de volta), tenta nomear um administrador: o app recusa, ou, se a nomeação for escrita, ela não vale para ninguém. Novo grupo e editar a comunidade também não valem mais; banir, admitir e ocultar continuam funcionando pelo aparelho novo.
+11. **Quem criou sai e volta, nos grupos.** Quem criou a comunidade nomeia um administrador num grupo dela, sai da comunidade e volta. O administrador nomeado antes continua com o título no grupo. Um banimento escrito no grupo pelo aparelho que criou a comunidade, depois da saída, não vale.
+12. **Tirar um administrador depois da volta.** Antes de sair, quem criou a comunidade nomeia um administrador pelo aparelho que a criou (simula um administrador nomeado por quem roubou esse aparelho). Quem criou sai e volta por um aparelho novo. Só depois que a saída está confirmada no diário (e, para um grupo, depois que o diário marcou a raiz do grupo), tira esse administrador pelo aparelho novo, da comunidade (e de um grupo, se for o caso): a pessoa perde o título. Antes disso, a retirada pelo aparelho novo não vale. Depois disso, banir essa pessoa funciona.
+13. **Concluir saída.** Se a saída de quem criou a comunidade for interrompida (por exemplo, sem conexão no meio dela), o app mostra **Concluir saída** na tela da comunidade. Tocar no botão e confirmar termina a saída (o diário passa a ter o `group-confirm` dessa saída), e o botão some. Depois da sincronização, o administrador nomeado antes pelo aparelho que criou pode ser tirado pelo aparelho novo, como no item 12.
+14. **Entrar depois de uma saída interrompida.** Quem criou a comunidade tem a saída interrompida (como no item 13) e, em vez de Concluir saída, toca Entrar (ou usa `varanda community join <chave>`). A saída é concluída primeiro: no diário aparecem as marcas das raízes e o `group-confirm` daquela saída antes da nova entrada na comunidade.
+15. **Sair sem os dados de um grupo.** No aparelho de quem criou a comunidade falta a raiz de um grupo que essa pessoa criou (por exemplo, um grupo recém-criado por outro aparelho que ainda não sincronizou). Sair pede uma segunda confirmação, "Sair mesmo assim?"; confirmar sai, e esse grupo fica sem marca. Numa outra comunidade, esperar a sincronização e sair sem forçar: a saída marca o grupo.
+16. **Mudar a entrada depois da volta.** Quem criou uma comunidade com aprovação muda a entrada para aberta, sai, volta e, pelo aparelho novo, muda a entrada de volta para com aprovação em Ajustes. A comunidade passa a pedir aprovação de novo.
+17. **Tirar um grupo da lista depois da volta.** Quem criou sai e volta; pelo aparelho novo, na tela da comunidade, toca **Tirar da lista** num grupo indesejado e confirma: o grupo some da lista. O Geral não mostra o botão (`varanda community remove-group` no Geral responde "o grupo Geral só sai com a comunidade").
+18. **Devolver à lista.** Depois do item 17, na seção **Tirados da lista**, quem criou toca **Devolver à lista** no grupo tirado e confirma: o grupo volta para a lista da comunidade.
+19. **Saída espera os dados da comunidade.** No aparelho que criou a comunidade, enquanto os dados da comunidade ainda estão baixando, Sair pede uma segunda confirmação, "Este aparelho ainda não baixou tudo desta comunidade. Sair mesmo assim?" (sem confirmar, nada é gravado; a CLI responde "este aparelho ainda não baixou tudo da comunidade: aguarde para sair"). Confirmar com **Sair mesmo assim** (ou `varanda community leave <chave> --force`) sai, e o que ainda não chegou ao aparelho não conta. Sem forçar, depois de baixar, Sair funciona.
+20. **Consertos continuam valendo.** Quem criou sai, volta por um aparelho novo, muda a entrada ou tira um grupo da lista por esse aparelho e depois sai por ele (saída confirmada no diário, gravada depois dos consertos). Os consertos continuam valendo: a entrada e a lista ficam como estavam. Uma mudança feita pelo aparelho antigo, de antes da primeira saída, não vale como conserto.
+21. **Saída espera os outros aparelhos.** Quem criou a comunidade usa dois aparelhos nela; o segundo escreve algo que ainda não chegou ao primeiro. Sair pelo primeiro pede "Outro aparelho seu ainda não terminou de sincronizar esta comunidade. Sair mesmo assim?"; sem confirmar, nada é gravado (a CLI responde "aguarde a sincronização dos seus aparelhos nesta comunidade para sair"). Depois da sincronização, Sair funciona sem essa pergunta.
+
+### Não verificado / limites conhecidos
+
+- Resíduo de datação retroativa por um aparelho que já saiu: ele ainda pode acrescentar mensagens com data antiga. Não é impedido, porque a data é declarada pelo próprio aparelho; banir ou ocultar cobre essas mensagens, e a autoridade de moderação de quem saiu não volta.
+- Aparelho antigo roubado: quem tem nas mãos um aparelho que já saiu da comunidade consegue esconder o que foi escrito por esse mesmo aparelho (decisão do ciclo 10). Ele não encerra a participação atual da conta: uma saída escrita por um aparelho antigo não conta.
+- Quem criou a comunidade e saiu por outro aparelho: entre a saída honesta e a chegada da confirmação no diário dela, o aparelho que criou a comunidade ainda vale. Só a confirmação exata dessa saída no diário (`group-confirm`), assinado pela identidade, encerra os poderes da raiz; desligar o aparelho no diário não confirma nada.
+- Quem criou a comunidade e saiu de verdade (saída confirmada no diário), ao voltar, não nomeia mais administradores e não cria grupos (decisão do dono do projeto): a raiz perde esses poderes para sempre a partir da saída, para que um aparelho perdido não os use depois. Pelo aparelho novo, continua moderando e pode consertar a comunidade: mudar o nome e a entrada, tirar grupos da lista (menos o Geral) e devolvê-los, e tirar o cargo de qualquer administrador. Esses consertos só valem quando feitos por um aparelho que voltou depois da saída que encerrou os poderes da raiz (os aparelhos de antes dessa saída nunca consertam), e continuam valendo depois que esse aparelho sai, a menos que uma saída confirmada no diário encerre esse aparelho antes deles. Uma saída falsa, sem a confirmação do diário, não tira esses poderes.
+- Se a cópia dos dados da comunidade no aparelho que criou tem uma lacuna que nunca se completa, uma saída forçada gravada nesse aparelho só conta quando a lacuna se completar. Nesse caso, quem criou deve sair por outro aparelho.
+- Um aparelho de quem já saiu só volta a contar na comunidade quando a entrada assinada pelo diário nomeia a mesma saída que o cabeçalho do aparelho. Um aparelho novo sem essa entrada fica de fora: não modera nem conserta.
+- Quem criou a comunidade espera, ao sair, as raízes dos grupos que criou e marca todas as que tem no aparelho; a saída nunca fica bloqueada, porque "Sair mesmo assim" sai sem esperar. Um grupo que ficou sem marca, depois de uma saída confirmada, não tem nenhum poder pela raiz: o que quem criou fez nele como criador antes deixa de valer.
+- A nota local da saída de quem criou é gravada antes da própria saída. Se o bloco gravado não for exatamente a saída que a nota descreve, o aparelho não confirma nada, a chamada falha com "a saída gravada não confere; tente sair de novo" e a nota fica. Uma saída no escritor do aparelho que não confere com a nota nunca é confirmada por esse aparelho.
+- Só na web: enquanto o diário de quem criou a comunidade e já saiu dela uma vez tem um buraco na leitura do navegador, os grupos ignoram a moderação que o aparelho que criou fez antes, até o diário ficar completo. Isso nunca dá poder a ninguém, só tira por um tempo. O nó do núcleo lê o diário inteiro e não tem esse caso.
+- Quem tem a identidade (a chave do diário) é a pessoa: fica fora do alcance do protocolo. Um aparelho roubado sem a chave do diário não apaga o histórico dos outros aparelhos da pessoa nem tira os poderes de quem criou a comunidade, porque só o diário confirma uma saída.
+- O 32º grupo é o limite: só quem criou a comunidade cria grupos, então não há corrida; um grupo além do limite fica órfão.
+- Os dados do protocolo v1 são descartados na atualização (irreversível).
+- Um administrador rebaixado ainda pode escrever blocos de chave válidos na leitura, mas ninguém envia mensagens sob eles.
+- Uma comunidade é sempre pública.
+- A dica `attached` fica falsa enquanto a raiz de um grupo não é servida.
+- A verificação de uma ocultação incerta lê só a página mais nova (já era assim, vinda de `Cadeira.js`).

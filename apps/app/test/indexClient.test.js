@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchGroupSearch: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -881,7 +881,7 @@ test('fetchEngagers: request options, contract, a fresh copy and transport', asy
 })
 
 test('with an installation set, every index URL is absolute on that origin only', async (t) => {
-  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, fetchCounts } = await load()
+  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, communityGroupsUrl, fetchCounts } = await load()
   const { setInstallation } = await import('../src/installation.js')
   t.teardown(() => setInstallation(null))
   t.ok(setInstallation('https://example.test'))
@@ -892,6 +892,7 @@ test('with an installation set, every index URL is absolute on that origin only'
   t.is(topicUrl('ab+cd'), O + '/index/topic/ab+cd')
   t.is(engagersUrl('likes', REF), O + '/index/likes/' + A + '/5')
   t.is(searchUrl('ana-bia'), O + '/index/search/ana-bia')
+  t.is(communityGroupsUrl(C, A), O + '/index/community/' + C + '/groups/' + A)
   t.is(postUrl('bad'), null, 'bad input still refused')
   const urls = []
   const good = { counts: {}, indexing: false, complete: true }
@@ -910,6 +911,7 @@ function groupBody (over = {}) {
     creator: A,
     rootServed: true,
     community: null,
+    attached: false,
     writers: [
       { key: A, diary: A, length: 4, signed: 5, seq: 1, left: false },
       { key: B, diary: C, length: 2, signed: 2, seq: 3, left: true }
@@ -922,17 +924,22 @@ function groupBody (over = {}) {
 }
 
 test('group URL builders lowercase and refuse anything else', async (t) => {
-  const { groupUrl, groupsUrl, communityUrl, groupSearchUrl } = await load()
+  const { groupUrl, groupsUrl, communityUrl, communityGroupsUrl, groupSearchUrl } = await load()
   t.is(groupUrl(A), '/index/group/' + A)
   t.is(groupUrl(A.toUpperCase(), B), '/index/group/' + A + '/' + B)
   t.is(groupsUrl(A.toUpperCase()), '/index/groups/' + A)
   t.is(communityUrl(C), '/index/community/' + C)
+  t.is(communityGroupsUrl(C.toUpperCase(), A.toUpperCase()), '/index/community/' + C + '/groups/' + A)
   t.is(groupSearchUrl('praia-azul'), '/index/group-search/praia-azul')
   for (const bad of [null, 7, 'zz'.repeat(32), A + '/..', A.slice(2)]) {
     t.is(groupUrl(bad), null)
     t.is(groupsUrl(bad), null)
     t.is(communityUrl(bad), null)
+    t.is(communityGroupsUrl(bad, A), null)
+    t.is(communityGroupsUrl(C, bad), null)
   }
+  t.is(communityGroupsUrl(C), null, 'a cursor is required')
+  t.is(communityGroupsUrl(C, A + '/x'), null)
   t.is(groupUrl(A, 'nope'), null)
   t.is(groupUrl(A, A + '/x'), null)
   for (const bad of ['a', 'Praia', 'a-', 'x y', '', 'a--b', null, 'a-b-c-d-e']) t.is(groupSearchUrl(bad), null, String(bad))
@@ -950,6 +957,7 @@ test('fetchGroup: request, exact shape, older seeder without signed', async (t) 
   t.alike(res.value, groupBody({ next: C }))
   t.is(calls[0].url, '/index/group/' + A)
   t.is(calls[0].opts.credentials, 'omit')
+  t.is((await fetchGroup(A, null, { fetch: json(groupBody({ community: C, attached: true })) })).value.attached, true)
   const old = groupBody()
   old.writers = old.writers.map(({ signed, ...w }) => w)
   const res2 = await fetchGroup(A, null, { fetch: json(old) })
@@ -973,6 +981,10 @@ test('fetchGroup refuses malformed JSON whole', async (t) => {
     groupBody({ name: 'x'.repeat(81) }),
     groupBody({ creator: A.toUpperCase() }),
     groupBody({ community: 'ab' }),
+    groupBody({ attached: null }),
+    groupBody({ attached: 1 }),
+    groupBody({ attached: 'true' }),
+    groupBody({ attached: undefined }),
     groupBody({ next: 'ab' }),
     groupBody({ rootServed: 'yes' }),
     groupBody({ indexing: 1 }),
@@ -1045,34 +1057,153 @@ test('fetchGroupSearch: public hits only, cap 20, null name allowed', async (t) 
   t.is((await fetchGroupSearch('a', { fetch: json(body) })).reason, 'invalid-input')
 })
 
-test('fetchCommunity: a private row is only group and visibility', async (t) => {
-  const { fetchCommunity } = await load()
-  const body = {
+function communityRow (over = {}) {
+  return { group: A, visibility: 'public', join: 'open', name: 'Praia', writerCount: 3, ...over }
+}
+
+function communityBody (over = {}) {
+  return {
     name: 'Cais',
-    groups: [{ group: A, name: 'Praia', writerCount: 3 }, { group: B, visibility: 'private' }],
+    join: 'open',
+    creator: C,
+    members: 2,
+    groups: [communityRow(), communityRow({ group: B, visibility: 'private', join: 'approval', name: null, writerCount: null })],
+    next: B,
     indexing: false,
-    complete: true
+    complete: true,
+    ...over
   }
+}
+
+function badCommunityRows () {
+  const row = communityRow()
+  return [
+    null,
+    'x',
+    Array.from({ length: 33 }, (_, i) => communityRow({ group: i.toString(16).padStart(64, '0') })),
+    [row, row],
+    [communityRow({ group: B }), row],
+    [null],
+    [{ ...row, extra: 1 }],
+    [{ group: A, visibility: 'private' }],
+    [{ group: A, name: 'Praia', writerCount: 3 }],
+    [{ group: A }],
+    ...['group', 'visibility', 'join', 'name', 'writerCount'].map((key) => [Object.fromEntries(Object.entries(row).filter(([k]) => k !== key))]),
+    ...['ab', A.toUpperCase(), null, 7].map((group) => [communityRow({ group })]),
+    ...['secret', null, 7].map((visibility) => [communityRow({ visibility })]),
+    ...['closed', null, 7].map((join) => [communityRow({ join })]),
+    ...[3, '', 'x'.repeat(81)].map((name) => [communityRow({ name })]),
+    ...[-1, 0.5, '3', null, Number.MAX_SAFE_INTEGER + 1].map((writerCount) => [communityRow({ writerCount })]),
+    [communityRow({ visibility: 'private', name: 'Segredo', writerCount: null })],
+    [communityRow({ visibility: 'private', name: null, writerCount: 2 })]
+  ]
+}
+
+test('fetchCommunity: uniform public and private rows, exact response and copies', async (t) => {
+  const { fetchCommunity, validCommunity } = await load()
+  const body = communityBody()
   const calls = []
   const res = await fetchCommunity(C, { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
   t.alike(res, { ok: true, value: body })
   t.is(calls[0], '/index/community/' + C)
-  t.is((await fetchCommunity(C, { fetch: json({ ...body, name: null }) })).ok, true, 'name may be null')
-  const hit = (i) => ({ group: String(i).padStart(64, '0'), name: 'n', writerCount: 1 })
-  t.is((await fetchCommunity(C, { fetch: json({ ...body, groups: Array.from({ length: 32 }, (_, i) => hit(i)) }) })).ok, true)
-  const bad = [
-    { ...body, groups: Array.from({ length: 33 }, (_, i) => hit(i)) },
-    { ...body, groups: [{ group: B, visibility: 'private', name: 'Segredo' }] },
-    { ...body, groups: [{ group: B, visibility: 'private', writerCount: 2 }] },
-    { ...body, groups: [{ group: B, visibility: 'public' }] },
-    { ...body, groups: [{ group: B }] },
-    { ...body, groups: [hit(1), { group: String(1).padStart(64, '0'), visibility: 'private' }] },
-    { ...body, groups: [{ ...hit(1), name: 3 }] },
-    { ...body, name: 4 },
-    { ...body, name: '' },
-    { ...body, indexing: 'no' },
-    { name: 'x', groups: [], indexing: false, complete: true, extra: 1 }
-  ]
-  for (const b of bad) t.is((await fetchCommunity(C, { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
+  const copy = validCommunity(body)
+  copy.groups[0].name = 'Outra'
+  copy.groups.push(communityRow({ group: C }))
+  t.is(body.groups.length, 2)
+  t.is(body.groups[0].name, 'Praia')
+  for (const groups of badCommunityRows()) {
+    t.is((await fetchCommunity(C, { fetch: json(communityBody({ groups })) })).reason, 'malformed')
+  }
   t.is((await fetchCommunity('nope', { fetch: json(body) })).reason, 'invalid-input')
+})
+
+test('validCommunity: nullable header, counts, flags, cursor and exact keys', async (t) => {
+  const { validCommunity, COMMUNITY_GROUPS_MAX } = await load()
+  t.is(COMMUNITY_GROUPS_MAX, 32)
+  const full = Array.from({ length: 32 }, (_, i) => communityRow({ group: i.toString(16).padStart(64, '0') }))
+  for (const body of [communityBody(), communityBody({ name: null, join: null, creator: null, members: 0, next: null, groups: [], indexing: true, complete: false }), communityBody({ join: 'approval', groups: full, next: full[31].group }), communityBody({ groups: [communityRow({ name: null, writerCount: 0 })], next: A })]) {
+    t.alike(validCommunity(body), body)
+  }
+  const body = communityBody()
+  const bad = [
+    null, [], { ...body, extra: 1 },
+    ...Object.keys(body).map((key) => Object.fromEntries(Object.entries(body).filter(([k]) => k !== key))),
+    ...[4, '', 'x'.repeat(81)].map((name) => communityBody({ name })),
+    ...['closed', 7].map((join) => communityBody({ join })),
+    ...[A.toUpperCase(), 'ab', 7].map((creator) => communityBody({ creator })),
+    ...[-1, 0.5, '2', null, Number.MAX_SAFE_INTEGER + 1].map((members) => communityBody({ members })),
+    ...['ab', A.toUpperCase(), 7].map((next) => communityBody({ next })),
+    communityBody({ next: A }), communityBody({ next: C }), communityBody({ groups: [], next: B }),
+    communityBody({ indexing: 'no' }), communityBody({ complete: 1 }),
+    ...badCommunityRows().map((groups) => communityBody({ groups }))
+  ]
+  for (const value of bad) t.is(validCommunity(value), null, JSON.stringify(value).slice(0, 100))
+})
+
+test('validCommunityGroups: bounded sorted rows strictly after the cursor', async (t) => {
+  const { validCommunityGroups } = await load()
+  const body = { groups: [communityRow({ group: B })], next: B, indexing: false, complete: true }
+  t.alike(validCommunityGroups(body, A), body)
+  const empty = { groups: [], next: null, indexing: true, complete: false }
+  t.alike(validCommunityGroups(empty, A), empty)
+  const fullRows = Array.from({ length: 32 }, (_, i) => communityRow({ group: (i + 1).toString(16).padStart(64, '0') }))
+  const full = { ...body, groups: fullRows, next: fullRows[31].group }
+  t.alike(validCommunityGroups(full, '0'.repeat(64)), full)
+  const privatePage = { ...body, groups: [communityRow({ group: B, visibility: 'private', join: 'approval', name: null, writerCount: null })] }
+  t.alike(validCommunityGroups(privatePage, A), privatePage)
+  const copy = validCommunityGroups(body, A)
+  copy.groups[0].name = 'Outra'
+  copy.groups.push(communityRow({ group: C }))
+  t.is(body.groups[0].name, 'Praia')
+  t.is(body.groups.length, 1)
+  const bad = [
+    null, [], { ...body, extra: 1 },
+    ...Object.keys(body).map((key) => Object.fromEntries(Object.entries(body).filter(([k]) => k !== key))),
+    ...badCommunityRows().map((groups) => ({ ...body, groups })),
+    { ...body, groups: [communityRow()] },
+    { ...body, indexing: 1 }, { ...body, complete: 'yes' },
+    ...['ab', B.toUpperCase(), 7].map((next) => ({ ...body, next })),
+    { ...body, next: C }, { ...empty, next: B }
+  ]
+  for (const value of bad) t.is(validCommunityGroups(value, A), null)
+  t.is(validCommunityGroups(body, B), null, 'equal to cursor')
+  t.is(validCommunityGroups(body, C), null, 'before cursor')
+  for (const cursor of [undefined, null, 7, 'ab', A.toUpperCase()]) t.is(validCommunityGroups(empty, cursor), null, 'invalid cursor')
+})
+
+test('fetchCommunityGroups: request options, validation, transport and timeout', async (t) => {
+  const { fetchCommunityGroups } = await load()
+  const body = { groups: [communityRow({ group: B })], next: B, indexing: false, complete: true }
+  const calls = []
+  const fetch = async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }
+  t.alike(await fetchCommunityGroups(C.toUpperCase(), A.toUpperCase(), { fetch }), { ok: true, value: body })
+  t.is(calls[0].url, '/index/community/' + C + '/groups/' + A)
+  const opts = calls[0].opts
+  t.is(opts.method, 'GET')
+  t.is(opts.credentials, 'omit')
+  t.is(opts.redirect, 'error')
+  t.is(opts.cache, 'no-store')
+  t.is(opts.headers.Accept, 'application/json')
+  t.ok(opts.signal)
+  t.is((await fetchCommunityGroups(C, A, { fetch })).ok, true)
+  t.is(calls.length, 2, 'never cached')
+  for (const [community, cursor] of [['bad', A], [C, null], [C, 'bad']]) {
+    t.alike(await fetchCommunityGroups(community, cursor, { fetch }), { ok: false, reason: 'invalid-input' })
+  }
+  t.is(calls.length, 2, 'invalid input makes no request')
+  t.is((await fetchCommunityGroups(C, B, { fetch })).reason, 'malformed', 'response is checked against the cursor')
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => response('{') })).reason, 'malformed')
+  t.is((await fetchCommunityGroups(C, A, { fetch: json(body, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchCommunityGroups(C, A, { fetch: json(body, { redirected: true }) })).reason, 'status')
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => { throw new Error('offline') } })).reason, 'network')
+  const big = response('x'.repeat(70000))
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled)
+  let signal
+  const timeout = await fetchCommunityGroups(C, A, { timeoutMs: 10, fetch: (url, opts) => { signal = opts.signal; return new Promise(() => {}) } })
+  t.is(timeout.reason, 'timeout')
+  t.ok(signal.aborted)
+  const limited = await fetchCommunityGroups(C, A, { fetch: json(body, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs))
 })

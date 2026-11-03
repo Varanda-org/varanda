@@ -17,10 +17,12 @@ const enc = (record) => b4a.from(JSON.stringify(record))
 const group = key()
 const diary = key()
 const writer = key()
-const privateRoot = enc(groupHeader({ diary, visibility: 'private', join: 'approval', name: null, box: key() }))
-const publicRoot = enc(groupHeader({ diary, name: 'Praça', join: 'open' }))
-const boxed = enc(writerHeader({ group, diary, box: key() }))
-const bare = enc(writerHeader({ group, diary }))
+const community = key()
+const cw = key()
+const privateRoot = enc(groupHeader({ diary, community, member: community, visibility: 'private', join: 'approval', name: null, box: key() }))
+const publicRoot = enc(groupHeader({ diary, community, member: community, name: 'Praça', join: 'open' }))
+const boxed = enc(writerHeader({ group, diary, member: cw, box: key() }))
+const bare = enc(writerHeader({ group, diary, member: cw }))
 
 test('a private root is accepted like a public one', (t) => {
   t.is(groupVerdict(privateRoot, group, group, diary), null)
@@ -29,7 +31,7 @@ test('a private root is accepted like a public one', (t) => {
 })
 
 test('a private community root is header-invalid', (t) => {
-  const raw = enc({ type: 'group-header', v: 1, kind: 'community', diary, visibility: 'private', join: 'approval', name: null, box: key(), at: new Date().toISOString() })
+  const raw = enc({ type: 'group-header', v: 2, kind: 'community', diary, community: null, member: null, visibility: 'private', join: 'approval', name: null, box: key(), at: new Date().toISOString() })
   t.is(groupVerdict(raw, group, group, diary, true), 'header-invalid')
 })
 

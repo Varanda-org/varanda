@@ -312,6 +312,12 @@ const isCredentialId = (v) => typeof v === 'string' && CREDENTIAL_ID_RE.test(v)
 const isUserId = (v) => v === '' || isKey(v)
 const isMediaMime = (v) => typeof v === 'string' && L.MEDIA_MIMES.includes(v)
 
+// community.leave's force: true skips every wait of the creator's leave, a
+// list only the waits it names.
+const LEAVE_WAITS = ['root', 'groups', 'devices']
+const isLeaveForce = (v) => isBool(v) ||
+  (Array.isArray(v) && v.length > 0 && v.every((w) => LEAVE_WAITS.includes(w)) && new Set(v).size === v.length)
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -541,10 +547,11 @@ const SPECS = {
   // `visibility` is fixed at creation (docs/rpc.md 5.36); a private group forces
   // join 'approval'. No method changes it afterwards.
   'group.create': {
-    fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin), visibility: opt(isGroupVisibility, 'public') },
+    fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin), visibility: opt(isGroupVisibility, 'public'), community: req(isKey) },
     mutating: true
   },
-  'group.join': { fields: { group: req(isKey) }, mutating: true },
+  // `community` names the group's community when its root is not held yet (docs/rpc.md 5.37).
+  'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
     fields: { group: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isGroupRef) },
@@ -585,12 +592,54 @@ const SPECS = {
   // Private groups (docs/rpc.md 5.61): a new epoch key for the group, never returned.
   'group.rekey': { fields: { group: req(isKey) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
-  // Communities (docs/rpc.md 5.57 to 5.60): sets of groups, named by their root key.
-  'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)) }, mutating: true },
-  'community.link': { fields: { community: req(isKey), group: req(isKey), on: req(isBool) }, mutating: true },
+  // Communities (docs/rpc.md 5.57 to 5.70): hold the groups, named by their root key.
+  // community.link was removed in protocol v2 (docs/rpc.md 5.58): an unknown method.
+  'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
+  // Success: { community, name, join, creator, role, state, members, admins,
+  // groups, general, incomplete, leavePending: boolean, repair: boolean,
+  // dropped: [group key] }.
+  // leavePending is true only for C's creator whose own leave, noted by this
+  // device, is written but not confirmed by the diary yet: community.leave
+  // finishes it. repair is true only for C's creator whose root's powers
+  // ended (cwDemote) and who writes through a live CW: community.meta then
+  // goes through that CW and community.removeGroup is open. dropped lists
+  // the groups currently taken off C's catalogue (sorted keys, never Geral),
+  // which community.removeGroup with undo puts back.
   'community.info': { fields: { community: req(isKey) } },
   'community.list': { fields: none },
   'community.admin': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'community.join': { fields: { community: req(isKey) }, mutating: true },
+  // force: C's creator leaves even with group roots its diary bound not held
+  // here yet; those roots stay unmarked (docs/rpc.md 5.64).
+  'community.leave': { fields: { community: req(isKey), force: opt(isLeaveForce, false) }, mutating: true },
+  'community.members': {
+    fields: {
+      community: req(isKey),
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_MEMBERS_LIMIT_MAX), L.GROUP_MEMBERS_LIMIT_MAX)
+    }
+  },
+  'community.requests': {
+    fields: {
+      community: req(isKey),
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_MEMBERS_LIMIT_MAX), L.GROUP_MEMBERS_LIMIT_MAX)
+    }
+  },
+  'community.admit': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'community.ban': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'community.meta': {
+    fields: { community: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
+    mutating: true,
+    cross (given, value) {
+      if (!hasOwn(value, 'name') && !hasOwn(value, 'join')) return 'nada a alterar'
+      return null
+    }
+  },
+  // C's creator, back after its root's powers ended, takes a group off C's
+  // catalogue through its CW (docs/rpc.md 5.70). Geral never leaves. undo:
+  // puts a group it dropped back. Success: { ok: true }.
+  'community.removeGroup': { fields: { community: req(isKey), group: req(isKey), undo: opt(isBool, false) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

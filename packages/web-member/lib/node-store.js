@@ -48,7 +48,7 @@ const {
   MAX_MEDIA_BYTES
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
-const { validateGroupRecord, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
+const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -410,6 +410,22 @@ async function readRaw (core) {
   return raw.slice(0, present)
 }
 
+// As @varanda/core readBlocks: a group core's blocks, decoded, tombstones
+// not applied (deletion is a diary feature, groups hide with their own
+// records), up to the first block not held locally.
+async function readBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) break
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) break
+    out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -445,10 +461,10 @@ function appendRecord (core, record, limits) {
 }
 
 // The same queue and limits for a group core: block 0 is its header, the
-// root (`root: true`) alone may hold root-only records, and a community root
-// (`community: true`) only its own set of them.
+// root (`root: true`) alone may hold root-only records, and a community core
+// (`community: true`: its root or a community writer) only its own set.
 function appendGroupRecord (core, record, { root = false, community = false, private: priv = false, limits } = {}) {
-  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: root === true && community === true, private: priv === true })
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: community === true, private: priv === true })
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
@@ -990,6 +1006,100 @@ async function removeGroupReplica (storage, hex) {
   return keys
 }
 
+// kv communityCreate = { v: 1, community, communityNonce, group, groupNonce,
+// name, join, at }: a community.create planned here and not finished (its two
+// own cores and nonces, the Geral group), so a repeated call resumes it with
+// the same keys. null when none.
+async function readCommunityCreate (storage) {
+  const d = await readKv(storage, 'communityCreate')
+  if (!isVersioned(d) || ![d.community, d.communityNonce, d.group, d.groupNonce].every(isHex64) ||
+      typeof d.name !== 'string' || (d.join !== 'open' && d.join !== 'approval') || !isCanonicalIso(d.at)) return null
+  return {
+    v: 1,
+    community: d.community.toLowerCase(),
+    communityNonce: d.communityNonce.toLowerCase(),
+    group: d.group.toLowerCase(),
+    groupNonce: d.groupNonce.toLowerCase(),
+    name: d.name,
+    join: d.join,
+    at: d.at
+  }
+}
+
+function writeCommunityCreate (storage, record) {
+  return storage.writeJson('communityCreate', record === null ? null : { ...record, v: 1 })
+}
+
+// kv communityLeave = { v: 1, notes: [{ community, writer, seq, hash }] }: per
+// community, the group-leave this device appended as its creator (the CW,
+// the block's seq and the hex blake2b of its bytes) until the diary confirms
+// it. Only a leave matching its note is confirmed later.
+async function readLeaveNotes (storage) {
+  const d = await readKv(storage, 'communityLeave')
+  // v 1 notes named a block hash, not the leave's digest: never finished.
+  if (d === null || typeof d !== 'object' || d.v !== 2 || !Array.isArray(d.notes)) return []
+  const root = (r) => r !== null && typeof r === 'object' && isHex64(r.group) && Number.isSafeInteger(r.cut) && r.cut >= 1
+  return d.notes.filter((n) => n !== null && typeof n === 'object' && [n.community, n.writer, n.digest].every(isHex64) &&
+    Number.isSafeInteger(n.seq) && n.seq >= 1 && Array.isArray(n.roots) && n.roots.every(root))
+    .map((n) => ({
+      community: n.community.toLowerCase(),
+      writer: n.writer.toLowerCase(),
+      seq: n.seq,
+      digest: n.digest.toLowerCase(),
+      roots: n.roots.map((r) => ({ group: r.group.toLowerCase(), cut: r.cut }))
+    }))
+}
+
+// { community, writer, seq, digest, roots: [{ group, cut }] }: the C leave
+// this creator device appends at `seq` on its CW (its leaveDigest), and the
+// length of each group root of C it held at leave time.
+function writeLeaveNotes (storage, notes) {
+  return storage.writeJson('communityLeave', notes.length === 0 ? null : { v: 2, notes })
+}
+
+// Protocol v1 group cores (a group-header or group-writer block 0 with
+// v: 1) among those kv groupWriters, groupReplicas and groupCores name:
+// each is purged and dropped from the lists, a created entry included, since
+// no seeder or fold of protocol v2 takes it -> [{ event: 'group-skipped',
+// key, reason: 'legacy' }], one per purged core.
+async function purgeLegacyGroupCores (storage) {
+  const writers = await readGroupWriters(storage)
+  const keys = new Set([...await readGroupReplicas(storage), ...await readGroupCoreKeys(storage)])
+  for (const e of writers) {
+    keys.add(e.key)
+    if (e.rootNonce !== null) keys.add(e.group)
+  }
+  const legacy = new Set()
+  for (const key of [...keys].sort()) {
+    const core = await openGroupCoreReadOnly(storage, key)
+    if (core === null) continue
+    let h = null
+    try {
+      if (core.contiguousLength > 0) h = decodeBlock(await core.get(0, { wait: false, raw: true }))
+    } catch {
+    } finally {
+      await core.close()
+    }
+    if (h === null || typeof h !== 'object') continue
+    const reason = h.type === 'group-header' ? validateGroupHeader(h) : h.type === 'group-writer' ? validateWriterHeader(h) : null
+    if (reason === 'legacy') legacy.add(key)
+  }
+  if (legacy.size === 0) return []
+  for (const e of writers) {
+    if (!legacy.has(e.key) && !legacy.has(e.group)) continue
+    await removeGroupWriter(storage, e.group)
+    // The own writer of a legacy group goes with it.
+    legacy.add(e.key)
+  }
+  const events = []
+  for (const key of [...legacy].sort()) {
+    await purgeGroupCore(storage, key)
+    await removeGroupReplica(storage, key)
+    events.push({ event: 'group-skipped', key, reason: 'legacy' })
+  }
+  return events
+}
+
 // The binding diaries of accepted foreign group writers, stored as replicas
 // (replicaName) for the join evidence and the names of their authors and
 // never listed in kv follows: kv 'groupDiaries' { v: 1, keys }, at most
@@ -1066,6 +1176,8 @@ async function deleteGroupData (storage) {
   }
   await storage.writeJson('groupWriters', null)
   await storage.writeJson('groupReplicas', null)
+  await storage.writeJson('communityCreate', null)
+  await storage.writeJson('communityLeave', null)
   // A new identity on this storage derives a new box key pair: the old
   // nonce would only tie it to the cores just deleted.
   await withGroupBoxLock(storage, () => storage.writeJson('groupBoxDevice', null))
@@ -1201,6 +1313,7 @@ module.exports = {
   readAll,
   readVisible,
   readRaw,
+  readBlocks,
   readBlock0,
   appendRecord,
   appendRecords,
@@ -1240,6 +1353,11 @@ module.exports = {
   addGroupDiary,
   removeGroupDiary,
   deleteGroupData,
+  readCommunityCreate,
+  writeCommunityCreate,
+  readLeaveNotes,
+  writeLeaveNotes,
+  purgeLegacyGroupCores,
   readGroupCoreKeys,
   readGroupCerts,
   putGroupCert,

@@ -193,11 +193,12 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
   t.pass()
 })
 
-test('cadeira and comunidade are keyed by a lowercase hex64 root key', async (t) => {
+test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.ok(SCREENS.includes('cadeira'))
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade'])
+  t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
-  for (const screen of ['cadeira', 'comunidade']) {
+  for (const screen of ['grupo', 'comunidade']) {
     t.ok(validEntry({ screen, key: A }))
     const stack = push(EMPTY, { screen, key: A })
     t.alike(top(stack), { screen, key: A, params: {} })
@@ -207,7 +208,7 @@ test('cadeira and comunidade are keyed by a lowercase hex64 root key', async (t)
       t.is(push(EMPTY, { screen, key }), EMPTY)
     }
   }
-  t.is(push(push(EMPTY, { screen: 'cadeira', key: A }), { screen: 'comunidade', key: A }).length, 2, 'same key on another screen is a new entry')
+  t.is(push(push(EMPTY, { screen: 'grupo', key: A }), { screen: 'comunidade', key: A }).length, 2, 'same key on another screen is a new entry')
   t.ok(validEntry({ screen: 'conversa', key: A + ':1' }) && validEntry({ screen: 'membro', key: A }), 'existing screens keep working')
   t.is(MAX_DEPTH, 20)
 })

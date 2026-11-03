@@ -91,8 +91,8 @@ import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
-import { Cadeira } from './src/screens/Cadeira'
-import { Cadeiras } from './src/screens/Cadeiras'
+import { Grupo } from './src/screens/Grupo'
+import { Comunidades } from './src/screens/Comunidades'
 import { Comunidade } from './src/screens/Comunidade'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
@@ -117,7 +117,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Comunidades' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', comunidades: 'Comunidades' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -1034,10 +1034,10 @@ function Member () {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
-    pushScreen({ screen: 'cadeira', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
+    pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
   }, [pushScreen])
-  const openCommunity = useCallback((community) => {
-    pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  const openCommunity = useCallback((community, opts) => {
+    pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
   }, [pushScreen])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
@@ -1095,15 +1095,15 @@ function Member () {
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
-  const groupsOnScreen = mode === 'hosted' && ready && (tab === 'cadeiras' || (topEntry !== null && topEntry.screen === 'cadeira'))
+  const groupsOnScreen = mode === 'hosted' && ready && (tab === 'comunidades' || (topEntry !== null && topEntry.screen === 'grupo'))
   const groupVersions = node.groupVersions || NO_VERSIONS
   useEffect(() => {
-    const open = topEntry !== null && topEntry.screen === 'cadeira' ? topEntry.key : null
+    const open = topEntry !== null && topEntry.screen === 'grupo' ? topEntry.key : null
     setGroupSeen((cur) => {
       const base = cur.epoch === nodeEpoch ? cur.map : {}
       let map = base
       if (groupsOnScreen) {
-        const all = tab === 'cadeiras' && topEntry === null
+        const all = tab === 'comunidades' && topEntry === null
         for (const g of Object.keys(groupVersions)) {
           if ((all || g === open) && base[g] !== groupVersions[g]) {
             if (map === base) map = { ...base }
@@ -1143,7 +1143,7 @@ function Member () {
       return
     }
     if (!atTabs || mode !== 'hosted') return
-    pushScreen({ screen: pendingLink.kind === 'grupo' ? 'cadeira' : 'comunidade', key: pendingLink.key, params: {} })
+    pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
     setPendingLink(null)
   }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
   const action = inviteAction({
@@ -1618,8 +1618,8 @@ function Member () {
           </View>
           {mode === 'hosted'
             ? (
-              <View style={shown('cadeiras')}>
-                <Cadeiras key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+              <View style={shown('comunidades')}>
+                <Comunidades key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
               </View>
               )
             : null}
@@ -1646,14 +1646,14 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
-                if (entry.screen === 'cadeira' || entry.screen === 'comunidade') {
+                if (entry.screen === 'grupo' || entry.screen === 'comunidade') {
                   // Keyed by the node epoch: a lock, unlock or identity change
                   // remounts the screen, so late answers from before are dropped.
                   return (
                     <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      {entry.screen === 'cadeira'
-                        ? <Cadeira group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
-                        : <Comunidade community={entry.key} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
+                      {entry.screen === 'grupo'
+                        ? <Grupo group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
+                        : <Comunidade community={entry.key} afterGroup={entry.params.group || null} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
                     </View>
                   )
                 }
@@ -1675,7 +1675,7 @@ function Member () {
             )
           : null}
         <Fab onPress={openComposer} />
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, cadeiras: groupsBadge }} tabs={tabsFor(mode)} />}
+        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, comunidades: groupsBadge }} tabs={tabsFor(mode)} />}
       </View>
     )
   }
