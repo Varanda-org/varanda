@@ -3893,3 +3893,46 @@ A segue B. B não segue A.
 - O app instalado não tem aviso do sistema. A novidade só aparece com o app aberto (`dm.pull`, `DM_PULL_EVERY_MS` = 120000) e pelo ponto.
 - Um aparelho offline por mais de sete dias (`DM_RETENTION_MS`) perde o que a varredura já tirou.
 - `seed --no-dm` deixa os dois canais sem suporte. Sem a opção, ficam ligados.
+
+## 70. Convidar por @nome pelas Conversas (PR feat/convidar-por-nome)
+
+Quem pode convidar (criação, administradores e, com "Membros podem convidar", os membros) vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo. Digita @nome ou escolhe na busca, vê a pessoa e toca em Convidar. O app confere `dm.lookup`; sem Conversas, mostra "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."; com Conversas, manda uma mensagem privada (`dm.send`) "Convite para a comunidade X na Varanda: <link>" (ou a forma de grupo). Envio incerto mostra "Não deu para confirmar se o convite foi enviado. Tente de novo: a mensagem não se repete." e **Tentar de novo**, que reenvia o mesmo texto, nunca sozinho. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite; abrir nunca entra. Links de outros endereços são ignorados.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `apps/app/test/inviteMessage.test.js` | 12 testes: texto do convite (também de grupo sem nome), corte dos nomes, reconhecimento estrito do link (só no começo do texto ou depois de espaço, o último link vale) |
+| `apps/app/test/group-flow.test.js` | dois testes novos: seção Convidar e Convidar para o grupo, consulta ao nó antes do envio, membro conferido no nó, Tentar de novo com o mesmo texto e nenhum envio dentro de um efeito |
+| `apps/app/test/conversas.test.js` | o teste novo da linha de mensagem com Abrir convite |
+
+### Checagens humanas (a fazer)
+
+Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local. As caixas ficam desmarcadas até alguém executar o passo.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] Um administrador convida @nome na comunidade. A pessoa recebe a mensagem nas Conversas; em Pedidos de mensagem se não seguir quem convidou.
+- [ ] **Abrir convite** abre a comunidade no cartão de convite.
+- [ ] Abrir o convite não entra: só o toque em **Entrar** (ou **Pedir entrada**) grava a entrada.
+- [ ] Repetir em Ajustes do grupo, com **Convidar para o grupo**.
+- [ ] Um membro só vê **Convidar** quando a regra é "Membros podem convidar".
+- [ ] Uma pessoa sem Conversas faz aparecer "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."
+- [ ] Com o envio incerto (rede cortada logo após tocar), aparece o texto de incerteza e **Tentar de novo**; a pessoa convidada recebe uma só mensagem.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro: convite por @nome, Pedidos, Abrir convite, Entrar ainda necessário, regra Membros podem convidar, pessoa sem Conversas e Tentar de novo.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- A pessoa convidada precisa usar as Conversas; sem elas, só o link pelo Compartilhar.
+- "Quem pode convidar" controla só o botão: qualquer pessoa ainda pode mandar o link pelo Compartilhar ou colá-lo numa mensagem.
+- O convite não aprova a entrada. Os administradores não veem "convidado por".

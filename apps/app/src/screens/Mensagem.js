@@ -22,9 +22,10 @@ import { StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { countChars } from '../format'
-import { LABELS } from '../dm'
+import { LABELS, UNSURE_SEND } from '../dm'
 import { mergeMessages, newestOf, refreshThread, sendPlan, threadRows } from '../dm-screen'
 import { Btn, ErrorText, Soft, colors, errorText, useAction, useNow } from '../ui'
 import { DmMessageRow } from '../ui/DmMessageRow'
@@ -35,10 +36,10 @@ import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 
-const UNSURE_SEND = 'não deu para confirmar o envio'
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 
-export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport }) {
+export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, onOpenInvite }) {
+  const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
   const now = useNow(60000)
   const { request } = node
@@ -345,6 +346,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport }
           <DmMessageRow
             item={item}
             now={now}
+            origin={origin}
+            onOpenInvite={onOpenInvite}
             onReply={() => setReplyTo({ id: item.id, text: item.deleted ? LABELS.deletedQuote : item.text })}
             onReport={typeof onReport === 'function' && !item.mine && !item.deleted ? () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from }) : undefined}
           />

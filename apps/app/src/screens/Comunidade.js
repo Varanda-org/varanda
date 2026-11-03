@@ -21,6 +21,7 @@ import { useNode } from '../node'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
 import { communityLink } from '../groupLink'
+import { INVITE_NOTE, INVITE_NO_DM, INVITE_SENT, INVITE_UNSURE, inviteText } from '../inviteMessage'
 import { installationOrigin } from '../installation'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
@@ -29,6 +30,7 @@ import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
 import { shortKey } from '../format'
 import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, PRIVATE_LABEL, can, membersLabel, reconcile, roleLabel, visibilityLabel } from '../groups'
+import { UNSURE_SEND } from '../dm'
 import { Body, Btn, Card, ErrorText, Field, SectionHeader, Soft, Title, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -120,6 +122,169 @@ function GroupRow ({ title, detail, onPress }) {
         {detail ? <Text style={styles.handle} numberOfLines={1}>{detail}</Text> : null}
       </View>
     </Pressable>
+  )
+}
+
+const NO_LINK = 'Não foi possível montar o link.'
+const INVITE_SELF = 'Você já está aqui.'
+const INVITE_MEMBER = 'Essa pessoa já é membro.'
+
+// Invite by @nome through a private message (Conversas). Exported for the
+// group settings, which sends its own link text through makeText. The send
+// starts only from a tap: an uncertain answer keeps the same { to, text } for
+// one more tap on Tentar de novo (the node re-puts the same drop, so there is
+// no duplicate) and is never resent on its own.
+export function InviteByName ({ request, hosted, online, ownKey, isMember, makeText }) {
+  const [input, setInput] = useState('')
+  const [candidate, setCandidate] = useState(null)
+  const [resolving, setResolving] = useState(false)
+  const [localError, setLocalError] = useState('')
+  const [result, setResult] = useState('')
+  const [held, setHeld] = useState(null)
+  const send = useAction()
+  const sendErr = useRef(null)
+  const resolveGen = useRef(0)
+  const search = useMemberSearch({ request, hosted, online, ownKey })
+  const offline = !online
+  const cls = classifyFollowInput(input)
+  const searchable = cls.kind === 'name' || cls.kind === 'handle'
+  const hits = search.hits.filter((h) => h.author !== ownKey)
+
+  const typeInput = (t) => {
+    setInput(t)
+    setCandidate(null)
+    setLocalError('')
+    setResult('')
+    setHeld(null)
+    send.clearError()
+    resolveGen.current++
+    setResolving(false)
+    const c = classifyFollowInput(t)
+    search.setQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
+  }
+
+  const find = async () => {
+    setLocalError('')
+    setResult('')
+    if (cls.kind === 'key') return setCandidate({ member: cls.key, label: shortKey(cls.key) })
+    if (cls.kind !== 'handle') return
+    const name = isUsername(cls.handle)
+    if (name === null) return setLocalError('@nome inválido')
+    const mine = ++resolveGen.current
+    setResolving(true)
+    try {
+      const found = await lookupUsername(name)
+      if (mine !== resolveGen.current) return
+      if (found === null || !isKey(found.member) || !usernameMatches(found.usernameRecord, found.member, name)) {
+        setLocalError(NOT_FOUND)
+      } else {
+        setCandidate({ member: found.member, label: '@' + displayText(name) })
+      }
+    } catch (err) {
+      if (mine === resolveGen.current) setLocalError(errorText(err))
+    } finally {
+      if (mine === resolveGen.current) setResolving(false)
+    }
+  }
+
+  // The one place dm.send runs, always from a tap.
+  const deliver = async (to, text, checkBox) => {
+    sendErr.current = null
+    setHeld(null)
+    setResult('')
+    // A lookup still running must not bring the candidate back after the send.
+    resolveGen.current++
+    setResolving(false)
+    const r = await send.run(async () => {
+      try {
+        if (checkBox) {
+          // Whoever may invite does not always see the member list, so the
+          // check is asked of the node; a failed check does not block the send.
+          let inside = false
+          if (typeof isMember === 'function') {
+            try { inside = (await isMember(to)) === true } catch { inside = false }
+          }
+          if (inside) return 'member'
+          const found = await request('dm.lookup', { member: to })
+          if (!found || typeof found.box !== 'string') return 'nodm'
+        }
+        await request('dm.send', { to, text })
+        return 'sent'
+      } catch (err) {
+        sendErr.current = err
+        throw err
+      }
+    })
+    const err = sendErr.current
+    if (r.ok && r.value === 'nodm') return setResult(INVITE_NO_DM)
+    if (r.ok && r.value === 'member') return setLocalError(INVITE_MEMBER)
+    if (r.ok) {
+      resolveGen.current++
+      setResolving(false)
+      setResult(INVITE_SENT)
+      setInput('')
+      setCandidate(null)
+      search.clear()
+      return
+    }
+    if (r.uncertain || (err && err.message === UNSURE_SEND)) {
+      setHeld({ to, text })
+      setResult(INVITE_UNSURE)
+    }
+  }
+
+  const invite = (member) => {
+    if (offline || send.pending) return
+    setLocalError('')
+    if (typeof ownKey === 'string' && member === ownKey) return setLocalError(INVITE_SELF)
+    let text = null
+    try { text = makeText() } catch { text = null }
+    if (typeof text !== 'string' || text === '') return setLocalError(NO_LINK)
+    deliver(member, text, true)
+  }
+
+  return (
+    <View style={styles.block}>
+      <Soft>{INVITE_NOTE}</Soft>
+      <Field label='Convidar por @nome' placeholder='nome, @nome ou código' value={input} onChangeText={typeInput} maxLength={80} mono />
+      {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
+      {cls.kind === 'key' || cls.kind === 'handle'
+        ? <Btn label={cls.kind === 'key' ? 'Conferir pessoa' : 'Procurar @nome'} onPress={find} pending={resolving} disabled={offline} secondary />
+        : null}
+      {candidate
+        ? (
+          <View style={styles.inline}>
+            <Text style={styles.name} numberOfLines={1}>{candidate.label}</Text>
+            <Btn label='Convidar' onPress={() => invite(candidate.member)} pending={send.pending} disabled={offline} />
+          </View>
+          )
+        : null}
+      {localError ? <ErrorText>{localError}</ErrorText> : null}
+      {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
+      {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
+      {searchable && search.phase === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
+      {search.phase === 'loading' && hits.length === 0 ? <Skeleton rows={2} /> : null}
+      {hits.map((hit) => {
+        const who = whoOf({ name: hit.name, username: hit.username })
+        const label = displayText(who.title)
+        return (
+          <View key={hit.author} style={styles.hit}>
+            <View style={styles.hitWho}>
+              <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
+              <View style={styles.hitText}>
+                <Text style={styles.name} numberOfLines={1}>{label}</Text>
+                {who.subtitle ? <Text style={styles.handle} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
+              </View>
+            </View>
+            <Pill label='Convidar' onPress={() => invite(hit.author)} pending={send.pending} disabled={offline || send.pending} />
+          </View>
+        )
+      })}
+      {search.phase === 'ready' && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
+      {held ? <Btn label='Tentar de novo' onPress={() => deliver(held.to, held.text, false)} pending={send.pending} disabled={offline} secondary /> : null}
+      {held ? null : <ErrorText>{send.error}</ErrorText>}
+      {result ? <Soft>{result}</Soft> : null}
+    </View>
   )
 }
 
@@ -683,6 +848,25 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
               {panel && people.rows.length < people.total
                 ? <View style={styles.block}><Pill label={panel === 'members' ? 'mais membros' : 'mais pedidos'} onPress={() => loadPeople(panel, people.rows.length)} pending={people.loading} /></View>
                 : null}
+            </View>
+            )
+          : null}
+        {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
+          ? (
+            <View>
+              <SectionHeader>Convidar</SectionHeader>
+              <InviteByName
+                request={node.request}
+                hosted={hosted}
+                online={!offline}
+                ownKey={ownKey}
+                isMember={(m) => isCommunityMember(m)}
+                makeText={() => {
+                  const base = origin()
+                  const path = communityLink(community)
+                  return base === '' || path === null ? null : inviteText({ communityName: typeof info.name === 'string' ? info.name : '', link: base + path })
+                }}
+              />
             </View>
             )
           : null}

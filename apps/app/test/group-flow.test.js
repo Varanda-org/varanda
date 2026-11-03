@@ -383,3 +383,38 @@ test('a non-member sees an invite card with one join button, from the index too'
   t.ok(held.includes('<JoinCard') && held.includes("label='Compartilhar'"))
   t.absent(held.includes('joinWord') || held.includes("label='Entrar'") || held.includes("'Pedir entrada'"), 'no second join button beside the card')
 })
+
+test('invite by @nome: lookup before send, inviteText, the can gate, and no send from an effect', async (t) => {
+  const com = screen('Comunidade.js')
+  const set = screen('GrupoAjustes.js')
+  t.ok(com.indexOf("'dm.lookup'") !== -1 && com.indexOf("'dm.lookup'") < com.indexOf("'dm.send'"), 'lookup comes before send')
+  t.ok(com.includes('INVITE_NO_DM') && com.includes('INVITE_UNSURE') && com.includes('INVITE_SENT'))
+  t.ok(com.includes('inviteText({') && com.includes('<SectionHeader>Convidar</SectionHeader>'))
+  t.ok(com.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
+  t.ok(set.includes('inviteText({') && set.includes('<InviteByName') && set.includes('<SectionHeader>Convidar para o grupo</SectionHeader>'))
+  t.ok(set.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
+  t.ok(set.includes("request('community.info'"))
+  t.ok(com.includes("label='Tentar de novo'") && com.includes('deliver(held.to, held.text, false)'), 'retry resends the same text, once, on a tap')
+  for (const [name, src] of [['Comunidade.js', com], ['GrupoAjustes.js', set]]) {
+    let at = src.indexOf('useEffect(')
+    while (at !== -1) {
+      const end = src.indexOf('\n  }, [', at)
+      t.absent(src.slice(at, end === -1 ? at + 400 : end).includes("'dm.send'"), name + ': dm.send never runs in an effect')
+      at = src.indexOf('useEffect(', at + 1)
+    }
+  }
+})
+
+test('invite by @nome: membership asked of the node, and a send cancels pending lookups', async (t) => {
+  const com = screen('Comunidade.js')
+  const set = screen('GrupoAjustes.js')
+  const inv = com.slice(com.indexOf('export function InviteByName'), com.indexOf('return (', com.indexOf('const invite = (member)')))
+  t.ok(inv.includes('isMember') && inv.indexOf('await isMember(to)') !== -1 && inv.indexOf('await isMember(to)') < inv.indexOf("'dm.lookup'"), 'isMember is awaited before dm.lookup')
+  t.absent(inv.includes('isKnownMember'), 'no panel-bound member check')
+  t.ok(com.includes('isMember={(m) => isCommunityMember(m)}'), 'Comunidade reuses isCommunityMember')
+  t.ok(set.includes('isMember={isGroupMember}') && set.includes("request('group.members', { group, offset: page * PAGE, limit: PAGE })") && set.includes('page < 20'), 'GrupoAjustes pages group.members')
+  const deliver = inv.slice(inv.indexOf('const deliver ='), inv.indexOf('const invite ='))
+  t.ok(deliver.indexOf('resolveGen.current++') !== -1 && deliver.indexOf('resolveGen.current++') < deliver.indexOf('send.run('), 'a send starts by invalidating lookups')
+  const sent = deliver.indexOf('setResult(INVITE_SENT)')
+  t.ok(deliver.lastIndexOf('resolveGen.current++', sent) > deliver.indexOf('send.run('), 'success invalidates lookups too')
+})

@@ -1747,7 +1747,7 @@ function Member () {
                 if (entry.screen === 'mensagem') {
                   return (
                     <View key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
                     </View>
                   )
                 }
