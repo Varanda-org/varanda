@@ -32,7 +32,9 @@
 // reads while a once run is active).
 //
 // `online` (web) is the browser's network hint (online.web.js; always true on
-// native). `visible` is the page visibility (always true on native).
+// native). `visible` is the page visibility on web; on native it follows
+// AppState only while the node is hosted (the web kind), and is always true
+// otherwise, because the core kind's worklet suspends its session in Bare.
 // `hostedSource` is where the hosted configuration came from: 'live'
 // (the installation answered), 'remembered' (the installation did not answer
 // and the last valid configuration of this origin is used) or null.
@@ -93,7 +95,7 @@ import { connectNode } from './client/connect'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
 import { isOnline, subscribeOnline } from './online'
-import { isVisible, subscribeVisible } from './visibility'
+import { effectiveVisible, isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
@@ -152,7 +154,12 @@ export function NodeProvider ({ children }) {
   const [online, setOnline] = useState(() => isOnline())
   const onlineRef = useRef(online)
   onlineRef.current = online
-  const [visible, setVisible] = useState(() => isVisible())
+  // Raw visibility, and whether the node is hosted (both read by applyVisible).
+  const rawVisibleRef = useRef(null)
+  if (rawVisibleRef.current === null) rawVisibleRef.current = isVisible()
+  const hostedRef = useRef(false)
+  // Effective: what every stop and start decision reads (see the header).
+  const [visible, setVisible] = useState(() => effectiveVisible(rawVisibleRef.current, false))
   const visibleRef = useRef(visible)
   // Replaced on visibility transitions, never by a late stop response.
   const hiddenStopRef = useRef({ attempts: 0, retry: false })
@@ -317,13 +324,31 @@ export function NodeProvider ({ children }) {
   }, [])
 
   useEffect(() => subscribeOnline(setOnline), [])
-  useEffect(() => subscribeVisible((next) => {
+  const applyVisible = useCallback(() => {
+    const next = effectiveVisible(rawVisibleRef.current, hostedRef.current)
     const change = visibilityChange({ wasVisible: visibleRef.current, visible: next })
     if (change.newPeriod) hiddenStopRef.current = { attempts: 0, retry: false }
     if (change.clearIdle && idleUntilRef.current !== 0) setBackoff({ idle: 0 })
     visibleRef.current = next
     setVisible(next)
-  }), [setBackoff])
+  }, [setBackoff])
+  useEffect(() => {
+    const unsubscribe = subscribeVisible((next) => {
+      rawVisibleRef.current = next
+      applyVisible()
+    })
+    // A change between the first render and this subscription fires no event.
+    rawVisibleRef.current = isVisible()
+    applyVisible()
+    return unsubscribe
+  }, [applyVisible])
+  // Declared before the stop and start effects so they read the recomputed
+  // ref in the same commit: a stale hidden state never stops a core-kind
+  // run, and a backgrounded web-kind node is hidden as soon as it is hosted.
+  useEffect(() => {
+    hostedRef.current = hosted
+    applyVisible()
+  }, [hosted, applyVisible])
   // The service worker (hosted browser-node page only); never awaited.
   useEffect(() => { startPwa().catch(() => {}) }, [])
 

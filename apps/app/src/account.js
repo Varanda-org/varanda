@@ -9,6 +9,7 @@ import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
 import { isAppClient } from './appClient.js'
 import { KYC_STATES, canonicalJson } from './wallet.js'
+import { sha256Hex } from './sha256.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -381,8 +382,14 @@ export const ageResult = async ({ member, nonce, signature }) => {
 const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const NETWORK_RE = /^[a-z]{1,16}$/
 const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
-const UPLOAD_HOST = 'uploads.hodle.com.br'
-const LIVENESS_HOST = 'app.hodle.com.br'
+// The same exact hosts as apps/cli/lib/account/hodle.js; production's upload
+// URLs come from BRLA's S3 bucket and its selfie link is a Sumsub page, not
+// the documented hosts.
+const UPLOAD_HOSTS = Object.freeze([
+  'uploads.hodle.com.br',
+  'brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+])
+const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
 const UPLOAD_MAX = 10 * 1024 * 1024
 const UPLOAD_TIMEOUT_MS = 30000
@@ -404,10 +411,10 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
 
-function isHodleUrl (v, host) {
+function isHodleUrl (v, hosts) {
   if (!isVerificationUrl(v)) return false
   const u = new URL(v)
-  return u.hostname === host && u.port === ''
+  return hosts.includes(u.hostname) && u.port === ''
 }
 
 function uncertainError () {
@@ -517,13 +524,13 @@ export const walletOptin = async ({ member, nonce, signature, op }) => {
 export const walletKycDocument = async ({ member, nonce, signature, op }) => {
   const data = await walletCall('/account/wallet/kyc-document', { member, nonce, action: 'kyc-document', op, signature }, { uncertain: true, definite: true })
   if (isObject(op) && op.documentType === 'SELFIE-FROM-LIVENESS') {
-    if (isHodleUrl(data.livenessUrl, LIVENESS_HOST)) return { livenessUrl: data.livenessUrl }
+    if (isHodleUrl(data.livenessUrl, LIVENESS_HOSTS)) return { livenessUrl: data.livenessUrl }
     throw uncertainError()
   }
-  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOST)) throw uncertainError()
+  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOSTS)) throw uncertainError()
   const out = { uploadUrlFront: data.uploadUrlFront }
   if (isObject(op) && op.isDoubleSided === 1) {
-    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOST)) throw uncertainError()
+    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOSTS)) throw uncertainError()
     out.uploadUrlBack = data.uploadUrlBack
   }
   return out
@@ -758,42 +765,57 @@ export const walletOpStatus = async (args) => {
   return op
 }
 
-function toHex (buf) {
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 // Lowercase hex SHA-256 of the UTF-8 canonical JSON: the signed op carries
 // only this hash, the service recomputes it from the fields it forwards.
 export async function kycHash (kyc) {
-  const bytes = new TextEncoder().encode(canonicalJson(kyc))
-  return toHex(await globalThis.crypto.subtle.digest('SHA-256', bytes))
+  return sha256Hex(canonicalJson(kyc))
 }
 
-// The image goes from the browser straight to the provider's single-use URL,
-// never through the account service; no cookies, no redirects.
-export async function uploadDocument (url, blob) {
-  if (!isHodleUrl(url, UPLOAD_HOST)) throw toError('indisponivel')
-  if (!blob || typeof blob !== 'object' || !UPLOAD_TYPES.includes(blob.type) ||
-    !Number.isSafeInteger(blob.size) || blob.size < 1 || blob.size > UPLOAD_MAX) {
+// True when the answer may come from somewhere else than `url` (the same
+// rule as media/fetch.js). Any exception counts as true.
+function leftUploadOrigin (res, url) {
+  try {
+    if (res.redirected === true) return true
+    if (typeof res.url !== 'string' || res.url === '') return false
+    return new URL(res.url).origin !== new URL(url).origin
+  } catch {
+    return true
+  }
+}
+
+// The image goes from the device straight to the provider's single-use URL,
+// never through the account service; no cookies, no redirects. `doc` is a
+// web File or Blob, or { type, size, bytes } from the native picker.
+// deps.fetch: expo/fetch on the phone (deps.native), which has no cache mode.
+export async function uploadDocument (url, doc, deps = {}) {
+  if (!isHodleUrl(url, UPLOAD_HOSTS)) throw toError('indisponivel')
+  if (!doc || typeof doc !== 'object' || !UPLOAD_TYPES.includes(doc.type) ||
+    !Number.isSafeInteger(doc.size) || doc.size < 1 || doc.size > UPLOAD_MAX) {
     throw new Error('arquivo inválido')
   }
+  const send = (deps && typeof deps.fetch === 'function') ? deps.fetch : globalThis.fetch
+  // Production's presigned URLs sign host;if-none-match, so S3 refuses the
+  // upload without it. It also keeps the single-use URL from being written
+  // twice, and the bucket's CORS allows it.
+  const init = {
+    method: 'PUT',
+    body: doc.bytes instanceof Uint8Array ? doc.bytes : doc,
+    headers: { 'content-type': doc.type, 'if-none-match': '*' },
+    credentials: 'omit',
+    redirect: 'error'
+  }
+  if (!(deps && deps.native === true)) init.cache = 'no-store'
   const ctl = new AbortController()
+  init.signal = ctl.signal
   const timer = setTimeout(() => ctl.abort(), UPLOAD_TIMEOUT_MS)
   let res
   try {
-    res = await fetch(url, {
-      method: 'PUT',
-      body: blob,
-      headers: { 'content-type': blob.type },
-      credentials: 'omit',
-      redirect: 'error',
-      cache: 'no-store',
-      signal: ctl.signal
-    })
+    res = await send(url, init)
   } catch {
     throw toError('indisponivel')
   } finally {
     clearTimeout(timer)
   }
   if (!res || !(res.status >= 200 && res.status < 300)) throw toError('indisponivel')
+  if (leftUploadOrigin(res, url)) throw toError('indisponivel')
 }

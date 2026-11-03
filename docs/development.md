@@ -6,7 +6,7 @@ How to work in this repository. Normative facts about formats and the wire are i
 
 - Node.js 20 or newer (`engines.node` is `>=20`) and npm. On the Mac this was written on: Node v26.10.0 and npm 11.19.1 (an example, not a requirement).
 - For the iOS app only: Xcode and CocoaPods. The gate passed with Xcode 26.2, CocoaPods 1.16.2 and an iPhone 17 Pro simulator (iOS 26.2). These are examples from [ios-gate.md](ios-gate.md).
-- For a native Android build: an Android SDK and JDK 17 or 21. The debug build has run on an x86_64 emulator (see "Android"); a real device, arm64-v8a and a release build have not.
+- For a native Android build: an Android SDK and JDK 17 or 21. On an Apple Silicon Mac, "Android" below has the exact setup (JDK 17, SDK root, an arm64-v8a emulator). The debug build has run on an x86_64 emulator on another machine; a real device and a release build have not.
 
 ## Layout (npm workspaces)
 
@@ -127,6 +127,24 @@ cd apps/app
 npm run ios                          # expo run:ios
 ```
 
+Phone first means the iOS simulator too: a screen change is checked on the Android debug build and on the simulator. On this kind of Mac (Xcode 26.2, iOS 26.2 simulator runtime, CocoaPods 1.16.2) the build and a run without `expo run:ios`:
+
+```sh
+npm ci --ignore-scripts
+npm run prepare:native -w apps/app -- ios
+(cd apps/app/ios && xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug \
+  -sdk iphonesimulator -destination 'name=iPhone 17 Pro' -derivedDataPath build build)
+xcrun simctl boot "iPhone 17 Pro"; open -a Simulator              # the build does not boot it; skip if booted
+xcrun simctl install booted apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
+(cd apps/app && npx expo start --port 8081)                       # in another terminal
+xcrun simctl launch booted app.varanda
+xcrun simctl openurl booted 'varanda:///g/<64 lowercase hex>'     # a group link, as Linking delivers it
+```
+
+- `pod install` always rewrites two `SPEC CHECKSUMS` lines of `apps/app/ios/Podfile.lock`: `React-Core-prebuilt` and `ReactNativeDependencies` point at prebuilt tarballs under `Pods/`, and their podspec carries that absolute path, so the checksum depends on where the repository lives (section 7 of [verification.md](verification.md)). Do not commit those two lines; commit every other change, for example a new Expo module. `node apps/app/scripts/check-pods-lock.js <committed lock> <generated lock>` compares two locks without those lines and the `COCOAPODS:` version, and fails on a pod that is missing, extra or at another version (`git show HEAD:apps/app/ios/Podfile.lock > /tmp/Podfile.lock.committed` gives the committed one). After you put the committed lines back, the next Xcode build fails its "Check Pods Manifest.lock" phase until `pod install` runs again; that is expected on the machine that just ran it.
+- `pod install` also rewrites `ios/Varanda/PrivacyInfo.xcprivacy` with other indentation only; revert it (`test/hardening.test.js` compares it without whitespace anyway).
+- Signing in with a passkey on iOS waits for the Apple Developer associated domain, so the simulator covers everything up to Conectar and the screens that need no account.
+
 - `prepare:native` runs `scripts/prepare-native.sh [ios|android|all]`: the three steps below in order, then checks again that every addon is linked. `npm run ios` and `npm run android` run the same check (`scripts/link-addons.sh check`) before `expo run:*`, so a build without the addons fails with a message instead of producing an app whose worklet cannot load them.
 - `link:addons` runs `scripts/link-addons.sh`. It fails unless rocksdb-native, udx-native, sodium-native, bare-fs, fs-native-extensions, bare-crypto and bare-tls are linked for every platform it handles. The linked addons live in `node_modules/react-native-bare-kit`, so every install wipes them.
 - `pack:worklet` runs `scripts/pack-worklet.sh` and writes `apps/app/assets/worklet/main.bundle.js` (generated and ignored by version control).
@@ -139,6 +157,48 @@ npm run ios                          # expo run:ios
 Status: the debug build runs on an x86_64 emulator (API 36) and passes the worklet gate (steps a to i of [ios-gate.md](ios-gate.md), 2026-10-28; the `.so` addons are packed in `lib/x86_64` and loaded). Not run: a real device, arm64-v8a and a release build. `npm run android` is `expo run:android`. Gradle needs JDK 17 or 21; the commands for the gate are in the "Android emulator" section of ios-gate.md.
 
 Release signing: the committed `debug.keystore` is the public React Native debug key, so it signs debug builds only (application ID `app.varanda.debug`). A release build reads `VARANDA_RELEASE_STORE_FILE`, `VARANDA_RELEASE_STORE_PASSWORD`, `VARANDA_RELEASE_KEY_ALIAS` and `VARANDA_RELEASE_KEY_PASSWORD` from Gradle properties kept outside the repository (for example `~/.gradle/gradle.properties`) and fails at signing without them. Backups are off (`android:allowBackup="false"`), so the node's key material is not copied to cloud backups. Signing was not exercised in the emulator run (debug build only). See "Residual risks" in [ios-gate.md](ios-gate.md).
+
+### macOS setup (Apple Silicon)
+
+The practical phone today is Android: iOS passkey sign-in waits on the Apple Developer associated domain (see [app.md](app.md), "No app instalado com a instalação"). This host runs arm64 images, so use `arm64-v8a`; the earlier x86_64 run was another machine.
+
+```sh
+brew install openjdk@17
+brew install --cask android-commandlinetools
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+mkdir -p "$ANDROID_HOME"
+yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+sdkmanager --sdk_root="$ANDROID_HOME" "cmdline-tools;latest"
+sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "emulator" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1" "system-images;android-36;google_apis;arm64-v8a"
+yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
+echo no | avdmanager create avd -n varanda-api36 -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
+```
+
+Accept the licenses before the first install: without them `sdkmanager` stops at the prompt and installs nothing. Installed on 2026-11-01: openjdk 17.0.21, cmdline-tools 23.0.0, build-tools 36.0.0, platforms android-36 2.0.0, NDK 27.1.12297006, CMake 3.22.1, emulator 37.2.13, platform-tools 37.0.1, system image 7.0.0.
+
+- JDK: the Homebrew formula `openjdk@17` (no sudo) at the `JAVA_HOME` above, not a cask. There is one SDK root, `~/Library/Android/sdk`, with `cmdline-tools;latest` installed into it; pass `--sdk_root` on every `sdkmanager` call so nothing lands in the cask's own directory. Put the exports in your shell profile.
+- The versions after `platforms;` and `build-tools;` are the ones this setup used; Gradle downloads anything else it needs (such as the NDK) once the licenses are accepted. If your Gradle run asks for different versions, install those.
+
+Build and run, from the repo root:
+
+```sh
+npm ci --ignore-scripts
+npm run prepare:native -w apps/app -- android
+cd apps/app/android && ./gradlew assembleDebug && cd ../../..
+emulator -avd varanda-api36 -no-snapshot
+adb install -r apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8081 tcp:8081
+cd apps/app && npx expo start --port 8081 --clear
+```
+
+Open the installed Varanda debug app on the emulator; it loads the JavaScript from Metro through the reverse tunnel. Never run `expo prebuild` (`ios/` and `android/` are hand-maintained and carry security edits; see the bullet above on `plugins/with-hardening.js`). `npm ci` wipes the linked addons, so run `prepare:native` again after every install. The Android build needs no pod install. The iOS side needs one (see "iOS" above).
+
+What the local loop cannot do: the debug build is `app.varanda.debug`, signed with the public debug key (`apps/app/android/app/build.gradle:124`), while the installation's `assetlinks.json` associates only `app.varanda` (`deploy/seeder/well-known.sh:61`). A debug build therefore cannot sign in with a passkey on a production installation. The local loop covers everything up to Conectar and the screens that need no account; signed-in phone checks use the EAS preview APK (release key, `app.varanda`) for now. Never add the public debug key to a production `assetlinks.json`: anyone could then build an app that uses the domain's passkeys. A development installation with its own debug association is a maintainer decision, not part of this change.
+
+Phone first: `apps/app` is one codebase and a screen is checked on the phone before the web. `apps/app/test/platformGate.test.js` fails a shared screen that calls a browser API, and `.github/workflows/native.yml` builds the native app on every pull request that may touch it (it skips the builds only when every changed path is outside the app: `docs/`, `apps/site/`, `apps/cli/`, `deploy/`, top-level Markdown, the other workflows and the GitHub templates): the Android debug APK with the commands above (`ubuntu-24.04`, JDK 17, NDK 27.1.12297006, CMake 3.22.1), the iOS app for the simulator, unsigned (`macos-26`, Xcode 26.2, `check-pods-lock.js` against the committed lock), and the Android and iOS JavaScript bundles with `expo export`. A pull request that does not touch the app skips the builds; the `native` job reports both cases and is the name to make required. The builds prove the app compiles and its bundles resolve, not that a screen works on a device.
 
 ## Builds de teste (EAS)
 

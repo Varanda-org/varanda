@@ -110,8 +110,12 @@ export function nextCursor (prev, next) {
 export function listView (opts) {
   const { hosted, online, unsupported, phase, rows, next, unconfirmed, error, kind, total, indexing, complete } = isPlain(opts) ? opts : {}
   const count = Array.isArray(rows) ? rows.length : 0
-  if (hosted !== true || unsupported === true) {
+  if (hosted !== true) {
     return { view: 'web-only', title: 'Só na versão web', body: 'Quem curtiu e quem republicou aparece na versão web, com internet.' }
+  }
+  // On a hosted connection the web is not a fallback for a refused list.
+  if (unsupported === true) {
+    return { view: 'unavailable', title: 'Lista indisponível', body: 'Quem curtiu e quem republicou não está disponível nesta conexão.' }
   }
   if (online === false && count === 0) {
     return { view: 'offline', title: 'Sem conexão', body: 'A lista precisa de internet.', action: 'tentar de novo' }

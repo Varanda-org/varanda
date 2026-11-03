@@ -17,6 +17,7 @@ import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
 import { can, joinLink, reconcile, roleOf } from '../groups'
+import { installationOrigin } from '../installation'
 import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -40,8 +41,9 @@ function nameOf (row) {
   return shortKey(row.member || '')
 }
 
+// Native has no document origin. The hosted site never stores an installation.
 function origin () {
-  return typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string' ? window.location.origin : ''
+  return installationOrigin() || globalThis.location?.origin || ''
 }
 
 function PersonRow ({ row, label, onOpenMember, children }) {
@@ -228,7 +230,13 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   // The system share sheet when there is one, else a copy. The link is never
   // shown as text.
   const shareInvite = async (path) => {
-    const url = origin() + path
+    const base = origin()
+    // An empty origin would hand the share sheet a relative path.
+    if (base === '') {
+      setShareNote('Não foi possível copiar o link.')
+      return
+    }
+    const url = base + path
     const nav = shareNav()
     setShareNote('')
     const title = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : 'Varanda'

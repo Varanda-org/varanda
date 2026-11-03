@@ -88,7 +88,7 @@ export const TEXTS = Object.freeze({
   KYC_WAIT: 'Sua verificação de identidade está em análise. Aguarde e confira de novo mais tarde.',
   KYC_REJECTED: 'Sua verificação de identidade foi recusada. Você pode começar uma nova tentativa.',
   KYC_APPROVED: 'Verificação aprovada. A carteira será liberada em breve.',
-  LIVENESS_OPEN: 'A selfie é feita numa página da Hodle, que abre em outra janela. Quando terminar, volte aqui e toque em Já terminei.',
+  LIVENESS_OPEN: 'A selfie é feita numa página da Sumsub, a empresa que faz a prova de vida para a Hodle, e abre em outra janela. Quando terminar, volte aqui e toque em Já terminei.',
   UNDER_18: 'Para abrir a conta de pagamentos, você precisa ter 18 anos ou mais.',
   UNCERTAIN_CREATE: 'Não deu para confirmar se a conta ou a carteira foi criada. Aguarde e toque em Conferir; nada é refeito sozinho.'
 })

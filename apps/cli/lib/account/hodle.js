@@ -110,8 +110,14 @@ const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/
 
-const UPLOAD_HOST = 'uploads.hodle.com.br'
-const LIVENESS_HOST = 'app.hodle.com.br'
+// Exact hosts only, never a suffix match. Production hands out the single-use
+// upload URLs on BRLA's S3 bucket, not on the documented host (seen 2026-11-02).
+const UPLOAD_HOSTS = Object.freeze([
+  'uploads.hodle.com.br',
+  'brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com'
+])
+// Production's selfie link is a Sumsub page (seen 2026-11-02).
+const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const DOCUMENT_TYPES = new Set(['ID', 'DRIVERS-LICENSE', 'PASSPORT', 'SELFIE-FROM-LIVENESS'])
 
 const KYC_OUTCOMES = Object.freeze({
@@ -202,12 +208,12 @@ function retryAfterSeconds (res) {
   return Math.min(Number(raw), MAX_RETRY_AFTER)
 }
 
-function hodleUrl (url, host) {
+function hodleUrl (url, hosts) {
   if (typeof url !== 'string' || url.length > MAX_URL || !url.startsWith('https://')) return false
   try {
     const parsed = new URL(url)
     return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '' &&
-      parsed.hostname === host && parsed.port === ''
+      hosts.includes(parsed.hostname) && parsed.port === ''
   } catch {
     return false
   }
@@ -539,12 +545,12 @@ function createHodle (opts = {}) {
     return call(true, 'POST', '/api/kyc/document', payload, callOpts, (d) => {
       if (!validId(d.documentId)) return null
       if (selfie) {
-        return hodleUrl(d.livenessUrl, LIVENESS_HOST) ? { documentId: d.documentId, livenessUrl: d.livenessUrl } : null
+        return hodleUrl(d.livenessUrl, LIVENESS_HOSTS) ? { documentId: d.documentId, livenessUrl: d.livenessUrl } : null
       }
-      if (!hodleUrl(d.uploadUrlFront, UPLOAD_HOST)) return null
+      if (!hodleUrl(d.uploadUrlFront, UPLOAD_HOSTS)) return null
       const out = { documentId: d.documentId, uploadUrlFront: d.uploadUrlFront }
       if (isDoubleSided) {
-        if (!hodleUrl(d.uploadUrlBack, UPLOAD_HOST)) return null
+        if (!hodleUrl(d.uploadUrlBack, UPLOAD_HOSTS)) return null
         out.uploadUrlBack = d.uploadUrlBack
       }
       return out

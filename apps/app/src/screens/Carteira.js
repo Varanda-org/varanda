@@ -1,7 +1,5 @@
-/* global document */
-
-// Conta de pagamentos (Ajustes, hosted web only): the opt-in, the identity
-// check at Hodle and the PIN. Every step comes from the service's status
+// Conta de pagamentos (Ajustes, hosted node: the site and the installed
+// app): the opt-in, the identity check at Hodle and the PIN. Every step comes from the service's status
 // (walletStep), never from the URL. Each call is signed by the node over the
 // exact op the service receives, and nothing that changes state is ever sent
 // again on its own: an unknown outcome forces a status read before any button
@@ -21,7 +19,14 @@ import {
   walletStart, walletStatement, walletStatus
 } from '../account'
 import { HELP, carteiraHelp } from '../help'
+import { base64url } from '../appLinkSecret'
+import { openExternal, linkProps } from '../openExternal'
+import { pickPhoto } from '../pickPhoto'
+import { selectContents } from '../selectText'
+import { sha256Hex } from '../sha256'
 import { copyText } from '../share'
+import { shareNav } from '../shareNav'
+import { uploadDeps } from '../uploadFetch'
 import {
   DISPUTE_TEXTS, FEE_STATUS_TEXTS, MIN_DEPOSIT_CENTS, MIN_PAYOUT_CENTS, PAY_TEXTS, PIX_KEY_LABELS, RECEIVE_TEXTS,
   TEXTS, UNCERTAIN_MONEY, canonicalPixKey, cepDigits, cpfDigits, depositArrivalText, feeLines, formatBrl,
@@ -33,7 +38,6 @@ import { Icon } from '../ui/Icon'
 import { colors, fonts } from '../ui/theme'
 
 const READ_EVERY_MS = 30 * 1000
-const PHOTO_ACCEPT = 'image/jpeg,image/png'
 const DOCUMENTS = Object.freeze([
   { type: 'ID', label: 'RG ou CIN', sides: 2 },
   { type: 'DRIVERS-LICENSE', label: 'CNH', sides: 2 },
@@ -44,6 +48,7 @@ const TWO_SIDES_LABEL = 'O documento tem frente e verso'
 const DOC_SENT_TEXT = 'Foto do documento enviada.'
 const DOC_READY_TEXT = 'A Hodle já recebeu a foto do documento.'
 const SELFIE_READY_TEXT = 'A Hodle já recebeu a selfie.'
+const PHOTO_FAILED_TEXT = 'Não deu para usar essa foto. Escolha outra, de até 10 MB.'
 const LINK_TEXT = 'Se a página não abriu, toque neste link:'
 const PIN_RULE = 'A senha precisa ter 6 dígitos, sem números todos iguais nem em sequência, e as duas precisam ser iguais.'
 const FORM_TEXTS = Object.freeze({
@@ -124,34 +129,6 @@ function isoDate (s) {
 const FAR_FUTURE = Date.UTC(2200, 0, 1)
 const isRealDate = (iso) => isBirthDate(iso, FAR_FUTURE)
 
-// A hidden <input type=file> for one photo, created per pick and removed when
-// it ends (the same pattern as src/media/attach.web.js).
-function pickPhoto () {
-  if (typeof document !== 'object' || document === null) return Promise.resolve(null)
-  return new Promise((resolve) => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = PHOTO_ACCEPT
-    input.style.display = 'none'
-    input.setAttribute('aria-hidden', 'true')
-    let settled = false
-    const done = (file) => {
-      if (settled) return
-      settled = true
-      input.removeEventListener('change', onChange)
-      input.removeEventListener('cancel', onCancel)
-      try { input.remove() } catch {}
-      resolve(file)
-    }
-    const onChange = () => done((input.files && input.files[0]) || null)
-    const onCancel = () => done(null)
-    input.addEventListener('change', onChange)
-    input.addEventListener('cancel', onCancel)
-    document.body.appendChild(input)
-    input.click()
-  })
-}
-
 function Check ({ label, checked, onToggle, disabled }) {
   return (
     <Pressable
@@ -197,10 +174,7 @@ function PinField ({ label, value, onChangeText, editable }) {
 function mintOpId () {
   const c = globalThis.crypto
   if (!c || typeof c.getRandomValues !== 'function') return null
-  const bytes = c.getRandomValues(new Uint8Array(16))
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
-  return globalThis.btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return base64url(c.getRandomValues(new Uint8Array(16)))
 }
 
 // The service's externalIdFor (wallet-ops-store.js): lets the screen find an
@@ -208,19 +182,6 @@ function mintOpId () {
 async function payoutExternalId (member, opId) {
   const hex = await sha256Hex(member + ':payout:' + opId)
   return hex === null ? null : 'var-' + hex.slice(0, 32)
-}
-
-// Lowercase hex SHA-256, or null without WebCrypto. Also how the screen
-// remembers which CPF an attempt used without keeping the number.
-async function sha256Hex (text) {
-  const subtle = globalThis.crypto && globalThis.crypto.subtle
-  if (!subtle || typeof subtle.digest !== 'function') return null
-  try {
-    const buf = await subtle.digest('SHA-256', new TextEncoder().encode(text))
-    return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('')
-  } catch {
-    return null
-  }
 }
 
 function timeOf (iso) {
@@ -455,8 +416,23 @@ export default function Carteira ({ open, active, member, node, onBack }) {
     else await readStatus()
   })
 
-  const pickFront = async () => { const f = await pickPhoto(); if (f) setFront(f) }
-  const pickBack = async () => { const f = await pickPhoto(); if (f) setBack(f) }
+  // A pick that ends after a member change or leaving is dropped. null is a
+  // cancel; false is a photo the picker could not use, which must not look
+  // like a cancel.
+  const pickFront = async () => {
+    const gen = genRef.current
+    const f = await pickPhoto()
+    if (gen !== genRef.current) return
+    if (f === false) setError(PHOTO_FAILED_TEXT)
+    else if (f) setFront(f)
+  }
+  const pickBack = async () => {
+    const gen = genRef.current
+    const f = await pickPhoto()
+    if (gen !== genRef.current) return
+    if (f === false) setError(PHOTO_FAILED_TEXT)
+    else if (f) setBack(f)
+  }
   const chooseDoc = (d) => {
     setDocType(d.type)
     setTwoSides(d.sides === 2)
@@ -471,8 +447,12 @@ export default function Carteira ({ open, active, member, node, onBack }) {
     }
     const urls = await signed('kyc-document', { documentType: docType, isDoubleSided: sides ? 1 : 0 }, walletKycDocument)
     if (gen !== genRef.current) return
-    await uploadDocument(urls.uploadUrlFront, front)
-    if (sides) await uploadDocument(urls.uploadUrlBack, back)
+    // The upload URLs expire 30 s after they are made (X-Amz-Expires), so
+    // the back starts with the front instead of waiting for it to finish.
+    await Promise.all([
+      uploadDocument(urls.uploadUrlFront, front, uploadDeps()),
+      sides ? uploadDocument(urls.uploadUrlBack, back, uploadDeps()) : null
+    ])
     if (gen !== genRef.current) return
     setFront(null)
     setBack(null)
@@ -491,7 +471,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   // cannot be framed, hence a new window and the 'Já terminei' button.
   const openLiveness = () => {
     if (typeof livenessUrl !== 'string') return
-    try { globalThis.open(livenessUrl, '_blank', 'noopener') } catch {}
+    openExternal(livenessUrl)
     // With noopener the browser never says whether the window opened, so the
     // link stays as the way out of a blocked popup.
     setOpened(true)
@@ -672,8 +652,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
                           <Soft>{LINK_TEXT}</Soft>
                           <Text
                             style={styles.link}
-                            href={livenessUrl}
-                            hrefAttrs={{ target: '_blank', rel: 'noopener noreferrer' }}
+                            {...linkProps(livenessUrl)}
                             selectable
                           >
                             {livenessUrl}
@@ -971,24 +950,12 @@ function Dinheiro ({ active, policy, member, signed }) {
   const copyCode = async () => {
     const code = charge && charge.qrCode
     if (typeof code !== 'string') return
-    if (await copyText(globalThis.navigator, code)) {
+    if (await copyText(shareNav(), code)) {
       setNote(MONEY_TEXTS.copied)
       return
     }
     // Without clipboard access, select the code so the system menu copies it.
-    try {
-      const node = codeRef.current
-      const doc = globalThis.document
-      if (!node || !doc || typeof globalThis.Node !== 'function' || !(node instanceof globalThis.Node)) throw new Error('no node')
-      const range = doc.createRange()
-      range.selectNodeContents(node)
-      const sel = globalThis.getSelection()
-      sel.removeAllRanges()
-      sel.addRange(range)
-      setNote(MONEY_TEXTS.selected)
-    } catch {
-      setNote(MONEY_TEXTS.copyFailed)
-    }
+    setNote(selectContents(codeRef.current) ? MONEY_TEXTS.selected : MONEY_TEXTS.copyFailed)
   }
 
   // The charge's state is read while Receber is showing: every 10 s while it

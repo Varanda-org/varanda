@@ -1,4 +1,5 @@
-// The bottom tabs per mode: five everywhere, six on the hosted web, the only
+// The bottom tabs per mode: five when the node is not hosted (manual
+// configuration, varanda-serve), six wherever the node is hosted, the only
 // mode with Comunidades.
 export const TABS = [
   { id: 'rua', label: 'A Rua', icon: 'casa' },

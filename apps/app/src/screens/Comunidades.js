@@ -4,8 +4,9 @@
 // group when the index knows it, "Entrar por link" (a /c/ or /g/ link or a
 // bare key: it opens the community or the group, where the person joins) and
 // the Nova comunidade sheet. Groups live inside a community: there is no
-// "Novo grupo" here. Hosted web only: elsewhere the tab shows the "só na
-// versão web" note, like Avisos, and calls nothing. App.js draws the top bar.
+// "Novo grupo" here. Hosted node only: a node that is not hosted shows the
+// "só na versão web" note, like Avisos, and calls nothing. App.js draws the
+// top bar.
 // Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
 // root key. onOpenCommunity also opens a community just made.
 

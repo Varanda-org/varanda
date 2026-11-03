@@ -9,13 +9,16 @@
 //     return (any app can claim or forge it): the one-time code R arrives
 //     only in the result of the auth session the app opened,
 //     https://<installation>/account/app/conta (parseSessionReturn);
-//   - invite and profile links, either varanda:///<path> (empty host, so the
-//     path is the web path) or an https link of this installation.
-// A link is never consent to follow: the profile store records 'new' only.
+//   - invite, profile, group (/g/<hex64>) and community (/c/<hex64>) links,
+//     either varanda:///<path> (empty host, so the path is the web path) or
+//     an https link of this installation.
+// A link is never consent to follow or to join: the profile store records
+// 'new' only, and a group or community link only names what to open.
 
 import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
+import { parseGroupPath, parseCommunityPath } from './groupLink.js'
 
 const MAX_URL = 400
 const AGE_PREFIX = 'varanda://idade?'
@@ -117,7 +120,8 @@ function linkPath (url) {
 }
 
 // -> { kind: 'convite', code } | { kind: 'perfil', username } |
-// { kind: 'perfil', key } | null. The paths go through the web parsers.
+// { kind: 'perfil', key } | { kind: 'grupo', key } |
+// { kind: 'comunidade', key } | null. The paths go through the web parsers.
 export function parseAppLink (url) {
   if (!clean(url)) return null
   const path = linkPath(url)
@@ -125,7 +129,12 @@ export function parseAppLink (url) {
   const code = parseSignupInvitePath(path)
   if (code !== null) return { kind: 'convite', code }
   const target = parseProfilePath(path)
-  if (target === null) return null
+  if (target === null) {
+    const group = parseGroupPath(path)
+    if (group !== null) return { kind: 'grupo', key: group }
+    const community = parseCommunityPath(path)
+    return community !== null ? { kind: 'comunidade', key: community } : null
+  }
   return target.username ? { kind: 'perfil', username: target.username } : { kind: 'perfil', key: target.key }
 }
 

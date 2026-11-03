@@ -2791,7 +2791,7 @@ As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN d
 - Arquivo `wallet.json` (`apps/cli/lib/account/wallet-store.js`, modo 0600, volume `account-data`): `subAccountId`, rede, estado do KYC, `attemptId`, `documentId`, `selfieId`, `walletId`, endereço e chave embrulhada. As marcas de criação incerta vão para o disco antes da chamada. A primeira carteira fica. O PIN, o CPF, o nome, o endereço, as fotos, as URLs e os saldos não entram.
 - Declaração `varanda-wallet-v1` (`packages/core/lib/wallet-proof.js`) e método RPC `wallet.sign` (`docs/rpc.md` 5.35), só no nó do navegador. O nó do núcleo, o `varanda-serve` e a CLI respondem `USAGE` `assinatura disponível só no navegador`. A operação assinada não leva PIN nem CPF.
 - App, módulo puro `apps/app/src/wallet.js`: os passos do opt-in ao PIN, a idade mínima de 18 anos no formulário, o PIN de 6 dígitos sem sequência óbvia, e os textos fixos. O operador escolhe `VARANDA_HODLE_MODE`, na ordem de ativação `cadastro` < `carteira` < `pix` < `completo`. O padrão `cadastro` permite só subconta e KYC e para no KYC aprovado. O modo `carteira` acrescenta a criação da carteira com o PIN da própria pessoa e só deve ser configurado depois que a Hodle confirmar por escrito o PIN por pessoa. Nesta versão existem apenas `cadastro` e `carteira`; `pix` e `completo` chegam nos próximos PRs.
-- As fotos não passam pelo serviço de conta. O documento sobe direto para `uploads.hodle.com.br`. A selfie abre `app.hodle.com.br`.
+- As fotos não passam pelo serviço de conta. O documento sobe direto para o endereço que a Hodle devolve, só se o domínio for exatamente `uploads.hodle.com.br` ou `brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com` (o que a produção usa). A selfie abre a página de prova de vida, só se o domínio for exatamente `app.hodle.com.br` ou `in.sumsub.com` (a Sumsub, que a produção usa). O endereço de envio vale 30 s (`X-Amz-Expires`) e a assinatura dele cobre `if-none-match`: frente e verso sobem ao mesmo tempo, com `if-none-match: *`.
 - Variáveis: `VARANDA_HODLE_API_KEY` (`hodle_live_` ou `hodle_test_`; sem ela o recurso fica desligado), `VARANDA_HODLE_NETWORK` (`polygon` ou `base`, padrão `polygon`, só antes da primeira carteira), `VARANDA_HODLE_MODE` (`cadastro` por padrão, ou `carteira`) e `VARANDA_HODLE_DAILY_LIMIT`.
 - Termos de Uso e Política de Privacidade versão 7, com novo aceite. O `wallet-ops.json` é do PR2 e não faz parte desta abertura.
 - Bloqueio que continua: a documentação da Hodle descreve um PIN da plataforma herdado pela subconta. A Varanda quer um PIN por pessoa. Enquanto a Hodle não confirmar, a carteira não deve ser criada na API real. O sandbox é Base Sepolia e não exercita subcontas.
@@ -3557,7 +3557,70 @@ Duas janelas com perfis do navegador diferentes (A e B, cada uma com a própria 
 - Fora das telas, por não terem sido feitos: responder a uma mensagem (`groups.js` lê `replyTo`, mas as telas não o mostram nem o enviam), remover um administrador da comunidade e desvincular pelo lado da comunidade. Renomear (a criadora, na administração) e criar comunidade (na aba) estão nas telas; vale conferir os dois à mão.
 - O que mais as telas não conseguirem fazer fica registrado na descrição do PR.
 
-## 65. Comunidades com grupos (PR feat/comunidades-com-grupos)
+## 65. App no Android arm64: build de debug, Metro e links (pilha "celular primeiro", 2026-11-01)
+
+Verificação do app nativo com todas as mudanças da pilha "celular primeiro" aplicadas sobre `main@a0303c2` (links de grupo e comunidade, origem dos links compartilhados, `expo-clipboard`, visibilidade nativa, textos do nó hospedado, Carteira, trava `platformGate`). É a primeira execução do ciclo local no Mac Apple Silicon descrito em [development.md](development.md) ("macOS setup").
+
+- Aparelho: emulador AVD `varanda-api36`, ABI `arm64-v8a`, API 36, imagem `google_apis`, sem janela (`-no-window -no-audio -no-snapshot`). Evidência por `adb exec-out screencap -p` (as imagens ficaram fora do repositório).
+- Versões: JDK 17 (Homebrew `openjdk@17`), Gradle 9.0.0, Expo 55.0.31 (o Metro avisou que o esperado é ~55.0.32), id da aplicação `app.varanda.debug`.
+
+### Comandos e resultados
+
+1. `npm run prepare:native -w apps/app -- android`: saiu com 0. Gerou o bundle do worklet (3767580 bytes, 517 arquivos, 50 entradas de addons), "node scan: clean" e "prepare-native: ready (android)".
+2. `(cd apps/app/android && ./gradlew assembleDebug)`: saiu com 0, `BUILD SUCCESSFUL in 10m 28s` (372 tarefas, primeira compilação). O Gradle não pediu SDK, NDK nem build-tools além dos já instalados.
+3. `emulator -avd varanda-api36 -no-snapshot -no-window`: iniciou; `ro.product.cpu.abi` = `arm64-v8a`, `ro.build.version.sdk` = 36.
+4. `adb install -r .../app-debug.apk`: `Success`. `adb reverse tcp:8081 tcp:8081`: 8081.
+5. `npx expo start --port 8081 --clear` em `apps/app` (com `CI=1`): `Android Bundled 3453ms apps/app/index.js (989 modules)`. Nenhum `EXPO_PUBLIC_VARANDA_INSTALLATION` definido.
+6. Abertura: `adb shell monkey -p app.varanda.debug 1` não abriu a tela (saiu com 251). A abertura foi por `adb shell am start -n app.varanda.debug/app.varanda.MainActivity` (MAIN/LAUNCHER) e funcionou.
+
+### Observado
+
+- O bundle JS carregou do Metro e o logcat mostrou `ReactNativeJS: Running "main"` (Fabric ligado).
+- Sem instalação configurada, a sequência na tela foi: introdução ("Seu diário, perto de você", Pular/Próximo), depois "Termos de Uso e Política de Privacidade" (versão 8) e, depois de aceitar os termos neste aparelho de teste, **Conectar** ("Informe o endereço da instalação do Varanda", campo `https://varanda.exemplo`, botões conectar e Avançado). Não digitei endereço nem conectei.
+- Links: `adb shell am start -a android.intent.action.VIEW -d 'varanda:///g/<64 hex minúsculos>' app.varanda.debug` e a forma `/c/` (chave de teste `ab` repetido 32 vezes, sem relação com nenhuma cadeira real) foram entregues à instância em execução ("intent has been delivered to currently running top-most instance"). O processo continuou vivo (mesmo pid antes e depois) e a tela seguiu em Conectar, porque ainda não há instalação nem sessão para resolver o link.
+- HOME e retorno: o processo continuou vivo (mesmo pid) e a tarefa voltou à frente. Não foi observada a pausa de sincronização, que só aparece em Ajustes > Sincronização com sessão.
+- logcat filtrado (`-s ReactNativeJS:* AndroidRuntime:E`): só a linha `Running "main"`; `FATAL EXCEPTION` ocorreu 0 vezes.
+- `git status --short apps/app/android apps/app/ios` vazio ao final (saídas do Gradle ignoradas pelo git).
+
+### O que não foi executado
+
+- Aparelho real, emulador x86_64, build de release.
+- Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
+- O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
+- Pagamentos e KYC, push do sistema, login no iOS.
+- O workflow `native.yml` não foi disparado.
+
+### CI local
+
+Na mesma árvore, no Mac (Node 24.22.1), na ordem da CI:
+
+- `npm ci --ignore-scripts`, depois `npm run lint`: saiu com 0.
+- `VARANDA_TEST_CONCURRENCY=6 npm test`: falharam 2 arquivos de `packages/core`, pacote que esta pilha não altera. `private-member.test.js` estourou o tempo de 30 s num teste sob a carga do pool e passou sozinho (207/207). `sync-groups.test.js` #34 ("a writer evicted by an earlier proven join is still purged when its diary forks", asserção "it was held before the eviction") falhou também sozinho na primeira vez (142/143) e passou sozinho na segunda: é o teste instável já conhecido. Os demais workspaces passaram (app: 94 arquivos, 0 falhas).
+- `npm run demo`: `DEMO OK`.
+- `npm run pack:worklet -w apps/app` ("node scan: clean") e `npx expo export --platform android` em `apps/app`: saíram com 0 (os comandos do workflow `native.yml`).
+- O primeiro build local mostrou que a saída do Gradle dos módulos locais (`apps/app/modules/*/android/build/`) não estava no `.gitignore`; agora está.
+
+## 66. App no simulador iOS depois da pilha "celular primeiro" (PR fix/ios-native-loop, 2026-11-02)
+
+Mesmo roteiro da seção 65, agora no iOS, sobre `main@bc56143` (a pilha inteira já na `main`). Mac Apple Silicon, Xcode 26.2 (17C52), runtime iOS 26.2, simulador iPhone 17 Pro, CocoaPods 1.16.2. As capturas ficaram fora do repositório.
+
+### Comandos e resultados
+
+1. `npm ci --ignore-scripts`, depois `npm run prepare:native -w apps/app -- ios`: saiu com 0, "Pod installation complete! There are 95 dependencies from the Podfile and 97 total pods installed." e "prepare-native: ready (ios)".
+2. O `pod install` acrescentou o pod `ExpoClipboard` (55.0.17), que faltava no `Podfile.lock` desde a entrada do `expo-clipboard`, e mudou as duas linhas de `SPEC CHECKSUMS` que dependem do caminho (`React-Core-prebuilt`, `ReactNativeDependencies`; veja a seção 7) e a indentação de `PrivacyInfo.xcprivacy`. Só o `ExpoClipboard` foi commitado. `node apps/app/scripts/check-pods-lock.js` acusou o lock antigo (as seis linhas do `ExpoClipboard` como "not committed", saída 1) e aceitou o novo contra o lock gerado (saída 0).
+3. `xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator -destination 'name=iPhone 17 Pro' -derivedDataPath build build`: `** BUILD SUCCEEDED **`.
+4. `xcrun simctl install` no iPhone 17 Pro, Metro com `npx expo start --port 8081 --clear` (`iOS Bundled 5108ms apps/app/index.js (988 modules)`) e `xcrun simctl launch ... app.varanda`.
+
+### Observado
+
+- O app abriu do Metro na introdução ("Seu diário, perto de você", Pular/Próximo). O aparelho de teste já tinha uma instalação anterior do app, que foi substituída sem apagar os dados.
+- `xcrun simctl openurl ... 'varanda:///g/<64 hex>'` e a forma `/c/` (chave de teste `ab` repetido 32 vezes) foram entregues, o processo seguiu vivo e a tela continuou na introdução, porque não há instalação nem sessão para abrir o link. O Metro não registrou erro.
+
+### O que não foi executado
+
+- Entrar com passkey (depende do domínio associado da conta Apple Developer), telas que exigem conta, aparelho real, build de release.
+
+## 67. Comunidades com grupos (PR feat/comunidades-com-grupos)
 
 Uma comunidade passa a conter grupos: toda comunidade nasce com o grupo Geral, e só quem criou a comunidade cria grupos (pelo aparelho que a criou; administradores moderam, não criam). A pessoa entra na comunidade (aberta ou com aprovação) e, por ela, nos grupos. Sair ou ser banido na comunidade vale para todos os grupos dela: as mensagens antigas de quem sai continuam visíveis, mas quem sai não tem mais autoridade de moderação em nenhum grupo da comunidade, e um administrador que sai e volta precisa de nova nomeação. Os grupos privados seguem a comunidade (a chave troca depois de um banimento). Os grupos e comunidades do protocolo v1 são descartados. Normativo: seção 10 de `docs/protocol.md` e RPC 5.36 a 5.69 de `docs/rpc.md`.
 

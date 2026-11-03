@@ -1,9 +1,10 @@
 // Denunciar: the report sheet. A member reports another member's post, or the
-// whole account, to the association's moderation. Only the hosted browser
-// node can sign the statement (RPC report.sign is answered by the web session
-// only, packages/web-member/lib/session.js; the native/CLI key cannot sign,
-// docs/protocol.md:13), and only a member whose Google account is linked may
-// report (the account service refuses 'nao-vinculado').
+// whole account, to the association's moderation. Only the hosted web-member
+// session signs the statement, in the browser or in the native web kind (the
+// worklet apps/app/worklet/web-node.js registers its handlers, report.sign
+// included; packages/web-member/lib/session.js:1460). The core node and the
+// CLI cannot sign (docs/verification.md:1025), and only a member whose Google
+// account is linked may report (the account service refuses 'nao-vinculado').
 // Flow: /account/status -> /account/report/start (nonce) -> report.sign ->
 // /account/report. Nothing is stored: no localStorage, no diary write.
 // `target` = { author, name, username, seq, text } with the RAW peer strings; they are

@@ -9,7 +9,8 @@
 // resent: the screen re-reads and only then lets the person try again.
 // Props: community (hex64 root key), afterGroup (a group to open once the
 // person joined, from a /g/ link), onBack(), onOpenGroup(group),
-// onOpenMember(diary). Hosted web only, like the Comunidades tab.
+// onOpenMember(diary). The screen runs wherever the node is hosted (site and
+// installed app with an installation), like the Comunidades tab.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -18,6 +19,7 @@ import { useNode } from '../node'
 import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
 import { communityLink } from '../groupLink'
+import { installationOrigin } from '../installation'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { fetchCommunity } from '../indexClient'
@@ -66,8 +68,9 @@ const leaveWaitOf = (err) => {
   return Object.keys(LEAVE_WAITS).find((name) => LEAVE_WAITS[name][0] === err.message) || null
 }
 
+// Native has no document origin. The hosted site never stores an installation.
 function origin () {
-  return typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string' ? window.location.origin : ''
+  return installationOrigin() || globalThis.location?.origin || ''
 }
 
 function adminsLabel (n) {
@@ -448,7 +451,13 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   const shareCommunity = async () => {
     const path = communityLink(community)
     if (path === null) return
-    const url = origin() + path
+    const base = origin()
+    // An empty origin would hand the share sheet a relative path.
+    if (base === '') {
+      setShareNote('Não foi possível copiar o link.')
+      return
+    }
+    const url = base + path
     const nav = shareNav()
     setShareNote('')
     if (canShare(nav) && (await shareUrl(nav, { url, title: title === 'Comunidade' ? 'Varanda' : title })) !== 'failed') return

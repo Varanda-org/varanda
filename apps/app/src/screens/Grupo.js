@@ -17,7 +17,8 @@
 // never queued, never persisted (for a private group that would leak the
 // plaintext). A mutation answered UNCERTAIN is never resent: the screen
 // re-reads, asks groups.js reconcile and only then offers "tentar de novo".
-// Hosted web only: elsewhere the screen says so, like Avisos.
+// Hosted node only: a node that is not hosted sees the "Só na versão web"
+// state, like Avisos.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
