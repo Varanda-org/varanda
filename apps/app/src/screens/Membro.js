@@ -23,6 +23,7 @@ import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { FollowPill } from '../ui/FollowPill'
+import { MentionText } from '../ui/MentionText'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { LABELS } from '../dm'
@@ -291,7 +292,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       <Avatar name={who.avatarName} publicKey={author} size={88} picture={header.avatar} persist={own || isFollowed} />
       <Text style={styles.name} accessibilityRole='header'>{displayText(who.title)}</Text>
       {who.subtitle ? <Text style={styles.handle}>{displayText(who.subtitle)}</Text> : null}
-      {header.bio ? <Text style={styles.bio}>{displayText(header.bio, { multiline: true })}</Text> : null}
+      {header.bio ? <MentionText text={header.bio} style={styles.bio} /> : null}
       <View style={styles.actions}>
         {!own
           ? (

@@ -19,6 +19,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Painel de emojis do composer com cerca de 400 emojis em 11 grupos, cada um com nome em português, e um campo "buscar emoji" que filtra pelo nome sem diferenciar acento nem maiúsculas.
+- Links `http://`, `https://` e `www.` ficam sublinhados e abrem direto, fora do app e sem confirmação, em publicações, bios do Diário e do Membro e mensagens de grupo. No cartão da citação o link segue como texto, porque o cartão corta o texto em 6 linhas e poderia esconder parte do endereço: tocar no cartão abre a publicação citada, onde o link funciona. Domínios sem prefixo, como `exemplo.com.br`, e hosts com caracteres fora do ASCII seguem como texto; não há dependência nova.
 - Conversas: mensagens privadas cifradas de ponta a ponta entre membros, com Pedidos de mensagem, resposta, bloqueio, denúncia de uma mensagem e aviso push sem remetente. Termos e Política na versão 11, com novo aceite.
 - Comunidades e grupos ganham "Quem pode convidar" (Só administradores ou Membros podem convidar), ajustado por quem criou ou pelos administradores e guardado num novo registro assinado, `group-invites` (versões antigas o ignoram). O convite por @nome em si vem a seguir.
 
