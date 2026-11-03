@@ -209,7 +209,9 @@ final class LivenessCapture {
       return "UNSUPPORTED"
     // The same rule as the web detector: a valid session id that the stream
     // rejects ran out or was already used, so the service has to start again.
-    case .sessionNotFound, .validation:
+    // The SDK reports every timeout, the session's included, as the face
+    // oval one; a timed out session also needs a new one, as on Android.
+    case .sessionNotFound, .validation, .sessionTimedOut, .faceInOvalMatchExceededTimeLimitError:
       return "SESSION_EXPIRED"
     default:
       return "FAILED"

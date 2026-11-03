@@ -162,10 +162,14 @@ jobs:
       # host tool, for the simulator. The AWS Face Liveness Swift packages run
       # that plugin and Swift macros, which xcodebuild refuses until they are
       # trusted in the Xcode UI; the owner approved skipping that check, and
-      # Package.resolved pins every package by commit.
+      # Package.resolved pins every package by commit. The upstream manifests
+      # use version ranges, so the build may only use those pins: a stale file
+      # fails instead of resolving newer, unvalidated plugin code.
       - name: Build for the simulator
         working-directory: apps/app/ios
-        run: xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath build ARCHS=arm64 CODE_SIGNING_ALLOWED=NO -skipPackagePluginValidation -skipMacroValidation build
+        run: xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath build ARCHS=arm64 CODE_SIGNING_ALLOWED=NO -skipPackagePluginValidation -skipMacroValidation -onlyUsePackageVersionsFromResolvedFile build
+      - name: Check the Swift package pins did not move
+        run: git diff --exit-code -- apps/app/ios/Varanda.xcworkspace/xcshareddata/swiftpm/Package.resolved
       - name: Check the app exists
         run: test -d apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
 

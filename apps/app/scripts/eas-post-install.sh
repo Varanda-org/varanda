@@ -23,11 +23,15 @@ bash scripts/prepare-native.sh "$platform"
 # these defaults are the build machine's equivalent of the
 # -skipPackagePluginValidation -skipMacroValidation flags native.yml passes;
 # the owner approved both on 2026-11-03. The packages are pinned by commit in
-# ios/Varanda.xcworkspace/xcshareddata/swiftpm/Package.resolved. The first key
-# is misspelled on Apple's side and must stay so.
+# ios/Varanda.xcworkspace/xcshareddata/swiftpm/Package.resolved, and the third
+# key makes Xcode use only those pins (the upstream manifests use version
+# ranges), so a stale file fails the build instead of resolving newer,
+# unvalidated plugin code. The first key is misspelled on Apple's side and
+# must stay so.
 if [ "$platform" = ios ]; then
   defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
   defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
+  defaults write com.apple.dt.Xcode IDEPackageOnlyUseVersionsFromResolvedFile -bool YES
 fi
 
 if [ ! -f assets/worklet/main.bundle.js ]; then

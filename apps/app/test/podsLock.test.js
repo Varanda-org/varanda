@@ -79,8 +79,14 @@ test('the face liveness pod is locked and pins the official AWS package exactly'
 test('every package the iOS build trusts is pinned by commit', (t) => {
   const resolved = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'ios', 'Varanda.xcworkspace', 'xcshareddata', 'swiftpm', 'Package.resolved'), 'utf8'))
   t.ok(resolved.pins.length > 0)
+  // The pins run plugin and macro code unvalidated, so a swapped origin must
+  // fail here instead of relying on a reviewer reading the lockfile.
+  const origins = ['apple', 'aws-amplify', 'awslabs', 'smithy-lang', 'stephencelis', 'swift-server', 'swiftlang']
   for (const pin of resolved.pins) {
     t.ok(/^[0-9a-f]{40}$/.test(pin.state.revision), pin.identity + ' has a revision')
+    t.is(pin.state.branch, undefined, pin.identity + ' is not a branch')
+    const m = /^https:\/\/github\.com\/([^/]+)\/[A-Za-z0-9._-]+?(\.git)?$/.exec(pin.location)
+    t.ok(m && origins.includes(m[1]), pin.identity + ' comes from an allowed GitHub org')
   }
   const liveness = resolved.pins.find((pin) => pin.identity === 'amplify-ui-swift-liveness')
   t.is(liveness.location, 'https://github.com/aws-amplify/amplify-ui-swift-liveness')
@@ -94,4 +100,5 @@ test('the EAS iOS build skips the package plugin and macro trust prompt', (t) =>
   if (!ios) return
   t.ok(ios[1].includes('defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES'))
   t.ok(ios[1].includes('defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES'))
+  t.ok(ios[1].includes('defaults write com.apple.dt.Xcode IDEPackageOnlyUseVersionsFromResolvedFile -bool YES'), 'only the pinned Swift packages')
 })

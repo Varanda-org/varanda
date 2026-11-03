@@ -112,6 +112,8 @@ test('native.yml: the builds the job names promise', (t) => {
   t.ok(/-destination 'generic\/platform=iOS Simulator'/.test(ios) && /CODE_SIGNING_ALLOWED=NO/.test(ios), 'unsigned simulator build')
   t.absent(/-sdk /.test(ios), 'no -sdk: it would build the SPM host tools for the simulator')
   t.ok(/ -skipPackagePluginValidation /.test(ios) && / -skipMacroValidation /.test(ios), 'the AWS packages run a plugin and macros')
+  t.ok(/ -skipMacroValidation -onlyUsePackageVersionsFromResolvedFile build/.test(ios), 'skipped validation only over the pinned packages')
+  t.ok(/git diff --exit-code -- apps\/app\/ios\/Varanda\.xcworkspace\/xcshareddata\/swiftpm\/Package\.resolved/.test(ios), 'the build did not move the pins')
 })
 
 test('native.yml: the gate', (t) => {

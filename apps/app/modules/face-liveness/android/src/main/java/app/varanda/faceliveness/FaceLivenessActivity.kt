@@ -96,6 +96,8 @@ class FaceLivenessActivity : ComponentActivity() {
     }
   }
 
+  // The SDK keeps its face oval timeout class internal, so only the session
+  // timeout can be named here; the oval one ends as FAILED.
   private fun codeFor(error: FaceLivenessDetectionException): String = when (error) {
     is FaceLivenessDetectionException.SessionNotFoundException,
     is FaceLivenessDetectionException.SessionTimedOutException -> SESSION_EXPIRED
