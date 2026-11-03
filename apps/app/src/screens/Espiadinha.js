@@ -11,13 +11,10 @@
 // the counts and offers curtir, republicar and citar; a reply names its
 // parent, a quote shows the quoted post and a repost the original, each
 // read and verified by the node.
-// Hosted web only, a field "pesquisar por assunto" above the short note and help: on
-// submit (never per keystroke) the Busca screen replaces the rounds with the
-// posts of any diary the seeder indexed that contain the words; 'limpar'
-// brings the rounds back from memory, unchanged.
+// Word search in posts is the Busca tab's (screens/Busca.js).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -29,16 +26,13 @@ import {
   recordFollow, skippedText, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
-import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
-import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
-import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { Pill } from '../ui/Pill'
-import { type } from '../ui/theme'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
 // most 4095 diaries, so nine pages is the whole list and a hard stop.
@@ -75,9 +69,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     following: new Set()
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
-  // The typed text and the active search ({ tokens, path } or null).
-  const [draft, setDraft] = useState('')
-  const [query, setQuery] = useState(null)
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
@@ -236,16 +227,12 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    // While a search is shown, Busca handles its own reloads: the refresh value
-    // is NOT advanced, so a bump during the search (a follow) is still seen as
-    // `changed` once the query is cleared and the rounds reload.
-    const searching = query !== null
-    previous.current = { active, refresh: active && !searching ? refresh : prev.refresh, scrollToTop }
-    if (!active || searching) return
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    if (!active) return
     const current = stateRef.current
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
     if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadFirst()
-  }, [active, refresh, scrollToTop, loadFirst, query])
+  }, [active, refresh, scrollToTop, loadFirst])
 
   // A follow made elsewhere (Membro, Seguindo, A Rua, another device): drop
   // the followed authors' rows without reloading, so the pages and the
@@ -304,60 +291,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
 
-  // Submit only: the seeder allows a few /index requests per client per 10 s.
-  const submit = () => {
-    const r = searchPath(draft)
-    if (r === null) {
-      if (typeof onToast === 'function') onToast(SEARCH_INVALID)
-      return
-    }
-    if (r.truncated && typeof onToast === 'function') onToast(SEARCH_TRUNCATED)
-    setQuery({ tokens: r.tokens, path: r.path })
-  }
-  // Set when Busca toggled a like or repost: the rounds' cache is then stale.
-  const socialDirtyRef = useRef(false)
-  const clear = () => {
-    if (socialDirtyRef.current) {
-      // Re-read counts and own state of the kept rounds; no peek.read reload.
-      socialDirtyRef.current = false
-      ingest({ ...pageNeeds(stateRef.current.items), reset: true })
-    }
-    setQuery(null)
-    setDraft('')
-  }
-
-  const searchBox = (
-    <View>
-      {hosted && notice === null
-        ? (
-          <View style={styles.searchBox}>
-            <Field
-              label={SEARCH_LABEL}
-              placeholder={SEARCH_PLACEHOLDER}
-              value={draft}
-              onChangeText={setDraft}
-              maxLength={SEARCH_INPUT_MAX}
-              returnKeyType='search'
-              onSubmitEditing={submit}
-              mono
-            />
-            <Btn label={SEARCH_BUTTON} onPress={submit} disabled={draft.trim() === ''} secondary />
-            {query !== null
-              ? (
-                <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} onPress={clear} hitSlop={6}>
-                  <Text style={styles.toggle}>{SEARCH_CLEAR}</Text>
-                </Pressable>
-                )
-              : null}
-          </View>
-          )
-        : null}
-    </View>
-  )
-
   const header = (
     <View style={styles.header}>
-      {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
       <CountsNote social={social} />
     </View>
@@ -467,33 +402,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   const renderItem = ({ item }) => rowOf(item)
 
   const shownItems = notice === null ? items : []
-  // The rounds stay mounted (state and social cache) under the search. Only
-  // 'web-only' hides it: the rounds' 'offline' notice (no round loaded yet)
-  // must not unmount a search that loaded, which has its own offline state.
-  if (query !== null && hosted && notice !== 'web-only') {
-    return (
-      <Busca
-        query={query}
-        avatarOf={profileOf}
-        header={<View style={styles.searchTop}>{searchBox}</View>}
-        ownKey={ownKey}
-        active={active}
-        scrollToTop={scrollToTop}
-        refresh={refresh}
-        onReply={onReply}
-        onReport={onReport}
-        onQuote={onQuote}
-        onOpenThread={onOpenThread}
-        onOpenMember={onOpenMember}
-        onOpenMention={onOpenMention}
-        onOpenEngagers={onOpenEngagers}
-        onFollowsChanged={onFollowsChanged}
-        onFollowed={dropFollowed}
-        onSocialChanged={() => { socialDirtyRef.current = true }}
-        onToast={onToast}
-      />
-    )
-  }
   return (
     <RefreshableList
       data={shownItems}
@@ -516,9 +424,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 }
 
 const styles = StyleSheet.create({
-  toggle: { ...type.counter, color: colors.accent },
   header: { padding: 16, gap: 8 },
-  searchTop: { padding: 16 },
-  searchBox: { gap: 8 },
   footer: { padding: 16, gap: 8 }
 })
