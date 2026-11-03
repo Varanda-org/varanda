@@ -3921,3 +3921,32 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 - As voltas `lista-de-espera` e `convite-invalido` continuam no passo de configuração, como antes.
 - Se o envio do @nome falha logo depois de a pessoa nova confirmar o vínculo, a folha Conta não abre mais sozinha para oferecer "enviar o @nome de novo"; o botão continua em Ajustes › Conta.
 - O Android e o iOS não mudam de código (só as checagens 4 e 5).
+
+## 71. Barra de ícones, sino, Busca e perfis iguais (PR feat/app-ux-icones)
+
+A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Seguidores continuam privados: não há contagem nem lista em lugar nenhum. Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes novos ou alterados: `apps/app/test/buscaGlobal.test.js` (categorias, textos, plano de consulta de Contas e de Publicações), `apps/app/test/peopleFilter.test.js` (o filtro local de Seguindo), `apps/app/test/tabBar.test.js` e `apps/app/test/nav.test.js` (abas, ordem, pilha com Seguindo) e `apps/app/test/help.test.js` (folhas de ajuda).
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada), depois no iOS (simulador) e na web.
+
+1. **Barra.** Cinco ícones sem palavras, na ordem A Rua (estrada com a faixa tracejada), Espiadinha, Conversas, Busca (lupa) e Diário (a foto da própria pessoa ou as iniciais, com anel verde quando selecionado). Numa configuração manual são quatro, sem Conversas. TalkBack e VoiceOver leem os nomes.
+2. **Sino.** O sino aparece no canto direito da barra do topo de cada aba (A Rua, Espiadinha, Conversas, Busca) e, branco, no canto da faixa do Diário. Com novidade em Avisos há um ponto no sino (nunca um número). Tocar abre Avisos com o título "Avisos" e a seta de voltar, que leva à aba anterior; o ponto some. Um push de quem seguiu ainda abre Avisos.
+3. **Busca › Contas (hospedado).** Nome e @nome buscam depois de 2 letras; "Seguir @nome" segue; o código de 64 letras e números mostra "Seguir"; um código incompleto mostra "Código incompleto: são 64 letras e números.". Numa configuração manual só há o campo "Cole o código da pessoa (64 letras e números)." e a pílula "Seguir".
+4. **Busca › Publicações.** Só pesquisa ao enviar, nunca a cada tecla; mostra os resultados; "limpar" apaga; cada categoria guarda o próprio rascunho ao trocar. Numa configuração manual aparece "Só na versão web", sem nenhum pedido.
+5. **Espiadinha.** Sem campo de pesquisa; carrega e atualiza como antes.
+6. **Seguindo.** "N seguindo" no Diário abre a lista. O campo "Filtrar nesta lista" ("nome ou @nome") reduz a lista no aparelho, com a dica "Para encontrar outra conta, use a Busca." e, sem correspondência, "Ninguém com esse nome nesta lista."; colar um código de 64 letras e números não segue ninguém; "Deixar de seguir" ainda pede confirmação; voltar retorna ao Diário.
+7. **Perfil de outra pessoa.** Tem o desenho do Diário: faixa atrás da barra de estado com a barra de estado clara, o círculo de voltar no canto esquerdo da faixa acessível (não coberto pelo avatar), avatar com anel à esquerda, nome, @nome, bio e as pílulas Seguir, Mensagem (hospedado) e denunciar a conta, todas funcionando.
+8. **Seguidores.** Não há contagem nem lista de seguidores em lugar nenhum.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Limite aceito: as contagens da Espiadinha podem demorar a refletir uma curtida feita na Busca até a próxima atualização dela.
+- Limite aceito: Avisos não entra na pilha de telas. Na web, o botão Voltar do navegador não fecha Avisos (era assim quando Avisos era aba); Esc, a seta da barra do topo, o ícone da aba anterior e o Voltar do Android fecham.
+- Limite aceito: no perfil de outra pessoa, como no Diário, a barra de estado fica clara mesmo depois que a faixa sai da tela ao rolar.
+- Com o filtro de Seguindo, a lista carrega no máximo 3 páginas seguidas sem nenhum resultado novo; depois mostra "Ninguém com esse nome entre os já carregados." e "carregar mais".

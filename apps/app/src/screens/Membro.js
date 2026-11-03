@@ -1,7 +1,9 @@
 // Membro: a member's profile, pushed above the tabs (App.js screen stack,
 // entry { screen: 'membro', key: authorHex, params: { seed } } where the seed
-// is { name, username, avatar } from the row tapped). The header (avatar, name,
-// @nome, bio) comes from profile.read when the node holds the diary, else
+// is { name, username, avatar } from the row tapped). The header is the shared
+// ProfileHeader (sunset band with the back control, avatar, name, @nome, bio,
+// actions), drawn from the top of the scroll content with its own status inset
+// like the Diário. Its data comes from profile.read when the node holds the diary, else
 // (hosted web) from a diary.peek of the seeder index's profile/username seq
 // hints. Seguindo asks for confirmation before follow.remove;
 // 'denunciar a conta' opens the report sheet without a post (hosted web). On
@@ -12,7 +14,8 @@
 // through displayText (PostRow does it for the rows).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -21,20 +24,21 @@ import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
-import { Avatar } from '../ui/Avatar'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { ProfileHeader } from '../ui/ProfileHeader'
 import { LABELS } from '../dm'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { TopBar } from '../ui/TopBar'
-import { colors, type } from '../ui/theme'
+import { colors } from '../ui/theme'
 import { isSeederDown, knownAuthors, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a conexão voltar.'
+
+const BAND = 96
 
 const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
 
@@ -286,14 +290,20 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
 
+  const insets = useSafeAreaInsets()
   const head = (
-    <View style={styles.head}>
-      <Avatar name={who.avatarName} publicKey={author} size={88} picture={header.avatar} persist={own || isFollowed} />
-      <Text style={styles.name} accessibilityRole='header'>{displayText(who.title)}</Text>
-      {who.subtitle ? <Text style={styles.handle}>{displayText(who.subtitle)}</Text> : null}
-      {header.bio ? <Text style={styles.bio}>{displayText(header.bio, { multiline: true })}</Text> : null}
-      <View style={styles.actions}>
-        {!own
+    <ProfileHeader
+      bandHeight={insets.top + BAND}
+      topInset={insets.top}
+      onBack={onBack}
+      bandButtons={null}
+      avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
+      title={displayText(who.title)}
+      subtitle={who.subtitle ? displayText(who.subtitle) : null}
+      bio={header.bio ? displayText(header.bio, { multiline: true }) : null}
+      counts={[]}
+      actions={[
+        !own
           ? (
             <FollowPill
               following={follows === null ? null : isFollowed}
@@ -304,11 +314,11 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               onUnfollow={toggleFollow}
             />
             )
-          : null}
-        {!own && node.hosted === true && typeof onMessage === 'function'
+          : null,
+        !own && node.hosted === true && typeof onMessage === 'function'
           ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
-          : null}
-        {canReport
+          : null,
+        canReport
           ? (
             <Pill
               label='denunciar a conta'
@@ -316,19 +326,17 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               onPress={() => onReport({ author, name: header.name, username: header.username })}
             />
             )
-          : null}
-      </View>
-    </View>
+          : null
+      ]}
+    />
   )
 
-  const top = <TopBar title={displayText(who.title)} onBack={onBack} />
   if (!full) {
     return (
       <View style={styles.flex}>
-        {top}
-        <OfflineNote />
         <View style={styles.flex}>
           {head}
+          <OfflineNote />
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
         </View>
       </View>
@@ -344,6 +352,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const listHeader = (
     <View>
       {head}
+      <OfflineNote />
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>
   )
@@ -367,8 +376,6 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   return (
     <View style={styles.flex}>
-      {top}
-      <OfflineNote />
       <View style={styles.flex}>
         <RefreshableList
           data={phase === 'ready' ? items : []}
@@ -404,10 +411,5 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  head: { alignItems: 'center', gap: 6, paddingTop: 20, paddingBottom: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: colors.line },
-  name: { ...type.profileName, color: colors.ink, textAlign: 'center', marginTop: 8 },
-  handle: { ...type.postMeta, color: colors.soft },
-  bio: { ...type.postText, color: colors.ink, textAlign: 'center' },
-  actions: { flexDirection: 'row', gap: 10, marginTop: 10, flexWrap: 'wrap', justifyContent: 'center' },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 }
 })
