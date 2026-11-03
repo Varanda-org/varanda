@@ -3887,7 +3887,7 @@ A segue B. B não segue A.
 ### Não verificado / limites conhecidos
 
 - Nenhuma caixa acima foi executada nesta documentação.
-- O nó hospedado acha o `dm-key` na réplica local ou nas `DM_LOOKUP_WINDOWS` = 8 janelas mais novas de `PEEK_WINDOW` = 36 blocos. Um `dm-key` muito antigo, num diário longo, pode passar despercebido até essa pessoa abrir Conversas de novo.
+- O nó hospedado acha o `dm-key` na réplica local ou nas `DM_LOOKUP_WINDOWS` = 8 janelas mais novas de `PEEK_WINDOW` = 36 blocos. Um `dm-key` muito antigo, num diário longo, pode passar despercebido até essa pessoa abrir o app de novo (o app publica o `dm-key` uma vez por sessão destravada).
 - Depois de uma troca de `gen`, envelopes lacrados para a geração antiga que ainda estão no conjunto não são abertos.
 - O primeiro envio logo depois de ligar pode responder "o limite de envio de hoje acabou" até a primeira recarga de selos (`DM_STAMP_WALLET`) terminar.
 - O app instalado não tem aviso do sistema. A novidade só aparece com o app aberto (`dm.pull`, `DM_PULL_EVERY_MS` = 120000) e pelo ponto.

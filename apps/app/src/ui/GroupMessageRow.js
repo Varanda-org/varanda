@@ -5,13 +5,15 @@
 // screen knows for the author; without them the row shows the 8-hex short key
 // rowsOf already computed. A group message is addressed by { writer, seq },
 // never by PostRow's diary ref. The actions sit behind a "mais" button so a
-// tap on the text does nothing by surprise.
+// tap on the text does nothing by surprise: only a link in it opens the
+// browser, and mentions stay plain here.
 
 import { useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
 import { Avatar } from './Avatar'
+import { MentionText } from './MentionText'
 import { Pill } from './Pill'
 import { colors, type } from './theme'
 
@@ -48,7 +50,9 @@ export function GroupMessageRow ({ item, name, username, own, canHide, canBan, c
           {who.handle ? <Text style={styles.meta} numberOfLines={1}>{who.handle}</Text> : null}
           {time ? <Text style={styles.meta}>{time}</Text> : null}
         </View>
-        <Text style={[styles.text, item.hidden && styles.hidden]} selectable={!item.hidden}>{item.text}</Text>
+        {item.hidden
+          ? <Text style={[styles.text, styles.hidden]}>{item.text}</Text>
+          : <MentionText text={item.text} style={styles.text} selectable />}
         {open
           ? (
             <View style={styles.actions}>

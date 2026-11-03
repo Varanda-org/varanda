@@ -26,13 +26,16 @@
 //   onFollow ('seguir', disabled while followPending), onReport, onDelete (each
 //   button shows only with its handler).
 // - onOpenMention(username): makes the @nome in the text and in the quote
-//   tappable (./MentionText). A text or quote with a mention is rendered
-//   outside the body's single accessible element, so the link is reachable by
-//   assistive tech and a tap on it never opens the conversation.
+//   tappable (./MentionText). The post text with an http(s)/www link or a
+//   handled mention is rendered outside the body's single accessible element,
+//   so the link is reachable by assistive tech and a tap on it opens the
+//   browser or the profile, never the conversation. A quote is lifted out only
+//   for a handled mention; its web links stay plain (./QuoteCard).
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
+import { hasLink } from '../links'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
@@ -123,10 +126,10 @@ export function PostRow ({
   const bodyLabel = bodyParts.join('. ')
   const openMention = fn(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = !!openMention && hasText && hasMention(text)
+  const textOut = hasText && (hasLink(text) || (!!openMention && hasMention(text)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && fn(quote.onOpenMention)) || openMention
-  const quoteOut = !!quoteMention && quoteOn && typeof quote.text === 'string' && hasMention(quote.text)
+  const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
   const quoteProp = quoteMention && quoteOn ? { ...quote, onOpenMention: quoteMention } : quote
   const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
   const textNode = hasText

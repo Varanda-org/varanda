@@ -1194,6 +1194,20 @@ function Member () {
       setDmDot(false)
     }
   }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  // Anyone may write to anyone (owner decision 2026-11-03), so every hosted
+  // member publishes its message key once per unlocked session, without first
+  // opening Conversas; dm.enable appends nothing when the key is already
+  // there. One call, never repeated on failure: the next session tries again.
+  const dmEnabled = useRef(false)
+  useEffect(() => {
+    if (!dmReady) {
+      dmEnabled.current = false
+      return
+    }
+    if (dmEnabled.current) return
+    dmEnabled.current = true
+    dmRequest('dm.enable', {}).catch(() => {})
+  }, [dmReady, dmRequest])
   const dmWasVisible = useRef(true)
   useEffect(() => {
     const visibleNow = node.visible !== false

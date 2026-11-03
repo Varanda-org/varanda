@@ -350,7 +350,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
           title={displayText(who.title)}
           subtitle={who.subtitle ? displayText(who.subtitle) : null}
-          bio={bio ? displayText(bio, { multiline: true }) : null}
+          bio={bio || null}
           counts={[{
             label: 'seguindo',
             value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),

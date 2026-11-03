@@ -1,11 +1,14 @@
 // The profile header shared by the own Diário and another person's profile:
 // sunset band (optional back button, caller's buttons), the avatar rising into
 // the band, name, @nome, bio, counts, a note and the action row. Callers pass
-// display-safe strings (already through displayText).
+// display-safe strings (already through displayText), except `bio`: the raw
+// peer text, which MentionText passes through displayText piece by piece so
+// its links stay tappable, as in a post.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { MentionText } from './MentionText'
 import { SunsetBand } from './SunsetBand'
 import { colors, fonts, type } from './theme'
 
@@ -42,7 +45,7 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
       <View style={styles.data}>
         {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
         {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
-        {bio ? <Text style={styles.bio}>{bio}</Text> : null}
+        {bio ? <MentionText text={bio} style={styles.bio} /> : null}
         {shownCounts.length > 0
           ? (
             <View style={styles.countsRow}>

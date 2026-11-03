@@ -300,7 +300,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
       title={displayText(who.title)}
       subtitle={who.subtitle ? displayText(who.subtitle) : null}
-      bio={header.bio ? displayText(header.bio, { multiline: true }) : null}
+      bio={header.bio || null}
       counts={[]}
       actions={[
         !own
