@@ -106,7 +106,8 @@ test('espiadinha and avisos hold for the site and the app tied to the installati
     t.ok(text.includes('app ligado à instalação da associação'), key)
     t.absent(text.includes('só funciona'), key + ' is no longer web only')
   }
-  t.ok(HELP.seguindo.paragraphs[0].includes('app ligado à instalação'))
+  t.ok(HELP.seguindo.paragraphs[0].includes('qualquer instalação'))
+  t.ok(HELP.seguindo.paragraphs.join(' ').includes('O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca.'))
 })
 
 test('help and short texts avoid jargon and em dashes', async (t) => {

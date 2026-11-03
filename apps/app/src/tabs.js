@@ -1,12 +1,11 @@
-// The bottom tabs per mode: five when the node is not hosted (manual
-// configuration, varanda-serve), six wherever the node is hosted. The sixth
-// tab is Conversas, but its id stays 'comunidades' because callers compare
-// that id.
+// The bottom tabs: four in every mode, five when the node is hosted. The fifth
+// is Conversas, but its id stays 'comunidades' because callers compare that id.
+// Avisos opens from the bell in the top bar, and Seguindo from the 'N seguindo'
+// count on the Diário.
 export const TABS = [
-  { id: 'rua', label: 'A Rua', icon: 'casa' },
+  { id: 'rua', label: 'A Rua', icon: 'rua' },
   { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
-  { id: 'seguindo', label: 'Seguindo', icon: 'gente' },
-  { id: 'avisos', label: 'Avisos', icon: 'sino' },
+  { id: 'busca', label: 'Busca', icon: 'lupa' },
   { id: 'diario', label: 'Diário', icon: 'pessoa' }
 ]
 

@@ -23,17 +23,16 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       PEEK_RULE_TEXT,
       'Essas publicações não ficam guardadas neste aparelho: ficam só enquanto a aba está aberta.',
-      'Em pesquisar por assunto, você procura palavras nas publicações públicas, inclusive de quem você segue.',
       'A Espiadinha funciona no site da associação e no app ligado à instalação da associação. Não funciona com uma configuração manual.'
     ])
   }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
-      'Siga pessoas para ver as publicações delas na Rua. No site da associação e no app ligado à instalação, dá para encontrar alguém pelo nome ou pelo @nome.',
-      'No lugar do @nome também vale o código da pessoa, com 64 letras e números.',
+      'Seguindo é a lista de pessoas que você segue. Abra a lista tocando no número ao lado de seguindo, no Diário. Ela funciona em qualquer instalação.',
+      'Siga pessoas para ver as publicações delas na Rua. Para encontrar alguém, use a Busca.',
       'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
-      'No topo, um só campo encontra pessoas: digite um nome ou @nome para buscar, ou cole o código da pessoa para seguir direto. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
+      'O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
     ])
   }),
   avisos: Object.freeze({
@@ -41,7 +40,7 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
       'O Varanda não mostra contagem nem lista de seguidores.',
-      'Quando há algo novo, a aba ganha um ponto, nunca um número.',
+      'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
     ])
   }),
@@ -49,7 +48,7 @@ export const HELP = Object.freeze({
     title: 'Como funciona o Diário',
     paragraphs: Object.freeze([
       'O Diário é o seu perfil e as suas publicações.',
-      'O número ao lado de seguindo é quantas pessoas você segue. Não há lista de quem segue você.',
+      'O número ao lado de seguindo é quantas pessoas você segue; toque nele para abrir a lista. Não há lista de quem segue você.',
       'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
     ])
@@ -113,10 +112,11 @@ export const HELP = Object.freeze({
     ])
   }),
   busca: Object.freeze({
-    title: 'Como funciona a pesquisa',
+    title: 'Como funciona a Busca',
     paragraphs: Object.freeze([
       SEARCH_HINT,
       SEARCH_MEMORY,
+      'A Busca tem duas partes. Em Contas, você encontra pessoas pelo nome ou @nome no site da associação e no app ligado à instalação; em qualquer versão, você pode colar o código de 64 letras e números de alguém para seguir. Em Publicações, você procura palavras nas publicações públicas.',
       'Cada resultado é conferido antes de aparecer. O que não pôde ser conferido conta como indisponível e não é mostrado.'
     ])
   }),

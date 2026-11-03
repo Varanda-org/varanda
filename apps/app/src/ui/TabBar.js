@@ -1,17 +1,19 @@
-// The bottom tab bar, with Comunidades added in hosted mode. Pressing
+// The bottom tab bar: icons only, with Comunidades added in hosted mode. The
+// Diario tab shows the person's own avatar when `me` is given. Pressing
 // the tab that is already current calls onReselect (scroll to top / refresh),
 // not onSelect. `badges` maps a tab id to true to show a plain dot on its icon
-// (never a count).
+// (never a count). Screen readers still read each tab's name.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { Avatar } from './Avatar'
 import { Icon } from './Icon'
-import { colors, layout, type } from './theme'
+import { colors, layout } from './theme'
 import { TABS } from '../tabs'
 
 export { TABS, tabsFor } from '../tabs'
 
-export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TABS }) {
+export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TABS, me }) {
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
@@ -19,6 +21,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
         const selected = tab.id === current
         const tint = selected ? colors.accent : colors.soft
         const badged = badges[tab.id] === true
+        const showAvatar = tab.id === 'diario' && me && me.publicKey
         return (
           <Pressable
             key={tab.id}
@@ -35,10 +38,18 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
             style={styles.tab}
           >
             <View style={styles.iconWrap}>
-              <Icon name={tab.icon} size={27} color={tint} />
+              {showAvatar
+                ? (
+                  <View
+                    style={[styles.avatarRing, { borderColor: selected ? colors.accent : 'transparent' }]}
+                    accessible={false}
+                  >
+                    <Avatar name={me.name} publicKey={me.publicKey} size={28} picture={me.picture} persist />
+                  </View>
+                  )
+                : <Icon name={tab.icon} size={27} color={tint} />}
               {badged && <View style={styles.dot} />}
             </View>
-            <Text style={[styles.label, tabs.length === 6 && styles.labelCompact, { color: tint }, selected && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={1.3}>{tab.label}</Text>
           </Pressable>
         )
       })}
@@ -52,7 +63,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    // 6 + icon 27 + gap 3 + label 12 + the 1 pt top border = 49.
+    // 6 top padding + 1 pt top border + 42 pt for the centred 27 pt icon = 49.
     paddingTop: 6,
     paddingHorizontal: 8,
     flexDirection: 'row',
@@ -60,9 +71,11 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.line
   },
-  tab: { flex: 1, alignItems: 'center', gap: 3 },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   // Anchors the dot to the icon's corner rather than the whole tab.
   iconWrap: { position: 'relative' },
+  // The border is always 2 pt (transparent when not selected) so the size never shifts.
+  avatarRing: { borderWidth: 2, borderRadius: 16 },
   // A plain dot: no text, no number.
   dot: {
     position: 'absolute',
@@ -72,8 +85,5 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: colors.accent
-  },
-  label: { ...type.tab },
-  labelCompact: { fontSize: 9, letterSpacing: -0.2 },
-  labelOn: { fontWeight: '700' }
+  }
 })

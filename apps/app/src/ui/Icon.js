@@ -1,7 +1,6 @@
 // The app's icons: Feather glyphs from @expo/vector-icons under Portuguese
 // names. The mock draws the active tab with a thicker stroke (2.3); a font
-// glyph has one fixed weight, so the colour and the label weight carry the
-// active state instead.
+// glyph has one fixed weight, so the colour carries the active state instead.
 
 import Feather from '@expo/vector-icons/Feather'
 import { View } from 'react-native'
@@ -34,7 +33,8 @@ const GLYPHS = {
   coracao: 'heart',
   republicar: 'repeat',
   citar: 'edit-3',
-  lixeira: 'trash-2'
+  lixeira: 'trash-2',
+  lupa: 'search'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
@@ -51,6 +51,25 @@ export function Icon ({ name, size = 24, color = colors.ink, style }) {
         <View style={{ ...stroke, left: 4 * unit, top: 11 * unit, width: 16 * unit, height: 6 * unit }} />
         <View style={{ ...leg, left: 5 * unit }} />
         <View style={{ ...leg, left: 17 * unit }} />
+      </View>
+    )
+  }
+  // Feather has no street, so it is drawn on its 24-unit grid with the same
+  // stroke; the scene is the street seen from the veranda (road to the horizon,
+  // dashed centre line). End points (3,20)-(10,6) and (21,20)-(14,6).
+  if (name === 'rua') {
+    const unit = size / 24
+    const bar = { position: 'absolute', backgroundColor: color, borderRadius: unit }
+    const edge = { ...bar, top: (13 - 15.65 / 2) * unit, width: 2 * unit, height: 15.65 * unit }
+    const dash = { ...bar, left: 11 * unit, width: 2 * unit }
+    return (
+      <View style={[{ width: size, height: size }, style]}>
+        <View style={{ ...bar, left: 8 * unit, top: 4 * unit, width: 8 * unit, height: 2 * unit }} />
+        <View style={{ ...edge, left: (6.5 - 1) * unit, transform: [{ rotate: '26.57deg' }] }} />
+        <View style={{ ...edge, left: (17.5 - 1) * unit, transform: [{ rotate: '-26.57deg' }] }} />
+        <View style={{ ...dash, top: 15 * unit, height: 4 * unit }} />
+        <View style={{ ...dash, top: 10.5 * unit, height: 3 * unit }} />
+        <View style={{ ...dash, top: 7.5 * unit, height: 2 * unit }} />
       </View>
     )
   }

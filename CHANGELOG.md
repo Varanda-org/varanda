@@ -20,6 +20,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 ### Adicionado
 
 - Convidar por @nome pelas Conversas: quem pode convidar vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo, digita @nome e a pessoa recebe o convite como mensagem privada (em Pedidos se não seguir quem convidou). Quem ainda não usa as Conversas recebe a orientação de mandar o link pelo Compartilhar. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite sem entrar. Envio incerto oferece **Tentar de novo**, nunca automático. "Quem pode convidar" controla só o botão.
+- Aba Busca, com as categorias Contas (por nome ou @nome na versão hospedada; seguir por @nome na versão hospedada, ou pelo código de 64 letras e números em qualquer instalação) e Publicações (palavras nas publicações públicas, só ao enviar, só na versão hospedada). Detalhes em `docs/verification.md`, seção 71.
 - Painel de emojis do composer com cerca de 400 emojis em 11 grupos, cada um com nome em português, e um campo "buscar emoji" que filtra pelo nome sem diferenciar acento nem maiúsculas.
 - Links `http://`, `https://` e `www.` ficam sublinhados e abrem direto, fora do app e sem confirmação, em publicações, bios do Diário e do Membro e mensagens de grupo. No cartão da citação o link segue como texto, porque o cartão corta o texto em 6 linhas e poderia esconder parte do endereço: tocar no cartão abre a publicação citada, onde o link funciona. Domínios sem prefixo, como `exemplo.com.br`, e hosts com caracteres fora do ASCII seguem como texto; não há dependência nova.
 - Conversas: mensagens privadas cifradas de ponta a ponta entre membros, com Pedidos de mensagem, resposta, bloqueio, denúncia de uma mensagem e aviso push sem remetente. Termos e Política na versão 11, com novo aceite.
@@ -161,6 +162,11 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- A barra de baixo mostra só ícones, sem palavras: A Rua ganha um ícone novo (uma estrada até o horizonte) e o Diário mostra a foto da própria pessoa, com anel verde quando selecionado. Quatro abas, cinco na versão hospedada.
+- Avisos sai da barra e abre pelo sino no canto direito da barra do topo e na faixa do Diário, com o mesmo ponto e sem número.
+- Seguindo sai da barra e vira uma lista aberta por "N seguindo" no Diário. O campo agora é "Filtrar nesta lista" e só reduz a lista; achar e seguir outra conta fica na Busca.
+- A Espiadinha perde o campo de pesquisa por assunto, que passou para Busca › Publicações.
+- O perfil de outra pessoa (Membro) ganha o desenho do Diário: faixa, círculo de voltar, avatar com anel à esquerda, nome, @nome, bio e as pílulas.
 - A aba Comunidades virou Conversas, com o seletor Mensagens | Comunidades e um ícone novo; a cadeira segue como marca na abertura e na barra.
 - O app Android inteiro passa a compilar com Kotlin 2.3.0 (era 2.1.20), porque a liveness 1.13.0 da AWS depende do kotlinx-serialization 1.11.0, feito com Kotlin 2.3. Afeta todos os módulos nativos; o build de iOS passa a pular a validação de plugin e de macros do SwiftPM (`-skipPackagePluginValidation -skipMacroValidation`), por causa do smithy-swift. Exige um build novo.
 - O link de comunidade cai num cartão de convite com um botão (**Entrar** ou **Pedir entrada**) e o aviso "Participar é público: sua entrada fica registrada no seu diário.". Na web, o link sobrevive ao passo do Google por até 1 h e a tela Entrar avisa do convite.
