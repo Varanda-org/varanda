@@ -808,3 +808,171 @@ test('account push-key prints only the public key and refuses a second run; serv
   t.is(await broken.stop(), 0, broken.stderr())
   t.ok(varanda(dir, ['account', 'status']).stdout.includes('avisos push: desligados'))
 })
+
+test('relay: a DM wake fans out once to every subscription, names nobody and is coalesced for 15 minutes', async (t) => {
+  const s = await setup(t)
+  const wake = { v: 1, kind: 'dm-wake' }
+
+  // Nobody subscribed: 202, no vendor call, and the window does not start.
+  t.is((await s.relay(wake)).status, 202)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(s.delivered.length, 0)
+
+  await s.acceptTerms(s.m)
+  await s.acceptTerms(s.actor)
+  const subs = [subscription(), subscription('updates.push.services.mozilla.com'), subscription()]
+  t.alike((await s.toggle(s.m, 'on', subs[0])).body, { ok: true, changed: true })
+  t.alike((await s.toggle(s.m, 'on', subs[1])).body, { ok: true, changed: true })
+  t.alike((await s.toggle(s.actor, 'on', subs[2])).body, { ok: true, changed: true })
+
+  const r = await s.relay(wake)
+  t.is(r.status, 202)
+  t.alike(r.body, {})
+  await until(() => s.delivered.length === 3, { name: 'three sends' })
+  const topics = new Set()
+  for (const sub of subs) {
+    const got = s.delivered.filter((d) => d.url === sub.endpoint)
+    t.is(got.length, 1, 'one send to each subscription')
+    topics.add(got[0].headers.Topic)
+    const plain = decrypt(got[0].body, sub.uaPrivate, sub.auth)
+    t.alike(JSON.parse(plain), wake)
+    t.absent(/[0-9a-f]{64}/.test(plain), 'no key in the payload')
+    t.absent(/ana|bia/i.test(plain), 'no name in the payload')
+  }
+  t.is(topics.size, 1, 'one identical topic for the whole fan-out')
+
+  // A second wake inside the window is accepted and dropped.
+  t.is((await s.relay(wake)).status, 202)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(s.delivered.length, 3, 'one vendor batch per window')
+
+  // The wake pads to the same ciphertext length as a member notice.
+  await s.relay(s.like(s.actor, s.m))
+  await until(() => s.delivered.length === 5, { name: 'like sends' })
+  const like = s.delivered.find((d, i) => i >= 3 && d.url === subs[0].endpoint)
+  t.is(like.body.length, s.delivered.find((d) => d.url === subs[0].endpoint).body.length, 'same size as other pushes')
+
+  // After the window, the next wake fans out again.
+  s.c.offset += 15 * 60 * 1000
+  t.is((await s.relay(wake)).status, 202)
+  await until(() => s.delivered.length === 8, { name: 'second window' })
+
+  // A wake that names anyone is the generic rejection.
+  for (const bad of [{ ...wake, actor: s.actor.hex }, { ...wake, recipient: s.m.hex }, { v: 2, kind: 'dm-wake' }]) {
+    const res = await s.relay(bad)
+    t.is(res.status, 400)
+    t.alike(res.body, { error: 'pedido-invalido' })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(s.delivered.length, 8)
+  cleanLogs(t, s, subs.map((x) => x.endpoint))
+})
+
+test('relay: a DM wake answered 404 or 410 removes that subscription from its member', async (t) => {
+  const s = await setup(t)
+  await s.acceptTerms(s.m)
+  await s.acceptTerms(s.actor)
+  const gone = subscription()
+  const missing = subscription()
+  const live = subscription()
+  await s.toggle(s.m, 'on', gone)
+  await s.toggle(s.actor, 'on', missing)
+  await s.toggle(s.m, 'on', live)
+  s.statusOf.set(gone.endpoint, 410)
+  s.statusOf.set(missing.endpoint, 404)
+  t.is((await s.relay({ v: 1, kind: 'dm-wake' })).status, 202)
+  await until(() => s.logs.filter((l) => l === JSON.stringify({ event: 'push', reason: 'removido' })).length === 2, { name: 'two removed' })
+  t.alike(s.pushStore.list(s.m.hex).map((r) => r.endpoint), [live.endpoint])
+  t.alike(s.pushStore.list(s.actor.hex), [])
+  for (const d of s.delivered) t.alike(JSON.parse(decrypt(d.body, [gone, missing, live].find((x) => x.endpoint === d.url).uaPrivate, [gone, missing, live].find((x) => x.endpoint === d.url).auth)), { v: 1, kind: 'dm-wake' })
+  cleanLogs(t, s, [gone, missing, live].map((x) => x.endpoint))
+})
+
+test('relay: a capped DM wake counts the rest, rotates where the next one starts and never starts the window when nothing was queued', async (t) => {
+  const { MAX_QUEUE, MAX_IN_FLIGHT } = require('../lib/account/push-routes')
+  // A wake takes at most half the queue; member notices keep the rest.
+  const HALF = Math.floor(MAX_QUEUE / 2)
+  const token = 'ef'.repeat(32)
+  const N = HALF + 88
+  const rows = []
+  for (let i = 0; i < N; i++) {
+    const member = nodeCrypto.createHash('sha256').update('m' + (i % 50)).digest('hex')
+    rows.push({ member, endpoint: 'https://fcm.googleapis.com/fcm/send/d' + i, p256dh: 'p' + i, auth: 'a' + i })
+  }
+  const pushStore = {
+    available: () => true,
+    all: () => rows.map((r) => ({ ...r })),
+    list: (member) => rows.filter((r) => r.member === member).map(({ endpoint, p256dh, auth }) => ({ endpoint, p256dh, auth })),
+    remove: async () => ({ changed: true })
+  }
+  const sent = []
+  const held = []
+  let hold = true
+  const send = ({ subscription }) => {
+    sent.push(subscription.endpoint)
+    if (!hold) return Promise.resolve('ok')
+    return new Promise((resolve) => held.push(() => resolve('ok')))
+  }
+  const logs = []
+  const clock = { t: Date.parse('2026-11-03T12:00:00.000Z') }
+  const http = {
+    send: () => {},
+    sendError: () => { throw new Error('refused') },
+    readJsonBody: async () => ({ v: 1, kind: 'dm-wake' }),
+    checkPost: () => {},
+    RouteError: Error,
+    refuse: (code) => new Error(code),
+    fromStore: (e) => e,
+    keyedWindow: () => () => true
+  }
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    relayTokenHash: sha256(token),
+    pushStore,
+    vapid: {},
+    send,
+    log: (e) => logs.push(e),
+    now: () => clock.t,
+    http
+  })
+  const wake = () => r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  const capped = () => logs.filter((e) => e.reason === 'teto')
+
+  // First wake: half the queue is taken, the tail is counted.
+  await wake()
+  t.is(sent.length, MAX_IN_FLIGHT)
+  t.alike(capped(), [{ event: 'push', reason: 'teto', count: N - HALF }])
+  t.is(r.stats().dropped, N - HALF)
+
+  // Next window, the wake's half nearly full: only its free slots, starting
+  // where the first wake stopped.
+  clock.t += 15 * 60 * 1000
+  await wake()
+  t.is(r.stats().queued, HALF)
+  // Next window, the wake's half full: nothing queued, so the window does not
+  // start.
+  clock.t += 15 * 60 * 1000
+  await wake()
+  t.is(capped().length, 3)
+  t.is(capped()[2].count, N)
+
+  hold = false
+  while (held.length > 0) held.shift()()
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained' })
+  t.is(sent.length, HALF + MAX_IN_FLIGHT)
+  t.alike(sent.slice(HALF), rows.slice(HALF, HALF + MAX_IN_FLIGHT).map((x) => x.endpoint), 'the second wake started at the tail')
+
+  // Same instant as the refused third wake: the window it never started is
+  // open, and the fan-out continues after the second wake's rows.
+  await wake()
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained again' })
+  const fourth = sent.slice(HALF + MAX_IN_FLIGHT)
+  t.is(fourth.length, HALF)
+  t.is(fourth[0], rows[HALF + MAX_IN_FLIGHT].endpoint)
+  const later = sent.slice(HALF)
+  t.ok(rows.slice(HALF).every((x) => later.includes(x.endpoint)), 'the tail the first wake skipped is reached')
+  // And a wake inside that new window is dropped.
+  await wake()
+  t.is(logs[logs.length - 1].reason, 'descartado')
+})

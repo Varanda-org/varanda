@@ -137,7 +137,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force
+  --join --undo --private --community --force --no-dm
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -449,6 +449,8 @@ npm run demo -- --keep
 ## Operar o semeador
 
 Para quem mantém um semeador ligado: comandos de operação, saúde e métricas, serviço supervisionado (Docker Compose ou systemd) e a política de registros. Os arquivos de implantação ficam em `deploy/seeder/`.
+
+`seed --no-dm` desliga as mensagens diretas nesse semeador: ele não abre os canais `varanda/dm/1` nem `varanda/dm-stamp/1`, não guarda o conjunto de envelopes e não emite selos, e o membro vê os dois canais como sem suporte. Sem a opção, os dois canais ficam ligados.
 
 ### Comandos de operação
 

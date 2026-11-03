@@ -17,7 +17,8 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
@@ -26,7 +27,7 @@ test('method list and mutating set', (t) => {
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
@@ -1105,4 +1106,93 @@ test('unknown method and non-object params', (t) => {
 test('messages never echo the value', (t) => {
   const r = validateParams('follow.add', { key: '/home/secret' })
   t.absent(r.message.includes('/home'))
+})
+
+test('dm.* (Conversas)', (t) => {
+  const ID = 'cd'.repeat(16)
+  const nonce = 'n'.repeat(43)
+  for (const m of ['dm.enable', 'dm.pull']) {
+    ok(t, m, {}, {})
+    bad(t, m, { peer: KEY })
+  }
+  t.ok(isMutating('dm.enable'))
+  t.absent(isMutating('dm.pull'))
+
+  const AT = '2026-11-03T12:00:00.000Z'
+  const cur = { at: AT, peer: KEY }
+  t.absent(isMutating('dm.list'))
+  ok(t, 'dm.list', {}, { folder: 'inbox', limit: 30 })
+  ok(t, 'dm.list', { folder: 'request' }, { folder: 'request', limit: 30 })
+  ok(t, 'dm.list', { folder: 'inbox', limit: 1 })
+  ok(t, 'dm.list', { folder: 'request', limit: 50, before: cur }, { folder: 'request', limit: 50, before: cur })
+  for (const folder of ['Inbox', 'requests', 'blocked', '', null, 1]) bad(t, 'dm.list', { folder }, 'folder ' + folder)
+  for (const limit of [0, 51, 1.5, '30', null]) bad(t, 'dm.list', { limit }, 'limit ' + limit)
+  for (const before of [{ at: AT }, { peer: KEY }, { at: '2026-11-03', peer: KEY }, { at: AT, peer: KEY.toUpperCase() },
+    { at: AT, peer: KEY, seq: 1 }, { at: AT, key: KEY }, AT, null, []]) {
+    bad(t, 'dm.list', { before }, 'before ' + JSON.stringify(before))
+  }
+  bad(t, 'dm.list', { peer: KEY })
+
+  t.absent(isMutating('dm.lookup'))
+  ok(t, 'dm.lookup', { member: KEY }, { member: KEY })
+  bad(t, 'dm.lookup', {})
+  bad(t, 'dm.lookup', { member: KEY.toUpperCase() })
+  bad(t, 'dm.lookup', { member: KEY, peer: KEY })
+
+  t.ok(isMutating('dm.send'))
+  ok(t, 'dm.send', { to: KEY, text: 'oi' }, { to: KEY, text: 'oi' })
+  ok(t, 'dm.send', { to: KEY, text: 'x' })
+  ok(t, 'dm.send', { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID }, { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID })
+  t.is(validateParams('dm.send', { to: KEY, text: '' }).message, 'parâmetro inválido: text')
+  bad(t, 'dm.send', { to: KEY, text: 'x'.repeat(MAX_TEXT + 1) }, 'text too long')
+  bad(t, 'dm.send', { text: 'oi' })
+  bad(t, 'dm.send', { to: KEY })
+  for (const replyTo of [ID.toUpperCase(), ID.slice(1), ID + '0', KEY, null, 1]) {
+    t.is(validateParams('dm.send', { to: KEY, text: 'oi', replyTo }).message, 'parâmetro inválido: replyTo')
+  }
+  bad(t, 'dm.send', { to: KEY, text: 'oi', media: [] }, 'no photos')
+
+  t.absent(isMutating('dm.thread'))
+  ok(t, 'dm.thread', { peer: KEY }, { peer: KEY, limit: 30 })
+  ok(t, 'dm.thread', { peer: KEY, before: ID, limit: 50 }, { peer: KEY, before: ID, limit: 50 })
+  ok(t, 'dm.thread', { peer: KEY, limit: 1 })
+  bad(t, 'dm.thread', {})
+  bad(t, 'dm.thread', { peer: KEY, limit: 0 })
+  bad(t, 'dm.thread', { peer: KEY, limit: 51 })
+  bad(t, 'dm.thread', { peer: KEY, limit: 100 })
+  bad(t, 'dm.thread', { peer: KEY, before: 'x' })
+  bad(t, 'dm.thread', { peer: KEY, offset: 0 })
+
+  t.ok(isMutating('dm.set'))
+  for (const state of ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']) {
+    ok(t, 'dm.set', { peer: KEY, state }, { peer: KEY, state })
+  }
+  for (const state of ['Accepted', 'accept', 'read', '', null, true]) bad(t, 'dm.set', { peer: KEY, state }, 'state ' + state)
+  bad(t, 'dm.set', { state: 'accepted' })
+  bad(t, 'dm.set', { peer: KEY })
+
+  t.absent(isMutating('dm.seen'))
+  ok(t, 'dm.seen', { peer: KEY }, { peer: KEY })
+  bad(t, 'dm.seen', {})
+  bad(t, 'dm.seen', { peer: KEY, id: ID }, 'no read receipt by id')
+
+  const base = { nonce, target: KEY, reason: 'assedio', quote: 'mensagem' }
+  t.absent(isMutating('dm.reportSign'))
+  ok(t, 'dm.reportSign', base, { ...base, text: '' })
+  ok(t, 'dm.reportSign', { ...base, text: '😀'.repeat(280), quote: 'x'.repeat(MAX_TEXT) })
+  for (const reason of ['spam', 'assedio', 'ilegal', 'outro']) ok(t, 'dm.reportSign', { ...base, reason })
+  for (const k of ['nonce', 'target', 'reason', 'quote']) {
+    const p = { ...base }
+    delete p[k]
+    t.is(validateParams('dm.reportSign', p).message, 'parâmetro obrigatório: ' + k)
+  }
+  bad(t, 'dm.reportSign', { ...base, quote: '' }, 'empty quote')
+  bad(t, 'dm.reportSign', { ...base, quote: 'x'.repeat(MAX_TEXT + 1) }, 'quote too long')
+  bad(t, 'dm.reportSign', { ...base, text: '😀'.repeat(281) }, 'text of 281 code points')
+  for (const target of [KEY.toUpperCase(), KEY.slice(1), 1, null]) bad(t, 'dm.reportSign', { ...base, target }, 'target ' + target)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 1]) bad(t, 'dm.reportSign', { ...base, nonce: n }, 'nonce ' + n)
+  // The caller never chooses the member, the association, a signature or bytes.
+  for (const k of ['member', 'association', 'signature', 'payload', 'seq', 'id', 'key']) {
+    bad(t, 'dm.reportSign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
 })

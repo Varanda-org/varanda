@@ -7,7 +7,7 @@ const load = () => import('../src/help.js')
 test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
-    'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'entrar', 'vinculo',
+    'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'carteira'
   ].sort())
@@ -139,4 +139,20 @@ test('wallet help lists only the fees of features the mode offers', async (t) =>
   t.is(carteiraHelp(null), HELP.carteira)
   t.ok(HELP.carteira.paragraphs[0].includes('quando o serviço liberar'))
   t.absent(HELP.carteira.paragraphs.some((p) => p.includes('próximas versões') || p.includes('Quando enviar dinheiro estiver disponível')))
+})
+
+test('conversas help states the private-message rules', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.conversas.title, 'Como funcionam as Conversas')
+  t.alike([...HELP.conversas.paragraphs], [
+    'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
+    'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+    'Quem você segue aparece em Mensagens. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
+    'Aceitar ou recusar não avisa a outra pessoa.',
+    'Não há confirmação de leitura.',
+    'Bloquear interrompe as mensagens nos seus aparelhos.',
+    'Apagar remove a conversa só nos seus aparelhos.',
+    'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
+    'Comunidades são os grupos que já existem.'
+  ])
 })

@@ -899,3 +899,47 @@ test('message: the push ping is answered on its port, anything else ignored', (t
   t.execution(() => w.handlers.message({}))
   t.execution(() => w.handlers.message(null))
 })
+
+test('push: a DM wake shows the fixed sentence naming nobody; anything more is the fallback', async (t) => {
+  const w = renderedWorker()
+  const shown = await push(w, pushData({ v: 1, kind: 'dm-wake' }))
+  t.is(shown.title, 'Varanda')
+  t.is(shown.options.body, 'Pode haver uma mensagem nova na Varanda')
+  t.is(shown.options.tag, 'varanda-dm-wake')
+  t.is(shown.options.renotify, false)
+  t.alike(plain(shown.options.data), { kind: 'dm-wake' })
+  for (const bad of [{ v: 1, kind: 'dm-wake', actor: ACTOR }, { v: 1, kind: 'dm-wake', body: 'Ana mandou' }, { v: 2, kind: 'dm-wake' }, { kind: 'dm-wake' }]) {
+    const fallback = await push(w, pushData(bad))
+    t.is(fallback.options.body, FALLBACK, JSON.stringify(bad))
+    t.alike(plain(fallback.options.data), {})
+  }
+})
+
+test('notificationclick: a DM wake focuses the app and posts varanda-dm-open', async (t) => {
+  const w = renderedWorker()
+  const mine = fakeWindow(ORIGIN + '/')
+  w.windows = [mine]
+  t.ok(await click(w, { kind: 'dm-wake' }), 'closed')
+  t.is(mine.focused, 1)
+  t.alike(plain(mine.messages), [{ type: 'varanda-dm-open' }])
+  t.alike(w.opened, [])
+
+  // No window open: the launch query, read once the app starts, opens
+  // Conversas; nothing is posted to a page that may still be loading.
+  const fresh = renderedWorker()
+  t.ok(await click(fresh, { kind: 'dm-wake' }))
+  t.alike(fresh.opened, ['/?aviso=dm'])
+
+  // A window that refuses focus: the same launch query in a new window.
+  const stuck = renderedWorker()
+  const refusing = fakeWindow(ORIGIN + '/')
+  refusing.focus = async () => { throw new Error('InvalidAccessError') }
+  stuck.windows = [refusing]
+  t.ok(await click(stuck, { kind: 'dm-wake' }))
+  t.alike(stuck.opened, ['/?aviso=dm'])
+  t.alike(refusing.messages, [])
+
+  // Extra fields are not a DM wake: nothing is posted.
+  t.ok(await click(w, { kind: 'dm-wake', actor: ACTOR }))
+  t.is(mine.messages.length, 1)
+})

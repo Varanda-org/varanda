@@ -1,13 +1,31 @@
 // Web: one module-level store shared by the shell's note and Ajustes, so a tap
 // on either already holds the registration read earlier.
-/* global localStorage */
+/* global localStorage, navigator */
 
 import { useSyncExternalStore } from 'react'
 import { pushCheck, pushKey } from './account'
 import { disablePush, enablePush, getPushState, pushSupportNow } from './pushClient'
 import { createPushStore } from './push-offer'
+import { requestDmOpen } from './dm-open'
 
 const store = createPushStore({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
+
+function isDmOpen (d) {
+  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && d.type === 'varanda-dm-open'
+}
+
+// A click on the DM wake notice (scripts/sw.js) opens Conversas. Only this
+// origin's worker posts to navigator.serviceWorker.
+try {
+  const sw = typeof navigator === 'object' && navigator !== null ? navigator.serviceWorker : null
+  if (sw) {
+    sw.addEventListener('message', (e) => {
+      try {
+        if (isDmOpen(e && e.data)) requestDmOpen()
+      } catch {}
+    })
+  }
+} catch {}
 
 export function getPush () {
   return store.getSnapshot()

@@ -42,6 +42,7 @@ const noop = () => {}
 
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
+const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
 
@@ -586,6 +587,22 @@ function createSession ({
     // (docs/rpc.md 5.28). Nothing is opened, read or written.
     'notices.list': serial(async () => {
       throw new UsageError('avisos disponíveis só no navegador')
+    }),
+
+    // Conversas seal to an X25519 box key derived from the Ed25519 identity
+    // key and talk to the seeder over the browser node's link, so only the
+    // browser node offers them (docs/rpc.md 5.71 to 5.79). Nothing is opened.
+    'dm.enable': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.lookup': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.send': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pull': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.list': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.set': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.seen': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // Like report.sign (docs/rpc.md 5.20).
+    'dm.reportSign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
     }),
 
     // A photo lives in a media core only the browser node writes.

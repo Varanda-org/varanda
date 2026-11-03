@@ -55,6 +55,12 @@ const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
+// A key advertisement only (docs/protocol.md section 11): one per identity,
+// the highest gen wins.
+const DM_KEY_KEYS = ['type', 'box', 'gen', 'at']
+// The key derivation encodes gen as uint32be: a higher gen no device can
+// derive would outrank every real key.
+const MAX_DM_KEY_GEN = 4294967295
 const GROUP_JOIN_KEYS = ['type', 'group', 'writer', 'on', 'at']
 // A community writer created by a rejoin also names, in its join, the leave
 // its header's `rejoin` names (null otherwise): the diary signs the writer's
@@ -270,7 +276,12 @@ function validDeleteRanges (media) {
   return true
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key'])
+
+// Required lazily: lib/group.js requires this module at load time.
+function weakBoxKey (hex) {
+  return require('./group').isWeakBoxKey(hex)
+}
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -310,6 +321,11 @@ function check (record, seq) {
   }
   if (type === 'follow') {
     if (!hasExactKeys(record, FOLLOW_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'dm-key') {
+    if (!hasExactKeys(record, DM_KEY_KEYS) || !isHex64(record.box) || weakBoxKey(record.box)) return 'malformed'
+    if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // The creator binds the group root itself: writer may equal group.
@@ -573,6 +589,8 @@ module.exports = {
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,
+  DM_KEY_KEYS,
+  MAX_DM_KEY_GEN,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,

@@ -1289,7 +1289,168 @@ function writeFoldedFollows (storage, derived, ownHex) {
   })
 }
 
+// ---- direct messages (docs/protocol.md section 11) ----
+
+// 'dm-local': this identity's message store, local only (./dm-store.js). It
+// is never replicated, never named in an inventory, a hello or a kv list: the
+// sync opens cores from kv lists only, so this name never reaches it. Compat
+// mode with a key pair derived from the local store key, created with the
+// public key only; the pair is set in memory, as the diary's.
+const DM_LOCAL = 'dm-local'
+
+async function openDmLocal (storage, keyPair) {
+  checkKeyPair(keyPair)
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  if (!(await storage.hasCore(DM_LOCAL))) options.keyPair = { publicKey: keyPair.publicKey }
+  const { core } = await openShared(storage, DM_LOCAL, 'json', async () => {
+    const core = new Hypercore(storage.core(DM_LOCAL), options)
+    await core.ready()
+    return core
+  })
+  if (!b4a.equals(core.key, keyPair.publicKey)) {
+    await core.close()
+    return null
+  }
+  core.setKeyPair({ publicKey: keyPair.publicKey, secretKey: keyPair.secretKey })
+  return core
+}
+
+function deleteDmLocal (storage) {
+  return storage.deleteCore(DM_LOCAL)
+}
+
+const SEEN_TOKEN_RE = /^[0-9a-f]{32}$/
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
+const HEX16_RE = /^[0-9a-f]{16}$/
+const MAX_DM_SEEN = 5000
+const MAX_DM_STAMPS = 64
+
+// kv dmKey = { v: 1, gen }: the box key generation in use. No key in kv.
+async function readDmKey (storage) {
+  const data = await readKv(storage, 'dmKey')
+  return isVersioned(data) && Number.isSafeInteger(data.gen) && data.gen >= 1 && data.gen <= 0xffffffff ? { v: 1, gen: data.gen } : null
+}
+
+function writeDmKey (storage, gen) {
+  if (!Number.isSafeInteger(gen) || gen < 1 || gen > 0xffffffff) throw new TypeError('gen inválido')
+  return storage.writeJson('dmKey', { v: 1, gen })
+}
+
+// kv dmCursor = { v: 1, after }: the exclusive pool seq cursor.
+async function readDmCursor (storage) {
+  const data = await readKv(storage, 'dmCursor')
+  return isVersioned(data) && Number.isSafeInteger(data.after) && data.after >= 0 ? data.after : 0
+}
+
+function writeDmCursor (storage, after) {
+  if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('cursor inválido')
+  return storage.writeJson('dmCursor', { v: 1, after })
+}
+
+// kv dmSeen = { v: 1, ids: [hex32] }: for each message marked seen here, a
+// token keyed by the local store key over its seen key (@varanda/core
+// lib/dm-fold.js seenKey, which names the sender), so kv holds no peer key;
+// newest last, at most MAX_DM_SEEN. A bare id of an earlier form matches no
+// token and is dropped in effect (its dot may show once more).
+async function readDmSeen (storage) {
+  const data = await readKv(storage, 'dmSeen')
+  if (!isVersioned(data) || !Array.isArray(data.ids)) return []
+  return data.ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id))
+}
+
+function writeDmSeen (storage, ids) {
+  const list = [...new Set(ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id)))]
+  return storage.writeJson('dmSeen', { v: 1, ids: list.slice(-MAX_DM_SEEN) })
+}
+
+// A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
+// Stamps and queued drops are bearer values (anyone holding one can spend
+// it), so kv holds them only sealed; plaintext entries of the earlier v1
+// form are dropped on read (a top-up refills the wallet).
+const NONCE48_RE = /^[0-9a-f]{48}$/
+const MAX_SEALED_B64 = 16384
+
+function validBox (b) {
+  return b !== null && typeof b === 'object' && typeof b.nonce === 'string' && NONCE48_RE.test(b.nonce) &&
+    typeof b.box === 'string' && b.box.length <= MAX_SEALED_B64 && BASE64_RE.test(b.box)
+}
+
+function isV2 (data) {
+  return data !== null && typeof data === 'object' && !Array.isArray(data) && data.v === 2 && Array.isArray(data.items)
+}
+
+function validKids (kids) {
+  return Array.isArray(kids) ? kids.filter((k) => typeof k === 'string' && HEX16_RE.test(k)).slice(0, 2) : []
+}
+
+// kv dmStamps = { v: 2, items: [{ kid, nonce, box }], kids }: the unspent
+// wallet, each stamp's { token, sig } sealed, and the last two postage kids
+// seen (newest first). The kid alone spends nothing.
+async function readDmStamps (storage) {
+  const data = await readKv(storage, 'dmStamps')
+  if (!isV2(data)) return { items: [], kids: [] }
+  return {
+    items: data.items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(data.kids)
+  }
+}
+
+function writeDmStamps (storage, { items, kids }) {
+  return storage.writeJson('dmStamps', {
+    v: 2,
+    items: items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_DM_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(kids)
+  })
+}
+
+// kv dmCtlQueue = { v: 2, items: [{ nonce, box }] }: ctls to the own box not
+// put yet, oldest first, at most MAX_DM_CTL_QUEUE, each sealed. Inside, a
+// sealed envelope still waiting for a stamp or, once stamped, the exact
+// encoded drop (dropId and stamp inside), so a later put repeats the same
+// bytes.
+const MAX_DM_CTL_QUEUE = 32
+
+async function readDmCtlQueue (storage) {
+  const data = await readKv(storage, 'dmCtlQueue')
+  if (!isV2(data)) return []
+  return data.items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box }))
+}
+
+function writeDmCtlQueue (storage, items) {
+  return storage.writeJson('dmCtlQueue', { v: 2, items: items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box })) })
+}
+
+// Appends one sealed item -> how many old ones were dropped to fit.
+async function pushDmCtlQueue (storage, item) {
+  const items = [...await readDmCtlQueue(storage), item]
+  const dropped = Math.max(0, items.length - MAX_DM_CTL_QUEUE)
+  await writeDmCtlQueue(storage, items)
+  return dropped
+}
+
+// Every dm kv entry and the local store (reset).
+async function deleteDmData (storage) {
+  await storage.deleteCore(DM_LOCAL)
+  for (const key of ['dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'dmCtlQueue']) await storage.writeJson(key, null)
+}
+
 module.exports = {
+  DM_LOCAL,
+  openDmLocal,
+  deleteDmLocal,
+  readDmKey,
+  writeDmKey,
+  readDmCursor,
+  writeDmCursor,
+  readDmSeen,
+  writeDmSeen,
+  readDmStamps,
+  writeDmStamps,
+  deleteDmData,
+  readDmCtlQueue,
+  writeDmCtlQueue,
+  pushDmCtlQueue,
+  MAX_DM_CTL_QUEUE,
   DIARY,
   LOCKED,
   MISMATCH,

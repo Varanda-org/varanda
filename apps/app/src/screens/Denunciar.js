@@ -12,13 +12,17 @@
 // { group, writer, private } (the text is then the one the reporter sees; for
 // a private group, the locally decrypted one) and the sheet says what leaves
 // the group before anything is sent.
+// A private message: `target` = { dm: true, id, text, author } (author = the
+// sender's diary key). Only that message and the sender's key leave the
+// device, signed with dm.reportSign (docs/rpc.md 5.79).
 
 import { useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
-import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, submitReport, validateReportText, wellFormed } from '../report'
+import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
+import { LABELS as DM_LABELS } from '../dm'
 import { countChars } from '../format'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
@@ -62,11 +66,16 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     })
   }, [open, target, hosted, member])
 
-  const fromPost = target !== null && target.seq !== null && target.seq !== undefined
+  const isDm = target !== null && target.dm === true && typeof target.author === 'string'
+  const fromPost = !isDm && target !== null && target.seq !== null && target.seq !== undefined
   const postMode = fromPost && !whole
   const inGroup = fromPost && typeof target.group === 'string' && typeof target.writer === 'string'
   // The exact text that is signed and sent (lone surrogates normalized, D5).
-  const quote = postMode ? wellFormed(target.text) : ''
+  // A private message is quoted exactly as the sheet shows it, so the signed
+  // quote never carries direction marks the reporter did not see.
+  const quote = isDm
+    ? displayText(wellFormed(target.text), { multiline: true })
+    : postMode ? wellFormed(target.text) : ''
   const noteText = validateReportText(wellFormed(note))
   const shownName = target === null
     ? ''
@@ -77,19 +86,29 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     // A close, a lock or a new target while this runs makes it stale: a stale
     // run stops before signing and before sending, not only before the toast.
     const mine = seqRef.current
-    // seq omitted (and quote empty) for a report of the whole account.
-    const r = await send.run(() => submitReport({
-      member,
-      target: target.author,
-      seq: postMode ? target.seq : null,
-      writer: postMode && inGroup ? target.writer : null,
-      group: postMode && inGroup ? target.group : null,
-      reason,
-      text: noteText,
-      quote,
-      sign: (params) => node.request('report.sign', params),
-      isStale: () => mine !== seqRef.current
-    }))
+    const r = await send.run(() => isDm
+      ? submitDmReport({
+        member,
+        target: target.author,
+        reason,
+        text: noteText,
+        quote,
+        sign: (params) => node.request('dm.reportSign', params),
+        isStale: () => mine !== seqRef.current
+      })
+      // seq omitted (and quote empty) for a report of the whole account.
+      : submitReport({
+        member,
+        target: target.author,
+        seq: postMode ? target.seq : null,
+        writer: postMode && inGroup ? target.writer : null,
+        group: postMode && inGroup ? target.group : null,
+        reason,
+        text: noteText,
+        quote,
+        sign: (params) => node.request('report.sign', params),
+        isStale: () => mine !== seqRef.current
+      }))
     if (r.ok && r.value !== null && mine === seqRef.current) onSent(r.value.duplicate ? 'você já tinha denunciado isso' : 'denúncia enviada')
   }
 
@@ -105,10 +124,14 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   } else {
     body = (
       <>
-        <Text style={styles.line}>
-          {'Denunciar ' + (postMode ? 'a publicação de ' : 'a conta de ')}
-          <Text style={styles.name}>{shownName}</Text>
-        </Text>
+        {isDm
+          ? <Text style={styles.line}>Denunciar esta mensagem privada</Text>
+          : (
+            <Text style={styles.line}>
+              {'Denunciar ' + (postMode ? 'a publicação de ' : 'a conta de ')}
+              <Text style={styles.name}>{shownName}</Text>
+            </Text>
+            )}
         {fromPost
           ? (
             <View style={styles.pills}>
@@ -117,7 +140,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             </View>
             )
           : null}
-        {postMode
+        {postMode || isDm
           ? (
             <View style={styles.quoteBox}>
               <Label>Texto que será enviado</Label>
@@ -126,7 +149,8 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             )
           : null}
         {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
-        {!postMode ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
+        {isDm ? <Soft>{DM_LABELS.reportNote}</Soft> : null}
+        {!postMode && !isDm ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
         <View style={styles.pills}>
           {REASONS.map(([id, label]) => (
             <ChoicePill key={id} label={label} selected={reason === id} onPress={() => setReason(id)} />

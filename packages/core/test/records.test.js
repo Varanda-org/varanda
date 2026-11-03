@@ -803,7 +803,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1107,4 +1107,60 @@ test('validateRecord: delete records', async (t) => {
   t.is(validateRecord(trap, 7), 'malformed')
   t.is(records.validRecordCopy(hostileSeq, 7), null)
   t.alike(records.validRecordCopy(del, 7), del)
+})
+
+test('validateRecord: dm-key', (t) => {
+  const { DM_KEY_KEYS, validRecordCopy } = records
+  const { pushCandidate } = require('../lib/push-events')
+  t.alike(DM_KEY_KEYS, ['type', 'box', 'gen', 'at'])
+  const box = '9'.repeat(64)
+  const dmKey = (over = {}) => ({ type: 'dm-key', box, gen: 1, at: AT, ...over })
+  t.is(validateRecord(dmKey(), 3), null)
+  t.alike(validRecordCopy(dmKey({ gen: 2 }), 3), dmKey({ gen: 2 }), 'round trip')
+  t.alike(decodeBlock(b4a.from(JSON.stringify(dmKey()))), dmKey())
+  t.is(validateRecord({ ...dmKey(), extra: 1 }, 3), 'malformed', 'extra key')
+  t.is(validateRecord({ type: 'dm-key', box, at: AT }, 3), 'malformed', 'missing gen')
+  t.is(validateRecord(dmKey({ box: 'A'.repeat(64) }), 3), 'malformed', 'uppercase hex')
+  t.is(validateRecord(dmKey({ box: 'a'.repeat(63) }), 3), 'malformed', 'short hex')
+  t.is(validateRecord(dmKey({ box: '0'.repeat(64) }), 3), 'malformed', 'weak box key')
+  t.is(validateRecord(dmKey({ box: 'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' }), 3), 'malformed', 'weak box key, high bit set')
+  t.is(validateRecord(dmKey({ gen: 0 }), 3), 'malformed', 'gen 0')
+  t.is(validateRecord(dmKey({ gen: 4294967295 }), 3), null, 'gen 2^32 - 1')
+  t.is(validateRecord(dmKey({ gen: 4294967296 }), 3), 'malformed', 'gen above uint32')
+  t.is(validateRecord(dmKey({ gen: 1.5 }), 3), 'malformed', 'gen not an integer')
+  t.is(validateRecord(dmKey({ gen: '1' }), 3), 'malformed', 'gen string')
+  t.is(validateRecord(dmKey({ at: 'nope' }), 3), 'date-invalid', 'bad date')
+  t.is(validateRecord(dmKey(), 0), 'genesis-required', 'seq 0')
+
+  const NOW = Date.parse(AT) + 60000
+  const args = { author: K1, seq: 3, isMember: () => true, isBlocked: () => false, now: NOW }
+  t.is(pushCandidate({ ...args, record: dmKey() }), null, 'no push candidate')
+  t.is(pushCandidate({ ...args, record: dmKey({ box: K2 }) }), null, 'box key never read as a target')
+})
+
+test('dm-key: no notice row', (t) => {
+  const { createNoticeIndex } = require('../lib/notices')
+  const { createPostNoticeIndex } = require('../lib/post-notices')
+  const author = 'c'.repeat(64)
+  const followRec = { type: 'follow', key: K1, on: true, at: AT }
+  const postRec = { type: 'post', text: 'oi', at: AT, replyTo: { author: K1, seq: 1 } }
+  const dmRec = { type: 'dm-key', box: K1, gen: 1, at: AT }
+
+  const notices = createNoticeIndex()
+  notices.foldFollow(author, 1, followRec)
+  notices.foldFollow(author, 2, postRec)
+  notices.foldFollow(author, 3, dmRec)
+  notices.commit(author)
+  const rows = notices.page({ target: K1, isBlocked: () => false }).items
+  t.is(rows.length, 1, 'only the follow row')
+  t.is(rows[0].seq, 1)
+
+  const posts = createPostNoticeIndex({ verifyUsername: () => true })
+  posts.foldPost(author, 1, followRec)
+  posts.foldPost(author, 2, postRec)
+  posts.foldPost(author, 3, dmRec)
+  posts.settle(author)
+  const page = posts.pageV2({ target: K1, issuerUsable: () => true, now: Date.parse(AT) + 60000 })
+  t.is(page.items.length, 1, 'only the reply row')
+  t.is(page.items[0].seq, 2)
 })

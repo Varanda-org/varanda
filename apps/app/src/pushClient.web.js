@@ -243,14 +243,26 @@ export async function disablePush ({ node, member, registration = null, subscrip
   return { ok: false, reason: uncertain ? 'uncertain' : 'failed', unsubscribed }
 }
 
+// The DM wake click (scripts/sw.js) opens /?aviso=dm: exactly one aviso,
+// and none of the member notice fields beside it.
+export function dmLaunch (search) {
+  try {
+    const params = new URLSearchParams(typeof search === 'string' ? search : '')
+    const aviso = params.getAll('aviso')
+    return aviso.length === 1 && aviso[0] === 'dm' && !params.has('actor') && !params.has('recipient') && !params.has('ref')
+  } catch {
+    return false
+  }
+}
+
 // The notification click's query (/?aviso=...), read once at load and then
 // cleaned from the address bar, the rest of the search and the hash kept.
-// Memory only: the intent is never stored.
+// Memory only: the intent is never stored. A DM wake is { kind: 'dm' }.
 export function captureLaunch () {
   if (hostedPage !== true) return null
   try {
     const search = location.search || ''
-    const intent = parseLaunch(search)
+    const intent = dmLaunch(search) ? { kind: 'dm' } : parseLaunch(search)
     const kept = stripLaunch(search)
     if (kept !== search) {
       try {

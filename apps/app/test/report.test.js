@@ -290,3 +290,39 @@ test('a failed POST is not retried', async (t) => {
   await t.exception(submitReport({ member: M, target: T, seq: 4, writer: W, group: G, reason: 'spam', text: '', quote: 'q', sign: async () => ({ signature: SIG }), isStale: () => false }))
   t.is(calls.length, 2, 'one nonce, one POST')
 })
+
+test('dm report: dm.reportSign params and a kind dm POST with the sender as target, nothing else', async (t) => {
+  const { submitDmReport } = await load()
+  const calls = flowStub(t)
+  let params = null
+  const out = await submitDmReport({
+    member: M,
+    target: T,
+    reason: 'assedio',
+    text: 'nota',
+    quote: 'oi ' + LONE,
+    sign: async (p) => { params = p; return { signature: SIG } },
+    isStale: () => false
+  })
+  t.alike(out, { id: 'r1', duplicate: false })
+  t.alike(params, { nonce: NONCE, target: T, reason: 'assedio', text: 'nota', quote: 'oi ' + FFFD })
+  t.is(calls[1].url.endsWith('/account/report'), true)
+  const body = JSON.parse(calls[1].init.body)
+  t.alike(body, { kind: 'dm', member: M, nonce: NONCE, target: T, reason: 'assedio', text: 'nota', quote: 'oi ' + FFFD, signature: SIG })
+  for (const k of ['peer', 'seq', 'writer', 'group', 'from', 'to']) t.absent(Object.hasOwn(body, k), 'no ' + k)
+  const st = core.verifyDmReport
+  t.is(typeof st, 'function', 'core verifies this statement')
+})
+
+test('dm report: stale stops before signing; a failed POST is not retried', async (t) => {
+  const { submitDmReport } = await load()
+  let signed = 0
+  const sign = async () => { signed++; return { signature: SIG } }
+  const a = flowStub(t)
+  t.is(await submitDmReport({ member: M, target: T, reason: 'spam', text: '', quote: 'q', sign, isStale: () => true }), null)
+  t.is(signed, 0)
+  t.is(a.length, 1)
+  const b = flowStub(t, { failSend: true })
+  await t.exception(submitDmReport({ member: M, target: T, reason: 'spam', text: '', quote: 'q', sign, isStale: () => false }))
+  t.is(b.length, 2, 'one nonce, one POST')
+})

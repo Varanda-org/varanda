@@ -198,3 +198,58 @@ test('stats carry counts only', async (t) => {
   for (const value of Object.values(stats)) t.is(typeof value, 'number')
   t.absent(JSON.stringify(stats).includes(ACTOR))
 })
+
+test('sendDmWake posts exactly { v: 1, kind: dm-wake } with the bearer and logs only a token', async (t) => {
+  const fake = await fakeAccount(t)
+  const logs = []
+  const relay = relayFor(t, fake.baseUrl, { log: (e) => logs.push(e) })
+  t.is(relay.sendDmWake(), true)
+  await until(() => relay.stats().sent === 1, { name: 'sent' })
+  t.is(fake.requests.length, 1)
+  const req = fake.requests[0]
+  t.is(req.method, 'POST')
+  t.is(req.url, '/push-event')
+  t.is(req.headers.authorization, 'Bearer ' + TOKEN)
+  t.is(req.body, JSON.stringify({ v: 1, kind: 'dm-wake' }))
+  t.absent(/[0-9a-f]{64}/.test(req.body), 'no key in the wake')
+  t.alike(logs, [{ event: 'push', reason: 'dm' }])
+})
+
+test('a failed wake is never retried', async (t) => {
+  const fake = await fakeAccount(t, (req, res) => { res.statusCode = 500; res.end() })
+  const relay = relayFor(t, fake.baseUrl)
+  relay.sendDmWake()
+  await until(() => relay.stats().failed === 1, { name: '500' })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(fake.requests.length, 1)
+
+  let calls = 0
+  const broken = createPushRelay({ baseUrl: fake.baseUrl, token: TOKEN, fetch: async () => { calls++; throw new Error('ECONNREFUSED') } })
+  t.teardown(() => broken.close())
+  broken.sendDmWake()
+  await settled(broken)
+  t.is(calls, 1)
+})
+
+test('a waiting wake covers later drops; a full queue drops the wake; closed refuses', async (t) => {
+  const held = []
+  const fake = await fakeAccount(t, (req, res) => held.push(res))
+  const relay = relayFor(t, fake.baseUrl, { maxPending: 1 })
+  t.is(relay.send(event({ seq: 1 })), true)
+  await until(() => held.length === 1, { name: 'first request arrived' })
+  t.is(relay.sendDmWake(), true)
+  t.is(relay.sendDmWake(), false, 'one wake already waiting')
+  t.is(relay.stats().duplicate, 1)
+  held.shift().end()
+  await until(() => held.length === 1, { name: 'wake arrived' })
+  t.is(relay.send(event({ seq: 2 })), true)
+  t.is(relay.sendDmWake(), false, 'full queue drops the wake')
+  t.is(relay.stats().full, 1)
+  held.shift().end()
+  await until(() => held.length === 1, { name: 'third arrived' })
+  held.shift().end()
+  await settled(relay)
+  t.is(fake.requests.length, 3)
+  relay.close()
+  t.is(relay.sendDmWake(), false)
+})

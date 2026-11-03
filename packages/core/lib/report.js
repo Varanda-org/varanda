@@ -19,6 +19,14 @@
 // quote to the association's account service. It does NOT prove that the
 // reported diary contains the quote; the moderator checks that separately.
 //
+// A report of a private message (Conversas) signs 'varanda-dm-report-v1':
+// the quote is the plaintext the reporter chose and `target` is the sender's
+// diary key, so moderators can block the account. The signature proves that
+// the reporter attested this quote about this target; it does NOT prove that
+// the target sent it. No sender signature, message id or conversation is
+// bound, so the quote is unverifiable and the panel labels it 'não conferida'
+// (docs/protocol.md section 11).
+//
 // Pure: b4a, hypercore-crypto, ./safe and ./records only (loaded by the
 // browser bundle and the account service alike; no '#fs', no network).
 const b4a = require('b4a')
@@ -28,6 +36,7 @@ const { MAX_TEXT, MAX_LOG_BLOCKS } = require('./records')
 
 const PREFIX = 'varanda-report-v1'
 const PREFIX_V2 = 'varanda-report-v2'
+const PREFIX_DM = 'varanda-dm-report-v1'
 const REASONS = Object.freeze(['spam', 'assedio', 'ilegal', 'outro'])
 const REASON_LABELS = Object.freeze({ spam: 'spam', assedio: 'assédio', ilegal: 'conteúdo ilegal', outro: 'outro' })
 // Code points (Array.from length), as packages/rpc text.js charLength.
@@ -40,6 +49,9 @@ const SEQ_MAX = MAX_LOG_BLOCKS - 1
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX128 = /^[0-9a-f]{128}$/
+// An allow-list, so a field naming a message or conversation (seq, writer,
+// group, peer) can never ride along unsigned.
+const DM_KEYS = Object.freeze(['nonce', 'member', 'association', 'target', 'reason', 'text', 'quote'])
 
 function isPlainObject (o) {
   if (o === null || typeof o !== 'object') return false
@@ -159,9 +171,77 @@ function verifyReport (fields, signatureHex) {
   }
 }
 
+// Exactly the DM keys as own data properties, copied once (as push-proof.js):
+// no getter runs, nothing is inherited, and no hidden extra key rides along,
+// so the values checked are the values signed. -> the copy, or null.
+function dmSnapshot (fields) {
+  if (!isPlainObject(fields)) return null
+  if (Reflect.ownKeys(fields).length !== DM_KEYS.length) return null
+  const copy = {}
+  for (const key of DM_KEYS) {
+    const d = Object.getOwnPropertyDescriptor(fields, key)
+    if (d === undefined || !('value' in d)) return null
+    copy[key] = d.value
+  }
+  return copy
+}
+
+function checkDmFields (fields) {
+  if (fields === null) return 'fields'
+  const { nonce, member, association, target, reason, text, quote } = fields
+  if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return 'nonce'
+  if (typeof member !== 'string' || !HEX64.test(member)) return 'member'
+  if (typeof association !== 'string' || !HEX64.test(association)) return 'association'
+  if (typeof target !== 'string' || !HEX64.test(target)) return 'target'
+  if (member === target) return 'target'
+  if (typeof reason !== 'string' || !REASONS.includes(reason)) return 'reason'
+  if (!validText(text, TEXT_MAX, false)) return 'text'
+  if (!validText(quote, QUOTE_MAX, true) || quote === '') return 'quote'
+  return null
+}
+
+// { nonce, member, association, target, reason, text, quote } -> the UTF-8
+// bytes of PREFIX_DM, nonce, member, association, target, reason,
+// digest(text), digest(quote) joined by LF (no trailing LF). Throws TypeError
+// on a bad shape or on any other key.
+function dmReportPayload (fields) {
+  return dmPayloadOf(dmSnapshot(fields))
+}
+
+function dmPayloadOf (snap) {
+  const bad = checkDmFields(snap)
+  if (bad !== null) throw new TypeError('invalid dm report ' + bad)
+  const { nonce, member, association, target, reason, text, quote } = snap
+  const lines = [PREFIX_DM, nonce, member, association, target, reason, digest(text), digest(quote)]
+  return b4a.from(lines.join('\n'), 'utf8')
+}
+
+// -> lowercase hex128 Ed25519 signature by keyPair.secretKey.
+function signDmReport (fields, keyPair) {
+  const payload = dmReportPayload(fields)
+  if (keyPair === null || typeof keyPair !== 'object' || !(keyPair.secretKey instanceof Uint8Array) || keyPair.secretKey.byteLength !== 64) {
+    throw new TypeError('invalid key pair')
+  }
+  return b4a.toString(crypto.sign(payload, keyPair.secretKey), 'hex')
+}
+
+// As verifyReport, against `member`. Never throws.
+function verifyDmReport (fields, signatureHex) {
+  try {
+    const snap = dmSnapshot(fields)
+    if (checkDmFields(snap) !== null) return { ok: false, reason: 'malformed' }
+    if (typeof signatureHex !== 'string' || !HEX128.test(signatureHex)) return { ok: false, reason: 'malformed' }
+    const ok = crypto.verify(dmPayloadOf(snap), b4a.from(signatureHex, 'hex'), b4a.from(snap.member, 'hex'))
+    return ok ? { ok: true } : { ok: false, reason: 'bad-signature' }
+  } catch {
+    return { ok: false, reason: 'malformed' }
+  }
+}
+
 module.exports = {
   PREFIX,
   PREFIX_V2,
+  PREFIX_DM,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -173,5 +253,8 @@ module.exports = {
   isGroupReport,
   reportPayload,
   signReport,
-  verifyReport
+  verifyReport,
+  dmReportPayload,
+  signDmReport,
+  verifyDmReport
 }

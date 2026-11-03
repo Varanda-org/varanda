@@ -73,7 +73,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force
+  --join --undo --private --community --force --no-dm
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
@@ -180,6 +180,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     json: false,
     once: false,
     noPublish: false,
+    noDm: false,
     newList: false,
     yes: false,
     undo: false,
@@ -235,6 +236,8 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const flag of ['--help', '-h']) t.is(parse([flag]).help, true)
   t.is(parse(['--json', '--json']).json, true)
   t.is(parse(['--once']).once, true)
+  t.is(parse(['seed', '--no-dm']).noDm, true)
+  t.is(parse(['seed']).noDm, false)
   t.is(parse(['mod', 'block', upperKey, '--no-publish']).noPublish, true)
   t.alike(parse(['mod', 'block', upperKey, '--no-publish']).positionals, ['block', upperKey])
   t.is(parse(['mod', 'block', upperKey, '--new-list']).newList, true)

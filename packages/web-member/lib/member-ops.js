@@ -3519,7 +3519,100 @@ async function communityGroups (ctx, { community }) {
   }
 }
 
+// ---- direct messages (docs/protocol.md section 11) ----
+
+// The newest valid dm-key of a diary's entries ({ seq, record }): highest
+// gen, ties by highest seq; a weak box key is invalid (records.js). ->
+// { box, gen, seq } | null.
+function newestDmKey (entries) {
+  let best = null
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (e === null || typeof e !== 'object' || e.record === null || typeof e.record !== 'object') continue
+    if (e.record.type !== 'dm-key' || validateRecord(e.record, e.seq) !== null) continue
+    if (best === null || e.record.gen > best.gen || (e.record.gen === best.gen && e.seq > best.seq)) {
+      best = { box: e.record.box, gen: e.record.gen, seq: e.seq }
+    }
+  }
+  return best
+}
+
+// Readers that hold no complete replica find a dm-key by a bounded
+// newest-first scan (the session's dmLookupOf, 8 windows of 36 seqs), so the
+// owner keeps its newest dm-key within the newest DM_KEY_REFRESH_BLOCKS
+// blocks of its diary: an older one is appended again, same box and gen (a
+// refresh, not a rotation).
+const DM_KEY_REFRESH_BLOCKS = 256
+
+function dmKeyCurrent (current, length, { box, gen }) {
+  return current !== null && current.box === box && current.gen === gen && current.seq >= length - DM_KEY_REFRESH_BLOCKS
+}
+
+// Whether dmKeyEnsure would append (no write gate, nothing written).
+async function dmKeyStale (ctx, { box, gen }) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return false
+    return !dmKeyCurrent(newestDmKey(await store.readAll(diary)), diary.length, { box, gen })
+  })
+}
+
+// Appends a dm-key for { box, gen } unless the diary's newest valid one is
+// exactly that and recent (the caller ran the write gate). -> { box, gen,
+// seq | null }.
+async function dmKeyEnsure (ctx, { box, gen }) {
+  if (!isHex64(box) || !Number.isSafeInteger(gen) || gen < 1) throw new TypeError('chave de caixa inválida')
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const current = newestDmKey(await store.readAll(diary))
+    if (dmKeyCurrent(current, diary.length, { box, gen })) return { box, gen, seq: null }
+    const seq = await appendOwn(ctx, diary, { type: 'dm-key', box, gen, at: nowIso() })
+    return { box, gen, seq }
+  })
+}
+
+// The newest dm-key of `member` from local data: the own diary or a stored
+// replica. -> { box, gen } (box null only for the own diary without one), or
+// null when no stored replica holds a dm-key in what it has read (a replica
+// may still be backfilling: the session then peeks, never answers "none"
+// from a partial replica).
+// A public read: it needs no identity or key pair, and it never deletes
+// anything (an empty replica is left to the sync's own sweep).
+async function dmLookup (ctx, member) {
+  const key = String(member).toLowerCase()
+  const cores = borrowedCores(ctx)
+  let own = null
+  if (cores !== null && hex(cores.diary.key) === key) {
+    own = await readBorrowed(cores.diary, (d) => store.readAll(d))
+  } else if (cores === null) {
+    const status = await store.diaryStatus(ctx.storage)
+    if (status.exists && status.publicKey === key) {
+      const diary = await store.openDiary(ctx.storage)
+      try { own = await store.readAll(diary) } finally { await diary.close() }
+    }
+  }
+  if (own !== null) {
+    const best = newestDmKey(own)
+    return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+  }
+  let entries
+  const borrowed = cores === null ? null : cores.replica(key)
+  if (borrowed !== null) {
+    entries = await readBorrowed(borrowed, async (core) => (await store.readVisible(core)).entries)
+  } else {
+    if (!(await store.replicaExists(ctx.storage, key))) return null
+    if (cores !== null) throw needsExclusive()
+    const replica = await store.openReplica(ctx.storage, key)
+    try { entries = (await store.readVisible(replica)).entries } finally { await replica.close() }
+  }
+  const best = newestDmKey(entries)
+  return best === null ? null : { box: best.box, gen: best.gen }
+}
+
 module.exports = {
+  newestDmKey,
+  dmKeyEnsure,
+  dmKeyStale,
+  DM_KEY_REFRESH_BLOCKS,
+  dmLookup,
   GENESIS_REQUIRED,
   GROUP_NOT_FOUND,
   GROUP_FORBIDDEN,

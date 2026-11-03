@@ -469,6 +469,25 @@ function openPushStore (dataDir, { now = Date.now, readOnly = false, guard = () 
     return (state.members[member] || []).map((r) => ({ endpoint: r.endpoint, p256dh: r.p256dh, auth: r.auth }))
   }
 
+  // Every subscription of every member, for the DM wake that names nobody.
+  // The member is the row's owner for the route's re-check and removal, never
+  // part of the notice. The store already keeps one owner per endpoint; the
+  // Set (first member wins) only guards the fan-out against ever sending one
+  // browser two copies.
+  function all () {
+    usable()
+    const seen = new Set()
+    const out = []
+    for (const [member, rows] of Object.entries(state.members)) {
+      for (const r of rows) {
+        if (seen.has(r.endpoint)) continue
+        seen.add(r.endpoint)
+        out.push({ member, endpoint: r.endpoint, p256dh: r.p256dh, auth: r.auth })
+      }
+    }
+    return out
+  }
+
   function devices (member) {
     checkMember(member)
     usable()
@@ -488,6 +507,7 @@ function openPushStore (dataDir, { now = Date.now, readOnly = false, guard = () 
     removeAll,
     heal,
     list,
+    all,
     devices,
     count,
     fail () { failed = true },

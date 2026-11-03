@@ -95,7 +95,9 @@ import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
 import { Grupo } from './src/screens/Grupo'
-import { Comunidades } from './src/screens/Comunidades'
+import { Conversas } from './src/screens/Conversas'
+import { Mensagem } from './src/screens/Mensagem'
+import { DEFAULT_SEGMENT, onDmOpen, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
@@ -120,7 +122,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', comunidades: 'Comunidades' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', comunidades: 'Conversas' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -1111,7 +1113,10 @@ function Member () {
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
-  const groupsOnScreen = mode === 'hosted' && ready && (tab === 'comunidades' || (topEntry !== null && topEntry.screen === 'grupo'))
+  // The Conversas tab shows the groups only on its Comunidades segment.
+  const [convSegment, setConvSegment] = useState(DEFAULT_SEGMENT)
+  const groupsTab = tab === 'comunidades' && convSegment === 'comunidades'
+  const groupsOnScreen = mode === 'hosted' && ready && (groupsTab || (topEntry !== null && topEntry.screen === 'grupo'))
   const groupVersions = node.groupVersions || NO_VERSIONS
   useEffect(() => {
     const open = topEntry !== null && topEntry.screen === 'grupo' ? topEntry.key : null
@@ -1119,7 +1124,7 @@ function Member () {
       const base = cur.epoch === nodeEpoch ? cur.map : {}
       let map = base
       if (groupsOnScreen) {
-        const all = tab === 'comunidades' && topEntry === null
+        const all = groupsTab && topEntry === null
         for (const g of Object.keys(groupVersions)) {
           if ((all || g === open) && base[g] !== groupVersions[g]) {
             if (map === base) map = { ...base }
@@ -1129,9 +1134,54 @@ function Member () {
       }
       return map === base && cur.epoch === nodeEpoch ? cur : { epoch: nodeEpoch, map }
     })
-  }, [nodeEpoch, groupsOnScreen, tab, topEntry, groupVersions])
+  }, [nodeEpoch, groupsOnScreen, groupsTab, topEntry, groupVersions])
   const groupsBadge = mode === 'hosted' && !groupsOnScreen &&
     Object.keys(groupVersions).some((g) => groupVersions[g] !== (seenMap[g] || 0))
+
+  // --- Conversas: the tab dot, the foreground pull and the push opener ---
+  // dm.changed is only a hint: the dot is re-read from dm.list after every
+  // dm.pull attempt (node.bumpDm), on dm.changed and when a pushed screen
+  // closes. inboxUnread and requests cover every page (docs/rpc.md 5.75).
+  const [dmOpenCount, setDmOpenCount] = useState(0)
+  const [dmDot, setDmDot] = useState(false)
+  const dmReady = mode === 'hosted' && ready && !locked
+  const dmRequest = node.request
+  const bumpDm = node.bumpDm
+  const dmDotGen = useRef(0)
+  const readDmDot = useCallback(async () => {
+    const gen = ++dmDotGen.current
+    try {
+      const r = await dmRequest('dm.list', { folder: 'inbox', limit: 1 })
+      if (gen !== dmDotGen.current) return
+      setDmDot(r.inboxUnread === true || r.requests === true)
+    } catch {}
+  }, [dmRequest])
+  useEffect(() => {
+    if (dmReady) readDmDot()
+    else {
+      dmDotGen.current++
+      setDmDot(false)
+    }
+  }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  const dmWasVisible = useRef(true)
+  useEffect(() => {
+    const visibleNow = node.visible !== false
+    if (dmReady && visibleNow && !dmWasVisible.current) {
+      dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+    }
+    dmWasVisible.current = visibleNow
+  }, [dmReady, node.visible, dmRequest, bumpDm])
+  // A window that was already visible gets no visibility change, so the
+  // pull the wake is for runs here too.
+  useEffect(() => onDmOpen(() => {
+    clearStack()
+    setTab('comunidades')
+    setDmOpenCount((n) => n + 1)
+    if (dmReady) dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }), [clearStack, dmReady, dmRequest, bumpDm])
+  const openMessage = useCallback((peer) => {
+    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
+  }, [pushScreen])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
@@ -1207,6 +1257,11 @@ function Member () {
     const intent = launchRef.current
     if (intent === null || !atTabs || typeof launchKey !== 'string') return
     launchRef.current = null
+    // A DM wake names nobody: Conversas opens for whoever is unlocked.
+    if (intent.kind === 'dm') {
+      requestDmOpen()
+      return
+    }
     if (intent.recipient !== launchKey.toLowerCase()) return
     if (intent.kind === 'follow') {
       clearStack()
@@ -1567,12 +1622,13 @@ function Member () {
       onOpenMention: mentionHandler,
       onToast: showToast,
       onFollowsChanged: followsChanged,
+      onMessage: openMessage,
       onDeletedPost: deletedPost
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab]} />} />
+          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab === 'comunidades' ? 'conversas' : tab]} />} />
           : null}
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed
@@ -1650,7 +1706,7 @@ function Member () {
           {mode === 'hosted'
             ? (
               <View style={shown('comunidades')}>
-                <Comunidades key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+                <Conversas key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} onOpenThread={openMessage} showMensagens={dmOpenCount} onSegment={setConvSegment} />
               </View>
               )
             : null}
@@ -1688,6 +1744,13 @@ function Member () {
                     </View>
                   )
                 }
+                if (entry.screen === 'mensagem') {
+                  return (
+                    <View key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+                    </View>
+                  )
+                }
                 const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
                 return (
                   <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
@@ -1706,7 +1769,7 @@ function Member () {
             )
           : null}
         <Fab onPress={openComposer} />
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, comunidades: groupsBadge }} tabs={tabsFor(mode)} />}
+        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} />}
       </View>
     )
   }

@@ -276,6 +276,8 @@ self.addEventListener('fetch', (event) => {
 const PUSH_KINDS = ['follow', 'reply', 'like', 'repost']
 const PUSH_KEYS = ['v', 'kind', 'body', 'actor', 'recipient', 'ref']
 const PUSH_FALLBACK = 'Você tem um aviso novo na Varanda'
+// The DM wake names nobody (packages/core/lib/dm-wake.js DM_WAKE_TEXT).
+const DM_WAKE_TEXT = 'Pode haver uma mensagem nova na Varanda'
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
 
@@ -316,11 +318,15 @@ function validPush (p) {
   return p.v === 1 && validBody(p.body) && validTarget(p.kind, p.actor, p.recipient, p.ref)
 }
 
+function isDmWake (p) {
+  return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'dm-wake'
+}
+
 function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
-    return validPush(p) ? p : null
+    return validPush(p) || isDmWake(p) ? p : null
   } catch {
     return null
   }
@@ -328,15 +334,18 @@ function readPush (data) {
 
 async function showPush (data) {
   const p = readPush(data)
-  const options = p
-    ? {
-        body: p.body,
-        icon: '/icon-192.png',
-        tag: 'varanda-' + p.kind + '-' + (p.ref || p.actor),
-        renotify: false,
-        data: { kind: p.kind, actor: p.actor, recipient: p.recipient, ref: p.ref }
-      }
-    : { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
+  let options = { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
+  if (p && isDmWake(p)) {
+    options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
+  } else if (p) {
+    options = {
+      body: p.body,
+      icon: '/icon-192.png',
+      tag: 'varanda-' + p.kind + '-' + (p.ref || p.actor),
+      renotify: false,
+      data: { kind: p.kind, actor: p.actor, recipient: p.recipient, ref: p.ref }
+    }
+  }
   try {
     await self.registration.showNotification('Varanda', options)
   } catch {}
@@ -347,9 +356,11 @@ async function showPush (data) {
 async function openPush (data) {
   const d = isPlainObject(data) ? data : {}
   const ok = validTarget(d.kind, d.actor, d.recipient, d.ref)
-  const path = ok
-    ? '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
-    : '/'
+  // A DM wake opens Conversas; it carries nothing else to pass on.
+  const dm = Object.keys(d).length === 1 && d.kind === 'dm-wake'
+  let path = '/'
+  if (ok) path = '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
+  else if (dm) path = '/?aviso=dm'
   try {
     const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
     // Same origin is not enough: the moderation panel (/account/mod/) and
@@ -374,9 +385,12 @@ async function openPush (data) {
       }
       if (focused) {
         if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
+        if (dm) client.postMessage({ type: 'varanda-dm-open' })
         return
       }
     }
+    // A page that is still loading would miss a message: the query is read
+    // once the app starts (pushClient.web.js captureLaunch).
     await clients.openWindow(path)
   } catch {}
 }

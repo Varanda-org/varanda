@@ -5,7 +5,7 @@ const { WIRE_CODES, MAX_ERROR_MESSAGE } = require('./errors')
 const { charLength } = require('./text')
 const { isMethod, validateParams, isPlainObject, hasOwn, isId, isKey } = require('./methods')
 
-const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed'])
+const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed'])
 // 'idle': the browser node ended a continuous run because its verified
 // seeder link was settled for the lease hold (docs/rpc.md 6.1); no result.
 const STOP_REASONS = Object.freeze(['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
@@ -77,6 +77,8 @@ function validateEventData (event, data) {
   if (event === 'follows.changed') return exactKeys(data, ['count']) && Number.isSafeInteger(data.count) && data.count >= 0
   // The group whose folded state changed.
   if (event === 'groups.changed') return exactKeys(data, ['group']) && isKey(data.group)
+  // How many messages a pull filed; 0 when it only applied a ctl.
+  if (event === 'dm.changed') return exactKeys(data, ['added']) && Number.isSafeInteger(data.added) && data.added >= 0
   // sync.stopped
   if (!exactKeys(data, ['runId', 'reason'], ['result'])) return false
   if (!isId(data.runId) || !STOP_REASONS.includes(data.reason)) return false

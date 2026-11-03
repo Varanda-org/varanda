@@ -155,6 +155,10 @@ const REPORT_KEYS_V2_EARLY = [...REPORT_KEYS_V1, 'writer', 'group']
 // null otherwise and for rows written before the field existed (those only
 // ever blocked the diary).
 const REPORT_KEYS = [...REPORT_KEYS_V2_EARLY, 'blocked']
+// A private message (kind 'dm'): it sits on no diary, so there is no seq,
+// writer or group. `target` is the sender the reporter names; the quote is
+// the reporter's word only.
+const REPORT_KEYS_DM = ['id', 'at', 'kind', 'reporter', 'target', 'reason', 'text', 'quote', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note', 'blocked']
 const CHANGE_KEYS = ['id', 'op', 'member', 'by', 'at', 'reportIds', 'claimedAt']
 
 function exactKeys (obj, keys) {
@@ -169,22 +173,27 @@ function validId (id) {
 // missing any piece of evidence (signature, nonce, seq, reason...) is not a
 // row this module wrote and must never be carried into a rewrite.
 function validReportRow (id, r) {
-  if (!isPlainObject(r) || !exactKeys(r, REPORT_KEYS)) return false
-  if (r.writer === null) {
-    if (r.group !== null) return false
-  } else if (!isLowerHex(r.writer, 32) || !isLowerHex(r.group, 32) || r.seq === null) {
-    return false
+  if (!isPlainObject(r)) return false
+  if (r.kind === 'dm') {
+    if (!exactKeys(r, REPORT_KEYS_DM) || r.quote === '') return false
+  } else {
+    if (!exactKeys(r, REPORT_KEYS)) return false
+    if (r.writer === null) {
+      if (r.group !== null) return false
+    } else if (!isLowerHex(r.writer, 32) || !isLowerHex(r.group, 32) || r.seq === null) {
+      return false
+    }
+    if (r.seq === null) {
+      if (r.kind !== 'account' || r.quote !== '') return false
+    } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
+      return false
+    }
   }
   if (r.id !== id || !validId(id) || !isCanonicalIso(r.at)) return false
   if (!isLowerHex(r.target, 32) || !isLowerHex(r.reporter, 32) || r.reporter === r.target) return false
-  if (r.seq === null) {
-    if (r.kind !== 'account' || r.quote !== '') return false
-  } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
-    return false
-  }
   if (r.blocked !== null) {
     if (r.status !== 'bloquear' || !BLOCK_TARGETS.includes(r.blocked)) return false
-    if (r.blocked === 'grupo' && r.group === null) return false
+    if (r.blocked === 'grupo' && (r.kind === 'dm' || r.group === null)) return false
   }
   if (!REASONS.includes(r.reason)) return false
   if (!boundedText(r.text, TEXT_MAX, false) || !boundedText(r.quote, QUOTE_MAX, true)) return false
@@ -437,20 +446,11 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       // seq numbers, and so do two writer cores.
       const rows = Object.values(state.reports)
       for (const r of rows) {
-        if (r.status === 'aberta' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq) {
+        if (r.status === 'aberta' && r.kind !== 'dm' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq) {
           return { report: copyReport(r), duplicate: true }
         }
       }
-      // Evidence is never evicted: retention belongs to issue #38.
-      let open = 0
-      for (const r of rows) if (r.status === 'aberta') open++
-      if (open >= MAX_REPORTS || rows.length >= MAX_STORED_REPORTS) throw fail('limite')
-      const t = now()
-      let today = 0
-      for (const r of rows) {
-        if (r.reporter === reporter && Date.parse(r.at) >= t - DAY_MS) today++
-      }
-      if (today >= MAX_PER_REPORTER_DAY) throw fail('limite-denuncias')
+      const t = checkBudget(rows, reporter)
 
       const report = {
         id: newId(),
@@ -470,6 +470,63 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         note: '',
         writer,
         group,
+        blocked: null
+      }
+      const next = cloneState(state)
+      next.reports[report.id] = report
+      persist(next)
+      return { report: copyReport(report), duplicate: false }
+    })
+  }
+
+  // Evidence is never evicted: retention belongs to issue #38. One daily
+  // budget per reporter covers every kind of report. -> now
+  function checkBudget (rows, reporter) {
+    let open = 0
+    for (const r of rows) if (r.status === 'aberta') open++
+    if (open >= MAX_REPORTS || rows.length >= MAX_STORED_REPORTS) throw fail('limite')
+    const t = now()
+    let today = 0
+    for (const r of rows) {
+      if (r.reporter === reporter && Date.parse(r.at) >= t - DAY_MS) today++
+    }
+    if (today >= MAX_PER_REPORTER_DAY) throw fail('limite-denuncias')
+    return t
+  }
+
+  // A private message report (kind 'dm'). The quote is required: it is the
+  // only evidence, since the message is on no diary.
+  function addDm ({ reporter, target, reason, text = '', quote, signature, nonce } = {}) {
+    return enqueue(() => {
+      usable()
+      if (!isLowerHex(reporter, 32) || !isLowerHex(target, 32) || reporter === target) throw fail('pedido-invalido')
+      if (!REASONS.includes(reason)) throw fail('pedido-invalido')
+      if (!boundedText(text, TEXT_MAX, false)) throw fail('pedido-invalido')
+      if (!boundedText(quote, QUOTE_MAX, true) || quote === '') throw fail('pedido-invalido')
+      if (!isLowerHex(signature, 64)) throw fail('pedido-invalido')
+      if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) throw fail('pedido-invalido')
+      const rows = Object.values(state.reports)
+      for (const r of rows) {
+        if (r.status === 'aberta' && r.kind === 'dm' && r.reporter === reporter && r.target === target && r.quote === quote) {
+          return { report: copyReport(r), duplicate: true }
+        }
+      }
+      const t = checkBudget(rows, reporter)
+      const report = {
+        id: newId(),
+        at: iso(t),
+        kind: 'dm',
+        reporter,
+        target,
+        reason,
+        text,
+        quote,
+        nonce,
+        signature,
+        status: 'aberta',
+        decidedBy: null,
+        decidedAt: null,
+        note: '',
         blocked: null
       }
       const next = cloneState(state)
@@ -519,7 +576,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (!DECISIONS.includes(decision) || !validBy(by)) throw fail('pedido-invalido')
       if (!boundedText(note, NOTE_MAX, true)) throw fail('pedido-invalido')
       if (!BLOCK_TARGETS.includes(block)) throw fail('pedido-invalido')
-      if (block === 'grupo' && state.reports[id].group === null) throw fail('pedido-invalido')
+      if (block === 'grupo' && (state.reports[id].kind === 'dm' || state.reports[id].group === null)) throw fail('pedido-invalido')
       const blockKey = block === 'grupo' ? state.reports[id].group : state.reports[id].target
       const before = netBlockedCount(state)
       const next = cloneState(state)
@@ -803,7 +860,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
 }
 
 module.exports = {

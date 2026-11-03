@@ -666,6 +666,75 @@ Who started following the caller and whom the caller does not follow yet ("follo
 
 - Mutating community methods (`community.create`, `community.join`, `community.leave`, `community.admit`, `community.ban`, `community.meta`, `community.admin`, `community.removeGroup`) and `group.create` are never resent by the client; a lost answer surfaces `uncertain: true` (section 9).
 
+### Conversas (5.71 to 5.79)
+
+Private 1:1 text between two diaries (protocol section 11). Browser node only (`packages/web-member/lib/session.js`). Text only: no read receipts, no typing state, no photos, and no method below accepts a field for any of them. Every `text`, `preview` and `quote` a result carries is peer text: the UI renders it through `displayText` with `multiline: true` (section 10, section 11).
+
+- Node session (`packages/core/lib/session.js`): every `dm.*` method except `dm.reportSign` answers `USAGE` `'mensagens diretas disponíveis só no navegador'`, with or without an identity, before anything is opened, read or written (the box key derives from the passkey PRF output, which only the browser node holds). `dm.reportSign` answers `USAGE` `'assinatura disponível só no navegador'`, as `report.sign` (5.20).
+- Browser node: with no identity -> `NOT_FOUND` `'identidade não encontrada'`; locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; a key that does not match the stored diary -> `USAGE` `'passkey não corresponde ao diário guardado'`. This applies to every method below except `dm.lookup`, which reads public records only.
+
+### 5.71 `dm.enable`
+
+- Params: `{}`, nothing else. Mutating.
+- Derives the own box key pair for the current generation (protocol section 11, "Key") and appends one `dm-key` record to the own diary only when the diary has none, or its newest valid `dm-key` names another `gen` or another `box` than the derived one; otherwise appends nothing. The append goes through the write gate of section 11 (catch-up, then push), like `profile.set`.
+- Result: `{ box: hex64, gen: integer >= 1, seq: integer | null }`; `seq` is the appended block, `null` when nothing was appended. Safe to call on every start. As every mutating method it is never resent by the client; an unknown outcome surfaces `uncertain: true` and the UI calls it again only after re-reading (`dm.lookup` of the own key).
+
+### 5.72 `dm.lookup`
+
+- Params: `{ member }`, nothing else (`member` lowercase hex64). Not mutating.
+- Result: `{ box: hex64 | null, gen: integer | null }`: the newest valid `dm-key` of that diary (highest `gen`, ties by highest seq) from the local replica, else through the on-demand read of `diary.peek` (5.27, protocol section 6 "Browser node on-demand reads"). A weak box key reads as `null`. `box: null` (and `gen: null`) means the person cannot receive messages yet; the app shows `'ainda não recebe mensagens'`.
+- Opens no conversation and contacts the peer in no way; the on-demand read is the same exposure as opening a profile.
+
+### 5.73 `dm.send`
+
+- Params: `{ to, text, replyTo? }`, nothing else: `to` lowercase hex64 (the recipient's diary key); `text` `1..MAX_TEXT` (1000) code points; `replyTo` optional, an inner message id (32 lowercase hex). Mutating.
+- Seals the message to the recipient's newest box key and a self copy to the own box (two drops, each with its own `dropId` and stamp, protocol section 11 "Multi-device"), puts both on the anonymous channel `'varanda/dm/1'` and files the own copy locally once the seeder acknowledged.
+- Result: `{ id: hex32, at: ISO }` after the seeder's ack: the inner message id and its time.
+- `USAGE` messages: `to` = the own key -> `'não é possível enviar para si'`; a blocked peer -> `'você bloqueou esta pessoa'`; no valid `dm-key` for `to` -> `'esta pessoa ainda não recebe mensagens'`; no stamp left and the seeder refused more today -> `'o limite de envio de hoje acabou'`; `replyTo` not a message of this conversation -> `'responda uma mensagem desta conversa'`; a text whose sealed frame does not fit (`buildInner`) -> `'mensagem longa demais'`.
+- A lost ack, a closed link or a timeout -> `uncertain: true`; the node never resends by itself. When the link was open and the put was written but no ack came back, the node answers USAGE `'não deu para confirmar o envio'`: this message is the uncertain signal for `dm.send` (the error envelope does not carry the node's flag), and the app treats it exactly as `uncertain: true`. A user retry of the same uncertain send re-puts the SAME drop bytes once (same `dropId`, same stamp; the seeder answers a repeated identical drop as success, protocol section 11 "Seeder storage"), so a retry never makes a second message.
+
+### 5.74 `dm.pull`
+
+- Params: `{}`, nothing else. Not mutating: it reads the seeder pool and writes only the local cursor and the local (secretboxed) copies, so it is safe to repeat and must survive an uncertain answer (a periodic pull). It never sends a drop.
+- Pages the global pool on the anonymous channel from the local cursor, `DM_PAGE_MAX` = 8 drops per page, at most `DM_PULL_BUDGET_BYTES` per run, tries every drop with the own box key, files every message that opens (protocol section 11 "Local semantics") and applies every own `ctl`.
+- Result: `{ added: integer >= 0, cursor: integer >= 0, incomplete: boolean }`: `added` the messages filed, `cursor` the new exclusive seq cursor, `incomplete` true when the budget ended the run before the pool's end. Emits `dm.changed` (section 6) when it filed a message or applied a `ctl`.
+- A failed or lost answer (`TIMEOUT`, `CLOSED`, any error) may still have filed messages and applied `ctl`s before it ended. Since the method is not mutating the client gets `uncertain: false`, which here says only that a repeat is safe, not that nothing happened: the client re-reads `dm.list` (and `dm.thread` of the open conversation) after EVERY `dm.pull` attempt, success or failure, and after a reconnect. `dm.changed` is a hint, not the only signal.
+- Locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`.
+
+### 5.75 `dm.list`
+
+- Params: `{ folder?, limit?, before? }`, nothing else: `folder` `'inbox'` or `'request'`, default `'inbox'`; `limit` `1..50`, default 30; `before` optional, exactly `{ at: canonical ISO, peer: hex64 }`, the position of the oldest conversation the caller holds (the `next` of the previous page). Not mutating; local only.
+- Result: `{ conversations: [{ peer: hex64, folder: 'inbox' | 'request', preview: string, at: ISO, unread: boolean, mine: boolean }], next: { at, peer } | null, requests: boolean, inboxUnread: boolean }`. Conversations of that folder only, newest first (by `at` descending, then `peer` ascending, protocol section 11 "Local semantics"); `next` is the `before` of the following page, `null` after the last one. `requests` is true when any request conversation is unread, whatever `folder` was asked (the app shows a dot on the Pedidos entry, never a count); `inboxUnread` is true when any inbox conversation is unread, on any page, so the tab dot never depends on which page was read.
+- `preview` is the raw text of the newest kept message cut by the node to at most 140 code points on a code-point boundary, with nothing appended (the app applies `displayText` and may add its own ellipsis); `mine` says whether that message is the own one. `unread` is a boolean, never a count. A blocked conversation is not listed; a deleted or declined one only comes back with a later message.
+- Size: the worst page is 50 rows x (140 code points x 4 B + about 200 B of keys, ISO and JSON) = about 38 KB, far below `MAX_MESSAGE` (262144 B, section 2).
+
+### 5.76 `dm.thread`
+
+- Params: `{ peer, before?, limit? }`, nothing else: `peer` lowercase hex64; `before` optional, a message id (32 lowercase hex) to page older messages; `limit` `1..50`, default 30. Not mutating; local only.
+- Result: `{ messages: [{ id: hex32, from: hex64, text: string, replyTo: hex32 | null, at: ISO, mine: boolean }], next: hex32 | null, folder: 'inbox' | 'request', blocked: boolean }`, oldest first within the page; `next` is the `before` of the older page, `null` at the start of the conversation. `at` is the effective time (protocol section 11). A message id is unique only per sender: the UI keys a row by `from` and `id` together. `before` resolves to the newest kept message with that id; an id no longer kept pages from the newest message, never an empty page while messages remain. `folder` and `blocked` are this conversation's own state from the same fold as `dm.list`, so the screen never infers them from a list page; `folder` is `'request'` only when the conversation keeps a message from the peer, none of the own, and the peer is neither followed nor accepted, and a conversation with no kept message is `'inbox'` (one the person may start); while `folder` is `'request'` the UI offers Aceitar, Recusar and Bloquear instead of the composer.
+- Size: the worst page is 50 messages x (1000 code points x 4 B + about 250 B of ids, keys, ISO and JSON) = about 212 KB, below `MAX_MESSAGE` (262144 B, section 2); a larger limit would not fit.
+
+### 5.77 `dm.set`
+
+- Params: `{ peer, state }`, nothing else: `peer` lowercase hex64; `state` one of `'accepted'`, `'declined'`, `'blocked'`, `'unblocked'`, `'deleted'`. Mutating.
+- `accepted` moves a request to the inbox. `declined` hides the current request messages; a later message from that peer opens a new request. `blocked` drops future messages from that key after they open and makes `dm.send` to it refuse; `unblocked` returns the conversation to the folder its follow state gives, with the messages from the blocked period still hidden. `deleted` erases the conversation on this device and, through the `ctl`, on the member's other devices; the peer keeps its copy and the seeder deletes only by retention.
+- Every state seals one `ctl` envelope to the OWN box only (protocol section 11 "Multi-device") and NEVER sends anything to the peer.
+- Result: `{ ok: true }`. As every mutating method it is never resent by the client; an unknown outcome surfaces `uncertain: true` and the UI re-reads with `dm.list`.
+
+### 5.78 `dm.seen`
+
+- Params: `{ peer }`, nothing else (`peer` lowercase hex64). Not mutating: an idempotent local mark.
+- Clears the `unread` mark of that conversation on this device. It is not a read receipt: nothing is sent to the peer, the seeder or the member's other devices.
+- Result: `{ ok: true }`. A failed or lost answer may still have marked the conversation seen; the client re-reads `dm.list` after every attempt instead of assuming either outcome, and may repeat the call.
+
+### 5.79 `dm.reportSign`
+
+- Params: `{ nonce, target, reason, text?, quote }`, nothing else: `nonce` as `report.sign` (5.20); `target` the sender's diary key (lowercase hex64); `reason` one of `'spam'`, `'assedio'`, `'ilegal'`, `'outro'`; `text` the reporter's own words, `0..280` code points (default `''`); `quote` the chosen message's plaintext, `1..MAX_TEXT` (1000) code points. Not mutating.
+- The caller never passes the member, the association, a digest or any bytes: the node fills in `member` = its own diary key and `association` = its configured association and signs exactly the UTF-8 bytes of these eight lines joined by LF (`0x0a`), no trailing LF (`dmReportPayload`, `packages/core/lib/report.js`): `varanda-dm-report-v1`, `<nonce>`, `<member>`, `<association>`, `<target>`, `<reason>`, `<digest(text)>`, `<digest(quote)>`, with `digest` as in 5.20.
+- The report carries the sender's diary key as `target`, so moderators can act on the account, and only the one chosen message as `quote`. It never carries the sender's signature: the quote cannot be proven to a third party and the moderator sees it as `não conferida`.
+- Result: `{ signature: hex128 }`. Opens no diary, does not preempt or start a sync, appends nothing and contacts no one. Same lock rules as `report.sign` (5.20); `target` = the own key -> `USAGE` `'não é possível denunciar a própria chave'`; a statement `report.js` refuses -> `USAGE` `'denúncia inválida'`.
+- Node session: `USAGE` `'assinatura disponível só no navegador'`, as 5.20.
+
 ### Errors common to every method
 
 - The data dir held by another process, or the node session in its error state -> `LOCKED` (message `'diretório de dados em uso'` for the lock). A request reaching a closed node session -> `LOCKED` `'sessão encerrada'`.
@@ -682,9 +751,11 @@ Who started following the caller and whom the caller does not follow yet ("follo
 | `warning` | `{ line: string <= MAX_LINE chars }` |
 | `follows.changed` | `{ count: integer >= 0 }` |
 | `groups.changed` | `{ group: hex64 }` |
+| `dm.changed` | `{ added: integer >= 0 }` |
 
 - `follows.changed` (browser node only): the follow set changed from the own diary, normally another device's `follow` records folded in by the sync; `count` is the new number of follows. The UI reloads A Rua and the follow count. The browser node also restarts its continuous run once per distinct folded diary length (coalesced), so the run follows the new set; a once run is never restarted. The core node never sends it.
 - `groups.changed`: the folded state of that group changed (new posts, members, requests or metadata), from a local write or from the sync. `group` is the group root key and nothing else is carried; the UI re-reads with `group.read`, `group.info` or `group.members`. The same event is reused for communities, with the same shape: `group` is then the community root key C and the UI re-reads with `community.info`; there is no separate community event. Every community mutation emits it with `group` = C, plus for each affected group: `group.create` emits G and C; `community.join` emits C and Geral (when written); `community.leave`, `community.admit`, `community.ban` and `community.admin` emit C and every group of C in the caller's local list; `community.meta` emits C only. Sync growth of a C core emits it for C and for every local group whose header names C.
+- `dm.changed` (browser node only): a `dm.pull` (5.74) filed new messages or applied a `ctl` from another own device. `added` is the number of messages filed (0 when it only applied a `ctl`); no peer, id or text is carried. The UI re-reads with `dm.list` and, for an open conversation, `dm.thread`. The core node never sends it.
 
 - `sync.started`: emitted every time a run starts, whether from `sync.start` or from the node restarting a continuous run after a preemption (section 6.1); `once` is the run's mode. With `sync.stopped` it lets the UI track the sync state from events alone: a run is active between its `sync.started` and its `sync.stopped`.
 
@@ -764,6 +835,7 @@ The SyncResult of protocol §6 reshaped so that a `sync.stopped` event always fi
 - An error response rejects with `RpcError(code, message)`, `uncertain: false`.
 - Timeout (`timeoutMs`, per request) -> `RpcError` `TIMEOUT`; `close()` (connection lost) rejects every pending request with `CLOSED`; a `send` that throws rejects that request with `CLOSED`. For a mutating method these carry `uncertain: true` (it may or may not have happened); for a read `uncertain: false`. Requests made after `close()` reject `CLOSED`, `uncertain: false` (never sent).
 - **Never resend**: the client never retries or resends a request on its own. After an `uncertain` failure the UI re-reads state (for example `log.read`, `follow.list`, `sync.status`) before offering the action again.
+- `uncertain: false` on a non-mutating method means a repeat is safe, not that nothing changed. `dm.pull` (5.74) and `dm.seen` (5.78) write local state, and a lost answer may still have filed messages or marked a conversation seen: the client re-reads `dm.list` (and the open `dm.thread`) after every attempt of either, success or failure, and after a reconnect.
 - A request that timed out on the client may still be in flight on the server and still counts toward the server's `MAX_PENDING` until it answers.
 
 ## 10. Display rule (A8): `displayText(value, { multiline = false } = {})`
@@ -796,11 +868,12 @@ This is the `isUnsafe` set of `packages/core/lib/safe.js` plus the three marks a
 - The WebSocket is `varanda-serve`'s job (T7): it binds loopback only, checks the `Host` and `Origin` headers, requires a token in `session.open` (high-entropy, compared with `tokensEqual`), rejects binary frames, parses with `parseMessage(text, MAX_REQUEST)` and drops a client whose queued outbound bytes exceed `MAX_OUTBOUND`.
 - `tokensEqual(a, b)` is constant-time over the longer length: no early exit on the first difference or on a length mismatch; a length mismatch or a non-string gives `false`.
 - Results and messages never carry a filesystem path, a secret key, the bootstrap list or the DHT host (section 5.2, section 7).
+- Conversas (5.71 to 5.79): every `text`, `preview` and `quote` in a `dm.*` result is peer text, signed but chosen by the sender, and goes through `displayText` (section 10) before it reaches the screen. No `dm.*` result or event carries the box secret key, the local storage key, a stamp or a drop.
 - Any protocol error (section 3, a failed `session.open`, an envelope without a usable id) closes the connection; nothing is resent.
 
 ## 12. Module exports (`require('@varanda/rpc')`)
 
-`index.js` re-exports: every constant of section 2 (including `FEED_INCOMPLETE_MAX`, `PEEK_LIMIT_DEFAULT`, `PEEK_LIMIT_MAX`, `PROFILE_LIMIT_MAX`, `ENGAGEMENT_LIMIT_MAX`, `PEEK_SEQS_MAX`, `PEEK_TIMEOUT_MS`, `NOTICES_LIMIT_DEFAULT`, `NOTICES_LIMIT_MAX`, `AVATAR_SIDE`, `MAX_AVATAR_BLOCKS`, `MAX_AVATAR_BYTES`, `AVATAR_MIMES`, `GROUP_LIMIT_DEFAULT`, `GROUP_LIMIT_MAX`, `GROUP_MEMBERS_LIMIT_MAX`, `MAX_GROUP_NAME`, `MAX_GROUP_CUTS`, `MAX_GROUPS_PER_COMMUNITY` and `COMMUNITY_LIST_MAX`); `findMentions`, `mentionTokens`, `mentionSegments`, `activeMention` and `MENTION_MAX` (`lib/mentions.js`, the `@nome` grammar of protocol section 2; `NOTICE_KINDS` is not exported here, it lives in `@varanda/core` `lib/notices-v2.js`); every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error', 'idle']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/mentions.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
+`index.js` re-exports: every constant of section 2 (including `FEED_INCOMPLETE_MAX`, `PEEK_LIMIT_DEFAULT`, `PEEK_LIMIT_MAX`, `PROFILE_LIMIT_MAX`, `ENGAGEMENT_LIMIT_MAX`, `PEEK_SEQS_MAX`, `PEEK_TIMEOUT_MS`, `NOTICES_LIMIT_DEFAULT`, `NOTICES_LIMIT_MAX`, `AVATAR_SIDE`, `MAX_AVATAR_BLOCKS`, `MAX_AVATAR_BYTES`, `AVATAR_MIMES`, `GROUP_LIMIT_DEFAULT`, `GROUP_LIMIT_MAX`, `GROUP_MEMBERS_LIMIT_MAX`, `MAX_GROUP_NAME`, `MAX_GROUP_CUTS`, `MAX_GROUPS_PER_COMMUNITY` and `COMMUNITY_LIST_MAX`); `findMentions`, `mentionTokens`, `mentionSegments`, `activeMention` and `MENTION_MAX` (`lib/mentions.js`, the `@nome` grammar of protocol section 2; `NOTICE_KINDS` is not exported here, it lives in `@varanda/core` `lib/notices-v2.js`); every export of section 7; `METHODS` (array), `MUTATING` (frozen array), `isMethod`, `isMutating`, `validateParams`, `isKey`, `isRef(str, minSeq = 1)`; `EVENTS` (`['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed']`), `STOP_REASONS` (`['done', 'stopped', 'preempted', 'timeout', 'error', 'idle']`), `validateRequest`, `validateResponse`, `validateEvent`; `encodeFrame`, `createFrameDecoder`, `parseMessage`; `displayText`, `utf8ByteLength`, `utf8Encode`, `utf8Decode`, `clipText(str, max)`; `tokensEqual`; `capList`, `capSyncResult`; `createServerDispatcher`, `createClient`. Files: `lib/limits.js`, `lib/errors.js`, `lib/methods.js`, `lib/mentions.js`, `lib/envelope.js`, `lib/framing.js`, `lib/text.js`, `lib/token.js`, `lib/server.js`, `lib/client.js`.
 
 ## 13. Known limits (v1)
 
