@@ -19,7 +19,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
-- Aba Busca, com as categorias Contas (por nome ou @nome na versão hospedada; seguir por @nome ou pelo código de 64 letras e números em qualquer instalação) e Publicações (palavras nas publicações públicas, só ao enviar, só na versão hospedada). Detalhes em `docs/verification.md`, seção 71.
+- Aba Busca, com as categorias Contas (por nome ou @nome na versão hospedada; seguir por @nome na versão hospedada, ou pelo código de 64 letras e números em qualquer instalação) e Publicações (palavras nas publicações públicas, só ao enviar, só na versão hospedada). Detalhes em `docs/verification.md`, seção 71.
 - Conversas: mensagens privadas cifradas de ponta a ponta entre membros, com Pedidos de mensagem, resposta, bloqueio, denúncia de uma mensagem e aviso push sem remetente. Termos e Política na versão 11, com novo aceite.
 - Comunidades e grupos ganham "Quem pode convidar" (Só administradores ou Membros podem convidar), ajustado por quem criou ou pelos administradores e guardado num novo registro assinado, `group-invites` (versões antigas o ignoram). O convite por @nome em si vem a seguir.
 

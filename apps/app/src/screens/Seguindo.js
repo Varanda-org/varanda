@@ -37,8 +37,8 @@ import { TopBar } from '../ui/TopBar'
 import { colors, type } from '../ui/theme'
 
 const PAGE = 50
-// Pages in a row that add no filtered row before the filter stops paging.
-const DRY_MAX = 3
+// Half the names cache's retry window (5 s): see the filter below.
+const NAMES_RETRY_MS = 2500
 
 // One followed diary. The avatar and name column open the member's profile
 // (`onOpen(followKey, profile)`, optional); 'denunciar' opens the report sheet
@@ -292,38 +292,20 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   const filtering = text.trim() !== ''
   const shownKeys = useMemo(() => filterPeople(keys, profileOf, text), [keys, profileOf, text])
 
-  // A key whose profile is not known yet is not a non-match: nothing is
-  // decided (no paging, no 'nobody here') until every loaded name resolved.
-  const unresolved = useMemo(() => keys.reduce((n, k) => n + (profileOf(k) === undefined ? 1 : 0), 0), [keys, profileOf])
+  // A key whose profile is not known yet is not a non-match: while any is
+  // unknown the empty filter says so instead of 'nobody here'.
+  const unresolvedKeys = useMemo(() => keys.filter((k) => profileOf(k) === undefined), [keys, profileOf])
+  const unresolved = unresolvedKeys.length
+  const unresolvedTag = unresolvedKeys.join(',')
 
-  // A filter that leaves less than a page of rows reads on, so a match deeper
-  // in the list is found without scrolling. Every follow.list interrupts the
-  // node's sync, so it is bounded: only while this screen is on top, and it
-  // stops after DRY_MAX pages in a row that add no visible row (the person
-  // then asks for more with 'carregar mais'). A page counts once its names
-  // are known. A new filter text starts the count over.
-  const [dry, setDry] = useState(0)
-  const pageRef = useRef({ len: 0, shown: 0 })
+  // A failed profile.read is never cached and the names cache retries only on
+  // its own events, so while the filter needs names it asks again. The cache
+  // drops an ask within its 5 s retry window, so the beat is half of it.
   useEffect(() => {
-    pageRef.current = { len: keys.length, shown: shownKeys.length }
-    setDry(0)
-  }, [text])
-  useEffect(() => {
-    if (!filtering || unresolved > 0) return
-    const last = pageRef.current
-    if (keys.length === last.len) return
-    pageRef.current = { len: keys.length, shown: shownKeys.length }
-    setDry((d) => shownKeys.length > last.shown ? 0 : d + 1)
-  }, [keys.length, unresolved, shownKeys.length, filtering])
-  const paused = filtering && dry >= DRY_MAX
-  useEffect(() => {
-    if (!isTop || !active || !filtering || !loaded || atEnd || loadingMore || moreError !== '' || unresolved > 0 || paused) return
-    if (shownKeys.length < PAGE) doMore()
-  }, [isTop, active, filtering, loaded, atEnd, loadingMore, moreError, unresolved, paused, shownKeys.length])
-  const moreByHand = () => {
-    setDry(0)
-    doMore()
-  }
+    if (!filtering || unresolved === 0 || !isTop || !active) return
+    const timer = setInterval(() => resolveMany(unresolvedKeys), NAMES_RETRY_MS)
+    return () => clearInterval(timer)
+  }, [filtering, unresolvedTag, resolveMany, isTop, active])
 
   // Follows stored on this device before the update: published only after the
   // person confirms the exact list once. The provider loads the keys.
@@ -421,14 +403,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
             ? <View style={styles.note}><Soft>Carregando nomes…</Soft></View>
             : atEnd
               ? <View style={styles.note}><Soft>{FILTER_EMPTY}</Soft></View>
-              : paused
-                ? (
-                  <View style={styles.note}>
-                    <Soft>Ninguém com esse nome entre os já carregados.</Soft>
-                    <Pill label='carregar mais' onPress={moreByHand} pending={loadingMore} />
-                  </View>
-                  )
-                : <View style={styles.note}><Soft>Procurando…</Soft></View>)
+              : <View style={styles.note}><Soft>Ninguém com esse nome entre os já carregados.</Soft></View>)
         : null
 
   return (
@@ -443,7 +418,10 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
         keyExtractor={(key) => key}
         onRefresh={refresh}
         refreshing={refreshing}
-        onLoadMore={doMore}
+        // A short filtered list reads on by itself at the list's end, with the
+        // list's own pause after dry pages ('carregar mais'). Each follow.list
+        // interrupts the node's sync, so only while this screen is on top.
+        onLoadMore={isTop && active ? doMore : undefined}
         loadingMore={loadingMore}
         loadMoreError={moreError !== ''}
         atEnd={atEnd}

@@ -80,7 +80,7 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 
 ## Navegação
 
-Cinco abas + o botão de publicar + os ajustes. Onde ficam as telas:
+Quatro abas (cinco na versão hospedada) + o botão de publicar + os ajustes. Onde ficam as telas:
 
 | Tela de hoje | Onde fica |
 |---|---|

@@ -1653,7 +1653,7 @@ function Member () {
     const stacked = nav.depth(stack) > 0
     // The Diário tab's avatar: from the profiles cache, like the composer's.
     const tabMe = typeof ownKey === 'string'
-      ? { name: ownProfile ? (ownProfile.name || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
+      ? { name: ownProfile ? (ownProfile.name || ownProfile.username || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
       : null
     const screenProps = {
       ownKey,

@@ -1,4 +1,4 @@
-// The filter field of the Seguindo and Seguidores lists. It narrows only the
+// The filter field of the Seguindo list. It narrows only the
 // rows already on the list: finding any other account is the global Busca's
 // job, so a 64-hex string typed here is just text, never a follow or a lookup.
 //
