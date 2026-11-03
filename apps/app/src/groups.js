@@ -36,10 +36,6 @@ export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'en
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
 
 const HEX64 = /^[0-9a-f]{64}$/
-const LINK = /^(?:https?:\/\/[^/?#\s]+)?\/g\/([0-9a-fA-F]{64})\/?(?:[?#].*)?$/
-
-const COMMUNITY_LINK = /^(?:https?:\/\/[^/?#\s]+)?\/c\/([0-9a-fA-F]{64})\/?(?:[?#].*)?$/
-
 const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create'])
 
 // --- merging ---
@@ -187,20 +183,6 @@ export function joinLink (group) {
   if (typeof group !== 'string') return null
   const g = group.toLowerCase()
   return HEX64.test(g) ? '/g/' + g : null
-}
-
-// '/g/<hex>', optionally with an origin, a query or a hash -> the lowercase
-// key, else null. Nothing else is accepted.
-export function parseJoinLink (text) {
-  if (typeof text !== 'string') return null
-  const m = LINK.exec(text.trim())
-  return m ? m[1].toLowerCase() : null
-}
-
-export function parseCommunityJoinLink (text) {
-  if (typeof text !== 'string') return null
-  const m = COMMUNITY_LINK.exec(text.trim())
-  return m ? m[1].toLowerCase() : null
 }
 
 // --- reconciliation of an uncertain mutation ---

@@ -166,8 +166,8 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // to a Google account. Only same-origin /account/* calls (../account.js) and
 // the RPCs account.sign, cert.add and username.add; the Google page opens in
 // this same tab and nothing of the link is kept across the reload, except the
-// profile invite in sessionStorage (src/profileLink.js), which is never sent
-// to /account/*.
+// profile invite (src/profileLink.js) and a group or community link
+// (src/groupLinkStore) in tab storage, which are never sent to /account/*.
 const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
@@ -994,16 +994,18 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     }, pkFail).finally(pkEnd)
   }
 
-  // A profile invite (App.js, src/profileLink.js) on a card where no
-  // ceremony is possible (an in-app browser, an IP address): the visitor is
-  // told to open the link elsewhere and can copy it. Hosted page only.
+  // A profile invite (App.js, src/profileLink.js) or a group or community
+  // link (src/groupLink.js) on a card where no ceremony is possible (an
+  // in-app browser, an IP address): the visitor is told to open the link
+  // elsewhere and can copy it; a group or community link is never drawn as
+  // text. Hosted page only.
   const inviteHere = node.hosted === true && invite !== null
   const blockedInvite = inviteHere
     ? (
       <>
         <Notice>{displayText(invite.text)}</Notice>
-        <Soft>{OPEN_IN_BROWSER_TEXT}</Soft>
-        <ShareProfile url={invite.link} />
+        <Soft>{invite.openText || OPEN_IN_BROWSER_TEXT}</Soft>
+        <ShareProfile url={invite.link} labels={invite.labels} />
       </>
       )
     : null

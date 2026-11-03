@@ -1,10 +1,9 @@
 // Comunidades: the tab (docs/app.md). Minhas comunidades from community.list
 // (rpc 5.62), a search of public groups through the index (/index/group-search;
 // private groups never appear there) whose rows name the community of each
-// group when the index knows it, "Entrar por link" (a /c/ or /g/ link or a
-// bare key: it opens the community or the group, where the person joins) and
-// the Nova comunidade sheet. Groups live inside a community: there is no
-// "Novo grupo" here. Hosted node only: a node that is not hosted shows the
+// group when the index knows it, and the Nova comunidade sheet. There is no
+// paste field: a /c/ or /g/ link opens its screen (App.js). Groups live
+// inside a community: there is no "Novo grupo" here. Hosted node only: a node that is not hosted shows the
 // "só na versão web" note, like Avisos, and calls nothing. App.js draws the
 // top bar.
 // Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
@@ -16,7 +15,7 @@ import rpc from '@varanda/rpc'
 import { useNode } from '../node'
 import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
 import { queryPath } from '../search'
-import { COMMUNITY_JOIN_LABELS, PUBLIC_LABEL, membersLabel, parseCommunityJoinLink, parseJoinLink, roleLabel } from '../groups'
+import { COMMUNITY_JOIN_LABELS, PUBLIC_LABEL, membersLabel, roleLabel } from '../groups'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
 import { Icon } from '../ui/Icon'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -33,17 +32,6 @@ const LIST_DELAY_MS = 800
 const HEX64 = /^[0-9a-f]{64}$/
 // How many search rows get their community name looked up (one index call each).
 const NAMED_HITS = 8
-
-// A /c/ link, a /g/ link or a bare key: { kind, key } or null. A bare key is
-// taken as a group, like before; the group screen finds its community.
-export function parseEntry (text) {
-  const community = parseCommunityJoinLink(text)
-  if (community) return { kind: 'community', key: community }
-  const group = parseJoinLink(text)
-  if (group) return { kind: 'group', key: group }
-  const t = typeof text === 'string' ? text.trim().toLowerCase() : ''
-  return HEX64.test(t) ? { kind: 'group', key: t } : null
-}
 
 function communityTitle (row) {
   if (row.state !== 'ready') return 'Comunidade ainda chegando'
@@ -199,7 +187,6 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   const bottomPad = useBottomPad()
   const [list, setList] = useState({ rows: [], loaded: false, loading: false, error: '' })
   const [query, setQuery] = useState('')
-  const [link, setLink] = useState('')
   const [creating, setCreating] = useState(false)
   const search = useGroupSearch(hosted ? query : '')
   const communityNames = useCommunityNames(search.groups)
@@ -254,15 +241,6 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
     if (typeof onOpenGroup === 'function') onOpenGroup(group)
   }, [onOpenGroup])
 
-  const entry = parseEntry(link)
-
-  const go = () => {
-    if (!entry) return
-    setLink('')
-    if (entry.kind === 'community') openCommunity(entry.key)
-    else openGroup(entry.key)
-  }
-
   if (!hosted) {
     return <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
   }
@@ -298,20 +276,7 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
       {hits.length > 0 ? <View>{hits}</View> : null}
       {search.status === 'done' && search.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}
       <View style={styles.block}>
-        <Field
-          label='Entrar por link'
-          value={link}
-          onChangeText={setLink}
-          placeholder='/c/… ou /g/…'
-          mono
-          onSubmitEditing={go}
-          returnKeyType='go'
-        />
-        {link.trim() !== '' && !entry ? <Soft>Cole um link de comunidade (/c/…) ou de grupo (/g/…).</Soft> : null}
-        <View style={styles.actions}>
-          <Btn label='Entrar' onPress={go} disabled={!entry} secondary />
-          <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
-        </View>
+        <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
       </View>
       <SectionHeader>Minhas comunidades</SectionHeader>
       {list.error && list.rows.length > 0 ? <ErrorState message={list.error} onRetry={load} pending={list.loading} /> : null}
@@ -324,7 +289,7 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <Skeleton />
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body='Crie uma comunidade, busque um grupo público ou entre por um link.' />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body='Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.' />
   }
 
   const renderItem = ({ item }) => {
@@ -372,7 +337,6 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   sheet: { padding: 16, gap: 12 },
-  actions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
