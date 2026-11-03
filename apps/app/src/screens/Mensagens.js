@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -25,7 +26,7 @@ import { Avatar } from '../ui/Avatar'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
+import { layout, type } from '../ui/theme'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
 const LOCKED_TEXT = 'Desbloqueie com a passkey para ler suas mensagens.'
@@ -105,6 +106,7 @@ function NewMessage ({ onPick, onClose }) {
 
 export function Mensagens ({ onOpenThread }) {
   const node = useNode()
+  const insets = useSafeAreaInsets()
   const now = useNow(60000)
   const { request } = node
   const hosted = node.hosted === true
@@ -284,8 +286,10 @@ export function Mensagens ({ onOpenThread }) {
   else if (error) empty = <View style={styles.pad}><ErrorText>{error}</ErrorText><Pill label='tentar de novo' onPress={() => list()} /></View>
   else empty = <EmptyState icon='conversas' title={inRequests ? LABELS.emptyRequests : LABELS.emptyInbox} />
 
+  // The tab bar is drawn over the tab's area: stop the list and the "Nova
+  // mensagem" button above it, or the button sits hidden behind the tabs.
   return (
-    <View style={styles.root}>
+    <View style={[styles.root, { paddingBottom: layout.tabBar + insets.bottom }]}>
       <RefreshableList
         data={sorted}
         keyExtractor={(row) => row.peer}

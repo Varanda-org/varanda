@@ -18,3 +18,15 @@ const HOSTED_TABS = [
 export function tabsFor (mode) {
   return mode === 'hosted' ? HOSTED_TABS : TABS
 }
+
+// Screens that belong to Conversas: a private conversation, a group and a
+// community open on top of that tab.
+const CONVERSAS_SCREENS = new Set(['mensagem', 'grupo', 'comunidade'])
+
+// The floating "publicar" button belongs to posts: it is hidden on the
+// Conversas tab and on its screens. `screen` is the top of the stack, or
+// null when no screen is open above the tabs.
+export function showPostButton ({ tab, screen }) {
+  if (typeof screen === 'string') return !CONVERSAS_SCREENS.has(screen)
+  return tab !== 'comunidades'
+}
