@@ -22,6 +22,14 @@ test('Carteira.js uses no browser-only global', async (t) => {
   }
 })
 
+test('livenessCapture.native.js uses no browser-only global and never logs', async (t) => {
+  const src = read('livenessCapture.native.js')
+  for (const s of ['document.', 'window.', 'navigator', 'crypto.subtle', 'globalThis.open', 'globalThis.btoa',
+    'globalThis.document', 'isSecureContext', 'localStorage', 'sessionStorage', 'console.']) {
+    t.absent(src.includes(s), s)
+  }
+})
+
 test('account.js hashes without crypto.subtle', async (t) => {
   t.absent(read('account.js').includes('crypto.subtle'))
 })

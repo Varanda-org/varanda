@@ -78,7 +78,7 @@ export const TEXTS = Object.freeze({
   OPTIN_TITLE: 'Conta de pagamentos (opcional)',
   OPTIN_WHAT: 'Você pode abrir uma conta ligada ao seu @nome para receber e enviar dinheiro por Pix, quando o serviço liberar. É opcional: a Varanda continua funcionando igual sem ela.',
   OPTIN_KYC: 'Para abrir a conta, a lei pede uma verificação de identidade (KYC), feita pela Hodle, empresa parceira. Você vai enviar nome completo, CPF, data de nascimento, e-mail, endereço, a foto de um documento e uma selfie com prova de vida.',
-  OPTIN_DATA: 'Esses dados vão para a Hodle e seus parceiros regulados. A foto do documento vai do seu aparelho direto para a Hodle. A selfie é feita na página da Sumsub ou, quando o parceiro liberar no navegador, é um vídeo que vai direto para a AWS Rekognition e nunca passa pela Varanda. A Varanda guarda só os identificadores da conta e da carteira e o estado da verificação. A Varanda nunca guarda sua senha de 6 dígitos (PIN), seu CPF, suas fotos nem seu endereço.',
+  OPTIN_DATA: 'Esses dados vão para a Hodle e seus parceiros regulados. A foto do documento vai do seu aparelho direto para a Hodle. A selfie é feita na página da Sumsub ou, quando o parceiro liberar, dentro do app (no navegador ou no aplicativo instalado), como um vídeo que vai direto para a AWS Rekognition e nunca passa pela Varanda. A Varanda guarda só os identificadores da conta e da carteira e o estado da verificação. A Varanda nunca guarda sua senha de 6 dígitos (PIN), seu CPF, suas fotos nem seu endereço.',
   OPTIN_PERMANENT: 'A conta criada na Hodle não pode ser apagada depois.',
   OPTIN_MONEY: 'O dinheiro fica em BRLA, uma moeda digital que vale 1 real, emitida pela Avenia, numa carteira em seu nome. A Varanda não é banco e o saldo não rende juros.',
   OPTIN_FEES: 'Em alguns envios a Varanda cobra uma taxa própria, sempre mostrada antes de você confirmar, junto com a taxa do parceiro e o total.',
@@ -91,7 +91,7 @@ export const TEXTS = Object.freeze({
   LIVENESS_OPEN: 'A selfie é feita numa página da Sumsub, a empresa que faz a prova de vida para a Hodle, e abre em outra janela. Quando terminar, volte aqui e toque em Já terminei.',
   LIVENESS_IN_APP: 'A selfie com prova de vida é feita aqui mesmo, com a câmera. O vídeo vai direto para a AWS Rekognition, que faz a prova de vida para a Hodle, e nunca passa pela Varanda. Se preferir, abra a página da selfie.',
   LIVENESS_RETRY: 'A selfie não foi aceita ou expirou. Você pode tentar de novo.',
-  LIVENESS_CAMERA_DENIED: 'A câmera não foi liberada. Libere a câmera para este site ou abra a página da selfie.',
+  LIVENESS_CAMERA_DENIED: 'A câmera não foi liberada. Libere a câmera para a Varanda nos ajustes do celular, ou para este site no navegador, ou abra a página da selfie.',
   LIVENESS_PENDING: 'A selfie terminou. Toque em Confirmar a selfie para a Hodle conferir.',
   UNDER_18: 'Para abrir a conta de pagamentos, você precisa ter 18 anos ou mais.',
   UNCERTAIN_CREATE: 'Não deu para confirmar se a conta ou a carteira foi criada. Aguarde e toque em Conferir; nada é refeito sozinho.'

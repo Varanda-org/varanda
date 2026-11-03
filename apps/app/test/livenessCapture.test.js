@@ -5,7 +5,12 @@
 // neither tensorflow nor react-native is loaded. The detector stub keeps the
 // props it was rendered with on globalThis for the tests to drive. The
 // package CSS has no stub: the detector links it at run time instead.
+// src/livenessCapture.native.js gets its own stubs (the native module, the
+// credentials client, expo/fetch, the UI kit and a hooks-only React driven by
+// a small harness here), all reading their behaviour from globalThis.__nat.
 const { register } = require('node:module')
+const v8 = require('node:v8')
+const vm = require('node:vm')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -23,14 +28,38 @@ const box = globalThis.__liv = globalThis.__liv || { props: [] }
 export function Spinner (props) { box.spinner = (box.spinner || 0) + 1; return null }
 `
 const empty = 'export default {}'
+const nat = 'const nat = () => globalThis.__nat\n'
+const natStubs = {
+  react: nat + `
+export const createElement = (type, props) => ({ type, props: props || {} })
+export const useState = (v) => nat().react.useState(v)
+export const useRef = (v) => nat().react.useRef(v)
+export const useEffect = (fn, deps) => nat().react.useEffect(fn, deps)
+`,
+  '../modules/face-liveness': nat + `
+export function isAvailable () { return nat().available() }
+export function start (input) { return nat().start(input) }
+export function cancel (...args) { return nat().cancel(...args) }
+`,
+  './livenessCredentials.js': nat + 'export function createCredentialProvider (opts) { return nat().provider(opts) }\n',
+  'expo/fetch': nat + 'export function fetch (url, init) { return nat().expoFetch(url, init) }\n',
+  './ui': `
+export function Spinner () { return null }
+export function Btn () { return null }
+`
+}
 const hooks = `
 const url = (src) => 'data:text/javascript,' + encodeURIComponent(src)
 const stubs = {
   '@aws-amplify/ui-react-liveness': url(${JSON.stringify(liveness)}),
   'react-native': url(${JSON.stringify(empty)})
 }
+const natStubs = ${JSON.stringify(natStubs)}
 export async function resolve (specifier, context, next) {
   if (stubs[specifier]) return { url: stubs[specifier], shortCircuit: true }
+  if (/livenessCapture\\.native\\.js$/.test(context.parentURL || '') && natStubs[specifier]) {
+    return { url: url(natStubs[specifier]), shortCircuit: true }
+  }
   if (specifier === './ui' && /liveness(?:Capture|Detector)\\.web\\.js$/.test(context.parentURL || '')) {
     return { url: url(${JSON.stringify(ui)}), shortCircuit: true }
   }
@@ -329,15 +358,360 @@ test('capture: Spinner is the fallback while the detector loads', async (t) => {
   t.ok(src.includes('fetch: (u, i) => globalThis.fetch(u, i)'), 'fetch looked up at call time')
 })
 
-test('native stub: unavailable and renders nothing', async (t) => {
-  const { isAvailable, LivenessCapture } = await loadNative()
+// A hooks-only stand-in for React that runs effects right after a render, as
+// a committed mount would, and can replay the StrictMode double effect run.
+function mount (Component, props, { strict = false } = {}) {
+  const slots = []
+  let effects = []
+  let i = 0
+  let rendering = false
+  let dirty = false
+  let mounted = true
+  const out = { tree: null, renders: 0, lateSets: 0 }
+  globalThis.__nat.react = {
+    useState (init) {
+      const s = slots[i] || (slots[i] = { v: init })
+      i++
+      return [s.v, (v) => {
+        if (!mounted) { out.lateSets++; return }
+        s.v = typeof v === 'function' ? v(s.v) : v
+        if (rendering) dirty = true
+        else render()
+      }]
+    },
+    useRef (init) {
+      const s = slots[i] || (slots[i] = { current: init })
+      i++
+      return s
+    },
+    useEffect (fn, deps) {
+      const s = slots[i] || (slots[i] = { deps: null, cleanup: null })
+      i++
+      if (s.deps && deps && deps.length === s.deps.length && deps.every((d, k) => d === s.deps[k])) return
+      effects.push(() => {
+        if (s.cleanup) s.cleanup()
+        s.cleanup = fn() || null
+        s.deps = deps
+      })
+    }
+  }
+  function render () {
+    rendering = true
+    do {
+      dirty = false
+      i = 0
+      out.tree = Component(props)
+      out.renders++
+      const run = effects
+      effects = []
+      for (const e of run) e()
+      if (strict && out.renders === 1) {
+        for (const s of slots) if (s && s.cleanup) { s.cleanup(); s.cleanup = null }
+        for (const e of run) e()
+      }
+    } while (dirty)
+    rendering = false
+  }
+  render()
+  out.unmount = () => {
+    mounted = false
+    for (const s of slots) if (s && s.cleanup) { s.cleanup(); s.cleanup = null }
+  }
+  out.kind = () => out.tree && out.tree.type && out.tree.type.name
+  return out
+}
+
+const flush = async () => { for (let k = 0; k < 5; k++) await new Promise(setImmediate) }
+// Lets the unmount check, which waits on a timer, run.
+const settleTimers = async () => { await new Promise((resolve) => setTimeout(resolve, 10)); await flush() }
+
+function deferred () {
+  const d = {}
+  d.promise = new Promise((resolve, reject) => { d.resolve = resolve; d.reject = reject })
+  return d
+}
+
+const codeErr = (code) => Object.assign(new Error('x'), { code })
+
+// Each start of the capture builds a provider and calls it once; every call
+// hands out a fresh credentials object.
+function natSetup ({ start, provide } = {}) {
+  const seen = { factories: [], provided: [], starts: [], expoFetch: [], cancels: [] }
+  globalThis.__nat = {
+    available: () => true,
+    cancel: (...args) => { seen.cancels.push(args) },
+    expoFetch: async (url, init) => { seen.expoFetch.push({ url, init }); return { status: 200 } },
+    provider (opts) {
+      seen.factories.push(opts)
+      return async () => {
+        if (provide) return provide()
+        const c = { accessKeyId: 'AK' + seen.provided.length, secretAccessKey: 'SK', sessionToken: 'ST', expiration: new Date(2e12) }
+        seen.provided.push(c)
+        return c
+      }
+    },
+    start: (input) => {
+      seen.starts.push(input)
+      return start ? start(input) : Promise.resolve({ ok: true })
+    }
+  }
+  return seen
+}
+
+function callbacks () {
+  const calls = []
+  return {
+    calls,
+    props: {
+      sessionId: SESSION,
+      region: REGION,
+      identityPoolId: POOL,
+      onComplete: (...a) => calls.push(['complete', ...a]),
+      onError: (...a) => calls.push(['error', ...a]),
+      onCancel: (...a) => calls.push(['cancel', ...a])
+    }
+  }
+}
+
+test('native: isAvailable is the module answer', async (t) => {
+  natSetup()
+  const { isAvailable } = await loadNative()
+  t.is(isAvailable(), true, 'available when the module says so')
+  globalThis.__nat.available = () => false
   t.is(isAvailable(), false)
-  t.is(LivenessCapture({ sessionId: SESSION, region: REGION, identityPoolId: POOL }), null)
+  globalThis.__nat.available = () => { throw new Error('boom') }
+  t.is(isAvailable(), false, 'a throwing module is unavailable')
+  globalThis.__nat.available = () => 'yes'
+  t.is(isAvailable(), false, 'only a true answer counts')
+})
+
+test('native: one provider call per start, its credentials passed once to the module', async (t) => {
+  const seen = natSetup()
+  const { LivenessCapture } = await loadNative()
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props)
+  t.is(m.kind(), 'Spinner', 'spinner while credentials load')
+  await flush()
+  t.is(seen.factories.length, 1, 'one provider')
+  t.is(seen.factories[0].region, REGION)
+  t.is(seen.factories[0].identityPoolId, POOL)
+  t.is(seen.provided.length, 1, 'credentials fetched once')
+  t.is(seen.starts.length, 1, 'module started once')
+  t.alike(Object.keys(seen.starts[0]).sort(), ['credentials', 'region', 'sessionId'])
+  t.is(seen.starts[0].sessionId, SESSION)
+  t.is(seen.starts[0].region, REGION)
+  t.is(seen.starts[0].credentials, seen.provided[0], 'the provider answer, untouched')
+  t.alike(cb.calls, [['complete']], 'onComplete with no arguments')
+  await seen.factories[0].fetch('https://cognito.test/', { method: 'POST' })
+  t.is(seen.expoFetch.length, 1, 'the provider fetch is expo/fetch')
+  m.unmount()
+})
+
+test('native: credentials are not retained once the module has them', async (t) => {
+  v8.setFlagsFromString('--expose-gc')
+  const gc = vm.runInNewContext('gc')
+  let weak = null
+  natSetup({
+    provide: () => {
+      const c = { accessKeyId: 'AK', secretAccessKey: 'SK', sessionToken: 'ST', expiration: new Date(2e12) }
+      weak = new WeakRef(c)
+      return c
+    },
+    start: () => Promise.resolve({ ok: true })
+  })
+  globalThis.__nat.start = () => Promise.resolve({ ok: true })
+  const mod = await loadNative()
+  t.alike(Object.keys(mod).sort(), ['LivenessCapture', 'isAvailable'], 'no exported state')
+  const cb = callbacks()
+  const m = mount(mod.LivenessCapture, cb.props)
+  await flush()
+  t.alike(cb.calls, [['complete']])
+  t.ok(weak, 'credentials were handed out')
+  // A deref() keeps its target alive until the job ends, so gc runs in jobs
+  // that never deref.
+  for (let k = 0; k < 5; k++) { await flush(); gc() }
+  await flush()
+  t.is(weak.deref(), undefined, 'collectable while the capture is still mounted')
+  m.unmount()
+})
+
+test('native: module codes map to the web codes', async (t) => {
+  const { LivenessCapture } = await loadNative()
+  const cases = [
+    ['CANCELLED', ['cancel']],
+    ['CAMERA_DENIED', ['error', 'CAMERA_DENIED']],
+    ['SESSION_EXPIRED', ['error', 'SESSION_EXPIRED']],
+    ['UNSUPPORTED', ['error', 'UNSUPPORTED']],
+    ['INVALID', ['error', 'FAILED']],
+    ['BUSY', ['error', 'FAILED']],
+    ['FAILED', ['error', 'FAILED']],
+    ['SOMETHING_ELSE', ['error', 'FAILED']],
+    [undefined, ['error', 'FAILED']]
+  ]
+  for (const [code, want] of cases) {
+    natSetup({ start: () => Promise.reject(codeErr(code)) })
+    const cb = callbacks()
+    const m = mount(LivenessCapture, cb.props)
+    await flush()
+    t.alike(cb.calls, [want], String(code))
+    m.unmount()
+  }
+  for (const v of [null, 'text']) {
+    natSetup({ start: () => Promise.reject(v) })
+    const cb = callbacks()
+    const m = mount(LivenessCapture, cb.props)
+    await flush()
+    t.alike(cb.calls, [['error', 'FAILED']], 'rejected with ' + v)
+    m.unmount()
+  }
+})
+
+test('native: a credentials failure is FAILED and never starts the module', async (t) => {
+  const { LivenessCapture } = await loadNative()
+  for (const code of ['CREDENTIALS', 'TIMEOUT', 'CANCELLED', 'CAMERA_DENIED']) {
+    const seen = natSetup({ provide: () => Promise.reject(codeErr(code)) })
+    const cb = callbacks()
+    const m = mount(LivenessCapture, cb.props)
+    await flush()
+    t.is(seen.starts.length, 0, code + ': no start')
+    t.alike(cb.calls, [['error', 'FAILED']], code)
+    t.is(m.kind(), 'Spinner', code + ': no retry button of its own')
+    m.unmount()
+  }
+})
+
+test('native: a double effect run starts once and still delivers', async (t) => {
+  const seen = natSetup()
+  const { LivenessCapture } = await loadNative()
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props, { strict: true })
+  await flush()
+  t.is(seen.provided.length, 1, 'credentials once')
+  t.is(seen.starts.length, 1, 'start once')
+  t.alike(cb.calls, [['complete']])
+  m.unmount()
+})
+
+test('native: after CAMERA_DENIED a tap on Tentar de novo starts again with fresh credentials', async (t) => {
+  const answers = [deferred(), deferred(), deferred()]
+  let n = 0
+  const seen = natSetup({ start: () => answers[n++].promise })
+  const { LivenessCapture } = await loadNative()
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props)
+  await flush()
+  t.is(m.kind(), 'Spinner', 'spinner while the native screen is up')
+  answers[0].reject(codeErr('CAMERA_DENIED'))
+  await flush()
+  t.alike(cb.calls, [['error', 'CAMERA_DENIED']])
+  t.is(m.kind(), 'Btn', 'retry button')
+  t.is(m.tree.props.label, 'Tentar de novo')
+  await flush()
+  t.is(seen.starts.length, 1, 'never retried on its own')
+  const press = m.tree.props.onPress
+  press()
+  press()
+  t.is(m.kind(), 'Spinner', 'spinner again')
+  await flush()
+  t.is(seen.provided.length, 2, 'fresh credentials, one fetch for two taps')
+  t.is(seen.factories.length, 2, 'a new provider')
+  t.is(seen.starts.length, 2, 'one new start')
+  t.not(seen.starts[1].credentials, seen.starts[0].credentials, 'not the first credentials')
+  t.is(seen.starts[1].credentials, seen.provided[1])
+  answers[1].resolve({ ok: true })
+  await flush()
+  t.alike(cb.calls, [['error', 'CAMERA_DENIED'], ['complete']])
+  m.unmount()
+})
+
+test('native: a result after unmount calls nothing', async (t) => {
+  const { LivenessCapture } = await loadNative()
+  for (const settle of [(d) => d.resolve({ ok: true }), (d) => d.reject(codeErr('CAMERA_DENIED')), (d) => d.reject(codeErr('CANCELLED'))]) {
+    const d = deferred()
+    natSetup({ start: () => d.promise })
+    const cb = callbacks()
+    const m = mount(LivenessCapture, cb.props)
+    await flush()
+    m.unmount()
+    settle(d)
+    await flush()
+    t.alike(cb.calls, [], 'no callback')
+    t.is(m.lateSets, 0, 'no state update')
+  }
+  const slow = deferred()
+  const seen = natSetup({ provide: () => slow.promise })
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props)
+  m.unmount()
+  slow.resolve({ accessKeyId: 'AK', secretAccessKey: 'SK', sessionToken: 'ST', expiration: new Date(2e12) })
+  await flush()
+  t.alike(cb.calls, [], 'credentials after unmount: no callback')
+  t.is(seen.starts.length, 0, 'the native screen never opens after the capture left')
+})
+
+test('native: a real unmount during start closes the native screen once', async (t) => {
+  await settleTimers() // an earlier test's unmount check must not land here
+  const d = deferred()
+  const seen = natSetup({ start: () => d.promise })
+  const { LivenessCapture } = await loadNative()
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props)
+  await flush()
+  t.is(seen.starts.length, 1, 'the native screen is up')
+  t.is(seen.cancels.length, 0, 'nothing closed while mounted')
+  m.unmount()
+  await settleTimers()
+  t.alike(seen.cancels, [[]], 'cancel once, no arguments')
+  d.reject(codeErr('CANCELLED'))
+  await settleTimers()
+  t.alike(cb.calls, [], 'the CANCELLED that follows calls no callback')
+  t.is(m.lateSets, 0, 'no state update')
+  t.is(seen.cancels.length, 1, 'still once')
+  t.is(seen.starts.length, 1, 'never reopened')
+})
+
+test('native: a StrictMode replay never closes the native screen', async (t) => {
+  await settleTimers()
+  const d = deferred()
+  const seen = natSetup({ start: () => d.promise })
+  const { LivenessCapture } = await loadNative()
+  const cb = callbacks()
+  const m = mount(LivenessCapture, cb.props, { strict: true })
+  await settleTimers()
+  t.is(seen.starts.length, 1, 'started once')
+  t.is(seen.cancels.length, 0, 'the replay cleanup does not cancel')
+  d.resolve({ ok: true })
+  await settleTimers()
+  t.alike(cb.calls, [['complete']], 'the result still arrives')
+  m.unmount()
+  await settleTimers()
+  t.is(seen.cancels.length, 0, 'nothing running at unmount')
+})
+
+test('native: an unmount with nothing running never cancels', async (t) => {
+  await settleTimers()
+  const { LivenessCapture } = await loadNative()
+  for (const answer of [() => Promise.resolve({ ok: true }), () => Promise.reject(codeErr('CAMERA_DENIED')), () => Promise.reject(codeErr('CANCELLED'))]) {
+    const seen = natSetup({ start: answer })
+    const cb = callbacks()
+    const m = mount(LivenessCapture, cb.props)
+    await settleTimers()
+    t.is(cb.calls.length, 1, 'the attempt finished')
+    m.unmount()
+    await settleTimers()
+    t.is(seen.cancels.length, 0, 'no cancel after ' + cb.calls[0][0])
+  }
+})
+
+test('native: source keeps credentials in the call frame, no amplify, no CSS', async (t) => {
   const src = fs.readFileSync(path.join(SRC, 'livenessCapture.native.js'), 'utf8')
-  t.absent(/aws/i.test(src), 'no aws string')
-  t.absent(src.includes('accessKeyId'), 'no accessKeyId string')
-  t.absent(src.includes('livenessCredentials'), 'no credentials import')
-  t.absent(src.includes('import '), 'no imports at all')
+  t.absent(/@aws-amplify|aws-amplify/.test(src), 'no amplify')
+  t.absent(/(?:from|import\s*\(?|require\s*\()\s*['"][^'"]+\.css['"]/.test(src), 'no CSS')
+  t.absent(/^(?:let|var)\s/m.test(src), 'no module-level variable')
+  t.absent(/use(?:Ref|State)\([^)]*credentials/.test(src), 'no ref or state for credentials')
+  t.absent(/\.current\s*=\s*credentials|setState|console\./.test(src), 'credentials never stored or logged')
+  t.ok(/from '\.\.\/modules\/face-liveness'/.test(src), 'the native module')
+  t.ok(/from 'expo\/fetch'/.test(src), 'expo/fetch')
 })
 
 function sources (dir) {

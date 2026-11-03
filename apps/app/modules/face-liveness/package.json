@@ -1,0 +1,7 @@
+{
+  "name": "face-liveness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS Face Liveness capture with the official Amplify UI SDKs for the Varanda app",
+  "main": "index.js"
+}
