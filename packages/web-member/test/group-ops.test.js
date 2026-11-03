@@ -13,15 +13,148 @@ const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS } = grp
 const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { GROUP_LIMIT_DEFAULT } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
-const store = require('../lib/node-store')
-const ops = require('../lib/member-ops')
 
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
+}
+
+const realStore = require('../lib/node-store')
+const memberOps = require('../lib/member-ops')
+
+// Protocol v2: every group lives in a community. These fixtures give each
+// group creator one open community (made with its first group, Geral
+// included) and make every member a member of the group's community before
+// it joins or binds a writer there (the community root and its creator's
+// diary copied in, as a sync would bring them). The kv list the tests read
+// (store.readGroupWriters) leaves the community entries and Geral out;
+// realStore shows them.
+const ownCommunity = new Map() // storage -> community key
+const owners = new Map() // community -> { storage, ownHex }
+const groupCommunity = new Map() // group -> community
+const generals = new Set()
+
+async function copyCore (fromStorage, toStorage, key) {
+  const source = await realStore.openGroupCoreReadOnly(fromStorage, key)
+  if (source === null) return
+  const target = await realStore.openGroupReplica(toStorage, key)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    if (source.length > 0) await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+  await realStore.addGroupReplica(toStorage, key)
+}
+
+async function copyOwnDiary (owner, toStorage) {
+  const source = await realStore.openDiary(owner.storage)
+  const target = await realStore.openReplica(toStorage, owner.ownHex)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+}
+
+// The community cores `from` writes or holds as a member (its own root or
+// CW, and the root of a community it joined) go along with any group core.
+async function copyCommunityCores (fromStorage, toStorage) {
+  for (const e of await realStore.readGroupWriters(fromStorage)) {
+    if (e.kind !== 'community') continue
+    await copyCore(fromStorage, toStorage, e.key)
+    if (e.key !== e.group) await copyCore(fromStorage, toStorage, e.group)
+  }
+}
+
+// A full catalogue (Geral and 31 groups) moves on to a new community.
+async function ensureCommunity (ctx) {
+  const current = ownCommunity.get(ctx.storage)
+  if (current !== undefined && current.groups < grp.MAX_GROUPS_PER_COMMUNITY - 1) {
+    current.groups++
+    return current.community
+  }
+  const { community, group } = await memberOps.communityCreate(ctx, { name: 'Bairro', join: 'open' })
+  ownCommunity.set(ctx.storage, { community, groups: 1 })
+  owners.set(community, { storage: ctx.storage, ownHex: hex(ctx.keyPair.publicKey) })
+  generals.add(group)
+  return community
+}
+
+function canWrite (ctx) {
+  return ctx.keyPair !== null && ctx.keyPair !== undefined && typeof ctx.groupKeyPair === 'function'
+}
+
+async function enterCommunity (ctx, community) {
+  const owner = owners.get(community)
+  if (owner === undefined || owner.storage === ctx.storage || !canWrite(ctx)) return
+  await copyCore(owner.storage, ctx.storage, community)
+  await copyOwnDiary(owner, ctx.storage)
+  const own = (await realStore.readGroupWriters(ctx.storage)).find((e) => e.group === community)
+  let left = own === undefined
+  if (!left) {
+    const core = await realStore.openGroupCoreReadOnly(ctx.storage, own.key)
+    try {
+      left = core === null || (await realStore.readAll(core)).some((x) => x.record && x.record.type === 'group-leave')
+    } finally {
+      if (core !== null) await core.close()
+    }
+  }
+  if (left) await memberOps.communityJoin(ctx, { community })
+}
+
+// The own community writer of `m` in the community of `group` (the
+// community root for its creator), entering it first.
+async function cwOf (m, group) {
+  const community = groupCommunity.get(group)
+  await enterCommunity(m.ctx, community)
+  return (await realStore.readGroupWriters(m.storage)).find((e) => e.group === community).key
+}
+
+// A group-writer header of m's diary in `group` naming m's community writer.
+async function writerFor (m, group, fields = {}) {
+  return grp.writerHeader({ group, diary: m.ownHex, member: await cwOf(m, group), ...fields })
+}
+
+const ops = {
+  ...memberOps,
+  async groupCreate (ctx, params) {
+    const community = params.community || await ensureCommunity(ctx)
+    const res = await memberOps.groupCreate(ctx, { ...params, community })
+    groupCommunity.set(res.group, community)
+    return res
+  },
+  async groupJoin (ctx, params) {
+    const community = groupCommunity.get(String(params.group).toLowerCase())
+    if (community === undefined || !canWrite(ctx)) return memberOps.groupJoin(ctx, params)
+    await enterCommunity(ctx, community)
+    return memberOps.groupJoin(ctx, { community, ...params })
+  },
+  // The fixture's Geral groups are left out of the list and its total.
+  async groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {}) {
+    const all = (await memberOps.groupList(ctx, { offset: 0, limit: Infinity })).groups.filter((g) => !generals.has(g.group))
+    return { groups: all.slice(offset, offset + limit), total: all.length }
+  }
+}
+
+const store = {
+  ...realStore,
+  readGroupWriters: async (storage) => (await realStore.readGroupWriters(storage)).filter((e) => e.kind !== 'community' && !generals.has(e.group))
 }
 
 function call (file, method, ...args) {
@@ -98,6 +231,7 @@ async function shareGroupCore (from, to, key) {
     await dst.close()
   }
   await store.addGroupReplica(to.storage, key)
+  await copyCommunityCores(from.storage, to.storage)
 }
 
 // Copies `from`'s own diary into `to` as a followed replica.
@@ -126,12 +260,12 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.is(entries[0].key, group, 'the creator writes the root')
   const kp = await groupKeyPairFromPrf(a.prf, new Uint8Array(b4a.from(entries[0].nonce, 'hex')))
   t.is(hex(kp.publicKey), group, 'key deterministic from (PRF, nonce)')
-  const join = (await diaryRecords(a)).find((r) => r.type === 'group-join')
+  const join = (await diaryRecords(a)).find((r) => r.type === 'group-join' && r.group === group)
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', communities: [], visibility: 'public' })
-  t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1 }], total: 1 })
+  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public' })
+  t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
   const files = []
@@ -194,7 +328,7 @@ test('join, post and read across two members match the fold', async (t) => {
   t.is(hex((await groupKeyPairFromPrf(b.prf, new Uint8Array(b4a.from(entries[0].nonce, 'hex')))).publicKey), w, 'writer key from its nonce')
   t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' }, 'idempotent')
   t.alike(await store.readGroupWriters(b.storage), entries, 'no second writer')
-  t.is((await diaryRecords(b)).filter((r) => r.type === 'group-join').length, 1, 'one join record')
+  t.is((await diaryRecords(b)).filter((r) => r.type === 'group-join' && r.group === group).length, 1, 'one join record')
 
   t.is((await ops.groupPost(b.ctx, { group, text: 'oi' })).seq, 1)
   const bView = await ops.groupRead(b.ctx, { group })
@@ -277,7 +411,7 @@ test('leave and rejoin: the leave stays in the old writer, the new one names it'
   t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
   t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' }, 'a second leave writes nothing')
   t.is((await ops.groupInfo(b.ctx, { group })).role, 'left')
-  const joins = (await diaryRecords(b)).filter((r) => r.type === 'group-join')
+  const joins = (await diaryRecords(b)).filter((r) => r.type === 'group-join' && r.group === group)
   t.alike(joins.map((j) => [j.writer, j.on]), [[w1, true], [w1, false]])
   t.ok(await store.groupCoreExists(b.storage, w1), 'no local core deleted')
 
@@ -399,7 +533,7 @@ test('a leave from another device of the diary ends this device writer too', asy
   const kp = await groupKeyPairFromPrf(a.prf, new Uint8Array(crypto.randomBytes(32)))
   const other = await store.openGroupWriter(a.storage, kp)
   const otherKey = hex(other.key)
-  await store.appendGroupRecord(other, grp.writerHeader({ group, diary: a.ownHex }), { root: false })
+  await store.appendGroupRecord(other, await writerFor(a, group), { root: false })
   await store.appendGroupRecord(other, grp.groupLeave({}), { root: false })
   await other.close()
   await store.addGroupReplica(a.storage, otherKey)
@@ -419,7 +553,10 @@ async function otherDevice (m, group, records) {
   const kp = await groupKeyPairFromPrf(m.prf, new Uint8Array(crypto.randomBytes(32)))
   const core = await store.openGroupWriter(m.storage, kp)
   const key = hex(core.key)
-  for (const record of records) await store.appendGroupRecord(core, record, { root: false })
+  for (let record of records) {
+    if (record.type === 'group-writer' && record.member === null) record = { ...record, member: await cwOf(m, group) }
+    await store.appendGroupRecord(core, record, { root: false })
+  }
   await core.close()
   await store.addGroupReplica(m.storage, key)
   const diary = await store.openDiary(m.storage, m.ctx.keyPair)
@@ -461,6 +598,10 @@ test('a leave orders after another device rejoin whose clock is ahead', async (t
   const ahead = new Date(Date.now() + 3600000).toISOString()
   await otherDevice(a, group, [grp.writerHeader({ group, diary: a.ownHex, rejoin: { writer: o1, seq: 1 }, at: ahead })])
   t.is((await ops.groupInfo(a.ctx, { group })).state, 'member', 'the other device rejoined')
+  // The other device's leave (its cuts omit this device's writer) retired
+  // that writer in the fold: this device joins again before it leaves.
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'oi' }), /sem permissão no grupo/, 'the retired writer no longer writes')
+  t.alike(await ops.groupJoin(a.ctx, { group }), { state: 'member' })
   t.alike(await ops.groupLeave(a.ctx, { group }), { state: 'left' })
   t.is((await ops.groupInfo(a.ctx, { group })).state, 'left', 'the fold agrees')
 })
@@ -478,12 +619,21 @@ test('moderation orders after another device rejoin whose clock is ahead', async
   await shareGroupCore(a, b, group)
   const o1 = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupLeave({})])
   const ahead = new Date(Date.now() + 3600000).toISOString()
-  await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex, rejoin: { writer: o1, seq: 1 }, at: ahead })])
+  const o2 = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex, rejoin: { writer: o1, seq: 1 }, at: ahead })])
   t.is((await ops.groupInfo(b.ctx, { group })).role, 'admin', 'the other device rejoined')
+  // The other device's leave retired this device's writer: it joins again
+  // and the creator grants the new writer.
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w2 = (await store.readGroupWriters(b.storage))[0].key
+  t.not(w2, w)
+  for (const key of [o1, o2, w2]) await shareGroupCore(b, a, key)
+  await shareDiary(b, a)
+  await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
+  await shareGroupCore(a, b, group)
   const stranger = 'ab'.repeat(32)
   t.alike(await ops.groupBan(b.ctx, { group, member: stranger, on: true }), { ok: true })
   t.alike(await ops.groupBan(b.ctx, { group, member: stranger, on: false }), { ok: true }, 'the ban took effect')
-  const core = await store.openGroupCoreReadOnly(b.storage, w)
+  const core = await store.openGroupCoreReadOnly(b.storage, w2)
   const ban = JSON.parse(b4a.toString(await core.get(1)))
   await core.close()
   t.ok(ban.seen !== null, 'the ban names the fold last node')
@@ -585,22 +735,29 @@ test('a group operation reads only that group\'s cores and the diaries binding t
   await shareGroupCore(b, a, wOther)
   await shareDiary(b, a)
   await store.writeFollows(a.storage, [b.ownHex])
-  const read = store.readAll
+  // Group cores are read with readBlocks, diaries with readAll.
+  const read = realStore.readAll
+  const readBlocks = realStore.readBlocks
   const lengths = []
-  store.readAll = async (core) => {
+  realStore.readAll = async (core) => {
     lengths.push(core.length)
     return read(core)
+  }
+  realStore.readBlocks = async (core) => {
+    lengths.push(core.length)
+    return readBlocks(core)
   }
   let info
   try {
     info = await ops.groupInfo(a.ctx, { group })
   } finally {
-    store.readAll = read
+    realStore.readAll = read
+    realStore.readBlocks = readBlocks
   }
   t.is(info.members, 1, 'B\'s diary binds no core of this group here')
   // The own diary and this group's root: never B's diary nor the writer
   // core of the other group.
-  t.is(lengths.length, 2, 'only the own diary and the root are decoded')
+  t.is(lengths.length, 4, 'only the own diary, the root, the community root and B\'s CW are decoded')
   t.is((await ops.groupInfo(a.ctx, { group: other })).members, 2, 'the other group still reads B')
 })
 
@@ -653,21 +810,24 @@ test('kv caps: at most 64 groups that still write; a left joined group gives way
   await ops.groupJoin(a.ctx, { group: joined })
   const joinedWriter = (await store.readGroupWriters(a.storage)).find((e) => e.group === joined).key
   const groups = []
-  for (let i = 1; i < MAX_GROUPS_PER_DIARY; i++) groups.push((await ops.groupCreate(a.ctx, { name: 'g' + i, join: 'open' })).group)
+  // The communities, their Geral groups and the joined community's CW take
+  // slots too: groups are made until the real list is full.
+  for (let i = 1; (await realStore.readGroupWriters(a.storage)).length < MAX_GROUPS_PER_DIARY; i++) groups.push((await ops.groupCreate(a.ctx, { name: 'g' + i, join: 'open' })).group)
   await t.exception(() => ops.groupCreate(a.ctx, { name: 'demais', join: 'open' }), /limite de grupos atingido/)
   await t.exception(() => store.putGroupWriter(a.storage, { group: hex(crypto.randomBytes(32)), key: hex(crypto.randomBytes(32)), nonce: hex(crypto.randomBytes(32)) }), /limite de grupos atingido/)
   await ops.groupLeave(a.ctx, { group: groups[3] })
   await t.exception(() => ops.groupCreate(a.ctx, { name: 'ainda não', join: 'open' }), /limite de grupos atingido/, 'a created group keeps its root nonce')
   await ops.groupLeave(a.ctx, { group: joined })
   const { group } = await ops.groupCreate(a.ctx, { name: 'cabe', join: 'open' })
-  const entries = await store.readGroupWriters(a.storage)
+  const entries = await realStore.readGroupWriters(a.storage)
   t.is(entries.length, MAX_GROUPS_PER_DIARY)
   t.absent(entries.some((e) => e.group === joined), 'the left joined group gave way')
   t.ok(entries.some((e) => e.group === groups[3]), 'the left created group stays')
   t.ok(entries.some((e) => e.group === group))
   t.ok((await store.readGroupReplicas(a.storage)).includes(joinedWriter), 'its writer stays readable')
-  t.is((await ops.groupList(a.ctx, { offset: 60, limit: 10 })).groups.length, 4)
-  t.is((await ops.groupList(a.ctx)).total, MAX_GROUPS_PER_DIARY)
+  const listed = (await store.readGroupWriters(a.storage)).length
+  t.is((await ops.groupList(a.ctx, { offset: listed - 4, limit: 10 })).groups.length, 4)
+  t.is((await ops.groupList(a.ctx)).total, listed)
 
   const planted = Array.from({ length: 70 }, () => ({ group: hex(crypto.randomBytes(32)), key: hex(crypto.randomBytes(32)), nonce: hex(crypto.randomBytes(32)) }))
   await a.storage.writeJson('groupWriters', { v: 1, entries: [...planted, { group: 'zz', key: 1, nonce: null }] })
@@ -685,7 +845,7 @@ test('a joined group left through another device gives way and leaving it again 
   await shareDiary(b, a)
   await ops.groupJoin(a.ctx, { group: joined })
   const own = (await store.readGroupWriters(a.storage)).find((e) => e.group === joined)
-  for (let i = 1; i < MAX_GROUPS_PER_DIARY; i++) await ops.groupCreate(a.ctx, { name: 'g' + i, join: 'open' })
+  for (let i = 1; (await realStore.readGroupWriters(a.storage)).length < MAX_GROUPS_PER_DIARY; i++) await ops.groupCreate(a.ctx, { name: 'g' + i, join: 'open' })
   await otherDevice(a, joined, [grp.writerHeader({ group: joined, diary: a.ownHex }), grp.groupLeave({})])
   t.is((await ops.groupInfo(a.ctx, { group: joined })).state, 'left')
   const records = (await diaryRecords(a)).length
@@ -702,7 +862,7 @@ test('a joined group left through another device gives way and leaving it again 
   t.is(await length(), before, 'nothing written to the own writer')
   t.is((await diaryRecords(a)).length, records, 'no diary join')
   const { group } = await ops.groupCreate(a.ctx, { name: 'cabe', join: 'open' })
-  const entries = await store.readGroupWriters(a.storage)
+  const entries = await realStore.readGroupWriters(a.storage)
   t.is(entries.length, MAX_GROUPS_PER_DIARY)
   t.absent(entries.some((e) => e.group === joined), 'the group left elsewhere gave way')
   t.ok(entries.some((e) => e.group === group))
@@ -731,7 +891,6 @@ test('group cores are stored with a lazy data file', async (t) => {
 test('an own writer beyond the writer cap refuses to post, hide, moderate or leave', async (t) => {
   const { a, b } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Cheia', join: 'open' })
-  await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
   await shareGroupCore(a, b, group)
   await shareDiary(a, b)
   // Other devices of Bia hold the lowest keys, so the cap counts them and
@@ -741,7 +900,7 @@ test('an own writer beyond the writer cap refuses to post, hide, moderate or lea
     const nonce = crypto.randomBytes(32)
     const kp = await groupKeyPairFromPrf(b.prf, new Uint8Array(nonce))
     const core = await store.openGroupWriter(b.storage, kp)
-    await store.appendGroupRecord(core, grp.writerHeader({ group, diary: b.ownHex }), { root: false })
+    await store.appendGroupRecord(core, await writerFor(b, group), { root: false })
     cores.push({ key: hex(core.key), nonce: hex(nonce), core })
   }
   cores.sort((x, y) => (x.key < y.key ? -1 : 1))
@@ -753,6 +912,12 @@ test('an own writer beyond the writer cap refuses to post, hide, moderate or lea
   await diary.close()
   await b.storage.writeJson('groupReplicas', { v: 1, keys: cores.slice(0, -1).map((c) => c.key) })
   await store.putGroupWriter(b.storage, { group, key: local.key, nonce: local.nonce, rootNonce: null })
+  // The grant lists bound writers of Bia (the creator holds the lowest one
+  // and this device's): the admin title stays on a listed bound writer.
+  for (const key of [cores[0].key, local.key]) await shareGroupCore(b, a, key)
+  await shareDiary(b, a)
+  await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
+  await shareGroupCore(a, b, group)
   const info = await ops.groupInfo(b.ctx, { group })
   t.is(info.state, 'member', 'the counted writers keep the diary a member')
   t.is(info.role, 'admin')
@@ -788,7 +953,7 @@ test('a join refuses before creating a writer when the fold already counts the w
   for (let i = 0; i < grp.MAX_GROUP_WRITERS - 1; i++) {
     const kp = await groupKeyPairFromPrf(b.prf, new Uint8Array(crypto.randomBytes(32)))
     const core = await store.openGroupWriter(b.storage, kp)
-    await store.appendGroupRecord(core, grp.writerHeader({ group, diary: b.ownHex }), { root: false })
+    await store.appendGroupRecord(core, await writerFor(b, group), { root: false })
     keys.push(hex(core.key))
     await core.close()
     await store.appendRecord(diary, groupJoinRecord({ group, writer: keys[i], on: true }))
@@ -824,8 +989,10 @@ test('a blocked creator is no member or admin: charter writes refuse and members
     }
   }
   const before = await rootLength()
-  await t.exception(() => ops.groupMeta(a.ctx, { group, name: 'Outra' }), /sem permissão no grupo/)
-  await t.exception(() => ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true }), /sem permissão no grupo/)
+  // The blocked creator binds its community root no more either: the
+  // parent is unbound, so group writes wait for it before any permission.
+  await t.exception(() => ops.groupMeta(a.ctx, { group, name: 'Outra' }), /aguarde a sincronização da comunidade/)
+  await t.exception(() => ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true }), /aguarde a sincronização da comunidade/)
   t.is(await rootLength(), before, 'nothing appended to the root')
   const members = await ops.groupMembers(a.ctx, { group })
   t.alike(members.members.map((m) => m.member), [b.ownHex])
@@ -848,7 +1015,8 @@ test('a blocked own diary drops its writers from the fold and group writes refus
   t.absent((await ops.groupMembers(b.ctx, { group })).members.some((m) => m.member === b.ownHex))
   const records = (await diaryRecords(b)).length
   await t.exception(() => ops.groupPost(b.ctx, { group, text: 'bloqueada' }), /sem permissão no grupo/)
-  await t.exception(() => ops.groupJoin(b.ctx, { group }), /sem permissão no grupo/)
+  // A blocked own diary binds no community writer: not a member there.
+  await t.exception(() => ops.groupJoin(b.ctx, { group }), /entre na comunidade primeiro/)
   t.is((await diaryRecords(b)).length, records, 'no diary join from a blocked own diary')
 })
 
@@ -874,7 +1042,7 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   const entries = await store.readGroupWriters(b.storage)
   t.is(entries.length, 1)
   t.alike({ group: entries[0].group, rootNonce: entries[0].rootNonce }, { group, rootNonce: null })
-  t.is(b.derived.length, 1, 'exactly one writer created')
+  t.is(b.derived.length, 3, 'exactly one writer created in the group (the community writer and Geral take the other two)')
   t.ok((await store.readGroupReplicas(b.storage)).includes(group), 'the next sync fetches the root')
   const header = (await readGroupCoreEntries(b, entries[0].key))[0].record
   t.alike({ type: header.type, group: header.group, diary: header.diary, rejoin: header.rejoin }, { type: 'group-writer', group, diary: b.ownHex, rejoin: null })
@@ -883,11 +1051,11 @@ test('a join by key before the root arrives is pending until a sync brings it', 
 
   t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'a second join stays pending')
   t.alike(await store.readGroupWriters(b.storage), entries, 'no second writer')
-  t.is(b.derived.length, 1)
+  t.is(b.derived.length, 3, 'still the three writers of the first join')
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
-  t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0 }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [], visibility: 'public' })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', communities: [], visibility: 'public' }, 'reads work locked')
+  t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public' })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public' }, 'reads work locked')
   t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
@@ -988,6 +1156,7 @@ test('a grant cuts a writer at its signed length when blocks are missing locally
   await src.close()
   await dst.close()
   await store.addGroupReplica(a.storage, w)
+  await copyCommunityCores(b.storage, a.storage)
   await shareDiary(b, a)
   await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
   t.alike((await lastRecord(a, group)).cuts, [{ writer: w, seq: 3 }], 'the unseen signed record stays below the cut')
@@ -1019,6 +1188,7 @@ test('an unban cuts a writer at its signed length when blocks are missing locall
   await src.close()
   await dst.close()
   await store.addGroupReplica(a.storage, w)
+  await copyCommunityCores(b.storage, a.storage)
   await shareDiary(b, a)
   await ops.groupBan(a.ctx, { group, member: b.ownHex, on: true })
   await ops.groupBan(a.ctx, { group, member: b.ownHex, on: false })
@@ -1053,10 +1223,13 @@ test('a creator leaves from a device that stores the root without its key, listi
   const nonce = crypto.randomBytes(32)
   const kp = await groupKeyPairFromPrf(a.prf, new Uint8Array(nonce))
   const core = await store.openGroupWriter(a.storage, kp)
-  await store.appendGroupRecord(core, grp.writerHeader({ group, diary: a.ownHex }), { root: false })
+  await store.appendGroupRecord(core, await writerFor(a, group), { root: false })
   await core.close()
   await bindForeign(a, group, hex(kp.publicKey))
-  await a.storage.writeJson('groupWriters', { v: 1, entries: [{ group, key: hex(kp.publicKey), nonce: hex(nonce), rootNonce: null }] })
+  // The community entries stay: the device writes in the group through its
+  // live community writer.
+  const kept = (await realStore.readGroupWriters(a.storage)).filter((e) => e.kind === 'community')
+  await a.storage.writeJson('groupWriters', { v: 1, entries: [...kept, { group, key: hex(kp.publicKey), nonce: hex(nonce), rootNonce: null }] })
   t.alike(await ops.groupLeave(a.ctx, { group }), { state: 'left' })
   const leave = await lastRecord(a, hex(kp.publicKey))
   t.is(leave.type, 'group-leave')

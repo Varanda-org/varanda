@@ -25,7 +25,7 @@ const path = require('#path')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
-const { readConfig, readFollows, readGroups, storeExists } = require('./store')
+const { readConfig, readFollows, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
@@ -317,21 +317,21 @@ function createSession ({
     let grownTimer = null
     const flushGrown = () => {
       grownTimer = null
-      // A grown root that is no group of groups.json is a community root:
-      // its links and admins may change any group held here, and which ones
-      // is not known without opening the store mid-run.
-      let local = []
-      try {
-        local = readGroups(dataDir)
-      } catch {}
-      const own = new Set(local.filter((g) => g && g.kind !== 'community').map((g) => g.group))
+      // A grown community core (C's root or a CW) may change every group
+      // whose header names C: the gate, admins and the catalogue.
       const out = new Set(grown)
-      for (const key of grown) {
-        if (own.has(key)) continue
-        for (const group of own) out.add(group)
-      }
+      for (const key of grown) for (const group of groupsOf.get(key) || []) out.add(group)
       for (const group of out) send('groups.changed', { group }, epoch)
       grown.clear()
+    }
+    // Community -> the local groups whose held root names it, from the
+    // run's group-parent events (one per local group, at run start for the
+    // roots held then).
+    const groupsOf = new Map()
+    const noteParentEvent = (ev) => {
+      if (typeof ev.key !== 'string' || typeof ev.group !== 'string') return
+      if (!groupsOf.has(ev.key)) groupsOf.set(ev.key, new Set())
+      groupsOf.get(ev.key).add(ev.group)
     }
     const groupGrew = (group) => {
       grown.add(group)
@@ -356,6 +356,7 @@ function createSession ({
           },
           onEvent: (ev) => {
             if (ev && ev.event === 'group-downloaded' && typeof ev.group === 'string') groupGrew(ev.group)
+            if (ev && ev.event === 'group-parent') noteParentEvent(ev)
             if (ev && ev.event === 'skipped') {
               warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
               return
@@ -735,6 +736,7 @@ function createSession ({
     'group.create': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupCreate(c, params))
       send('groups.changed', { group: r.group }, epoch)
+      if (typeof params.community === 'string') send('groups.changed', { group: params.community.toLowerCase() }, epoch)
       return r
     }),
 
@@ -802,31 +804,72 @@ function createSession ({
       return r
     }),
 
+    // Every community mutation announces the keys member.js puts in
+    // `affected` (docs/rpc.md section 6): C, plus Geral on create and join,
+    // plus every local group of C on leave, admit, ban and admin.
     'community.create': serial(async (params, epoch) => {
-      const r = await withStore((c) => member.communityCreate(c, params))
-      send('groups.changed', { group: r.community }, epoch)
-      return r
-    }),
-
-    // A link changes the group's `communities` and the admins it inherits;
-    // an admin change reaches every group linked two-way.
-    'community.link': serial(async (params, epoch) => {
       const affected = new Set()
-      const r = await withStore((c) => member.communityLink(c, params, { affected }))
+      const r = await withStore((c) => member.communityCreate(c, params, { affected }))
       for (const group of affected) send('groups.changed', { group }, epoch)
       return r
     }),
+
+    'community.join': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityJoin(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.leave': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityLeave(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.admit': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityAdmit(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.ban': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityBan(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.meta': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityMeta(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.removeGroup': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityRemoveGroup(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.admin': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communitySetAdmin(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.members': serial((params) => withStore((c) => member.communityMembers(c, params))),
+
+    'community.requests': serial((params) => withStore((c) => member.communityRequests(c, params))),
 
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
 
     'community.list': serial(() => withStore((c) => member.communityList(c))),
-
-    'community.admin': serial(async (params, epoch) => {
-      const affected = new Set()
-      const r = await withStore((c) => member.communityAdmin(c, params, { affected }))
-      for (const group of affected) send('groups.changed', { group }, epoch)
-      return r
-    }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       // A connection closed meanwhile (detach) must not leave a run behind

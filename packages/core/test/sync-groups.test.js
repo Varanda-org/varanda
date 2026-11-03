@@ -18,7 +18,7 @@ const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = re
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const store = require('../lib/store')
 const member = require('../lib/member')
-const { hex, person, exchange, startSeeder, syncOnce, stored, ownWriter, texts, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, ownLengths, never } = require('./helpers/sync-groups')
+const { hex, PARENT, person, exchange, startSeeder, syncOnce, stored, ownWriter, texts, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, ownLengths, never } = require('./helpers/sync-groups')
 
 test('two members and a seeder: each sees the other\'s posts after sync --once, a blocked diary\'s writer is purged', async (t) => {
   t.timeout(240000)
@@ -27,10 +27,12 @@ test('two members and a seeder: each sees the other\'s posts after sync --once, 
   await startSeeder(t, bootstrap, kp)
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
-  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open' })
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   await member.groupPost(a, { group, text: 'primeiro' })
-  // B learns the root out of band; everything after this travels by sync.
+  // B learns the roots out of band; everything after this travels by sync.
   await exchange(a, b)
+  await member.communityJoin(b, { community })
   await member.groupJoin(b, { group })
   await member.groupPost(b, { group, text: 'oi' })
   await member.groupPost(a, { group, text: 'segundo' })
@@ -69,7 +71,9 @@ test('two members and a seeder: each sees the other\'s posts after sync --once, 
   // Listed again by the seeder, it is refused before anything is stored.
   const ra3 = await syncOnce(bootstrap, a)
   t.ok(ra3.result.ok, ra3.result.errors.join('; '))
-  t.ok(ra3.events.some((ev) => ev.event === 'group-skipped' && ev.key === wb && ev.reason === 'blocked'))
+  // B's CW in the community is listed first and carries the diary's skip.
+  const bWriters = store.readGroups(b.dataDir).map((g) => g.writer)
+  t.ok(ra3.events.some((ev) => ev.event === 'group-skipped' && bWriters.includes(ev.key) && ev.reason === 'blocked'))
   t.absent(await stored(a, wb), 'the blocked diary\'s writer is purged')
   t.ok(await stored(a, group), 'the own root stays')
   t.alike(await texts(a, group), ['primeiro', 'segundo', 'terceiro'])
@@ -88,7 +92,7 @@ test('more than 64 writers are fully paged; a writer whose header names another 
   // A real core the fake seeder serves: a writer header for another group.
   const bad = fake.store.get({ name: 'bad' })
   await bad.ready()
-  await bad.append(b4a.from(JSON.stringify(writerHeader({ group: hex(crypto.randomBytes(32)), diary }))))
+  await bad.append(b4a.from(JSON.stringify(writerHeader({ group: hex(crypto.randomBytes(32)), diary, member: PARENT }))))
   items.push({ key: hex(bad.key), diary, length: 1, seq: 1 })
   items.sort((x, y) => x.key < y.key ? -1 : 1)
 
@@ -121,7 +125,7 @@ test('a once run waits for a foreign writer to reach the advertised length', asy
   await w.ready()
   const wkey = hex(w.key)
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: wkey, on: true }))))
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   items.push({ key: wkey, diary: dkey, length: 4, seq: 1 })
 
   const m = await groupMember(t, kp, group)
@@ -629,7 +633,7 @@ test('a seeder listing too many wrong hints is no longer paged', async (t) => {
   for (let i = 0; i < 40; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real, member: PARENT }))))
     items.push({ key: hex(w.key), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
   }
   // A real writer advertised past what is served keeps the --once run
@@ -655,7 +659,7 @@ test('long-running: a seeder cut off for wrong hints is paged again after the re
   for (let i = 0; i < 40; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real, member: PARENT }))))
     items.push({ key: hex(w.key), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
   }
   items.sort((x, y) => x.key < y.key ? -1 : 1)
@@ -731,7 +735,7 @@ test('fabricated low-seq writers of a full diary never stop its held writers', a
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
     real.push({ key: hex(w.key), diary: dkey, length: 2, seq: i + 1 })
   }
@@ -782,7 +786,7 @@ test('a listing nobody can serve yet does not hide the writer another seeder lis
     events.push(ev)
     if (appended || ev.event !== 'group-skipped' || ev.key !== wkey || ev.reason !== 'timeout') return
     appended = true
-    w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey })))).catch(() => {})
+    w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT })))).catch(() => {})
   }
   const { result } = await syncOnce(bootstrap, m, { gateTimeoutMs: 1500, onEvent })
   t.ok(result.ok, result.errors.join('; '))
@@ -875,7 +879,7 @@ test('a held binding diary that learns the join after the gate starts admits the
   await w.ready()
   const wkey = hex(w.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   items.push({ key: wkey, diary: dkey, length: 1, seq: 1 })
   const m = await groupMember(t, kp, group)
   // The member holds the diary at its certificate only.
@@ -910,7 +914,7 @@ test('a writer evicted by an earlier proven join is still purged when its diary 
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     all.push({ key: hex(w.key), diary: dkey, length: 1, seq: i + 1 })
   }
   const last = all[all.length - 1].key
@@ -971,7 +975,7 @@ test('a join seq past the length learned with block 0 is waited for, not judged'
   await w.ready()
   const wkey = hex(w.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   items.push({ key: wkey, diary: dkey, length: 1, seq: 1 })
   setTimeout(() => {
     d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: wkey, on: true })))).catch(() => {})

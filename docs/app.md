@@ -248,41 +248,56 @@ Só um nó usa um diretório de dados por vez: um segundo worklet no mesmo diret
 
 ## Comunidades
 
-As Comunidades reúnem conversas em grupo, só de texto. Cada conversa é um **Grupo**, e uma **Comunidade** reúne até 32 grupos, públicos ou privados, sob uma mesma moderação. Elas existem só na versão web hospedada, com o nó no navegador. As regras de moderação e de retenção estão em [design.md](design.md) ("Grupos públicos" e "Grupos privados"); o protocolo, na seção 10 de [protocol.md](protocol.md).
+As Comunidades reúnem conversas em grupo, só de texto. Uma **Comunidade** contém **Grupos**, públicos ou privados, sob a mesma moderação, e toda comunidade nasce com o grupo **Geral**. Não há grupo fora de uma comunidade. Elas existem só na versão web hospedada, com o nó no navegador. As regras de moderação e de retenção estão em [design.md](design.md) ("Grupos públicos" e "Grupos privados"); o protocolo, na seção 10 de [protocol.md](protocol.md).
 
 ### Aba Comunidades
 
-Na web hospedada, a aba **Comunidades** fica logo depois da Espiadinha. A tela tem **Buscar grupos públicos** (grupos privados nunca aparecem), **Entrar por link** (cola um link `/g/<chave>` ou a chave), os botões **Novo grupo** e **Nova comunidade** e a lista **Meus grupos**, com o nome, o papel e o modo de entrada. Abaixo dela fica **Minhas comunidades** (`community.list`): as comunidades que a pessoa criou ou que estão ligadas aos seus grupos, cada uma com o nome, "criada por você" e "ligada aos seus grupos"; tocar abre a comunidade. A lista é lida de novo ao puxar a tela, quando os grupos mudam e depois de Nova comunidade. Sem comunidades, a seção não aparece, e um nó antigo sem o método a esconde sem aviso.
+Na web hospedada, a aba **Comunidades** fica logo depois da Espiadinha. A tela tem **Minhas comunidades** (as que a pessoa criou ou em que entrou, cada uma com o nome e o papel), o botão **Nova comunidade**, **Buscar grupos públicos** (grupos privados nunca aparecem) e **Entrar por link** (cola um link `/c/<chave>` ou `/g/<chave>`, ou a chave). Tocar numa comunidade a abre. A lista é lida de novo ao puxar a tela e quando algo muda. A aba aparece sempre na web hospedada; se o nó não responde aos métodos novos, a lista mostra o erro de carregamento em vez de esconder a aba.
 
-- **Novo grupo.** Folha com o nome, a visibilidade **pública** ou **privada** e a entrada **aberta** ou **com aprovação**. Um grupo privado sempre pede aprovação.
-
-### Grupo
-
-A tela de um grupo mostra a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa.
-
-- **Ocultar e banir** aparecem conforme o papel de quem olha. A autora de uma mensagem e os administradores podem ocultá-la; os administradores, incluindo a criadora, podem banir. Ocultar tira a mensagem da conversa e não apaga as cópias que outros aparelhos já têm.
-- **Denunciar.** Cada mensagem de outra pessoa que não está escondida tem "denunciar", que leva o grupo e a posição da mensagem; num grupo privado, a citação é o texto aberto neste aparelho.
-- **Quem ainda não entrou** (por exemplo, abriu o link) vê o que o grupo mostra a quem não é membro e o botão **Entrar no grupo**; num grupo privado nunca vê mensagens. Quem pediu entrada vê "Aguardando aprovação" e quem foi banido vê o aviso de banimento.
-- **Mensagens anteriores** carregam em páginas pelo botão "mensagens anteriores".
-- **Grupo privado.** As mensagens são cifradas. Quando há mensagens que este aparelho não consegue ler, a conversa mostra a contagem delas. Se o grupo aguarda uma nova chave, a caixa responde "aguardando nova chave" e nada é enviado até um administrador gerar a chave ou a chave chegar.
-
-### Administração
-
-A folha de administração, aberta pelo grupo, tem o botão **Compartilhar** (abre a folha de compartilhar do sistema ou, sem ela, copia o convite e avisa "Link copiado"; o endereço nunca aparece na tela) e tem **Nome** (só a criadora renomeia), **Pedidos** (aprovar ou recusar), **Membros**, **Administradores** (só a criadora nomeia), **Banidos**, o vínculo com a comunidade (só a criadora vincula ou desvincula), **Sair do grupo** e, em grupo privado, **Gerar nova chave**. Escape fecha a folha sem sair do grupo. Sair de um grupo com aprovação exige nova aprovação para voltar. Gerar nova chave abre uma nova época para as mensagens seguintes; o app nunca mostra a chave.
+- **Nova comunidade.** Folha com o nome e a entrada **aberta** ou **com aprovação**. Criar a comunidade cria também o Geral.
 
 ### Comunidade
 
-A tela da comunidade lista os grupos vinculados e quantos administradores ela tem; quem a criou vincula um grupo (colando o link) e adiciona administradores: digitando o nome ou o @nome, ou colando o código da pessoa. O @nome é conferido no serviço de conta e a tela mostra quem será adicionado antes de tornar a pessoa administradora; a busca por nome (só na web hospedada, como em Seguindo) lista as pessoas confirmadas, cada uma com **Tornar administrador**. Qualquer pessoa pode tocar em **Compartilhar** na comunidade, que abre a folha de compartilhar do sistema ou copia o link e avisa "Link copiado"; o link nunca aparece como texto. Ela abre pelo botão "comunidade" do grupo vinculado. Vincular pede o consentimento dos dois lados, o grupo e a comunidade: um lado só não vincula nada. Os administradores da comunidade agem nos grupos vinculados (banir, admitir, ocultar), mas não nomeiam administradores deles.
+A tela da comunidade mostra o botão de participação, os grupos e, para quem modera, os pedidos e os membros.
+
+- **Entrar, Pedir entrada e Sair.** Numa comunidade aberta o botão é **Entrar**; numa com aprovação, **Pedir entrada**, e quem já pediu vê **Desistir do pedido** no lugar de Sair, que retira o pedido (some da lista da administração). Entrar na comunidade leva aos grupos dela; sair, ou ser banido, vale para todos os grupos. Reentrar não ressuscita a participação antiga. Quem criou a comunidade recebe, antes de sair, o aviso: "Você criou esta comunidade: depois de sair, não poderá mais nomear administradores nem criar grupos, mesmo que volte. Ao voltar, ainda poderá mudar o nome e a entrada, tirar grupos da lista e tirar o cargo de administradores."
+- **Concluir saída.** Quando a saída de quem criou a comunidade foi interrompida antes de terminar (`leavePending` em `community.info`), a tela mostra o botão **Concluir saída**. A confirmação diz que a saída foi interrompida e que concluir grava o que falta; confirmar chama `community.leave`, e o botão some quando a saída termina. Concluir saída nunca força a saída.
+- **Sair mesmo assim.** Quem criou a comunidade pode ouvir de Sair que ainda falta algo, e cada espera tem a própria confirmação:
+  - dados da comunidade ("este aparelho ainda não baixou tudo da comunidade: aguarde para sair"): "Este aparelho ainda não baixou tudo desta comunidade. Sair mesmo assim? O que ainda não chegou aqui não vai contar."
+  - outros aparelhos ("aguarde a sincronização dos seus aparelhos nesta comunidade para sair"): "Outro aparelho seu ainda não terminou de sincronizar esta comunidade. Sair mesmo assim? O que ele fez e ainda não chegou aqui pode deixar de valer."
+  - grupos ("aguarde a sincronização dos grupos da comunidade para sair"): "Alguns grupos desta comunidade ainda não chegaram a este aparelho. Sair mesmo assim? Nesses grupos, o que você fez como criador antes deixa de valer."
+
+  **Sair mesmo assim** chama `community.leave` de novo com `force` igual às esperas aceitas até ali mais esta. Se aparecer outra espera, a tela pergunta de novo; uma espera já aceita que se repete aparece como erro.
+- **Grupos.** Lista com o **Geral** primeiro, marcado como grupo principal; cada linha mostra o nome atual do grupo, mesmo que o Geral tenha sido renomeado. **Novo grupo** só aparece para quem criou a comunidade, e só no aparelho que a criou. Quando quem criou voltou depois de sair (`repair` em `community.info`), cada grupo, menos o Geral, mostra **Tirar da lista**, com a confirmação "Tirar este grupo da lista da comunidade? Ele deixa de aparecer aqui e ninguém mais escreve nele." (chama `community.removeGroup`). Com `repair` ligado e algum grupo tirado (`dropped`), a tela mostra a seção **Tirados da lista**: cada grupo aparece pelo nome (lido em `group.info` quando a raiz está no aparelho; senão, "Grupo tirado da lista", nunca a chave) e tem **Devolver à lista**, com a confirmação "Devolver este grupo à lista da comunidade?" (chama `community.removeGroup` com `undo`).
+- **Pedidos e Membros.** Pedidos (aprovar ou recusar) e Membros (com banir e desbanir) aparecem para quem modera.
+- **Ajustes.** Nome, entrada (aberta ou com aprovação) e administradores. Nome e entrada continuam editáveis por quem criou, também depois de voltar (`community.meta`): a criadora escolhe um administrador por @nome entre os membros. O @nome é conferido no serviço de conta e a tela mostra quem será adicionado antes de confirmar.
+- **Compartilhar.** Abre a folha de compartilhar do sistema ou copia o link `/c/<chave>` e avisa "Link copiado"; o link nunca aparece como texto cru. Qualquer pessoa pode compartilhar.
+
+### Grupo
+
+A tela de um grupo mostra o selo da comunidade, a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa.
+
+- **Ocultar e banir** aparecem conforme o papel de quem olha. A autora de uma mensagem e quem modera podem ocultá-la; o banimento é feito na comunidade e vale para todos os grupos dela. Ocultar tira a mensagem da conversa e não apaga as cópias que outros aparelhos já têm.
+- **Denunciar.** Cada mensagem de outra pessoa que não está escondida tem "denunciar", que leva o grupo e a posição da mensagem; num grupo privado, a citação é o texto aberto neste aparelho.
+- **Quem ainda não entrou na comunidade** (por exemplo, abriu um link `/g/`) é levada primeiro à tela da comunidade, onde entra ou pede entrada; se ainda ficar no grupo, vê o que ele mostra a quem não é membro e, depois de uma entrada recusada por falta da comunidade, o botão **Entrar na comunidade**. Num grupo privado nunca vê mensagens. Quem pediu entrada vê "Aguardando aprovação" e quem foi banido vê o aviso de banimento.
+- **Grupo sem comunidade.** Um grupo cuja comunidade este aparelho ainda não conhece abre sem o selo. Se o nó o marca como sem comunidade, a caixa de escrever avisa que o grupo não pertence a nenhuma comunidade e nada é enviado.
+- **Mensagens anteriores** carregam em páginas pelo botão "mensagens anteriores".
+- **Grupo privado.** As mensagens são cifradas e seguem a comunidade: quem sai ou é banido deixa de receber as novas. Quando há mensagens que este aparelho não consegue ler, a conversa mostra a contagem delas. Se o grupo aguarda uma nova chave, a caixa responde "aguardando nova chave" e nada é enviado até um administrador gerar a chave ou a chave chegar.
+
+### Novo grupo e Ajustes do grupo
+
+**Novo grupo** (aberto pela comunidade, só para quem a criou, no aparelho que a criou; administradores moderam, mas não criam grupos) pede o nome e a visibilidade **pública** ou **privada**; também oferece a **Entrada** (aberta ou com aprovação; um grupo privado sempre pede aprovação). **Ajustes do grupo** tem **Compartilhar** (o convite), **Nome** (só quem criou a comunidade), **Pedidos**, **Membros**, **Administradores** (só quem criou a comunidade), **Banidos**, **Gerar nova chave** (em grupo privado) e **Sair do grupo**; sair do Geral não tira a pessoa da comunidade. Escape fecha a folha sem sair da tela. Gerar nova chave abre uma nova época para as mensagens seguintes; o app nunca mostra a chave.
 
 ### Links de entrada
 
-Cada grupo tem um link `/g/<chave>`, com a chave do grupo em hexadecimal, e cada comunidade tem um link `/c/<chave>`. Abrir o link leva ao grupo ou à comunidade na web hospedada, com as mesmas regras de entrada. Os links só se compartilham pelo botão **Compartilhar**. Grupos privados nunca aparecem na busca.
+Cada comunidade tem um link `/c/<chave>` e cada grupo, um link `/g/<chave>`, com a chave em hexadecimal. Abrir o link leva à comunidade (ou ao grupo) na web hospedada, com as mesmas regras de entrada. Os links só se compartilham pelo botão **Compartilhar**. Grupos privados nunca aparecem na busca.
 
 ### Limites
 
 - Só na versão web hospedada, com o nó no navegador. O app nativo e o `varanda-serve` mantêm as cinco abas, sem Comunidades; onde uma tela de Comunidades aparecer, ela mostra "Só na versão web", como Avisos.
 - Só texto: sem fotos nem GIFs.
-- Sem resposta a uma mensagem específica, sem remover administrador da comunidade e sem desvincular pelo lado da comunidade nas telas.
+- Uma comunidade é sempre pública (só os grupos podem ser privados). Os grupos e comunidades do protocolo v1 foram descartados na atualização.
+- Sem resposta a uma mensagem específica e sem remover administrador da comunidade nas telas.
 - Salas de áudio ao vivo ficam fora (veja "Fora do piloto").
 
 ## Fora do piloto

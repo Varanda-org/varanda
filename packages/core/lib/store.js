@@ -501,6 +501,25 @@ async function readRaw (core) {
   return raw.slice(0, present)
 }
 
+// The blocks of a group core (writer, root or community root), decoded,
+// tombstones not applied, up to the first block not held locally (a
+// decode failure is { seq, record: null }). Group logs are read without the
+// diary deletion fold: deletion is a diary feature, a group hides a post
+// with its own records, and every fold over a group core must see the
+// blocks its author signed whatever another block of that core claims.
+async function readBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) break
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) break
+    out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -692,6 +711,57 @@ function writeGroups (dataDir, groups) {
   }, 0o600)
 }
 
+// A block 0 of protocol v1 groups (docs/protocol.md, section 10): a
+// group-header or group-writer with `v: 1`.
+function legacyGroupBlock (block) {
+  return block !== null && typeof block === 'object' && block.v === 1 &&
+    (block.type === 'group-header' || block.type === 'group-writer')
+}
+
+async function blockZero (core) {
+  if (core.fork !== 0 || core.contiguousLength === 0) return null
+  try {
+    return decodeBlock(await core.get(0, { wait: false, raw: true }))
+  } catch {
+    return null
+  }
+}
+
+// Protocol v2 drops v1 groups: every stored core whose block 0 is a v1 group
+// header or writer is purged, and every groups.json entry whose writer or
+// root is such a core goes, created entries included (their roots are never
+// folded again). `emit` receives { event: 'group-skipped', key, reason:
+// 'legacy' } once per purged core or dropped group. Returns the purged keys.
+async function sweepLegacyGroups (dataDir, store, emit = () => {}) {
+  const legacy = new Set()
+  for await (const dk of store.list()) {
+    const core = store.get({ discoveryKey: dk, writable: false, active: false })
+    try {
+      await core.ready()
+      if (legacyGroupBlock(await blockZero(core))) legacy.add(b4a.toString(core.key, 'hex'))
+    } finally {
+      await core.close()
+    }
+  }
+  const entries = readGroups(dataDir)
+  const dropped = entries.filter((e) => e && (legacy.has(e.writer) || legacy.has(e.group)))
+  const told = new Set()
+  const tell = (key) => {
+    if (told.has(key)) return
+    told.add(key)
+    emit({ event: 'group-skipped', key, reason: 'legacy' })
+  }
+  for (const key of legacy) {
+    await purgeReplica(store, key)
+    tell(key)
+  }
+  if (dropped.length > 0) {
+    writeGroups(dataDir, entries.filter((e) => !dropped.includes(e)))
+    for (const e of dropped) tell(e.group)
+  }
+  return [...legacy]
+}
+
 const BOX_FILE = 'group-box.json'
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -864,6 +934,7 @@ module.exports = {
   purgeReplica,
   readAll,
   readRaw,
+  readBlocks,
   appendRecord,
   appendRecords,
   readConfig,
@@ -872,6 +943,7 @@ module.exports = {
   writeFollows,
   readGroups,
   writeGroups,
+  sweepLegacyGroups,
   ensureBoxKeyPair,
   readBlocklist,
   hasUnreadableBlocklist,

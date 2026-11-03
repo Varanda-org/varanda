@@ -2,18 +2,14 @@
 
 const test = require('brittle')
 const {
-  MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, GROUP_TYPES, MAX_COMMUNITY_CUTS, MAX_GROUPS_PER_COMMUNITY,
+  MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, GROUP_TYPES, MAX_GROUPS_PER_COMMUNITY,
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
-  communityAdmin, groupLink, communityLink,
+  groupCreateRecord, communityAdmit, communityBan, communityHide,
   groupJoins, groupJoinHistory, orderKey, compareOrder, isFuture, buildGroup, buildCommunity
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
-
-const K = (n) => n.toString(16).padStart(64, '0')
-const BASE = Date.parse('2026-01-01T00:00:00.000Z')
-const AT = (s) => new Date(BASE + s * 1000).toISOString()
-const NOW = BASE + 365 * 86400000
+const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
 
 const G = K(0x100)
 const C = K(1)
@@ -28,33 +24,37 @@ const wX = K(0x400)
 const wX2 = K(0x401)
 const wY = K(0x500)
 
-// A group under construction: the root, writers and the diaries' joins.
-function world ({ join = 'open', bindRoot = true } = {}) {
-  const logs = new Map([[G, { key: G, diary: C, entries: [{ seq: 0, record: groupHeader({ diary: C, join, name: 'Varanda', at: AT(0) }) }] }]])
-  const joins = new Map()
-  if (bindRoot) joins.set(C, [{ writer: G, on: true, seq: 1 }])
+// The community every world() group belongs to (v2): created by C, which
+// created G in it; each diary that writes in G gets one CW (cwOf) there.
+const CMG = K(0xc0)
+const cwOf = (diary) => 'cc' + diary.slice(2)
+
+// A group under construction: the root, writers and the diaries' joins,
+// inside its community `w.C`, an open community where every writing diary
+// is a member.
+// With `demoted`, Q created the community and C, a community admin later
+// demoted, wrote G's header: only the community's creator creates groups, so
+// that G is an orphan (no create of Q names it as C's).
+const Q = K(0xd0)
+function world ({ join = 'open', bindRoot = true, demoted = false } = {}) {
+  const parent = demoted
+    ? communityOf({ key: CMG, creator: Q, members: [{ diary: C, cw: cwOf(C), status: 'member' }], admins: [C], creates: [{ by: Q, group: G }] })
+    : communityOf({ key: CMG, creator: C, creates: [{ by: C, group: G }] })
+  if (demoted) parent.push(CMG, groupAdmin({ member: C, on: false, cuts: [{ writer: cwOf(C), seq: parent.len(cwOf(C)) }], at: parent.at() }))
+  const g = groupIn(parent, { key: G, diary: C, join, name: 'Varanda', bindRoot })
   const w = {
-    logs,
-    joins,
+    C: parent,
+    logs: g.logs,
+    joins: g.joins,
     add (diary, key, { rejoin = null, at = AT(0) } = {}) {
-      logs.set(key, { key, diary, entries: [{ seq: 0, record: writerHeader({ group: G, diary, rejoin, at }) }] })
-      const list = joins.get(diary) || []
-      list.push({ writer: key, on: true, seq: list.length + 1 })
-      joins.set(diary, list)
+      if (parent.cwOf(diary) === undefined) parent.addWriter(diary, cwOf(diary))
+      g.add(diary, key, { rejoin, at })
       return w
     },
-    push (key, record) {
-      const log = logs.get(key)
-      const seq = log.entries.length
-      log.entries.push({ seq, record })
-      return { writer: key, seq }
-    },
-    len (key) {
-      return logs.get(key).entries.length
-    },
-    input ({ drop = [] } = {}) {
-      const writers = [...logs.values()].filter((l) => l.key !== G && !drop.includes(l.key))
-      return { root: logs.get(G), writers, joins, communities: [], now: NOW }
+    push: g.push,
+    len: g.len,
+    input ({ drop = [], community = parent.input() } = {}) {
+      return g.input({ drop, community })
     }
   }
   return w
@@ -64,8 +64,12 @@ const post = (w, key, s, extra = {}) => w.push(key, groupPost({ text: 'p' + s, a
 const visible = (g) => g.posts.filter((p) => !p.hidden).map((p) => p.writer + ':' + p.seq)
 const refs = (g) => g.posts.map((p) => p.writer + ':' + p.seq)
 
+// The parent community's fold (Maps and Sets) as a stable text.
+const stableText = (v) => JSON.stringify(v, (k, x) => x instanceof Map
+  ? [...x].sort((a, b) => a[0] < b[0] ? -1 : 1)
+  : x instanceof Set ? [...x].sort() : x)
 function normalize (g) {
-  return { ...g, admins: [...g.admins].sort(), members: [...g.members].sort((a, b) => a[0] < b[0] ? -1 : 1) }
+  return { ...g, admins: [...g.admins].sort(), members: [...g.members].sort((a, b) => a[0] < b[0] ? -1 : 1), community: g.community === null ? null : stableText(g.community) }
 }
 function nestedObject (depth) {
   let v = 1
@@ -132,13 +136,16 @@ test('a writer block canon cannot render (BigInt) neither empties the group nor 
 })
 
 test('header shapes', async (t) => {
-  const h = groupHeader({ diary: C, name: 'Varanda', at: AT(0) })
-  t.alike(Object.keys(h), ['type', 'v', 'kind', 'diary', 'visibility', 'join', 'name', 'box', 'at'])
+  const h = groupHeader({ diary: C, community: CMG, member: CMG, name: 'Varanda', at: AT(0) })
+  t.alike(Object.keys(h), ['type', 'v', 'kind', 'diary', 'community', 'member', 'visibility', 'join', 'name', 'box', 'at'])
   t.is(validateGroupHeader(h), null)
   t.is(validateGroupHeader({ ...h, name: null }), null, 'a public group may be unnamed')
-  t.is(validateGroupHeader({ ...h, kind: 'community' }), null)
+  t.is(validateGroupHeader({ ...h, kind: 'community', community: null, member: null }), null)
+  t.is(validateGroupHeader({ ...h, kind: 'community' }), 'malformed', 'a community has no parent')
+  t.is(validateGroupHeader({ ...h, community: null }), 'malformed', 'a group has exactly one parent')
   t.is(validateGroupHeader({ ...h, extra: 1 }), 'malformed', 'extra key')
-  t.is(validateGroupHeader({ ...h, v: 2 }), 'malformed')
+  t.is(validateGroupHeader({ ...h, v: 3 }), 'malformed')
+  t.is(validateGroupHeader({ ...h, v: 1 }), 'legacy')
   t.is(validateGroupHeader({ ...h, kind: 'x' }), 'malformed')
   t.is(validateGroupHeader({ ...h, box: K(9) }), 'malformed', 'public has no box')
   t.is(validateGroupHeader({ ...h, name: '' }), 'name-length')
@@ -152,10 +159,12 @@ test('header shapes', async (t) => {
   t.is(validateGroupHeader({ ...priv, join: 'open' }), 'malformed', 'private implies approval')
   t.is(validateGroupHeader({ ...priv, name: 'x' }), 'malformed', 'private name is null')
   await t.exception.all(async () => groupHeader({ diary: 'x' }), /malformed/)
-  const wh = writerHeader({ group: G, diary: X, at: AT(0) })
-  t.alike(wh, { type: 'group-writer', v: 1, group: G, diary: X, box: null, rejoin: null, at: AT(0) })
-  t.alike(Object.keys(wh), ['type', 'v', 'group', 'diary', 'box', 'rejoin', 'at'])
-  t.alike(writerHeader({ group: G, diary: X, rejoin: { writer: wX, seq: 2, x: 1 }, at: AT(0) }).rejoin, { writer: wX, seq: 2 })
+  const wh = writerHeader({ group: G, diary: X, member: cwOf(X), at: AT(0) })
+  t.alike(wh, { type: 'group-writer', v: 2, group: G, diary: X, member: cwOf(X), box: null, rejoin: null, at: AT(0) })
+  t.alike(Object.keys(wh), ['type', 'v', 'group', 'diary', 'member', 'box', 'rejoin', 'at'])
+  t.alike(writerHeader({ group: G, diary: X, member: cwOf(X), rejoin: { writer: wX, seq: 2, x: 1 }, at: AT(0) }).rejoin, { writer: wX, seq: 2 })
+  t.is(validateWriterHeader({ ...wh, member: 'x' }), 'malformed')
+  t.is(validateWriterHeader({ ...wh, v: 1 }), 'legacy')
   t.is(validateWriterHeader({ ...wh, rejoin: { writer: wX, seq: 0 } }), 'malformed', 'a leave is never block 0')
   t.is(validateWriterHeader({ ...wh, rejoin: 'x' }), 'malformed')
   const noRejoin = { ...wh }
@@ -174,7 +183,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-link', 'community-link', 'group-key', 'group-sealed'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -236,10 +245,12 @@ test('groupJoins and groupJoinHistory', (t) => {
     { seq: 1, record: groupJoinRecord({ group: G, writer: wX, on: true, at: AT(1) }) },
     { seq: 2, record: groupJoinRecord({ group: G2, writer: wX2, on: true, at: AT(2) }) },
     { seq: 4, record: { type: 'group-join', group: G, writer: 'x', on: true, at: AT(4) } },
+    { seq: 5, record: groupJoinRecord({ group: G, writer: wY, on: true, rejoin: { writer: wX, seq: 2 }, at: AT(5) }) },
     null
   ]
-  t.alike([...groupJoins(entries)], [[wX2, { group: G2, writer: wX2, seq: 2, at: AT(2) }]])
-  t.alike(groupJoinHistory(entries, G), [{ writer: wX, on: true, seq: 1 }, { writer: wX, on: false, seq: 3 }])
+  t.alike([...groupJoins(entries)], [[wX2, { group: G2, writer: wX2, seq: 2, at: AT(2) }], [wY, { group: G, writer: wY, seq: 5, at: AT(5) }]].sort((a, b) => a[0] < b[0] ? -1 : 1))
+  // The rejoin a join names (null without one) travels to the fold.
+  t.alike(groupJoinHistory(entries, G), [{ writer: wX, on: true, seq: 1, rejoin: null }, { writer: wX, on: false, seq: 3, rejoin: null }, { writer: wY, on: true, seq: 5, rejoin: { writer: wX, seq: 2 } }])
   t.alike([...groupJoins('x')], [])
   t.alike(groupJoinHistory(null, G), [])
 })
@@ -563,11 +574,11 @@ test('a rejoin naming another diary leave is ignored', (t) => {
   const g = buildGroup(w.input())
   t.alike(refs(g), [wX + ':1'])
   t.is(g.incomplete, false)
-  w.logs.get(wX3).entries[0].record = writerHeader({ group: G, diary: X, rejoin: notLeave, at: AT(3) })
+  w.logs.get(wX3).entries[0].record = writerHeader({ group: G, diary: X, member: cwOf(X), rejoin: notLeave, at: AT(3) })
   const g2 = buildGroup(w.input())
   t.alike(refs(g2), [wX + ':1'], 'a rejoin naming a post is ignored too')
   t.is(g2.incomplete, false)
-  w.logs.get(wX3).entries[0].record = writerHeader({ group: G, diary: X, rejoin: { writer: wX, seq: 9 }, at: AT(3) })
+  w.logs.get(wX3).entries[0].record = writerHeader({ group: G, diary: X, member: cwOf(X), rejoin: { writer: wX, seq: 9 }, at: AT(3) })
   t.is(buildGroup(w.input()).incomplete, true, 'a leave not known yet leaves the group incomplete')
 })
 
@@ -701,9 +712,11 @@ test('the writer cap never keeps a rejoin without its leave', (t) => {
 
 test('over 512 writers keeps the 512 lowest keys', (t) => {
   const w = world()
+  // A community binds at most 511 CWs besides its root, so 75 diaries of 8
+  // writers each go over G's cap.
   const n = MAX_GROUP_WRITERS + 88
   for (let i = 0; i < n; i++) {
-    const d = K(0x10000 + i)
+    const d = K(0x10000 + (i % 75))
     const key = K(0x20000 + ((i * 7919) % n))
     w.add(d, key)
     post(w, key, i)
@@ -825,18 +838,32 @@ test('a demoted admin can then be banned', (t) => {
 })
 
 test('an unbound root carries no authority', (t) => {
-  const w = world({ bindRoot: false }).add(A, wA).add(X, wX)
-  const p = post(w, wX, 1)
-  w.push(G, groupMeta({ name: 'Falso', join: 'approval', at: AT(2) }))
-  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(2) }))
-  w.push(G, groupBan({ member: X, on: true, at: AT(3) }))
-  w.push(G, groupHide({ target: p, on: true, at: AT(3) }))
-  w.push(wA, groupHide({ target: p, on: true, at: AT(4) }))
-  post(w, G, 5)
-  const g = buildGroup(w.input())
+  const charter = (w) => {
+    const p = post(w, wX, 1)
+    w.push(G, groupMeta({ name: 'Falso', join: 'approval', at: AT(2) }))
+    w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(2) }))
+    w.push(G, groupBan({ member: X, on: true, at: AT(3) }))
+    w.push(G, groupHide({ target: p, on: true, at: AT(3) }))
+    w.push(wA, groupHide({ target: p, on: true, at: AT(4) }))
+    post(w, G, 5)
+    return buildGroup(w.input())
+  }
+  // G's creator is the community's creator: the community title stays, the
+  // unbound G root appoints and decides nothing.
+  let g = charter(world({ bindRoot: false }).add(A, wA).add(X, wX))
   t.is(g.incomplete, true)
+  t.is(g.orphan, false)
   t.is(g.name, 'Varanda', 'meta ignored, header still read')
   t.is(g.join, 'open')
+  t.is(g.creator, C)
+  t.alike([...g.admins], [C], 'no admin appointed: the header diary is listed only as the community creator')
+  t.absent(g.admins.has(A))
+  t.is(g.members.get(X), 'member', 'ban ignored')
+  t.alike(g.posts.map((q) => [q.writer + ':' + q.seq, q.hidden]), [[wX + ':1', false]], 'no root posts, no hide')
+  // The header of a demoted community admin (never the community creator):
+  // an orphan, with no community admins at all.
+  g = charter(world({ bindRoot: false, demoted: true }).add(A, wA).add(X, wX))
+  t.is(g.orphan, true, 'only the community creator creates groups')
   t.is(g.creator, C)
   t.alike([...g.admins], [], 'no admin appointed, and a creator with no counted core is no admin either')
   t.absent(g.members.has(C), 'nor a member: a node must not accept charter writes the fold ignores')
@@ -921,24 +948,38 @@ test('over the group cap the creator and admins go first and banned diaries last
 })
 
 test('an unbound root gives the header diary no creator powers', (t) => {
-  const w = world({ bindRoot: false, join: 'approval' }).add(C, wC).add(X, wX)
-  const p = post(w, wX, 1)
-  w.push(wC, groupBan({ member: X, on: true, at: AT(2) }))
-  w.push(wC, groupHide({ target: p, on: true, at: AT(2) }))
-  w.push(wC, groupAdmit({ member: X, on: true, at: AT(2) }))
-  post(w, wC, 3)
-  const g = buildGroup(w.input())
+  const acts = (w) => {
+    const p = post(w, wX, 1)
+    w.push(wC, groupBan({ member: X, on: true, at: AT(2) }))
+    w.push(wC, groupHide({ target: p, on: true, at: AT(2) }))
+    w.push(wC, groupAdmit({ member: X, on: true, at: AT(2) }))
+    post(w, wC, 3)
+    return buildGroup(w.input())
+  }
+  // The community creator, header diary of an unbound G root, acts from a G
+  // writer: no G authority; the community title needs no admit.
+  let g = acts(world({ bindRoot: false, join: 'approval' }).add(C, wC).add(X, wX))
   t.is(g.creator, C, 'the header stays readable')
-  t.alike([...g.admins], [])
+  t.alike([...g.admins], [C], 'the community creator only')
+  t.is(g.members.get(X), 'requested', 'no ban and no admit from the header diary')
+  t.is(g.members.get(C), 'member', 'a community admin needs no admit')
+  t.alike(g.posts.map((q) => q.hidden), [true, false], 'the request stays hidden, the community creator post shows')
+  // A demoted community admin's header: an orphan, nobody has authority.
+  g = acts(world({ bindRoot: false, join: 'approval', demoted: true }).add(C, wC).add(X, wX))
+  t.is(g.orphan, true)
+  t.is(g.creator, C, 'the header stays readable')
+  t.alike([...g.admins], [], 'no admins in an orphan with an unbound root')
   t.is(g.members.get(X), 'requested', 'no ban and no admit from the header diary')
   t.is(g.members.get(C), 'requested', 'an ordinary diary, never auto-admitted')
-  t.alike(g.posts.map((q) => q.hidden), [true, true])
-  const open = world({ bindRoot: false }).add(C, wC).add(X, wX)
-  open.push(wC, groupBan({ member: X, on: true, at: AT(1) }))
-  open.push(wX, groupBan({ member: C, on: true, at: AT(2) }))
-  const go = buildGroup(open.input())
-  t.is(go.members.get(X), 'member', 'its ban counts for nothing')
-  t.is(go.members.get(C), 'member', 'an ordinary member, banned by no one with authority')
+  t.alike(g.posts.map((q) => q.hidden), [true, true], 'a demoted community admin needs a group admit for its posts')
+  for (const demoted of [false, true]) {
+    const open = world({ bindRoot: false, demoted }).add(C, wC).add(X, wX)
+    open.push(wC, groupBan({ member: X, on: true, at: AT(1) }))
+    open.push(wX, groupBan({ member: C, on: true, at: AT(2) }))
+    const go = buildGroup(open.input())
+    t.is(go.members.get(X), 'member', 'its ban counts for nothing')
+    t.is(go.members.get(C), 'member', 'banned by no one with authority')
+  }
 })
 
 test('a record backdated before a leave on another writer is withdrawn', (t) => {
@@ -1070,78 +1111,100 @@ test('an admit at the observed lengths after a leave and rejoin admits the new g
   t.is(g.members.get(X), 'member')
 })
 
-// Communities: CM is created by Z, whose writer wZ is a member of G.
+// Communities: CM is created by Z (its root is Z's CW); C, a community
+// admin, created G in it.
 const CM = K(0x900)
 const CM2 = K(0x901)
 const Z = K(6)
 const wZ = K(0x700)
-const wA2 = K(0x201)
+const cwA = cwOf(A)
+const cwA2 = K(0xcc0201)
+const cwX = cwOf(X)
 
-// A community root, bound by its creator's diary unless `bind` is false.
-function community (records, { key = CM, creator = Z, kind = 'community', name = 'Bairro', bind = true } = {}) {
-  const entries = [{ seq: 0, record: groupHeader({ kind, diary: creator, name, at: AT(0) }) }]
-  for (const record of records) entries.push({ seq: entries.length, record })
-  return { key, entries, joins: new Map(bind ? [[creator, [{ writer: key, on: true, seq: 1 }]]] : []) }
+// G inside CM, created by CM's creator Z (only the community's creator
+// creates groups): C and A are community admins unless `admins` says
+// otherwise, X and Y plain members; A, X and Y write in G. Without
+// `create`, nobody created G in CM (an orphan).
+function linkedWorld ({ join = 'open', admins = [A], create = true } = {}) {
+  const cm = communityOf({
+    key: CM,
+    creator: Z,
+    members: [C, A, X, Y].map((diary) => ({ diary, cw: cwOf(diary), status: 'member' })),
+    admins: [C, ...admins],
+    creates: create ? [{ by: Z, group: G }] : []
+  })
+  const g = groupIn(cm, { key: G, diary: Z, join, name: 'Varanda' })
+  const w = {
+    C: cm,
+    logs: g.logs,
+    joins: g.joins,
+    push: g.push,
+    len: g.len,
+    add (diary, key, opts = {}) {
+      if (cm.cwOf(diary) === undefined) cm.addWriter(diary, cwOf(diary))
+      g.add(diary, key, opts)
+      return w
+    },
+    input ({ drop = [], community = cm.input() } = {}) {
+      return g.input({ drop, community })
+    }
+  }
+  return w.add(A, wA).add(X, wX).add(Y, wY)
 }
 
-// G with members A (community admin), X and Y (plain), Z (community creator).
-function linkedWorld ({ join = 'open', groupSide = true, communitySide = true, admins = [A] } = {}) {
-  const w = world({ join }).add(A, wA).add(X, wX).add(Y, wY).add(Z, wZ)
-  // Both sides list the creator's and the admins' writers, as the node does.
-  const cuts = [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }]
-  if (groupSide) w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(1) }))
-  const records = []
-  if (communitySide) records.push(groupLink({ group: G, on: true, cuts, at: AT(1) }))
-  const writerOf = new Map([[A, wA], [X, wX], [Y, wY]])
-  for (const member of admins) records.push(communityAdmin({ member, on: true, cuts: [{ writer: writerOf.get(member), seq: 1 }], at: AT(1) }))
-  return { w, records }
-}
-
-const withCommunities = (w, list) => ({ ...w.input(), communities: list })
+const cwBan = (w, cw, member, s) => w.C.push(cw, communityBan({ group: G, member, on: true, at: AT(s) }))
+const cwOfLog = (input, key) => input.writers.find((l) => l.key === key)
 
 test('community record shapes and limits', async (t) => {
-  const link = groupLink({ group: G, on: true, at: AT(1) })
-  t.alike(Object.keys(link), ['type', 'group', 'on', 'cuts', 'at'])
-  const back = communityLink({ community: CM, on: false, cuts: [{ writer: wA, seq: 2 }], at: AT(1) })
-  t.alike(Object.keys(back), ['type', 'community', 'on', 'cuts', 'at'])
-  t.is(validateGroupRecord(link, 1, { root: true, community: true }), null)
-  t.is(validateGroupRecord(link, 1, { root: true }), 'community-only', 'group-link only in a community root')
-  t.is(validateGroupRecord(link, 1), 'root-only')
-  t.is(validateGroupRecord(back, 1, { root: true }), null)
-  t.is(validateGroupRecord(back, 1, { root: true, community: true }), 'group-only', 'no community-link in a community root (no nesting)')
-  t.is(validateGroupRecord(back, 1), 'root-only')
-  t.is(validateGroupRecord(groupPost({ text: 'oi', at: AT(1) }), 1, { root: true, community: true }), 'group-only')
-  t.is(validateGroupRecord({ ...link, seen: null }, 1, { root: true, community: true }), 'malformed', 'exact keys')
-  t.is(validateGroupRecord({ ...link, group: 'x' }, 1, { root: true, community: true }), 'malformed')
-  const many = (n) => Array.from({ length: n }, (_, i) => ({ writer: K(0x1000 + i), seq: 1 }))
-  t.ok(communityAdmin({ member: A, on: false, cuts: many(MAX_COMMUNITY_CUTS), at: AT(1) }))
-  await t.exception.all(async () => communityAdmin({ member: A, on: false, cuts: many(MAX_COMMUNITY_CUTS + 1), at: AT(1) }), /cuts-invalid/)
-  await t.exception.all(async () => groupAdmin({ member: A, on: false, cuts: many(17), at: AT(1) }), /cuts-invalid/, 'a group root keeps 16 cuts')
-  await t.exception.all(async () => groupLink({ group: G, on: false, cuts: many(17), at: AT(1) }), /cuts-invalid/)
-  await t.exception.all(async () => communityLink({ community: CM, on: false, cuts: [{ writer: wA, seq: 1 }, { writer: wA, seq: 2 }], at: AT(1) }), /cuts-invalid/)
-})
-
-test('a one-sided community link binds nothing', (t) => {
-  for (const [groupSide, communitySide] of [[false, true], [true, false]]) {
-    const { w, records } = linkedWorld({ groupSide, communitySide })
-    post(w, wX, 2)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.members.get(X), 'member', 'the ban of a one-sided community admin is void')
-    t.is(g.community, null)
-    t.absent(g.admins.has(A))
-    t.absent(g.admins.has(Z))
+  const CR = { root: true, community: true }
+  const CW = { community: true }
+  const create = groupCreateRecord({ group: G, at: AT(1) })
+  t.alike(Object.keys(create), ['type', 'group', 'seen', 'at'])
+  t.is(validateGroupRecord(create, 1, CW), 'root-only', 'only the community creator creates, in its root')
+  t.is(validateGroupRecord(create, 1, CR), null)
+  t.is(validateGroupRecord(create, 1), 'community-only', 'group-create only in a community core')
+  const ban = communityBan({ group: G, member: X, on: true, at: AT(1) })
+  t.alike(Object.keys(ban), ['type', 'group', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'])
+  t.is(validateGroupRecord(ban, 1, CW), null)
+  t.is(validateGroupRecord({ ...ban, group: null }, 1, CW), null, 'group null acts on C itself')
+  t.is(validateGroupRecord(ban, 1), 'malformed', 'a group core takes no group key')
+  t.is(validateGroupRecord(communityHide({ group: G, target: { writer: wX, seq: 1 }, on: true, at: AT(1) }), 1, CW), null)
+  t.is(validateGroupRecord({ type: 'group-hide', group: null, target: { writer: wX, seq: 1 }, on: true, seen: null, at: AT(1) }, 1, CW), 'malformed', 'C has no posts')
+  t.is(validateGroupRecord(groupPost({ text: 'oi', at: AT(1) }), 1, CW), 'group-only')
+  for (const type of ['group-link', 'community-link']) {
+    t.is(validateGroupRecord({ type, group: G, on: true, cuts: [], at: AT(1) }, 1, CR), 'malformed', type + ' is gone')
   }
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ writer: K(0x1000 + i), seq: 1 }))
+  t.is(validateGroupRecord(groupAdmin({ member: A, on: false, cuts: many(16), at: AT(1) }), 1, CR), null, 'a community grant keeps 16 cuts')
+  t.is(validateGroupRecord({ ...groupAdmin({ member: A, on: false, at: AT(1) }), cuts: many(17) }, 1, CR), 'cuts-invalid')
+  await t.exception.all(async () => communityBan({ group: G, member: X, on: true, cuts: many(17), at: AT(1) }), /cuts-invalid/)
+  await t.exception.all(async () => communityAdmit({ group: G, member: X, on: true, cuts: [{ writer: wA, seq: 1 }, { writer: wA, seq: 2 }], at: AT(1) }), /cuts-invalid/)
 })
 
-test('a community admin ban in a linked group counts', (t) => {
-  const { w, records } = linkedWorld()
+test('a header naming C without a create there is an orphan: community powers stop at it', (t) => {
+  const w = linkedWorld({ create: false })
   post(w, wX, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  w.C.push(CM, communityBan({ group: G, member: Y, on: true, at: AT(3) }))
+  const g = buildGroup(w.input())
+  t.is(g.orphan, true)
+  t.is(g.community, null)
+  t.is(g.members.get(X), 'member', 'the ban of a community admin is void')
+  t.is(g.members.get(Y), 'member', 'and so is the community creator\'s')
+  t.absent(g.admins.has(A))
+  t.absent(g.admins.has(C), 'no community admin is listed')
+  t.alike([...g.admins], [Z], 'Z only as the header diary of its own root')
+})
+
+test('a community admin ban in G from its CW counts', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  cwBan(w, cwA, X, 3)
   post(w, wY, 4)
-  w.push(wZ, groupBan({ member: Y, on: true, at: AT(5) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
-  t.is(g.community, CM)
+  w.C.push(CM, communityBan({ group: G, member: Y, on: true, at: AT(5) }))
+  const g = buildGroup(w.input())
+  t.is(g.community.creator, Z)
   t.is(g.members.get(X), 'banned', 'by a community admin')
   t.is(g.members.get(Y), 'banned', 'by the community creator')
   t.ok(g.admins.has(A) && g.admins.has(Z))
@@ -1150,311 +1213,267 @@ test('a community admin ban in a linked group counts', (t) => {
 })
 
 test('a community admin never appoints group admins', (t) => {
-  const { w, records } = linkedWorld()
+  const w = linkedWorld()
   t.is(validateGroupRecord(groupAdmin({ member: X, on: true, at: AT(2) }), 1), 'root-only', 'group-admin stays a group root record')
-  w.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
+  t.is(validateGroupRecord(groupAdmin({ member: X, on: true, at: AT(2) }), 1, { community: true }), 'root-only', 'never from a CW')
+  w.C.push(cwA, communityAdmit({ group: G, member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  const g = buildGroup(w.input())
   t.absent(g.admins.has(X))
 })
 
-test('unlink removes community power from its cuts on, earlier bans stay', (t) => {
-  for (const side of ['group', 'community']) {
-    const { w, records } = linkedWorld()
-    post(w, wX, 2)
-    post(w, wY, 2)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-    w.push(wA, groupBan({ member: Y, on: true, at: AT(1) }))
-    const cuts = [{ writer: wA, seq: 2 }]
-    if (side === 'group') w.push(G, communityLink({ community: CM, on: false, cuts, at: AT(9) }))
-    else records.push(groupLink({ group: G, on: false, cuts, at: AT(9) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.members.get(X), 'banned', side + ': a ban below the cut stays')
-    t.is(g.members.get(Y), 'member', side + ': a ban at the cut is void even with an earlier at')
-    t.is(g.community, null)
-    t.absent(g.admins.has(A))
-  }
-})
-
-test('an unlisted writer loses every action after a demotion or unlink with cuts', (t) => {
-  for (const how of ['demote', 'unlink']) {
-    const { w, records } = linkedWorld()
-    w.add(A, wA2)
-    records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }, { writer: wA2, seq: 1 }], at: AT(2) }))
-    post(w, wX, 2)
-    post(w, wY, 2)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-    w.push(wA2, groupBan({ member: Y, on: true, at: AT(3) }))
-    const cuts = [{ writer: wA, seq: 5 }]
-    if (how === 'demote') records.push(communityAdmin({ member: A, on: false, cuts, at: AT(9) }))
-    else w.push(G, communityLink({ community: CM, on: false, cuts, at: AT(9) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.members.get(X), 'banned', how + ': the listed writer keeps actions below its cut')
-    t.is(g.members.get(Y), 'member', how + ': the unlisted writer keeps nothing')
-  }
-})
-
-test('a nested community link is ignored', (t) => {
-  // A community root of kind community: its community-link is invalid and it
-  // never takes community powers.
-  const inner = world().add(A, wA).add(X, wX)
-  inner.logs.get(G).entries[0].record = groupHeader({ kind: 'community', diary: C, name: 'Dentro', at: AT(0) })
-  inner.push(G, { type: 'community-link', community: CM, on: true, cuts: [], at: AT(1) })
-  inner.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-  const records = [groupLink({ group: G, on: true, at: AT(1) }), communityAdmin({ member: A, on: true, at: AT(1) })]
-  const g = buildGroup(withCommunities(inner, [community(records)]))
-  t.is(g.community, null)
-  t.is(g.members.get(X), 'member')
-  // A community linking another community never lists it.
-  const outer = community([groupLink({ group: CM2, on: true, at: AT(1) })])
-  const nested = community([], { key: CM2 })
-  t.alike(buildCommunity({ root: outer, groups: [nested] }).groups, [])
-  t.alike(buildCommunity({ root: outer }).groups, [CM2], 'without the roots only its own links are known')
-})
-
-test('a second community link for the same group is ignored while one is on', (t) => {
-  const { w, records } = linkedWorld()
-  const yCuts = [{ writer: wY, seq: 1 }]
-  w.push(G, communityLink({ community: CM2, on: true, cuts: yCuts, at: AT(2) }))
-  const second = community([groupLink({ group: G, on: true, cuts: yCuts, at: AT(1) })], { key: CM2, creator: Y })
+test('a community demotion removes CW power from its cut on, earlier bans stay', (t) => {
+  const w = linkedWorld()
   post(w, wX, 2)
-  w.push(wY, groupBan({ member: X, on: true, at: AT(3) }))
-  const input = withCommunities(w, [community(records), second])
-  const g = buildGroup(input)
-  t.is(g.community, CM)
-  t.is(g.members.get(X), 'member', 'the second community has no power')
-  t.alike(buildGroup({ ...input, communities: input.communities.slice().reverse() }).members, g.members, 'input order does not matter')
-  // After unlinking the first, a new link to the second counts.
-  w.push(G, communityLink({ community: CM, on: false, at: AT(4) }))
-  w.push(G, communityLink({ community: CM2, on: true, cuts: yCuts, at: AT(5) }))
-  const h = buildGroup(withCommunities(w, [community(records), second]))
-  t.is(h.community, CM2)
-  t.is(h.members.get(X), 'banned')
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  cwBan(w, cwA, Y, 1)
+  w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: 2 }], at: AT(9) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned', 'a ban below the cut stays')
+  t.is(g.members.get(Y), 'member', 'a ban at the cut is void even with an earlier at')
+  t.ok(g.community !== null, 'G stays in C')
+  t.absent(g.admins.has(A))
 })
 
-test('a community admin cannot be banned in a linked group and needs no admit', (t) => {
-  const { w, records } = linkedWorld({ join: 'approval' })
+test('an unlisted CW loses every action after a demotion with cuts', (t) => {
+  const w = linkedWorld()
+  w.C.addWriter(A, cwA2)
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }, { writer: cwA2, seq: 1 }], at: AT(2) }))
+  post(w, wX, 2)
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  cwBan(w, cwA2, Y, 3)
+  t.is(buildGroup(w.input()).members.get(Y), 'banned', 'the second CW acts once granted')
+  w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: 5 }], at: AT(9) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned', 'the listed CW keeps actions below its cut')
+  t.is(g.members.get(Y), 'member', 'the unlisted CW keeps nothing')
+})
+
+test('a community root never folds as a group, even when a community creates its key', (t) => {
+  const w = linkedWorld()
+  w.C.push(CM, groupCreateRecord({ group: CM2, at: AT(2) }))
+  const nested = communityOf({ key: CM2, creator: C, members: [{ diary: A, cw: K(0xcc0900), status: 'member' }] })
+  const g = buildGroup({ ...nested.input(), community: w.C.input() })
+  t.is(g.kind, null, 'the empty group')
+  t.is(g.community, null)
+  t.is(validateGroupHeader({ ...groupHeader({ kind: 'community', diary: Z, at: AT(0) }), community: CM }), 'malformed', 'a community has no parent')
+  w.C.push(CM, groupCreateRecord({ group: CM, at: AT(3) }))
+  t.absent(buildCommunity(w.C.input()).groups.includes(CM), 'a community never lists itself')
+})
+
+test('a second community creating the same group is ignored: the header is immutable', (t) => {
+  const w = linkedWorld()
+  const other = communityOf({ key: CM2, creator: Y, members: [{ diary: X, cw: K(0xcc0400), status: 'member' }] })
+  other.push(CM2, groupCreateRecord({ group: G, at: AT(1) }))
+  other.push(CM2, communityBan({ group: G, member: X, on: true, at: AT(3) }))
+  post(w, wX, 2)
+  const g = buildGroup(w.input({ community: other.input() }))
+  t.is(g.community, null, 'not the parent its header names')
+  t.is(g.incomplete, true)
+  t.is(g.members.get(X), 'member', 'the second community has no power')
+  const h = buildGroup(w.input())
+  t.is(h.community.creator, Z)
+  t.is(h.members.get(X), 'member')
+})
+
+test('a community admin cannot be banned in G and needs no admit', (t) => {
+  const w = linkedWorld({ join: 'approval' })
+  w.add(Z, wZ)
   w.push(G, groupAdmin({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
   post(w, wA, 2)
   w.push(wX, groupBan({ member: A, on: true, at: AT(3) }))
   w.push(G, groupBan({ member: Z, on: true, at: AT(3) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
+  const g = buildGroup(w.input())
   t.is(g.members.get(A), 'member')
   t.is(g.members.get(Z), 'member')
   t.absent(g.requests.includes(A))
   t.absent(g.requests.includes(Z))
   t.alike(visible(g), [wA + ':1'], 'auto-admitted')
   t.is(g.bans.size, 0)
-  // Unlinked, the same ban counts.
-  w.push(G, communityLink({ community: CM, on: false, at: AT(9) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(A), 'banned')
+  // Demoted in C, the same ban counts.
+  w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(9) }))
+  t.is(buildGroup(w.input()).members.get(A), 'banned')
 })
 
-test('only the linked community root grants community admins', (t) => {
-  const { w, records } = linkedWorld({ admins: [] })
+test('only the parent community root grants community admins', (t) => {
+  const w = linkedWorld({ admins: [] })
   post(w, wX, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-  // Another root naming the same creator, never linked, grants A.
-  const other = community([groupLink({ group: G, on: true, at: AT(1) }), communityAdmin({ member: A, on: true, at: AT(1) })], { key: CM2 })
-  const g = buildGroup(withCommunities(w, [community(records), other]))
+  cwBan(w, cwA, X, 3)
+  const g = buildGroup(w.input())
   t.is(g.members.get(X), 'member')
   t.absent(g.admins.has(A))
-  t.is(validateGroupRecord(communityAdmin({ member: A, on: true, at: AT(1) }), 1), 'root-only', 'never from a writer core')
+  // Another root of the same creator grants A: never G's parent.
+  const other = communityOf({ key: CM2, creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A] })
+  t.is(buildGroup(w.input({ community: other.input() })).members.get(X), 'member')
+  t.is(validateGroupRecord(groupAdmin({ member: A, on: true, at: AT(1) }), 1, { community: true }), 'root-only', 'never from a CW')
   // A grant naming the community creator changes nothing.
-  const self = community([groupLink({ group: G, on: true, cuts: [{ writer: wZ, seq: 1 }], at: AT(1) }), communityAdmin({ member: Z, on: false, at: AT(1) })])
-  w.push(wZ, groupBan({ member: Y, on: true, at: AT(4) }))
-  t.is(buildGroup(withCommunities(w, [self])).members.get(Y), 'banned')
+  w.C.push(CM, groupAdmin({ member: Z, on: false, at: AT(1) }))
+  w.C.push(CM, communityBan({ group: G, member: Y, on: true, at: AT(4) }))
+  t.is(buildGroup(w.input()).members.get(Y), 'banned')
 })
 
-test('a community link to a root not held sets incomplete', (t) => {
-  const { w } = linkedWorld()
-  t.is(buildGroup(withCommunities(w, [])).incomplete, true)
-  t.is(buildGroup(withCommunities(w, [community([])])).incomplete, false)
+test('a parent community not held sets incomplete', (t) => {
+  const w = linkedWorld()
+  t.is(buildGroup(w.input({ community: null })).incomplete, true)
+  t.is(buildGroup(w.input()).incomplete, false)
 })
 
 test('buildCommunity basics', (t) => {
   const groups = Array.from({ length: MAX_GROUPS_PER_COMMUNITY + 1 }, (_, i) => K(0x2000 + i))
-  const records = [
-    groupMeta({ name: 'Bairro Novo', join: 'open', at: AT(1) }),
-    communityAdmin({ member: A, on: true, at: AT(1) }),
-    communityAdmin({ member: B, on: true, at: AT(1) }),
-    communityAdmin({ member: B, on: false, at: AT(2) }),
-    ...groups.map((group) => groupLink({ group, on: true, at: AT(3) })),
-    groupLink({ group: groups[1], on: false, at: AT(4) })
-  ]
-  const root = community(records)
-  const c = buildCommunity({ root: root.key, entries: root.entries.slice().reverse(), joins: root.joins })
+  const cm = communityOf({ key: CM, creator: Z, members: [A, B].map((diary) => ({ diary, cw: cwOf(diary), status: 'member' })), admins: [A, B] })
+  cm.push(CM, groupMeta({ name: 'Bairro Novo', join: 'open', at: cm.at() }))
+  cm.push(CM, groupAdmin({ member: B, on: false, cuts: [{ writer: cwOf(B), seq: 1 }], at: cm.at() }))
+  for (const group of groups) cm.push(CM, groupCreateRecord({ group, at: cm.at() }))
+  cm.push(cwA, groupCreateRecord({ group: G, at: cm.at() }))
+  const input = cm.input()
+  const c = buildCommunity({ ...input, root: { ...input.root, entries: input.root.entries.slice().reverse() } })
+  t.is(c.kind, 'community')
   t.is(c.name, 'Bairro Novo')
   t.is(c.creator, Z)
   t.alike([...c.admins].sort(), [A, Z].sort())
-  t.alike(c.groups, groups.slice(0, MAX_GROUPS_PER_COMMUNITY).filter((g) => g !== groups[1]), 'the 33rd link was over the cap')
+  t.alike(c.groups, groups.slice(0, MAX_GROUPS_PER_COMMUNITY), 'the 33rd create was over the cap')
+  t.is(c.general, groups[0], 'the first root create')
+  t.is(c.created.get(groups[0]).diary, Z)
+  t.absent(c.created.has(G), 'an admin create in its CW is root-only')
   t.is(c.incomplete, false)
-  // With group roots: only two-way links, and a missing root is incomplete.
-  const linked = { key: groups[0], entries: [{ seq: 0, record: groupHeader({ diary: C, at: AT(0) }) }, { seq: 1, record: communityLink({ community: CM, on: true, at: AT(1) }) }] }
-  const oneSided = { key: groups[2], entries: [{ seq: 0, record: groupHeader({ diary: C, at: AT(0) }) }] }
-  const two = buildCommunity({ root, groups: [linked, oneSided] })
-  t.alike(two.groups, [groups[0]])
-  t.is(two.incomplete, true)
-  t.is(buildCommunity({ root: { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, at: AT(0) }) }] } }).creator, null, 'a group root is not a community')
+  t.is(buildCommunity({ root: { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, community: CM, member: CM, at: AT(0) }) }] } }).creator, null, 'a group root is not a community')
   t.is(buildCommunity(null).incomplete, true)
-  t.is(buildCommunity({ root: CM, entries: 'x' }).creator, null)
+  t.is(buildCommunity({ root: { key: CM, entries: 'x' } }).creator, null)
 })
 
-test('a community grant covers only the writers it lists, from the listed seq', (t) => {
-  const { w, records } = linkedWorld({ admins: [] })
-  w.add(A, wA2)
+test('a community grant covers only the CWs it lists, from the listed seq', (t) => {
+  const w = linkedWorld({ admins: [] })
+  w.C.addWriter(A, cwA2)
   post(w, wX, 2)
   post(w, wY, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-  records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(4) }))
-  w.push(wA2, groupBan({ member: Y, on: true, at: AT(5) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
+  cwBan(w, cwA, X, 3)
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(4) }))
+  cwBan(w, cwA2, Y, 5)
+  const g = buildGroup(w.input())
   t.ok(g.admins.has(A))
   t.is(g.members.get(X), 'member', 'a ban below the grant cut is void')
-  t.is(g.members.get(Y), 'member', 'an unlisted writer gets nothing')
-  w.push(wA, groupBan({ member: Y, on: true, at: AT(6) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(Y), 'banned', 'from the cut on it counts')
+  t.is(g.members.get(Y), 'member', 'an unlisted CW gets nothing')
+  cwBan(w, cwA, Y, 6)
+  t.is(buildGroup(w.input()).members.get(Y), 'banned', 'from the cut on it counts')
 })
 
-test('a new device of a community admin acts after a new grant alone while linked', (t) => {
-  const { w, records } = linkedWorld()
-  w.add(A, wA2)
+test('a new CW of a community admin acts after a new grant alone', (t) => {
+  const w = linkedWorld()
+  w.C.addWriter(A, cwA2)
   post(w, wX, 2)
-  w.push(wA2, groupBan({ member: X, on: true, at: AT(3) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', 'no grant lists it')
-  records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }, { writer: wA2, seq: w.len(wA2) }], at: AT(4) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', 'nothing retroactive')
-  w.push(wA2, groupBan({ member: X, on: true, at: AT(5) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'banned', 'the grant alone, no new link')
+  cwBan(w, cwA2, X, 3)
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'no grant lists it')
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }, { writer: cwA2, seq: w.C.len(cwA2) }], at: AT(4) }))
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'nothing retroactive')
+  cwBan(w, cwA2, X, 5)
+  t.is(buildGroup(w.input()).members.get(X), 'banned', 'the grant alone')
 })
 
-test('a new device of the community creator acts after a community-side link alone', (t) => {
-  const { w, records } = linkedWorld()
-  const wZ2 = K(0x701)
-  w.add(Z, wZ2)
+test('a new CW of the community creator acts at once', (t) => {
+  const w = linkedWorld()
+  const cwZ2 = K(0xcc0006)
+  w.C.addWriter(Z, cwZ2)
   post(w, wX, 2)
-  w.push(wZ2, groupBan({ member: X, on: true, at: AT(3) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', 'its own side does not list it')
-  records.push(groupLink({ group: G, on: true, cuts: [{ writer: wZ2, seq: w.len(wZ2) }], at: AT(4) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', 'nothing below the cut')
-  w.push(wZ2, groupBan({ member: X, on: true, at: AT(5) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
-  t.is(g.community, CM)
-  t.is(g.members.get(X), 'banned', 'no new group-side link needed')
+  cwBan(w, cwZ2, X, 3)
+  const g = buildGroup(w.input())
+  t.ok(g.community !== null)
+  t.is(g.members.get(X), 'banned', 'the creator needs no grant')
 })
 
-test('link cuts only raise the start; a pre-link device the group side omitted counts from its grant', (t) => {
-  // A granted before the link with two devices from seq 0; both links list
-  // only wA, from its cut. wA starts at its link cut; wA2 is bounded by its
-  // grant alone (the documented residual).
-  const w = world().add(A, wA).add(A, wA2).add(X, wX).add(Y, wY).add(Z, wZ)
+test('a community grant starts each listed CW at its own cut', (t) => {
+  const w = linkedWorld({ admins: [] })
+  w.C.addWriter(A, cwA2)
   post(w, wX, 1)
   post(w, wY, 1)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(2) }))
-  w.push(wA2, groupBan({ member: Y, on: true, at: AT(2) }))
-  const records = [communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }, { writer: wA2, seq: 0 }], at: AT(1) })]
-  const cuts = [{ writer: wA, seq: w.len(wA) }]
-  records.push(groupLink({ group: G, on: true, cuts, at: AT(3) }))
-  w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(3) }))
-  const g = buildGroup(withCommunities(w, [community(records)]))
-  t.is(g.community, CM)
-  t.is(g.members.get(X), 'member', 'a listed writer: nothing below its link cut')
-  t.is(g.members.get(Y), 'banned', 'an unlisted writer: from its grant start')
-  w.push(wA, groupBan({ member: X, on: true, at: AT(4) }))
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'banned', 'the listed writer from its cut')
+  cwBan(w, cwA, X, 2)
+  cwBan(w, cwA2, Y, 2)
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 0 }, { writer: cwA2, seq: w.C.len(cwA2) }], at: AT(3) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned', 'a cut at 0 covers the CW from its start')
+  t.is(g.members.get(Y), 'member', 'nothing below the other cut')
+  cwBan(w, cwA2, Y, 4)
+  t.is(buildGroup(w.input()).members.get(Y), 'banned', 'the listed CW from its cut')
 })
 
-test('an unlink that never counted does not make the first link a relink', (t) => {
-  for (const side of ['group', 'community']) {
-    const { w, records } = linkedWorld({ groupSide: false, communitySide: false })
-    const cuts = [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }]
-    if (side === 'group') {
-      w.push(G, communityLink({ community: CM2, on: true, cuts, at: AT(1) }))
-      w.push(G, communityLink({ community: CM, on: false, cuts: [], at: AT(1) }))
-      w.push(G, communityLink({ community: CM2, on: false, cuts: [], at: AT(1) }))
-    } else {
-      records.unshift(groupLink({ group: G, on: false, cuts: [], at: AT(1) }))
-    }
-    w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(1) }))
-    records.push(groupLink({ group: G, on: true, cuts, at: AT(1) }))
-    w.add(A, wA2)
-    records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA2, seq: 1 }], at: AT(2) }))
-    post(w, wX, 2)
-    w.push(wA2, groupBan({ member: X, on: true, at: AT(3) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.community, CM, side)
-    t.is(g.members.get(X), 'banned', side + ': the granted device acts, the first real link is not a relink')
-  }
-})
-
-test('a relink without cuts restores nothing', (t) => {
-  for (const side of ['group', 'community']) {
-    const { w, records } = linkedWorld()
-    post(w, wX, 2)
-    post(w, wY, 2)
-    const relink = (on, cuts) => side === 'group'
-      ? w.push(G, communityLink({ community: CM, on, cuts, at: AT(3) }))
-      : records.push(groupLink({ group: G, on, cuts, at: AT(3) }))
-    relink(false, [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }])
-    relink(true, [])
-    w.push(wA, groupBan({ member: X, on: true, at: AT(4) }))
-    w.push(wZ, groupBan({ member: Y, on: true, at: AT(4) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.community, CM, side + ': linked again')
-    t.is(g.members.get(X), 'member', side + ': an admin writer the relink does not list has no power')
-    t.is(g.members.get(Y), 'member', side + ': nor has the creator writer')
-    relink(true, [{ writer: wA, seq: w.len(wA) }])
-    w.push(wA, groupBan({ member: X, on: true, at: AT(5) }))
-    const h = buildGroup(withCommunities(w, [community(records)]))
-    t.is(h.members.get(X), 'banned', side + ': a relink listing the writer starts it at its cut')
-    t.is(h.members.get(Y), 'member', side + ': and lists nothing else')
-  }
-})
-
-test('a link withdrawn by a creator leave binds nothing, in buildGroup and buildCommunity', (t) => {
-  const asGroup = (w) => ({ key: G, entries: w.logs.get(G).entries, writers: w.input().writers, joins: w.joins })
-  const plain = linkedWorld()
-  t.alike(buildCommunity({ root: community(plain.records), groups: [asGroup(plain.w)] }).groups, [G], 'linked before the leave')
-  for (const how of ['root', 'other writer']) {
-    const { w, records } = linkedWorld()
-    if (how === 'root') {
-      w.push(G, groupLeave({ cuts: [{ writer: G, seq: 1 }], at: AT(2) }))
-    } else {
-      w.add(C, wC)
-      w.push(wC, groupLeave({ cuts: [{ writer: wC, seq: w.len(wC) }], at: AT(2) }))
-    }
-    post(w, wX, 3)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(4) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.community, null, how + ': the group side is withdrawn')
-    t.is(g.members.get(X), 'member', how)
-    const c = buildCommunity({ root: community(records), groups: [asGroup(w)] })
-    t.alike(c.groups, [], how + ': buildCommunity agrees')
-    t.is(c.incomplete, false)
-  }
-})
-
-test('copies of a community root give the same result in any order', (t) => {
-  const { w, records } = linkedWorld({ admins: [] })
+test('after a leave and a rejoin in C, the new CW acts once a grant lists it', (t) => {
+  const w = linkedWorld()
   post(w, wX, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-  const full = community([
-    ...records,
-    communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(2) }),
-    communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 1 }], at: AT(4) })
-  ])
-  const grant = { key: CM, entries: full.entries.filter((e) => e.seq !== 3), joins: full.joins }
-  const demotion = { key: CM, entries: full.entries.filter((e) => e.seq !== 2), joins: full.joins }
-  const a = buildGroup(withCommunities(w, [grant, demotion]))
-  const b = buildGroup(withCommunities(w, [demotion, grant]))
+  const leave = w.C.push(cwA, groupLeave({ cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(3) }))
+  cwBan(w, cwA, X, 1)
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'a CW record after the leave is withdrawn in C')
+  w.C.addWriter(A, cwA2, { rejoin: leave })
+  cwBan(w, cwA2, X, 5)
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'the standing grant never listed the new CW')
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA2, seq: w.C.len(cwA2) }], at: AT(6) }))
+  cwBan(w, cwA2, X, 7)
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned')
+  t.ok(g.admins.has(A))
+})
+
+test('a leave in C voids the CW actions before and after it; a rejoin needs a new grant', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  t.is(buildGroup(w.input()).members.get(X), 'banned', 'control: before the leave the ban counts')
+  const leave = w.C.push(cwA, groupLeave({ cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(4) }))
+  cwBan(w, cwA, Y, 1)
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'member', 'no authority after leaving, past records included')
+  t.is(g.members.get(Y), 'member', 'after it on the same CW, whatever its clock')
+  t.absent(g.admins.has(A), 'a left admin is no admin')
+  w.C.addWriter(A, cwA2, { rejoin: leave })
+  let h = buildGroup(w.input())
+  t.absent(h.admins.has(A), 'back in C on a fresh CW the standing grant never listed')
+  t.is(h.members.get(X), 'member', 'the rejoin restores nothing')
+  t.is(h.members.get(Y), 'member')
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA2, seq: w.C.len(cwA2) }], at: AT(9) }))
+  h = buildGroup(w.input())
+  t.ok(h.admins.has(A), 're-granted on the new CW')
+  t.is(h.members.get(X), 'member', 'the old CW stays void')
+})
+
+test('a community creator leave withdraws its root creates above the cut, in buildGroup and buildCommunity', (t) => {
+  const cm = communityOf({ key: CM, creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G }] })
+  const Glate = K(0x1100)
+  cm.push(CM, groupLeave({ cuts: [{ writer: CM, seq: 2 }], at: AT(5) }))
+  cm.push(CM, groupCreateRecord({ group: Glate, at: AT(6) }))
+  const c = buildCommunity(cm.input())
+  t.alike(c.groups, [G], 'the create above the cut is withdrawn')
+  t.is(c.general, G)
+  t.is(buildGroup(groupIn(cm, { key: Glate, diary: Z }).input()).orphan, true, 'buildGroup agrees')
+  const g = groupIn(cm, { key: G, diary: Z })
+  g.add(X, wX)
+  post(g, wX, 7)
+  const r = buildGroup(g.input())
+  t.is(r.orphan, false)
+  t.is(r.members.get(Z), 'left', 'its creator is out of C')
+  t.is(r.members.get(X), 'member')
+})
+
+test('copies of a CW merge by seq in any order, and a forked CW is left out', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  cwBan(w, cwA, X, 3)
+  w.C.push(cwA, communityHide({ group: G, target: { writer: wX, seq: 1 }, on: true, at: AT(4) }))
+  const input = w.C.input()
+  const real = cwOfLog(input, cwA)
+  const others = input.writers.filter((l) => l.key !== cwA)
+  const one = { ...real, entries: real.entries.filter((e) => e.seq !== 2) }
+  const two = { ...real, entries: real.entries.filter((e) => e.seq !== 1) }
+  const a = buildGroup(w.input({ community: { ...input, writers: [...others, one, two] } }))
+  const b = buildGroup(w.input({ community: { ...input, writers: [two, ...others, one] } }))
   t.alike(normalize(a), normalize(b), 'consistent copies merge')
-  t.absent(a.admins.has(A), 'the demotion of the merged root counts')
-  t.is(a.members.get(X), 'member')
+  t.is(a.members.get(X), 'banned')
   t.is(a.incomplete, false)
-  const fork = { key: CM, joins: full.joins, entries: full.entries.map((e) => e.seq === 2 ? { seq: 2, record: communityAdmin({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(2) }) } : e) }
-  const f1 = buildGroup(withCommunities(w, [grant, fork]))
-  const f2 = buildGroup(withCommunities(w, [fork, grant]))
+  const fork = { ...real, entries: real.entries.map((e) => e.seq === 1 ? { seq: 1, record: communityBan({ group: G, member: Y, on: true, at: AT(3) }) } : e) }
+  const f1 = buildGroup(w.input({ community: { ...input, writers: [...others, real, fork] } }))
+  const f2 = buildGroup(w.input({ community: { ...input, writers: [fork, ...others, real] } }))
   t.alike(normalize(f1), normalize(f2), 'a fork too')
-  t.is(f1.community, null, 'a forked community root is ignored')
+  t.is(f1.members.get(X), 'member', 'the forked CW is left out')
+  t.is(f1.members.get(Y), 'member')
   t.is(f1.incomplete, true)
 })
 
@@ -1479,195 +1498,18 @@ test('copies of a writer core merge by seq and a forked writer is left out', (t)
   t.alike(normalize(f), normalize(buildGroup({ ...input, writers: [fork, ...others, { key: wX, diary: X, entries }] })))
 })
 
-test('a link written while another community is on stays ignored after that link is withdrawn', (t) => {
-  const { w, records } = linkedWorld()
-  w.add(C, wC)
-  const leave = w.push(wC, groupLeave({ cuts: [{ writer: wC, seq: w.len(wC) }], at: AT(2) }))
-  const wC2 = K(0x102)
-  w.add(C, wC2, { rejoin: leave, at: AT(3) })
-  const yCuts = [{ writer: wY, seq: 1 }]
-  w.push(G, communityLink({ community: CM2, on: true, cuts: [{ writer: wC2, seq: 1 }, ...yCuts], at: AT(4) }))
-  const second = community([groupLink({ group: G, on: true, cuts: yCuts, at: AT(1) })], { key: CM2, creator: Y })
-  post(w, wX, 5)
-  w.push(wY, groupBan({ member: X, on: true, at: AT(6) }))
-  const g = buildGroup(withCommunities(w, [community(records), second]))
-  t.is(g.community, null, 'the raw root still has the first community on')
-  t.is(g.members.get(X), 'member')
-  w.push(G, communityLink({ community: CM, on: false, cuts: [{ writer: wC2, seq: 1 }], at: AT(7) }))
-  w.push(G, communityLink({ community: CM2, on: true, cuts: yCuts, at: AT(8) }))
-  const h = buildGroup(withCommunities(w, [community(records), second]))
-  t.is(h.community, CM2, 'after the unlink a new link counts')
-  t.is(h.members.get(X), 'banned')
-})
-
-test('at the writer cap a withdrawn community link gives its admins no priority', (t) => {
-  const { w, records } = linkedWorld()
-  const wAhigh = K(0xf00002)
-  w.add(A, wAhigh)
-  w.push(G, groupLeave({ cuts: [{ writer: G, seq: 1 }], at: AT(2) }))
-  const n = MAX_GROUP_WRITERS - 5
-  for (let i = 0; i < n; i++) w.add(K(0x10000 + i), K(0x20000 + i))
-  const g = buildGroup(withCommunities(w, [community(records)]))
-  t.is(g.community, null)
-  t.is(g.writers.size, MAX_GROUP_WRITERS)
-  t.absent(g.writers.has(wAhigh), 'the ex community admin is not ranked first')
-  t.ok(g.writers.has(K(0x20000 + n - 1)), 'the highest ordinary writer keeps its slot')
-})
-
-test('the first cap pass ranks by leave-aware community admins, so a banned diary goes last', (t) => {
-  const w = world().add(Z, wZ)
-  const wXh = K(0xf00001)
-  const V = K(0x60)
-  const wV = K(0x6000)
-  const M = K(0x61)
-  const wM = K(0x6001)
-  w.add(X, wXh).add(V, wV).add(M, wM)
-  w.push(G, groupAdmin({ member: X, on: true, cuts: [{ writer: wXh, seq: 1 }], at: AT(1) }))
-  w.push(G, communityLink({ community: CM, on: true, cuts: [], at: AT(1) }))
-  w.push(G, groupLeave({ cuts: [{ writer: G, seq: 2 }], at: AT(2) }))
-  post(w, wV, 3)
-  w.push(wXh, groupBan({ member: V, on: true, at: AT(4) }))
-  const records = [groupLink({ group: G, on: true, cuts: [], at: AT(1) })]
-  const n = MAX_GROUP_WRITERS - 2
-  for (let i = 0; i < n; i++) {
-    w.add(K(0x80000 + i), K(0x10000 + i))
-    records.push(communityAdmin({ member: K(0x80000 + i), on: true, at: AT(1) }))
-  }
-  const g = buildGroup(withCommunities(w, [community(records)]))
-  t.is(g.community, null, 'the link is withdrawn')
-  t.is(g.writers.size, MAX_GROUP_WRITERS)
-  t.ok(g.writers.has(wXh), 'the root admin holding the ban is kept')
-  t.ok(g.bans.has(V))
-  t.absent(g.writers.has(wV), 'the banned diary is ranked last')
-  t.ok(g.writers.has(wM), 'and a member keeps the slot')
-})
-
-test('an explicitly empty joins map binds nothing in buildCommunity, as in buildGroup', (t) => {
-  const { w, records } = linkedWorld()
-  const item = { key: G, entries: w.logs.get(G).entries, joins: new Map() }
-  const c = buildCommunity({ root: community(records), groups: [item] })
-  const g = buildGroup({ ...withCommunities(w, [community(records)]), joins: new Map() })
-  t.is(g.community, null)
-  t.alike(c.groups, [], 'not listed')
-  t.is(c.incomplete, true)
-  t.alike(buildCommunity({ root: community(records), groups: [{ key: G, entries: item.entries }] }).groups, [G], 'omitted joins stay advisory')
-})
-
-test('copies of a community root with different headers are a fork, whatever the kind', (t) => {
-  const { w, records } = linkedWorld()
-  const real = community(records)
-  const other = { ...real, entries: real.entries.map((e) => e.seq === 0 ? { seq: 0, record: groupHeader({ diary: Z, name: 'Bairro', at: AT(0) }) } : e) }
-  const a = buildGroup(withCommunities(w, [real, other]))
-  const b = buildGroup(withCommunities(w, [other, real]))
-  t.alike(normalize(a), normalize(b))
-  t.is(a.community, null, 'the forked root is ignored')
-  t.absent(a.admins.has(A))
-  t.is(a.incomplete, true)
-})
-
 test('copies of a writer core whose headers differ are a fork', (t) => {
   const w = world().add(X, wX).add(Y, wY)
   post(w, wX, 1)
   const input = w.input()
   const entries = w.logs.get(wX).entries
   const others = input.writers.filter((l) => l.key !== wX)
-  for (const header of [writerHeader({ group: K(0x999), diary: X, at: AT(0) }), writerHeader({ group: G, diary: Y, at: AT(0) })]) {
+  for (const header of [writerHeader({ group: K(0x999), diary: X, member: cwOf(X), at: AT(0) }), writerHeader({ group: G, diary: Y, member: cwOf(Y), at: AT(0) })]) {
     const odd = { key: wX, diary: header.diary, entries: [{ seq: 0, record: header }] }
     const f = buildGroup({ ...input, writers: [...others, { key: wX, diary: X, entries }, odd] })
     t.absent(f.writers.has(wX), 'left out')
     t.is(f.incomplete, true)
     t.alike(normalize(f), normalize(buildGroup({ ...input, writers: [odd, ...others, { key: wX, diary: X, entries }] })))
-  }
-})
-
-test('an unlink of a link that was never on does not touch the live link', (t) => {
-  const { w, records } = linkedWorld()
-  w.push(G, communityLink({ community: CM2, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(2) }))
-  w.push(G, communityLink({ community: CM2, on: false, cuts: [], at: AT(2) }))
-  post(w, wX, 3)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(4) }))
-  const second = community([groupLink({ group: G, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) })], { key: CM2 })
-  const g = buildGroup(withCommunities(w, [community(records), second]))
-  t.is(g.community, CM)
-  t.ok(g.admins.has(A))
-  t.is(g.members.get(X), 'banned', 'the community admin acts')
-})
-
-test('buildCommunity is incomplete when a linked group fold is incomplete', (t) => {
-  const { w, records } = linkedWorld()
-  w.add(C, wC)
-  const item = { key: G, entries: w.logs.get(G).entries, writers: w.input({ drop: [wC] }).writers, joins: w.joins }
-  const c = buildCommunity({ root: community(records), groups: [item] })
-  t.alike(c.groups, [G], 'still listed while linked')
-  t.is(c.incomplete, true, 'a missing writer could hide a creator leave')
-  const full = buildCommunity({ root: community(records), groups: [{ ...item, writers: w.input().writers }] })
-  t.is(full.incomplete, false)
-})
-
-test('a community root its creator never bound gives no creator power', (t) => {
-  const { w, records } = linkedWorld()
-  post(w, wX, 2)
-  post(w, wY, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-  w.push(wZ, groupBan({ member: Y, on: true, at: AT(3) }))
-  const unbound = community(records, { bind: false })
-  const g = buildGroup(withCommunities(w, [unbound]))
-  t.is(g.community, null)
-  t.absent(g.admins.has(Z))
-  t.absent(g.admins.has(A))
-  t.is(g.members.get(X), 'member')
-  t.is(g.members.get(Y), 'member')
-  t.is(g.incomplete, true, 'a link to an unbound root reads as incomplete')
-  const c = buildCommunity({ root: unbound, groups: [{ key: G, entries: w.logs.get(G).entries }] })
-  t.is(c.creator, null)
-  t.is(c.admins.size, 0)
-  t.alike(c.groups, [])
-  t.is(c.incomplete, true)
-  t.is(c.name, 'Bairro')
-  const other = new Map([[A, [{ writer: CM, on: true, seq: 1 }]]])
-  t.is(buildCommunity({ root: { ...unbound, joins: other } }).creator, null, 'only the header diary binds')
-  t.is(buildGroup(withCommunities(w, [community(records)])).members.get(Y), 'banned', 'bound, the creator acts')
-})
-
-test('a repeated link never lowers the start an earlier link gave a writer', (t) => {
-  for (const side of ['group', 'community']) {
-    const w = world().add(A, wA).add(X, wX).add(Y, wY).add(Z, wZ)
-    post(w, wX, 1)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(2) }))
-    const records = [communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) })]
-    const tight = [{ writer: wA, seq: 2 }]
-    const loose = [{ writer: wA, seq: 1 }]
-    w.push(G, communityLink({ community: CM, on: true, cuts: side === 'group' ? tight : loose, at: AT(1) }))
-    records.push(groupLink({ group: G, on: true, cuts: side === 'community' ? tight : loose, at: AT(1) }))
-    t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', side + ': the ban is below the link start')
-    const more = [{ writer: wY, seq: 1 }]
-    if (side === 'group') w.push(G, communityLink({ community: CM, on: true, cuts: more, at: AT(3) }))
-    else records.push(groupLink({ group: G, on: true, cuts: more, at: AT(3) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.community, CM)
-    t.is(g.members.get(X), 'member', side + ': a repeated link that omits the writer keeps its start')
-    if (side === 'group') w.push(G, communityLink({ community: CM, on: true, cuts: loose, at: AT(4) }))
-    else records.push(groupLink({ group: G, on: true, cuts: loose, at: AT(4) }))
-    t.is(buildGroup(withCommunities(w, [community(records)])).members.get(X), 'member', side + ': nor does a lower cut lower it')
-  }
-})
-
-test('a repeated link that adds a device keeps every earlier action of the writers already listed', (t) => {
-  for (const side of ['group', 'community']) {
-    const { w, records } = linkedWorld()
-    post(w, wX, 2)
-    post(w, wY, 2)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-    w.push(wZ, groupBan({ member: Y, on: true, at: AT(3) }))
-    w.add(A, wA2)
-    // As a node writes it: every counted writer at its current length.
-    const cuts = [{ writer: wA, seq: w.len(wA) }, { writer: wZ, seq: w.len(wZ) }, { writer: wA2, seq: 1 }]
-    if (side === 'group') w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(4) }))
-    else records.push(groupLink({ group: G, on: true, cuts, at: AT(4) }))
-    const g = buildGroup(withCommunities(w, [community(records)]))
-    t.is(g.community, CM)
-    t.is(g.members.get(X), 'banned', side + ': the admin ban stays')
-    t.is(g.members.get(Y), 'banned', side + ': the creator ban stays')
   }
 })
 
@@ -1703,41 +1545,196 @@ test('a writer copy whose block 0 is invalid still forks the valid copy', (t) =>
   t.is(alone.incomplete, true)
 })
 
-test('a community root copy whose block 0 is invalid still forks the valid copy', (t) => {
-  const { w, records } = linkedWorld()
-  const real = community(records)
-  const odd = { ...real, entries: real.entries.map((e) => e.seq === 0 ? { seq: 0, record: { ...e.record, extra: 1 } } : e) }
-  t.is(buildGroup(withCommunities(w, [real])).community, CM)
-  const a = buildGroup(withCommunities(w, [real, odd]))
-  const b = buildGroup(withCommunities(w, [odd, real]))
-  t.alike(normalize(a), normalize(b))
-  t.is(a.community, null, 'the forked root is ignored')
-  t.absent(a.admins.has(A))
-  t.is(a.incomplete, true)
-  const alone = buildGroup(withCommunities(w, [odd]))
-  t.is(alone.community, null)
-  t.is(alone.incomplete, true, 'a root with only an invalid block 0 reads as missing')
+test('at the writer cap the writers of community admins rank with the group admins', (t) => {
+  const w = linkedWorld()
+  const wAhigh = K(0xf00002)
+  w.add(A, wAhigh)
+  // A community binds at most 511 CWs besides its root, so 64 diaries of
+  // up to 8 writers fill G's cap.
+  const n = MAX_GROUP_WRITERS - 2
+  for (let i = 0; i < n; i++) w.add(K(0x10000 + (i % 64)), K(0x20000 + i))
+  const g = buildGroup(w.input())
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.ok(g.writers.has(wAhigh), 'the community admin writer is kept')
+  t.absent(g.writers.has(K(0x20000 + n - 1)), 'the highest ordinary writer gives its slot')
+  t.is(g.incomplete, true)
 })
 
-test('a group snapshot without block 0 brings no header to compare in buildCommunity', (t) => {
-  const { w, records } = linkedWorld()
-  const entries = w.logs.get(G).entries
-  const full = { key: G, entries }
-  t.alike(buildCommunity({ root: community(records), groups: [full, { key: G, entries: [] }] }).groups, [G], 'an empty snapshot changes nothing')
-  t.alike(buildCommunity({ root: community(records), groups: [{ key: G, entries: entries.slice(1) }, full] }).groups, [G], 'a headerless partial copy merges')
-  const clash = { key: G, entries: [{ seq: 1, record: communityLink({ community: CM2, on: true, at: AT(1) }) }] }
-  const c = buildCommunity({ root: community(records), groups: [full, clash] })
-  t.alike(c.groups, [], 'a different block at the same seq is still a fork')
+test('at the writer cap a demoted community admin has no priority', (t) => {
+  const w = linkedWorld()
+  const wAhigh = K(0xf00002)
+  w.add(A, wAhigh)
+  w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(2) }))
+  const n = MAX_GROUP_WRITERS - 3
+  for (let i = 0; i < n; i++) w.add(K(0x10000 + (i % 64)), K(0x20000 + i))
+  const g = buildGroup(w.input())
+  t.ok(g.community !== null)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.absent(g.writers.has(wAhigh), 'the ex community admin is not ranked first')
+  t.ok(g.writers.has(K(0x20000 + n - 2)), 'ordinary writers keep their slots by key')
+})
+
+test('at the writer cap a diary a CW ban hits in G goes last', (t) => {
+  const w = linkedWorld()
+  const V = K(0x60)
+  const wV = K(0x6000)
+  const M = K(0x61)
+  const wM = K(0x6001)
+  w.add(V, wV).add(M, wM)
+  post(w, wV, 3)
+  cwBan(w, cwA, V, 4)
+  const n = MAX_GROUP_WRITERS - 3
+  for (let i = 0; i < n; i++) w.add(K(0x10000 + (i % 64)), K(0x30000 + i))
+  const g = buildGroup(w.input())
+  t.ok(g.community !== null)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.ok(g.bans.has(V), 'the ban sits in the CW, outside the cap')
+  t.absent(g.writers.has(wV), 'the banned diary is ranked last')
+  t.ok(g.writers.has(wM), 'and a member keeps the slot')
+})
+
+test('an explicitly empty joins map binds nothing in buildCommunity, as in buildGroup', (t) => {
+  const w = linkedWorld()
+  const empty = { ...w.C.input(), joins: new Map() }
+  const c = buildCommunity(empty)
+  t.is(c.creator, null)
+  t.alike(c.groups, [], 'no catalogue')
   t.is(c.incomplete, true)
+  const g = buildGroup(w.input({ community: empty }))
+  t.is(g.community, null)
+  t.is(g.incomplete, true)
+  t.is(buildGroup({ ...w.input(), joins: new Map() }).writers.size, 0, 'nor does a group')
+})
+
+test('a parent root whose header is not a community is ignored', (t) => {
+  const w = linkedWorld()
+  const input = w.C.input()
+  const header = groupHeader({ diary: Z, community: CM2, member: CM2, name: 'Bairro', at: AT(0) })
+  const other = { ...input, root: { ...input.root, entries: input.root.entries.map((e) => e.seq === 0 ? { seq: 0, record: header } : e) } }
+  const a = buildGroup(w.input({ community: other }))
+  t.is(a.community, null, 'the root is not a community')
+  t.absent(a.admins.has(A))
+  t.is(a.incomplete, true)
+})
+
+test('a community unban restores the posts a community ban hid in G', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  post(w, wX, 3)
+  const ban = w.C.push(CM, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: w.C.len(cwX) }], at: w.C.at() }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned')
+  t.alike(visible(g).filter((r) => r.startsWith(wX)), [])
+  w.C.push(CM, communityBan({ member: X, on: false, lifts: ban, cuts: [{ writer: cwX, seq: w.C.len(cwX) }], at: w.C.at() }))
+  const h = buildGroup(w.input())
+  t.is(h.members.get(X), 'member')
+  t.alike(visible(h).filter((r) => r.startsWith(wX)), [wX + ':1', wX + ':2'])
+})
+
+test('a group is incomplete when its community fold is incomplete', (t) => {
+  const w = linkedWorld()
+  w.C.addWriter(B, cwOf(B))
+  const g = buildGroup(w.input({ community: w.C.input({ drop: [cwOf(B)] }) }))
+  t.ok(g.community !== null, 'still under its community')
+  t.is(g.incomplete, true, 'a missing CW could hide a ban or a leave')
+  t.is(buildGroup(w.input()).incomplete, false)
+})
+
+test('a community root its creator never bound gives no creator power', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  w.C.push(CM, communityBan({ group: G, member: Y, on: true, at: AT(3) }))
+  const input = w.C.input()
+  const unbound = { ...input, joins: new Map([...input.joins].filter(([d]) => d !== Z)) }
+  const g = buildGroup(w.input({ community: unbound }))
+  t.is(g.community, null)
+  t.alike([...g.admins], [Z], 'Z only as G\'s own creator')
+  t.absent(g.admins.has(A))
+  t.is(g.members.get(X), 'member')
+  t.is(g.members.get(Y), 'member')
+  t.is(g.incomplete, true, 'an unbound parent reads as incomplete')
+  const c = buildCommunity(unbound)
+  t.is(c.creator, null)
+  t.is(c.admins.size, 0)
+  t.alike(c.groups, [])
+  t.is(c.incomplete, true)
+  t.is(c.name, 'Bairro')
+  const byA = new Map([...unbound.joins, [A, [...unbound.joins.get(A), { writer: CM, on: true, seq: 9 }]]])
+  t.is(buildCommunity({ ...unbound, joins: byA }).creator, null, 'only the header diary binds')
+  t.is(buildGroup(w.input()).members.get(Y), 'banned', 'bound, the creator acts')
+})
+
+test('a repeated community grant omitting a CW keeps its start; a lower cut starts it there', (t) => {
+  const w = linkedWorld({ admins: [] })
+  post(w, wX, 1)
+  cwBan(w, cwA, X, 2)
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 2 }], at: AT(1) }))
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'the ban is below the grant start')
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA2, seq: 1 }], at: AT(3) }))
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'a repeated grant that omits the CW keeps its start')
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: AT(4) }))
+  t.is(buildGroup(w.input()).members.get(X), 'banned', 'the root layer is ordered: the later grant starts it at 1')
+})
+
+test('a repeated grant that adds a CW keeps every earlier action of the CWs already listed', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  post(w, wY, 2)
+  cwBan(w, cwA, X, 3)
+  w.C.push(CM, communityBan({ group: G, member: Y, on: true, at: AT(3) }))
+  w.C.addWriter(A, cwA2)
+  w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: w.C.len(cwA) }, { writer: cwA2, seq: 1 }], at: AT(4) }))
+  const g = buildGroup(w.input())
+  t.ok(g.community !== null)
+  t.is(g.members.get(X), 'banned', 'the admin ban stays')
+  t.is(g.members.get(Y), 'banned', 'the creator ban stays')
+})
+
+test('a CW copy whose block 0 is invalid still forks the valid copy', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  cwBan(w, cwA, X, 3)
+  const input = w.C.input()
+  const real = cwOfLog(input, cwA)
+  const others = input.writers.filter((l) => l.key !== cwA)
+  const odd = { ...real, entries: real.entries.map((e) => e.seq === 0 ? { seq: 0, record: { ...e.record, extra: 1 } } : e) }
+  t.is(buildGroup(w.input()).members.get(X), 'banned')
+  const a = buildGroup(w.input({ community: { ...input, writers: [...others, real, odd] } }))
+  const b = buildGroup(w.input({ community: { ...input, writers: [odd, ...others, real] } }))
+  t.alike(normalize(a), normalize(b))
+  t.is(a.members.get(X), 'member', 'the forked CW is ignored')
+  t.is(a.incomplete, true)
+  const alone = buildGroup(w.input({ community: { ...input, writers: [...others, odd] } }))
+  t.is(alone.members.get(X), 'member')
+  t.is(alone.incomplete, true, 'a CW with only an invalid block 0 reads as missing')
+})
+
+test('a CW copy without block 0 is no copy of it', (t) => {
+  const w = linkedWorld()
+  post(w, wX, 2)
+  cwBan(w, cwA, X, 3)
+  const input = w.C.input()
+  const real = cwOfLog(input, cwA)
+  const others = input.writers.filter((l) => l.key !== cwA)
+  const with_ = (extra) => buildGroup(w.input({ community: { ...input, writers: [...others, ...extra] } }))
+  t.is(with_([real, { key: cwA, diary: A, entries: [] }]).members.get(X), 'banned', 'an empty snapshot changes nothing')
+  t.is(with_([{ ...real, entries: real.entries.slice(1) }, real]).members.get(X), 'banned', 'a headerless partial copy changes nothing')
+  const clash = { key: cwA, diary: A, entries: [{ seq: 1, record: communityBan({ group: G, member: Y, on: true, at: AT(3) }) }] }
+  const c = with_([real, clash])
+  t.is(c.members.get(X), 'banned', 'without block 0 it takes no part in the merge')
+  t.is(c.members.get(Y), 'member')
+  t.is(c.incomplete, false)
 })
 
 test('a community entry without a block 0 counts as not given', (t) => {
-  const { w, records } = linkedWorld()
-  t.is(buildGroup(withCommunities(w, [community(records)])).incomplete, false)
-  t.is(buildGroup(withCommunities(w, [])).incomplete, true, 'omitted')
-  t.is(buildGroup(withCommunities(w, [{ key: CM, entries: [] }])).incomplete, true, 'no entries')
-  const noHeader = community(records)
-  t.is(buildGroup(withCommunities(w, [{ ...noHeader, entries: noHeader.entries.slice(1) }])).incomplete, true, 'no block 0')
+  const w = linkedWorld()
+  const input = w.C.input()
+  t.is(buildGroup(w.input()).incomplete, false)
+  t.is(buildGroup(w.input({ community: null })).incomplete, true, 'omitted')
+  t.is(buildGroup(w.input({ community: { ...input, root: { key: CM, entries: [] } } })).incomplete, true, 'no entries')
+  t.is(buildGroup(w.input({ community: { ...input, root: { key: CM, entries: input.root.entries.slice(1) } } })).incomplete, true, 'no block 0')
 })
 
 const MAX_CUTS_IN_TEST = 16
@@ -1764,7 +1761,10 @@ function history (rnd, steps, { approval = false, rejoinRate = 0.08, withCommuni
   const writerDiary = new Map(DIARY_WRITERS.flatMap(([d, ws]) => ws.map((k) => [k, d])))
   const skew = new Map([...writerDiary.keys()].map((k) => [k, Math.floor((rnd() - 0.5) * 7200)]))
   const lens = new Map([...writerDiary.keys()].map((k) => [k, 1]))
-  lens.set(CM, 1)
+  // World's community: its root holds the header and G's create, each CW
+  // its header.
+  lens.set(CMG, 2)
+  for (const d of [A, B, X, Y]) lens.set(cwOf(d), 1)
   const all = []
   const postsMade = []
   const bansMade = []
@@ -1789,29 +1789,35 @@ function history (rnd, steps, { approval = false, rejoinRate = 0.08, withCommuni
       out.push({ writer: key, add: { diary, rejoin: leave, at: AT(i * 60 + skew.get(key)) } })
       continue
     }
-    // Community steps: Y creates CM; links from either side and community
-    // admin grants or demotions, all with random cuts.
+    // Community steps in G's parent (created by C): grants and demotions
+    // of community admins with random cuts over their CWs, CW admits, bans
+    // and hides naming G, and community leaves.
     if (withCommunity && rnd() < 0.2) {
       const at = AT(i * 60 + Math.floor((rnd() - 0.5) * 600))
       const roll = rnd()
-      let writer = CM
+      let writer = cwOf(pick([A, B, X]))
       let record
-      if (roll < 0.3) {
-        writer = G
-        record = communityLink({ community: rnd() < 0.85 ? CM : CM2, on: rnd() < 0.75, cuts: [], at })
-        record.cuts = cutsFor(pick([A, B, X]))
-      } else if (roll < 0.55) {
-        record = groupLink({ group: G, on: rnd() < 0.75, cuts: [], at })
-        record.cuts = cutsFor(pick([A, B, X]))
-      } else {
+      if (roll < 0.35) {
+        writer = CMG
         const member = pick([A, B, X])
-        record = communityAdmin({ member, on: rnd() < 0.7, cuts: [], at })
-        record.cuts = cutsFor(member)
+        const cw = cwOf(member)
+        record = groupAdmin({ member, on: rnd() < 0.7, cuts: rnd() < 0.7 ? [{ writer: cw, seq: Math.floor(rnd() * (lens.get(cw) + 1)) }] : [], at })
+      } else if (roll < 0.6) {
+        const member = pick([A, B, X, Y, C])
+        if (rnd() < 0.6 || !bansMade.length) record = communityBan({ group: G, member, on: true, cuts: cutsFor(member), at })
+        else record = communityBan({ group: G, member, on: false, cuts: cutsFor(member), lifts: pick(bansMade), at })
+      } else if (roll < 0.8 && postsMade.length) {
+        record = communityHide({ group: G, target: pick(postsMade), on: rnd() < 0.7, at })
+      } else if (roll < 0.95) {
+        const member = pick([A, B, X, Y])
+        record = communityAdmit({ group: G, member, on: rnd() < 0.8, cuts: cutsFor(member), at })
+      } else {
+        record = groupLeave({ cuts: [{ writer, seq: lens.get(writer) }], at })
       }
       const seq = lens.get(writer)
       lens.set(writer, seq + 1)
-      if (writer === G) all.push({ writer, seq })
-      out.push({ writer, seq, record })
+      if (record.type === 'group-ban' && record.on) bansMade.push({ writer, seq })
+      out.push({ writer, seq, record, community: true })
       continue
     }
     let writer = pick([...writerDiary.keys()])
@@ -1860,13 +1866,12 @@ function history (rnd, steps, { approval = false, rejoinRate = 0.08, withCommuni
 function inputOf (h, n, rnd) {
   const w = world({ join: h.join })
   for (const [d, ws] of DIARY_WRITERS) for (const k of ws) if (k !== G) w.add(d, k)
-  const comm = community([], { creator: Y })
   for (const s of h.steps.slice(0, n)) {
     if (s.add) w.add(s.add.diary, s.writer, s.add)
-    else if (s.writer === CM) comm.entries.push({ seq: s.seq, record: s.record })
+    else if (s.community) w.C.push(s.writer, s.record)
     else w.push(s.writer, s.record)
   }
-  const input = { ...w.input(), communities: h.withCommunity ? [comm] : [] }
+  const input = w.input()
   if (!rnd) return input
   const shuffle = (a) => {
     a = a.slice()
@@ -1876,13 +1881,13 @@ function inputOf (h, n, rnd) {
     }
     return a
   }
-  return {
-    ...input,
-    root: { ...input.root, entries: shuffle(input.root.entries) },
-    communities: input.communities.map((c) => ({ ...c, entries: shuffle(c.entries) })),
-    writers: shuffle(input.writers).map((l) => ({ ...l, entries: shuffle(l.entries) })),
-    joins: new Map(shuffle([...input.joins]).map(([d, list]) => [d, shuffle(list)]))
-  }
+  const mix = (x) => ({
+    ...x,
+    root: { ...x.root, entries: shuffle(x.root.entries) },
+    writers: shuffle(x.writers).map((l) => ({ ...l, entries: shuffle(l.entries) })),
+    joins: new Map(shuffle([...x.joins]).map(([d, list]) => [d, shuffle(list)]))
+  })
+  return { ...mix(input), community: mix(input.community) }
 }
 
 // A visible post of a rejoining writer in an approval group needs an admit
@@ -1977,7 +1982,7 @@ test('property: same output for every delivery order, stable when appending', (t
   t.ok(readmitted > 0, readmitted + ' approval histories show a post after a rejoin')
 })
 
-test('property: a linked community keeps the output identical for every delivery order', (t) => {
+test('property: community actions keep the output identical for every delivery order', (t) => {
   const rnd = mulberry32(0xc0de)
   let orders = 0
   let mismatches = 0
@@ -1987,8 +1992,8 @@ test('property: a linked community keeps the output identical for every delivery
   for (let scenario = 0; scenario < 110; scenario++) {
     const h = history(rnd, 30 + Math.floor(rnd() * 40), { withCommunity: true, approval: scenario % 3 === 0 })
     const built = buildGroup(inputOf(h, h.steps.length))
-    if (built.community !== null) linked++
-    if ([A, B, X].some((d) => built.admins.has(d))) communityAdmins++
+    if (built.community !== null && h.steps.some((s) => s.community)) linked++
+    if ([A, B, X].some((d) => built.community !== null && built.community.admins.has(d))) communityAdmins++
     const expected = normalize(built)
     for (let k = 0; k < 5; k++) {
       orders++
@@ -2003,59 +2008,45 @@ test('property: a linked community keeps the output identical for every delivery
   t.ok(orders >= 500, orders + ' delivery orders')
   t.is(mismatches, 0, 'identical output for every order')
   t.is(unstable, 0, 'appending never reorders earlier records')
-  t.ok(linked > 0, linked + ' histories end linked from both sides')
-  t.ok(communityAdmins > 0, communityAdmins + ' histories end with an admin')
+  t.ok(linked > 0, linked + ' histories carry community records')
+  t.ok(communityAdmins > 0, communityAdmins + ' histories end with a community admin')
 })
 
-test('thousands of link records with new cuts fold in linear time', (t) => {
-  // Each period's starts grow in place: copying them per record was
-  // quadratic (6000 records took about 15 s).
+test('thousands of group-create records fold in linear time', (t) => {
+  // The catalogue walks C's order once: 6000 creates, most of them repeats
+  // or over the cap.
   const N = 6000
-  const { w, records } = linkedWorld()
-  const fresh = (i) => Array.from({ length: 16 }, (_, j) => ({ writer: K(0x100000 + i * 16 + j), seq: 1 }))
-  for (let i = 0; i < N / 2; i++) {
-    w.push(G, communityLink({ community: CM, on: true, cuts: fresh(i), at: AT(2) }))
-    records.push(groupLink({ group: G, on: true, cuts: fresh(i), at: AT(2) }))
-  }
-  w.push(G, communityLink({ community: CM, on: false, cuts: [], at: AT(3) }))
-  const relink = [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }]
-  w.push(G, communityLink({ community: CM, on: true, cuts: relink, at: AT(4) }))
-  for (let i = N / 2; i < N; i++) {
-    w.push(G, communityLink({ community: CM, on: true, cuts: fresh(i), at: AT(5) }))
-    records.push(groupLink({ group: G, on: true, cuts: fresh(i), at: AT(5) }))
-  }
-  post(w, wX, 2)
-  w.push(wA, groupBan({ member: X, on: true, at: AT(6) }))
+  const w = linkedWorld()
+  for (let i = 0; i < N; i++) w.C.push(i % 2 ? cwA : CM, groupCreateRecord({ group: K(0x100000 + (i % 3000)), at: AT(10) }))
+  post(w, wX, 3)
+  cwBan(w, cwA, X, 4)
   const start = Date.now()
-  const g = buildGroup(withCommunities(w, [community(records)]))
+  const g = buildGroup(w.input())
   const ms = Date.now() - start
-  t.ok(ms < 2000, N * 2 + ' link records of 16 cuts folded in ' + ms + ' ms')
-  t.is(g.community, CM)
-  t.is(g.members.get(X), 'banned', 'the relink lists the admin writer, so its ban counts')
+  t.ok(ms < 2000, N + ' create records folded in ' + ms + ' ms')
+  t.ok(g.community !== null, 'G, created first, keeps its place')
+  t.is(g.community.groups.length, MAX_GROUPS_PER_COMMUNITY)
+  t.is(g.members.get(X), 'banned', 'and the admin CW still acts')
 })
 
-test('repeated links keep the first listing of a writer per period', (t) => {
+test('repeated community grants: the root layer decides each CW position', (t) => {
   const run = (extra) => {
-    const { w, records } = linkedWorld()
+    const w = linkedWorld()
     post(w, wX, 2)
     post(w, wY, 2)
-    w.push(wA, groupBan({ member: X, on: true, at: AT(3) }))
-    if (extra) {
-      // A later link listing wA higher never moves its start.
-      w.push(G, communityLink({ community: CM, on: true, cuts: [{ writer: wA, seq: 9 }], at: AT(4) }))
-      records.push(groupLink({ group: G, on: true, cuts: [{ writer: wA, seq: 9 }, { writer: K(0x10000), seq: 1 }], at: AT(4) }))
-    }
-    w.push(G, communityLink({ community: CM, on: false, cuts: [{ writer: wA, seq: 2 }], at: AT(5) }))
-    w.push(G, communityLink({ community: CM, on: true, cuts: [{ writer: wA, seq: 4 }], at: AT(6) }))
-    w.push(G, communityLink({ community: CM, on: true, cuts: [{ writer: wA, seq: 2 }], at: AT(7) }))
-    post(w, wA, 8)
-    w.push(wA, groupBan({ member: Y, on: true, at: AT(9) }))
-    return buildGroup(withCommunities(w, [community(records)]))
+    cwBan(w, cwA, X, 3)
+    // A grant listing only another CW never moves cwA.
+    if (extra) w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA2, seq: 1 }], at: w.C.at() }))
+    w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: 2 }], at: w.C.at() }))
+    w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 4 }], at: w.C.at() }))
+    cwBan(w, cwA, Y, 9)
+    post(w, wA, 10)
+    return buildGroup(w.input())
   }
   const plain = run(false)
   const repeated = run(true)
-  t.is(plain.members.get(X), 'banned', 'a ban in the first period counts')
-  t.is(plain.members.get(Y), 'member', 'the relink starts wA at 4, a later lower listing never lowers it')
+  t.is(plain.members.get(X), 'banned', 'a ban below the demotion counts')
+  t.is(plain.members.get(Y), 'member', 'cwA is off between the demotion and the new grant cut')
   t.alike([...repeated.members], [...plain.members])
   t.alike([...repeated.admins].sort(), [...plain.admins].sort())
   t.alike(visible(repeated), visible(plain))

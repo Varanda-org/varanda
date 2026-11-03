@@ -463,11 +463,20 @@ test('the built node bundle exchanges public and private group messages with a c
 
   // Public group: the core node creates and posts, the bundle joins and reads,
   // posts, and the core node reads it back.
-  const { group: pub } = await coreMember.groupCreate(coreCtx, { name: 'Praia', join: 'open', visibility: 'public' })
+  const { community } = await coreMember.communityCreate(coreCtx, { name: 'Bairro', join: 'open' })
+  const { group: pub } = await coreMember.groupCreate(coreCtx, { name: 'Praia', join: 'open', visibility: 'public', community })
   await coreMember.groupPost(coreCtx, { group: pub, text: 'publica-c1' })
-  t.ok((await syncCore()).ok, 'core pushes the public group')
+  t.ok((await syncCore()).ok, 'core pushes the community and the public group')
+  await rootOnSeeder(community)
   await rootOnSeeder(pub)
-  t.is((await web.request('group.join', { group: pub })).state, 'pending', 'join before the root is pending')
+  // A group is joined only inside its community: the community first (pending
+  // until its root is held), then the group its catalogue brought.
+  t.is((await web.request('community.join', { community })).state, 'pending', 'join before the community root is pending')
+  await syncWeb()
+  t.is((await web.request('community.join', { community })).state, 'member', 'the bundle joins the community')
+  t.ok((await syncWeb()).ok, 'the bundle pushes its community writer')
+  t.ok((await syncCore()).ok, 'core fetches the community writer')
+  t.is((await web.request('group.join', { group: pub })).state, 'member', 'the open group takes the member at once')
   await syncWeb()
   const infoPub = await web.request('group.info', { group: pub })
   t.is(infoPub.state, 'member', 'the bundle is a member of the open group')
@@ -481,16 +490,15 @@ test('the built node bundle exchanges public and private group messages with a c
   // it holds the root (a boxless writer no seeder admits), syncs, joins
   // again with a boxed writer, reads only a sealed count until admitted, then
   // the history, and posts.
-  const { group: priv } = await coreMember.groupCreate(coreCtx, { name: 'Conselho', join: 'open', visibility: 'private' })
+  const { group: priv } = await coreMember.groupCreate(coreCtx, { name: 'Conselho', join: 'open', visibility: 'private', community })
   await coreMember.groupPost(coreCtx, { group: priv, text: 'privada-c1' })
   t.ok((await syncCore()).ok, 'core pushes the private group')
   await rootOnSeeder(priv)
   t.is(seeder.indexGroup(priv).header.name, null, 'the index never names a private group')
 
-  t.is((await web.request('group.join', { group: priv })).state, 'pending', 'join before the root is pending')
   const first = await syncWeb()
-  t.ok(first.ok, 'the boxless writer is no push goal once the private root arrives' + (first.ok ? '' : ': ' + first.errors.join('; ')))
-  t.is((await web.request('group.join', { group: priv })).state, 'requested', 'a boxed rejoin requests entry')
+  t.ok(first.ok, 'the community catalogue brings the private root' + (first.ok ? '' : ': ' + first.errors.join('; ')))
+  t.is((await web.request('group.join', { group: priv })).state, 'requested', 'a boxed join requests entry')
   t.ok((await syncWeb()).ok, 'the bundle pushes the request')
   const sealedRead = await web.request('group.read', { group: priv })
   t.alike(texts(sealedRead), [], 'a non-member reads no text')

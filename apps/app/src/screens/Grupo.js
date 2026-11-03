@@ -1,8 +1,13 @@
-// Cadeira: one group's conversation, pushed above the tabs (nav.js screen
-// 'cadeira', keyed by the group root). Props: { group, onBack,
-// onOpenCommunity(community), onOpenMember(diary), onReport(target) }, with
-// `target` in Denunciar's shape { author, name, username, seq, text, group,
-// writer, private }. Renders CadeiraAjustes itself as a sheet.
+// Grupo: one group's conversation, pushed above the tabs (nav.js screen
+// 'grupo', keyed by the group root). Props: { group, onBack,
+// onOpenCommunity(community, { group }?), onOpenMember(diary),
+// onReport(target) }, with `target` in Denunciar's shape { author, name,
+// username, seq, text, group, writer, private }. Renders GrupoAjustes itself
+// as a sheet. The top bar names the group's community (a pill that opens it).
+// A group without a community (orphan) is read-only. Joining needs the
+// community first: a group opened from a /g/<hex> link this node does not
+// know is looked up in the seeder index, and its community opens first with
+// the group queued after community.join.
 // Oldest message on top, newest at the bottom; older pages come from the
 // `before` cursor (groups.js applyPage). The screen re-reads when the
 // node's version of the group moves (groups.changed) and on pull to refresh.
@@ -30,9 +35,14 @@ import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
-import { CadeiraAjustes } from './CadeiraAjustes'
+import { fetchGroup } from '../indexClient'
+import { shouldRedirectToCommunity } from '../groupRedirect'
+import { GrupoAjustes } from './GrupoAjustes'
 
 export const WEB_ONLY_TEXT = 'Comunidades só na versão web'
+const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
+const NEED_COMMUNITY = 'entre na comunidade primeiro'
+const HEX64 = /^[0-9a-f]{64}$/
 const LOCKED_TEXT = 'Desbloqueie para ler este grupo.'
 const INCOMPLETE_TEXT = 'Algumas mensagens ainda não chegaram a este aparelho.'
 const OFFLINE_POST_TEXT = 'Sem conexão: a mensagem só pode ser enviada com internet.'
@@ -46,7 +56,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onReport }) {
+export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport }) {
   const node = useNode()
   const now = useNow(60000)
   const hosted = node.hosted === true
@@ -68,6 +78,19 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
   const [check, setCheck] = useState(null)
   const [banTarget, setBanTarget] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // The community of a group this node does not hold yet (from the index),
+  // the community's name, and whether a join was refused for lack of one.
+  const [indexCommunity, setIndexCommunity] = useState(null)
+  const [communityName, setCommunityName] = useState('')
+  const [needCommunity, setNeedCommunity] = useState(false)
+  const [indexRole, setIndexRole] = useState(undefined)
+  const [lookupTick, setLookupTick] = useState(0)
+  // The text of a post whose outcome is not known: no second send until the
+  // person edits the draft or asks for it.
+  const [postHold, setPostHold] = useState(null)
+  const lookedUp = useRef(false)
+  const lookBusy = useRef(false)
+  const redirected = useRef(false)
   const post = useAction()
   const act = useAction()
   const join = useAction()
@@ -210,7 +233,10 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
     const verdict = await verify(change)
     if (verdict === 'landed') {
       setCheck(null)
-      if (change.action === 'post') setDraft((d) => (d === change.text ? '' : d))
+      if (change.action === 'post') {
+        setDraft((d) => (d === change.text ? '' : d))
+        setPostHold(null)
+      }
       return
     }
     setCheck({ change, verdict, retry })
@@ -221,12 +247,14 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
   const sendPost = async (text) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
     setCheck(null)
+    setPostHold(null)
     const sentAt = Date.now()
     const r = await post.run(() => request('group.post', { group, text }))
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
+      setPostHold(text)
       settle({ action: 'post', diary: ownKey, text, sentAt }, () => sendPost(text))
     }
   }
@@ -257,7 +285,17 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
 
   const enter = async () => {
     setCheck(null)
-    const r = await join.run(() => request('group.join', { group }))
+    setNeedCommunity(false)
+    // A pending root has no community yet: the index's answer names it.
+    const params = communityKey !== null && (info === null || info.community === null) ? { group, community: communityKey } : { group }
+    const r = await join.run(async () => {
+      try {
+        return await request('group.join', params)
+      } catch (err) {
+        if (err && err.message === NEED_COMMUNITY) setNeedCommunity(true)
+        throw err
+      }
+    })
     if (r.ok) loadRef.current()
     else if (r.uncertain) settle({ action: 'join' }, enter)
   }
@@ -294,7 +332,50 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
   const subtitle = info
     ? [visibilityLabel(info.visibility), joinLabel(info.join), membersLabel(info.members)].filter(Boolean).join(' · ')
     : ''
-  const community = info && Array.isArray(info.communities) && info.communities.length > 0 ? info.communities[0] : null
+  const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
+  const communityKey = heldCommunity || indexCommunity
+  const orphan = info !== null && info.orphan === true
+  const joinable = loadedAt !== null && !READERS.includes(role) && JOINABLE.includes(role)
+
+  // The community's name for the pill; the key alone never reaches the screen.
+  useEffect(() => {
+    if (!hosted || heldCommunity === null) return
+    let live = true
+    request('community.info', { community: heldCommunity }).then((c) => {
+      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+    }, () => {})
+    return () => { live = false }
+  }, [hosted, heldCommunity, request, version])
+
+  // A group this node does not know: ask the index which community it is in,
+  // then the node what the person is there. A failed lookup is retried on
+  // refresh, reconnect or a new version, never in a loop.
+  useEffect(() => {
+    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current || lookBusy.current) return
+    lookBusy.current = true
+    fetchGroup(group).then(async (res) => {
+      if (!res || !res.ok || typeof res.value.community !== 'string') return
+      const key = res.value.community
+      let communityRole = 'none'
+      try {
+        const c = await request('community.info', { community: key })
+        if (c && typeof c.role === 'string') communityRole = c.role
+      } catch {}
+      lookedUp.current = true
+      setIndexCommunity(key)
+      setIndexRole(communityRole)
+    }).finally(() => { lookBusy.current = false })
+  }, [hosted, joinable, heldCommunity, group, request, version, node.online, lookupTick])
+
+  // The community opens first, only for someone outside it (or after a join
+  // refused for that reason); a member waits on the group instead.
+  useEffect(() => {
+    const key = communityKey
+    if (redirected.current || key === null || !joinable || typeof onOpenCommunity !== 'function') return
+    if (!shouldRedirectToCommunity({ communityRole: heldCommunity !== null ? undefined : indexRole, refused: needCommunity, groupRole: role })) return
+    redirected.current = true
+    onOpenCommunity(key, { group })
+  }, [communityKey, indexRole, needCommunity, heldCommunity, joinable, role, group, onOpenCommunity])
 
   if (!hosted) {
     return (
@@ -307,8 +388,8 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
 
   const headerRight = (
     <View style={styles.headerRight}>
-      {community && typeof onOpenCommunity === 'function'
-        ? <Pill label='comunidade' onPress={() => onOpenCommunity(community)} accessibilityLabel='abrir a comunidade' />
+      {heldCommunity && typeof onOpenCommunity === 'function'
+        ? <Pill label={communityName !== '' ? displayText(communityName) : 'comunidade'} onPress={() => onOpenCommunity(heldCommunity)} accessibilityLabel='abrir a comunidade' />
         : null}
       {info
         ? (
@@ -330,6 +411,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
     ? (
       <View style={styles.note}>
         <Notice>{check.verdict === 'not-landed' ? CHECK_NOT_LANDED : CHECK_UNKNOWN}</Notice>
+        {check.change.action === 'post' && check.verdict !== 'not-landed' ? <Soft>Confira se a mensagem já apareceu antes de enviar de novo.</Soft> : null}
         <View style={styles.inline}>
           {check.verdict === 'not-landed'
             ? <Pill label='tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
@@ -364,7 +446,11 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
           {role === 'pending' ? <Soft>{PENDING_TEXT}</Soft> : null}
           {isPrivate ? <Soft>{PRIVATE_OUTSIDE_TEXT}</Soft> : null}
           {infoError && info === null ? <Soft>{infoError}</Soft> : null}
-          <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online} />
+          {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
+          {needCommunity && communityKey !== null && typeof onOpenCommunity === 'function'
+            ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(communityKey, { group })} />
+            : null}
+          <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online || orphan} />
           {!node.online ? <Soft>Sem conexão agora.</Soft> : null}
           <ErrorText>{join.error}</ErrorText>
         </View>
@@ -434,7 +520,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
     )
   }
 
-  const canPost = reader && can('post', role) && meta.state === 'ok'
+  const canPost = reader && can('post', role) && meta.state === 'ok' && !orphan
   const left = MAX_TEXT - countChars(draft)
 
   return (
@@ -450,20 +536,21 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
         ListHeaderComponent={stateNotes}
         ListEmptyComponent={empty}
         ListFooterComponent={<View>{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
-        onRefresh={() => load(true)}
+        onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
         refreshing={refreshing}
         keepVisiblePosition
       />
       {reader
         ? (
           <View style={styles.composer}>
+            {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
             {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
             <ErrorText>{post.error}</ErrorText>
             <View style={styles.composeRow}>
               <TextInput
                 style={styles.input}
                 value={draft}
-                onChangeText={setDraft}
+                onChangeText={(t) => { setDraft(t); setPostHold(null) }}
                 multiline
                 maxLength={MAX_TEXT * 2}
                 editable={canPost}
@@ -475,7 +562,7 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
                 label='Enviar'
                 onPress={() => sendPost(draft)}
                 pending={post.pending}
-                disabled={!canPost || !node.online || draft.trim() === '' || left < 0}
+                disabled={!canPost || !node.online || draft.trim() === '' || left < 0 || postHold !== null}
               />
             </View>
             {left < 50 ? <Soft>{left} caracteres restantes</Soft> : null}
@@ -484,13 +571,12 @@ export function Cadeira ({ group, onBack, onOpenCommunity, onOpenMember, onRepor
         : null}
       {info
         ? (
-          <CadeiraAjustes
+          <GrupoAjustes
             group={group}
             visible={settingsOpen}
             onClose={() => setSettingsOpen(false)}
             onLeft={() => { setSettingsOpen(false); loadRef.current() }}
             onOpenMember={onOpenMember}
-            onOpenCommunity={onOpenCommunity}
           />
           )
         : null}

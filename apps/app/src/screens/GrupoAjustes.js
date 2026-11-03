@@ -1,13 +1,15 @@
-// CadeiraAjustes: the administration sheet of one group, opened from
-// Cadeira. Props: { group, visible, onClose, onLeft(), onOpenMember(diary),
-// onOpenCommunity(community) }. Sections by role (groups.js can): the join
-// link, Nome (creator only, group.meta), Membros (paged), Pedidos (admit or refuse), Administradores (creator
-// only grants or revokes), Banidos, the community link (creator only), Gerar
+// GrupoAjustes: the administration sheet of one group, opened from
+// Grupo. Props: { group, visible, onClose, onLeft(), onOpenMember(diary) }.
+// Sections by role (groups.js can): the invite (shared, never shown as
+// text), Nome (creator only, group.meta), Membros (paged), Pedidos (admit or
+// refuse), Administradores (creator only grants or revokes), Banidos, Gerar
 // nova chave (private groups) and Sair do grupo, with a confirm that says a
-// group with approval needs a new approval to come back. Names come from the
-// node's rows through displayText; a key is only ever an 8-hex short key,
-// except the /g/<hex> link the person copies on purpose. A mutation answered
-// UNCERTAIN is never resent: the sheet re-reads and asks reconcile first.
+// group with approval needs a new approval to come back. The group's
+// community is fixed when the group is created and is not edited here;
+// leaving the Geral group does not leave the community. Names come from the
+// node's rows through displayText; a key is only ever an 8-hex short key.
+// A mutation answered UNCERTAIN is never resent: the sheet re-reads and
+// asks reconcile first.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -24,7 +26,6 @@ import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 
 const PAGE = 100
-const HEX64 = /^[0-9a-f]{64}$/
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
 const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const LEAVE_PRIVATE = 'Ao sair de um grupo privado, você deixa de receber as novas mensagens. Para voltar, um administrador precisa aprovar você de novo.'
@@ -58,7 +59,7 @@ function PersonRow ({ row, label, onOpenMember, children }) {
   )
 }
 
-export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember, onOpenCommunity }) {
+export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember }) {
   const node = useNode()
   const { request } = node
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
@@ -71,7 +72,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   const [loading, setLoading] = useState(false)
   const [check, setCheck] = useState(null)
   const [confirm, setConfirm] = useState(null)
-  const [communityKey, setCommunityKey] = useState('')
   const [nameDraft, setNameDraft] = useState('')
   const act = useAction()
   const more = useAction()
@@ -153,11 +153,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
         setInfo(value)
         return reconcile(change, { info: value })
       }
-      if (change.action === 'link') {
-        const value = await request('group.info', { group })
-        setInfo(value)
-        return reconcile(change, { info: value })
-      }
       if (change.action === 'rekey') {
         return reconcile(change, await request('group.read', { group }))
       }
@@ -214,7 +209,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   const admin = (member, on) => mutate('group.admin', { group, member, on }, { action: 'admin', member, on })
   const leave = () => mutate('group.leave', { group }, { action: 'leave' })
   const rename = (name) => mutate('group.meta', { group, name }, { action: 'meta', name })
-  const link = (community, on) => mutate('community.link', { community, group, on }, { action: 'link', community, on })
   const rekey = async () => {
     let epoch = null
     try {
@@ -230,7 +224,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   const live = members.rows.filter((m) => m && m.banned !== true)
   const admins = live.filter((m) => m.admin === true || m.member === creator)
   const banned = members.rows.filter((m) => m && m.banned === true)
-  const communities = info && Array.isArray(info.communities) ? info.communities : []
   const link0 = joinLink(group)
   // The system share sheet when there is one, else a copy. The link is never
   // shown as text.
@@ -242,7 +235,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
     if (canShare(nav) && (await shareUrl(nav, { url, title })) !== 'failed') return
     setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
-  const typedKey = communityKey.trim().toLowerCase()
   const newName = nameDraft.trim()
   const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && newName !== info?.name
 
@@ -250,7 +242,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
   // destination: close it before navigating.
   const close = () => { if (typeof onClose === 'function') onClose() }
   const openMember = typeof onOpenMember === 'function' ? (diary) => { close(); onOpenMember(diary) } : undefined
-  const openCommunity = typeof onOpenCommunity === 'function' ? (community) => { close(); onOpenCommunity(community) } : undefined
 
   const confirmBox = confirm
     ? (
@@ -376,31 +367,6 @@ export function CadeiraAjustes ({ group, visible, onClose, onLeft, onOpenMember,
                   {staff ? <Pill label='desbanir' onPress={() => ban(m.member, false)} pending={act.pending} /> : null}
                 </PersonRow>
               ))}
-            </View>
-            )
-          : null}
-
-        {can('link', role) || communities.length > 0
-          ? (
-            <View>
-              <SectionHeader>Comunidade</SectionHeader>
-              <View style={styles.box}>
-                {communities.map((c) => (
-                  <View key={c} style={styles.inline}>
-                    <Pill label={'comunidade ' + shortKey(c)} onPress={openCommunity ? () => openCommunity(c) : undefined} />
-                    {can('link', role) ? <Pill label='desvincular' danger onPress={() => link(c, false)} pending={act.pending} /> : null}
-                  </View>
-                ))}
-                {can('link', role) && communities.length === 0
-                  ? (
-                    <>
-                      <Soft>O vínculo só vale quando o grupo e a comunidade concordam: os dois lados precisam vincular.</Soft>
-                      <Field label='Chave da comunidade' value={communityKey} onChangeText={setCommunityKey} mono />
-                      <Btn label='Vincular' onPress={() => link(typedKey, true)} disabled={!HEX64.test(typedKey) || !node.online} pending={act.pending} />
-                    </>
-                    )
-                  : null}
-              </View>
             </View>
             )
           : null}

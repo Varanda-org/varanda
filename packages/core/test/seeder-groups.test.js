@@ -16,7 +16,8 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupHeader, writerHeader, groupPost } = require('../lib/group')
+const { groupPost } = require('../lib/group')
+const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const {
   hex,
   makeAssociation,

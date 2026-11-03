@@ -8,7 +8,8 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { joinAndFlush, topicFor } = require('../lib/net')
 const { groupJoinRecord } = require('../lib/records')
-const { groupHeader, groupPost } = require('../lib/group')
+const { groupPost } = require('../lib/group')
+const { groupHeader } = require('./helpers/seeder-groups')
 const {
   hex,
   makeAssociation,

@@ -10,7 +10,7 @@ export const TABS = [
 
 const HOSTED_TABS = [
   ...TABS.slice(0, 2),
-  { id: 'cadeiras', label: 'Comunidades', icon: 'cadeira' },
+  { id: 'comunidades', label: 'Comunidades', icon: 'cadeira' },
   ...TABS.slice(2)
 ]
 

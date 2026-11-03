@@ -52,6 +52,14 @@ async function connect (t, session, { timeoutMs = 90000, hold = null } = {}) {
   return { call: (method, params) => client.request(method, params), client, events, requests, held }
 }
 
+// A community of `m` (protocol v2: every group lives in one), its events
+// cleared.
+async function communityOf (m) {
+  const { community } = await m.call('community.create', { name: 'Bairro', join: 'open' })
+  m.events.splice(0)
+  return community
+}
+
 async function person (t, { kp = crypto.keyPair(), name = 'Ana', cert = true } = {}) {
   const dataDir = tmpDir(t)
   const association = hex(kp.publicKey)
@@ -110,7 +118,9 @@ test('group create, idempotent join, list, info and members expose every field',
   const issuerCert = createIssuerCert({ issuer: hex(issuer.publicKey) }, m.kp)
   await m.call('username.add', { record: createUsernameRecord({ member: m.publicKey, username: 'ana' }, issuer, issuerCert) })
   t.alike(await m.call('group.list'), { groups: [], total: 0 })
-  const created = await m.call('group.create', { name: 'Horta', join: 'open' })
+  const community = await communityOf(m)
+  const general = (await m.call('group.list')).groups[0].group
+  const created = await m.call('group.create', { name: 'Horta', join: 'open', community })
   t.alike(Object.keys(created), ['group'])
   t.ok(/^[0-9a-f]{64}$/.test(created.group))
   const { group } = created
@@ -118,10 +128,11 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('log.read'), log, 'joining again appends no diary record')
-  const summary = { group, name: 'Horta', join: 'open', role: 'creator', members: 1 }
-  t.alike(await m.call('group.list'), { groups: [summary], total: 1 })
-  t.alike(await m.call('group.list', { offset: 1, limit: 1 }), { groups: [], total: 1 })
-  t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', communities: [], visibility: 'public' })
+  const summary = { group, name: 'Horta', join: 'open', role: 'creator', members: 1, community }
+  const geral = { group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }
+  t.alike(await m.call('group.list'), { groups: [geral, summary].sort((x, y) => x.name < y.name ? -1 : 1), total: 2 })
+  t.alike(await m.call('group.list', { offset: 2, limit: 1 }), { groups: [], total: 2 })
+  t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public' })
   t.alike(await m.call('group.members', { group }), {
     members: [{ member: m.publicKey, name: 'Ana', username: 'ana', admin: true, banned: false, joinedAt: await headerTime(m, group) }],
     total: 1
@@ -129,13 +140,13 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(await m.call('group.members', { group, offset: 1 }), { members: [], total: 1 })
   t.alike(await m.call('group.requests', { group }), { requests: [], total: 0 })
   t.alike(await m.call('group.read', { group }), { items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' })
-  t.alike(m.events, Array.from({ length: 3 }, () => ({ event: 'groups.changed', data: { group } })))
+  t.alike(m.events.map((e) => e.data.group), [group, community, group, group], 'group.create also announces its community')
   t.alike(m.session.internal, [])
 })
 
 test('group posts serialize, page with cursors and retain hidden items', async (t) => {
   const m = await person(t)
-  const { group } = await m.call('group.create', { name: 'Horta', join: 'open' })
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
   const replyTo = { writer: group, seq: 1 }
   t.alike(await Promise.all([
     m.call('group.post', { group, text: 'um' }),
@@ -187,8 +198,11 @@ test('group posts serialize, page with cursors and retain hidden items', async (
 test('group requests, admission, administration, bans, metadata and leave through RPC', async (t) => {
   const a = await person(t)
   const b = await person(t, { kp: a.kp, name: 'Bia' })
-  const { group } = await a.call('group.create', { name: 'Horta', join: 'approval' })
+  const community = await communityOf(a)
+  const { group } = await a.call('group.create', { name: 'Horta', join: 'approval', community })
   await exchange(a, b)
+  await b.call('community.join', { community })
+  b.events.splice(0)
   t.alike(await b.call('group.join', { group }), { state: 'requested' })
   const log = await b.call('log.read')
   t.alike(await b.call('group.join', { group }), { state: 'requested' })
@@ -207,7 +221,7 @@ test('group requests, admission, administration, bans, metadata and leave throug
   await exchange(a, b)
   const { seq } = await b.call('group.post', { group, text: 'olá' })
   await exchange(b, a)
-  const writer = store.readGroups(b.dataDir)[0].writer
+  const writer = store.readGroups(b.dataDir).find((g) => g.group === group).writer
   const read = await a.call('group.read', { group })
   t.alike(read, {
     items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', replyTo: null, hidden: false, name: 'Bia', username: null }],
@@ -233,21 +247,21 @@ test('group requests, admission, administration, bans, metadata and leave throug
   t.alike(await a.call('group.ban', { group, member: b.publicKey, on: false }), { ok: true })
   t.alike(await a.call('group.meta', { group, name: 'Jardim', join: 'open' }), { ok: true })
   t.alike(await a.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', communities: [], visibility: 'public'
+    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public'
   })
   await exchange(a, b)
   t.alike(await b.call('group.leave', { group }), { state: 'left' })
   t.alike(await b.call('group.leave', { group }), { state: 'left' }, 'a repeated leave answers the state and writes nothing')
   t.alike(await failure(b.call('group.post', { group, text: 'depois' })), denied)
   t.alike(await b.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', communities: [], visibility: 'public'
+    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public'
   })
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
 
 test('group errors map to USAGE and NOT_FOUND without leaking internals', async (t) => {
   const m = await person(t, { cert: false })
-  t.alike(await failure(m.call('group.create', { name: 'Horta', join: 'open' })), {
+  t.alike(await failure(m.call('group.create', { name: 'Horta', join: 'open', community: OTHER })), {
     code: 'USAGE', message: 'grave o certificado de membro antes de publicar'
   })
   for (const method of ['group.info', 'group.read', 'group.members', 'group.requests', 'group.leave']) {
@@ -264,7 +278,7 @@ test('group errors map to USAGE and NOT_FOUND without leaking internals', async 
   try {
     for (const message of ['sem permissão no grupo', 'limite de grupos atingido', 'nada a alterar', 'limite do grupo atingido']) {
       member.groupCreate = async () => { throw new Error(message) }
-      t.alike(await failure(m.call('group.create', { name: 'Horta', join: 'open' })), { code: 'USAGE', message })
+      t.alike(await failure(m.call('group.create', { name: 'Horta', join: 'open', community: OTHER })), { code: 'USAGE', message })
     }
   } finally {
     member.groupCreate = original
@@ -275,7 +289,7 @@ test('group errors map to USAGE and NOT_FOUND without leaking internals', async 
 
 test('a timeout after a group append is uncertain and rereading finds one post', async (t) => {
   const m = await person(t)
-  const { group } = await m.call('group.create', { name: 'Horta', join: 'open' })
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
   const link = await connect(t, m.session, { timeoutMs: 1000, hold: 'group.post' })
   const error = await link.call('group.post', { group, text: 'uma vez' }).catch((err) => err)
   t.is(error.code, 'TIMEOUT')
@@ -303,35 +317,59 @@ test('group reports retain the core signing restriction and node.info has no cap
   })
 })
 
-test('community create, link, info and admin through RPC emit groups.changed for every affected key', async (t) => {
+test('every community method is registered, community.link is gone, and each mutation announces its affected keys', async (t) => {
   const kp = crypto.keyPair()
   const a = await person(t, { kp })
   const b = await person(t, { kp, name: 'Bia' })
-  for (const method of ['community.create', 'community.link', 'community.info', 'community.admin']) t.is(typeof a.session.handlers[method], 'function', method)
-  const { community } = await a.call('community.create', { name: 'Bairro' })
-  t.alike(a.events.splice(0), [{ event: 'groups.changed', data: { group: community } }])
-  const { group } = await a.call('group.create', { name: 'Horta', join: 'open' })
-  a.events.splice(0)
-  t.alike(await a.call('community.link', { community, group, on: true }), { community, group, on: true, sides: ['community', 'group'] })
-  t.alike(a.events.splice(0).map((e) => e.data.group).sort(), [community, group].sort())
-  t.alike((await a.call('group.info', { group })).communities, [community])
+  const methods = ['community.create', 'community.join', 'community.leave', 'community.admit', 'community.ban', 'community.meta', 'community.admin', 'community.members', 'community.requests', 'community.info', 'community.list']
+  for (const method of methods) t.is(typeof a.session.handlers[method], 'function', method)
+  t.is(a.session.handlers['community.link'], undefined, 'community.link is not registered')
+  const keys = () => a.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
+  const { community, group: general } = await a.call('community.create', { name: 'Bairro', join: 'open' })
+  t.alike(keys(), [community, general].sort(), 'create: the community and Geral')
+  const { group } = await a.call('group.create', { name: 'Horta', join: 'open', community })
+  t.alike(keys(), [community, group].sort(), 'group.create: the group and its community')
+  t.alike(await a.call('community.meta', { community, name: 'Bairro Novo' }), { ok: true })
+  t.alike(keys(), [community], 'meta: the community only')
   await exchange(a, b)
-  t.alike(await b.call('group.join', { group }), { state: 'member' })
+  const joined = await b.call('community.join', { community })
+  t.is(joined.state, 'member')
+  t.is(joined.group, general, 'join answers Geral')
+  t.alike(b.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort(), [community, general].sort(), 'join: the community and Geral')
   await exchange(b, a)
   t.alike(await a.call('community.admin', { community, member: b.publicKey, on: true }), { community, member: b.publicKey, on: true })
-  t.alike(a.events.splice(0).map((e) => e.data.group).sort(), [community, group].sort())
-  t.alike(await a.call('community.info', { community }), {
-    community, name: 'Bairro', creator: a.publicKey, groups: [{ group, name: 'Horta' }], admins: 2, state: 'ready', incomplete: false
-  })
-  t.alike(await failure(a.call('community.admin', { community, member: a.publicKey, on: true })), { code: 'USAGE', message: 'o criador da comunidade já administra' })
-  t.alike(await failure(b.call('community.link', { community, group, on: false })), { code: 'USAGE', message: 'sem permissão na comunidade' })
+  const adminKeys = keys()
+  t.ok(adminKeys.includes(community) && adminKeys.includes(general) && adminKeys.includes(group), 'admin: the community and every local group of it')
+  t.alike(await a.call('community.ban', { community, member: b.publicKey, on: true }).catch((err) => err.message), 'sem permissão na comunidade', 'an admin cannot be banned')
+  a.events.splice(0)
+  t.alike(await a.call('community.admin', { community, member: b.publicKey, on: false }), { community, member: b.publicKey, on: false })
+  a.events.splice(0)
+  t.alike(await a.call('community.ban', { community, member: b.publicKey, on: true }), { ok: true })
+  const banKeys = keys()
+  t.ok(banKeys.includes(community) && banKeys.includes(general) && banKeys.includes(group), 'ban: the community and every local group of it')
+  const info = await a.call('community.info', { community })
+  t.is(info.community, community)
+  t.is(info.name, 'Bairro Novo')
+  t.is(info.general, general)
+  t.ok(info.groups.some((g) => g.group === group), 'the catalogue names the group')
+  t.ok((await a.call('community.list')).communities.some((c) => c.community === community))
+  t.ok((await a.call('community.members', { community })).total >= 1)
+  t.is((await a.call('community.requests', { community })).total, 0)
+  t.alike(await failure(a.call('community.link', { community, group, on: true })), { code: 'USAGE', message: 'método desconhecido' }, 'community.link is unknown')
   t.alike(await failure(b.call('community.info', { community: group })), { code: 'NOT_FOUND', message: 'comunidade não encontrada' })
+  // B has not seen the ban yet: its leave lands and announces C and every
+  // local group of C.
+  b.events.splice(0)
+  t.alike(await b.call('community.leave', { community }), { state: 'left' })
+  const leaveKeys = b.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group)
+  t.ok(leaveKeys.includes(community) && leaveKeys.includes(general), 'leave: the community and its local groups')
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
 
 test('group.rekey: a private group rotates for its creator, a public one is refused', async (t) => {
   const m = await person(t)
-  const { group } = await m.call('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { community } = await m.call('community.create', { name: 'Bairro', join: 'open' })
+  const { group } = await m.call('group.create', { name: 'Segredo', join: 'open', visibility: 'private', community })
   const info = await m.call('group.info', { group })
   t.is(info.visibility, 'private')
   t.is(info.join, 'approval')
@@ -341,7 +379,7 @@ test('group.rekey: a private group rotates for its creator, a public one is refu
   t.is(r.group, group)
   t.alike(Object.keys(r).sort(), ['epoch', 'group'], 'only the kid, never a key')
   t.alike((await m.call('group.read', { group })).epoch, r.epoch, 'the new epoch is in use')
-  const pub = await m.call('group.create', { name: 'Praça', join: 'open' })
+  const pub = await m.call('group.create', { name: 'Praça', join: 'open', community })
   t.alike(await failure(m.call('group.rekey', { group: pub.group })), { code: 'USAGE', message: 'grupo público não usa chave' })
   t.ok(m.events.some((e) => e.event === 'groups.changed' && e.data.group === group), 'groups.changed after rekey')
   t.alike(m.session.internal, [])
