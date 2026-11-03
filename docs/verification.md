@@ -3893,3 +3893,31 @@ A segue B. B não segue A.
 - O app instalado não tem aviso do sistema. A novidade só aparece com o app aberto (`dm.pull`, `DM_PULL_EVERY_MS` = 120000) e pelo ponto.
 - Um aparelho offline por mais de sete dias (`DM_RETENTION_MS`) perde o que a varredura já tirou.
 - `seed --no-dm` deixa os dois canais sem suporte. Sem a opção, ficam ligados.
+
+## 70. Chegar em A Rua depois de configurar a conta (PR fix/rua-after-onboarding)
+
+`apps/app/App.js` abria Ajustes › Conta em toda carga `/?conta=` assim que `setupStep` ficava falso, para quem acabava de criar a conta e para quem já tinha certificado. `linkReturnTaker` em `apps/app/src/linkReturn.js` entrega a volta de quem é novo ao passo de configuração, que já conclui o vínculo, e abre a folha só para quem já tinha certificado. Logo depois de desbloquear, enquanto "Buscando sua conta…" segura a leitura do shell, o botão "confirmar vínculo" já funciona; por isso o cartão avisa o shell, por `onLinked`, assim que grava o certificado. No nativo nada muda.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes (número de `test(` e de asserções antes -> depois):
+
+| Arquivo | Testes antes -> depois | Asserções antes -> depois | O que cobre |
+|---|---|---|---|
+| `apps/app/test/linkReturn.test.js` | 19 -> 25 | 177 -> 214 | `linkReturnTaker` (volta de pessoa nova fica com o passo de configuração, nada decidido atrás dos Termos, quem já tinha certificado recebe Ajustes › Conta, campos ausentes nunca dão `conta`), a varredura de `App.js` (uma só chamada `setAjustes('conta')`, dentro do efeito novo; a guarda antiga sumiu) e a de `Identidade.js` (o cartão do passo de configuração chama `onLinked` logo depois de gravar o certificado; só o Identidade da configuração recebe `onLinked`); contra o `App.js` e o `Identidade.js` antigos: 23/25 testes, 203/214 asserções |
+
+### Checagens humanas (a fazer)
+
+1. **Web, pessoa nova.** Contra um semeador local: criar a passkey, passo do Google, recarga em `/?conta=`, desbloquear, confirmar vínculo, nome (ou "Pular por enquanto"): as abas abrem em A Rua, sem folha por cima.
+2. **Web, quem já tinha certificado.** Vincular o Google em Ajustes › Conta; depois da volta e do desbloqueio, a folha Conta abre uma vez e oferece "confirmar vínculo".
+3. **Web, convite `/@nome` para pessoa nova.** Depois da configuração, Membro abre por cima das abas, sem a folha Conta no meio (a seção 26 descreve o caminho antigo e fica como registro).
+4. **Android (build de debug).** Passkey, sessão do Google no app, nome ou pular: A Rua, sem folha.
+5. **iOS (simulador).** O mesmo fluxo do item 4.
+6. **Web, pessoa nova, confirmar durante a recuperação.** Como no item 1, mas tocar em "confirmar vínculo" enquanto "Buscando sua conta…" ainda aparece: as abas abrem em A Rua, sem folha por cima.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- As voltas `lista-de-espera` e `convite-invalido` continuam no passo de configuração, como antes.
+- Se o envio do @nome falha logo depois de a pessoa nova confirmar o vínculo, a folha Conta não abre mais sozinha para oferecer "enviar o @nome de novo"; o botão continua em Ajustes › Conta.
+- O Android e o iOS não mudam de código (só as checagens 4 e 5).

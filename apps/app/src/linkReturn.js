@@ -16,6 +16,8 @@
 // 'new' only, and a group or community link only names what to open.
 // An https App Link that arrives before the installation loads is held, not
 // parsed (waitsForInstallation).
+// The module also decides who takes the hosted web's ?conta= page load
+// (LINK_RETURN in App.js, linkReturnTaker).
 
 import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
@@ -178,6 +180,22 @@ export function dropsHeldInvite (err, native) {
 // just refused the invite.
 export function invitePasteShown ({ native, required, held, refused } = {}) {
   return native === true && held !== true && (required === true || refused === true)
+}
+
+// The web's return from the Google step is one page load. A newcomer still on
+// the setup's 'vinculo' with node.info read and no certificate is finished by
+// the setup's LinkCard, so the shell forgets the return and the tabs come up
+// with nothing on top. While info is null certMissing is false, so the
+// 'vinculo' flash of a member who already has an account waits. 'conta' is
+// only for a member who already held a certificate, once the terms are
+// accepted and the setup is gone: Ajustes > Conta is then the only card that
+// offers 'confirmar vínculo'. Missing fields never give 'conta'.
+export function linkReturnTaker ({ held, termsOk, setupStep, step, certMissing } = {}) {
+  if (held !== true) return 'none'
+  if (termsOk !== true) return 'wait'
+  if (step === 'vinculo' && certMissing === true) return 'setup'
+  if (setupStep !== false) return 'wait'
+  return 'conta'
 }
 
 // One token per captured profile link: a lookup started for an older link
