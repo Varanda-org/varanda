@@ -13,8 +13,10 @@
 // the wallet; wallet.json keeps only identifiers and the wrapped key and
 // survives a restart; no PIN, CPF or name reaches a file, a response or a log
 // line; a create whose answer was lost is never repeated (C12); the mode gates
-// the routes (C11); and the social routes do not depend on Hodle. The
-// route-level cases live in account-wallet.test.js.
+// the routes (C11); the social routes do not depend on Hodle; and in completo
+// a BRLA send by @nome or to an address moves exactly what was signed, its
+// fee only after the principal concluded, never twice on a lost answer
+// (C9, C10). The route-level cases live in account-wallet.test.js.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -176,7 +178,7 @@ async function connectClient (node) {
 // `serve()` opens one service lifetime over `dir` (stores included) with the
 // current `h.mode`; `device()` a browser session with a fresh identity;
 // `client(dev)` that browser's cookie jar towards the service.
-async function harness (t, { mode = 'carteira', fees = null, webhookSecrets = null } = {}) {
+async function harness (t, { mode = 'carteira', fees = null, webhookSecrets = null, moneyTimeoutMs } = {}) {
   const assocKp = crypto.keyPair()
   const issuerKp = crypto.keyPair()
   const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKp.publicKey, 'hex') }, assocKp)
@@ -212,6 +214,7 @@ async function harness (t, { mode = 'carteira', fees = null, webhookSecrets = nu
       ops,
       fees,
       walletWebhookSecrets: webhookSecrets,
+      walletMoneyTimeoutMs: moneyTimeoutMs,
       log: (e) => logs.push(JSON.stringify(e)),
       now
     })
@@ -440,7 +443,7 @@ test('wallet e2e 1: opt-in, KYC and wallet through wallet.sign; nothing personal
   const { dev, c } = await h.member('wanda')
 
   const policy = await c.api('GET', '/account/wallet/policy')
-  t.alike(policy.body, { available: true, network: 'polygon', mode: 'carteira' }, 'policy: on, carteira')
+  t.alike(policy.body, { available: true, network: 'polygon', mode: 'carteira', actions: ['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry', 'wallet-create'] }, 'policy: on, carteira')
   const none = await c.wallet('status')
   t.alike(none.body, { account: null }, 'no account before the opt-in')
 
@@ -756,7 +759,7 @@ test('wallet e2e 5: pix with a payout fee: deposit settles, a signed webhook con
   // Hodle answers the Pix as processing: the Varanda fee waits until Hodle
   // reports it concluded (S12).
   t.is(paid.body.status, 'pendente')
-  t.alike(paid.body.fee, { cents: 101, status: 'pendente' })
+  t.alike(paid.body.fee, { asset: 'BRL', cents: 101, status: 'pendente' })
   t.is(h.fake.state.sends.payout, 1, 'one payout')
   t.is(h.fake.state.sends.transfer, 0, 'no fee transfer before the payout concludes')
   const payouts = h.seen('POST', '/api/wallet/payout')
@@ -796,7 +799,7 @@ test('wallet e2e 5: pix with a payout fee: deposit settles, a signed webhook con
   t.is(opSt.status, 200, opSt.text)
   t.is(opSt.body.status, 'concluido')
   t.is(opSt.body.kind, 'payout')
-  t.alike(opSt.body.fee, { cents: 101, status: 'pendente' }, 'a conclusion charges nothing on its own')
+  t.alike(opSt.body.fee, { asset: 'BRL', cents: 101, status: 'pendente' }, 'a conclusion charges nothing on its own')
   t.is(h.fake.state.sends.transfer, 0)
 
   // The next payout the member signs collects it, after its own principal.
@@ -820,8 +823,8 @@ test('wallet e2e 5: pix with a payout fee: deposit settles, a signed webhook con
     totalDebitCents: preview2.body.totalDebitCents
   }, { pin: PIN })
   t.is(paid2.status, 200, paid2.text)
-  t.alike(paid2.body.pendingFee, { cents: 101, status: 'cobrada' })
-  t.alike(paid2.body.fee, { cents: preview2.body.varandaFeeCents, status: 'pendente' })
+  t.alike(paid2.body.pendingFee, { asset: 'BRL', cents: 101, status: 'cobrada' })
+  t.alike(paid2.body.fee, { asset: 'BRL', cents: preview2.body.varandaFeeCents, status: 'pendente' })
 
   // Two payouts and one fee transfer to the treasury, after the second.
   t.is(h.fake.state.sends.payout, 2, 'two payouts')
@@ -862,4 +865,263 @@ test('wallet e2e 5: pix with a payout fee: deposit settles, a signed webhook con
   t.is(h.svc.ops.get(externalId).to, '***test', 'the destination is kept masked')
   bearerOnlyInAuthorization(t, h)
   t.alike(dev.internal, [], 'no internal error in the session')
+})
+
+// --- completo: BRLA sends by @nome and to an address ------------------------
+
+const SEND_FEES = Object.freeze({
+  VARANDA_FEE_TRANSFER_CENTS: '10',
+  VARANDA_FEE_TRANSFER_BPS: '100',
+  VARANDA_FEE_CRYPTO_CENTS: '20',
+  VARANDA_FEE_TREASURY: 'sub:tesouro'
+})
+
+function newOpId () {
+  return nodeCrypto.randomBytes(16).toString('base64url')
+}
+
+// The treasury is an operator subaccount at Hodle, as in wallet e2e 5.
+function treasuryAtFake (h) {
+  h.fake.state.subaccounts.set('tesouro', { name: 'tesouro' })
+  h.fake.state.wallets.set('tesouro', [{ id: 'w-tesouro', address: '0x' + 'cd'.repeat(20), network: 'polygon', protectedSymmetricKey: 'psk-tesouro-sentinela' }])
+}
+
+// A linked, approved member with a wallet at the fake.
+async function walletMember (t, h, username) {
+  const { dev, c } = await h.member(username)
+  await approve(t, h, c, dev)
+  const created = await c.wallet('wallet-create', {}, { pin: PIN })
+  t.is(created.status, 200, 'wallet-create: ' + created.text)
+  return { dev, c, sub: h.entry(dev.hex).subAccountId, address: created.body.address }
+}
+
+// The preview the member reviews, then the send signed with exactly its
+// numbers (C10). `kind` is transfer (dest '@nome') or crypto (dest 0x...).
+async function sendBrla (t, c, kind, cents, dest, opId = newOpId()) {
+  const preview = await c.wallet('preview', { kind, cents })
+  t.is(preview.status, 200, 'preview: ' + preview.text)
+  const op = {
+    opId,
+    cents,
+    feeCents: preview.body.varandaFeeCents,
+    pendingFeeCents: preview.body.pendingFeeCents,
+    pendingFeeRef: preview.body.pendingFeeRef,
+    totalDebitCents: preview.body.totalDebitCents
+  }
+  if (kind === 'transfer') op.to = dest
+  else op.address = dest
+  const action = kind === 'transfer' ? 'transfer' : 'send-crypto'
+  const r = await c.wallet(action, op, { pin: PIN })
+  return { preview: preview.body, op, action, r }
+}
+
+test('wallet e2e 6: completo: a send to @nome and to an address, fees after the principal, refused destinations alike, pix cannot send', async (t) => {
+  t.timeout(90000)
+  const fees = parseFees(SEND_FEES)
+  const h = await harness(t, { mode: 'completo', fees })
+  treasuryAtFake(h)
+  await h.serve()
+  const a = await walletMember(t, h, 'anabela')
+  const b = await walletMember(t, h, 'bento')
+  const policy = await a.c.api('GET', '/account/wallet/policy')
+  t.is(policy.body.mode, 'completo')
+  t.ok(policy.body.actions.includes('transfer') && policy.body.actions.includes('send-crypto'), 'completo offers both sends')
+  const funded = 100000
+  h.fake.state.balances.set(a.sub, funded)
+  const bal = (sub) => h.fake.state.balances.get(sub) || 0
+
+  // A to @bento: the principal, then the fee to the treasury.
+  const cents = 1000
+  const fee = feeCents(fees.rates.transfer, cents)
+  const one = await sendBrla(t, a.c, 'transfer', cents, '@bento')
+  t.is(one.preview.varandaFeeCents, fee)
+  t.is(one.preview.totalDebitCents, cents + fee)
+  t.is(one.r.status, 200, 'transfer: ' + one.r.text)
+  const id1 = one.r.body.externalId
+  t.ok(/^var-[0-9a-f]{32}$/.test(id1))
+  t.is(one.r.body.status, 'concluido')
+  t.alike(one.r.body.fee, { asset: 'BRL', cents: fee, status: 'cobrada' }, 'the fee is collected once the principal concluded')
+  t.ok(/^0x[0-9a-f]{64}$/.test(one.r.body.txHash), 'the public hash comes back')
+  t.is(h.fake.state.sends.transfer, 2, 'principal and fee')
+  const legs = h.seen('POST', '/api/wallet/transfer')
+  t.is(legs.length, 2)
+  t.is(legs[0].body.reference, id1)
+  t.is(legs[0].body.toSubAccountId, b.sub, 'the principal goes to the member behind the name')
+  t.is(legs[0].body.amount, '10.00')
+  t.is(legs[1].body.reference, id1 + ':taxa')
+  t.is(legs[1].body.toSubAccountId, 'tesouro')
+  t.is(bal(a.sub), funded - cents - fee, 'the sender pays the principal plus the fee')
+  t.is(bal(b.sub), cents, 'the recipient receives the principal only')
+  t.is(bal('tesouro'), fee, 'the treasury receives the fee only')
+
+  // B's statement shows the money coming in, with nothing of A's ledger.
+  const st = await b.c.wallet('statement')
+  t.is(st.status, 200, st.text)
+  const incoming = st.body.items.filter((i) => i.kind === 'transfer')
+  t.is(incoming.length, 1)
+  t.is(incoming[0].direction, 'in')
+  t.is(incoming[0].cents, cents)
+  t.is(incoming[0].status, 'concluido')
+  t.is(incoming[0].externalId, null, 'the sender\'s id is not the recipient\'s')
+  t.is(incoming[0].fee, null, 'nothing charged on money coming in')
+  t.absent(st.text.includes(id1))
+
+  // A to an outside address: the principal leaves A and no subaccount.
+  const outside = '0x' + nodeCrypto.randomBytes(20).toString('hex')
+  const cents2 = 500
+  const fee2 = feeCents(fees.rates.crypto, cents2)
+  const before = { a: bal(a.sub), b: bal(b.sub), tesouro: bal('tesouro'), sends: h.fake.state.sends.transfer }
+  const two = await sendBrla(t, a.c, 'crypto', cents2, outside)
+  t.is(two.r.status, 200, 'send-crypto: ' + two.r.text)
+  const id2 = two.r.body.externalId
+  t.is(two.r.body.status, 'concluido')
+  t.alike(two.r.body.fee, { asset: 'BRL', cents: fee2, status: 'cobrada' })
+  t.ok(/^0x[0-9a-f]{64}$/.test(two.r.body.txHash))
+  t.is(h.fake.state.sends.transfer, before.sends + 2)
+  const legs2 = h.seen('POST', '/api/wallet/transfer').slice(2)
+  t.is(legs2[0].body.reference, id2)
+  t.is(legs2[0].body.recipientAddress, outside)
+  t.is(legs2[0].body.toSubAccountId, undefined, 'no subaccount is the recipient')
+  t.is(legs2[1].body.reference, id2 + ':taxa')
+  t.is(bal(a.sub), before.a - cents2 - fee2, 'the sender pays the principal plus the fee')
+  t.is(h.fake.state.credited.get(outside), cents2, 'the address receives the principal only')
+  t.is(bal('tesouro'), before.tesouro + fee2, 'the treasury receives the fee only')
+  t.is(bal(b.sub), before.b, 'no member subaccount credited')
+  t.is(h.svc.ops.get(id2).to, '0x..' + outside.slice(-6), 'the destination is kept masked')
+
+  // Every refused destination answers the same bytes, before Hodle is called.
+  await h.member('celina')
+  const posts = h.fake.state.posts.transfer
+  const refused = []
+  for (const name of ['@ninguemaqui', '@anabela', '@celina']) {
+    const r = await sendBrla(t, a.c, 'transfer', 300, name)
+    refused.push(r.r)
+  }
+  for (const address of [a.address.toLowerCase(), '0x' + '0'.repeat(40)]) {
+    const r = await sendBrla(t, a.c, 'crypto', 300, address)
+    refused.push(r.r)
+  }
+  for (const r of refused) {
+    t.is(r.status, 400)
+    t.is(r.text, refused[0].text, 'byte-identical: ' + r.text)
+  }
+  t.alike(refused[0].body, { error: 'destino-invalido' })
+  t.is(h.fake.state.posts.transfer, posts, 'no provider call for a refused destination')
+
+  t.absent(h.logs.some((l) => l.includes(PIN)), 'no log line holds the PIN')
+  t.absent(walk(h.root).concat(h.logs).join('\n').includes(outside), 'no full outside address in a file or a log line')
+  noSecrets(t, h, 'completo sends')
+  bearerOnlyInAuthorization(t, h)
+
+  // The same dir in pix: neither send exists, whatever the balance.
+  await h.svc.stop()
+  h.mode = 'pix'
+  await h.serve()
+  const pixPolicy = await a.c.api('GET', '/account/wallet/policy')
+  t.is(pixPolicy.body.mode, 'pix')
+  t.absent(pixPolicy.body.actions.includes('transfer') || pixPolicy.body.actions.includes('send-crypto'), 'pix offers no send')
+  const postsBefore = h.fake.state.posts.transfer
+  for (const action of ['transfer', 'send-crypto']) {
+    const s = await a.c.post('/account/wallet/start', { member: a.dev.hex, action })
+    t.is(s.status, 404, action + ': start answers 404 in pix')
+    const direct = await a.c.post('/account/wallet/' + action, { member: a.dev.hex, nonce: 'A'.repeat(43), action, op: {}, signature: 'a'.repeat(128), pin: PIN })
+    t.is(direct.status, 404, action + ': the route does not exist in pix')
+  }
+  t.is(h.fake.state.posts.transfer, postsBefore, 'no transfer reached Hodle in pix')
+  t.alike(a.dev.internal, [], 'no internal error in the session')
+})
+
+test('wallet e2e 7: completo: a 202 send settles by op-status and its fee rides the next send; a lost answer blocks the next debit and is never sent twice', async (t) => {
+  t.timeout(90000)
+  const fees = parseFees(SEND_FEES)
+  const h = await harness(t, { mode: 'completo', fees, moneyTimeoutMs: 1000 })
+  treasuryAtFake(h)
+  await h.serve()
+  const a = await walletMember(t, h, 'aurora')
+  const b = await walletMember(t, h, 'benicio')
+  const funded = 100000
+  h.fake.state.balances.set(a.sub, funded)
+  const bal = (sub) => h.fake.state.balances.get(sub) || 0
+
+  // Hodle accepts the send without completing it: no fee leg yet.
+  h.fake.state.transferAnswer = 'pending202'
+  const cents = 1000
+  const fee = feeCents(fees.rates.transfer, cents)
+  const one = await sendBrla(t, a.c, 'transfer', cents, '@benicio')
+  t.is(one.r.status, 200, one.r.text)
+  const id1 = one.r.body.externalId
+  t.is(one.r.body.status, 'pendente')
+  t.alike(one.r.body.fee, { asset: 'BRL', cents: fee, status: 'pendente' })
+  t.is(one.r.body.txHash, null)
+  t.is(h.fake.state.sends.transfer, 1, 'the principal only')
+  t.is(bal(b.sub), 0, 'nothing credited while pending')
+  t.ok(h.logs.includes(JSON.stringify({ event: 'carteira', reason: 'pendente-202' })))
+  h.fake.state.transferAnswer = 'done'
+
+  // The statement row completes; op-status reads it and charges nothing.
+  h.fake.settleTransfer(id1, 'COMPLETED')
+  const st = await a.c.wallet('op-status', { externalId: id1 })
+  t.is(st.status, 200, st.text)
+  t.is(st.body.kind, 'transfer')
+  t.is(st.body.status, 'concluido', 'resolved from the COMPLETED statement row')
+  t.ok(/^0x[0-9a-f]{64}$/.test(st.body.txHash))
+  t.alike(st.body.fee, { asset: 'BRL', cents: fee, status: 'pendente' }, 'a conclusion charges nothing on its own')
+  t.is(h.fake.state.sends.transfer, 1)
+  t.is(bal('tesouro'), 0)
+  t.is(bal(b.sub), cents)
+
+  // The next send collects it, after its own principal and fee.
+  const cents2 = 500
+  const fee2 = feeCents(fees.rates.transfer, cents2)
+  const two = await sendBrla(t, a.c, 'transfer', cents2, '@benicio')
+  t.is(two.preview.pendingFeeCents, fee)
+  t.is(two.preview.pendingFeeRef, id1 + ':taxa')
+  t.is(two.preview.totalDebitCents, cents2 + fee2 + fee)
+  t.is(two.r.status, 200, two.r.text)
+  const id2 = two.r.body.externalId
+  t.is(two.r.body.status, 'concluido')
+  t.alike(two.r.body.fee, { asset: 'BRL', cents: fee2, status: 'cobrada' })
+  t.alike(two.r.body.pendingFee, { asset: 'BRL', cents: fee, status: 'cobrada' })
+  t.is(h.fake.state.sends.transfer, 4)
+  const refs = h.seen('POST', '/api/wallet/transfer').map((r) => r.body.reference)
+  t.alike(refs, [id1, id2, id2 + ':taxa', id1 + ':taxa'], 'principal first, then the fees')
+  t.is(bal('tesouro'), fee + fee2, 'the treasury holds both fees, nothing more')
+  t.is(bal(b.sub), cents + cents2)
+  t.is(bal(a.sub), funded - cents - cents2 - fee - fee2)
+  t.is(h.svc.ops.get(id1).fee.status, 'cobrada')
+
+  // The answer never arrives: the money may have moved, so the row is incerto.
+  h.fake.state.transferAnswer = 'timeout'
+  const opId = newOpId()
+  const lost = await sendBrla(t, a.c, 'transfer', 300, '@benicio', opId)
+  t.is(lost.r.status, 503, lost.r.text)
+  t.is(lost.r.body.error, 'resultado-incerto')
+  const id3 = lost.r.body.externalId
+  t.ok(/^var-[0-9a-f]{32}$/.test(id3))
+  t.is(h.svc.ops.get(id3).status, 'incerto')
+  const sends = h.fake.state.sends.transfer
+  const posts = h.fake.state.posts.transfer
+  t.is(sends, 5, 'the fake executed it once')
+
+  // Another debit waits for it to resolve (C9), without calling Hodle.
+  const next = await sendBrla(t, a.c, 'transfer', 200, '@benicio')
+  t.is(next.r.status, 409, next.r.text)
+  t.alike(next.r.body, { error: 'operacao-pendente' })
+  const toAddress = await sendBrla(t, a.c, 'crypto', 200, '0x' + nodeCrypto.randomBytes(20).toString('hex'))
+  t.alike(toAddress.r.body, { error: 'operacao-pendente' }, 'an address send waits too')
+
+  // The same tap again returns the stored outcome, never a second send.
+  const again = await a.c.wallet('transfer', lost.op, { pin: PIN })
+  t.is(again.status, 200, again.text)
+  t.is(again.body.externalId, id3)
+  t.is(again.body.status, 'incerto')
+  t.is(h.fake.state.sends.transfer, sends, 'the same opId does not send again')
+  t.is(h.fake.state.posts.transfer, posts, 'nor reach Hodle at all')
+  t.is(h.fake.state.transfers.get(id3).cents, 300)
+  h.fake.state.transferAnswer = 'done'
+
+  t.absent(h.logs.some((l) => l.includes(PIN)), 'no log line holds the PIN')
+  noSecrets(t, h, 'completo lost answers')
+  bearerOnlyInAuthorization(t, h)
+  t.alike(a.dev.internal, [], 'no internal error in the session')
 })

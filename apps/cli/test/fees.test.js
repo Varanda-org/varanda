@@ -56,7 +56,7 @@ test('fees: in-range values parse', (t) => {
     VARANDA_FEE_PAYOUT_CENTS: '100000',
     VARANDA_FEE_PAYOUT_BPS: '2000',
     VARANDA_FEE_CRYPTO_BPS: ' 150 ',
-    VARANDA_FEE_SWAP_BPS: '30',
+    VARANDA_FEE_SWAP_BPS: '0',
     VARANDA_FEE_SWAP_CENTS: '0',
     VARANDA_FEE_TREASURY: TREASURY
   })
@@ -64,7 +64,7 @@ test('fees: in-range values parse', (t) => {
   t.alike(rates.payout, { cents: 100000, bps: 2000 })
   t.alike(rates.crypto, { cents: 0, bps: 150 })
   t.alike(rates.deposit, { cents: 0, bps: 0 })
-  t.alike(rates.swap, { cents: 0, bps: 30 })
+  t.alike(rates.swap, { cents: 0, bps: 0 })
   t.alike(treasury, { kind: 'sub', id: 'treasury-1' })
   t.is(isActive(rates), true)
 })
@@ -97,17 +97,31 @@ test('fees: a deposit fee is refused', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_DEPOSIT_BPS: 'x' }), 'VARANDA_FEE_DEPOSIT_BPS inválido', 'deposit bad format')
 })
 
-test('fees: a fixed swap fee is refused, swap bps is fine', (t) => {
+test('fees: any swap fee is refused, zero is accepted', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_CENTS: '1', VARANDA_FEE_TREASURY: TREASURY }),
-    'VARANDA_FEE_SWAP_CENTS não suportado', 'swap cents')
+    'VARANDA_FEE_SWAP_* ainda não suportado', 'swap cents')
+  throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '30', VARANDA_FEE_TREASURY: TREASURY }),
+    'VARANDA_FEE_SWAP_* ainda não suportado', 'swap bps')
   throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '2001', VARANDA_FEE_TREASURY: TREASURY }),
     'VARANDA_FEE_SWAP_BPS inválido', 'swap bps out of range')
-  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '', VARANDA_FEE_SWAP_BPS: '2000', VARANDA_FEE_TREASURY: ADDR }).rates.swap, { cents: 0, bps: 2000 })
+  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '', VARANDA_FEE_SWAP_BPS: '0' }).rates.swap, { cents: 0, bps: 0 })
+  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '0', VARANDA_FEE_SWAP_BPS: '' }).rates.swap, { cents: 0, bps: 0 })
+})
+
+test('fees: a swap quote is refused even with an in-memory rate', (t) => {
+  const rates = zeroRates()
+  rates.swap = { cents: 50, bps: 30 }
+  const q = quote({ kind: 'swap', amountCents: 10000, rates })
+  t.is(q.ok, false)
+  t.is(q.reason, 'valor-invalido')
+  t.is(q.varandaFeeCents, 0)
+  t.is(q.totalDebitCents, 0)
+  t.is(quote({ kind: 'swap', amountCents: 10000, rates: zeroRates() }).ok, false, 'a zero rate is refused too')
 })
 
 test('fees: treasury required only with a nonzero rate', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_TRANSFER_CENTS: '1' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'cents')
-  throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '1', VARANDA_FEE_TREASURY: '  ' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'blank')
+  throwsRange(t, () => parseFees({ VARANDA_FEE_CRYPTO_BPS: '1', VARANDA_FEE_TREASURY: '  ' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'blank')
   t.is(parseFees({ VARANDA_FEE_TRANSFER_CENTS: '0' }).treasury, null, 'zero rates need none')
   t.alike(parseFees({ VARANDA_FEE_TREASURY: ADDR }).treasury, { kind: 'address', address: ADDR }, 'set without rates is kept')
   throwsRange(t, () => parseFees({ VARANDA_FEE_TREASURY: 'nope' }), 'VARANDA_FEE_TREASURY inválido', 'bad treasury')

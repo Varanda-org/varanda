@@ -68,6 +68,7 @@ const PRINTABLE_RE = /^[\x21-\x7e]+$/
 // BR Code payloads carry spaces in the merchant name and city fields.
 const QR_RE = /^[\x20-\x7e]{1,1024}$/
 const BRL_RE = /^([0-9]+)(?:\.([0-9]{1,18}))?$/
+const MICROS_RE = /^([0-9]{1,30})(?:\.([0-9]{1,30}))?$/
 // A CPF or a CNPJ, digits only: payer of a deposit or beneficiary of a payout.
 const PAYER_TAX_ID_RE = /^([0-9]{11}|[0-9]{14})$/
 const HASH_RE = /^(0x[0-9a-fA-F]{64}|[1-9A-HJ-NP-Za-km-z]{43,88})$/
@@ -105,6 +106,12 @@ const PIN_CODES = Object.freeze({
 // A 409 that means "try again later", never "this reference already exists".
 const BUSY_CODES = new Set(['WALLET_BUSY', 'TRANSFER_IN_PROGRESS', 'PAYOUT_IN_PROGRESS'])
 const TRANSFER_FAILED = new Set(['FAILED', 'REJECTED', 'CANCELED', 'CANCELLED'])
+// Explicitly unfinished: a hash may already exist while the provider still
+// waits for confirmations, so these never conclude on a hash alone.
+const TRANSFER_PENDING = new Set(['PENDING', 'PROCESSING', 'QUEUED'])
+// The burn address: BRLA sent there is gone for good.
+const ZERO_ADDRESS = '0x' + '0'.repeat(40)
+const USDC_DECIMALS = 6
 // Lone surrogates would make encodeURIComponent throw outside the failure path.
 const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
 // eslint-disable-next-line no-control-regex
@@ -283,6 +290,17 @@ function brlToCents (text) {
   return cents <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(cents) : null
 }
 
+// '1.2345678' -> 1234567 USDC micro-units, the same BigInt rule as
+// brlToCents with six decimals. USDC never goes through brlToCents.
+function usdcToMicros (text) {
+  if (typeof text !== 'string') return null
+  const m = MICROS_RE.exec(text)
+  if (!m) return null
+  const micros = BigInt(m[1]) * 10n ** BigInt(USDC_DECIMALS) +
+    BigInt((m[2] || '').slice(0, USDC_DECIMALS).padEnd(USDC_DECIMALS, '0'))
+  return micros <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(micros) : null
+}
+
 // 1234 -> '12.34'.
 function centsToAmount (cents) {
   if (!Number.isSafeInteger(cents) || cents < 0) return null
@@ -296,13 +314,17 @@ function depositOutcome (status) {
     : 'desconhecido'
 }
 
-// 'done' only on a completed status or a txHash; 'failed' when the provider
-// says the transfer did not happen, ahead of any hash; 'pending' otherwise,
-// including an absent or unknown status.
+// The one transfer-outcome rule, shared with the routes. 'failed' when the
+// provider says the transfer did not happen, ahead of any hash; 'done' on
+// COMPLETED, or on a txHash when there is no status at all; 'pending'
+// otherwise, including PENDING, PROCESSING or QUEUED with a hash and an
+// unknown status.
 function transferState (status, txHash) {
   const s = typeof status === 'string' ? status.toUpperCase() : null
   if (TRANSFER_FAILED.has(s)) return 'failed'
-  if ((txHash !== undefined && txHash !== null) || s === 'COMPLETED') return 'done'
+  if (s === 'COMPLETED') return 'done'
+  if (TRANSFER_PENDING.has(s)) return 'pending'
+  if (s === null && txHash !== undefined && txHash !== null) return 'done'
   return 'pending'
 }
 
@@ -757,8 +779,9 @@ function createHodle (opts = {}) {
     return typeof walletPin === 'string' && PIN_RE.test(walletPin) && keyBlob(protectedSymmetricKey)
   }
 
-  // The BRLA balance of the wallet on the configured network, from a fresh
-  // provider read. A wallet without a BRLA row holds zero.
+  // The BRLA balance in cents and the USDC balance in micro-units of the
+  // wallet on the configured network, from a fresh provider read. A wallet
+  // without a row for an asset holds zero of it.
   async function balance ({ subAccountId, walletId } = {}, callOpts) {
     if (!validId(subAccountId) || !optionalId(walletId)) return FAIL
     const args = { subAccountId, sync: true }
@@ -769,13 +792,19 @@ function createHodle (opts = {}) {
     // wallet's, or the subaccount's sum.
     if (args.walletId !== undefined && !r.verified) return BAD_FORMAT
     let cents = 0
+    let usdcMicros = 0
     for (const row of r.balances) {
-      if (row.asset !== 'BRLA') continue
-      const c = brlToCents(row.amount)
-      if (c === null || !Number.isSafeInteger(cents + c)) return BAD_FORMAT
-      cents += c
+      if (row.asset === 'BRLA') {
+        const c = brlToCents(row.amount)
+        if (c === null || !Number.isSafeInteger(cents + c)) return BAD_FORMAT
+        cents += c
+      } else if (row.asset === 'USDC') {
+        const u = usdcToMicros(row.amount)
+        if (u === null || !Number.isSafeInteger(usdcMicros + u)) return BAD_FORMAT
+        usdcMicros += u
+      }
     }
-    return { ok: true, cents, address: r.address }
+    return { ok: true, cents, usdcMicros, address: r.address }
   }
 
   function decodeOperation (op) {
@@ -784,9 +813,22 @@ function createHodle (opts = {}) {
     const status = typeof op.status === 'string' ? op.status.toUpperCase() : null
     if (status === null || !STATUS_RE.test(status)) return null
     if (!isoTime(op.createdAt)) return null
+    // Rows of any other asset are skipped: their amounts mean nothing here.
+    const asset = op.asset === undefined || op.asset === null ? null : op.asset
+    if (asset !== null && asset !== 'BRLA' && asset !== 'USDC') return null
+    const usdc = asset === 'USDC'
     let cents = null
     if (typeof op.valueInBrl === 'string') cents = brlToCents(op.valueInBrl)
-    else if (op.asset === 'BRLA') cents = brlToCents(decimalString(op.amount))
+    else if (asset === 'BRLA') cents = brlToCents(decimalString(op.amount))
+    if (cents === null && present(op.valueInBrl)) return null
+    if (usdc) {
+      // A USDC row may come without a BRL value, so its own amount must read,
+      // and its fee is in USDC: neither ever goes through brlToCents.
+      const amountMicros = usdcToMicros(decimalString(op.amount))
+      const feeMicros = present(op.fee) ? usdcToMicros(decimalString(op.fee)) : 0
+      if (amountMicros === null || feeMicros === null) return null
+      return withOptional(op, { id: op.id, type: op.type, status, asset, cents, feeCents: null, amountMicros, feeMicros, createdAt: op.createdAt })
+    }
     if (cents === null) return null
     let feeCents = 0
     if (op.fee !== undefined && op.fee !== null) {
@@ -794,6 +836,11 @@ function createHodle (opts = {}) {
       if (feeCents === null) return null
     }
     const out = { id: op.id, type: op.type, status, cents, feeCents, createdAt: op.createdAt }
+    if (asset !== null) out.asset = asset
+    return withOptional(op, out)
+  }
+
+  function withOptional (op, out) {
     // A malformed optional field is dropped, not fatal: a reference written
     // by another integration must not hide the rest of the page.
     if (typeof op.txHash === 'string' && HASH_RE.test(op.txHash)) out.txHash = op.txHash
@@ -1009,9 +1056,10 @@ function createHodle (opts = {}) {
   }
 
   // On-chain BRLA from the member's wallet to another subaccount or address.
-  // `reference` is the idempotency key: a repeat answers 409 with the earlier
-  // transfer, which is reported as existing. Only a completed status or a
-  // txHash counts as done; anything else stays pending for a statement read.
+  // The asset is always sent: the provider's default is USDT. `reference` is
+  // the idempotency key: a repeat answers 409 with the earlier transfer,
+  // which is reported as existing. transferState decides done, pending or
+  // failed; a 202 PENDING stays pending for a statement read.
   function transfer (args = {}, callOpts) {
     if (!isObject(args)) return Promise.resolve(FAIL)
     const { fromSubAccountId, walletId, toSubAccountId, recipientAddress, amountCents, walletPin, protectedSymmetricKey, reference } = args
@@ -1020,6 +1068,7 @@ function createHodle (opts = {}) {
     const toAddress = recipientAddress !== undefined && recipientAddress !== null
     if (toSub === toAddress) return Promise.resolve(FAIL)
     if (toSub ? !validId(toSubAccountId) : !lowerAddress(recipientAddress)) return Promise.resolve(FAIL)
+    if (toAddress && lowerAddress(recipientAddress) === ZERO_ADDRESS) return Promise.resolve(FAIL)
     if (!intIn(amountCents, 1, MAX_TRANSFER_CENTS) || !validCredentials(walletPin, protectedSymmetricKey)) return Promise.resolve(FAIL)
     if (typeof reference !== 'string' || reference.trim() === '' || reference.length > MAX_REFERENCE || !REFERENCE_RE.test(reference)) {
       return Promise.resolve(FAIL)
@@ -1028,7 +1077,7 @@ function createHodle (opts = {}) {
     const payload = { fromSubAccountId, network, asset: 'BRLA', amount, walletPin, protectedSymmetricKey, reference }
     if (walletId !== undefined && walletId !== null) payload.walletId = walletId
     if (toSub) payload.toSubAccountId = toSubAccountId
-    else payload.recipientAddress = recipientAddress
+    else payload.recipientAddress = lowerAddress(recipientAddress)
     const sameAmount = (v) => brlToCents(decimalString(v)) === amountCents
     // A recipient echo on a transfer to a subaccount is that subaccount's
     // wallet address, which we do not know, so only an address request can
@@ -1042,8 +1091,16 @@ function createHodle (opts = {}) {
       }
       return true
     }
+    // A busy 409 is "try again later" unless it plainly describes our own
+    // earlier transfer: our reference, the same amount and a destination we
+    // can check. A recipient address echoed on a subaccount send is not one.
+    const echoesDestination = (c) => toSub
+      ? c.toSubAccountId === toSubAccountId || c.destination === toSubAccountId
+      : lowerAddress(c.recipientAddress) === lowerAddress(recipientAddress) || lowerAddress(c.destination) === lowerAddress(recipientAddress)
+    const ours = (c) => c.reference === reference && c.amount !== undefined && sameAmount(c.amount) &&
+      echoesDestination(c) && sameDestination(c)
     const onConflict = (c, extra) => {
-      if (extra.code && BUSY_CODES.has(extra.code)) return null
+      if (extra.code && BUSY_CODES.has(extra.code) && !ours(c)) return null
       if (c.transactionId === undefined && c.txHash === undefined) return null
       if (c.reference !== undefined && c.reference !== reference) return null
       if ((c.amount !== undefined && !sameAmount(c.amount)) || !sameDestination(c)) return { ...BAD_FORMAT, uncertain: true }
@@ -1068,6 +1125,7 @@ function createHodle (opts = {}) {
       if (state === 'failed') return { ok: false, reason: 'http-200', code: 'TRANSFER_FAILED' }
       const out = { status: state, existing: false }
       if (txHash) out.txHash = txHash
+      if (validId(d.transactionId)) out.transactionId = d.transactionId
       return out
     }, { pin: true, conflict: true, onConflict })
   }
@@ -1103,7 +1161,10 @@ module.exports = {
   kycOutcome,
   depositOutcome,
   brlToCents,
+  usdcToMicros,
   centsToAmount,
+  lowerAddress,
+  transferState,
   decodeDeposit,
   decodeQuote,
   decodePayout,

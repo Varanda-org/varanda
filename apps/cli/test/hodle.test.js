@@ -12,7 +12,10 @@ const {
   decodePayout,
   redact,
   brlToCents,
+  usdcToMicros,
   centsToAmount,
+  lowerAddress,
+  transferState,
   depositOutcome,
   BASES,
   STREAMING_REGIONS,
@@ -943,7 +946,7 @@ test('balance: BRLA on the configured network only, fresh read, null walletId om
   const h = client(fake)
   const acct = await funded(h, fake, 1234)
   t.alike(await h.balance({ subAccountId: acct.subAccountId, walletId: acct.walletId }),
-    { ok: true, cents: 1234, address: acct.address })
+    { ok: true, cents: 1234, usdcMicros: 0, address: acct.address })
   t.alike(lastSeen(fake).body, { subAccountId: acct.subAccountId, sync: true, walletId: acct.walletId })
   await h.balance({ subAccountId: acct.subAccountId, walletId: null })
   t.alike(lastSeen(fake).body, { subAccountId: acct.subAccountId, sync: true })
@@ -963,7 +966,7 @@ test('balance: BRLA on the configured network only, fresh read, null walletId om
       })
     }
   })
-  t.alike(await h.balance({ subAccountId: 's1' }), { ok: true, cents: 1234, address: null })
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: true, cents: 1234, usdcMicros: 0, address: null })
   fake.script({ walletGet (req, res, ctx) { ctx.json(res, 200, { success: true, data: { addresses: {}, balances: [{ network: 'polygon', asset: 'USDT', amount: '5' }] } }) } })
   t.is((await h.balance({ subAccountId: 's1' })).cents, 0, 'no BRLA row holds zero')
   fake.script({ walletGet (req, res, ctx) { ctx.json(res, 200, { success: true, data: { addresses: {}, balances: [{ network: 'polygon', asset: 'BRLA', amount: '9'.repeat(30) }] } }) } })
@@ -986,12 +989,12 @@ test('statement: POST body, typed rows, unknown keys dropped, cursor', async (t)
   t.is(r.cursor, null)
   t.is(r.operations.length, 2)
   const [dep, tr] = r.operations
-  t.alike(Object.keys(dep).sort(), ['cents', 'createdAt', 'direction', 'externalId', 'feeCents', 'id', 'status', 'type'])
+  t.alike(Object.keys(dep).sort(), ['asset', 'cents', 'createdAt', 'direction', 'externalId', 'feeCents', 'id', 'status', 'type'])
   t.is(dep.type, 'deposit')
   t.is(dep.cents, 5000)
   t.is(dep.feeCents, 100)
   t.is(dep.direction, 'in')
-  t.alike(Object.keys(tr).sort(), ['cents', 'createdAt', 'direction', 'feeCents', 'id', 'reference', 'status', 'txHash', 'type'])
+  t.alike(Object.keys(tr).sort(), ['asset', 'cents', 'createdAt', 'direction', 'feeCents', 'id', 'reference', 'status', 'txHash', 'type'])
   t.is(tr.reference, 'ref-1')
   t.is(tr.direction, 'out')
   t.is(tr.cents, 250)
@@ -1472,9 +1475,9 @@ test('balance: a read for a wallet the provider did not echo is refused', async 
   const h = client(fake)
   fake.script({ walletGet (req, res, ctx) { ctx.json(res, 200, { success: true, data: { addresses: {}, balances: [{ network: 'polygon', asset: 'BRLA', amount: '7.00' }] } }) } })
   t.alike(await h.balance({ subAccountId: 's1', walletId: 'w1' }), { ok: false, reason: 'formato' })
-  t.alike(await h.balance({ subAccountId: 's1' }), { ok: true, cents: 700, address: null }, 'no wallet asked: no echo needed')
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: true, cents: 700, usdcMicros: 0, address: null }, 'no wallet asked: no echo needed')
   fake.script({ walletGet (req, res, ctx) { ctx.json(res, 200, { success: true, data: { walletId: 'w1', addresses: {}, balances: [{ network: 'polygon', asset: 'BRLA', amount: '7.00' }] } }) } })
-  t.alike(await h.balance({ subAccountId: 's1', walletId: 'w1' }), { ok: true, cents: 700, address: null })
+  t.alike(await h.balance({ subAccountId: 's1', walletId: 'w1' }), { ok: true, cents: 700, usdcMicros: 0, address: null })
 })
 
 test('findByReference: a 89-day window is the widest, both bounds sent', async (t) => {
@@ -1545,4 +1548,220 @@ test('C8: findByReference over an explicit window reads up to maxPages pages', a
   pages = 0
   await h.findByReference({ subAccountId: 's1', externalId: 'never', days: 7 })
   t.is(pages, 3, 'the default path keeps three pages')
+})
+
+// Completo mode (PR3): BRLA transfers by @nome and sends to an address.
+
+async function pair (h, fake) {
+  const from = await funded(h, fake, 5000)
+  const to = await funded(h, fake, 0, NAME + '-b')
+  const args = {
+    fromSubAccountId: from.subAccountId,
+    walletId: from.walletId,
+    toSubAccountId: to.subAccountId,
+    amountCents: 1234,
+    walletPin: PIN,
+    protectedSymmetricKey: from.protectedSymmetricKey,
+    reference: 'nome-1'
+  }
+  return { from, to, args }
+}
+
+test('transferState: a failure wins, an explicit pending status beats a hash', (t) => {
+  const hash = '0x' + 'a'.repeat(64)
+  const cases = [
+    ['FAILED', hash, 'failed'], ['rejected', null, 'failed'], ['CANCELLED', undefined, 'failed'],
+    ['PENDING', hash, 'pending'], ['processing', hash, 'pending'], ['QUEUED', hash, 'pending'],
+    ['COMPLETED', null, 'done'], ['completed', hash, 'done'], [undefined, hash, 'done'], [null, hash, 'done'],
+    [undefined, null, 'pending'], ['SUBMITTED', hash, 'pending'], ['SUBMITTED', null, 'pending']
+  ]
+  for (const [status, txHash, want] of cases) t.is(transferState(status, txHash), want, String(status) + ' ' + String(txHash))
+})
+
+test('usdcToMicros and lowerAddress', (t) => {
+  const micros = [['0', 0], ['1', 1000000], ['12.345678', 12345678], ['12.3456789', 12345678], ['0.000001', 1], ['0.0000009', 0], ['9007199254.740991', 9007199254740991]]
+  for (const [text, want] of micros) t.is(usdcToMicros(text), want, text)
+  for (const bad of ['', '.5', '1.', '-1', '1e3', '1,5', ' 1', '9007199254.740992', 1.5, null, undefined]) t.is(usdcToMicros(bad), null, String(bad))
+  t.is(lowerAddress('0x' + 'AbCd'.repeat(10)), '0x' + 'abcd'.repeat(10))
+  t.is(lowerAddress('0X' + 'a'.repeat(40)), null)
+  t.is(lowerAddress('0x' + 'a'.repeat(39)), null)
+})
+
+test('transfer: 202 PENDING is pending, the stored state answers a reused reference', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const { from, to, args } = await pair(h, fake)
+  fake.state.transferAnswer = 'pending202'
+  const r = await h.transfer(args, { timeoutMs: 2000 })
+  const stored = fake.state.transfers.get('nome-1')
+  t.alike(r, { ok: true, status: 'pending', existing: false, transactionId: stored.transactionId })
+  t.is(stored.status, 'PENDING')
+  t.is(stored.txHash, null)
+  t.is(fake.state.balances.get(from.subAccountId), 5000 - 1234, 'the sender is debited')
+  t.is(fake.state.balances.get(to.subAccountId), 0, 'nothing credited while pending')
+  noLeakMoney(t, r)
+
+  const row = await h.findByReference({ subAccountId: from.subAccountId, reference: 'nome-1' })
+  t.is(row.operation.status, 'PENDING', 'the statement row carries the stored status')
+  t.absent('txHash' in row.operation)
+
+  t.alike(await h.transfer(args, { timeoutMs: 2000 }), { ok: true, status: 'pending', existing: true, transactionId: stored.transactionId })
+  t.is(fake.state.sends.transfer, 1, 'one transfer dispatched')
+  t.is(fake.state.posts.transfer, 2, 'the replay is a post')
+
+  fake.settleTransfer('nome-1', 'COMPLETED')
+  const done = await h.transfer(args, { timeoutMs: 2000 })
+  t.alike(done, { ok: true, status: 'done', existing: true, transactionId: stored.transactionId, txHash: stored.txHash })
+  t.is(fake.state.balances.get(to.subAccountId), 1234)
+  t.is((await h.findByReference({ subAccountId: to.subAccountId, reference: 'nome-1' })).operation.status, 'COMPLETED')
+
+  await h.transfer({ ...args, reference: 'nome-2', amountCents: 100 }, { timeoutMs: 2000 })
+  fake.settleTransfer('nome-2', 'FAILED')
+  t.is(fake.state.balances.get(from.subAccountId), 5000 - 1234, 'a failed transfer refunds the sender')
+  t.alike(await h.transfer({ ...args, reference: 'nome-2', amountCents: 100 }, { timeoutMs: 2000 }), { ok: false, reason: 'http-409', code: 'TRANSFER_FAILED' })
+  t.is(fake.state.sends.transfer, 2)
+  t.is(fake.state.posts.transfer, 5)
+})
+
+test('transfer: 202 and 200 answers under the outcome rule', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const { args } = await pair(h, fake)
+  const hash = '0x' + 'a'.repeat(64)
+  const answers = [
+    [202, { success: true, data: { status: 'PENDING', transactionId: 'tx-1' } }, { ok: true, status: 'pending', existing: false, transactionId: 'tx-1' }],
+    [202, { success: true, data: { status: 'PENDING', transactionId: '..' } }, { ok: true, status: 'pending', existing: false }],
+    [202, { data: { status: 'PENDING', transactionId: 'tx-1' } }, { ok: false, reason: 'formato', uncertain: true }],
+    [202, { success: 'true', data: { status: 'PENDING' } }, { ok: false, reason: 'formato', uncertain: true }],
+    [200, { success: true, data: { status: 'PENDING', txHash: hash } }, { ok: true, status: 'pending', existing: false, txHash: hash }],
+    [200, { success: true, data: { status: 'processing', txHash: hash, transactionId: 'tx-2' } }, { ok: true, status: 'pending', existing: false, txHash: hash, transactionId: 'tx-2' }],
+    [200, { success: true, data: { txHash: hash } }, { ok: true, status: 'done', existing: false, txHash: hash }],
+    [200, { success: true, data: { status: 'COMPLETED', txHash: hash, transactionId: 'tx-3' } }, { ok: true, status: 'done', existing: false, txHash: hash, transactionId: 'tx-3' }],
+    [200, { success: true, data: { status: 'FAILED', txHash: hash } }, { ok: false, reason: 'http-200', code: 'TRANSFER_FAILED' }]
+  ]
+  for (const [code, body, want] of answers) {
+    fake.script({ transfer (req, res, ctx) { ctx.json(res, code, body) } })
+    t.alike(await h.transfer(args, { timeoutMs: 2000 }), want, code + ' ' + JSON.stringify(body))
+  }
+})
+
+test('transfer: a busy 409 is a failure unless it echoes our own transfer', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const { to, args } = await pair(h, fake)
+  const hash = '0x' + 'a'.repeat(64)
+  const ours = { reference: 'nome-1', amount: '12.34', toSubAccountId: to.subAccountId }
+  const conflicts = [
+    [{ errorCode: 'WALLET_BUSY', transactionId: 'stranger', status: 'COMPLETED', txHash: hash }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 'stranger', reference: 'other', amount: '12.34', toSubAccountId: to.subAccountId }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', ...ours, amount: '12.35' }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', ...ours, toSubAccountId: 'outra' }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', reference: 'nome-1', amount: '12.34' }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    // On a subaccount send only the subaccount id identifies the destination.
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', reference: 'nome-1', amount: '12.34', recipientAddress: '0x' + 'cd'.repeat(20), status: 'COMPLETED', txHash: hash }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', reference: 'nome-1', amount: '12.34', recipientAddress: 'nada', status: 'COMPLETED' }, { ok: false, reason: 'http-409', code: 'WALLET_BUSY' }],
+    [{ errorCode: 'TRANSFER_IN_PROGRESS', transactionId: 't1', ...ours, status: 'PENDING' }, { ok: true, status: 'pending', existing: true, transactionId: 't1' }],
+    [{ errorCode: 'WALLET_BUSY', transactionId: 't1', ...ours, status: 'COMPLETED', txHash: hash }, { ok: true, status: 'done', existing: true, transactionId: 't1', txHash: hash }],
+    [{ errorCode: 'WALLET_BUSY', data: { transactionId: 't1', ...ours, status: 'FAILED' } }, { ok: false, reason: 'http-409', code: 'TRANSFER_FAILED' }],
+    [{ transactionId: 't1', ...ours, status: 'PENDING' }, { ok: true, status: 'pending', existing: true, transactionId: 't1' }]
+  ]
+  for (const [body, want] of conflicts) {
+    fake.script({ transfer (req, res, ctx) { ctx.json(res, 409, { success: false, ...body }) } })
+    t.alike(await h.transfer(args, { timeoutMs: 2000 }), want, JSON.stringify(body))
+  }
+})
+
+test('transfer: to an address, BRLA always, zero address refused, fake knobs', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const { from, args } = await pair(h, fake)
+  const mixed = '0x' + 'AbCd'.repeat(10)
+  const toAddr = { ...args, toSubAccountId: undefined, recipientAddress: mixed, reference: 'ext-1', amountCents: 300 }
+  const before = fake.seen.length
+  t.alike(await h.transfer({ ...toAddr, recipientAddress: '0x' + '0'.repeat(40) }), { ok: false, reason: 'entrada' })
+  t.is(fake.seen.length, before, 'the zero address never reaches the provider')
+
+  const r = await h.transfer(toAddr, { timeoutMs: 2000 })
+  t.is(r.status, 'done')
+  t.is(lastSeen(fake).body.recipientAddress, mixed.toLowerCase(), 'lowercased in the payload')
+  t.is(fake.state.credited.get(mixed.toLowerCase()), 300)
+  t.is(fake.state.balances.get(from.subAccountId), 5000 - 300)
+  t.alike(await h.transfer(toAddr, { timeoutMs: 2000 }), { ok: true, status: 'done', existing: true, transactionId: fake.state.transfers.get('ext-1').transactionId, txHash: r.txHash },
+    'the replay echoes the address and the amount')
+  t.alike(await h.transfer({ ...toAddr, amountCents: 301 }, { timeoutMs: 2000 }), { ok: false, reason: 'formato', uncertain: true }, 'the reference was used for another amount')
+
+  fake.state.transferAnswer = 'fail'
+  t.alike(await h.transfer({ ...args, reference: 'nome-f' }, { timeoutMs: 2000 }), { ok: false, reason: 'http-400', code: 'TRANSFER_FAILED' })
+  t.is(fake.state.sends.transfer, 1, 'a refusal is not a send')
+  t.is(fake.state.balances.get(from.subAccountId), 5000 - 300)
+
+  fake.state.transferAnswer = 'timeout'
+  t.alike(await h.transfer({ ...args, reference: 'nome-t' }, { timeoutMs: 200 }), { ok: false, reason: 'tempo', uncertain: true })
+  t.is(fake.state.sends.transfer, 2, 'the transfer did happen')
+  const found = await h.findByReference({ subAccountId: from.subAccountId, reference: 'nome-t' })
+  t.is(found.operation.status, 'COMPLETED')
+  t.is(found.operation.cents, 1234)
+
+  const posts = fake.seen.filter((s) => s.path === '/api/wallet/transfer')
+  t.is(posts.length, fake.state.posts.transfer)
+  t.ok(posts.every((s) => s.body.asset === 'BRLA'), 'asset BRLA on every payload')
+})
+
+test('balance: usdcMicros from the USDC rows of the network, never through cents', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const acct = await funded(h, fake, 1234)
+  fake.state.usdc.set(acct.subAccountId, '12.3456789')
+  t.alike(await h.balance({ subAccountId: acct.subAccountId, walletId: acct.walletId }),
+    { ok: true, cents: 1234, usdcMicros: 12345678, address: acct.address })
+
+  const rows = (balances) => ({ walletGet (req, res, ctx) { ctx.json(res, 200, { success: true, data: { addresses: {}, balances } }) } })
+  fake.script(rows([
+    { network: 'polygon', asset: 'USDC', amount: '1.5' },
+    { network: 'polygon', asset: 'USDC', amount: '0.000001' },
+    { network: 'base', asset: 'USDC', amount: '900' }
+  ]))
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: true, cents: 0, usdcMicros: 1500001, address: null })
+  fake.script(rows([{ network: 'polygon', asset: 'USDC', amount: '9'.repeat(16) }]))
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: false, reason: 'formato' }, 'an unsafe amount is refused')
+  fake.script(rows([{ network: 'polygon', asset: 'USDC', amount: '9007199254' }, { network: 'polygon', asset: 'USDC', amount: '1' }]))
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: false, reason: 'formato' }, 'an unsafe sum is refused')
+  fake.script(rows([{ network: 'polygon', asset: 'USDC', amount: 'muito' }]))
+  t.alike(await h.balance({ subAccountId: 's1' }), { ok: false, reason: 'formato' })
+})
+
+test('statement: USDC rows decode in micro-units, other assets are skipped', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const acct = await funded(h, fake)
+  fake.state.usdc.set(acct.subAccountId, '2.5')
+  const planted = await h.statement({ subAccountId: acct.subAccountId })
+  t.alike(planted.operations, [{
+    id: 'op_usdc',
+    type: 'deposit',
+    status: 'COMPLETED',
+    asset: 'USDC',
+    cents: null,
+    feeCents: null,
+    amountMicros: 2500000,
+    feeMicros: 0,
+    createdAt: new Date(0).toISOString(),
+    direction: 'in'
+  }])
+
+  const at = '2026-04-28T23:32:10.000Z'
+  const usdc = { id: 'op_u', type: 'transfer', status: 'COMPLETED', asset: 'USDC', amount: '10.1234567', fee: '0.01', createdAt: at, reference: 'swap-1', direction: 'in' }
+  const page = (operations) => ({ statement (req, res, ctx) { ctx.json(res, 200, { success: true, data: { operations } }) } })
+  fake.script(page([{ id: 'op_t', type: 'transfer', status: 'COMPLETED', asset: 'USDT', valueInBrl: '5.00', createdAt: at }, usdc]))
+  const found = await h.findByReference({ subAccountId: 's1', reference: 'swap-1' })
+  t.alike(found.operation, { id: 'op_u', type: 'transfer', status: 'COMPLETED', asset: 'USDC', cents: null, feeCents: null, amountMicros: 10123456, feeMicros: 10000, createdAt: at, reference: 'swap-1', direction: 'in' })
+  t.is((await h.statement({ subAccountId: 's1' })).skipped, 1, 'a USDT row is skipped')
+  fake.script(page([{ ...usdc, valueInBrl: '55.00' }]))
+  t.is((await h.findByReference({ subAccountId: 's1', reference: 'swap-1' })).operation.cents, 5500, 'a BRL value is kept')
+  for (const bad of [{ amount: 'muito' }, { amount: undefined }, { fee: 'x' }, { valueInBrl: 'muito' }]) {
+    fake.script(page([{ ...usdc, ...bad }]))
+    t.alike(await h.findByReference({ subAccountId: 's1', reference: 'swap-1' }), { ok: false, reason: 'formato' }, 'the unreadable target fails closed: ' + JSON.stringify(bad))
+  }
+  fake.script(page([{ ...usdc, asset: 'USDT', valueInBrl: '5.00' }]))
+  t.alike(await h.findByReference({ subAccountId: 's1', reference: 'swap-1' }), { ok: false, reason: 'formato' }, 'a skipped target of another asset fails closed')
 })

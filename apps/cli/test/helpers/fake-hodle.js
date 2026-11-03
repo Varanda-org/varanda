@@ -21,7 +21,21 @@
 //                   deposits         Map externalId -> deposit record
 //                   quotes           Map quoteId -> the quoted fields and `used`
 //                   payouts          Map transactionId -> payout record (status settable)
-//                   transfers        Map reference -> transfer record
+//                   transfers        Map reference -> transfer record, with its
+//                                    status (PENDING, COMPLETED or FAILED)
+//                   transferAnswer   how a new transfer is answered:
+//                                    'done' (default) executes and answers 200
+//                                    with a txHash; 'pending202' debits the
+//                                    sender, records PENDING without a hash and
+//                                    answers 202 { status: 'PENDING',
+//                                    transactionId }; 'timeout' executes as
+//                                    'done' and never answers; 'fail' refuses
+//                                    with 400 TRANSFER_FAILED and moves nothing
+//                   credited         Map lowercase address -> cents received by
+//                                    a transfer to an address (never a subaccount)
+//                   usdc             Map subAccountId -> USDC amount string, shown
+//                                    by walletGet and as a statement deposit row
+//                                    without valueInBrl
 //                   pinFailures      Map walletId -> wrong PIN count (3 locks the wallet)
 //                   depositFeeCents  fee of a new deposit, in cents
 //                   payoutFeeCents   fee of a payout or quote, in cents
@@ -29,6 +43,9 @@
 //                                    stays PENDING) or the status a new payout
 //                                    answers and keeps, e.g. 'COMPLETED'
 //                   sends            counts of executed money calls: { deposit, payout, transfer }
+//                                    (a 409 replay or a 4xx refusal is not one)
+//                   posts            { transfer }: every POST /api/wallet/transfer,
+//                                    replays and refusals included
 //   fake.script(handlers)
 //                 replaces the routes. `handlers` is either a function
 //                 (req, res, ctx) or a map with any of:
@@ -58,6 +75,9 @@
 //                 Returns { code, body }.
 //   fake.settleDeposit(externalId)
 //                 marks a deposit paid and credits its value minus the fee.
+//   fake.settleTransfer(reference, status)
+//                 advances a stored PENDING transfer to 'COMPLETED' (credits the
+//                 recipient, adds a txHash) or 'FAILED' (refunds the sender).
 //   fake.close()  closes the server and its connections.
 //   fake.livenessFields
 //                 true (default): a selfie answer carries the in-app liveness
@@ -141,7 +161,11 @@ async function startFakeHodle () {
     depositFeeCents: 100,
     payoutFeeCents: 75,
     payoutStatus: null,
-    sends: { deposit: 0, payout: 0, transfer: 0 }
+    transferAnswer: 'done',
+    credited: new Map(),
+    usdc: new Map(),
+    sends: { deposit: 0, payout: 0, transfer: 0 },
+    posts: { transfer: 0 }
   }
   let seq = 0
 
@@ -361,6 +385,9 @@ async function startFakeHodle () {
           { network: wallet.network, asset: 'BRLA', amount: amountText(balanceOf(subAccountId)) },
           { network: 'tron', asset: 'USDT', amount: '0.00' }
         )
+        if (state.usdc.has(subAccountId)) {
+          data.balances.push({ network: wallet.network, asset: 'USDC', amount: state.usdc.get(subAccountId) })
+        }
       }
       if (walletId !== undefined) data.walletId = walletId
       json(res, 200, { success: true, data })
@@ -543,6 +570,7 @@ async function startFakeHodle () {
       })
     },
     transfer (req, res, ctx) {
+      state.posts.transfer++
       const b = ctx.body || {}
       const from = b.fromSubAccountId
       if (!state.subaccounts.has(from)) return notFound(res, 'Subaccount')
@@ -551,13 +579,18 @@ async function startFakeHodle () {
       if (!checkCredentials(res, wallet, b)) return
       if (b.reference !== undefined && state.transfers.has(b.reference)) {
         const first = state.transfers.get(b.reference)
-        return json(res, 409, {
+        const echo = {
           success: false,
           error: 'A transfer with this reference already exists',
+          reference: first.reference,
           transactionId: first.transactionId,
-          status: 'COMPLETED',
-          txHash: first.txHash
-        })
+          status: first.status || 'COMPLETED',
+          amount: amountText(first.cents)
+        }
+        if (first.txHash) echo.txHash = first.txHash
+        if (first.to !== undefined) echo.toSubAccountId = first.to
+        else if (first.address !== undefined) echo.recipientAddress = first.address
+        return json(res, 409, echo)
       }
       if ((b.toSubAccountId === undefined) === (b.recipientAddress === undefined)) {
         return json(res, 400, { success: false, error: 'Provide toSubAccountId or recipientAddress' })
@@ -572,9 +605,12 @@ async function startFakeHodle () {
       }
       const cents = amountCents(b.amount)
       if (b.asset !== 'BRLA' || cents === null || cents < 1) return json(res, 400, { success: false, error: 'Validation failed' })
+      if (state.transferAnswer === 'fail') {
+        return json(res, 400, { success: false, error: 'Transfer failed', errorCode: 'TRANSFER_FAILED' })
+      }
       if (balanceOf(from) < cents) return json(res, 400, { success: false, error: 'Insufficient balance', errorCode: 'INSUFFICIENT_BALANCE' })
+      const pending = state.transferAnswer === 'pending202'
       move(from, -cents)
-      if (b.toSubAccountId !== undefined) move(b.toSubAccountId, cents)
       const record = {
         ...stamp(),
         transactionId: hex(12),
@@ -582,11 +618,16 @@ async function startFakeHodle () {
         from,
         to: b.toSubAccountId,
         cents,
-        txHash: txHash()
+        status: pending ? 'PENDING' : 'COMPLETED',
+        txHash: pending ? null : txHash()
       }
+      if (b.toSubAccountId === undefined) record.address = String(b.recipientAddress).toLowerCase()
+      if (!pending) credit(record)
       if (b.reference !== undefined) state.transfers.set(b.reference, record)
       else state.transfers.set('unreferenced-' + record.seq, record)
       state.sends.transfer++
+      if (state.transferAnswer === 'timeout') return
+      if (pending) return json(res, 202, { success: true, data: { status: 'PENDING', transactionId: record.transactionId } })
       json(res, 200, { success: true, data: { txHash: record.txHash, recipientAddress, amount: b.amount } })
     },
     statement (req, res, ctx) {
@@ -623,8 +664,15 @@ async function startFakeHodle () {
       }
       for (const t of state.transfers.values()) {
         const ref = t.reference === undefined ? null : t.reference
-        if (t.from === sub) ops.push({ ...base(t, 'transfer', 'out', t.cents, 0, 'COMPLETED'), reference: ref, txHash: t.txHash })
-        if (t.to === sub) ops.push({ ...base(t, 'transfer', 'in', t.cents, 0, 'COMPLETED'), reference: ref, txHash: t.txHash })
+        const status = t.status || 'COMPLETED'
+        const hash = t.txHash || null
+        if (t.from === sub) ops.push({ ...base(t, 'transfer', 'out', t.cents, 0, status), reference: ref, txHash: hash })
+        if (t.to === sub) ops.push({ ...base(t, 'transfer', 'in', t.cents, 0, status), reference: ref, txHash: hash })
+      }
+      if (state.usdc.has(sub)) {
+        const amount = state.usdc.get(sub)
+        const { valueInBrl, fee, ...row } = base({ seq: 0, createdAt: new Date(0).toISOString() }, 'deposit', 'in', 0, 0, 'COMPLETED')
+        ops.push({ ...row, id: 'op_usdc', asset: 'USDC', amount })
       }
       const types = b.type === undefined ? null : [].concat(b.type)
       const rows = ops.filter((op) => !types || types.includes(op.type)).sort((x, y) => y.seq - x.seq)
@@ -736,6 +784,24 @@ async function startFakeHodle () {
     move(dep.subAccountId, dep.value - dep.feeCents)
   }
 
+  function credit (record) {
+    if (record.to !== undefined) move(record.to, record.cents)
+    else state.credited.set(record.address, (state.credited.get(record.address) || 0) + record.cents)
+  }
+
+  function settleTransfer (reference, status) {
+    const record = state.transfers.get(reference)
+    if (!record || record.status !== 'PENDING') return
+    if (status === 'COMPLETED') {
+      record.status = 'COMPLETED'
+      record.txHash = txHash()
+      credit(record)
+    } else if (status === 'FAILED') {
+      record.status = 'FAILED'
+      move(record.from, record.cents)
+    }
+  }
+
   function close () {
     return new Promise((resolve) => {
       server.closeAllConnections()
@@ -743,7 +809,7 @@ async function startFakeHodle () {
     })
   }
 
-  return Object.assign(fake, { base, seen, state, script, apply, settleDeposit, close })
+  return Object.assign(fake, { base, seen, state, script, apply, settleDeposit, settleTransfer, close })
 }
 
 // A fetch that refuses any origin other than the fake, so a wrong default can

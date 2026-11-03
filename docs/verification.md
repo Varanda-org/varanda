@@ -3950,3 +3950,59 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Limite aceito: Avisos não entra na pilha de telas. Na web, o botão Voltar do navegador não fecha Avisos (era assim quando Avisos era aba); Esc, a seta da barra do topo, o ícone da aba anterior e o Voltar do Android fecham.
 - Limite aceito: no perfil de outra pessoa, como no Diário, a barra de estado fica clara mesmo depois que a faixa sai da tela ao rolar.
 - Com o filtro de Seguindo, a lista lê mais páginas sozinha pela regra de todas as listas (pausa depois de 3 páginas sem linha nova, com "Nada novo nas últimas páginas." e "carregar mais"), e só com a tela no topo, porque cada leitura interrompe a sincronização. Sem resultado entre as linhas já lidas, mostra "Ninguém com esse nome entre os já carregados.".
+
+## 72. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+
+As seções 1 a 71 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
+
+### O que mudou
+
+- `VARANDA_HODLE_MODE` ganha `completo`, depois de `pix`. Ele acrescenta as ações `transfer` e `send-crypto`, e a política (`policy.actions`) as lista. O padrão continua `cadastro`. O USDC recebido no endereço aparece só para leitura: não há conversão nem envio de USDC.
+- Regras do envio: PIN por membro, repassado por pedido e nunca guardado; teto de cada envio igual ao menor entre `VARANDA_HODLE_MAX_CENTS` e R$ 10.000; 10 transferências e 10 envios a endereço por dia por membro, com a janela gasta também por um destino recusado; um destino recusado recebe sempre `destino-invalido`.
+- C9: um débito sem resolução bloqueia outro do mesmo membro. C10: a operação assinada liga o débito inteiro (valor, taxa nova, taxa pendente e total); divergência dá `taxa-mudou`.
+- Resultado do parceiro: um 202 é `pendente` e a taxa espera. `TRANSFER_IN_PROGRESS` é `incerto` e bloqueia novos débitos. `WALLET_BUSY` é uma recusa: a linha do registro vai a `falhou` e nenhum dinheiro sai. O envio concluído traz o `txHash` da rede.
+- Taxa da Varanda: `VARANDA_FEE_TRANSFER_*` e `VARANDA_FEE_CRYPTO_*` (centavos e pontos-base) só no `completo`, só cobrada depois que o envio concluiu. Nada sobre dinheiro que entra. `VARANDA_FEE_SWAP_*` diferente de zero recusa a partida em todos os modos.
+- Registros novos: `transferencia`, `envio-cripto`, `destino-invalido`, `pendente-202`, além dos passos `transferencia` e `envio-cripto` em `hodle-<passo>-<causa>`.
+- O teto diário e o saldo são conferidos antes do destino: sem saldo, qualquer @nome recebe o mesmo `saldo-insuficiente`, e a recusa não diz quem tem carteira.
+- O app recusa um endereço com letras maiúsculas e minúsculas cujo checksum EIP-55 não confere (`apps/app/src/evmAddress.js`, com o keccak-256 do `@noble/hashes` que o app já usa). Endereço todo em minúsculas ou maiúsculas não tem checksum e passa.
+- Termos de Uso e Política de Privacidade versão 12, com novo aceite.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela num aparelho nem o parecer.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js`
+- `node apps/cli/test/account.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/carteiraNative.test.js`
+- `node apps/app/test/evmAddress.test.js`
+- `node packages/core/test/terms.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] No sandbox, com `completo` e a conta principal, transferir R$ 1,00 por @nome para outro membro: o app mostra valor, taxa e total em reais antes do PIN, o saldo cai pelo total e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
+2. [ ] Um envio que o Hodle aceita com 202: a linha fica `pendente`, o registro `pendente-202` aparece, a taxa da Varanda não é cobrada e só sai no envio seguinte que a pessoa confirma com o PIN, depois de o envio concluir (não realizada ainda).
+3. [ ] Enviar R$ 1,00 de BRLA a um endereço de carteira de teste: o resultado traz o `txHash` e ele confere na rede (não realizada ainda).
+4. [ ] Um @nome desconhecido, o próprio @nome e o endereço zero respondem o mesmo `destino-invalido`, e cada tentativa gasta uma das 10 da janela diária (não realizada ainda).
+5. [ ] Com um envio `incerto`, um segundo envio é recusado com `operacao-pendente`, e só `op-status` o resolve (não realizada ainda).
+6. [ ] Em `pix`, `transfer` e `send-crypto` respondem 404, e `VARANDA_FEE_TRANSFER_CENTS` diferente de zero recusa a partida; `VARANDA_FEE_SWAP_BPS` diferente de zero recusa a partida em todos os modos (não realizada ainda).
+7. [ ] O aceite dos Termos e da Política versão 12 aparece de novo para quem aceitou a versão 11 (não realizada ainda).
+8. [ ] O USDC recebido no endereço aparece só para leitura, sem botão de converter nem de enviar (não realizada ainda).
+
+### Limites
+
+- Só o falso de loopback foi exercitado. O sandbox da Hodle não roda fluxos de dinheiro de subconta, então ele não prova nada sobre subcontas.
+- A conversão de USDC para BRLA e qualquer envio de USDC ficam para o próximo PR.
+- Um envio `incerto` só se resolve pela leitura do extrato do parceiro por referência (`op-status`). Se o extrato nunca o mostrar, ele continua bloqueando os débitos do membro, e não há caminho para o operador.
+- Quando o `wallet.json` está indisponível, o serviço responde 503 depois de resolver um nome e 400 para um nome desconhecido: nessa janela, isso revela que um @nome está vinculado.
+- Um envio ao endereço da subconta da tesouraria não é recusado quando a tesouraria é `sub:<id>`; só uma tesouraria em endereço é comparada.
+- Um membro com saldo que manda um PIN errado de propósito recebe `destino-invalido` para um @nome sem carteira e `pin-invalido` para um com carteira, sem mover dinheiro: só o parceiro confere o PIN, e só ao enviar. Aceito pelo dono em 03/11/2026 (mandar R$ 0,01 revela o mesmo; cada tentativa gasta uma das três antes do bloqueio de 24 horas).
+- A ida ao ar do `completo` depende da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.

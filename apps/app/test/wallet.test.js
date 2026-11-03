@@ -12,14 +12,16 @@ const account = (state, extra = {}) => ({ kyc: { state, attempt: 1 }, ...extra }
 test('wallet: pure ES module loads in Node without imports', async (t) => {
   const wallet = await load()
   t.alike(Object.keys(wallet).sort(), [
-    'DISPUTE_TEXTS', 'FEE_STATUS_TEXTS', 'KYC_STATES', 'MIN_DEPOSIT_CENTS', 'MIN_PAYOUT_CENTS',
-    'OP_ID_RE', 'OP_STATUS_TEXTS', 'PAY_TEXTS', 'PIX_KEY_LABELS', 'RECEIVE_TEXTS', 'TEXTS',
+    'CRYPTO_TEXTS', 'DISPUTE_TEXTS', 'FEE_STATUS_TEXTS', 'KYC_STATES', 'MIN_DEPOSIT_CENTS', 'MIN_PAYOUT_CENTS',
+    'OP_ID_RE', 'OP_STATUS_TEXTS', 'PAY_TEXTS', 'PIX_KEY_LABELS', 'RECEIVE_TEXTS', 'TEXTS', 'TRANSFER_TEXTS',
     'UNCERTAIN_MONEY', 'canonicalJson', 'canonicalPixKey', 'cepDigits', 'cpfDigits',
-    'depositArrivalText', 'feeLines', 'formatBrl', 'isBirthDate', 'isCep', 'isCpf', 'isPin',
-    'maskPixKey', 'opStatusText', 'parseBrl', 'pixKeyCandidates', 'pixKeyType', 'walletErrorText', 'walletStep'
+    'depositArrivalText', 'feeLines', 'feeLinesFor', 'formatBrl', 'formatUsdc', 'isBirthDate', 'isCep', 'isCpf', 'isEvmAddress', 'isPin',
+    'maskPixKey', 'normalizeAddress', 'opStatusText', 'parseBrl', 'parseUsdc', 'pixKeyCandidates', 'pixKeyType', 'shortAddress', 'targetKind', 'walletErrorText', 'walletStep'
   ].sort())
   const source = readFileSync(join(__dirname, '../src/wallet.js'), 'utf8')
   t.absent(/\b(?:import|require)\s*(?:\(|[{*'"\w])/.test(source))
+  t.absent(/['"]react(?:-native)?['"]/.test(source))
+  t.absent(source.includes('react-native'))
   t.absent(source.includes(String.fromCharCode(0x2014)))
   t.ok(Object.isFrozen(wallet.KYC_STATES))
   t.alike([...wallet.KYC_STATES], ['documentos', 'pendente', 'aprovado', 'recusado', 'expirado'])
@@ -714,7 +716,7 @@ test('money texts stay frozen, name the Pix rules, and promise no yield', async 
   t.is(OP_STATUS_TEXTS.expirado, 'O código Pix expirou. Se você pagou, o valor aparece aqui quando o banco confirmar.')
   t.is(DISPUTE_TEXTS.cancelada, 'A contestação foi retirada.')
   t.is(FEE_STATUS_TEXTS.enviada, 'Taxa enviada; aguardando confirmação.')
-  t.is(FEE_STATUS_TEXTS.pendente, 'Taxa pendente: será cobrada num próximo envio seu, depois que o Pix for concluído. Se ele falhar ou voltar antes, não é cobrada.')
+  t.is(FEE_STATUS_TEXTS.pendente, 'Taxa pendente: será cobrada num próximo envio seu, depois que a operação for concluída. Se ela falhar ou voltar antes, não é cobrada.')
   t.alike(Object.keys(RECEIVE_TEXTS).sort(), ['ONE_CHARGE', 'OWN_CPF', 'OTHER_CPF', 'NO_VARANDA_FEE', 'EXPIRY'].sort())
   t.ok(RECEIVE_TEXTS.ONE_CHARGE.includes('único valor'))
   t.ok(RECEIVE_TEXTS.ONE_CHARGE.includes('Não é uma chave permanente'))
@@ -777,5 +779,167 @@ test('opStatusText: failed deposits do not claim receipt, other states use the s
       t.is(opStatusText(kind, status), OP_STATUS_TEXTS[status])
     }
     t.is(opStatusText(kind, 'unknown'), undefined)
+  }
+})
+
+const CHECKSUM_ADDRESS = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed'
+const NORMALIZED_ADDRESS = '0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed'
+const ZERO_ADDRESS = '0x' + '0'.repeat(40)
+
+test('isEvmAddress, normalizeAddress and shortAddress: checksum, zero and the ledger mask', async (t) => {
+  const { isEvmAddress, normalizeAddress, shortAddress } = await load()
+  t.is(isEvmAddress(CHECKSUM_ADDRESS), true)
+  t.is(normalizeAddress(CHECKSUM_ADDRESS), NORMALIZED_ADDRESS)
+  t.is(shortAddress(CHECKSUM_ADDRESS), '0x..1beaed')
+  t.is(shortAddress(NORMALIZED_ADDRESS), '0x..1beaed')
+  t.ok(/^0x\.\.[0-9a-f]{6}$/.test(shortAddress(CHECKSUM_ADDRESS)))
+  t.is(isEvmAddress(ZERO_ADDRESS), false)
+  t.is(isEvmAddress(ZERO_ADDRESS.toUpperCase().replace('0X', '0x')), false)
+  t.is(normalizeAddress(ZERO_ADDRESS), null)
+  t.is(shortAddress(ZERO_ADDRESS), null)
+  t.is(isEvmAddress('0x' + '0'.repeat(39) + '1'), true)
+  t.is(shortAddress('0x' + '0'.repeat(39) + '1'), '0x..000001')
+  for (const value of [undefined, null, 1, {}, [], '', '0x1234', '0x' + 'g'.repeat(40), '0x' + 'a'.repeat(39), '0x' + 'a'.repeat(41),
+    ' ' + NORMALIZED_ADDRESS, NORMALIZED_ADDRESS + '\n', '0X' + 'a'.repeat(40), ZERO_ADDRESS.slice(2)]) {
+    t.is(isEvmAddress(value), false, String(value))
+    t.is(normalizeAddress(value), null, String(value))
+    t.is(shortAddress(value), null, String(value))
+  }
+})
+
+test('targetKind: a name, @Nome, an address, a 6-hex reject and garbage', async (t) => {
+  const { targetKind } = await load()
+  t.is(targetKind('maria'), 'nome')
+  t.is(targetKind('Nome'), 'nome')
+  t.is(targetKind('@Nome'), 'nome')
+  t.is(targetKind('  @Ana_1  '), 'nome')
+  t.is(targetKind(CHECKSUM_ADDRESS), 'address')
+  t.is(targetKind('  ' + CHECKSUM_ADDRESS + ' '), 'address')
+  t.is(targetKind('@' + CHECKSUM_ADDRESS), 'address')
+  t.is(targetKind('abcdef'), null)
+  t.is(targetKind('@AbC123'), null)
+  t.is(targetKind('@DeAdBe'), null)
+  t.is(targetKind(ZERO_ADDRESS), null)
+  for (const value of [undefined, null, 1, {}, [], '', '   ', '@', '@@ana', 'ab', 'lixo com espaço', '0x1234', 'pessoa@exemplo.com']) {
+    t.is(targetKind(value), null, String(value))
+  }
+})
+
+test('feeLinesFor: Pix keeps its sentence, a transfer or address send names the envio', async (t) => {
+  const { feeLines, feeLinesFor, formatBrl } = await load()
+  const charged = {
+    amountCents: 10000,
+    varandaFeeCents: 150,
+    hodleFeeCents: 250,
+    pendingFeeCents: 0,
+    totalDebitCents: 10400,
+    netReceivedCents: 10000
+  }
+  const pix = 'Taxa da Varanda (cobrada depois que o Pix for concluído)'
+  const send = 'Taxa da Varanda (cobrada depois que o envio for concluído)'
+  t.is(feeLines(charged)[1].label, pix)
+  t.is(feeLinesFor(charged, 'payout')[1].label, pix)
+  t.alike(feeLines(charged), feeLinesFor(charged, 'payout'))
+  t.is(feeLinesFor(charged, 'transfer')[1].label, send)
+  t.is(feeLinesFor(charged, 'crypto')[1].label, send)
+  t.is(feeLinesFor(charged, 'transfer')[1].value, formatBrl(150))
+  t.is(feeLinesFor(charged, 'crypto')[1].value, feeLines(charged)[1].value)
+  const zero = { ...charged, varandaFeeCents: 0, totalDebitCents: 10250 }
+  for (const kind of ['payout', 'transfer', 'crypto']) {
+    t.is(feeLinesFor(zero, kind)[1].label, 'Taxa da Varanda', kind)
+    t.is(feeLinesFor(zero, kind)[1].value, 'sem taxa', kind)
+  }
+  // A total that does not add up is still shown: the charge is the preview.
+  const drifted = { ...charged, varandaFeeCents: 7, totalDebitCents: 99999, netReceivedCents: 1 }
+  const driftedLines = feeLinesFor(drifted, 'transfer')
+  t.is(driftedLines[1].label, send)
+  t.is(driftedLines[1].value, 'R$ 0,07')
+  t.is(driftedLines[3].value, 'R$ 999,99')
+  t.is(driftedLines[4].value, 'R$ 0,01')
+  t.ok(Object.isFrozen(driftedLines))
+  const before = JSON.stringify(charged)
+  feeLinesFor(charged, 'crypto')
+  t.is(JSON.stringify(charged), before)
+  for (const kind of [undefined, null, '', 'swap', 'deposit', 'Payout', 'toString']) {
+    t.is(feeLinesFor(charged, kind), null, String(kind))
+  }
+  t.is(feeLinesFor(null, 'transfer'), null)
+  t.is(feeLinesFor({ ...charged, amountCents: '10000' }, 'crypto'), null)
+})
+
+test('formatUsdc and parseUsdc: 1 USDC, one micro, a comma, and 7 decimals refused', async (t) => {
+  const { formatUsdc, parseUsdc } = await load()
+  t.is(formatUsdc(1000000), '1,00')
+  t.is(formatUsdc(1), '0,000001')
+  t.is(formatUsdc(1500000), '1,50')
+  t.is(formatUsdc(1230000), '1,23')
+  t.is(formatUsdc(1000001), '1,000001')
+  t.is(formatUsdc(1000000000), '1.000,00')
+  t.absent(formatUsdc(1000000).includes('USDC'))
+  t.is(parseUsdc('1'), 1000000)
+  t.is(parseUsdc('1,00'), 1000000)
+  t.is(parseUsdc('0,000001'), 1)
+  t.is(parseUsdc('1,5'), 1500000)
+  t.is(parseUsdc('1,000001'), 1000001)
+  t.is(parseUsdc('1.000,00'), 1000000000)
+  // A dot groups thousands, as parseBrl reads it, never a decimal mark.
+  t.is(parseUsdc('1.000'), 1000000000)
+  t.is(parseUsdc('10.000'), 10000000000)
+  t.is(parseUsdc('10.000,000001'), null, 'above the 10000 per-operation cap')
+  t.is(parseUsdc(formatUsdc(1)), 1)
+  t.is(parseUsdc(formatUsdc(1000000)), 1000000)
+  t.is(parseUsdc(formatUsdc(1000001)), 1000001)
+  for (const value of ['1,0000001', '0,0000001', '0.0000001', '1.0000001', '1.00000010', '1.00', '0.000001', '1.000001', '1.5',
+    undefined, null, 1, 1.5, {}, [], '', ' ', '1,', '1.', '.5', ',5', '-1', '+1', '1 USDC', 'USDC 1', '1e6', '1,00.00']) {
+    t.is(parseUsdc(value), null, String(value))
+  }
+  for (const value of [undefined, null, -1, 1.5, NaN, Infinity, '1000000', 1000000.5]) {
+    t.is(formatUsdc(value), null, String(value))
+  }
+})
+
+test('transfer and address-send texts confirm the target and do not offer USDC paid from BRLA', async (t) => {
+  const { TRANSFER_TEXTS, CRYPTO_TEXTS, UNCERTAIN_MONEY } = await load()
+  t.ok(Object.isFrozen(TRANSFER_TEXTS))
+  t.ok(Object.isFrozen(CRYPTO_TEXTS))
+  t.is(TRANSFER_TEXTS.CONFIRM_NOME, 'Confira o @nome de quem recebe antes de confirmar o envio.')
+  t.ok(TRANSFER_TEXTS.CONFIRM_NOME.includes('@nome'))
+  t.is(TRANSFER_TEXTS.UNCERTAIN, UNCERTAIN_MONEY)
+  t.is(CRYPTO_TEXTS.CONFIRM_ADDRESS, 'Confira o endereço e a rede antes de confirmar o envio.')
+  t.ok(CRYPTO_TEXTS.CONFIRM_ADDRESS.includes('endereço'))
+  t.ok(CRYPTO_TEXTS.CONFIRM_ADDRESS.includes('rede'))
+  t.is(CRYPTO_TEXTS.CHECKBOX, 'Conferi o endereço e a rede')
+  t.is(CRYPTO_TEXTS.USDC_HERE, 'O USDC que aparece neste endereço não pode ser convertido nesta versão.')
+  t.ok(CRYPTO_TEXTS.USDC_HERE.includes('não pode ser convertido'))
+  t.is(CRYPTO_TEXTS.UNCERTAIN, UNCERTAIN_MONEY)
+  t.ok(TRANSFER_TEXTS.UNCERTAIN.includes('nada é reenviado sozinho'))
+  t.ok(CRYPTO_TEXTS.UNCERTAIN.includes('nada é reenviado sozinho'))
+  const polygon = CRYPTO_TEXTS.onlyBrla('polygon')
+  const base = CRYPTO_TEXTS.onlyBrla('base')
+  t.is(polygon, 'Nesta versão só enviamos BRLA, e só na rede Polygon. Um envio na rede errada não pode ser desfeito.')
+  t.is(base, 'Nesta versão só enviamos BRLA, e só na rede Base. Um envio na rede errada não pode ser desfeito.')
+  t.ok(polygon.includes('BRLA'))
+  t.ok(polygon.includes('Polygon'))
+  t.ok(polygon.includes('não pode ser desfeito'))
+  for (const network of [undefined, null, '', 'Polygon', 'POLYGON', 'polygon ', 'poly gon', 'a'.repeat(17), 'base-sepolia']) {
+    t.is(CRYPTO_TEXTS.onlyBrla(network), null, String(network))
+  }
+  const banned = ['pagar USDC', 'enviar USDC', 'USDC com BRLA', 'usando BRLA', 'a partir de BRLA', 'BRLA em USDC', 'converter BRLA']
+  const strings = [
+    TRANSFER_TEXTS.CONFIRM_NOME,
+    TRANSFER_TEXTS.UNCERTAIN,
+    CRYPTO_TEXTS.CONFIRM_ADDRESS,
+    CRYPTO_TEXTS.CHECKBOX,
+    CRYPTO_TEXTS.USDC_HERE,
+    CRYPTO_TEXTS.UNCERTAIN,
+    polygon,
+    base
+  ]
+  for (const text of strings) {
+    t.is(typeof text, 'string')
+    t.ok(text.length > 0)
+    t.absent(text.includes(String.fromCharCode(0x2014)))
+    t.absent(/\brende\b|\bjuros\b|\brendimento\b/i.test(text))
+    for (const phrase of banned) t.absent(text.toLowerCase().includes(phrase.toLowerCase()), phrase)
   }
 })

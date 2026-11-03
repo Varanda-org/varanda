@@ -111,12 +111,12 @@ const DIDIT_DAILY_MAX = 100000
 // The client's own key shape (../account/hodle.js), so a key readEnv lets
 // through is never one createHodle refuses at start.
 const HODLE_KEY_RE = /^hodle_(live|test)_[\x21-\x7e]{8,200}$/
-// This release ships the first three modes of wallet-routes.js MODES:
-// cadastro (subaccount and KYC only), carteira (adds wallet-create with the
-// member's PIN), the latter only once Hodle confirmed in writing that
-// member-chosen PINs work on individual subaccounts, and pix (adds balance,
-// Pix deposits and Pix payouts).
-const HODLE_MODES = Object.freeze(['cadastro', 'carteira', 'pix'])
+// The modes of wallet-routes.js MODES: cadastro (subaccount and KYC only),
+// carteira (adds wallet-create with the member's PIN), the latter only once
+// Hodle confirmed in writing that member-chosen PINs work on individual
+// subaccounts, pix (adds balance, Pix deposits and Pix payouts) and completo
+// (adds BRLA transfers by @nome and sends to an outside address).
+const HODLE_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const HODLE_DAILY_DEFAULT = 100
 const HODLE_DAILY_MAX = 100000
 // wallet-routes.js refuses a cap below its minimum deposit (R$ 1,00).
@@ -124,8 +124,14 @@ const HODLE_MAX_CENTS_MIN = 100
 const HODLE_MAX_CENTS_MAX = 100000000
 const HODLE_MAX_CENTS_DEFAULT = 300000
 // The fee kinds each mode can actually charge. A rate for any other kind
-// would never be collected, and the operator must not believe it is.
-const FEE_KINDS_BY_MODE = Object.freeze({ cadastro: [], carteira: [], pix: ['payout'] })
+// would never be collected, and the operator must not believe it is. Money
+// coming in (deposit) and a USDC to BRLA conversion (swap) are never charged.
+const FEE_KINDS_BY_MODE = Object.freeze({
+  cadastro: [],
+  carteira: [],
+  pix: ['payout'],
+  completo: ['payout', 'transfer', 'crypto']
+})
 // PINs belong to members, typed at the moment they sign; the service never
 // holds one, the treasury's included, so one in the environment is a mistake.
 const FORBIDDEN_PIN_VARS = Object.freeze(['VARANDA_HODLE_PIN', 'VARANDA_FEE_TREASURY_PIN'])

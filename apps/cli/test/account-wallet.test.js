@@ -30,6 +30,10 @@ const { tmpDir } = require('./helpers/net')
 const ORIGIN = 'https://varanda.test'
 const API_KEY = 'hodle_test_fakekey0123456789'
 const PIN = '482915'
+// The policy's action lists, by mode.
+const CADASTRO_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
+const PIX_ACTIONS = Object.freeze([...CADASTRO_ACTIONS, 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
+const COMPLETO_ACTIONS = Object.freeze([...PIX_ACTIONS, 'transfer', 'send-crypto'])
 const ADULT = Object.freeze({ adult: 1 })
 const KYC = Object.freeze({
   fullName: 'Fulana de Tal',
@@ -210,7 +214,7 @@ test('wallet: policy off and on, routes 503 when off', async (t) => {
   const off = await setup(t, { on: false })
   const p = await off.api('GET', '/account/wallet/policy')
   t.is(p.status, 200)
-  t.alike(p.body, { available: false, network: null, mode: 'cadastro' })
+  t.alike(p.body, { available: false, network: null, mode: 'cadastro', actions: CADASTRO_ACTIONS })
   const st = await off.start(off.m, 'optin')
   t.is(st.status, 503)
   t.alike(st.body, { error: 'indisponivel' })
@@ -220,7 +224,7 @@ test('wallet: policy off and on, routes 503 when off', async (t) => {
 
   const s = await setup(t)
   const on = await s.api('GET', '/account/wallet/policy')
-  t.alike(on.body, { available: true, network: 'polygon', mode: 'cadastro' })
+  t.alike(on.body, { available: true, network: 'polygon', mode: 'cadastro', actions: CADASTRO_ACTIONS })
   t.ok(s.logs.includes(JSON.stringify({ event: 'carteira', reason: 'ligada' })))
 })
 
@@ -1023,7 +1027,7 @@ test('wallet: one network source, a differing walletNetwork throws', async (t) =
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => listener.close(), { force: true })
   const res = await fetch('http://127.0.0.1:' + listener.port + '/account/wallet/policy')
-  t.alike(await res.json(), { available: true, network: 'base', mode: 'cadastro' })
+  t.alike(await res.json(), { available: true, network: 'base', mode: 'cadastro', actions: CADASTRO_ACTIONS })
   const plain = createAccountServer(base)
   t.ok(plain)
 })
@@ -1395,13 +1399,14 @@ async function pay (t, s, cents, { pin = PIN, extra = {}, id = opId() } = {}) {
 test('wallet money: actions are 404 outside pix and completo; policy adds the cap and fees', async (t) => {
   for (const mode of ['cadastro', 'carteira']) {
     const s = await setup(t, { mode })
-    for (const action of ['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status']) {
+    for (const action of ['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto']) {
       t.is((await s.start(s.m, action)).status, 404, mode + ' start ' + action)
       const r = await s.post('/account/wallet/' + action, { member: s.m.hex, nonce: 'A'.repeat(43), action, op: {}, signature: 'a'.repeat(128), pin: PIN })
       t.is(r.status, 404, mode + ' ' + action)
     }
     const p = await s.api('GET', '/account/wallet/policy')
-    t.alike(Object.keys(p.body).sort(), ['available', 'mode', 'network'])
+    t.alike(Object.keys(p.body).sort(), ['actions', 'available', 'mode', 'network'])
+    t.alike(p.body.actions, mode === 'cadastro' ? CADASTRO_ACTIONS : [...CADASTRO_ACTIONS, 'wallet-create'])
   }
   const s = await setup(t, { mode: 'pix', fees: FEES, maxCents: 200000 })
   const p = await s.api('GET', '/account/wallet/policy')
@@ -1409,6 +1414,7 @@ test('wallet money: actions are 404 outside pix and completo; policy adds the ca
   t.is(p.body.maxCents, 200000)
   t.is(p.body.fees.payout, 'R$ 0,50 + 1%')
   t.is(p.body.fees.transfer, 'sem taxa')
+  t.alike(p.body.actions, PIX_ACTIONS)
   t.is((await s.start(s.m, 'payout')).status, 200)
   const pending = await s.step(s.m, 'balance')
   t.alike(pending.body, { error: 'carteira-pendente' })
@@ -1419,7 +1425,7 @@ test('wallet money: balance verifies the stored wallet once and reports pending 
   await funded(t, s, 12345)
   const b = await s.step(s.m, 'balance')
   t.is(b.status, 200, b.text)
-  t.alike(b.body, { cents: 12345, address: s.entry().wallet.address, network: 'polygon', pendingFeeCents: 0 })
+  t.alike(b.body, { cents: 12345, usdcMicros: 0, address: s.entry().wallet.address, network: 'polygon', pendingFeeCents: 0 })
   await s.step(s.m, 'balance')
   const checks = s.seen('POST', '/api/wallet/get').filter((q) => q.body.walletId === s.entry().wallet.id && q.body.sync === false)
   t.is(checks.length, 1, 'one wallet/get check, then cached')
@@ -1567,7 +1573,7 @@ test('wallet money: payout with quote and fee: one payout, then one transfer to 
   })
   t.is(r.status, 200, r.text)
   const externalId = r.body.externalId
-  t.alike(r.body, { externalId, status: 'concluido', fee: { cents: 100, status: 'cobrada' }, pendingFee: null })
+  t.alike(r.body, { externalId, status: 'concluido', fee: { asset: 'BRL', cents: 100, status: 'cobrada' }, pendingFee: null })
 
   const q = s.seen('POST', '/api/wallet/payout/beneficiary')[0].body
   t.is(q.subAccountId, sub)
@@ -1625,7 +1631,7 @@ test('wallet money: a busy fee leg stays pendente and the next payout collects i
   })
   const first = await pay(t, s, 5000)
   t.is(first.r.status, 200, first.r.text)
-  t.alike(first.r.body.fee, { cents: 100, status: 'pendente' })
+  t.alike(first.r.body.fee, { asset: 'BRL', cents: 100, status: 'pendente' })
   const firstId = first.r.body.externalId
   t.is(s.ops.get(firstId).fee.status, 'pendente')
   t.is(s.fake.state.sends.transfer, 0)
@@ -1638,8 +1644,8 @@ test('wallet money: a busy fee leg stays pendente and the next payout collects i
   t.is(second.preview.pendingFeeRef, firstId + ':taxa')
   t.is(second.preview.totalDebitCents, 2000 + 70 + 75 + 100)
   t.is(second.r.status, 200, second.r.text)
-  t.alike(second.r.body.pendingFee, { cents: 100, status: 'cobrada' })
-  t.alike(second.r.body.fee, { cents: 70, status: 'cobrada' })
+  t.alike(second.r.body.pendingFee, { asset: 'BRL', cents: 100, status: 'cobrada' })
+  t.alike(second.r.body.fee, { asset: 'BRL', cents: 70, status: 'cobrada' })
   const transfers = s.seen('POST', '/api/wallet/transfer')
   const refs = transfers.map((q) => q.body.reference)
   t.alike(refs.slice(-2), [second.r.body.externalId + ':taxa', firstId + ':taxa'], 'own fee, then the old one with its reference')
@@ -1798,7 +1804,7 @@ test('wallet money: the statement merges Hodle rows with the ledger without doub
   t.ok(ids.includes(dep.body.externalId))
   t.ok(ids.includes(paid.r.body.externalId))
   const payoutItem = items.find((i) => i.externalId === paid.r.body.externalId)
-  t.alike(payoutItem.fee, { cents: 70, status: 'cobrada' })
+  t.alike(payoutItem.fee, { asset: 'BRL', cents: 70, status: 'cobrada' })
   t.is(payoutItem.direction, 'out')
   t.is(payoutItem.to, '***test')
   t.is(items.filter((i) => i.kind === 'transfer').length, 0, 'the fee leg folds into its payout')
@@ -1821,7 +1827,7 @@ test('wallet money: a fee transfer accepted but not completed stays enviada and 
   })
   const { r } = await pay(t, s, 5000)
   t.is(r.status, 200, r.text)
-  t.alike(r.body.fee, { cents: 100, status: 'enviada' })
+  t.alike(r.body.fee, { asset: 'BRL', cents: 100, status: 'enviada' })
   const externalId = r.body.externalId
   t.is(s.ops.get(externalId).fee.status, 'enviada', 'not cobrada on an accepted, pending transfer')
   t.is(s.ops.get(externalId).fee.reference, externalId + ':taxa')
@@ -1829,7 +1835,7 @@ test('wallet money: a fee transfer accepted but not completed stays enviada and 
   s.fake.script({})
   const st = await s.step(s.m, 'op-status', { externalId })
   t.is(st.status, 200, st.text)
-  t.alike(st.body.fee, { cents: 100, status: 'cobrada' })
+  t.alike(st.body.fee, { asset: 'BRL', cents: 100, status: 'cobrada' })
   t.ok(/^0x[0-9a-f]{64}$/.test(s.ops.get(externalId).fee.txHash))
   t.is(s.seen('POST', '/api/wallet/transfer').length, 1, 'never resent')
 })
@@ -1987,7 +1993,7 @@ test('wallet money: a fee leg the provider reports FAILED goes back to pendente,
   failFeeTransfers(s)
   const st = await s.step(s.m, 'op-status', { externalId: first.r.body.externalId })
   t.is(st.status, 200, st.text)
-  t.alike(st.body.fee, { cents: 100, status: 'pendente' }, 'op-status: failed wins over the hash')
+  t.alike(st.body.fee, { asset: 'BRL', cents: 100, status: 'pendente' }, 'op-status: failed wins over the hash')
 
   s.fake.script({
     transfer (req, res, ctx) {
@@ -2153,7 +2159,7 @@ test('wallet money: a fee leg settles only from the member outbound transfer of 
   showing([op({ direction: 'in' })])
   const st = await s.step(s.m, 'op-status', { externalId })
   t.is(st.status, 200, st.text)
-  t.alike(st.body.fee, { cents: 100, status: 'enviada' }, 'op-status: an inbound row does not settle')
+  t.alike(st.body.fee, { asset: 'BRL', cents: 100, status: 'enviada' }, 'op-status: an inbound row does not settle')
 
   showing([op({})])
   t.is((await s.step(s.m, 'statement')).status, 200)
@@ -2317,9 +2323,9 @@ test('wallet money: a payout must leave every other pending fee in the wallet, a
     }
   })
   const first = await pay(t, s, 5000)
-  t.alike(first.r.body.fee, { cents: 100, status: 'pendente' })
+  t.alike(first.r.body.fee, { asset: 'BRL', cents: 100, status: 'pendente' })
   const second = await pay(t, s, 2000)
-  t.alike(second.r.body.fee, { cents: 70, status: 'pendente' })
+  t.alike(second.r.body.fee, { asset: 'BRL', cents: 70, status: 'pendente' })
   t.is(s.ops.outstandingFees(s.m.hex).cents, 170)
   s.fake.script({})
 
@@ -2337,8 +2343,8 @@ test('wallet money: a payout must leave every other pending fee in the wallet, a
   s.fake.state.balances.set(sub, preview.totalDebitCents + 70)
   const ok = await s.step(s.m, 'payout', payoutOp(opId(), 1000, quote, preview), { pin: PIN })
   t.is(ok.status, 200, ok.text)
-  t.alike(ok.body.fee, { cents: 60, status: 'cobrada' })
-  t.alike(ok.body.pendingFee, { cents: 100, status: 'cobrada' })
+  t.alike(ok.body.fee, { asset: 'BRL', cents: 60, status: 'cobrada' })
+  t.alike(ok.body.pendingFee, { asset: 'BRL', cents: 100, status: 'cobrada' })
   t.is(s.ops.get(first.r.body.externalId).fee.status, 'cobrada')
   t.is(s.ops.get(second.r.body.externalId).fee.status, 'pendente', 'only one old fee per send')
   t.is(s.fake.state.balances.get(sub), 70, 'the reserved fee stays in the wallet')
@@ -2351,7 +2357,7 @@ test('wallet money: the Varanda fee is charged only once Hodle reports the payou
   const first = await pay(t, s, 5000)
   t.is(first.r.status, 200, first.r.text)
   t.is(first.r.body.status, 'pendente')
-  t.alike(first.r.body.fee, { cents: 100, status: 'pendente' }, 'charged in a later send')
+  t.alike(first.r.body.fee, { asset: 'BRL', cents: 100, status: 'pendente' }, 'charged in a later send')
   t.is(s.seen('POST', '/api/wallet/transfer').length, 0, 'no fee transfer while the Pix is pending')
   const firstId = first.r.body.externalId
   t.is(s.ops.get(firstId).fee.status, 'pendente')
@@ -2373,8 +2379,8 @@ test('wallet money: the Varanda fee is charged only once Hodle reports the payou
   t.is(second.preview.pendingFeeCents, 100)
   t.is(second.preview.pendingFeeRef, firstId + ':taxa')
   t.is(second.r.status, 200, second.r.text)
-  t.alike(second.r.body.fee, { cents: 60, status: 'pendente' })
-  t.alike(second.r.body.pendingFee, { cents: 100, status: 'cobrada' })
+  t.alike(second.r.body.fee, { asset: 'BRL', cents: 60, status: 'pendente' })
+  t.alike(second.r.body.pendingFee, { asset: 'BRL', cents: 100, status: 'cobrada' })
   t.alike(s.seen('POST', '/api/wallet/transfer').map((q) => q.body.reference), [firstId + ':taxa'])
   t.is(s.ops.get(firstId).fee.status, 'cobrada')
 
@@ -2393,7 +2399,7 @@ test('wallet money: the Varanda fee is charged only once Hodle reports the payou
   const third = await s.step(s.m, 'payout', payoutOp(opId(), 1000, after.quote, after.preview), { pin: PIN })
   t.is(third.status, 200, third.text)
   t.is(third.body.status, 'concluido')
-  t.alike(third.body.fee, { cents: 60, status: 'cobrada' })
+  t.alike(third.body.fee, { asset: 'BRL', cents: 60, status: 'cobrada' })
   t.is(s.seen('POST', '/api/wallet/transfer').length, 2)
   t.ok(s.fake.state.balances.get(sub) >= 0)
 })
@@ -2438,4 +2444,328 @@ test('wallet money: payouts racing for the last ceiling slot reach the balance r
   t.alike(results.map((r) => r.status).sort(), [200, 503], results.map((r) => r.text).join(' '))
   t.alike(results.find((r) => r.status === 503).body, { error: 'indisponivel' })
   t.ok(s.logs.includes(JSON.stringify({ event: 'carteira', reason: 'teto-diario' })))
+})
+
+// --- completo: BRLA sends by @nome and to an outside address --------------
+
+const SEND_FEES = parseFees({
+  VARANDA_FEE_TRANSFER_CENTS: '10',
+  VARANDA_FEE_TRANSFER_BPS: '100',
+  VARANDA_FEE_CRYPTO_CENTS: '30',
+  VARANDA_FEE_CRYPTO_BPS: '150',
+  VARANDA_FEE_TREASURY: TREASURY
+})
+const OUTSIDE = '0x' + 'CD'.repeat(20)
+
+// Another linked member with terms accepted and, unless `wallet` is false,
+// an approved wallet holding `cents`.
+async function otherMember (t, s, username, { cents = 0, wallet = true } = {}) {
+  const who = member()
+  await linkDirect(s.store, s.iss, who, username)
+  await s.terms.accept({ member: who.hex, version: TERMS_VERSION, nonce: 'o'.repeat(43), signature: 'c'.repeat(128) })
+  if (!wallet) return who
+  t.is((await s.step(who, 'optin', ADULT)).status, 200)
+  await documents(t, s, who)
+  markReady(s)
+  t.is((await s.step(who, 'kyc-submit', { kycHash: kycHash(KYC) }, { kyc: KYC })).status, 200)
+  t.is((await s.step(who, 'status')).body.account.kyc.state, 'aprovado')
+  const w = await s.step(who, 'wallet-create', {}, { pin: PIN })
+  t.is(w.status, 200, w.text)
+  s.fake.state.balances.set(s.wallets.get(who.hex).subAccountId, cents)
+  return who
+}
+
+async function sendTo (t, s, kind, cents, dest, { id = opId(), pin = PIN, extra = {} } = {}) {
+  const pv = await s.step(s.m, 'preview', { kind, cents })
+  t.is(pv.status, 200, pv.text)
+  const op = {
+    opId: id,
+    cents,
+    feeCents: pv.body.varandaFeeCents,
+    pendingFeeCents: pv.body.pendingFeeCents,
+    pendingFeeRef: pv.body.pendingFeeRef,
+    totalDebitCents: pv.body.totalDebitCents,
+    ...(kind === 'transfer' ? { to: dest } : { address: dest }),
+    ...extra
+  }
+  const r = await s.step(s.m, kind === 'transfer' ? 'transfer' : 'send-crypto', op, { pin })
+  return { op, preview: pv.body, r }
+}
+
+function logged (s, reason) {
+  return s.logs.includes(JSON.stringify({ event: 'carteira', reason }))
+}
+
+test('wallet completo: policy lists the actions; pix 404s the sends and refuses preview kinds transfer and crypto', async (t) => {
+  const c = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const p = await c.api('GET', '/account/wallet/policy')
+  t.alike(p.body.actions, COMPLETO_ACTIONS)
+  t.is(p.body.fees.transfer, 'R$ 0,10 + 1%')
+  t.is(p.body.fees.crypto, 'R$ 0,30 + 1,5%')
+
+  const s = await setup(t, { mode: 'pix' })
+  await funded(t, s, 10000)
+  for (const action of ['transfer', 'send-crypto']) {
+    t.is((await s.start(s.m, action)).status, 404, 'start ' + action)
+    const r = await s.post('/account/wallet/' + action, { member: s.m.hex, nonce: 'A'.repeat(43), action, op: {}, signature: 'a'.repeat(128), pin: PIN })
+    t.is(r.status, 404, action)
+  }
+  for (const kind of ['transfer', 'crypto']) {
+    const pv = await s.step(s.m, 'preview', { kind, cents: 1000 })
+    t.alike(pv.body, { error: 'pedido-invalido' }, 'pix preview ' + kind)
+  }
+})
+
+test('wallet completo: an @nome transfer concludes, charges its fee after the principal, and the receiver sees it coming in', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 10000)
+  const b = await otherMember(t, s, 'bia')
+  const bSub = s.wallets.get(b.hex).subAccountId
+  let lookups = 0
+  const lookup = s.store.lookup
+  s.store.lookup = (name) => { lookups++; return lookup(name) }
+
+  const pv = await s.step(s.m, 'preview', { kind: 'transfer', cents: 1000 })
+  t.is(pv.status, 200, pv.text)
+  t.is(pv.body.varandaFeeCents, 20, 'R$ 0,10 + 1% of R$ 10,00')
+  t.is(pv.body.hodleFeeCents, 0)
+  t.is(lookups, 0, 'preview looks no name up')
+  t.alike((await s.step(s.m, 'preview', { kind: 'transfer', cents: 1000, quoteId: 'q1' })).body, { error: 'pedido-invalido' })
+  t.alike((await s.step(s.m, 'preview', { kind: 'transfer', cents: MAX_TRANSFER_CENTS + 1 })).body, { error: 'valor-invalido' })
+
+  const { r } = await sendTo(t, s, 'transfer', 1000, '@Bia')
+  t.is(r.status, 200, r.text)
+  t.is(lookups, 1)
+  const externalId = r.body.externalId
+  t.ok(/^0x[0-9a-f]{64}$/.test(r.body.txHash), 'the chain hash reaches the member')
+  t.alike(r.body, { externalId, status: 'concluido', fee: { asset: 'BRL', cents: 20, status: 'cobrada' }, pendingFee: null, txHash: r.body.txHash })
+  t.is(s.fake.state.balances.get(bSub), 1000, 'the receiver got the amount')
+  t.is(s.fake.state.credited.get(TREASURY), 20, 'the fee reached the treasury')
+  const sent = s.seen('POST', '/api/wallet/transfer')
+  t.is(sent[0].body.toSubAccountId, bSub)
+  t.is(sent[0].body.reference, externalId)
+  const row = s.ops.get(externalId)
+  t.is(row.kind, 'transfer')
+  t.is(row.to, '@bia')
+  t.is(row.asset, 'BRLA')
+  t.is(row.source, null)
+  t.ok(logged(s, 'transferencia'))
+  t.absent(s.logs.some((l) => l.includes('bia') || l.includes(PIN)), 'no name or PIN in a log line')
+
+  const st = await s.step(b, 'statement')
+  t.is(st.status, 200, st.text)
+  const incoming = st.body.items.find((i) => i.kind === 'transfer')
+  t.is(incoming.direction, 'in')
+  t.is(incoming.cents, 1000)
+  t.is(incoming.externalId, null, 'the sender row is not the receiver row')
+  t.absent('amountMicros' in incoming)
+  t.is(s.ops.listByMember(b.hex).length, 0, 'the receiver gets no ledger row')
+
+  const mine = await s.step(s.m, 'statement')
+  const out = mine.body.items.find((i) => i.externalId === externalId)
+  t.is(out.direction, 'out')
+  t.alike(out.fee, { asset: 'BRL', cents: 20, status: 'cobrada' })
+  t.is(mine.body.items.filter((i) => i.externalId === externalId).length, 1)
+
+  // A provider row without a direction is not guessed; ours stays out.
+  s.fake.script({
+    statement (req, res, ctx) {
+      const o = s.fake.apply('statement', ctx)
+      for (const op of o.body.data.operations) delete op.direction
+      ctx.json(res, o.code, o.body)
+    }
+  })
+  const bare = await s.step(b, 'statement')
+  t.is(bare.body.items.find((i) => i.kind === 'transfer').direction, null)
+  const mineBare = await s.step(s.m, 'statement')
+  t.is(mineBare.body.items.find((i) => i.externalId === externalId).direction, 'out')
+  s.fake.script({})
+
+  // Incoming USDC shows in the balance and the statement, never as reais.
+  s.fake.state.usdc.set(bSub, '1.5')
+  const bal = await s.step(b, 'balance')
+  t.is(bal.body.usdcMicros, 1500000)
+  t.is(bal.body.cents, 1000)
+  const withUsdc = await s.step(b, 'statement')
+  const usdc = withUsdc.body.items.find((i) => i.asset === 'USDC')
+  t.is(usdc.amountMicros, 1500000)
+  t.is(usdc.cents, null)
+  t.is(usdc.externalId, null)
+  t.is(s.ops.listByMember(b.hex).length, 0, 'USDC creates no ledger row')
+
+  const op = await s.step(s.m, 'op-status', { externalId })
+  t.is(op.body.asset, 'BRLA')
+  t.absent('amountMicros' in op.body)
+})
+
+test('wallet completo: an address send lowercases the address, charges the crypto fee, and refuses own, zero and treasury addresses', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 10000)
+  const own = s.entry().wallet.address
+  for (const address of [own, own.toUpperCase().replace('0X', '0x'), '0x' + '0'.repeat(40), TREASURY]) {
+    const { r } = await sendTo(t, s, 'crypto', 1000, address)
+    t.is(r.status, 400, r.text)
+    t.is(r.text, JSON.stringify({ error: 'destino-invalido' }) + '\n')
+  }
+  t.is(s.fake.state.posts.transfer, 0, 'no refused address reached Hodle')
+  t.alike((await sendTo(t, s, 'crypto', 1000, '0x1234')).r.body, { error: 'pedido-invalido' })
+
+  const { r, preview } = await sendTo(t, s, 'crypto', 2000, OUTSIDE)
+  t.is(r.status, 200, r.text)
+  t.is(preview.varandaFeeCents, 60, 'R$ 0,30 + 1,5% of R$ 20,00')
+  t.alike(r.body.fee, { asset: 'BRL', cents: 60, status: 'cobrada' })
+  t.is(s.fake.state.credited.get(OUTSIDE.toLowerCase()), 2000)
+  t.is(s.fake.state.credited.get(TREASURY), 60)
+  const row = s.ops.get(r.body.externalId)
+  t.is(row.kind, 'crypto')
+  t.is(row.to, '0x..cdcdcd')
+  t.is(row.source, 'BRLA')
+  t.ok(logged(s, 'envio-cripto'))
+  t.absent(s.logs.some((l) => l.toLowerCase().includes('cdcdcdcd')), 'no address in a log line')
+})
+
+test('wallet completo: destino-invalido is the same for unknown, self, no wallet and treasury, with no row and no call', async (t) => {
+  const fees = parseFees({ VARANDA_FEE_TREASURY: 'sub:depois' })
+  const s = await setup(t, { mode: 'completo', fees })
+  await funded(t, s, 10000)
+  const b = await otherMember(t, s, 'bia')
+  await otherMember(t, s, 'caio', { wallet: false })
+  // bia's subaccount becomes the treasury.
+  fees.treasury.id = s.wallets.get(b.hex).subAccountId
+  const ledgerBefore = s.ledger()
+  const texts = []
+  for (const to of ['@ninguem', '@ana', '@caio', '@bia']) {
+    const { r } = await sendTo(t, s, 'transfer', 500, to)
+    t.is(r.status, 400, to)
+    texts.push(r.text)
+  }
+  t.alike(texts, Array(4).fill(JSON.stringify({ error: 'destino-invalido' }) + '\n'), 'byte-identical')
+  t.is(s.ledger(), ledgerBefore, 'no row')
+  t.is(s.fake.state.posts.transfer, 0)
+  t.is(s.fake.state.sends.transfer, 0)
+  t.ok(logged(s, 'destino-invalido'))
+  t.alike((await sendTo(t, s, 'transfer', 500, 'nome com espaco')).r.body, { error: 'pedido-invalido' })
+})
+
+test('wallet completo: without the funds every @nome gets the same answer, so a refusal never tells which names hold a wallet', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 100)
+  await otherMember(t, s, 'bia')
+  const texts = []
+  for (const to of ['@ninguem', '@bia']) {
+    const { r } = await sendTo(t, s, 'transfer', 5000, to)
+    t.is(r.status, 409, to)
+    texts.push(r.text)
+  }
+  t.alike(texts, Array(2).fill(JSON.stringify({ error: 'saldo-insuficiente' }) + '\n'), 'byte-identical')
+  t.is(s.fake.state.posts.transfer, 0)
+})
+
+test('wallet completo: a 202 is pendente with its fee waiting; the next debit runs; op-status concludes it and the next send collects the fee', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 20000)
+  await otherMember(t, s, 'bia')
+  s.fake.state.transferAnswer = 'pending202'
+  const first = await sendTo(t, s, 'transfer', 1000, '@bia')
+  t.is(first.r.status, 200, first.r.text)
+  const externalId = first.r.body.externalId
+  t.alike(first.r.body, { externalId, status: 'pendente', fee: { asset: 'BRL', cents: 20, status: 'pendente' }, pendingFee: null, txHash: null })
+  t.ok(logged(s, 'pendente-202'))
+  t.ok(s.ops.get(externalId).providerId, 'the transactionId is kept')
+  t.is(s.fake.state.sends.transfer, 1, 'no fee leg on a pending principal')
+
+  s.fake.state.transferAnswer = 'done'
+  const second = await sendTo(t, s, 'transfer', 500, '@bia')
+  t.is(second.r.status, 200, 'C9 released: a pending send blocks nothing')
+  t.is(second.preview.pendingFeeCents, 0, 'a pending principal owes nothing yet')
+  const sendsBefore = s.fake.state.sends.transfer
+  const treasuryBefore = s.fake.state.credited.get(TREASURY)
+
+  s.fake.settleTransfer(externalId, 'COMPLETED')
+  const st = await s.step(s.m, 'op-status', { externalId })
+  t.is(st.status, 200, st.text)
+  t.is(st.body.status, 'concluido')
+  t.alike(st.body.fee, { asset: 'BRL', cents: 20, status: 'pendente' }, 'op-status sends no fee')
+  t.is(s.fake.state.sends.transfer, sendsBefore)
+  t.is(s.fake.state.credited.get(TREASURY), treasuryBefore)
+
+  const third = await sendTo(t, s, 'crypto', 1000, OUTSIDE)
+  t.is(third.preview.pendingFeeCents, 20)
+  t.is(third.r.status, 200, third.r.text)
+  t.alike(third.r.body.pendingFee, { asset: 'BRL', cents: 20, status: 'cobrada' })
+  t.is(s.ops.get(externalId).fee.status, 'cobrada')
+})
+
+test('wallet completo: a lost answer is incerto, blocks the next debit, and the same opId never sends again', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES, moneyTimeoutMs: 300 })
+  await funded(t, s, 10000)
+  await otherMember(t, s, 'bia')
+  s.fake.state.transferAnswer = 'timeout'
+  const id = opId()
+  const first = await sendTo(t, s, 'transfer', 1000, '@bia', { id })
+  t.is(first.r.status, 503)
+  t.is(first.r.body.error, 'resultado-incerto')
+  const externalId = first.r.body.externalId
+  t.is(s.ops.get(externalId).status, 'incerto')
+  t.is(s.fake.state.sends.transfer, 1)
+  s.fake.state.transferAnswer = 'done'
+
+  const blocked = await sendTo(t, s, 'crypto', 500, OUTSIDE)
+  t.alike(blocked.r.body, { error: 'operacao-pendente' })
+  const again = await s.step(s.m, 'transfer', first.op, { pin: PIN })
+  t.is(again.status, 200, again.text)
+  t.is(again.body.status, 'incerto')
+  t.alike((await s.step(s.m, 'transfer', { ...first.op, cents: 999 }, { pin: PIN })).body, { error: 'operacao-divergente' })
+  t.is(s.fake.state.sends.transfer, 1, 'never sent twice')
+  t.is(s.fake.state.posts.transfer, 1)
+})
+
+test('wallet completo: busy, failed and changed-fee sends; a failed one charges no fee; a down ledger refuses first', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 10000)
+  await otherMember(t, s, 'bia')
+
+  const changed = await sendTo(t, s, 'transfer', 1000, '@bia', { extra: { feeCents: 1 } })
+  t.alike(changed.r.body, { error: 'taxa-mudou' })
+
+  s.fake.state.transferAnswer = 'fail'
+  const failed = await sendTo(t, s, 'transfer', 1000, '@bia')
+  t.alike(failed.r.body, { error: 'indisponivel', externalId: failed.r.body.externalId })
+  t.is(s.ops.get(failed.r.body.externalId).status, 'falhou')
+  t.is(s.fake.state.credited.get(TREASURY), undefined, 'no treasury transfer after a failed principal')
+  t.is(s.fake.state.sends.transfer, 0)
+  s.fake.state.transferAnswer = 'done'
+
+  s.fake.script({ transfer (req, res, ctx) { ctx.json(res, 409, { success: false, errorCode: 'WALLET_BUSY' }) } })
+  const busy = await sendTo(t, s, 'transfer', 1000, '@bia')
+  t.is(busy.r.status, 503)
+  t.is(busy.r.body.error, 'indisponivel')
+  t.is(s.ops.get(busy.r.body.externalId).status, 'falhou')
+
+  s.fake.script({ transfer (req, res, ctx) { ctx.json(res, 409, { success: false, errorCode: 'TRANSFER_IN_PROGRESS' }) } })
+  const inProgress = await sendTo(t, s, 'transfer', 1000, '@bia')
+  t.is(inProgress.r.body.error, 'resultado-incerto')
+  t.is(s.ops.get(inProgress.r.body.externalId).status, 'incerto')
+  t.alike((await sendTo(t, s, 'transfer', 500, '@bia')).r.body, { error: 'operacao-pendente' })
+  s.fake.script({})
+
+  const posts = s.fake.state.posts.transfer
+  s.ops.available = () => false
+  const down = await s.step(s.m, 'transfer', { ...changed.op, opId: opId(), feeCents: 20 }, { pin: PIN })
+  t.is(down.status, 503)
+  t.alike(down.body, { error: 'indisponivel' })
+  t.ok(logged(s, 'armazenamento-indisponivel'))
+  t.is(s.fake.state.posts.transfer, posts, 'no provider call')
+})
+
+test('wallet completo: a send above one transfer is valor-invalido before any row', async (t) => {
+  const s = await setup(t, { mode: 'completo', maxCents: MAX_TRANSFER_CENTS * 2 })
+  await funded(t, s, 10000)
+  await otherMember(t, s, 'bia')
+  const op = { opId: opId(), cents: MAX_TRANSFER_CENTS + 1, to: '@bia', feeCents: 0, pendingFeeCents: 0, pendingFeeRef: '', totalDebitCents: MAX_TRANSFER_CENTS + 1 }
+  const ledgerBefore = s.ledger()
+  t.alike((await s.step(s.m, 'transfer', op, { pin: PIN })).body, { error: 'valor-invalido' })
+  t.alike((await s.step(s.m, 'transfer', { ...op, cents: 0, totalDebitCents: 0 }, { pin: PIN })).body, { error: 'valor-invalido' })
+  t.is(s.ledger(), ledgerBefore)
+  t.alike((await s.step(s.m, 'transfer', { ...op, cents: 100, totalDebitCents: 100 }, { pin: '12' })).body, { error: 'pin-invalido' })
 })

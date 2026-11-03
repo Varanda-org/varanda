@@ -48,8 +48,11 @@ function parseFees (env = {}) {
   if (rates.deposit.cents !== 0 || rates.deposit.bps !== 0) {
     throw new RangeError('VARANDA_FEE_DEPOSIT_* ainda não suportado')
   }
-  // A swap debits USDC: a fixed BRL fee would need an exchange rate.
-  if (rates.swap.cents !== 0) throw new RangeError('VARANDA_FEE_SWAP_CENTS não suportado')
+  // A USDC to BRLA conversion is the member's own money changing form, and
+  // the owner ruled it is never charged.
+  if (rates.swap.cents !== 0 || rates.swap.bps !== 0) {
+    throw new RangeError('VARANDA_FEE_SWAP_* ainda não suportado')
+  }
 
   const rawTreasury = env.VARANDA_FEE_TREASURY
   const treasuryText = typeof rawTreasury === 'string' ? rawTreasury.trim() : ''
@@ -140,7 +143,8 @@ const ZERO_QUOTE = Object.freeze({
 // above what one transfer can carry could never be collected. Never throws:
 // bad input is a refused quote with every number zero.
 function quote ({ kind, amountCents, rates, hodleFeeCents = 0, pendingFeeCents = 0, pendingFeeRef = '', maxCents, maxFeeCents, minCents = 1 } = {}) {
-  const rate = rates && KINDS.includes(kind) ? rates[kind] : null
+  // A swap is never charged, even by a rate built without parseFees.
+  const rate = rates && KINDS.includes(kind) && kind !== 'swap' ? rates[kind] : null
   if (!isValidRate(rate) ||
       !isSafeAmount(amountCents) || !isSafeAmount(hodleFeeCents) || !isSafeAmount(pendingFeeCents) ||
       typeof pendingFeeRef !== 'string' || (pendingFeeCents > 0 && pendingFeeRef === '') ||

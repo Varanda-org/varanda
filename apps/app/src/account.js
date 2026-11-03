@@ -384,7 +384,13 @@ export const ageResult = async ({ member, nonce, signature }) => {
 // body and are never kept here.
 const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const NETWORK_RE = /^[a-z]{1,16}$/
-const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
+export const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
+// The same lists as apps/cli/lib/account/wallet-routes.js. An older service
+// sends no actions, so they are derived from its mode.
+const WALLET_BASE_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
+const WALLET_MONEY_ACTIONS = Object.freeze(['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
+const WALLET_SEND_ACTIONS = Object.freeze(['transfer', 'send-crypto'])
+const WALLET_ACTIONS = Object.freeze([...WALLET_BASE_ACTIONS, 'wallet-create', ...WALLET_MONEY_ACTIONS, ...WALLET_SEND_ACTIONS])
 // The same exact hosts as apps/cli/lib/account/hodle.js; production's upload
 // URLs come from BRLA's S3 bucket and its selfie link is a Sumsub page, not
 // the documented hosts.
@@ -479,6 +485,21 @@ function parseFeeTexts (v) {
   return out
 }
 
+function modeActions (mode) {
+  if (mode === 'cadastro') return [...WALLET_BASE_ACTIONS]
+  if (mode === 'carteira') return [...WALLET_BASE_ACTIONS, 'wallet-create']
+  const money = [...WALLET_BASE_ACTIONS, 'wallet-create', ...WALLET_MONEY_ACTIONS]
+  return mode === 'completo' ? [...money, ...WALLET_SEND_ACTIONS] : money
+}
+
+function parseActions (v) {
+  if (!Array.isArray(v) || v.length > WALLET_ACTIONS.length) return null
+  if (!v.every((a) => typeof a === 'string' && WALLET_ACTIONS.includes(a))) return null
+  return new Set(v).size === v.length ? [...v] : null
+}
+
+export const hasAction = (policy, name) => isObject(policy) && Array.isArray(policy.actions) && policy.actions.includes(name)
+
 // null on any failure: walletStep treats a missing policy as off.
 export const walletPolicy = async () => {
   try {
@@ -486,7 +507,9 @@ export const walletPolicy = async () => {
     if (!isObject(data) || typeof data.available !== 'boolean' || !WALLET_MODES.includes(data.mode)) return null
     const network = data.network === undefined ? null : data.network
     if (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network))) return null
-    const out = { available: data.available, network, mode: data.mode }
+    const actions = data.actions === undefined ? modeActions(data.mode) : parseActions(data.actions)
+    if (actions === null) return null
+    const out = { available: data.available, network, mode: data.mode, actions }
     // Absent from a service without the money routes.
     if (data.maxCents !== undefined) {
       if (!isCount(data.maxCents)) return null
@@ -591,6 +614,10 @@ const OP_KINDS = Object.freeze(['deposit', 'payout', 'transfer', 'crypto', 'swap
 const OP_STATUSES = Object.freeze(['enviado', 'incerto', 'pendente', 'expirado', 'concluido', 'falhou', 'devolvido'])
 const FEE_STATUSES = Object.freeze(['nenhuma', 'pendente', 'enviada', 'incerta', 'cobrada'])
 const DISPUTES = Object.freeze(['aberta', 'aceita', 'rejeitada', 'cancelada'])
+const OP_ASSETS = Object.freeze(['BRLA', 'USDC'])
+const FEE_ASSETS = Object.freeze(['BRL', 'USDC'])
+// The same hash forms as hodle.js accepts from the provider.
+const TX_HASH_RE = /^(0x[0-9a-fA-F]{64}|[1-9A-HJ-NP-Za-km-z]{43,88})$/
 const EXTERNAL_ID_RE = /^var-[0-9a-f]{32}$/
 const FEE_REF_RE = /^[A-Za-z0-9_.:-]{1,64}$/
 const QR_RE = /^[\x20-\x7e]{1,1024}$/
@@ -622,16 +649,41 @@ function moneyCall (action, body, opts = {}) {
 
 const signedBody = ({ member, nonce, signature, op }) => ({ member, nonce, op, signature })
 
+// A USDC fee is counted in micros and never read as centavos. BRL is the
+// default, so a fee from an older service keeps its { cents, status } shape.
+function parseFee (v, amountOptional) {
+  if (!isObject(v) || !FEE_STATUSES.includes(v.status)) return undefined
+  const asset = v.asset ?? 'BRL'
+  if (!FEE_ASSETS.includes(asset)) return undefined
+  const cents = v.cents ?? null
+  const feeMicros = v.feeMicros ?? null
+  const amountOk = (n) => amountOptional ? (n === null || isCount(n)) : isCount(n)
+  if (asset === 'USDC') {
+    if (cents !== null || !amountOk(feeMicros)) return undefined
+    return { cents: null, feeMicros, status: v.status, asset }
+  }
+  if (feeMicros !== null || !amountOk(amountOptional ? cents : v.cents)) return undefined
+  return { cents, status: v.status }
+}
+
 // One ledger or statement row, only its known keys. undefined when malformed.
+// A USDC row carries its amount in micros; its centavos may be unknown.
 function parseOp (o) {
   if (!isObject(o)) return undefined
-  if (!OP_KINDS.includes(o.kind) || !OP_STATUSES.includes(o.status) || !isCount(o.cents)) return undefined
+  if (!OP_KINDS.includes(o.kind) || !OP_STATUSES.includes(o.status)) return undefined
+  const asset = o.asset ?? null
+  if (asset !== null && !OP_ASSETS.includes(asset)) return undefined
+  const amountMicros = o.amountMicros ?? null
+  const feeMicros = o.feeMicros ?? null
+  if (asset === 'USDC' ? !isCount(amountMicros) : amountMicros !== null) return undefined
+  if (feeMicros !== null && (asset !== 'USDC' || !isCount(feeMicros))) return undefined
+  if (o.cents === null ? asset !== 'USDC' : !isCount(o.cents)) return undefined
   const hodleFeeCents = o.hodleFeeCents ?? null
   if (hodleFeeCents !== null && !isCount(hodleFeeCents)) return undefined
   let fee = null
   if (o.fee !== undefined && o.fee !== null) {
-    if (!isObject(o.fee) || !isCount(o.fee.cents) || !FEE_STATUSES.includes(o.fee.status)) return undefined
-    fee = { cents: o.fee.cents, status: o.fee.status }
+    fee = parseFee(o.fee, false)
+    if (fee === undefined) return undefined
   }
   const dispute = o.dispute ?? null
   if (dispute !== null && !DISPUTES.includes(dispute)) return undefined
@@ -644,9 +696,16 @@ function parseOp (o) {
   const externalId = o.externalId ?? null
   if (externalId !== null && (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId))) return undefined
   const out = { kind: o.kind, status: o.status, cents: o.cents, hodleFeeCents, fee, dispute, at, to, direction, externalId }
+  if (asset !== null) out.asset = asset
+  if (amountMicros !== null) out.amountMicros = amountMicros
+  if (feeMicros !== null) out.feeMicros = feeMicros
   if (o.endToEndId !== undefined && o.endToEndId !== null) {
     if (typeof o.endToEndId !== 'string' || !E2E_RE.test(o.endToEndId)) return undefined
     out.endToEndId = o.endToEndId
+  }
+  if (o.txHash !== undefined && o.txHash !== null) {
+    if (typeof o.txHash !== 'string' || !TX_HASH_RE.test(o.txHash)) return undefined
+    out.txHash = o.txHash
   }
   return out
 }
@@ -655,12 +714,14 @@ export const walletBalance = async (args) => {
   const data = await moneyCall('balance', signedBody(args))
   const address = data.address ?? null
   const network = data.network ?? null
-  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) ||
+  // Absent from a service without USDC balances.
+  const usdcMicros = data.usdcMicros ?? 0
+  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) || !isCount(usdcMicros) ||
     (address !== null && (typeof address !== 'string' || !WALLET_ADDRESS_RE.test(address))) ||
     (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network)))) {
     throw toError('indisponivel')
   }
-  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents }
+  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents, usdcMicros }
 }
 
 // A malformed row refuses the whole page: dropping it could hide an
@@ -757,10 +818,7 @@ export function debitTerms (preview) {
 
 function parseLeg (v) {
   if (v === undefined || v === null) return null
-  if (!isObject(v) || !FEE_STATUSES.includes(v.status)) return undefined
-  const cents = v.cents ?? null
-  if (cents !== null && !isCount(cents)) return undefined
-  return { cents, status: v.status }
+  return parseFee(v, true)
 }
 
 // The principal and each fee leg are reported apart (C2): a sent payout whose
@@ -778,6 +836,29 @@ export const walletPayout = async ({ member, nonce, signature, op, pin }) => {
   }
   return { externalId, status: principal.status, fee, pendingFee }
 }
+
+// A transfer to an @nome or a send to an outside address, answered like a
+// payout plus the chain hash once the provider has one. The PIN goes into
+// this one request body, never into the signed op.
+async function sendMoney (action, { member, nonce, signature, op, pin }) {
+  const data = await moneyCall(action, { member, nonce, op, signature, pin }, { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
+  const principal = isObject(data.principal) ? data.principal : data
+  const externalId = principal.externalId ?? data.externalId
+  const txHash = principal.txHash ?? data.txHash ?? null
+  const fee = parseLeg(data.fee)
+  const pendingFee = parseLeg(data.pendingFee)
+  if (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId) || !OP_STATUSES.includes(principal.status) ||
+    fee === undefined || pendingFee === undefined || (txHash !== null && (typeof txHash !== 'string' || !TX_HASH_RE.test(txHash)))) {
+    throw uncertainError()
+  }
+  return { externalId, status: principal.status, fee, pendingFee, txHash }
+}
+
+// op: { opId, cents, to, feeCents, pendingFeeCents, pendingFeeRef, totalDebitCents }
+export const walletTransfer = (args) => sendMoney('transfer', args)
+
+// op: { opId, cents, address, feeCents, pendingFeeCents, pendingFeeRef, totalDebitCents }
+export const walletSendCrypto = (args) => sendMoney('send-crypto', args)
 
 // One of the member's own operations; the service may poll the provider but
 // never sends anything for it.

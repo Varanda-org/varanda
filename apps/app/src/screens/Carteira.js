@@ -8,15 +8,17 @@
 // each request, on leaving and on a member change (Ajustes keeps hidden
 // screens mounted, so nothing is cleared by unmounting). Once the wallet is
 // open and the operator mode moves money (pix, completo), Dinheiro below
-// shows Saldo, Receber, Pagar and Extrato under the same rules.
+// shows Saldo, Receber, Pagar and Extrato under the same rules, plus Enviar
+// and Cripto when the mode is completo.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import {
-  debitTerms, kycHash, uploadDocument, walletBalance, walletCreate, walletDeposit, walletKycDocument,
+  debitTerms, hasAction, kycHash, uploadDocument, walletBalance, walletCreate, walletDeposit, walletKycDocument,
   walletKycSubmit, walletLivenessRetry, walletLivenessValidate, walletOpStatus, walletOptin, walletPayout,
-  walletPayoutQuote, walletPolicy, walletPreview, walletStart, walletStatement, walletStatus
+  walletPayoutQuote, walletPolicy, walletPreview, walletSendCrypto, walletStart, walletStatement, walletStatus,
+  walletTransfer
 } from '../account'
 import { HELP, carteiraHelp } from '../help'
 import { isAvailable, LivenessCapture } from '../livenessCapture'
@@ -24,14 +26,16 @@ import { base64url } from '../appLinkSecret'
 import { openExternal, linkProps } from '../openExternal'
 import { pickPhoto } from '../pickPhoto'
 import { selectContents } from '../selectText'
+import { hasValidChecksum } from '../evmAddress'
 import { sha256Hex } from '../sha256'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { uploadDeps } from '../uploadFetch'
 import {
-  DISPUTE_TEXTS, FEE_STATUS_TEXTS, MIN_DEPOSIT_CENTS, MIN_PAYOUT_CENTS, PAY_TEXTS, PIX_KEY_LABELS, RECEIVE_TEXTS,
-  TEXTS, UNCERTAIN_MONEY, canonicalPixKey, cepDigits, cpfDigits, depositArrivalText, feeLines, formatBrl,
-  isBirthDate, isCep, isCpf, isPin, maskPixKey, opStatusText, parseBrl, pixKeyCandidates, walletErrorText, walletStep
+  CRYPTO_TEXTS, DISPUTE_TEXTS, FEE_STATUS_TEXTS, MIN_DEPOSIT_CENTS, MIN_PAYOUT_CENTS, PAY_TEXTS, PIX_KEY_LABELS,
+  RECEIVE_TEXTS, TEXTS, TRANSFER_TEXTS, UNCERTAIN_MONEY, canonicalPixKey, cepDigits, cpfDigits, depositArrivalText,
+  feeLines, feeLinesFor, formatBrl, formatUsdc, isBirthDate, isCep, isCpf, isPin, maskPixKey, normalizeAddress,
+  opStatusText, parseBrl, pixKeyCandidates, targetKind, walletErrorText, walletStep
 } from '../wallet'
 import { Body, Btn, Card, ErrorText, Field, Label, Notice, Page, Row, Soft, Spinner, UNCERTAIN, errorText, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
@@ -84,6 +88,11 @@ const CONFIRM_MS = 5 * 60 * 1000
 const FINAL_STATUSES = Object.freeze(['concluido', 'falhou', 'devolvido', 'expirado'])
 const OPEN_FEES = Object.freeze(['enviada', 'incerta'])
 const OPEN_STATUSES = Object.freeze(['enviado', 'incerto'])
+// Refusals of a send retry that prove its opId has no row: the service answers
+// a known opId with the stored row, and these come after that read or depend
+// only on the op itself. Any other refusal (service, ledger, terms, proof)
+// may come before the read, so it proves nothing.
+const RETRY_NOTHING_SENT = Object.freeze(['destino-invalido', 'saldo-insuficiente', 'taxa-mudou', 'limite-carteira', 'valor-invalido', 'pedido-invalido'])
 const KEEP_CONFIRM_CODES = Object.freeze(['pin-invalido', 'limite-carteira', 'indisponivel'])
 const BALANCE_NOTE = 'BRLA, vale 1 real; não rende juros.'
 const KIND_LABELS = Object.freeze({
@@ -117,6 +126,21 @@ const MONEY_TEXTS = Object.freeze({
   checking: 'O extrato mostra este pagamento. Conferindo a confirmação…',
   readFirst: 'Antes de outro pagamento, confira o extrato.',
   empty: 'Nenhuma operação nos últimos dias.'
+})
+const SEND_TEXTS = Object.freeze({
+  target: 'Digite um @nome da Varanda ou um endereço 0x.',
+  noAddress: 'Envio para endereço indisponível agora.',
+  badChecksum: 'Este endereço tem um erro de digitação: as letras maiúsculas e minúsculas não conferem. Copie o endereço de novo de quem vai receber.',
+  noNome: 'Envio por @nome indisponível agora.',
+  checkbox: 'Marque que conferiu o endereço e a rede antes de digitar a senha.',
+  // Says nothing about why: whether a name exists or has a wallet is not told.
+  badTarget: 'Não é possível enviar para este destino.',
+  previewRefused: 'Não dá para fazer este envio agora.',
+  notSettled: 'O envio ainda não foi confirmado. Você pode conferir de novo ou tentar de novo com o mesmo pedido, sem risco de enviar duas vezes.',
+  inFlight: 'Um envio ainda está em andamento. Toque em Conferir para ver se ele foi confirmado.',
+  copied: 'Endereço copiado.',
+  copyFailed: 'Não deu para copiar. Toque e segure o endereço para copiar.',
+  noReceive: 'O endereço não está disponível agora.'
 })
 const EMPTY_FORM = Object.freeze({ fullName: '', cpf: '', birth: '', email: '', cep: '', uf: '', city: '', street: '' })
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -184,9 +208,9 @@ function mintOpId () {
 }
 
 // The service's externalIdFor (wallet-ops-store.js): lets the screen find an
-// uncertain payout in the statement without asking the service to resend it.
-async function payoutExternalId (member, opId) {
-  const hex = await sha256Hex(member + ':payout:' + opId)
+// uncertain payout or send without asking the service to resend it.
+async function opExternalId (member, kind, opId) {
+  const hex = await sha256Hex(member + ':' + kind + ':' + opId)
   return hex === null ? null : 'var-' + hex.slice(0, 32)
 }
 
@@ -233,6 +257,11 @@ function Countdown ({ until, label, onExpire }) {
   return <Soft>{label} {text}</Soft>
 }
 
+function usdcText (micros) {
+  const formatted = formatUsdc(micros)
+  return formatted === null ? null : formatted + ' USDC'
+}
+
 function Line ({ label, value }) {
   return (
     <View style={styles.line}>
@@ -242,9 +271,10 @@ function Line ({ label, value }) {
   )
 }
 
+// A USDC fee is counted in micros: formatBrl would read them as centavos.
 function feeSentence (fee, prefix) {
   if (!fee || !Object.hasOwn(FEE_STATUS_TEXTS, fee.status)) return null
-  const formatted = formatBrl(fee.cents)
+  const formatted = fee.asset === 'USDC' ? usdcText(fee.feeMicros) : formatBrl(fee.cents)
   const amount = formatted !== null ? ' (' + formatted + ')' : ''
   return prefix + amount + ': ' + FEE_STATUS_TEXTS[fee.status]
 }
@@ -942,7 +972,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   )
 }
 
-// Saldo, Receber, Pagar and Extrato. Nothing here is sent twice on its own:
+// Saldo, Receber, Pagar, Enviar, Cripto and Extrato. Nothing here is sent twice on its own:
 // a deposit or a payout whose outcome is unknown keeps its opId, and only a
 // deliberate tap sends that same opId again, which the service answers with
 // the stored outcome instead of a second charge or payout.
@@ -1014,10 +1044,58 @@ function Dinheiro ({ active, policy, member, signed }) {
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(null)
 
+  // Enviar: one destination field, read as an @nome or an address.
+  const canTransfer = hasAction(policy, 'transfer')
+  const canCrypto = hasAction(policy, 'send-crypto')
+  // An unexpected network label has no warning text, so no address send.
+  const networkWarning = CRYPTO_TEXTS.onlyBrla(policy.network)
+  const [sendTarget, setSendTarget] = useState('')
+  const [sendAmount, setSendAmount] = useState('')
+  // { kind, dest, cents, preview, until }
+  const [sendConfirm, setSendConfirm] = useState(null)
+  const [sendChecked, setSendChecked] = useState(false)
+  const [sendPin, setSendPin] = useState('')
+  const sendOpRef = useRef(null)
+  // { kind, op } of the last send, for 'Tentar de novo' under the same opId.
+  const lastSendRef = useRef(null)
+  const sendExpectedRef = useRef(null)
+  // form | confirm | incerto | result
+  const [sendPhase, setSendPhaseState] = useState('form')
+  // Mirrored so a check that answers after the screen moved on can still
+  // read where the Enviar view is.
+  const sendPhaseRef = useRef('form')
+  const setSendPhase = useCallback((v) => {
+    sendPhaseRef.current = typeof v === 'function' ? v(sendPhaseRef.current) : v
+    setSendPhaseState(sendPhaseRef.current)
+  }, [])
+  const [sendResult, setSendResult] = useState(null)
+  const [sendRetryReady, setSendRetryReady] = useState(false)
+  // Like payLock, for the send in flight or with an unknown outcome.
+  const [sendLock, setSendLockState] = useState(null)
+  const sendLockRef = useRef(null)
+  const setSendLock = useCallback((v) => {
+    sendLockRef.current = v
+    setSendLockState(v)
+  }, [])
+  // Whatever path settles the current send (Conferir in the statement, a
+  // late check, the poll), an open incerto card follows it to the result.
+  const settleSend = useCallback((row) => {
+    const l = sendLockRef.current
+    if (!(l && row && l.externalId === row.externalId && !OPEN_STATUSES.includes(row.status))) return
+    setSendLock(null)
+    if (sendPhaseRef.current !== 'incerto') return
+    const kind = lastSendRef.current !== null ? lastSendRef.current.kind : l.kind
+    sendOpRef.current = null
+    setSendRetryReady(false)
+    setSendResult({ externalId: row.externalId, status: row.status, fee: row.fee, pendingFee: null, txHash: row.txHash || null, kind, confirmed: true })
+    setSendPhase('result')
+  }, [setSendLock, setSendPhase])
+
   const clearSecrets = useCallback(() => {
     setPayerCpf('')
     setBeneficiaryCpf('')
     setPayPin('')
+    setSendPin('')
   }, [])
 
   // A confirmation is only good with the PIN typed right after it, so it
@@ -1027,7 +1105,10 @@ function Dinheiro ({ active, policy, member, signed }) {
     setPreview(null)
     setConfirmUntil(0)
     setPhase((p) => (p === 'confirm' ? 'form' : p))
-  }, [])
+    setSendConfirm(null)
+    setSendChecked(false)
+    setSendPhase((p) => (p === 'confirm' ? 'form' : p))
+  }, [setSendPhase])
 
   useEffect(() => {
     if (!active) {
@@ -1073,8 +1154,8 @@ function Dinheiro ({ active, policy, member, signed }) {
   })
 
   useEffect(() => {
-    if (active && view === 'saldo') readBalance()
-    // Only on opening Saldo: readBalance changes every render.
+    if (active && (view === 'saldo' || view === 'cripto')) readBalance()
+    // Only on opening Saldo or Cripto: readBalance changes every render.
   }, [active, view])
 
   // A new amount or payer is a new charge; the same amount and payer keep the
@@ -1221,6 +1302,7 @@ function Dinheiro ({ active, policy, member, signed }) {
   const conferir = () => run(async (gen) => {
     if (mustStatement) return setError(MONEY_TEXTS.readFirst)
     if (payLockRef.current !== null) return setError(MONEY_TEXTS.inFlight)
+    if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
     const type = chosenKeyType(pixKey, keyChoice)
     if (type === null) return setError(pixKeyCandidates(pixKey).length > 1 ? MONEY_TEXTS.keyChoice : MONEY_TEXTS.key)
     const cents = parseBrl(payAmount)
@@ -1326,7 +1408,7 @@ function Dinheiro ({ active, policy, member, signed }) {
           ...debitTerms(preview)
         }
         lastOpRef.current = { ...op }
-        expectedRef.current = await payoutExternalId(member, op.opId)
+        expectedRef.current = await opExternalId(member, 'payout', op.opId)
         payCpfHashRef.current = null
         if (payOther) {
           op.beneficiaryCpf = cpfDigits(beneficiaryCpf.trim())
@@ -1442,6 +1524,7 @@ function Dinheiro ({ active, policy, member, signed }) {
   const checkItem = (externalId) => run(async (gen) => {
     const row = await signed('op-status', { externalId }, walletOpStatus)
     settleLock(row)
+    settleSend(row)
     if (gen !== genRef.current) return
     setItems((list) => (list === null
       ? list
@@ -1476,6 +1559,206 @@ function Dinheiro ({ active, policy, member, signed }) {
     leaveConfirm()
     setError(MONEY_TEXTS.confirmExpired)
   }, [leaveConfirm])
+
+  // Enviar. The preview is read on Conferir only; the destination is checked
+  // by the service at send time, never looked up from this screen.
+  const editSend = (setter) => (t) => {
+    setter(t)
+    dropConfirm()
+  }
+
+  const sendRefusalText = (err) => (err && err.code === 'destino-invalido'
+    ? SEND_TEXTS.badTarget
+    : walletErrorText(err) || errorText(err))
+
+  const conferirSend = () => run(async (gen) => {
+    if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
+    if (payLockRef.current !== null) return setError(MONEY_TEXTS.inFlight)
+    const target = targetKind(sendTarget)
+    if (target === null) return setError(SEND_TEXTS.target)
+    if (target === 'nome' && !canTransfer) return setError(SEND_TEXTS.noNome)
+    if (target === 'address' && (!canCrypto || networkWarning === null)) return setError(SEND_TEXTS.noAddress)
+    const cents = parseBrl(sendAmount)
+    if (cents === null || cents < 1) return setError(MONEY_TEXTS.amount)
+    const raw = sendTarget.trim().replace(/^@/, '')
+    const kind = target === 'nome' ? 'transfer' : 'crypto'
+    // A send to an outside address cannot be undone, so a mixed-case address
+    // must carry a valid EIP-55 checksum before it is lowercased.
+    if (kind === 'crypto' && !hasValidChecksum(raw)) return setError(SEND_TEXTS.badChecksum)
+    const dest = kind === 'transfer' ? raw.toLowerCase() : normalizeAddress(raw)
+    if (dest === null) return setError(SEND_TEXTS.target)
+    if (sendOpRef.current === null) sendOpRef.current = mintOpId()
+    if (sendOpRef.current === null) return setError(MONEY_TEXTS.noRandom)
+    const p = await signed('preview', { kind, cents }, walletPreview)
+    if (gen !== genRef.current) return
+    if (p.ok !== true) return setError(walletErrorText({ code: p.reason }) || SEND_TEXTS.previewRefused)
+    if (feeLinesFor(p, kind) === null) return setError(SEND_TEXTS.previewRefused)
+    setSendConfirm({ kind, dest, cents, preview: p, until: Date.now() + CONFIRM_MS })
+    setSendChecked(false)
+    setSendPhase('confirm')
+  })
+
+  const resetSend = () => {
+    setSendPhase('form')
+    setSendResult(null)
+    setSendConfirm(null)
+    setSendChecked(false)
+    setSendTarget('')
+    setSendAmount('')
+    setSendRetryReady(false)
+    setSendPin('')
+    sendOpRef.current = null
+    lastSendRef.current = null
+    sendExpectedRef.current = null
+    setError('')
+    setNote('')
+  }
+
+  // A definite refusal is final for its opId, so the next attempt gets a
+  // fresh one; a wrong PIN or a passing limit keeps the confirmation.
+  const sendRefused = (err, retry) => {
+    sendOpRef.current = null
+    setError(sendRefusalText(err))
+    if (!retry && KEEP_CONFIRM_CODES.includes(err && err.code)) {
+      sendOpRef.current = mintOpId()
+      return
+    }
+    setSendConfirm(null)
+    setSendChecked(false)
+    setSendPhase('form')
+    setSendRetryReady(false)
+  }
+
+  // retry: the same op under the same opId, which the service answers with
+  // the stored outcome instead of a second send. The PIN goes into this one
+  // request and leaves the state before it is sent.
+  const sendPay = (retry) => run(async () => {
+    const chosen = sendPin
+    setSendPin('')
+    if (!isPin(chosen)) return setError('Digite a senha de 6 dígitos (PIN) da carteira.')
+    let kind
+    let op
+    if (retry) {
+      if (lastSendRef.current === null) return
+      kind = lastSendRef.current.kind
+      op = { ...lastSendRef.current.op }
+    } else {
+      if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
+      if (sendConfirm === null || Date.now() >= sendConfirm.until || sendOpRef.current === null) {
+        dropConfirm()
+        return setError(MONEY_TEXTS.confirmExpired)
+      }
+      if (sendConfirm.kind === 'crypto' && !sendChecked) return setError(SEND_TEXTS.checkbox)
+      kind = sendConfirm.kind
+      op = { opId: sendOpRef.current, cents: sendConfirm.cents }
+      if (kind === 'transfer') op.to = sendConfirm.dest
+      else op.address = sendConfirm.dest
+      Object.assign(op, debitTerms(sendConfirm.preview))
+      lastSendRef.current = { kind, op: { ...op } }
+      sendExpectedRef.current = await opExternalId(member, kind, op.opId)
+    }
+    const lock = { opId: op.opId, externalId: sendExpectedRef.current, kind, sentAt: Date.now(), inFlight: true }
+    setSendLock(lock)
+    const send = kind === 'transfer' ? walletTransfer : walletSendCrypto
+    let out
+    try {
+      out = await signed(kind === 'transfer' ? 'transfer' : 'send-crypto', op, (a) => send({ ...a, pin: chosen }))
+    } catch (err) {
+      // On a retry, operacao-pendente may be the first request still inside
+      // the service: nothing is known about this opId yet.
+      if ((err && err.uncertain === true) || (retry && err && err.code === 'operacao-pendente')) {
+        setSendLock({ ...lock, inFlight: false })
+        setSendPhase('incerto')
+        setSendRetryReady(false)
+        setSendConfirm(null)
+        setSendChecked(false)
+      } else if (retry && !RETRY_NOTHING_SENT.includes(err && err.code)) {
+        // The first attempt may still settle, so the lock and the opId stay.
+        setSendLock({ ...lock, inFlight: false })
+        setError(sendRefusalText(err))
+      } else {
+        // A definite refusal: nothing was sent under this opId.
+        setSendLock(null)
+        sendRefused(err, retry)
+      }
+      return
+    }
+    setError('')
+    setSendConfirm(null)
+    setSendChecked(false)
+    setSendRetryReady(false)
+    setSendLock({ ...lock, externalId: out.externalId, inFlight: false })
+    settleSend(out)
+    if (OPEN_STATUSES.includes(out.status)) {
+      setSendPhase('incerto')
+      return
+    }
+    sendOpRef.current = null
+    setSendResult({ ...out, kind, confirmed: true })
+    setSendPhase('result')
+  })
+
+  // An unknown send is settled by op-status (the service reads the provider
+  // statement by reference); a statement read alone does not move its row.
+  const checkSend = () => run(async (gen) => {
+    const l = sendLockRef.current
+    const id = l !== null && l.externalId !== null ? l.externalId : sendExpectedRef.current
+    if (id === null) return
+    let row
+    try {
+      row = await signed('op-status', { externalId: id }, walletOpStatus)
+    } catch (err) {
+      // An unanswered check proves nothing: the lock and the opId stay.
+      if (gen === genRef.current) setSendRetryReady(true)
+      throw err
+    }
+    // A settled row moves the incerto card to the result here, even when
+    // this answer arrives after the screen moved on.
+    settleSend(row)
+    if (gen !== genRef.current) return
+    if (OPEN_STATUSES.includes(row.status)) {
+      setSendPhase('incerto')
+      setSendRetryReady(true)
+      setNote(SEND_TEXTS.notSettled)
+    }
+  })
+
+  const sendResultId = sendResult && sendResult.externalId
+  const sendOpen = sendPhase === 'result' && !!sendResult && !(sendResult.confirmed === true && isFinal(sendResult))
+  useEffect(() => {
+    if (!active || view !== 'enviar' || !sendResultId || !sendOpen) return
+    const timer = setInterval(async () => {
+      if (busyRef.current) return
+      const gen = genRef.current
+      try {
+        const row = await signed('op-status', { externalId: sendResultId }, walletOpStatus)
+        settleSend(row)
+        if (gen !== genRef.current) return
+        if (OPEN_STATUSES.includes(row.status)) {
+          setSendRetryReady(true)
+          setSendPhase('incerto')
+          return
+        }
+        setSendResult((r) => (r && r.externalId === row.externalId ? { ...r, status: row.status, fee: row.fee, txHash: row.txHash || r.txHash, confirmed: true } : r))
+      } catch {}
+    }, POLL_EVERY_MS)
+    return () => clearInterval(timer)
+  }, [active, view, sendResultId, sendOpen, signed, settleSend, setSendPhase])
+
+  // A send in flight or already sent is past its confirmation: the countdown
+  // left on screen must not touch it.
+  const onSendExpired = useCallback(() => {
+    if (sendLockRef.current !== null || sendPhaseRef.current !== 'confirm') return
+    dropConfirm()
+    setSendPin('')
+    setError(MONEY_TEXTS.confirmExpired)
+  }, [dropConfirm])
+
+  const copyAddress = async () => {
+    const address = bal && bal.address
+    if (typeof address !== 'string') return
+    setNote(await copyText(shareNav(), address) ? SEND_TEXTS.copied : SEND_TEXTS.copyFailed)
+  }
 
   const off = busy || !active
   const locked = payLock !== null
@@ -1618,6 +1901,151 @@ function Dinheiro ({ active, policy, member, signed }) {
     }
   }
 
+  const canSendAddress = canCrypto && networkWarning !== null
+  if (view === 'enviar') {
+    const sendLocked = sendLock !== null
+    const sendLockNote = sendLocked
+      ? (
+        <>
+          <Notice>{SEND_TEXTS.inFlight}</Notice>
+          <Btn label='Conferir' secondary onPress={checkSend} pending={busy} disabled={off} />
+        </>
+        )
+      : null
+    const sendLines = sendConfirm !== null ? feeLinesFor(sendConfirm.preview, sendConfirm.kind) : null
+    const sendKind = lastSendRef.current !== null ? lastSendRef.current.kind : null
+    if (sendPhase === 'form') {
+      const typed = targetKind(sendTarget)
+      content = (
+        <>
+          <Body>Enviar BRLA</Body>
+          <Soft>{canSendAddress ? 'Para um @nome da Varanda ou para um endereço 0x.' : 'Para um @nome da Varanda.'}</Soft>
+          <Field
+            label={canSendAddress ? 'Para (@nome ou endereço 0x)' : 'Para (@nome)'}
+            value={sendTarget}
+            onChangeText={editSend(setSendTarget)}
+            maxLength={64}
+            editable={!off}
+            mono
+          />
+          {typed === 'address' && canSendAddress ? <Notice>{networkWarning}</Notice> : null}
+          <Field label='Valor (R$)' value={sendAmount} onChangeText={editSend(setSendAmount)} maxLength={16} editable={!off} mono />
+          {payLock !== null ? <Notice>{MONEY_TEXTS.inFlight}</Notice> : null}
+          {sendLockNote}
+          <Btn label='Conferir' onPress={conferirSend} pending={busy} disabled={off || sendLocked} />
+        </>
+      )
+    } else if (sendPhase === 'confirm' && sendConfirm !== null && sendLines !== null) {
+      const isAddress = sendConfirm.kind === 'crypto'
+      const reserved = Number.isSafeInteger(sendConfirm.preview.reservedFeeCents) && sendConfirm.preview.reservedFeeCents > 0
+        ? formatBrl(sendConfirm.preview.reservedFeeCents)
+        : null
+      content = (
+        <Card>
+          <Label>Quem recebe</Label>
+          {isAddress
+            ? (
+              <>
+                <Text style={styles.code} selectable>{sendConfirm.dest}</Text>
+                <Soft>{CRYPTO_TEXTS.CONFIRM_ADDRESS}</Soft>
+                <Notice>{networkWarning}</Notice>
+              </>
+              )
+            : (
+              <>
+                <Body>@{displayText(sendConfirm.dest)}</Body>
+                <Soft>{TRANSFER_TEXTS.CONFIRM_NOME}</Soft>
+              </>
+              )}
+          {sendLines.map((l) => <Line key={l.label} label={l.label} value={l.value} />)}
+          {reserved !== null ? <Soft>{'Reservado para taxas pendentes: ' + reserved + ' (fica na sua conta até ser cobrado).'}</Soft> : null}
+          <Countdown key={sendConfirm.until} until={sendConfirm.until} label='A conferência vale por mais' onExpire={onSendExpired} />
+          {isAddress
+            ? <Check label={CRYPTO_TEXTS.CHECKBOX} checked={sendChecked} onToggle={() => { setSendChecked(!sendChecked); setSendPin('') }} disabled={off} />
+            : null}
+          {!isAddress || sendChecked
+            ? <PinField label='Senha de 6 dígitos (PIN)' value={sendPin} onChangeText={setSendPin} editable={!off} />
+            : null}
+          {sendLockNote}
+          <Row>
+            <Btn
+              label={'Enviar ' + formatBrl(sendConfirm.preview.totalDebitCents)}
+              onPress={() => sendPay(false)}
+              pending={busy}
+              disabled={off || sendLocked || (isAddress && !sendChecked)}
+            />
+            <Btn label='Alterar' secondary onPress={() => { dropConfirm(); setSendPin('') }} disabled={busy} />
+          </Row>
+        </Card>
+      )
+    } else if (sendPhase === 'incerto') {
+      content = (
+        <Card>
+          <Notice>{sendKind === 'crypto' ? CRYPTO_TEXTS.UNCERTAIN : TRANSFER_TEXTS.UNCERTAIN}</Notice>
+          <Btn label='Conferir o extrato' onPress={checkSend} pending={busy} disabled={off} />
+          {sendRetryReady
+            ? (
+              <>
+                <PinField label='Senha de 6 dígitos (PIN)' value={sendPin} onChangeText={setSendPin} editable={!off} />
+                <Btn label='Tentar de novo' onPress={() => sendPay(true)} pending={busy} disabled={off} />
+              </>
+              )
+            : null}
+        </Card>
+      )
+    } else if (sendPhase === 'result' && sendResult !== null) {
+      const feeText = feeSentence(sendResult.fee, 'Taxa da Varanda')
+      const pendingText = feeSentence(sendResult.pendingFee, 'Taxa pendente anterior')
+      content = (
+        <Card>
+          <Label>Envio</Label>
+          <Body>{opStatusText(sendResult.kind, sendResult.status)}</Body>
+          {sendResult.txHash ? <Soft>Transação: {displayText(sendResult.txHash)}</Soft> : null}
+          {feeText ? <Soft>{feeText}</Soft> : null}
+          {pendingText ? <Soft>{pendingText}</Soft> : null}
+          {sendOpen ? <Spinner /> : null}
+          {sendLockNote}
+          <Row>
+            <Btn label='Novo envio' onPress={resetSend} disabled={off || sendLocked} />
+            <Btn label='Ver extrato' secondary onPress={() => go('extrato')} disabled={busy} />
+          </Row>
+        </Card>
+      )
+    }
+  }
+
+  // Receiving from another wallet. The USDC on the address is only shown:
+  // this version neither converts nor sends it.
+  if (view === 'cripto') {
+    const warning = bal !== null ? CRYPTO_TEXTS.onlyBrla(bal.network) : null
+    const usdc = bal !== null ? usdcText(bal.usdcMicros) : null
+    content = (
+      <Card>
+        <Label>Receber de outra carteira</Label>
+        {bal === null
+          ? (busy ? <Spinner /> : <Soft>Saldo ainda não carregado.</Soft>)
+          : (bal.address !== null && warning !== null
+              ? (
+                <>
+                  <Text style={styles.code} selectable>{bal.address}</Text>
+                  <Btn label='Copiar' onPress={copyAddress} disabled={!active} />
+                  <Notice>{warning}</Notice>
+                </>
+                )
+              : <Soft>{SEND_TEXTS.noReceive}</Soft>)}
+        {usdc !== null
+          ? (
+            <>
+              <Line label='USDC' value={usdc} />
+              <Soft>{CRYPTO_TEXTS.USDC_HERE}</Soft>
+            </>
+            )
+          : null}
+        <Btn label='Atualizar' secondary onPress={readBalance} pending={busy} disabled={off} />
+      </Card>
+    )
+  }
+
   if (view === 'receber') {
     const final = !!charge && FINAL_STATUSES.includes(charge.status)
     const showCode = !!charge && typeof charge.qrCode === 'string' && !final && !chargeGone
@@ -1714,6 +2142,14 @@ function Dinheiro ({ active, policy, member, signed }) {
           <Btn label='Pagar' onPress={() => go('pagar')} disabled={off} />
           <Btn label='Extrato' secondary onPress={() => go('extrato')} disabled={off} />
         </Row>
+        {canTransfer || canSendAddress || canCrypto
+          ? (
+            <Row>
+              {canTransfer || canSendAddress ? <Btn label='Enviar' onPress={() => go('enviar')} disabled={off} /> : null}
+              {canCrypto ? <Btn label='Cripto' secondary onPress={() => go('cripto')} disabled={off} /> : null}
+            </Row>
+            )
+          : null}
         <Row>
           <Btn label='Atualizar' secondary onPress={readBalance} pending={busy} disabled={off} />
         </Row>
@@ -1731,16 +2167,22 @@ function Dinheiro ({ active, policy, member, signed }) {
           : (items.length === 0 ? <Soft>{MONEY_TEXTS.empty}</Soft> : null)}
         {(items || []).map((item, i) => {
           const incoming = item.direction === 'in' || item.kind === 'deposit'
+          // A row without a known direction gets no sign rather than a guess.
+          const sign = incoming ? '+ ' : (item.direction === 'out' ? '- ' : '')
           const feeText = feeSentence(item.fee, 'Taxa da Varanda')
-          const amountText = formatBrl(item.cents)
+          // A USDC row may also carry centavos from the provider; its amount is the micros.
+          const amountText = item.asset === 'USDC' ? usdcText(item.amountMicros) : formatBrl(item.cents)
           return (
             <Card key={item.externalId || 'i' + i}>
-              <Line label={KIND_LABELS[item.kind]} value={amountText === null ? '' : (incoming ? '+ ' : '- ') + amountText} />
+              <Line label={KIND_LABELS[item.kind]} value={amountText === null ? '' : sign + amountText} />
               <Soft>{opStatusText(item.kind, item.status)}</Soft>
               {item.dispute !== null ? <Soft>{DISPUTE_TEXTS[item.dispute]}</Soft> : null}
               {item.to !== null ? <Soft>Para: {displayText(item.to)}</Soft> : null}
               {item.hodleFeeCents !== null && item.hodleFeeCents > 0
                 ? <Soft>Taxa do parceiro: {formatBrl(item.hodleFeeCents)}</Soft>
+                : null}
+              {item.asset === 'USDC' && item.feeMicros > 0
+                ? <Soft>Taxa do parceiro: {usdcText(item.feeMicros)}</Soft>
                 : null}
               {feeText ? <Soft>{feeText}</Soft> : null}
               {item.at !== null ? <Soft>{dateText(item.at)}</Soft> : null}

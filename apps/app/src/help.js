@@ -191,6 +191,8 @@ const FEE_LABELS = Object.freeze({
   crypto: 'Enviar para outra carteira'
 })
 
+const CARTEIRA_COMPLETO = 'Receber dinheiro, por Pix, em BRLA ou em USDC, não tem taxa da Varanda. A taxa de uma transferência ou de um envio para outra carteira só é cobrada depois que o envio é concluído: em geral no próprio envio, e num envio seguinte quando ele conclui mais tarde ou a taxa não pôde sair na hora. Se o envio falhar, a taxa dele nunca é cobrada. Nada é reenviado sozinho. USDC que aparecer no seu endereço não pode ser convertido nesta versão.'
+
 export function carteiraHelp (policy) {
   const fees = policy && typeof policy.fees === 'object' && policy.fees !== null ? policy.fees : null
   const extra = []
@@ -201,6 +203,7 @@ export function carteiraHelp (policy) {
       .map((k) => FEE_LABELS[k] + ': ' + fees[k] + '.')
     if (lines.length > 0) extra.push('Taxa da Varanda hoje. ' + lines.join(' ') + ' Receber por Pix: sem taxa da Varanda.')
   }
+  if (policy && policy.mode === 'completo') extra.push(CARTEIRA_COMPLETO)
   const cap = policy ? PAY_TEXTS.cap(policy.maxCents) : null
   if (cap !== null) extra.push(cap)
   if (extra.length === 0) return HELP.carteira

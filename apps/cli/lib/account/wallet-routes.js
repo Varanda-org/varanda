@@ -6,7 +6,8 @@ const { canonicalOp, verifyWallet, opHash } = require('@varanda/core/lib/wallet-
 const feeMath = require('./fees')
 const { externalIdFor, OP_ID_RE } = require('./wallet-ops-store')
 const { advanceOp, normalHash, adoptableAttempt } = require('./wallet-webhook')
-const { MAX_TRANSFER_CENTS } = require('./hodle')
+const { MAX_TRANSFER_CENTS, transferState } = require('./hodle')
+const { isUsername } = require('@varanda/core/lib/account-link')
 const { createLivenessTokens } = require('./liveness-tokens')
 
 // The optional payments account with Hodle (mounted by ./server.js):
@@ -28,7 +29,8 @@ const { createLivenessTokens } = require('./liveness-tokens')
 // completo. A route outside the mode answers 404.
 //
 // pix and completo add the money actions (balance, statement, deposit,
-// payout-quote, preview, payout, op-status) over the ledger of
+// payout-quote, preview, payout, op-status; completo also transfer by @nome
+// and send-crypto to an outside address, both BRLA) over the ledger of
 // ./wallet-ops-store.js. Every operation is written there BEFORE its
 // provider call and never sent twice on our own: a lost answer leaves it
 // 'incerto' until op-status reads the outcome. A member with an unresolved
@@ -77,6 +79,9 @@ const NETWORKS = Object.freeze(['polygon', 'base'])
 const MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const BASE_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
 const MONEY_ACTIONS = Object.freeze(['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
+// completo adds sends inside BRLA: to another member by @nome and to an
+// outside address. Every action here needs the ledger.
+const LEDGER_ACTIONS = Object.freeze([...MONEY_ACTIONS, 'transfer', 'send-crypto'])
 const MONEY_MODES = Object.freeze(['pix', 'completo'])
 const MIN_DEPOSIT_CENTS = 100
 const MIN_PAYOUT_CENTS = 10
@@ -93,7 +98,11 @@ const STATEMENT_CURSOR_RE = /^([0-9]{1,15})\.([\x21-\x7e]{1,512})$/
 // The last pending fee is re-presented only while the tap is this fresh.
 const LEG_BUDGET_MS = 45 * 1000
 const MONEY_TIMEOUT_MS = 30 * 1000
-const TRANSFER_FAILED = Object.freeze(['FAILED', 'REJECTED', 'CANCELED', 'CANCELLED'])
+const TRANSFER_PENDING = Object.freeze(['PENDING', 'PROCESSING', 'QUEUED'])
+// Busy answers of a transfer: in progress may already have moved money.
+const TRANSFER_BUSY = Object.freeze(['WALLET_BUSY', 'TRANSFER_IN_PROGRESS'])
+const ADDRESS_RE = /^0x[0-9a-f]{40}$/
+const ZERO_ADDRESS = '0x' + '0'.repeat(40)
 // The recovery search around a row, and the provider's statement window.
 const FIND_BEFORE_MS = DAY_MS
 const FIND_AFTER_MS = 30 * DAY_MS
@@ -110,7 +119,7 @@ const PIX_KEY_RES = Object.freeze({
   EMAIL: /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\.[A-Za-z]{2,24}$/,
   RANDOM: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 })
-const PREVIEW_KINDS = Object.freeze(['payout'])
+const PREVIEW_KINDS = Object.freeze(['payout', 'transfer', 'crypto'])
 const ZERO_RATES = Object.freeze(Object.fromEntries(feeMath.KINDS.map((k) => [k, Object.freeze({ cents: 0, bps: 0 })])))
 // Hodle's provider statuses of a payout, a transfer or a statement row.
 const PROVIDER_STATUS = Object.freeze({
@@ -250,9 +259,10 @@ function createWalletRoutes ({
 
   const on = hodle !== null && wallets !== null
   const money = MONEY_MODES.includes(mode)
+  const completo = mode === 'completo'
   const actions = mode === 'cadastro'
     ? BASE_ACTIONS
-    : money ? [...BASE_ACTIONS, 'wallet-create', ...MONEY_ACTIONS] : [...BASE_ACTIONS, 'wallet-create']
+    : money ? [...BASE_ACTIONS, 'wallet-create', ...(completo ? LEDGER_ACTIONS : MONEY_ACTIONS)] : [...BASE_ACTIONS, 'wallet-create']
   log({ event: 'carteira', reason: on ? 'ligada' : 'desligada' })
 
   const limits = {
@@ -272,6 +282,8 @@ function createWalletRoutes ({
     quote: keyedWindow(30, 600 * 1000, now),
     preview: keyedWindow(60, 600 * 1000, now),
     payout: keyedWindow(10, DAY_MS, now),
+    transfer: keyedWindow(10, DAY_MS, now),
+    sendCrypto: keyedWindow(10, DAY_MS, now),
     opStatus: keyedWindow(60, 600 * 1000, now),
     daily: ceiling(dailyLimit, DAY_MS, now),
     // Each member's share of the ceiling, so one member cannot block the rest.
@@ -305,6 +317,8 @@ function createWalletRoutes ({
   const debiting = new Set()
 
   const over = () => refuse('limite-carteira')
+  // A send is one Hodle transfer, which carries at most MAX_TRANSFER_CENTS.
+  const sendCap = Math.min(maxCents, MAX_TRANSFER_CENTS)
 
   function storageDown () {
     log({ event: 'carteira', reason: 'armazenamento-indisponivel' })
@@ -600,7 +614,7 @@ function createWalletRoutes ({
 
   async function policy (req, res) {
     if (!limits.policy()) throw new RouteError('pedido-invalido', 429)
-    const out = { available: on, network: net, mode }
+    const out = { available: on, network: net, mode, actions: [...actions] }
     if (money) Object.assign(out, { maxCents, fees: feeMath.describe(rates) })
     send(res, 200, out)
   }
@@ -991,13 +1005,11 @@ function createWalletRoutes ({
     return sha256Hex('pix\n' + pixKeyType + '\n' + pixKey)
   }
 
-  // The same rule as hodle.js transferState: a failure status wins over a
-  // hash; done only on COMPLETED or a hash.
+  // hodle.js transferState, the one rule: a failure status wins, a pending
+  // status stays pending even with a hash, and a hash concludes only with
+  // no status at all.
   function transferOutcome (status, txHash) {
-    const s = typeof status === 'string' ? status.toUpperCase() : null
-    if (TRANSFER_FAILED.includes(s)) return 'failed'
-    if ((txHash !== undefined && txHash !== null) || s === 'COMPLETED') return 'done'
-    return 'pending'
+    return transferState(status, txHash)
   }
 
   // A fee leg's provider row: failed goes back to pendente (re-presented
@@ -1086,7 +1098,15 @@ function createWalletRoutes ({
   }
 
   function feeView (row) {
-    return row.fee.status === 'nenhuma' ? null : { cents: row.fee.cents, status: row.fee.status }
+    if (row.fee.status === 'nenhuma') return null
+    // The ledger keeps a USDC fee in micro-units in fee.cents.
+    if (row.fee.asset === 'USDC') return { asset: 'USDC', cents: null, feeMicros: row.fee.cents, status: row.fee.status }
+    return { asset: row.fee.asset, cents: row.fee.cents, status: row.fee.status }
+  }
+
+  // Micro-units ride only on USDC rows, as the app reads them.
+  function assetFields (asset, amountMicros) {
+    return asset === 'USDC' ? { asset, amountMicros } : { asset }
   }
 
   function opView (row) {
@@ -1095,11 +1115,13 @@ function createWalletRoutes ({
       kind: row.kind,
       status: row.status,
       cents: row.cents,
+      ...assetFields(row.asset, row.amountMicros),
       hodleFeeCents: row.hodleFeeCents,
       fee: feeView(row),
       dispute: row.dispute,
       to: row.to,
-      at: row.createdAt
+      at: row.createdAt,
+      ...(row.txHash && (row.kind === 'transfer' || row.kind === 'crypto') ? { txHash: row.txHash } : {})
     }
   }
 
@@ -1126,7 +1148,7 @@ function createWalletRoutes ({
       log({ event: 'carteira', reason: 'carteira-incerta' })
       throw refuse('carteira-incerta')
     }
-    return { cents: r.cents, address: e.wallet.address, network: net, pendingFeeCents: owedFeeTotal(member) }
+    return { cents: r.cents, usdcMicros: r.usdcMicros, address: e.wallet.address, network: net, pendingFeeCents: owedFeeTotal(member) }
   }
 
   function kindOf (type) {
@@ -1182,7 +1204,9 @@ function createWalletRoutes ({
     const matched = new Set()
     const items = []
     for (const o of r.operations) {
-      const feeRow = feeRowOf(member, o.reference)
+      // A USDC row never folds into a BRL ledger row or a fee leg.
+      const usdc = o.asset === 'USDC'
+      const feeRow = usdc ? null : feeRowOf(member, o.reference)
       if (feeRow !== null) {
         // A fee leg folds into its principal; a settled one is reconciled.
         if (feeRow.fee.status !== 'cobrada') {
@@ -1194,7 +1218,7 @@ function createWalletRoutes ({
         }
         continue
       }
-      const row = rowOf(member, o.externalId) || rowOf(member, o.reference)
+      const row = usdc ? null : rowOf(member, o.externalId) || rowOf(member, o.reference)
       if (row !== null) {
         if (!first && Date.parse(row.createdAt) >= cutoff) continue
         if (matched.has(row.externalId)) continue
@@ -1211,7 +1235,19 @@ function createWalletRoutes ({
         dispute: row !== null ? row.dispute : null,
         at: o.createdAt,
         to: row !== null ? row.to : null,
-        direction: o.direction || (o.type === 'deposit' ? 'in' : 'out')
+        // Our own row knows its direction; a provider row without a clear
+        // one is not guessed.
+        direction: row !== null
+          ? (row.kind === 'deposit' ? 'in' : 'out')
+          : (o.direction === 'in' || o.direction === 'out' ? o.direction : null)
+      }
+      if (row !== null) {
+        Object.assign(item, assetFields(row.asset, row.amountMicros))
+      } else if (usdc) {
+        Object.assign(item, assetFields('USDC', o.amountMicros))
+        if (o.feeMicros !== undefined) item.feeMicros = o.feeMicros
+      } else if (o.asset !== undefined) {
+        item.asset = o.asset
       }
       if (o.endToEndId !== undefined) item.endToEndId = o.endToEndId
       items.push(item)
@@ -1229,7 +1265,8 @@ function createWalletRoutes ({
         dispute: row.dispute,
         at: row.createdAt,
         to: row.to,
-        direction: row.kind === 'deposit' ? 'in' : 'out'
+        direction: row.kind === 'deposit' ? 'in' : 'out',
+        ...assetFields(row.asset, row.amountMicros)
       })
     }
     items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
@@ -1383,7 +1420,11 @@ function createWalletRoutes ({
   async function preview (member, op) {
     opKeys(op, ['kind', 'cents'], ['quoteId'])
     if (!PREVIEW_KINDS.includes(op.kind)) throw refuse('pedido-invalido')
-    if (!intIn(op.cents, 1, maxCents)) throw refuse('valor-invalido')
+    const isSend = op.kind !== 'payout'
+    // A send has no destination here, so preview never looks a name up, and
+    // Hodle charges nothing on it.
+    if (isSend && (!completo || op.quoteId !== undefined)) throw refuse('pedido-invalido')
+    if (!intIn(op.cents, 1, isSend ? sendCap : maxCents)) throw refuse('valor-invalido')
     if (op.quoteId !== undefined && (typeof op.quoteId !== 'string' || !ID_RE.test(op.quoteId))) throw refuse('pedido-invalido')
     if (!limits.preview(member)) throw over()
     const e = await ready(member)
@@ -1403,7 +1444,7 @@ function createWalletRoutes ({
       pendingFeeRef: pf === null ? '' : pf.fee.reference,
       maxCents,
       maxFeeCents: MAX_TRANSFER_CENTS,
-      minCents: MIN_PAYOUT_CENTS
+      minCents: isSend ? 1 : MIN_PAYOUT_CENTS
     })
     return { ...q, reservedFeeCents: reservedFees(member, q.pendingFeeCents) }
   }
@@ -1585,11 +1626,17 @@ function createWalletRoutes ({
 
     // Leg 2: Varanda's fee, only once Hodle reports this payout concluded.
     // Still pending, the fee waits on the row for a later send.
-    let fee = feeCents > 0 ? { cents: feeCents, status: 'pendente' } : null
+    const { fee, pendingFee } = await feeLegs(e, pin, externalId, status, feeCents, feeRef, pf, q, started)
+    return { externalId, status, fee, pendingFee }
+  }
+
+  // Legs 2 and 3 of a debit whose principal did not fail.
+  async function feeLegs (e, pin, externalId, status, feeCents, feeRef, pf, q, started) {
+    let fee = feeCents > 0 ? { asset: 'BRL', cents: feeCents, status: 'pendente' } : null
     let legsOk = true
     if (feeCents > 0 && status === 'concluido') {
       const leg = await feeLeg(e, pin, externalId, feeCents, feeRef)
-      fee = { cents: feeCents, status: leg.status }
+      fee = { asset: 'BRL', cents: feeCents, status: leg.status }
       legsOk = leg.status === 'cobrada'
       if (leg.code === 'PIN_INVALID' || leg.code === 'PIN_LOCKED') legsOk = false
     }
@@ -1597,13 +1644,199 @@ function createWalletRoutes ({
     // Leg 3: at most one fee owed from before, while the tap is fresh.
     let pendingFee = null
     if (pf !== null && q.pendingFeeCents > 0) {
-      pendingFee = { cents: pf.fee.cents, status: pf.fee.status }
+      pendingFee = { asset: pf.fee.asset, cents: pf.fee.cents, status: pf.fee.status }
       if (legsOk && now() - started < LEG_BUDGET_MS) {
         const leg = await feeLeg(e, pin, pf.externalId, pf.fee.cents, pf.fee.reference)
-        pendingFee = { cents: pf.fee.cents, status: leg.status }
+        pendingFee = { asset: pf.fee.asset, cents: pf.fee.cents, status: leg.status }
       }
     }
-    return { externalId, status, fee, pendingFee }
+    return { fee, pendingFee }
+  }
+
+  const TRANSFER_REFUSALS = Object.freeze({
+    PIN_INVALID: 'pin-invalido',
+    PIN_LOCKED: 'pin-bloqueado',
+    INSUFFICIENT_BALANCE: 'saldo-insuficiente'
+  })
+  const SEND_KEYS = Object.freeze(['opId', 'cents', 'feeCents', 'pendingFeeCents', 'pendingFeeRef', 'totalDebitCents'])
+
+  // Every way a destination is refused answers the same bytes, so the
+  // answer never tells who holds a name or a wallet.
+  function badTarget () {
+    log({ event: 'carteira', reason: 'destino-invalido' })
+    return refuse('destino-invalido')
+  }
+
+  // Another approved member's wallet on this network, by its current name.
+  function nameTarget (member, e, name) {
+    let holder
+    try {
+      holder = store.lookup(name)
+    } catch {
+      throw storageDown()
+    }
+    if (holder === null || holder.member === member) throw badTarget()
+    const t = getEntry(holder.member)
+    if (t === null || t.subAccountId === null || t.subAccountId === e.subAccountId ||
+      t.kyc.status !== 'aprovado' || t.wallet === null || t.network !== net ||
+      feeMath.isSelfTreasury(treasury, { subAccountId: t.subAccountId, address: t.wallet.address })) throw badTarget()
+    return { toSubAccountId: t.subAccountId }
+  }
+
+  function addressTarget (e, address) {
+    if (address === ZERO_ADDRESS || address === e.wallet.address.toLowerCase() ||
+      feeMath.isSelfTreasury(treasury, { address })) throw badTarget()
+    return { recipientAddress: address }
+  }
+
+  async function transfer (member, op, pin) {
+    opKeys(op, [...SEND_KEYS, 'to'])
+    const name = typeof op.to === 'string' ? op.to.replace(/^@/, '').toLowerCase() : null
+    if (!isUsername(name)) throw refuse('pedido-invalido')
+    return brlaSend(member, op, pin, 'transfer', name)
+  }
+
+  async function sendCrypto (member, op, pin) {
+    opKeys(op, [...SEND_KEYS, 'address'])
+    const address = typeof op.address === 'string' ? op.address.toLowerCase() : null
+    if (address === null || !ADDRESS_RE.test(address)) throw refuse('pedido-invalido')
+    return brlaSend(member, op, pin, 'crypto', address)
+  }
+
+  // A BRLA send by @nome (kind transfer) or to an outside address (kind
+  // crypto), in the payout's order: every check, the row, then the one call.
+  async function brlaSend (member, op, pin, kind, dest) {
+    const opId = opIdParam(op.opId)
+    const cents = op.cents
+    // Refused before any row: the client would refuse such a row as input.
+    if (!intIn(cents, 1, sendCap)) throw refuse('valor-invalido')
+    for (const k of ['feeCents', 'pendingFeeCents', 'totalDebitCents']) if (!intIn(op[k], 0, Number.MAX_SAFE_INTEGER)) throw refuse('pedido-invalido')
+    if (typeof op.pendingFeeRef !== 'string') throw refuse('pedido-invalido')
+    if (typeof pin !== 'string' || !PIN_RE.test(pin)) throw refuse('pin-invalido')
+    const externalId = externalIdFor(member, kind, opId)
+    const to = kind === 'transfer' ? '@' + dest : '0x..' + dest.slice(-6)
+    try {
+      const e = await ready(member)
+      const existing = ledgerRead(() => ops.get(externalId))
+      if (existing !== null) {
+        // The same tap again: its stored outcome, never a second send.
+        if (existing.cents !== cents || existing.to !== to || existing.fee.cents !== op.feeCents ||
+          existing.pendingFeeCents !== op.pendingFeeCents || (existing.pendingFeeRef ?? '') !== op.pendingFeeRef ||
+          existing.totalDebitCents !== op.totalDebitCents) throw refuse('operacao-divergente')
+        return { externalId, status: existing.status, fee: feeView(existing), pendingFee: null, txHash: existing.txHash ?? null }
+      }
+      if (debiting.has(member) || unresolvedDebit(member)) throw refuse('operacao-pendente')
+      debiting.add(member)
+      try {
+        return await sendBrla(member, e, op, pin, kind, dest, externalId, to)
+      } finally {
+        debiting.delete(member)
+      }
+    } finally {
+      pin = null
+    }
+  }
+
+  async function sendBrla (member, e, op, pin, kind, dest, externalId, to) {
+    const cents = op.cents
+    const pf = owedFee(member)
+    const q = feeMath.quote({
+      kind,
+      amountCents: cents,
+      rates: memberRates(e),
+      hodleFeeCents: 0,
+      pendingFeeCents: pf === null ? 0 : pf.fee.cents,
+      pendingFeeRef: pf === null ? '' : pf.fee.reference,
+      maxCents,
+      maxFeeCents: MAX_TRANSFER_CENTS,
+      minCents: 1
+    })
+    if (feeMath.checkDebit(op, q) !== null) throw refuse('taxa-mudou')
+    if (treasury === null && (q.varandaFeeCents > 0 || q.pendingFeeCents > 0)) throw refuse('indisponivel')
+    if (!q.ok) throw refuse('valor-invalido')
+    // Spent by every well-formed attempt, a refused destination included, so
+    // the window bounds how many names one member can probe.
+    if (!(kind === 'transfer' ? limits.transfer : limits.sendCrypto)(member)) throw over()
+    // The ceiling and the balance come before the destination, so a member
+    // who cannot pay gets the same answer for every @nome and cannot use a
+    // refusal to learn which names hold a wallet.
+    dailyRoom()
+    paidCall(member)
+    const bal = await hodle.balance({ subAccountId: e.subAccountId, walletId: e.wallet.id })
+    if (!bal.ok) {
+      logProvider('saldo', bal)
+      throw refuse('indisponivel')
+    }
+    if (bal.cents < q.totalDebitCents + reservedFees(member, q.pendingFeeCents)) throw refuse('saldo-insuficiente')
+    const target = kind === 'transfer' ? nameTarget(member, e, dest) : addressTarget(e, dest)
+
+    const feeCents = q.varandaFeeCents
+    const feeRef = feeCents > 0 ? feeMath.feeReference(externalId) : null
+    const put = await write(() => ops.put({
+      externalId,
+      member,
+      kind,
+      status: 'enviado',
+      cents,
+      hodleFeeCents: 0,
+      asset: 'BRLA',
+      source: kind === 'crypto' ? 'BRLA' : null,
+      fee: { asset: 'BRL', cents: feeCents, status: feeCents > 0 ? 'pendente' : 'nenhuma', reference: feeRef },
+      to,
+      pendingFeeCents: q.pendingFeeCents,
+      pendingFeeRef: q.pendingFeeCents > 0 ? q.pendingFeeRef : null,
+      totalDebitCents: q.totalDebitCents
+    }))
+    if (put.divergent) throw refuse('operacao-divergente')
+    const started = now()
+    const row = () => readAfter(() => ops.get(externalId), externalId)
+
+    // Leg 1: the principal. The externalId is its idempotency reference.
+    const args = {
+      fromSubAccountId: e.subAccountId,
+      walletId: e.wallet.id,
+      ...target,
+      amountCents: cents,
+      walletPin: pin,
+      protectedSymmetricKey: e.wallet.protectedSymmetricKey,
+      reference: externalId
+    }
+    let r
+    try {
+      r = await hodle.transfer(args, moneyOpts())
+    } catch {
+      // The row is written, so an unexpected failure is an unknown outcome.
+      r = { ok: false, reason: 'falha', uncertain: true }
+    }
+    args.walletPin = null
+    if (!r.ok) {
+      logProvider(kind === 'transfer' ? 'transferencia' : 'envio-cripto', r)
+      const code = typeof r.code === 'string' ? r.code : null
+      // In progress may already have moved the money: only a plain refusal
+      // or a busy wallet is falhou.
+      if (code === 'TRANSFER_IN_PROGRESS' || r.uncertain === true) {
+        await writeAfter(() => advanceOp(ops, row(), { status: 'incerto' }))
+        throw refuse('resultado-incerto', { externalId })
+      }
+      await writeAfter(() => advanceOp(ops, row(), { status: 'falhou' }))
+      const token = code !== null && !TRANSFER_BUSY.includes(code) && Object.prototype.hasOwnProperty.call(TRANSFER_REFUSALS, code)
+        ? TRANSFER_REFUSALS[code]
+        : 'indisponivel'
+      throw refuse(token, { externalId })
+    }
+    log({ event: 'carteira', reason: kind === 'transfer' ? 'transferencia' : 'envio-cripto' })
+    const accepted = r.status === 'done' ? 'concluido' : 'pendente'
+    // Accepted, not yet on chain: the fee waits on the row for a later send.
+    if (accepted === 'pendente') log({ event: 'carteira', reason: 'pendente-202' })
+    await writeAfter(() => advanceOp(ops, row(), { status: accepted, providerId: r.transactionId, txHash: normalHash(r.txHash) }))
+    // A status read may have moved the row while the call was in flight.
+    const { status, txHash } = row()
+    if (status === 'falhou' || status === 'devolvido') {
+      return { externalId, status, fee: null, pendingFee: null, txHash: null }
+    }
+    const { fee, pendingFee } = await feeLegs(e, pin, externalId, status, feeCents, feeRef, pf, q, started)
+    // The hash is public on chain and lets the member check the send there.
+    return { externalId, status, fee, pendingFee, txHash: txHash ?? null }
   }
 
   // True only when Hodle answered with a status for the operation and it was
@@ -1620,6 +1853,7 @@ function createWalletRoutes ({
       await write(() => advanceOp(ops, row, { status, hodleFeeCents: s.hodleFeeCents, txHash: normalHash(s.txHash) }))
       return true
     }
+    if (row.kind === 'transfer' || row.kind === 'crypto') return pollSend(e, row)
     if (row.kind !== 'payout') return false
     if (row.providerId !== null) {
       const s = await hodle.payoutStatus(row.providerId)
@@ -1639,6 +1873,23 @@ function createWalletRoutes ({
     const status = PROVIDER_STATUS[f.operation.status]
     if (status === undefined || status === 'expirado') return false
     await write(() => advanceOp(ops, row, { status, txHash: normalHash(f.operation.txHash) }))
+    return true
+  }
+
+  // A send is found by its reference, and only the member's outbound
+  // transfer of exactly its amount counts: anyone may pick a reference.
+  async function pollSend (e, row) {
+    const f = await findAround(e, row, { reference: row.externalId })
+    if (f === null || f.operation === null) return false
+    const o = f.operation
+    if (o.type !== 'transfer' || o.direction !== 'out' || o.cents !== row.cents) return false
+    const state = transferOutcome(o.status, o.txHash)
+    let status
+    if (state === 'failed') status = 'falhou'
+    else if (state === 'done') status = 'concluido'
+    else if (TRANSFER_PENDING.includes(typeof o.status === 'string' ? o.status.toUpperCase() : '')) status = 'pendente'
+    else return false
+    await write(() => advanceOp(ops, row, { status, txHash: normalHash(o.txHash) }))
     return true
   }
 
@@ -1729,6 +1980,8 @@ function createWalletRoutes ({
     'payout-quote': (member, op) => payoutQuote(member, op),
     preview: (member, op) => preview(member, op),
     payout: (member, op, secret) => payout(member, op, secret.pin),
+    transfer: (member, op, secret) => transfer(member, op, secret.pin),
+    'send-crypto': (member, op, secret) => sendCrypto(member, op, secret.pin),
     'op-status': (member, op) => opStatus(member, op)
   }
 
@@ -1738,7 +1991,7 @@ function createWalletRoutes ({
     delete body.pin
     delete body.kyc
     available()
-    if (MONEY_ACTIONS.includes(action)) {
+    if (LEDGER_ACTIONS.includes(action)) {
       if (ops === null) throw refuse('indisponivel')
       let ok = false
       try { ok = ops.available() === true } catch {}

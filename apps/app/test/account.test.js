@@ -673,14 +673,17 @@ test('wallet error tokens map to fixed pt-BR messages', async (t) => {
   t.is(toError('resultado-incerto').code, 'indisponivel', 'resultado-incerto stays an unknown token')
 })
 
+const BASE_ACTIONS = ['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry']
+const PIX_ACTIONS = [...BASE_ACTIONS, 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status']
+
 test('walletPolicy: { available, network, mode } or null on any failure', async (t) => {
   const a = await load()
   const calls = stub(t, json(200, { available: true, network: 'polygon', mode: 'cadastro' }))
-  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'cadastro' })
+  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'cadastro', actions: BASE_ACTIONS })
   t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/wallet/policy')
   t.is(calls[0].init.body, undefined)
   stub(t, json(200, { available: false, mode: 'cadastro' }))
-  t.alike(await a.walletPolicy(), { available: false, network: null, mode: 'cadastro' })
+  t.alike(await a.walletPolicy(), { available: false, network: null, mode: 'cadastro', actions: BASE_ACTIONS })
   for (const mode of ['carteira', 'pix', 'completo']) {
     stub(t, json(200, { available: true, network: 'base', mode }))
     t.is((await a.walletPolicy()).mode, mode)
@@ -1200,7 +1203,7 @@ test('walletPolicy: maxCents and fee texts when present, refused when malformed'
   const a = await load()
   const fees = { transfer: 'sem taxa', payout: 'R$ 1,00 + 1,5%', crypto: 'sem taxa', deposit: 'sem taxa', swap: '0,5%' }
   stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxCents: 300000, fees }))
-  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'pix', maxCents: 300000, fees })
+  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'pix', actions: PIX_ACTIONS, maxCents: 300000, fees })
   for (const extra of [{ maxCents: 1.5 }, { maxCents: -1 }, { maxCents: '300000' }, { fees: [] }, { fees: { payout: 5 } },
     { fees: { payout: 'x'.repeat(65) } }, { fees: { payout: 'a\nb' } }, { fees: { 'Pay out': 'sem taxa' } }]) {
     stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', ...extra }))
@@ -1240,7 +1243,14 @@ test('money calls: path, action, the exact signed op; reads 20 s, debits and dep
 test('walletBalance: integers and the address, anything else refused', async (t) => {
   const a = await load()
   stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, extra: 'x' }))
-  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150 })
+  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 0 },
+    'an older service sends no USDC balance')
+  stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000 }))
+  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000 })
+  for (const usdcMicros of [-1, 1.5, '2500000', 2 ** 53]) {
+    stub(t, json(200, { cents: 5000, pendingFeeCents: 0, usdcMicros }))
+    await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, 'usdcMicros ' + JSON.stringify(usdcMicros))
+  }
   for (const body of [{ cents: 1.5, pendingFeeCents: 0 }, { cents: -1, pendingFeeCents: 0 }, { cents: '5000', pendingFeeCents: 0 },
     { cents: 5000 }, { cents: 5000, pendingFeeCents: 0, address: 'x' }, { cents: 5000, pendingFeeCents: 0, network: 'Poly' }]) {
     stub(t, json(200, body))
@@ -1271,6 +1281,12 @@ test('walletStatement: rows shape-checked and reduced to known keys; a bad row r
     endToEndId: 'E1234567820261030'
   }, 'txHash and asset dropped')
   t.alike(out.items[1], { kind: 'deposit', status: 'incerto', cents: 5000, hodleFeeCents: null, fee: null, dispute: null, at: null, to: null, direction: null, externalId: null })
+  // A transfer's chain hash is public and lets the member check it on chain.
+  const sent = { ...ROW, kind: 'transfer', to: '@bia', endToEndId: undefined, txHash: '0x' + 'a'.repeat(64) }
+  stub(t, json(200, { items: [sent], cursor: null }))
+  t.is((await a.walletStatement(signed({}))).items[0].txHash, '0x' + 'a'.repeat(64))
+  stub(t, json(200, { items: [{ ...sent, txHash: 'nao-e-hash' }], cursor: null }))
+  await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, 'bad txHash')
   const bad = [
     { ...ROW, kind: 'emprestimo' }, { ...ROW, status: 'feito' }, { ...ROW, cents: 1.5 }, { ...ROW, cents: -5 },
     { ...ROW, fee: { cents: 1, status: 'paga' } }, { ...ROW, fee: { cents: -1, status: 'cobrada' } },
@@ -1509,4 +1525,124 @@ test('walletOpStatus: one shape-checked row with its externalId', async (t) => {
   }
   stub(t, json(404, { error: 'nao-encontrado' }))
   await expectError(t, a.walletOpStatus(args), 'indisponivel', false, 'money route off: 404 is definite')
+})
+
+test('walletPolicy: actions listed by the service, or derived from the mode; hasAction', async (t) => {
+  const a = await load()
+  const all = [...PIX_ACTIONS, 'transfer', 'send-crypto']
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'completo', actions: all }))
+  const completo = await a.walletPolicy()
+  t.alike(completo.actions, all)
+  t.ok(a.hasAction(completo, 'transfer'))
+  t.ok(a.hasAction(completo, 'send-crypto'))
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'completo' }))
+  t.alike((await a.walletPolicy()).actions, all, 'an older service: completo includes transfer and send-crypto')
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'pix' }))
+  const pix = await a.walletPolicy()
+  t.alike(pix.actions, PIX_ACTIONS)
+  t.absent(a.hasAction(pix, 'transfer'))
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'carteira' }))
+  t.alike((await a.walletPolicy()).actions, [...BASE_ACTIONS, 'wallet-create'])
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'completo', actions: ['balance'] }))
+  const narrow = await a.walletPolicy()
+  t.ok(a.hasAction(narrow, 'balance'))
+  t.absent(a.hasAction(narrow, 'transfer'), 'the listed actions win over the mode')
+  for (const actions of [['emprestimo'], ['transfer', 'transfer'], 'transfer', [5], {}, null, new Array(30).fill('balance')]) {
+    stub(t, json(200, { available: true, network: 'polygon', mode: 'completo', actions }))
+    t.is(await a.walletPolicy(), null, JSON.stringify(actions))
+  }
+  t.absent(a.hasAction(null, 'transfer'))
+  t.absent(a.hasAction({}, 'transfer'))
+})
+
+test('WALLET_ADDRESS_RE: lowercase 0x hex40 only', async (t) => {
+  const { WALLET_ADDRESS_RE } = await load()
+  t.ok(WALLET_ADDRESS_RE.test('0x' + 'a1'.repeat(20)))
+  for (const bad of ['0x' + 'A1'.repeat(20), '0x' + 'a'.repeat(39), 'a1'.repeat(21), '0x' + 'g'.repeat(40)]) t.absent(WALLET_ADDRESS_RE.test(bad), bad)
+})
+
+const TX = '0x' + 'f'.repeat(64)
+const SEND_TERMS = { feeCents: 150, pendingFeeCents: 0, pendingFeeRef: '', totalDebitCents: 10150 }
+
+test('walletTransfer and walletSendCrypto: signed op unchanged, PIN in the body only, 100 s, never retried', async (t) => {
+  const a = await load()
+  for (const [action, fn, dest] of [['transfer', a.walletTransfer, { to: '@ana' }], ['send-crypto', a.walletSendCrypto, { address: ADDR }]]) {
+    const op = { opId: OP_ID, cents: 10000, ...dest, ...SEND_TERMS }
+    const calls = stub(t, json(200, { externalId: EXT, status: 'concluido', fee: { cents: 150, status: 'cobrada', asset: 'BRL' }, pendingFee: null, txHash: TX }))
+    const delays = spyTimeouts(t)
+    t.alike(await fn({ ...signed(op), pin: '135790' }), { externalId: EXT, status: 'concluido', fee: { cents: 150, status: 'cobrada' }, pendingFee: null, txHash: TX }, action)
+    t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/wallet/' + action)
+    t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: NONCE, op, signature: SIG, pin: '135790', action }, action + ' body')
+    t.absent(Object.keys(JSON.parse(calls[0].init.body).op).includes('pin'), 'the PIN is not in the signed op')
+    t.ok(delays.includes(100000), action + ' timeout')
+    const sent = stub(t, () => { throw new Error('rede') })
+    await expectError(t, fn({ ...signed(op), pin: '135790' }), 'indisponivel', true, action + ' no answer')
+    t.is(sent.length, 1, action + ' never retried')
+  }
+})
+
+test('walletTransfer: success shapes, incerto, destino-invalido, malformed fee', async (t) => {
+  const a = await load()
+  const args = { ...signed({ opId: OP_ID, cents: 10000, to: '@ana', ...SEND_TERMS }), pin: '135790' }
+  stub(t, json(200, { externalId: EXT, status: 'pendente', fee: { cents: 150, status: 'pendente' } }))
+  t.alike(await a.walletTransfer(args), { externalId: EXT, status: 'pendente', fee: { cents: 150, status: 'pendente' }, pendingFee: null, txHash: null }, 'a 202 pending transfer')
+  stub(t, json(200, { principal: { externalId: EXT, status: 'concluido', txHash: TX }, fee: null, pendingFee: { cents: 90, status: 'cobrada' } }))
+  t.alike(await a.walletTransfer(args), { externalId: EXT, status: 'concluido', fee: null, pendingFee: { cents: 90, status: 'cobrada' }, txHash: TX }, 'nested principal')
+  stub(t, json(200, { externalId: EXT, status: 'incerto' }))
+  t.is((await a.walletTransfer(args)).status, 'incerto', 'a stored incerto row is a known answer')
+  stub(t, json(503, { error: 'resultado-incerto', externalId: EXT }))
+  await expectError(t, a.walletTransfer(args), 'indisponivel', true, 'resultado-incerto')
+  stub(t, json(400, { error: 'destino-invalido' }))
+  const e = await expectError(t, a.walletTransfer(args), 'destino-invalido', false)
+  t.is(e.message, 'Destino inválido.')
+  for (const bad of [{ fee: { cents: 1, status: 'paga' } }, { fee: { cents: -1, status: 'cobrada' } }, { fee: { cents: 150, status: 'cobrada', asset: 'EUR' } },
+    { fee: { cents: 150, status: 'cobrada', asset: 'USDC' } }, { fee: { cents: 150, status: 'cobrada', feeMicros: 5 } }, { pendingFee: 'sim' },
+    { txHash: '0x123' }, { txHash: 5 }, { status: 'pago' }, { externalId: 'var-x' }]) {
+    stub(t, json(200, { externalId: EXT, status: 'concluido', ...bad }))
+    await expectError(t, a.walletTransfer(args), 'indisponivel', true, 'unusable success: ' + JSON.stringify(bad))
+  }
+  stub(t, json(200, { externalId: EXT, status: 'concluido', fee: { feeMicros: 5000, status: 'cobrada', asset: 'USDC' } }))
+  t.alike((await a.walletTransfer(args)).fee, { cents: null, feeMicros: 5000, status: 'cobrada', asset: 'USDC' }, 'a USDC fee stays in micros')
+})
+
+test('walletStatement: USDC rows in micros; BRL rows without the new fields unchanged; a bad USDC amount refuses the page', async (t) => {
+  const a = await load()
+  const usdc = { kind: 'crypto', status: 'concluido', asset: 'USDC', cents: null, amountMicros: 2500000, feeMicros: 1000, hodleFeeCents: null, direction: null, at: '2026-11-01T10:00:00.000Z' }
+  const brla = { ...ROW, kind: 'transfer', asset: 'BRLA', to: '@ana', direction: 'in' }
+  stub(t, json(200, { items: [ROW, usdc, brla], cursor: null }))
+  const out = await a.walletStatement(signed({}))
+  t.absent('asset' in out.items[0], 'a BRL row without the new fields keeps its shape')
+  t.absent('amountMicros' in out.items[0])
+  t.alike(out.items[1], {
+    kind: 'crypto',
+    status: 'concluido',
+    cents: null,
+    hodleFeeCents: null,
+    fee: null,
+    dispute: null,
+    at: usdc.at,
+    to: null,
+    direction: null,
+    externalId: null,
+    asset: 'USDC',
+    amountMicros: 2500000,
+    feeMicros: 1000
+  })
+  t.is(out.items[2].asset, 'BRLA')
+  t.is(out.items[2].cents, 10000)
+  stub(t, json(200, { items: [{ ...usdc, cents: 1300 }], cursor: null }))
+  t.is((await a.walletStatement(signed({}))).items[0].cents, 1300, 'a USDC row may carry its value in centavos')
+  stub(t, json(200, { items: [{ ...usdc, fee: { asset: 'USDC', feeMicros: 500, status: 'cobrada' } }], cursor: null }))
+  t.alike((await a.walletStatement(signed({}))).items[0].fee, { cents: null, feeMicros: 500, status: 'cobrada', asset: 'USDC' })
+  const bad = [
+    { ...usdc, amountMicros: 1.5 }, { ...usdc, amountMicros: -1 }, { ...usdc, amountMicros: '2500000' }, { ...usdc, amountMicros: null },
+    { ...usdc, amountMicros: 2 ** 53 }, { ...usdc, asset: 'USDT' }, { ...usdc, feeMicros: -1 }, { ...ROW, cents: null },
+    { ...ROW, asset: 'BRLA', cents: null }, { ...ROW, amountMicros: 5 }, { ...ROW, feeMicros: 5 },
+    { ...usdc, fee: { asset: 'USDC', cents: 500, status: 'cobrada' } }, { ...usdc, fee: { asset: 'USDC', feeMicros: 1.5, status: 'cobrada' } },
+    { ...ROW, fee: { cents: 150, status: 'cobrada', asset: 'EUR' } }, { ...ROW, fee: { cents: null, status: 'cobrada' } }
+  ]
+  for (const row of bad) {
+    stub(t, json(200, { items: [ROW, row], cursor: null }))
+    await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, JSON.stringify(row))
+  }
 })

@@ -170,6 +170,49 @@ export function formatBrl (cents) {
   return 'R$ ' + grouped + ',' + frac
 }
 
+// Same rule as parseBrl: a float cannot hold six decimal places, so the digits
+// stay a string until they are an integer count of micros. The caller adds
+// the USDC label. The comma is the decimal mark and a dot only groups
+// thousands, as in reais, so '1.000' is a thousand on both fields.
+const USDC_SCALE = 1000000
+const USDC_RE = /^(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,6}))?$/
+// Hodle moves at most 10000 units of an asset per transfer or swap.
+const MAX_USDC_MICROS = 10000 * USDC_SCALE
+
+export function parseUsdc (text) {
+  if (typeof text !== 'string') return null
+  const trimmed = text.trim().replace(/[\u00a0\u202f]/g, ' ').trim()
+  if (trimmed.length === 0 || trimmed.length > 40) return null
+  const match = USDC_RE.exec(trimmed)
+  if (!match) return null
+  const whole = match[1].replace(/\./g, '')
+  const frac = match[2] || ''
+  if (whole.length > 15) return null
+  const wholeNum = Number(whole)
+  const fracNum = Number(frac.padEnd(6, '0'))
+  if (!Number.isSafeInteger(wholeNum) || !Number.isSafeInteger(fracNum)) return null
+  if (wholeNum > Math.floor(Number.MAX_SAFE_INTEGER / USDC_SCALE)) return null
+  const micros = wholeNum * USDC_SCALE + fracNum
+  if (!Number.isSafeInteger(micros) || micros > MAX_USDC_MICROS) return null
+  return micros
+}
+
+export function formatUsdc (micros) {
+  if (!Number.isSafeInteger(micros) || micros < 0) return null
+  const whole = Math.floor(micros / USDC_SCALE)
+  // At least two decimals, like reais. USDC has six places, so 0,000001 stays
+  // visible and a whole cent of USDC does not keep four trailing zeros.
+  const frac = String(micros % USDC_SCALE).padStart(6, '0').replace(/0+$/, '')
+  const decimals = frac.length < 2 ? frac.padEnd(2, '0') : frac
+  const digits = String(whole)
+  let grouped = ''
+  for (let i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 === 0) grouped += '.'
+    grouped += digits[i]
+  }
+  return grouped + ',' + decimals
+}
+
 // Hodle's pixKeyType on the wire. A random key is RANDOM; the label is what the screen shows.
 export const PIX_KEY_LABELS = Object.freeze({
   PHONE: 'telefone',
@@ -281,9 +324,49 @@ function feeLine (label, value) {
   return Object.freeze({ label, value })
 }
 
+// 0x plus 40 hex, any case. The zero address is not a destination: a send
+// there burns the funds.
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
+const ZERO_ADDRESS = '0x' + '0'.repeat(40)
+// Copied from packages/core/lib/account-link.js so this module stays
+// standalone. A 6-hex name reads like the fallback handle '@' + key.slice(0, 6).
+const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
+const HEX6_RE = /^[0-9a-f]{6}$/
+
+export function isEvmAddress (s) {
+  return typeof s === 'string' && EVM_ADDRESS_RE.test(s) && s.toLowerCase() !== ZERO_ADDRESS
+}
+
+export function normalizeAddress (s) {
+  return isEvmAddress(s) ? s.toLowerCase() : null
+}
+
+// Ledger rows keep '0x..' plus the last 6 hex, never the full address.
+export function shortAddress (s) {
+  const address = normalizeAddress(s)
+  return address === null ? null : '0x..' + address.slice(-6)
+}
+
+export function targetKind (text) {
+  if (typeof text !== 'string') return null
+  const normalized = text.trim().replace(/^@/, '').toLowerCase()
+  if (USERNAME_RE.test(normalized) && !HEX6_RE.test(normalized)) return 'nome'
+  if (isEvmAddress(normalized)) return 'address'
+  return null
+}
+
+// A transfer or an address send is not a Pix, so its fee waits for that send.
+// Amounts stay the preview the member signs: this does not recompute a rate.
+const VARANDA_FEE_LATER = Object.freeze({
+  payout: 'Taxa da Varanda (cobrada depois que o Pix for concluído)',
+  transfer: 'Taxa da Varanda (cobrada depois que o envio for concluído)',
+  crypto: 'Taxa da Varanda (cobrada depois que o envio for concluído)'
+})
+
 // Prints the server preview as given. Recomputing the rate here would let the
 // screen show a different charge from the one the PIN confirms.
-export function feeLines (preview) {
+export function feeLinesFor (preview, kind) {
+  if (typeof kind !== 'string' || !Object.hasOwn(VARANDA_FEE_LATER, kind)) return null
   const amount = centsOf(preview, 'amountCents')
   const varanda = centsOf(preview, 'varandaFeeCents')
   const hodle = centsOf(preview, 'hodleFeeCents')
@@ -293,14 +376,19 @@ export function feeLines (preview) {
   if (amount === null || varanda === null || hodle === null || pending === null || total === null || net === null) return null
   const lines = [
     feeLine('Valor', formatBrl(amount)),
-    // The new fee leaves only after the Pix concludes, in a later send.
-    feeLine(varanda === 0 ? 'Taxa da Varanda' : 'Taxa da Varanda (cobrada depois que o Pix for concluído)', varanda === 0 ? 'sem taxa' : formatBrl(varanda)),
+    // The new fee leaves only once that send has concluded.
+    feeLine(varanda === 0 ? 'Taxa da Varanda' : VARANDA_FEE_LATER[kind], varanda === 0 ? 'sem taxa' : formatBrl(varanda)),
     feeLine('Taxa do parceiro', formatBrl(hodle))
   ]
   if (pending > 0) lines.push(feeLine('Taxas pendentes', formatBrl(pending)))
   lines.push(feeLine('Total debitado', formatBrl(total)))
   lines.push(feeLine('Quem recebe ganha', formatBrl(net)))
   return Object.freeze(lines)
+}
+
+// Callers that already render a Pix preview keep the payout sentence.
+export function feeLines (preview) {
+  return feeLinesFor(preview, 'payout')
 }
 
 export const UNCERTAIN_MONEY = 'Não deu para confirmar se o envio foi feito. Confira o extrato antes de repetir: nada é reenviado sozinho.'
@@ -331,7 +419,7 @@ export const DISPUTE_TEXTS = Object.freeze({
 
 export const FEE_STATUS_TEXTS = Object.freeze({
   cobrada: 'Taxa cobrada.',
-  pendente: 'Taxa pendente: será cobrada num próximo envio seu, depois que o Pix for concluído. Se ele falhar ou voltar antes, não é cobrada.',
+  pendente: 'Taxa pendente: será cobrada num próximo envio seu, depois que a operação for concluída. Se ela falhar ou voltar antes, não é cobrada.',
   incerta: 'Não deu para confirmar se a taxa foi cobrada. Confira o extrato: nada é cobrado sozinho.',
   enviada: 'Taxa enviada; aguardando confirmação.'
 })
@@ -357,5 +445,31 @@ export const PAY_TEXTS = Object.freeze({
   cap (maxCents) {
     const formatted = formatBrl(maxCents)
     return formatted === null ? null : 'O limite por operação é ' + formatted + '.'
+  }
+})
+
+export const TRANSFER_TEXTS = Object.freeze({
+  CONFIRM_NOME: 'Confira o @nome de quem recebe antes de confirmar o envio.',
+  UNCERTAIN: UNCERTAIN_MONEY
+})
+
+// The policy network is a short token. Anything else is refused so the
+// warning cannot print provider text. A balance shown as USDC stays on the
+// address: this version does not convert it and does not send it.
+const NETWORK_LABEL_RE = /^[a-z]{1,16}$/
+
+function networkLabel (network) {
+  if (typeof network !== 'string' || !NETWORK_LABEL_RE.test(network)) return null
+  return network.charAt(0).toUpperCase() + network.slice(1)
+}
+
+export const CRYPTO_TEXTS = Object.freeze({
+  CONFIRM_ADDRESS: 'Confira o endereço e a rede antes de confirmar o envio.',
+  CHECKBOX: 'Conferi o endereço e a rede',
+  USDC_HERE: 'O USDC que aparece neste endereço não pode ser convertido nesta versão.',
+  UNCERTAIN: UNCERTAIN_MONEY,
+  onlyBrla (network) {
+    const label = networkLabel(network)
+    return label === null ? null : 'Nesta versão só enviamos BRLA, e só na rede ' + label + '. Um envio na rede errada não pode ser desfeito.'
   }
 })
