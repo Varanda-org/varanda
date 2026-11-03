@@ -35,6 +35,7 @@ import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { MentionText } from '../ui/MentionText'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -350,7 +351,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           <Text style={styles.name}>{displayText(who.title)}</Text>
           {who.subtitle ? <Text style={styles.keyText}>{displayText(who.subtitle)}</Text> : null}
           {bio
-            ? <Text style={styles.bio}>{displayText(bio, { multiline: true })}</Text>
+            ? <MentionText text={bio} style={styles.bio} />
             : null}
           <Text style={styles.counts}>
             <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
