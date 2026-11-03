@@ -21,7 +21,7 @@
 // state, like Avisos.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
@@ -524,8 +524,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
   const canPost = reader && can('post', role) && meta.state === 'ok' && !orphan
   const left = MAX_TEXT - countChars(draft)
 
+  // On iOS the keyboard opens over the bottom composer unless the screen
+  // shrinks for it (Android resizes the window itself: adjustResize).
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <TopBar title={nameText} subtitle={subtitle} onBack={onBack} right={headerRight} />
       <OfflineNote />
       <RefreshableList
@@ -581,7 +583,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
           />
           )
         : null}
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
