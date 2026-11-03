@@ -34,6 +34,20 @@
 //   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-group-box/hkdf/v1'),
 //                       info = utf8('varanda/member-group-box/x25519/v1') || nonce, 32)
 //   boxKeyPair = crypto_box_seed_keypair(seed)
+//
+// The direct message box key pair (X25519), version 1, IDENTITY-WIDE: no
+// device nonce, so every device that opens the passkey derives the same pair
+// and reads the same conversations. gen (a safe integer >= 1) rotates it:
+//   seed = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-dm-box/hkdf/v1'),
+//                       info = utf8('varanda/member-dm-box/x25519/v1') || uint32be(gen), 32)
+//   dmBoxKeyPair = crypto_box_seed_keypair(seed)
+//
+// The local message store key (crypto_secretbox), version 1, identity-wide
+// too, so a device that loses its kv rebuilds the key from the passkey:
+//   key = HKDF-SHA-256(ikm = prf, salt = utf8('varanda/member-dm-local/hkdf/v1'),
+//                      info = utf8('varanda/member-dm-local/secretbox/v1'), 32)
+// Neither changes the identity Ed25519 derivation above or the group box.
+//
 // The labels are raw UTF-8 bytes, not hashes, so every option is built
 // synchronously and the WebAuthn call stays inside the user's click.
 //
@@ -58,6 +72,10 @@ const GROUP_HKDF_SALT = b4a.from('varanda/member-group/hkdf/v1', 'utf8')
 const GROUP_HKDF_INFO = b4a.from('varanda/member-group/ed25519/v1', 'utf8')
 const BOX_HKDF_SALT = b4a.from('varanda/member-group-box/hkdf/v1', 'utf8')
 const BOX_HKDF_INFO = b4a.from('varanda/member-group-box/x25519/v1', 'utf8')
+const DM_BOX_HKDF_SALT = b4a.from('varanda/member-dm-box/hkdf/v1', 'utf8')
+const DM_BOX_HKDF_INFO = b4a.from('varanda/member-dm-box/x25519/v1', 'utf8')
+const DM_LOCAL_HKDF_SALT = b4a.from('varanda/member-dm-local/hkdf/v1', 'utf8')
+const DM_LOCAL_HKDF_INFO = b4a.from('varanda/member-dm-local/secretbox/v1', 'utf8')
 
 const PRF_BYTES = 32
 const NONCE_BYTES = 32
@@ -231,6 +249,24 @@ async function groupKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
 // the pair group-crypto allocated are zeroed.
 async function boxKeyPairFromPrf (prf, nonce, { hkdf: derive } = {}) {
   return nonceKeyPair(prf, nonce, BOX_HKDF_SALT, BOX_HKDF_INFO, derive, boxKeyPairFromSeed)
+}
+
+// The identity-wide direct message box key pair for generation gen (a safe
+// integer from 1 to 2^32 - 1). Same buffer discipline as boxKeyPairFromPrf.
+async function dmBoxKeyPairFromPrf (prf, gen, { hkdf: derive } = {}) {
+  checkPrf(prf)
+  if (!Number.isSafeInteger(gen) || gen < 1 || gen > 0xffffffff) throw new TypeError('gen inválido')
+  const info = new Uint8Array(DM_BOX_HKDF_INFO.byteLength + 4)
+  info.set(DM_BOX_HKDF_INFO, 0)
+  new DataView(info.buffer).setUint32(DM_BOX_HKDF_INFO.byteLength, gen, false)
+  return boxKeyPairFromSeed(await hkdf(prf, DM_BOX_HKDF_SALT, info, derive))
+}
+
+// The 32-byte crypto_secretbox key of the local message store, in a fresh
+// buffer; the caller zeroes it when done.
+async function dmLocalKeyFromPrf (prf, { hkdf: derive } = {}) {
+  checkPrf(prf)
+  return hkdf(prf, DM_LOCAL_HKDF_SALT, DM_LOCAL_HKDF_INFO, derive)
 }
 
 function boxKeyPairFromSeed (seed) {
@@ -432,12 +468,18 @@ module.exports = {
   GROUP_HKDF_INFO,
   BOX_HKDF_SALT,
   BOX_HKDF_INFO,
+  DM_BOX_HKDF_SALT,
+  DM_BOX_HKDF_INFO,
+  DM_LOCAL_HKDF_SALT,
+  DM_LOCAL_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
   mediaKeyPairFromPrf,
   groupKeyPairFromPrf,
   boxKeyPairFromPrf,
+  dmBoxKeyPairFromPrf,
+  dmLocalKeyFromPrf,
   rpIdFor,
   supportStatus,
   createOptions,

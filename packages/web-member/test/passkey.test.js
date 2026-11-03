@@ -588,3 +588,114 @@ test('injected hkdf: box key pair byte-equal to WebCrypto', async (t) => {
     t.is(hex(injected.secretKey), hex(web.secretKey), 'secret key ' + i)
   }
 })
+
+// Direct message box (gen 1 and gen 2) and local store key golden vectors,
+// computed once (node:crypto hkdfSync and sodium crypto_box_seed_keypair) and
+// pinned.
+const GOLDEN_DM_BOX_SEED_1 = 'cc41fd13c051aa63489fcd04c9fbe73e2e90c362d3e7a5156360c7ab1f1d131c'
+const GOLDEN_DM_BOX_PUBLIC_KEY_1 = '79dc2edd6d5b5c00acd9a890e5795a580770a33a1cb0e74731e17f6c6db8620b'
+const GOLDEN_DM_BOX_SEED_2 = 'b08fab40846a93478669941b100a68cccd01f0fe92915c2fe19b19e183e53644'
+const GOLDEN_DM_BOX_PUBLIC_KEY_2 = '90e7b71cd8afeabbf39f22c57e8ca1920926b287b45f5797128173a2f49cfe67'
+const GOLDEN_DM_LOCAL_KEY = 'b6955e3fee9ac520dcc64c3611e7cbc1e66570bf0e598f4c86fd38dc8bf2d16c'
+
+test('dm box key pair: golden vectors per gen, identity-wide, unrelated to the group box, zeroed buffers', async (t) => {
+  const sodium = require('sodium-universal')
+  const groupCrypto = require('@varanda/core/lib/group-crypto')
+  const { DM_BOX_HKDF_SALT, DM_BOX_HKDF_INFO, dmBoxKeyPairFromPrf, boxKeyPairFromPrf } = passkey
+  t.is(b4a.toString(DM_BOX_HKDF_SALT), 'varanda/member-dm-box/hkdf/v1')
+  t.is(b4a.toString(DM_BOX_HKDF_INFO), 'varanda/member-dm-box/x25519/v1')
+
+  const goldens = [[1, GOLDEN_DM_BOX_SEED_1, GOLDEN_DM_BOX_PUBLIC_KEY_1], [2, GOLDEN_DM_BOX_SEED_2, GOLDEN_DM_BOX_PUBLIC_KEY_2]]
+  for (const [gen, goldenSeed, goldenPublicKey] of goldens) {
+    const info = b4a.concat([DM_BOX_HKDF_INFO, b4a.from([0, 0, 0, gen])])
+    t.is(hex(crypto.hkdfSync('sha256', GOLDEN_PRF, DM_BOX_HKDF_SALT, info, 32)), goldenSeed, 'gen ' + gen + ' seed matches node:crypto hkdfSync')
+    const kp = await dmBoxKeyPairFromPrf(GOLDEN_PRF, gen)
+    t.is(hex(kp.publicKey), goldenPublicKey, 'gen ' + gen + ' public key')
+    const pk = b4a.alloc(32)
+    const sk = b4a.alloc(32)
+    sodium.crypto_box_seed_keypair(pk, sk, b4a.from(goldenSeed, 'hex'))
+    t.is(hex(pk), goldenPublicKey, 'gen ' + gen + ' seed -> public key')
+    t.is(hex(kp.secretKey), hex(sk), 'gen ' + gen + ' secret key')
+    t.is(kp.publicKey.byteLength, 32)
+    t.is(kp.secretKey.byteLength, 32)
+  }
+  t.not(GOLDEN_DM_BOX_PUBLIC_KEY_1, GOLDEN_DM_BOX_PUBLIC_KEY_2, 'gen 1 and gen 2 differ')
+  t.ok(GOLDEN_PRF.every((x, i) => x === i), 'caller PRF untouched')
+
+  const kp = await dmBoxKeyPairFromPrf(GOLDEN_PRF, 1)
+  const again = await dmBoxKeyPairFromPrf(new Uint8Array(GOLDEN_PRF), 1)
+  t.is(hex(again.secretKey), hex(kp.secretKey), 'deterministic: every device of the passkey derives the same pair')
+  t.not(again.secretKey.buffer, kp.secretKey.buffer, 'fresh buffers')
+  t.not(hex(kp.publicKey), GOLDEN_BOX_PUBLIC_KEY, 'not the group box golden')
+  t.not(hex((await boxKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)).publicKey), GOLDEN_DM_BOX_PUBLIC_KEY_1, 'not the group box for the same PRF')
+  t.not(hex((await dmBoxKeyPairFromPrf(new Uint8Array(32).fill(7), 1)).publicKey), GOLDEN_DM_BOX_PUBLIC_KEY_1, 'another PRF, another key')
+
+  const sealed = groupCrypto.sealTo(b4a.from('oi'), b4a.from(kp.publicKey))
+  const opened = groupCrypto.openFrom(sealed, { publicKey: b4a.from(kp.publicKey), secretKey: b4a.from(kp.secretKey) })
+  t.is(b4a.toString(opened), 'oi', 'usable with crypto_box_seal')
+
+  const original = groupCrypto.boxKeyPairFromSeed
+  let seenSeed = null
+  let made = null
+  groupCrypto.boxKeyPairFromSeed = (s) => {
+    seenSeed = s
+    made = original(s)
+    return made
+  }
+  try {
+    const kp2 = await dmBoxKeyPairFromPrf(GOLDEN_PRF, 1)
+    t.is(hex(kp2.publicKey), GOLDEN_DM_BOX_PUBLIC_KEY_1)
+    t.ok(seenSeed.every((x) => x === 0), 'seed zeroed')
+    t.ok(made.secretKey.every((x) => x === 0), 'internal secret key zeroed')
+  } finally {
+    groupCrypto.boxKeyPairFromSeed = original
+  }
+
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), null, 'x'.repeat(32), new Uint8Array(32).buffer]) {
+    t.is(await codeOf(() => dmBoxKeyPairFromPrf(bad, 1)), 'TypeError', 'bad PRF refused')
+  }
+  for (const gen of [0, -1, 1.5, '1', NaN, Infinity, null, undefined, 2 ** 32, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(await codeOf(() => dmBoxKeyPairFromPrf(GOLDEN_PRF, gen)), 'TypeError', 'gen ' + String(gen) + ' refused')
+  }
+  t.ok(await dmBoxKeyPairFromPrf(GOLDEN_PRF, 2 ** 32 - 1), 'the largest uint32 gen is accepted')
+})
+
+test('dm local key: golden vector, 32 bytes, unrelated to every key pair', async (t) => {
+  const { DM_LOCAL_HKDF_SALT, DM_LOCAL_HKDF_INFO, dmLocalKeyFromPrf, dmBoxKeyPairFromPrf, boxKeyPairFromPrf } = passkey
+  t.is(b4a.toString(DM_LOCAL_HKDF_SALT), 'varanda/member-dm-local/hkdf/v1')
+  t.is(b4a.toString(DM_LOCAL_HKDF_INFO), 'varanda/member-dm-local/secretbox/v1')
+  t.is(hex(crypto.hkdfSync('sha256', GOLDEN_PRF, DM_LOCAL_HKDF_SALT, DM_LOCAL_HKDF_INFO, 32)), GOLDEN_DM_LOCAL_KEY, 'matches node:crypto hkdfSync')
+  const key = await dmLocalKeyFromPrf(GOLDEN_PRF)
+  t.ok(key instanceof Uint8Array)
+  t.is(key.byteLength, 32)
+  t.is(hex(key), GOLDEN_DM_LOCAL_KEY, 'local key')
+  t.ok(GOLDEN_PRF.every((x, i) => x === i), 'caller PRF untouched')
+  const again = await dmLocalKeyFromPrf(GOLDEN_PRF)
+  t.not(again.buffer, key.buffer, 'fresh buffer')
+
+  const others = [
+    (await dmBoxKeyPairFromPrf(GOLDEN_PRF, 1)).secretKey,
+    (await dmBoxKeyPairFromPrf(GOLDEN_PRF, 2)).secretKey,
+    (await boxKeyPairFromPrf(GOLDEN_PRF, GOLDEN_GROUP_NONCE)).secretKey,
+    await seedFromPrf(GOLDEN_PRF)
+  ]
+  for (const other of others) t.not(hex(other), GOLDEN_DM_LOCAL_KEY, 'not another derived key')
+
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), null, 'x'.repeat(32), new Uint8Array(32).buffer]) {
+    t.is(await codeOf(() => dmLocalKeyFromPrf(bad)), 'TypeError', 'bad PRF refused')
+  }
+})
+
+test('injected hkdf: dm box key pair and local key byte-equal to WebCrypto', async (t) => {
+  const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = passkey
+  t.is(hex((await dmBoxKeyPairFromPrf(GOLDEN_PRF, 1, { hkdf: injectedHkdf })).publicKey), GOLDEN_DM_BOX_PUBLIC_KEY_1, 'golden gen 1')
+  t.is(hex(await dmLocalKeyFromPrf(GOLDEN_PRF, { hkdf: injectedHkdf })), GOLDEN_DM_LOCAL_KEY, 'golden local key')
+  for (let i = 0; i < 3; i++) {
+    const prf = new Uint8Array(crypto.randomBytes(32))
+    const gen = 1 + i
+    const web = await dmBoxKeyPairFromPrf(prf, gen)
+    const injected = await dmBoxKeyPairFromPrf(prf, gen, { hkdf: injectedHkdf })
+    t.is(hex(injected.secretKey), hex(web.secretKey), 'dm box secret key ' + i)
+    t.is(hex(await dmLocalKeyFromPrf(prf, { hkdf: injectedHkdf })), hex(await dmLocalKeyFromPrf(prf)), 'local key ' + i)
+  }
+})

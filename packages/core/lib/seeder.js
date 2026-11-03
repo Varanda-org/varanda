@@ -86,6 +86,16 @@
 // the blocklist snapshot, a fork or the quota.
 // Group keys never travel on the admission channel; members learn writer
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
+//
+// Direct messages (docs/protocol.md section 11), only with the `dm` option:
+// the pool of sealed drops (lib/dm-pool.js) under <dataDir>/dm-pool/, the
+// anonymous 'varanda/dm/1' channel and the 'varanda/dm-stamp/1' channel on
+// every peer. The postage key is asked of dm.postage.get() only when a peer
+// opens the stamp channel or puts a drop, never in start(), so a seeder that
+// nobody writes to never makes one. Stamps are issued under the current key
+// only; a drop is accepted under the current or the previous one. The daily
+// stamp budget per diary is kept in <dataDir>/dm-stamps.json for the current
+// and the previous Brasília day only, so the file is no activity log.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -135,6 +145,11 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
+const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL } = require('./dm')
+const { createDmPool } = require('./dm-pool')
+const { attachDm } = require('./dm-net')
+const { attachDmStamp } = require('./dm-stamp-net')
+const dmPostage = require('./dm-postage')
 const { attachNotices, attachNoticesV2 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
 const { pushCandidate, pushName } = require('./push-events')
@@ -195,6 +210,13 @@ const TOMB_NEW_MAX = 1024
 const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
+const DM_STAMPS_FILE = 'dm-stamps.json'
+const DM_SWEEP_MS = 60000
+const DM_STAMP_ROWS_MAX = 100000
+const DM_STAMP_ROW_DAYS = 3
+const DM_STAMP_KEEP_DAYS = 7
+const DM_DAY = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/
+const DECIMAL = /^[1-9][0-9]*$/
 // Per-peer announce limits (H3): a token bucket (ANNOUNCE_RATE per second,
 // ANNOUNCE_BURST tokens) checked before any signature is verified, and a cap
 // on announces whose certificate fails (MAX_BAD_ANNOUNCES).
@@ -757,6 +779,85 @@ function checkSeederCert (cert, keyPair, associationHex) {
   if (!r.ok) throw new Error('certificado do semeador inválido (' + r.reason + ')')
 }
 
+function dmOptions (dm) {
+  if (dm === null || dm === undefined) return null
+  if (typeof dm !== 'object' || dm.postage === null || typeof dm.postage !== 'object' || typeof dm.postage.get !== 'function') {
+    throw new TypeError('dm.postage.get must be a function')
+  }
+  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop } = dm
+  if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
+  if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
+  return { postage, stampsPerDay, onDrop }
+}
+
+// The postage keys usable by the seeder, newest first, at most two (the
+// current one and the previous one), each { pub, n, d }; throws on anything
+// that is not a key, so a broken key file never issues or accepts a stamp.
+function dmPostageKeys (got) {
+  const list = got !== null && typeof got === 'object' && Array.isArray(got.keys) ? got.keys : [got]
+  const keys = []
+  for (const k of list.slice(0, 2)) {
+    if (k === null || typeof k !== 'object') throw new Error('dm-postage inválido')
+    const pub = { v: 1, kid: k.kid, n: k.n, e: k.e }
+    const parsed = dmPostage.parsePublicKey(pub)
+    if (parsed === null || typeof k.d !== 'string' || !DECIMAL.test(k.d)) throw new Error('dm-postage inválido')
+    const d = BigInt(k.d)
+    if (d >= parsed.n) throw new Error('dm-postage inválido')
+    keys.push({ pub, n: parsed.n, d })
+  }
+  if (keys.length === 0) throw new Error('dm-postage inválido')
+  return keys
+}
+
+function daysBefore (day, n) {
+  return new Date(Date.parse(day + 'T00:00:00.000Z') - n * 86400000).toISOString().slice(0, 10)
+}
+
+// A diary's row: { 'YYYY-MM-DD': count } with its DM_STAMP_ROW_DAYS most
+// recent days only.
+function trimStampRow (row) {
+  const out = {}
+  for (const d of Object.keys(row).sort().reverse().slice(0, DM_STAMP_ROW_DAYS)) out[d] = row[d]
+  return out
+}
+
+function isCount (n) {
+  return Number.isSafeInteger(n) && n >= 0
+}
+
+// dm-stamps.json as a Map diary -> row; an unreadable file counts as empty
+// (the budget restarts, which costs at most one day of stamps). A v1 file
+// ({ diary: { day, count } }) is read as one day per diary.
+function readDmStamps (dataDir, log) {
+  const out = new Map()
+  let file = null
+  try {
+    file = readJson(path.join(dataDir, DM_STAMPS_FILE), null)
+  } catch {
+    log({ event: 'warning', reason: 'dm-stamps-unreadable' })
+    return out
+  }
+  if (file === null) return out
+  if (typeof file !== 'object' || (file.v !== 1 && file.v !== 2) || file.days === null || typeof file.days !== 'object') {
+    log({ event: 'warning', reason: 'dm-stamps-unreadable' })
+    return out
+  }
+  for (const [key, e] of Object.entries(file.days)) {
+    if (out.size >= DM_STAMP_ROWS_MAX) break
+    if (!HEX64.test(key) || e === null || typeof e !== 'object') continue
+    const row = {}
+    if (file.v === 1) {
+      if (typeof e.day === 'string' && DM_DAY.test(e.day) && isCount(e.count)) row[e.day] = e.count
+    } else {
+      for (const [d, n] of Object.entries(e)) {
+        if (DM_DAY.test(d) && isCount(n)) row[d] = n
+      }
+    }
+    if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
+  }
+  return out
+}
+
 class Seeder {
   // purgeHook(core), gateHook(key), admitHook(key, step) ('persist' |
   // 'open', awaited right before that admission step; a throw simulates the
@@ -790,6 +891,12 @@ class Seeder {
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per follow, reply, like or repost appended to a served diary past
   // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // dm (header comment) is not a test hook either: { postage: { get() },
+  // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
+  // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
+  // newest first; only the first two count. onDrop() is called with no
+  // arguments after each new drop is stored (a throw is ignored). null
+  // leaves both direct message channels unanswered.
   // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
   // the bytes of deleted diary blocks and media ranges: they are only
   // hidden, as before byte deletion.
@@ -805,6 +912,7 @@ class Seeder {
     regateHook = null,
     storeHook = null,
     onPush = null,
+    dm = null,
     noClear = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
@@ -866,6 +974,14 @@ class Seeder {
     this.storeHook = storeHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
+    this._dmOpts = dmOptions(dm)
+    this._dm = null
+    this._dmTimer = null
+    this._dmKeys = []
+    this._dmKeysFrom = null
+    this._dmStamps = new Map() // diary key -> { day, count }
+    this._dmHandles = new Set()
+    this._dmStampChannels = new Map() // seeder stamp handle -> { kid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
@@ -1236,6 +1352,7 @@ class Seeder {
     try {
       this._guardReplication()
       if (this.storeHook) await this.storeHook()
+      if (this._dmOpts !== null && !this._closing) this._openDm()
       const file = readAdmittedFile(this.dataDir)
       for (const [key, cert] of Object.entries(file.admitted)) {
         if (HEX64.test(key)) this._admitted.set(key, cert)
@@ -5725,6 +5842,27 @@ class Seeder {
     }
     this._noticeHandles.add(noticesV2)
     release.push(() => this._noticeHandles.delete(noticesV2))
+    // Direct messages: the anonymous drop channel now, the stamp channel
+    // once the peer opens it (the postage key is loaded then, never before).
+    // A peer from before them never opens either and stays connected.
+    if (this._dm !== null) {
+      let dm = null
+      try {
+        dm = attachDm(socket, {
+          role: 'seeder',
+          put: (bytes) => this._dmPut(bytes),
+          page: (q) => this._dm.page(q),
+          log: (ev) => this.log(ev)
+        })
+        const mux = socket.noiseStream.userData
+        mux.pair({ protocol: DM_STAMP_PROTOCOL }, () => this._attachDmStamp(socket, release))
+      } catch {
+        socket.destroy()
+        return
+      }
+      this._dmHandles.add(dm)
+      release.push(() => this._dmHandles.delete(dm))
+    }
     // Groups channel: writer pages from the group index, before the hello
     // like the notices channel (groups-net.js).
     let groups = null
@@ -5771,6 +5909,200 @@ class Seeder {
       this.log({ event: 'peer', role: peer.remoteRole, peerKey: peer.peerKey })
       this._retryGroupTimeouts()
     }, noop)
+  }
+
+  // ---- Direct messages (header comment) -------------------------------
+
+  _openDm () {
+    const { onDrop } = this._dmOpts
+    this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
+    this._dm = createDmPool({
+      dir: this.dataDir,
+      verifyStamp: (kid, token, sig) => this._verifyStamp(kid, token, sig),
+      isKidAccepted: (kid) => this._dmKidAccepted(kid),
+      onStored: () => {
+        try { onDrop() } catch {}
+      },
+      log: (ev) => this.log(ev)
+    })
+    this._dmTimer = setInterval(() => { this._dmTick().catch(noop) }, DM_SWEEP_MS)
+    if (typeof this._dmTimer.unref === 'function') this._dmTimer.unref()
+  }
+
+  // Asks postage.get() every time: the key file rotates on its own clock.
+  async _dmPostageKeys () {
+    const got = await this._dmOpts.postage.get()
+    if (got !== this._dmKeysFrom) {
+      this._dmKeys = dmPostageKeys(got)
+      this._dmKeysFrom = got
+    }
+    return this._dmKeys
+  }
+
+  // Current or previous kid only: older stamps are refused, and the pool
+  // remembers spent tokens longer than this window (dm-pool.js).
+  _verifyStamp (kid, token, sig) {
+    for (const k of this._dmKeys) {
+      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub)
+    }
+    return false
+  }
+
+  // Whether a spent token's kid can still verify a stamp. Before the keys are
+  // loaded nothing is known, so every hash is kept: forgetting one early would
+  // let its stamp be spent twice.
+  _dmKidAccepted (kid) {
+    if (!Array.isArray(this._dmKeys) || this._dmKeys.length === 0) return true
+    return this._dmKeys.some((k) => k.pub.kid === kid)
+  }
+
+  // A failure of our own (the key file, the disk) throws: dm-net then closes
+  // the channel without an ack and the member's put stays uncertain. Only a
+  // drop that is itself bad is answered 'invalido', which is final.
+  async _dmPut (bytes) {
+    try {
+      await this._dmPostageKeys()
+    } catch (err) {
+      this.log({ event: 'dm', reason: 'postage' })
+      throw err
+    }
+    const result = this._dm.submit(bytes)
+    const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
+    this.log({ event: 'dm', reason })
+    return result
+  }
+
+  // protomux awaits this pairing call: the stamp channel opens only after
+  // the key is known, and a failure leaves the peer's open rejected.
+  async _attachDmStamp (socket, release) {
+    if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    let key = null
+    try {
+      key = (await this._dmPostageKeys())[0]
+    } catch {
+      this.log({ event: 'dm-stamp', reason: 'postage' })
+      return
+    }
+    if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    // attachDmStamp keeps the key it was given for the channel's life, so a
+    // channel whose key is no longer current signs nothing ('ruim', no
+    // allowance spent) and is closed by the next key refresh (_dmTick); the
+    // peer's next open on this socket gets the current key.
+    let handle = null
+    try {
+      handle = attachDmStamp(socket, {
+        role: 'seeder',
+        postage: {
+          publicKey: key.pub,
+          sign: (blinded) => {
+            const current = this._dmKeys[0]
+            if (current === undefined || current.pub.kid !== key.pub.kid) return null
+            return dmPostage.sign(blinded, key.n, key.d)
+          }
+        },
+        budget: {
+          check: (diary, day) => this._checkStamp(diary, day),
+          take: (diary, day) => this._takeStamp(diary, day)
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._dmHandles.add(handle)
+    this._dmStampChannels.set(handle, { kid: key.pub.kid, socket, release })
+    release.push(() => {
+      this._dmHandles.delete(handle)
+      this._dmStampChannels.delete(handle)
+    })
+  }
+
+  // The 60 s tick: the current postage keys first (a rotation closes the
+  // stamp channels of an older key), then the pool sweep, whose token
+  // retention reads those keys. Keys are refreshed only once a DM peer has
+  // loaded them: a seeder no member has used creates no key file.
+  async _dmTick () {
+    if (this._dmKeysFrom !== null) {
+      try {
+        await this._dmPostageKeys()
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'postage' })
+      }
+    }
+    if (this._closing || this._dm === null) return
+    const current = this._dmKeys.length > 0 ? this._dmKeys[0].pub.kid : null
+    for (const [handle, ch] of [...this._dmStampChannels]) {
+      if (current === null || ch.kid === current) continue
+      this._dmStampChannels.delete(handle)
+      this._dmHandles.delete(handle)
+      try { handle.close() } catch {}
+      if (!ch.socket.destroyed) {
+        ch.socket.noiseStream.userData.pair({ protocol: DM_STAMP_PROTOCOL }, () => this._attachDmStamp(ch.socket, ch.release))
+      }
+    }
+    try {
+      this._dm.sweep()
+    } catch {
+      this.log({ event: 'warning', reason: 'dm-sweep-failed' })
+    }
+  }
+
+  // A write failure throws: the stamp is then not issued and not counted.
+  // Stamps go only to a member diary this seeder admits or serves and that is
+  // not blocked; anyone else gets 'teto' and adds no row. Each diary keeps a
+  // count per Brasília day for its DM_STAMP_ROW_DAYS most recent days, so a
+  // clock stepped forward and back finds the earlier day still charged. Days
+  // older than DM_STAMP_KEEP_DAYS before the current one are dropped (the
+  // file is no activity log); a clock jump past that window can restore an
+  // allowance. Rows are capped: past the cap no new diary gets a row (nor a
+  // stamp) until old rows are dropped.
+  _takeStamp (diary, day) {
+    const { stampsPerDay } = this._dmOpts
+    if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
+    const known = this._dmStamps.get(diary)
+    const count = known !== undefined && isCount(known[day]) ? known[day] : 0
+    if (count >= stampsPerDay) return false
+    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    const next = new Map()
+    for (const [k, row] of this._dmStamps) {
+      const kept = {}
+      for (const d of Object.keys(row)) {
+        if (d >= keepFrom) kept[d] = row[d]
+      }
+      if (Object.keys(kept).length > 0) next.set(k, kept)
+    }
+    if (!next.has(diary) && next.size >= this._dmStampRowsMax()) return false
+    next.set(diary, trimStampRow({ ...(next.get(diary) || {}), [day]: count + 1 }))
+    writeJsonAtomic(path.join(this.dataDir, DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
+    this._dmStamps = next
+    return true
+  }
+
+  // Whether _takeStamp would allow a stamp now, by the same rules, without
+  // writing anything: dm-stamp-net asks this before the costly blind
+  // signature.
+  _checkStamp (diary, day) {
+    const { stampsPerDay } = this._dmOpts
+    if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
+    const known = this._dmStamps.get(diary)
+    const count = known !== undefined && isCount(known[day]) ? known[day] : 0
+    if (count >= stampsPerDay) return false
+    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    let rows = 0
+    let hasRow = false
+    for (const [k, row] of this._dmStamps) {
+      if (!Object.keys(row).some((d) => d >= keepFrom)) continue
+      rows++
+      if (k === diary) hasRow = true
+    }
+    return hasRow || rows < this._dmStampRowsMax()
+  }
+
+  // Room for every diary the seeder may serve, twice over (diaries dropped
+  // within the kept days still hold their rows).
+  _dmStampRowsMax () {
+    return Math.min(DM_STAMP_ROWS_MAX, 2 * this.maxServed)
   }
 
   _onMessage (msg, peer) {
@@ -5847,6 +6179,14 @@ class Seeder {
         removeQuarantine(this.dataDir)
       }
       await Promise.allSettled([...this._drops.values()])
+      // The pool is closed before the store releases the data-dir lock.
+      if (this._dmTimer !== null) {
+        clearInterval(this._dmTimer)
+        this._dmTimer = null
+      }
+      if (this._dm !== null) {
+        try { this._dm.close() } catch {}
+      }
       if (this.store) {
         try { await this.store.close() } catch {}
       }
@@ -5860,6 +6200,10 @@ class Seeder {
         try { handle.close() } catch {}
       }
       this._groupHandles.clear()
+      for (const handle of this._dmHandles) {
+        try { handle.close() } catch {}
+      }
+      this._dmHandles.clear()
       this._resolveClosed()
     })()
     return this._closing

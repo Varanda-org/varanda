@@ -66,10 +66,10 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force
+  --join --undo --private --community --force --no-dm
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--community', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
@@ -239,6 +239,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     json: get('json') === true,
     once: get('once') === true,
     noPublish: get('no-publish') === true,
+    noDm: get('no-dm') === true,
     newList: get('new-list') === true,
     yes: get('yes') === true,
     undo: get('undo') === true,

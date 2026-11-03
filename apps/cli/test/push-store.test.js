@@ -199,6 +199,33 @@ test('removeAll clears the member', async (t) => {
   t.alike(await store.removeAll(a), { changed: false })
 })
 
+test('all lists every subscription across members, once per endpoint', async (t) => {
+  const { store } = setup(t)
+  const a = memberKey()
+  const b = memberKey()
+  t.alike(store.all(), [])
+  await store.put(sub(a, 1))
+  await store.put(sub(a, 2))
+  await store.put(sub(b, 3))
+  const byEp = (x, y) => x.endpoint < y.endpoint ? -1 : 1
+  const row = (member, n) => ({ member, endpoint: ep(n), p256dh: p256dh(), auth: auth() })
+  t.alike(store.all().sort(byEp), [row(a, 1), row(a, 2), row(b, 3)])
+  // Moving an endpoint to another member still lists it once, under its new owner.
+  await store.put(sub(b, 1))
+  t.alike(store.all().sort(byEp), [row(b, 1), row(a, 2), row(b, 3)])
+  await store.remove({ member: a, endpoint: ep(2) })
+  t.alike(store.all().sort(byEp), [row(b, 1), row(b, 3)])
+  await store.removeAll(b)
+  t.alike(store.all(), [])
+  store.fail()
+  try {
+    store.all()
+    t.fail('all on a failed store')
+  } catch (err) {
+    t.is(err.code, 'indisponivel')
+  }
+})
+
 test('bad argument shapes throw TypeError', async (t) => {
   const { store } = setup(t)
   const m = memberKey()

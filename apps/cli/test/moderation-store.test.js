@@ -831,3 +831,72 @@ test('exportRows filters by member; events hold no signature, reporter or note',
   for (const e of events) t.ok(e.by === MOD || e.by === 'operador', 'by is the moderator or the operator')
   t.alike(events.map((e) => e.action), ['bloquear', 'pedido', 'enviado', 'aplicado', 'pedido'])
 })
+
+function dmReport (target, reporter = key(), extra = {}) {
+  return { reporter, target, reason: 'assedio', text: '', quote: 'mensagem ruim', signature: SIG, nonce: NONCE, ...extra }
+}
+
+test('a dm report is stored with its own keys: target and quote, no seq, writer or group', async (t) => {
+  const { dir, store, open } = setup(t)
+  const target = key()
+  const reporter = key()
+  const { report: r, duplicate } = await store.addDm(dmReport(target, reporter))
+  t.is(duplicate, false)
+  t.is(r.kind, 'dm')
+  t.is(r.target, target)
+  t.is(r.quote, 'mensagem ruim')
+  t.alike(Object.keys(r).sort(), ['at', 'blocked', 'decidedAt', 'decidedBy', 'id', 'kind', 'nonce', 'note', 'quote', 'reason', 'reporter', 'signature', 'status', 'target', 'text'])
+  t.is(onDisk(dir).reports[r.id].seq, undefined)
+  const again = await store.addDm(dmReport(target, reporter))
+  t.is(again.duplicate, true, 'same open quote by the same reporter')
+  t.is(again.report.id, r.id)
+  t.is(open().get(r.id).kind, 'dm', 'reopens')
+})
+
+test('addDm refuses a missing or own target and an empty quote', async (t) => {
+  const { store } = setup(t)
+  const reporter = key()
+  await rejects(t, store.addDm(dmReport(undefined, reporter)), 'pedido-invalido', 'no target')
+  await rejects(t, store.addDm(dmReport(reporter, reporter)), 'pedido-invalido', 'own target')
+  await rejects(t, store.addDm(dmReport(key(), reporter, { quote: '' })), 'pedido-invalido', 'empty quote')
+  await rejects(t, store.addDm(dmReport(key(), reporter, { reason: 'x' })), 'pedido-invalido', 'reason')
+})
+
+test('dm reports share the per-reporter daily budget', async (t) => {
+  const { store } = setup(t)
+  const reporter = key()
+  for (let i = 0; i < MAX_PER_REPORTER_DAY - 1; i++) await store.add(report(key(), reporter))
+  await store.addDm(dmReport(key(), reporter))
+  await rejects(t, store.addDm(dmReport(key(), reporter, { quote: 'outra' })), 'limite-denuncias', 'dm over the cap')
+  await rejects(t, store.add(report(key(), reporter)), 'limite-denuncias', 'post over the cap')
+})
+
+test('a dm row on disk with seq, writer or group, without target or with target === reporter is invalid', async (t) => {
+  const mutations = [
+    (r) => ({ ...r, seq: null }),
+    (r) => ({ ...r, writer: null, group: null }),
+    (r) => { const o = { ...r }; delete o.target; return o },
+    (r) => ({ ...r, target: r.reporter }),
+    (r) => ({ ...r, quote: '' })
+  ]
+  for (const mutate of mutations) {
+    const { dir, store, open } = setup(t)
+    const { report: r } = await store.addDm(dmReport(key()))
+    const disk = onDisk(dir)
+    disk.reports[r.id] = mutate(disk.reports[r.id])
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk))
+    throwsCode(t, () => open().list(), 'indisponivel', 'store refuses the row')
+  }
+})
+
+test('bloquear on a dm report blocks the target like an account report; grupo is refused', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const { report: r } = await store.addDm(dmReport(target))
+  await rejects(t, store.decide(r.id, { decision: 'bloquear', by: MOD, block: 'grupo' }), 'pedido-invalido', 'no group')
+  const { report: decided, change } = await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  t.is(decided.blocked, 'diario')
+  t.is(change.member, target)
+  t.is(change.op, 'block')
+  t.alike(change.reportIds, [r.id])
+})

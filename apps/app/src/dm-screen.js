@@ -1,0 +1,110 @@
+// Pure helpers for the Conversas screens (Mensagens, Mensagem). No platform
+// imports, so they run in the tests.
+
+import { threadOf } from './dm.js'
+
+// A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
+// by sender and id together.
+export function messageKey (message) {
+  const from = message && typeof message.from === 'string' ? message.from : ''
+  const id = message && typeof message.id === 'string' ? message.id : ''
+  return from + ':' + id
+}
+
+function timeOf (value) {
+  const t = typeof value === 'string' ? Date.parse(value) : NaN
+  return Number.isFinite(t) ? t : null
+}
+
+// Same order as threadOf (time, then id), refined by sender so two messages
+// that share an id and a time still come out in one fixed order.
+function compareRows (a, b) {
+  const ta = timeOf(a.at)
+  const tb = timeOf(b.at)
+  if (ta !== null && tb !== null && ta !== tb) return ta - tb
+  if (ta !== null && tb === null) return -1
+  if (ta === null && tb !== null) return 1
+  if (a.id < b.id) return -1
+  if (a.id > b.id) return 1
+  const fa = typeof a.from === 'string' ? a.from : ''
+  const fb = typeof b.from === 'string' ? b.from : ''
+  if (fa < fb) return -1
+  if (fa > fb) return 1
+  return 0
+}
+
+// The rows of a thread: threadOf's display text and quote, plus the source
+// message's own key, sender, side and raw text. The input is sorted first in
+// an order threadOf's stable sort keeps, so rows pair with messages by index
+// and nothing is copied between two messages that share an id.
+export function threadRows (messages) {
+  const list = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && typeof m === 'object' && typeof m.id === 'string' && m.id.length > 0)
+    .slice()
+    .sort(compareRows)
+  const shown = threadOf(list)
+  return shown.map((row, i) => {
+    const source = list[i]
+    return {
+      ...row,
+      key: messageKey(source),
+      mine: source.mine === true,
+      from: typeof source.from === 'string' ? source.from : null,
+      rawText: typeof source.text === 'string' ? source.text : ''
+    }
+  })
+}
+
+// An older page prepended to what the screen holds; the held copy wins.
+export function mergeMessages (older, current) {
+  const out = new Map()
+  for (const m of Array.isArray(older) ? older : []) out.set(messageKey(m), m)
+  for (const m of Array.isArray(current) ? current : []) out.set(messageKey(m), m)
+  return Array.from(out.values())
+}
+
+// The newest thread page over what the screen holds, by effective time only
+// (never by a tie-break the node may order differently). A held row whose key
+// is in the page takes the page's copy. A held row the node no longer returns
+// after the page's oldest time (decline, block, delete) goes away. Held rows
+// at exactly that time are kept (the page may have cut a tie), and rows
+// strictly older stay. An empty page clears everything. Returns
+// { messages, keepOlder }: keepOlder false means the older cursor resets to
+// the page's own.
+export function refreshThread (current, page) {
+  const fresh = Array.isArray(page) ? page.filter((m) => m && typeof m.id === 'string') : []
+  if (fresh.length === 0) return { messages: [], keepOlder: false }
+  let oldest = null
+  for (const m of fresh) {
+    const t = timeOf(m.at)
+    if (t !== null && (oldest === null || t < oldest)) oldest = t
+  }
+  const seen = new Set(fresh.map(messageKey))
+  const kept = (Array.isArray(current) ? current : []).filter((m) => {
+    if (!m || seen.has(messageKey(m))) return false
+    const t = timeOf(m.at)
+    return t !== null && oldest !== null && t <= oldest
+  })
+  return { messages: kept.concat(fresh), keepOlder: kept.length > 0 }
+}
+
+// The key of the node's newest message: the last of the newest page (oldest
+// first within a page). Loading an older page never changes it.
+export function newestOf (page) {
+  const list = Array.isArray(page) ? page.filter((m) => m && typeof m.id === 'string') : []
+  return list.length > 0 ? messageKey(list[list.length - 1]) : ''
+}
+
+// One line for a conversation preview: a line break would show as U+FFFD.
+export function previewLine (value) {
+  return typeof value === 'string' ? value.replace(/\r?\n/g, ' ') : ''
+}
+
+// Enviar while a send is held as uncertain: the same text and quote re-put
+// the held bytes ('retry'); a different text asks first ('confirm'), since
+// the held one may already have reached the peer. No hold: a plain 'send'.
+export function sendPlan (hold, text, quoteId) {
+  if (!hold) return 'send'
+  if (hold.text === text && (hold.quoteId || null) === (quoteId || null)) return 'retry'
+  return 'confirm'
+}

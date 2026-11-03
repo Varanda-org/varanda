@@ -194,3 +194,27 @@ export async function submitReport ({ member, sign, isStale, ...fields }) {
     signature
   })
 }
+
+// A private message report (docs/rpc.md 5.81, kind 'dm'): the chosen message
+// as `quote` and its sender's diary key as `target`, nothing else of the
+// conversation. Same account client and header as a post report.
+export function buildDmReportSend ({ member, nonce, target, reason, text, quote, signature }) {
+  return buildPost('/account/report', { kind: 'dm', member, nonce, target, reason, text, quote, signature })
+}
+
+// The dm.reportSign params: never a member, an association or a digest.
+export function dmReportParams ({ nonce, target, reason, text, quote }) {
+  return { nonce, target, reason, text, quote: wellFormed(quote) }
+}
+
+// As submitReport, signed with dm.reportSign. No retry: a failed POST throws
+// and the next attempt starts from a fresh nonce.
+export async function submitDmReport ({ member, sign, isStale, target, reason, text, quote }) {
+  const { nonce } = await reportStart({ member })
+  if (isStale()) return null
+  const params = dmReportParams({ nonce, target, reason, text, quote })
+  const { signature } = await sign(params)
+  if (isStale()) return null
+  const data = await call(buildDmReportSend({ member, nonce, ...params, signature }))
+  return { id: typeof data.id === 'string' ? data.id : null, duplicate: data.duplicate === true }
+}

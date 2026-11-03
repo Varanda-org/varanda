@@ -56,6 +56,9 @@
 // onReport, reconcile or learning step touches them, because readPost would
 // read the author's diary at the writer core's seq, another block entirely.
 //
+// Private message reports (kind 'dm') are human-only too: marked 'dm' once,
+// never read, embedded or learned from.
+//
 // Logging: log({ event: 'triage', reason: <token> }) only. No text, quote,
 // embedding, key, token or e-mail ever reaches the logger or an error.
 
@@ -400,6 +403,12 @@ function createWorker ({
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
     }
+    // A private message is on no diary: no read, no embed, a human decides.
+    // Checked first, before anything reads the row's post fields.
+    if (row.kind === 'dm') {
+      emit('dm')
+      return markAbstain(id, 'dm')
+    }
     if (isGroupRow(row)) return
     if (row.kind !== 'post') return markAbstain(id, 'conta')
     if (decidedPosts.has(postKey(row)) || decidedBefore(row)) return markAbstain(id, 'recurso')
@@ -679,7 +688,7 @@ function createWorker ({
     let last = null
     for (let k = 0; k < open.length && picked < SCAN_LIMIT; k++) {
       const r = open[(start + k) % open.length]
-      if (isGroupRow(r) || !due(r.id, size, nowIso)) continue
+      if (isGroupRow(r) || (r.kind === 'dm' && ledger.get(r.id) !== null) || !due(r.id, size, nowIso)) continue
       enqueueReport(r.id)
       picked++
       last = { at: r.at, id: r.id }

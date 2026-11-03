@@ -5,6 +5,9 @@
 // notice, and the in-app Avisos still show follows. Nothing about an event
 // is logged or kept beyond the dedupe keys.
 const { validatePushEvent } = require('@varanda/core/lib/push-events')
+const { validateDmWake } = require('@varanda/core/lib/dm-wake')
+
+const DM_WAKE = JSON.stringify({ v: 1, kind: 'dm-wake' })
 
 // Same rule as VARANDA_ACCOUNT_HTTP in cli.js: the bearer token must never
 // leave the machine.
@@ -15,11 +18,12 @@ function positiveInt (value, name) {
   return value
 }
 
-function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs = 5000, maxPending = 256, dedupeMax = 4096 } = {}) {
+function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs = 5000, maxPending = 256, dedupeMax = 4096, log = () => {} } = {}) {
   const match = typeof baseUrl === 'string' ? LOOPBACK_RE.exec(baseUrl) : null
   if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) throw new TypeError('baseUrl must be a loopback http URL')
   if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) throw new TypeError('token must be 64 lowercase hex characters')
   if (typeof fetch !== 'function') throw new TypeError('fetch must be a function')
+  if (typeof log !== 'function') throw new TypeError('log must be a function')
   positiveInt(timeoutMs, 'timeoutMs')
   positiveInt(maxPending, 'maxPending')
   positiveInt(dedupeMax, 'dedupeMax')
@@ -96,6 +100,30 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     return true
   }
 
+  // A stored DM drop: the wake names nobody, so neither does this log line.
+  // One wake already waiting covers every drop behind it; the account
+  // service coalesces the rest.
+  function sendDmWake () {
+    if (closed) return false
+    const event = { v: 1, kind: 'dm-wake' }
+    if (!validateDmWake(event)) {
+      counts.invalid++
+      return false
+    }
+    if (queue.includes(DM_WAKE)) {
+      counts.duplicate++
+      return false
+    }
+    if (queue.length >= maxPending) {
+      counts.full++
+      return false
+    }
+    queue.push(DM_WAKE)
+    log({ event: 'push', reason: 'dm' })
+    if (!draining) drain()
+    return true
+  }
+
   function stats () {
     return { ...counts, pending: queue.length, inflight: inflight === null ? 0 : 1 }
   }
@@ -106,7 +134,7 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     if (inflight !== null) inflight.abort()
   }
 
-  return { send, stats, close }
+  return { send, sendDmWake, stats, close }
 }
 
 module.exports = { createPushRelay }

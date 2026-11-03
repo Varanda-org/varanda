@@ -3798,3 +3798,98 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 - O registro da aba não é confiável: só nomeia uma tela a abrir.
 - Um convite de perfil e um link de comunidade pendentes ao mesmo tempo abrem os dois depois de entrar.
 - Uma comunidade cuja entrada seguiu pelo caminho pendente responde com o papel `pending`; reabrir a tela antes de sincronizar pode mostrar de novo o cartão do índice com Entrar (tocar de novo é idempotente).
+
+## 69. Conversas: mensagens privadas (pilha feat/dm-core ... feat/dm-reports-push)
+
+Mensagens privadas 1:1, só texto, cifradas de ponta a ponta, na aba **Conversas** (id interno `comunidades`, ícone `conversas`). O seletor é Mensagens | Comunidades. Quem a pessoa segue cai em Mensagens; quem ela não segue cai em Pedidos de mensagem, com um ponto e nunca uma contagem. Aceitar, recusar e bloquear não avisam a outra pessoa. Não há confirmação de leitura, fotos nem indicador de digitação. Apagar vale neste aparelho e nos outros aparelhos da mesma pessoa; a outra pessoa fica com a cópia dela. A denúncia (`dm.reportSign`, `varanda-dm-report-v1`) leva a mensagem escolhida e a chave do diário de quem enviou, no campo `target`, para a moderação poder bloquear a conta. Não leva o resto da conversa nem a assinatura de quem enviou. No painel a citação sai com o rótulo "Texto não conferido". Normativo: seção 11 de `docs/protocol.md` e RPC 5.73 a 5.81 de `docs/rpc.md`. A descrição para quem usa o app está em `docs/app.md`, seção Conversas.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`). A suíte inteira usa `VARANDA_TEST_CONCURRENCY=1`, como a CI. Nenhum teste usa a DHT pública.
+
+Testes desta funcionalidade:
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/core/test/dm.test.js` | quadro, texto interno, lacre e constantes |
+| `packages/core/test/dm-fold.test.js` | pedido, aceite, recusa, bloqueio, apagar, ponto sem contagem |
+| `packages/core/test/dm-net.test.js` | canal `varanda/dm/1`; a transcrição não leva chave de diário |
+| `packages/core/test/dm-pool.test.js` | conjunto, reinício, diretório sem chave de diário, varredura de 7 dias com o relógio adiantado (8 dias sai, 1 dia fica) |
+| `packages/core/test/dm-postage.test.js` | selo RSA cego |
+| `packages/core/test/dm-stamp-net.test.js` | canal `varanda/dm-stamp/1`; o registro `{ event: 'dm-stamp', reason }` não leva chave |
+| `packages/core/test/dm-session-refuse.test.js` | o nó do núcleo recusa `dm.*` antes de abrir qualquer coisa |
+| `packages/core/test/seeder-dm.test.js` | o semeador guarda, pagina e mantém o conjunto ao reiniciar; `seed --no-dm` deixa os dois canais sem suporte |
+| `packages/core/test/records.test.js` | registro `dm-key` (`DM_KEY_KEYS`) |
+| `packages/core/test/report.test.js` | denúncia `varanda-dm-report-v1`, com `target` e sem assinatura de quem enviou |
+| `packages/rpc/test/methods.test.js` | contrato dos métodos `dm.*` |
+| `packages/rpc/test/envelope.test.js` | evento `dm.changed` |
+| `packages/web-member/test/dm.test.js` | pedido, aceite, bloqueio, segundo aparelho, `ctl` que não vai ao par, nada em claro no disco |
+| `packages/web-member/test/dm-store.test.js` | a cópia local reabre com a mesma chave e fica cifrada em repouso |
+| `packages/web-member/test/dm-link.test.js` | selo e canal anônimo contra um semeador |
+| `packages/web-member/test/passkey.test.js` | derivação da chave de caixa e da chave local a partir da passkey |
+| `packages/web-member/test/dm-e2e.test.js` | ponta a ponta na DHT local |
+| `apps/app/test/dm.test.js` | rótulos, seletor Mensagens e Comunidades, ponto sem contagem, sem confirmação de leitura |
+| `apps/app/test/conversas.test.js` | telas de Conversas |
+| `apps/app/test/help.test.js` | folha "Como funcionam as Conversas" |
+| `apps/app/test/tabBar.test.js` | aba Conversas, id `comunidades`, ícone `conversas`; cinco abas fora do nó hospedado |
+| `apps/app/test/legal.test.js` | `LEGAL_VERSION` 11 |
+| `packages/core/test/terms.test.js` | `TERMS_VERSION` 11 |
+| `packages/core/test/dm-wake.test.js` | o sinal `dm-wake`: formato exato, sem chave nem texto, não é evento de membro |
+| `apps/cli/test/dm-report.test.js` | denúncia de mensagem privada no serviço de conta, com `target` e a citação não conferida |
+| `apps/cli/test/moderation-store.test.js` | a denúncia de mensagem privada no armazém de moderação |
+| `apps/cli/test/ai-worker.test.js` | a triagem automática e a denúncia de mensagem privada |
+| `apps/cli/test/account-push.test.js` | rotas de push do serviço de conta, com o aviso de mensagem |
+| `apps/cli/test/push-relay.test.js` | o relé de push e o aviso de mensagem |
+| `apps/cli/test/push-store.test.js` | o armazém de push e o aviso de mensagem |
+| `apps/app/test/sw.test.js` | o service worker mostra o aviso de mensagem com a frase fixa, sem nome, e abre o app ao tocar |
+| `apps/app/test/report.test.js` | a denúncia de mensagem privada no app |
+| `apps/app/test/terms-version.test.js` | versão dos termos igual no app e no núcleo |
+| `apps/cli/test/seed-ops.test.js` | `seed --no-dm` e a rotação de `dm-postage.json` |
+| `apps/cli/test/cli.test.js` | a opção `--no-dm` |
+
+A varredura de 7 dias é o teste de relógio adiantado em `packages/core/test/dm-pool.test.js`. Não é um passo de aparelho.
+
+### Checagens humanas (a fazer)
+
+Primeiro no Android, com dois apps instalados (duas contas). Depois o mesmo roteiro no simulador iOS. Por último na web, contra um semeador local. As caixas ficam desmarcadas até alguém executar o passo.
+
+#### Android (dois apps instalados)
+
+A segue B. B não segue A.
+
+- [ ] A envia uma mensagem a B.
+- [ ] B vê a linha Pedidos de mensagem, com um ponto e sem contagem. A não vê estado de leitura.
+- [ ] B aceita e responde. A vê a resposta. B não recebe confirmação de que A leu.
+- [ ] B recusa um estranho C. C não fica sabendo de nada (nem aceite, nem recusa, nem leitura).
+- [ ] Uma mensagem posterior de C abre um pedido novo.
+- [ ] B bloqueia D. A mensagem seguinte de D não aparece para B.
+- [ ] B apaga a conversa num aparelho. O outro aparelho de B perde a conversa depois de um `dm.pull`. A continua com a cópia dela.
+- [ ] Um segundo aparelho da mesma passkey vê o que foi enviado, o que foi recebido e o estado aceito.
+- [ ] A folha de denúncia mostra só a mensagem escolhida e a frase "Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa."
+- [ ] A abertura e a barra do topo continuam com a cadeira. O estado vazio dentro de Comunidades continua com o ícone `cadeira`.
+- [ ] Na configuração manual a barra tem cinco abas e não tem Conversas.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS (duas contas; A segue B e B não segue A).
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro de mensagem, Pedidos, aceite, resposta, recusa de C, pedido novo, bloqueio de D e apagar em dois aparelhos.
+- [ ] Com os avisos no aparelho ligados, o push de mensagem diz só "Pode haver uma mensagem nova na Varanda", sem nome e sem texto, no máximo um a cada 15 minutos.
+- [ ] O painel de moderação mostra a citação com o rótulo "Texto não conferido" e dá para bloquear a conta de quem enviou (`target` é a chave do diário).
+- [ ] O registro do semeador (`{ event: 'dm', reason }` e `{ event: 'dm-stamp', reason }`) não traz chave, endereço nem texto.
+- [ ] Reiniciar o semeador mantém o conjunto.
+- [ ] A abertura e a barra do topo continuam com a cadeira.
+- [ ] A configuração manual continua com cinco abas, sem Conversas.
+- [ ] `LEGAL_VERSION` (`apps/app/src/legal.js`) e `TERMS_VERSION` (`packages/core/lib/terms.js`) são 10. Em `docs/design.md`, seção LGPD, existem as linhas Mensagens diretas, Envelopes de mensagens diretas, Selos de envio e Denúncia de mensagem direta.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O nó hospedado acha o `dm-key` na réplica local ou nas `DM_LOOKUP_WINDOWS` = 8 janelas mais novas de `PEEK_WINDOW` = 36 blocos. Um `dm-key` muito antigo, num diário longo, pode passar despercebido até essa pessoa abrir Conversas de novo.
+- Depois de uma troca de `gen`, envelopes lacrados para a geração antiga que ainda estão no conjunto não são abertos.
+- O primeiro envio logo depois de ligar pode responder "o limite de envio de hoje acabou" até a primeira recarga de selos (`DM_STAMP_WALLET`) terminar.
+- O app instalado não tem aviso do sistema. A novidade só aparece com o app aberto (`dm.pull`, `DM_PULL_EVERY_MS` = 120000) e pelo ponto.
+- Um aparelho offline por mais de sete dias (`DM_RETENTION_MS`) perde o que a varredura já tirou.
+- `seed --no-dm` deixa os dois canais sem suporte. Sem a opção, ficam ligados.

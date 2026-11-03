@@ -215,6 +215,17 @@
 // while the diary length is unchanged (noticeCtxCache, forgotten on lock,
 // reset, setKeyPair and close). The link itself still opens no storage core, and a v1 read
 // never reads the own diary.
+//
+// Direct messages (web only, docs/rpc.md 5.73 to 5.81): ./dm.js holds the
+// box key pair and the local store key, derived at setKeyPair from the PRF
+// and zeroed with the identity (lock, reset, close). dm.enable publishes the
+// dm-key through the write gate; dm.send and dm.set put over a fresh
+// anonymous link (./dm-link.js), never the sync socket; dm.pull runs off the
+// chain (one at a time); dm.lookup reads local data on the chain and
+// otherwise a bounded newest-first diary.peek scan off it. A continuous run
+// ticks a pull every DM_PULL_EVERY_MS and a wallet check (top-ups over the
+// separate stamp link, at most one per 10 minutes, and once after an
+// unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
@@ -231,7 +242,7 @@ const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
-const { signReport } = require('@varanda/core/lib/report')
+const { signReport, signDmReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { signAge } = require('@varanda/core/lib/age')
@@ -249,6 +260,7 @@ const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
+const { createDmEngine } = require('./dm')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const LOCKED_MESSAGE = 'diretório de dados em uso'
@@ -269,6 +281,13 @@ const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+// Direct messages (see the header): the sync loop pulls at most this often
+// and checks the wallet on this tick; a dm-key lookup by peek reads at most
+// this many windows of PEEK_WINDOW seqs, newest first.
+const DM_PULL_EVERY_MS = 120000
+const DM_TICK_MS = 60000
+const DM_LOOKUP_WINDOWS = 8
+const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
@@ -630,6 +649,34 @@ function createBrowserSession ({
     limits: syncOptions.notices
   })
 
+  const dmEngine = createDmEngine({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    log: (text) => warning(safe(text)),
+    emit: (event, data) => send(event, data),
+    limits: syncOptions.dm
+  })
+  let dmLastPull = 0
+
+  // The sync loop's direct message tick: while a continuous run lives and
+  // the identity is unlocked with a published dm-key, a pull every
+  // DM_PULL_EVERY_MS and a wallet check (the engine limits top-ups to one
+  // per 10 minutes). Off the chain: it opens no storage core. Never throws.
+  async function dmTick () {
+    try {
+      if (closed || keyPair === null || ownKey === null || !dmEngine.unlocked()) return
+      if ((await store.readDmKey(storage)) === null) return
+      const own = ownKey
+      if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
+        dmLastPull = Date.now()
+        await dmEngine.pull(own).catch(noop)
+      }
+      if (keyPair !== null) await dmEngine.topUp(keyPair)
+    } catch {}
+  }
+
   // ---- sync runs ----
 
   // internal: a gate or push run of the session itself (its line names it;
@@ -653,6 +700,7 @@ function createBrowserSession ({
       clear () { publish(null) }
     }
     run = r
+    if (!once && !internal) r.dmTimer = setInterval(() => { dmTick() }, DM_TICK_MS)
     send('sync.started', { runId, once }, epoch)
     if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
     const event = (text) => send('sync.event', { runId, line: line(text) }, epoch)
@@ -688,6 +736,7 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
+                  if (!once && !internal) dmTick()
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
                 return
@@ -764,6 +813,7 @@ function createBrowserSession ({
         error = err
       }
       if (run === r) run = null
+      if (r.dmTimer) clearInterval(r.dmTimer)
       clearLease(r)
       // A drain deferred by this user's once run is due now.
       if (once && !internal && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
@@ -1414,6 +1464,65 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
+  // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
+
+  // The identity unlocked AND the dm keys derived (setKeyPair with a prf).
+  async function requireDm () {
+    const own = await requireUnlocked()
+    if (!dmEngine.unlocked()) throw new UsageError(store.LOCKED)
+    return own
+  }
+
+  // The newest dm-key of `member` -> { box, gen } (both null when none).
+  // Local data on the chain; else a bounded newest-first scan through the
+  // diary.peek path OFF the chain (a peek waits for the run, which the chain
+  // would hold back). Never logs the key.
+  async function dmLookupOf (memberKey) {
+    const key = memberKey.toLowerCase()
+    const localHit = await serial(() => withCores((c) => member.dmLookup(c, key)))({})
+    if (localHit !== null) return localHit
+    const first = await diaryPeek({ author: key, seqs: [1] })
+    const found = first.entries.slice()
+    let best = member.newestDmKey(found)
+    let hi = first.length - 1
+    for (let w = 0; best === null && hi > 1 && w < DM_LOOKUP_WINDOWS; w++) {
+      const lo = Math.max(2, hi - PEEK_WINDOW + 1)
+      const seqs = []
+      for (let q = lo; q <= hi; q++) seqs.push(q)
+      const r = await diaryPeek({ author: key, seqs })
+      best = member.newestDmKey(r.entries)
+      hi = lo - 1
+    }
+    return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+  }
+
+  // dm.enable's body: the dm-key through the write gate, kv dmKey after.
+  async function dmEnable (epoch) {
+    await requireDm()
+    const { box, gen } = dmEngine.boxHex()
+    await ensureCaughtUp(epoch)
+    const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
+    if (r.seq !== null) wrote(r.seq)
+    await store.writeDmKey(storage, gen)
+    await pushAfterWrite()
+    return r
+  }
+
+  // Once after an unlock with a dm-key: an own dm-key fallen out of the
+  // newest member-ops DM_KEY_REFRESH_BLOCKS is appended again through the
+  // write gate (dm.enable's path); otherwise nothing runs. A failure is a
+  // warning only.
+  const dmRefresh = serial(async (_, epoch) => {
+    try {
+      if (keyPair === null || !dmEngine.unlocked()) return
+      const { box, gen } = dmEngine.boxHex()
+      if (!(await withStore((c) => member.dmKeyStale(c, { box, gen })))) return
+      await dmEnable(epoch)
+    } catch {
+      warning('aviso: chave de mensagens não renovada')
+    }
+  })
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -1914,6 +2023,82 @@ function createBrowserSession ({
     'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
     'community.list': serial(() => withStore((c) => member.communityList(c))),
 
+    'dm.enable': serial(async (_, epoch) => {
+      const r = await dmEnable(epoch)
+      if (keyPair !== null) dmEngine.topUp(keyPair).catch(noop)
+      return r
+    }),
+
+    // Reads public records only; works locked.
+    'dm.lookup': async ({ member: memberKey }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      try {
+        return await dmLookupOf(memberKey)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The recipient's key is looked up first (off the chain), then the send
+    // runs on the chain. A send for an identity without a published dm-key
+    // runs dm.enable first.
+    'dm.send': async ({ to, text, replyTo }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      // Self and a blocked peer are refused before any lookup.
+      await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
+      let recipient
+      try {
+        recipient = to === ownKey ? { box: null } : await dmLookupOf(to)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        const own = await requireDm()
+        if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
+        return dmEngine.send(own, keyPair, { to, text, replyTo: replyTo === undefined ? null : replyTo }, recipient.box)
+      })({})
+    },
+
+    // Not on the chain: it reads the pool over its own link and writes only
+    // kv and the local store (one pull at a time, in the engine).
+    'dm.pull': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      try {
+        dmLastPull = Date.now()
+        return await dmEngine.pull(own)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
+    'dm.thread': serial(async (params) => dmEngine.thread(await requireDm(), params)),
+    'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
+    'dm.seen': serial(async ({ peer }) => dmEngine.seen(await requireDm(), peer)),
+
+    // As report.sign: no diary opened, nothing appended, no network.
+    'dm.reportSign': serial(async ({ nonce, target, reason, text, quote }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      if (target === own) throw new UsageError(SELF_REPORT)
+      let signature
+      try {
+        signature = signDmReport({ nonce, member: own, association: cfg.association, target, reason, text: text === undefined ? '' : text, quote }, keyPair)
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+        throw err
+      }
+      return { signature }
+    }),
+
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
       const gone = () => epoch !== connection
       if (gone()) throw rpcError('USAGE', 'conexão encerrada')
@@ -1981,6 +2166,7 @@ function createBrowserSession ({
     if (groupPrf !== null) groupPrf.fill(0)
     groupPrf = null
     boxKeys.lock()
+    dmEngine.lock()
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
   }
@@ -2034,6 +2220,17 @@ function createBrowserSession ({
           await boxKeys.unlock(storage, prfCopy)
         } catch (err) {
           if (!(err instanceof UsageError)) reportInternal(err)
+        }
+        // The dm box pair and the local store key (docs/rpc.md 5.73); the
+        // wallet is checked once after an unlock that has a dm-key.
+        try {
+          await dmEngine.unlock(prfCopy)
+          if ((await store.readDmKey(storage)) !== null) {
+            dmEngine.topUp(copy).catch(noop)
+            dmRefresh({}).catch(noop)
+          }
+        } catch (err) {
+          reportInternal(err)
         }
       }
       followChanged()
@@ -2164,6 +2361,9 @@ function createBrowserSession ({
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     zeroKeyPair()
+    // A pull, send or top-up still unwinding must not see its store go.
+    await dmEngine.idle()
+    await store.deleteDmData(storage)
     ownKey = null
     certKnown = false
     diaryInfo = null
@@ -2225,6 +2425,7 @@ function createBrowserSession ({
       noticer.close()
       zeroKeyPair()
       boxKeys.close()
+      await dmEngine.close()
     })()
     return closing
   }

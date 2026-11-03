@@ -54,6 +54,20 @@ export const HELP = Object.freeze({
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
     ])
   }),
+  conversas: Object.freeze({
+    title: 'Como funcionam as Conversas',
+    paragraphs: Object.freeze([
+      'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
+      'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+      'Quem você segue aparece em Mensagens. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
+      'Aceitar ou recusar não avisa a outra pessoa.',
+      'Não há confirmação de leitura.',
+      'Bloquear interrompe as mensagens nos seus aparelhos.',
+      'Apagar remove a conversa só nos seus aparelhos.',
+      'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
+      'Comunidades são os grupos que já existem.'
+    ])
+  }),
   entrar: Object.freeze({
     title: 'Como funciona a entrada',
     paragraphs: Object.freeze([

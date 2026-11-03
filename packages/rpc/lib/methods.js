@@ -318,6 +318,26 @@ const LEAVE_WAITS = ['root', 'groups', 'devices']
 const isLeaveForce = (v) => isBool(v) ||
   (Array.isArray(v) && v.length > 0 && v.every((w) => LEAVE_WAITS.includes(w)) && new Set(v).size === v.length)
 
+const DM_ID_RE = /^[0-9a-f]{32}$/
+const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
+// Page sizes keep a worst-case page (4-byte code points) far below
+// MAX_MESSAGE (docs/rpc.md 5.77 and 5.78).
+const DM_THREAD_LIMIT_DEFAULT = 30
+const DM_THREAD_LIMIT_MAX = 50
+const DM_LIST_LIMIT_DEFAULT = 30
+const DM_LIST_LIMIT_MAX = 50
+const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
+const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
+const isDmFolder = (v) => v === 'inbox' || v === 'request'
+
+// dm.list `before` (docs/rpc.md 5.77): exactly { at, peer }, the list-order
+// position of the oldest conversation the caller holds.
+function isDmListCursor (v) {
+  if (!isPlainObject(v) || Object.keys(v).length !== 2) return false
+  if (!hasOwn(v, 'at') || !hasOwn(v, 'peer')) return false
+  return isCanonicalIso(v.at) && isKey(v.peer)
+}
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -647,6 +667,35 @@ const SPECS = {
   // The same-value check is the node's.
   'group.invitePolicy': { fields: { group: req(isKey), members: req(isBool) }, mutating: true },
   'community.invitePolicy': { fields: { community: req(isKey), members: req(isBool) }, mutating: true },
+  // Conversas, browser node only (docs/rpc.md 5.73 to 5.81). dm.pull and
+  // dm.seen write only local state and must survive an uncertain answer, so
+  // they are not mutating: the client may repeat them.
+  'dm.enable': { fields: none, mutating: true },
+  'dm.lookup': { fields: { member: req(isKey) } },
+  'dm.send': { fields: { to: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isDmId) }, mutating: true },
+  'dm.pull': { fields: none },
+  'dm.list': {
+    fields: {
+      folder: opt(isDmFolder, 'inbox'),
+      limit: opt(int(1, DM_LIST_LIMIT_MAX), DM_LIST_LIMIT_DEFAULT),
+      before: opt(isDmListCursor)
+    }
+  },
+  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, DM_THREAD_LIMIT_MAX), DM_THREAD_LIMIT_DEFAULT) } },
+  'dm.set': { fields: { peer: req(isKey), state: req(isDmState) }, mutating: true },
+  'dm.seen': { fields: { peer: req(isKey) } },
+  // The node fills in member and association and hashes text and quote; the
+  // quote is the chosen message as this device decrypted it, which no one
+  // can verify. target is the sender's diary key, never its signature.
+  'dm.reportSign': {
+    fields: {
+      nonce: req(isNonce),
+      target: req(isKey),
+      reason: req(isReason),
+      text: opt(str(0, REPORT_TEXT_MAX), ''),
+      quote: req(str(1, L.MAX_TEXT))
+    }
+  },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

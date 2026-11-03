@@ -3,7 +3,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { verifyReport } = require('@varanda/core/lib/report')
+const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
 const { MAX_REPORTS, AI_ACTOR } = require('./moderation-store')
@@ -427,6 +427,8 @@ function createModRoutes ({
     const target = hex64(body.target)
     // The own key is never a target; checked before the signature and the store.
     if (target === member) throw refuse('pedido-invalido')
+    if (body.kind === 'dm') return reportDm(res, body, { member, nonce, expiresAt, target })
+    if (body.kind !== undefined) throw refuse('pedido-invalido')
     const seq = body.seq === undefined || body.seq === null ? null : body.seq
     // A group message (report v2): writer and group come together, only with
     // a seq.
@@ -456,6 +458,25 @@ function createModRoutes ({
     // reaches the triage: it reads the diary at `seq`, which is not the
     // reported block, so only a human decides it.
     if (!duplicate && writer === null) afterAnswer(() => triage.onReport(added))
+  }
+
+  // A private message (report kind 'dm', docs/rpc.md 5.81): the message is on
+  // no diary, so the seeder is never asked for it and the quote is the
+  // reporter's word only. Fields of a diary or group report make it invalid.
+  async function reportDm (res, body, { member, nonce, expiresAt, target }) {
+    for (const k of ['seq', 'writer', 'group', 'peer']) {
+      if (body[k] !== undefined) throw refuse('pedido-invalido')
+    }
+    const text = body.text === undefined ? '' : body.text
+    const { reason, quote, signature } = body
+    if (!verifyDmReport({ nonce, member, association, target, reason, text, quote }, signature).ok) throw refuse('assinatura-invalida')
+    // Spent as in report(): no await since the nonce check.
+    spend(spentReportNonces, nonce, expiresAt)
+    const { report: added, duplicate } = await storeAsync(() => moderation.addDm({ reporter: member, target, reason, text, quote, signature, nonce }))
+    log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
+    send(res, 200, { id: added.id, duplicate })
+    // The worker marks it for a human without reading or embedding anything.
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
   // --- moderator sign-in ---------------------------------------------------
@@ -568,9 +589,15 @@ function createModRoutes ({
     return r.target === own || r.reporter === own
   }
 
+  // A private message row (kind 'dm') has no seq, writer or group keys at
+  // all; every group test reads them through here.
+  function groupOf (r) {
+    return r.kind === 'dm' ? null : r.group
+  }
+
   // -> { ok: true, root, name, creator, texto, sealed? } | { ok: false, code }. Never throws.
   async function confirmGroup (r) {
-    if (r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
+    if (r.kind === 'dm' || r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
     if (groupCheck === null) return { ok: false, code: 'config' }
     try {
       const v = await groupCheck.check({ group: r.group, writer: r.writer, diary: r.target, seq: r.seq })
@@ -586,7 +613,7 @@ function createModRoutes ({
   // account), so every such block waits for the seeder to confirm a served
   // diary. -> { ok: true, needed } | { ok: false, code }. Never throws.
   async function confirmTarget (r) {
-    if (r.group !== null) return { ok: true, needed: false }
+    if (groupOf(r) !== null) return { ok: true, needed: false }
     if (groupCheck === null || typeof groupCheck.checkDiary !== 'function') return { ok: false, code: 'config' }
     try {
       const v = await groupCheck.checkDiary({ diary: r.target })
@@ -609,9 +636,9 @@ function createModRoutes ({
       at: r.at,
       kind: r.kind,
       target: r.target,
-      seq: r.seq,
-      writer: r.writer,
-      group: r.group,
+      seq: r.seq ?? null,
+      writer: r.writer ?? null,
+      group: r.group ?? null,
       quote: r.quote,
       reason: r.reason,
       text: r.text,
@@ -733,7 +760,7 @@ function createModRoutes ({
     // as author) therefore waits for the seeder to confirm that the writer
     // belongs to that diary, so an invented quote cannot aim a block at a
     // diary that never wrote it. Fails closed; 'descartar' never asks.
-    if (body.decision === 'bloquear' && row.group !== null) {
+    if (body.decision === 'bloquear' && groupOf(row) !== null) {
       const v = await confirmGroup(row)
       if (!v.ok) {
         log({ event: 'grupo', reason: v.code })
@@ -748,7 +775,7 @@ function createModRoutes ({
       }
     }
     // ('grupo' on a report without a group is the store's refusal.)
-    if (body.decision === 'bloquear' && row.group === null && block === 'diario') {
+    if (body.decision === 'bloquear' && groupOf(row) === null && block === 'diario') {
       const v = await confirmTarget(row)
       if (!v.ok) {
         log({ event: 'alvo', reason: v.code })
@@ -785,7 +812,7 @@ function createModRoutes ({
   // only: decide checks again.
   async function groupInfo (req, res, session, id) {
     const row = store(() => moderation.get(id))
-    if (row === null || row.writer === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (row === null || groupOf(row) === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
     const v = await confirmGroup(row)
     if (!v.ok) log({ event: 'grupo', reason: v.code })
     // `texto`: the reported message as the seeder decoded it (peer text,
@@ -803,7 +830,7 @@ function createModRoutes ({
   // again.
   async function targetInfo (req, res, session, id) {
     const row = store(() => moderation.get(id))
-    if (row === null || row.group !== null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (row === null || groupOf(row) !== null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
     const v = await confirmTarget(row)
     if (!v.ok) log({ event: 'alvo', reason: v.code })
     send(res, 200, v.ok ? { confirmed: true } : { confirmed: false, reason: v.code })

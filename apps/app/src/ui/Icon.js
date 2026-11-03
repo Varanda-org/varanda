@@ -12,6 +12,7 @@ const GLYPHS = {
   gente: 'users',
   pessoa: 'user',
   resposta: 'message-circle',
+  conversas: 'message-square',
   lapis: 'edit-2',
   engrenagem: 'settings',
   sinc: 'refresh-cw',

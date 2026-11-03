@@ -19,6 +19,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Conversas: mensagens privadas cifradas de ponta a ponta entre membros, com Pedidos de mensagem, resposta, bloqueio, denúncia de uma mensagem e aviso push sem remetente. Termos e Política na versão 11, com novo aceite.
 - Comunidades e grupos ganham "Quem pode convidar" (Só administradores ou Membros podem convidar), ajustado por quem criou ou pelos administradores e guardado num novo registro assinado, `group-invites` (versões antigas o ignoram). O convite por @nome em si vem a seguir.
 
 - App Links no Android para `/c/<chave>` e `/g/<chave>` de `bora.varanda.app` (o `assetlinks.json` já tinha `handle_all_urls`); um link desses que chega antes de a instalação carregar espera e é lido de novo quando ela carrega. Os links universais no iOS vêm depois, com a conta Apple Developer.
@@ -157,6 +158,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Alterado
 
+- A aba Comunidades virou Conversas, com o seletor Mensagens | Comunidades e um ícone novo; a cadeira segue como marca na abertura e na barra.
 - O app Android inteiro passa a compilar com Kotlin 2.3.0 (era 2.1.20), porque a liveness 1.13.0 da AWS depende do kotlinx-serialization 1.11.0, feito com Kotlin 2.3. Afeta todos os módulos nativos; o build de iOS passa a pular a validação de plugin e de macros do SwiftPM (`-skipPackagePluginValidation -skipMacroValidation`), por causa do smithy-swift. Exige um build novo.
 - O link de comunidade cai num cartão de convite com um botão (**Entrar** ou **Pedir entrada**) e o aviso "Participar é público: sua entrada fica registrada no seu diário.". Na web, o link sobrevive ao passo do Google por até 1 h e a tela Entrar avisa do convite.
 - A aba Cadeiras de Praia passa a se chamar Comunidades, e cada cadeira passa a se chamar grupo, nas telas da web hospedada.

@@ -25,6 +25,7 @@ import { Avatar } from '../ui/Avatar'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { LABELS } from '../dm'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
@@ -70,7 +71,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -303,6 +304,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onRep
               onUnfollow={toggleFollow}
             />
             )
+          : null}
+        {!own && node.hosted === true && typeof onMessage === 'function'
+          ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
           : null}
         {canReport
           ? (

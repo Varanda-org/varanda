@@ -59,6 +59,7 @@ const AI_REASONS = {
   margem: 'casos parecidos com decisões diferentes',
   divergente: 'os casos mais parecidos discordam entre si',
   conta: 'denúncia de conta, não de publicação',
+  dm: 'mensagem privada: sempre uma pessoa decide, a IA não lê',
   ilegal: 'conteúdo possivelmente ilegal pede uma pessoa',
   contexto: 'depende de contexto',
   midia: 'a publicação tem fotos, que a IA não vê',
@@ -107,6 +108,7 @@ const TEXT = {
   groupCreator: 'criado pela conta: ',
   groupUnconfirmed: 'O semeador não confirmou que esta chave é de um grupo com esta pessoa como autora. Bloquear conta e Bloquear grupo ficam indisponíveis: nada nesta denúncia foi conferido.',
   groupSealedQuote: 'cifrada: citação do denunciante',
+  dmQuoteLabel: 'Mensagem privada que a pessoa escolheu denunciar. Texto não conferido: a denúncia não prova que esta conta enviou isso. Nada mais da conversa chega aqui.',
   groupVerifiedText: 'Texto conferido no semeador:',
   groupRootUnconfirmed: 'O semeador conferiu a autoria, mas não confirmou a chave do grupo. Só é possível bloquear a conta.',
   targetChecking: 'conferindo a chave no semeador…',
@@ -273,6 +275,11 @@ function actorOf (r) {
 }
 
 // HTTP status -> what the panel does next.
+function kindLabel (r) {
+  if (r.kind === 'dm') return 'mensagem privada'
+  return r.kind === 'account' ? 'conta' : 'publicação'
+}
+
 function nextAction (status) {
   if (status === 401) return 'login'
   if (status >= 200 && status < 300) return 'ok'
@@ -286,13 +293,15 @@ function person (p) {
 function reportRow (r) {
   if (!has(r, 'id') || typeof r.id !== 'string' || !ID_RE.test(r.id)) return null
   const reported = person(r.reported)
-  // A group message names both keys; anything else is a diary report.
-  const grouped = has(r, 'writer') && has(r, 'group') && HEX64.test(str(r.writer)) && HEX64.test(str(r.group))
+  // A private message has no post fields at all; a group message names
+  // both keys; anything else is a diary report.
+  const dm = r.kind === 'dm'
+  const grouped = !dm && has(r, 'writer') && has(r, 'group') && HEX64.test(str(r.writer)) && HEX64.test(str(r.group))
   return {
     id: r.id,
     at: str(r.at),
-    kind: r.kind === 'account' ? 'account' : 'post',
-    seq: Number.isInteger(r.seq) ? r.seq : null,
+    kind: dm ? 'dm' : r.kind === 'account' ? 'account' : 'post',
+    seq: !dm && Number.isInteger(r.seq) ? r.seq : null,
     writer: grouped ? r.writer : null,
     group: grouped ? r.group : null,
     quote: str(r.quote),
@@ -1006,13 +1015,13 @@ function createPanel (env) {
       }
       return h('div', { className: 'card' },
         h('h2', { text: reasonLabel(r.reason) }),
-        h('p', { className: 'meta', text: formatDate(r.at) + ' · ' + (r.kind === 'account' ? 'conta' : 'publicação' + (r.seq !== null ? ' nº ' + r.seq : '')) }),
+        h('p', { className: 'meta', text: formatDate(r.at) + ' · ' + kindLabel(r) + (r.kind === 'post' && r.seq !== null ? ' nº ' + r.seq : '') }),
         h('p', { text: 'denunciada: ' + target }),
         r.ai !== null ? h('p', { className: 'ai', text: aiLine(r.ai) }) : null,
         verifiedBlock(r.verified),
         grouped ? h('p', { className: 'label', text: TEXT.groupMessage }) : null,
         grouped ? groupBlock(r, groupChecked ? info : null) : null,
-        r.quote !== '' ? h('p', { className: 'label', text: TEXT.quoteLabel }) : null,
+        r.quote !== '' ? h('p', { className: 'label', text: r.kind === 'dm' ? TEXT.dmQuoteLabel : TEXT.quoteLabel }) : null,
         r.quote !== '' ? untrusted('blockquote', r.quote) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
         r.text !== '' ? untrusted('p', r.text) : null,
@@ -1022,7 +1031,7 @@ function createPanel (env) {
         waiting ? h('p', { className: 'waiting', text: TEXT.waiting }) : null,
         targetLine,
         rootMissing ? h('p', { className: 'warning', text: TEXT.groupRootUnconfirmed }) : null,
-        grouped ? null : button('Bloquear', () => decide('bloquear'), { className: 'danger', disabled: busy || waiting || !targetOk }),
+        grouped ? null : button(r.kind === 'dm' ? 'Bloquear conta' : 'Bloquear', () => decide('bloquear'), { className: 'danger', disabled: busy || waiting || !targetOk }),
         // Neither block on a group report until the seeder confirms the
         // writer belongs to the reported diary: the quote is the reporter's
         // word only, with no AI read behind it (decide checks again).
@@ -1092,7 +1101,7 @@ function createPanel (env) {
     if (reports.length === 0) return h('p', { text: TEXT.noDecided })
     const cards = reports.map((r) => h('div', { className: 'card' },
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
-      h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + (r.kind === 'account' ? 'conta' : 'publicação') + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
+      h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + kindLabel(r) + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
       verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,

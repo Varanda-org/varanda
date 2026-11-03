@@ -195,7 +195,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'mensagem'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade']) {
@@ -211,4 +211,20 @@ test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) =
   t.is(push(push(EMPTY, { screen: 'grupo', key: A }), { screen: 'comunidade', key: A }).length, 2, 'same key on another screen is a new entry')
   t.ok(validEntry({ screen: 'conversa', key: A + ':1' }) && validEntry({ screen: 'membro', key: A }), 'existing screens keep working')
   t.is(MAX_DEPTH, 20)
+})
+
+test('mensagem accepts a lowercase hex64 key and refuses uppercase', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('mensagem'))
+  t.ok(SCREENS.includes('conversa'), 'conversa stays the post thread')
+  t.ok(validEntry({ screen: 'mensagem', key: A }))
+  const stack = push(EMPTY, { screen: 'mensagem', key: A })
+  t.alike(top(stack), { screen: 'mensagem', key: A, params: {} })
+  t.is(push(stack, { screen: 'mensagem', key: A, params: { seed: 2 } }), stack, 'same top is a no-op')
+  t.absent(validEntry({ screen: 'mensagem', key: A.toUpperCase() }))
+  t.is(push(EMPTY, { screen: 'mensagem', key: A.toUpperCase() }), EMPTY)
+  for (const key of ['ab', A + ':1', 42, null, A + '0']) {
+    t.absent(validEntry({ screen: 'mensagem', key }), String(key))
+    t.is(push(EMPTY, { screen: 'mensagem', key }), EMPTY)
+  }
 })
