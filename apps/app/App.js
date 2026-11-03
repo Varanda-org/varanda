@@ -64,7 +64,7 @@ import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
-import { tabsFor } from './src/tabs'
+import { showPostButton, tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
@@ -1773,7 +1773,7 @@ function Member () {
             </View>
             )
           : null}
-        <Fab onPress={openComposer} />
+        {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
         {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} />}
       </View>
     )
