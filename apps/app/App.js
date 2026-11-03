@@ -110,7 +110,7 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -737,20 +737,16 @@ function Member () {
     setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
   }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
 
-  // Back from the Google step with a certificate already held: the tabs show
-  // after the unlock, so open Ajustes → Conta once, where the account card offers
-  // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
-  // handles the return.
+  // Back from the Google step, the return is decided by linkReturnTaker next to
+  // the signup signal below (it needs step and certMissing, computed there).
+  // The setup's LinkCard also drops it when it lands the certificate (onLinked),
+  // since during the recovery the shell may not have seen info without one.
   const linkReturnRef = useRef(LINK_RETURN)
+  const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])
   // Native has no ?conta= load: an auth session's result lands in the
   // Identidade card that opened it, which is still mounted (the native
   // install card is always 'none', so the signup offer needs no signal).
   const linkReturned = LINK_RETURN
-  useEffect(() => {
-    if (!termsOk || setupStep || !linkReturnRef.current) return
-    linkReturnRef.current = false
-    setAjustes('conta')
-  }, [setupStep, termsOk])
 
   // Native: the URLs the app is opened with (Linking's initial URL and its
   // 'url' events), all untrusted. varanda://idade feeds the same path as the
@@ -883,11 +879,20 @@ function Member () {
   // also covers an existing member linking Google from Ajustes > Conta, so the
   // signup signal is 'vinculo' with a node.info that has been read and holds no
   // certificate: while info is still null the step machine shows 'vinculo' for
-  // that member too. Dismissing also quiets the top-bar note for 30 days. The
-  // Ajustes > Conta sheet the linkReturnRef effect may open on this load can
-  // cover the card for a moment.
+  // that member too. Dismissing also quiets the top-bar note for 30 days.
   const signupRef = useRef(false)
   const certMissing = info !== null && info.memberCert !== true
+  // A newcomer's return is finished by the setup's LinkCard, so it is dropped
+  // on the commit the signup signal fires, before setupStep turns false, and
+  // the tabs come up on A Rua with no sheet. Only a member who already held a
+  // certificate (linking from Ajustes > Conta) gets that sheet, once, after
+  // the unlock.
+  useEffect(() => {
+    const taker = linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })
+    if (taker === 'none' || taker === 'wait') return
+    linkReturnRef.current = false
+    if (taker === 'conta') setAjustes('conta')
+  }, [termsOk, setupStep, step, certMissing])
   useEffect(() => { if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true }, [linkReturned, step, certMissing])
   const [installCardOpen, setInstallCardOpen] = useState(false)
   useEffect(() => {
@@ -1186,10 +1191,10 @@ function Member () {
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
   // renders only in the tabs branch) and Membro are seen. !sheetOpen: on a
-  // ?conta= load the shell opens Ajustes → Conta once setupStep turns false
-  // (for a newcomer, right after the account link), and that sheet would
-  // cover both. The once-sync clauses mirror the outbox gate above: a member
-  // request now would preempt the recovery run.
+  // ?conta= load the shell opens Ajustes → Conta only for a member who already
+  // held a certificate (never for a newcomer: the setup takes that return),
+  // and that sheet would cover both. The once-sync clauses mirror the outbox
+  // gate above: a member request now would preempt the recovery run.
   const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
   // A group or community link opens once the tabs are on screen and the node
@@ -1546,7 +1551,7 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} invite={inviteProp || entryProp} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} invite={inviteProp || entryProp} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>
