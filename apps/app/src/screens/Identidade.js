@@ -286,7 +286,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked }) {
   const node = useNode()
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
@@ -398,6 +398,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       if (!(err && err.message === CERT_KEPT_ERROR)) throw err
       kept = true
     }
+    // In the setup the shell drops the web's Google return here, before
+    // onChanged tells it the certificate arrived (a newcomer may confirm
+    // while the recovery still holds the shell's info read).
+    if (typeof onLinked === 'function') onLinked()
     if (record) {
       await node.request('username.add', { record })
       accepted(publicKey, record)
@@ -764,7 +768,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
 // setup: the first run (App.js). The cards render inside the Stepper of
 // `step` (src/onboarding.js) at `index` of `total`.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, invite = null }) {
+// onLinked (setup only): called once a certificate from the account link
+// lands in this diary, so the shell knows the setup took the Google return.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null }) {
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -1205,6 +1211,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             quiet={recovering || onceActive}
             setup={setup}
             onChanged={refresh}
+            onLinked={setup ? onLinked : undefined}
           />
           )
         : null}
