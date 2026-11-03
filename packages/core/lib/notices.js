@@ -28,8 +28,10 @@
 // following random keys can neither exhaust maxEdges for everyone nor make
 // every page incomplete forever.
 //
-// Privacy rule: nothing here returns a follower count, total, size or length;
-// pages are cursors over followers, never tallies.
+// Public follows: by owner decision, follower counts and lists are public.
+// followsPage and followCounts serve who follows an account and whom it
+// follows, from committed state only. The proof-gated notices channel
+// (page, rowsFor, notices-net) is unchanged and still returns no tally.
 //
 // Browser-safe: b4a, hypercore-crypto and ./records only (no hypercore,
 // hyperswarm, corestore, node: builtins or `crypto`, which the web bundle
@@ -117,10 +119,14 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   const truncated = new Set()
   // author -> number of non-member targets stored in its fold.
   const nonMembers = new Map()
+  // Authors whose fold skipped a non-member target at the cap, and the same
+  // set as of each author's last commit (what followsPage reads).
+  const foldCapped = new Set()
+  const capped = new Set()
   // Exact number of fold entries over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor }
+  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor, followsPage, followCounts }
 
   function markPending (authorHex) {
     if (!isHex64(authorHex)) return
@@ -161,7 +167,11 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
       member = false
     }
     const outsiders = nonMembers.get(authorHex) || 0
-    if (!member && outsiders >= MAX_NONMEMBER_TARGETS_PER_AUTHOR) return
+    if (!member && outsiders >= MAX_NONMEMBER_TARGETS_PER_AUTHOR) {
+      // Only a follow lost here can make the author's list miss someone.
+      if (on === true) foldCapped.add(authorHex)
+      return
+    }
     // Bounded during the scan, not only after it: a new target is refused
     // once either cap is reached, and the author's notices are incomplete.
     if ((fold ? fold.size : 0) >= maxPerAuthor || edges >= maxEdges) {
@@ -207,6 +217,8 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
       }
       if (targets.size > 0) publishedBy.set(authorHex, targets)
     }
+    if (foldCapped.has(authorHex)) capped.add(authorHex)
+    else capped.delete(authorHex)
     pending.delete(authorHex)
   }
 
@@ -220,6 +232,8 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
     }
     lastSeq.delete(authorHex)
     nonMembers.delete(authorHex)
+    foldCapped.delete(authorHex)
+    capped.delete(authorHex)
     pending.delete(authorHex)
     truncated.delete(authorHex)
   }
@@ -267,6 +281,114 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
       rows.push({ key, seq: e.seq, at: e.at })
     }
     return { rows, incomplete }
+  }
+
+  // Any diary still being scanned may add a follower. The global truncated
+  // set is not used: commit never clears it, so every list would stay
+  // incomplete forever.
+  function followersIncomplete () {
+    return pending.size > 0
+  }
+
+  function followingIncomplete (author) {
+    return pending.has(author) || truncated.has(author) || capped.has(author)
+  }
+
+  // -> [{ key, seq, at }] of committed follows, before the omit rule.
+  function followRows (author, kind) {
+    const rows = []
+    if (kind === 'seguidores') {
+      const followers = published.get(author)
+      if (!followers) return rows
+      for (const [key, e] of followers) rows.push({ key, seq: e.seq, at: e.at })
+    } else {
+      const targets = publishedBy.get(author)
+      if (!targets) return rows
+      for (const target of targets) {
+        const followers = published.get(target)
+        const e = followers && followers.get(author)
+        if (e) rows.push({ key: target, seq: e.seq, at: e.at })
+      }
+    }
+    return rows
+  }
+
+  // -> { items: [{ key, seq, at }], next: null | { atMs, key }, total,
+  // incomplete }. Public: committed state only, never folds.
+  function followsPage ({ author, kind, after = null, limit, visible, now } = {}) {
+    let incomplete = false
+    if (isHex64(author)) {
+      if (kind === 'seguidores') incomplete = followersIncomplete()
+      else if (kind === 'seguindo') incomplete = followingIncomplete(author)
+    }
+    const empty = { items: [], next: null, total: 0, incomplete }
+    if (!isHex64(author) || (kind !== 'seguidores' && kind !== 'seguindo') || typeof visible !== 'function') return empty
+    let cursor = null
+    if (after !== null) {
+      cursor = readFollowsCursor(after)
+      if (cursor === null) return empty
+    }
+    const n = clampLimit(limit)
+    const rows = []
+    for (const row of followRows(author, kind)) {
+      if (!keep(row.key, author, visible)) continue
+      // Clamped like the cursor, so a pre-1970 row can never sort after a
+      // cursor that points at it and loop the pages forever.
+      rows.push({ t: Math.max(0, Date.parse(row.at) || 0), ...row })
+    }
+    rows.sort(compareRows)
+    const items = []
+    let more = false
+    for (const row of rows) {
+      if (cursor !== null && compareRows(row, cursor) <= 0) continue
+      if (items.length === n) {
+        more = true
+        break
+      }
+      items.push(row)
+    }
+    const last = items[items.length - 1]
+    const next = more ? { atMs: last.t, key: last.key } : null
+    return {
+      items: items.map((r) => ({ key: r.key, seq: r.seq, at: r.at })),
+      next,
+      total: rows.length,
+      incomplete
+    }
+  }
+
+  // -> { seguindo, seguidores, incomplete } under followsPage's omit rule.
+  function followCounts (author, visible) {
+    if (!isHex64(author) || typeof visible !== 'function') return { seguindo: 0, seguidores: 0, incomplete: false }
+    let seguindo = 0
+    let seguidores = 0
+    for (const row of followRows(author, 'seguindo')) if (keep(row.key, author, visible)) seguindo++
+    for (const row of followRows(author, 'seguidores')) if (keep(row.key, author, visible)) seguidores++
+    return { seguindo, seguidores, incomplete: followersIncomplete() || followingIncomplete(author) }
+  }
+}
+
+// visible is a KEEP predicate (true shows the row), the opposite of skip()'s
+// isBlocked. The author is never listed; a throwing visible hides the row.
+function keep (key, author, visible) {
+  if (key === author) return false
+  try {
+    return visible(key) === true
+  } catch {
+    return false
+  }
+}
+
+// -> { t, key } | null for a valid { t, key } follows cursor.
+function readFollowsCursor (after) {
+  try {
+    if (!isPlainObject(after) || !hasExactKeys(after, ['t', 'key'])) return null
+    const t = after.t
+    const key = after.key
+    if (!Number.isSafeInteger(t) || t < 0 || !isHex64(key)) return null
+    return { t, key }
+  } catch {
+    return null
   }
 }
 

@@ -1,5 +1,5 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
-// @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
+// @nome from profile.read, bio, counts) over the own log (log.read), newest first, paged backwards with
 // infinite scroll and pull to refresh. On the hosted web, 'Compartilhar'
 // under the profile data opens a sheet with the link (copiar link /
 // compartilhar; the /m/<key> form is never printed). Only publications are
@@ -15,6 +15,9 @@
 // own reposts still on show the original under 'Você republicou' (only the
 // newest repost record per target counts; likes are not listed). Originals,
 // counts and the own state come from A Rua's useSocial.
+// The own 'seguindo' count comes from the local node; 'seguidores' comes
+// from the seeder (hosted only, useFollowCounts) and can be lower than
+// reality, hence the note under the counts.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -44,6 +47,8 @@ import { ProfileHeader } from '../ui/ProfileHeader'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
+import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
+import { useFollowCounts } from '../useFollowCounts'
 import { type } from '../ui/theme'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
@@ -144,6 +149,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [olderError, setOlderError] = useState('')
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
+  const [pulls, setPulls] = useState(0)
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -158,6 +164,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const { request, ackFresh } = node
   const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
   const social = useSocial({ ownKey: ownPublicKey, onToast })
+  const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   const { ingest } = social
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
@@ -242,7 +249,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     loadNewest(refreshProfile)
   }, [active, loadNewest, refresh])
 
-  const reload = () => pull.run(() => loadNewest(true))
+  const reload = () => {
+    setPulls((n) => n + 1)
+    return pull.run(() => loadNewest(true))
+  }
 
   // Pages with no publication (only technical records) are paged through by
   // RefreshableList's infinite scroll, which pauses after a few dry pages.
@@ -355,7 +365,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             label: 'seguindo',
             value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
+          }, {
+            label: 'seguidores',
+            value: followCounts.seguidores === null ? null : displayText(String(followCounts.seguidores)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
           }]}
+          note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           actions={[
             <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
             profileUrl !== null ? <Pill key='share' label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
@@ -515,6 +530,7 @@ const styles = StyleSheet.create({
   bell: { ...bandButton, right: 16 },
   gear: { ...bandButton, right: 16 },
   gearShifted: { ...bandButton, right: 58 },
+  countsNote: { marginTop: 4 },
   info: { ...bandButton, right: 58 },
   infoShifted: { ...bandButton, right: 100 },
   shareBody: { padding: 16, gap: 12 },

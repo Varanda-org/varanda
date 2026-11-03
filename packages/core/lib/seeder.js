@@ -4944,6 +4944,75 @@ class Seeder {
     }
   }
 
+  // The follow edges are public: who follows an author and whom it follows,
+  // under the same read gate as indexEngagers. A held author answers null; a
+  // held person is left out and the answer says complete false.
+  _followsVisible () {
+    const state = { held: false }
+    state.visible = (hex) => {
+      if (!this._indexVisible(hex)) return false
+      if (this._searchHeld(hex)) {
+        state.held = true
+        return false
+      }
+      return true
+    }
+    return state
+  }
+
+  // GET /index/follows/<author>: both counts, or null for an author the
+  // index may not show.
+  indexFollowCounts (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const v = this._followsVisible()
+      const counts = this._notices.followCounts(authorHex, v.visible)
+      const flags = this._indexFlags()
+      return { seguindo: counts.seguindo, seguidores: counts.seguidores, indexing: flags.indexing, complete: flags.complete && !v.held && !counts.incomplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/follows/<author>/<kind>[/<atMs>.<key>]: one page of
+  // followers or followed accounts, newest first, with a hint per listed
+  // key; null for an unknown kind, an author not shown or a malformed cursor.
+  // The cursor stays in integer milliseconds (no Date round trip).
+  indexFollows (authorHex, kind, cursor = null) {
+    try {
+      if (kind !== 'seguindo' && kind !== 'seguidores') return null
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { t, key: m[2] }
+      }
+      const v = this._followsVisible()
+      const page = this._notices.followsPage({ author: authorHex, kind, after, limit: 20, visible: v.visible })
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return {
+        author: authorHex,
+        kind,
+        items: page.items.map((it) => ({ key: it.key, seq: it.seq, at: it.at })),
+        next: page.next,
+        total: page.total,
+        authors,
+        indexing: flags.indexing,
+        complete: flags.complete && !v.held && !page.incomplete
+      }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/counts/<ref,...>: counts for the refs that are indexed (an
   // unknown ref, or one of an author not visible, is omitted).
   indexCounts (refs) {
