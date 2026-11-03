@@ -24,7 +24,7 @@ export const LABELS = Object.freeze({
   emptyInbox: 'Nenhuma conversa ainda. Abra o perfil de alguém e toque em Mensagem.',
   emptyRequests: 'Nenhum pedido de mensagem',
   requestNote: 'Até você aceitar, quem enviou não sabe se você leu',
-  noBox: 'Esta pessoa ainda não recebe mensagens',
+  noBox: 'Esta pessoa ainda não recebe mensagens. Assim que ela abrir o Varanda com a versão nova, dá para escrever.',
   blockedSend: 'Você bloqueou esta pessoa',
   selfSend: 'Não é possível enviar para si',
   noStamps: 'O limite de envio de hoje acabou',

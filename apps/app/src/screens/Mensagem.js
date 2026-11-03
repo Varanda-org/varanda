@@ -18,7 +18,7 @@
 // LABELS.sent.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -280,10 +280,20 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
         </View>
       </View>
     )
+  } else if (blockNote !== null) {
+    // No field that takes no typing: say why, and for a missing key let the
+    // person check again (the other side publishes it when it opens the app).
+    composer = (
+      <View style={styles.composer}>
+        <Soft>{blockNote}</Soft>
+        {lookup === null
+          ? <View style={styles.inline}><Pill label='verificar de novo' onPress={readLookup} /></View>
+          : null}
+      </View>
+    )
   } else {
     composer = (
       <View style={styles.composer}>
-        {blockNote ? <Soft>{blockNote}</Soft> : null}
         {replyTo
           ? (
             <View style={styles.replying}>
@@ -317,7 +327,6 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
             onChangeText={(t) => { setDraft(t); setAskNew(false) }}
             multiline
             maxLength={MAX_TEXT * 2}
-            editable={blockNote === null}
             placeholder='Escreva uma mensagem'
             placeholderTextColor={colors.placeholder}
             accessibilityLabel='mensagem'
@@ -334,8 +343,10 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   else if (loadError) empty = <View style={styles.pad}><ErrorText>{loadError}</ErrorText></View>
   else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body='Escreva a primeira.' />
 
+  // On iOS the keyboard opens over the bottom composer unless the screen
+  // shrinks for it (Android resizes the window itself: adjustResize).
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <TopBar title={nameText} onBack={onBack} right={topRight} />
       <OfflineNote />
       <RefreshableList
@@ -377,7 +388,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
             : <Btn label={LABELS.delete} danger onPress={() => setConfirmDelete(true)} />}
         </View>
       </Sheet>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 
