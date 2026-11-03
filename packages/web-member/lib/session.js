@@ -1934,7 +1934,7 @@ function createBrowserSession ({
     // Notices (docs/rpc.md 5.28), works only unlocked (the link's proof is
     // signed by the identity key). Shaped like peek.read: not serial as a
     // whole, its own slot; only the own-key lookup (lookupOwnKey's rule)
-    // and, on a v2 read, the own-diary read run on the chain.
+    // and, on a v2 or v3 read, the own-diary read run on the chain.
     'notices.list': async (params) => {
       const epoch = connection
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
@@ -1950,7 +1950,7 @@ function createBrowserSession ({
       if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
       if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
       if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
-      // Called by the noticer only on a v2 read: the own diary is read on
+      // Called by the noticer only on a v2 or v3 read: the own diary is read on
       // the chain (withCores alone does not exclude a write; serial does).
       const ownContext = () => serial(async () => {
         if (keyPair === null) throw new UsageError(store.LOCKED)

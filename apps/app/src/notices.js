@@ -1,10 +1,11 @@
-// The Avisos tab's building blocks: lines for a follow, a reply, a quote and
-// a mention, seen ids (the node's opaque `seen` tokens, never follower keys),
-// page merging, the notice shown in place of the list and the fixed texts.
+// The Avisos tab's building blocks: lines for a follow, a reply, a quote, a
+// mention, a like and a repost, seen ids (the node's opaque `seen` tokens,
+// never follower keys), page merging, the notice shown in place of the list
+// and the fixed texts.
 // Pure: no imports and no globals, so Node tests load it directly.
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
-export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.'
+export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
 export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
@@ -23,31 +24,52 @@ const UNNAMED_TITLE = 'sem nome'
 
 const WEB_ONLY_MESSAGES = ['método desconhecido', 'avisos disponíveis só no navegador']
 
-// A row from an older node has no kind. Anything else is not one of the four
+// A row from an older node has no kind. Anything else is not one of the six
 // notices this tab shows, so it reads as a follow too.
 export function noticeKind (item) {
   const kind = item && item.kind
-  if (kind === 'follow' || kind === 'reply' || kind === 'quote' || kind === 'mention') return kind
+  if (kind === 'follow' || kind === 'reply' || kind === 'quote' || kind === 'mention' || kind === 'like' || kind === 'repost') return kind
   return 'follow'
 }
 
-// "Bia começou a seguir você" (respondeu, citou, mencionou for the other
-// kinds), or "Alguém" when the title is "sem nome" or not a non-empty
-// string. The title is the only text used. kind defaults to follow.
+// "Bia começou a seguir você" (respondeu, citou, mencionou, curtiu,
+// republicou for the other kinds), or "Alguém" when the title is "sem nome"
+// or not a non-empty string. The title is the only text used. kind defaults
+// to follow.
 export function noticeLine (who, kind = 'follow') {
   const title = who.title
   const name = typeof title !== 'string' || title.length === 0 || title === UNNAMED_TITLE ? 'Alguém' : title
   if (kind === 'reply') return name + ' respondeu à sua publicação'
   if (kind === 'quote') return name + ' citou sua publicação'
   if (kind === 'mention') return name + ' mencionou você'
+  if (kind === 'like') return name + ' curtiu sua publicação'
+  if (kind === 'repost') return name + ' republicou sua publicação'
   return name + ' começou a seguir você'
 }
 
+// Mirrors isRef in nav.js (this file has no imports): lowercase hex64 and a
+// canonical seq that is a safe integer. A like or repost that fails this
+// must not open a conversa.
+const POST_REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
+
+function callerPost (post) {
+  if (typeof post !== 'string') return null
+  const m = POST_REF.exec(post)
+  if (!m) return null
+  const seq = Number(m[2])
+  if (!Number.isSafeInteger(seq) || String(seq) !== m[2]) return null
+  return post
+}
+
 // A follow opens no post. A reply, quote or mention points at the signed
-// block, in the '<key>:<seq>' form a conversa screen uses (nav.js).
+// block, in the '<key>:<seq>' form a conversa screen uses (nav.js). A like
+// or repost points at `post`, the caller's own post: this row's key:seq is
+// the other person's like or repost block, so it is never the ref.
 export function noticeRef (item) {
-  if (noticeKind(item) === 'follow') return null
-  return item.key + ':' + item.seq
+  const kind = noticeKind(item)
+  if (kind === 'reply' || kind === 'quote' || kind === 'mention') return item.key + ':' + item.seq
+  if (kind === 'like' || kind === 'repost') return callerPost(item.post)
+  return null
 }
 
 // Newest first by Date.parse(at): string order breaks for negative-year ISO
@@ -292,8 +314,8 @@ export async function readNotices (request, { limit, after = null, maxContinuati
   }
 }
 
-// Following back clears that diary's follow notice. A reply, quote or
-// mention from the same key is about a post and stays in the list.
+// Following back clears that diary's follow notice. A reply, quote, mention,
+// like or repost from the same key is about a post and stays in the list.
 export function withoutAuthor (items, key) {
   return items.filter((item) => item.key !== key || noticeKind(item) !== 'follow')
 }

@@ -110,7 +110,8 @@ function noticesResult (n, ch) {
   // Derive the maximum from core's username rule, which exports no length limit.
   let username = 'uuu'
   while (isUsername(username + 'u')) username += 'u'
-  const item = { kind: 'mention', key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR }
+  // A repost row carries the caller's post ref and the longest kind name.
+  const item = { kind: 'repost', key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR, post: HEX + ':' + SEQ }
   return {
     notices: Array(n).fill(item),
     next: { at: AT, key: HEX, seq: SEQ },

@@ -16,7 +16,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, followRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, followRecord, deleteRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachNotices, PROTOCOL } = require('@varanda/core/lib/notices-net')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -27,6 +27,8 @@ const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
 const { writeBlocklist, writeFollows, replicaExists, LOCKED } = require('../lib/node-store')
+// The stand-in that also speaks 'varanda/notices/2' and 'varanda/notices/3'.
+const { noticesSeeder: kindedSeeder } = require('./helpers/notices')
 
 const BUSY = 'avisos já em andamento'
 const NO_SEEDER = 'sem conexão com o semeador'
@@ -699,5 +701,209 @@ test('regression: a head tombstone that times out never lets the profile it dele
   const second = await web.request('notices.list', {})
   t.alike(second.notices.map((n) => [n.key, n.name]), [[hex(A.key), null]])
   t.ok(A.uploads > uploads, 'the evidence was not cached: the second read fetched again')
+  t.alike(internal, [])
+})
+
+function order (a, b) {
+  return (Date.parse(b.at) - Date.parse(a.at)) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || (b.seq - a.seq)
+}
+
+function empty () {
+  return { items: [], next: null, incomplete: false }
+}
+
+// A v2 / v3 page callback over `items` for `target` only, in notices order,
+// continuing strictly after the cursor.
+function kindedPages (target, items) {
+  const sorted = [...items].sort(order)
+  return (t, after, limit) => {
+    if (t !== target) return empty()
+    const from = after === null ? 0 : sorted.findIndex((it) => order(it, after) > 0)
+    const page = from < 0 ? [] : sorted.slice(from, from + limit)
+    const last = page[page.length - 1]
+    const next = from >= 0 && from + limit < sorted.length ? { at: last.at, key: last.key, seq: last.seq } : null
+    return { items: page, next, incomplete: false }
+  }
+}
+
+test('v3: likes and reposts of own posts are rows naming the post; foreign, off, shifted, toggled and forged ones drop', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const seeder = await kindedSeeder(t, { signer: assoc.kp, state })
+  const keyPair = crypto.keyPair()
+  const seed = b4a.from(keyPair.secretKey.subarray(0, 32)) // copied: a lock zeroes the pair
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { keyPair, certify: true })
+  const p1 = await web.request('post.create', { text: 'primeiro' })
+  const p2 = await web.request('post.create', { text: 'segundo' })
+  const to1 = { author: me, seq: p1.seq }
+  const to2 = { author: me, seq: p2.seq }
+  const other = hex(crypto.keyPair().publicKey)
+  const at = (h) => iso(now - h * HOUR)
+
+  const like = likeRecord({ to: to1, on: true, at: at(1) })
+  const L = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Lia', bio: '' }), () => like])
+  const repost = repostRecord({ to: to2, on: true, at: at(2) })
+  const P = await diary(t, [certOf(assoc), () => repost])
+  const notPost = likeRecord({ to: { author: me, seq: 999 }, on: true, at: at(3) })
+  const X = await diary(t, [certOf(assoc), () => notPost])
+  const off = likeRecord({ to: to1, on: false, at: at(4) })
+  const O = await diary(t, [certOf(assoc), () => off])
+  const shifted = likeRecord({ to: to1, on: true, at: at(5) })
+  const M = await diary(t, [certOf(assoc), () => shifted])
+  const unliked = likeRecord({ to: to1, on: true, at: at(8) })
+  const U = await diary(t, [certOf(assoc), () => unliked, () => likeRecord({ to: to1, on: false, at: at(7) })])
+  const reply = postRecord({ text: 'resposta', replyTo: to1, at: at(9) })
+  const R = await diary(t, [certOf(assoc), () => reply])
+  const hintedReply = likeRecord({ to: to2, on: true, at: at(10) })
+  const K = await diary(t, [certOf(assoc), () => hintedReply])
+  const plain = postRecord({ text: 'nada a ver', at: at(11) })
+  const Z = await diary(t, [certOf(assoc), () => plain])
+  const foreign = likeRecord({ to: { author: other, seq: p1.seq }, on: true, at: at(12) })
+  const F = await diary(t, [certOf(assoc), () => foreign])
+  const older = likeRecord({ to: to2, on: true, at: at(14) })
+  const newer = likeRecord({ to: to2, on: true, at: at(13) })
+  const V = await diary(t, [certOf(assoc), () => older, () => newer])
+  state.cores = [L, P, X, O, M, U, R, K, Z, F, V]
+  state.pageV3 = kindedPages(me, [
+    { key: hex(L.key), seq: 2, at: like.at, kind: 'like' },
+    { key: hex(P.key), seq: 1, at: repost.at, kind: 'repost' },
+    { key: hex(X.key), seq: 1, at: notPost.at, kind: 'like' }, // not an own post
+    { key: hex(O.key), seq: 1, at: off.at, kind: 'like' },
+    { key: hex(M.key), seq: 1, at: at(6), kind: 'like' }, // not the block's at
+    { key: hex(U.key), seq: 1, at: unliked.at, kind: 'like' }, // unliked at seq 2
+    { key: hex(R.key), seq: 1, at: reply.at, kind: 'like' }, // the hint lies: a reply
+    { key: hex(K.key), seq: 1, at: hintedReply.at, kind: 'reply' }, // the hint lies: a like
+    { key: hex(Z.key), seq: 1, at: plain.at, kind: 'like' },
+    { key: hex(F.key), seq: 1, at: foreign.at, kind: 'like' }, // another diary's post
+    { key: hex(V.key), seq: 2, at: newer.at, kind: 'like' },
+    { key: hex(V.key), seq: 1, at: older.at, kind: 'like' }, // liked again at seq 2
+    { key: me, seq: 1, at: at(15), kind: 'like' } // a self-like
+  ])
+
+  const r = await web.request('notices.list', {})
+  t.alike(withoutSeen(t, r), {
+    notices: [
+      { key: hex(L.key), seq: 2, at: like.at, kind: 'like', name: 'Lia', avatar: null, username: null, post: me + ':' + p1.seq },
+      { key: hex(P.key), seq: 1, at: repost.at, kind: 'repost', name: null, avatar: null, username: null, post: me + ':' + p2.seq },
+      { key: hex(R.key), seq: 1, at: reply.at, kind: 'reply', name: null, avatar: null, username: null },
+      { key: hex(K.key), seq: 1, at: hintedReply.at, kind: 'like', name: null, avatar: null, username: null, post: me + ':' + p2.seq },
+      { key: hex(V.key), seq: 2, at: newer.at, kind: 'like', name: null, avatar: null, username: null, post: me + ':' + p2.seq }
+    ],
+    next: null,
+    incomplete: false,
+    supported: true,
+    activity: true
+  })
+  t.is(r.notices[0].seen, seenOf(seed, me, hex(L.key), 2), 'seen is the token of (own, key, seq)')
+  t.is(seeder.pagesV2.length, 0, 'the v2 channel was not read')
+  t.is(seeder.pages.length, 0, 'the v1 channel was not read')
+  t.alike(seeder.pagesV3[0], { target: me, after: null, limit: 64 })
+  const cached = await web.request('notices.list', {})
+  t.alike(cached.notices.map((n) => [n.key, n.seq, n.kind]), r.notices.map((n) => [n.key, n.seq, n.kind]), 'the kinds come back the same from cached facts')
+  t.alike(internal, [])
+})
+
+test('v3: one row per author, post and kind, the higher seq, when the tail is not read', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const seeder = await kindedSeeder(t, { signer: assoc.kp, state })
+  // Block 0 and `seq` only: no tail, so no later toggle is seen.
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { certify: true, notices: { maxBlocksPerRow: 2 } })
+  const p1 = await web.request('post.create', { text: 'primeiro' })
+  const to = { author: me, seq: p1.seq }
+  const a = likeRecord({ to, on: true, at: iso(now - 3 * HOUR) })
+  const b = likeRecord({ to, on: true, at: iso(now - 2 * HOUR) })
+  const c = repostRecord({ to, on: true, at: iso(now - HOUR) })
+  const D = await diary(t, [certOf(assoc), () => a, () => b, () => c])
+  state.cores = [D]
+  state.pageV3 = kindedPages(me, [
+    { key: hex(D.key), seq: 1, at: a.at, kind: 'like' },
+    { key: hex(D.key), seq: 2, at: b.at, kind: 'like' },
+    { key: hex(D.key), seq: 3, at: c.at, kind: 'repost' }
+  ])
+  const r = await web.request('notices.list', {})
+  t.alike(r.notices.map((n) => [n.seq, n.kind, n.post]), [[3, 'repost', me + ':' + p1.seq], [2, 'like', me + ':' + p1.seq]])
+  t.alike(internal, [])
+})
+
+test('a seeder that rejects v3 is read over v2 at once (no likes, activity true), and one that takes neither over v1', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  // A long request timeout: a fallback that waited it out would show.
+  const notices = { requestTimeoutMs: 20000 }
+
+  for (const v2 of [true, false]) {
+    const state = { cores: [], page: empty }
+    if (v2) state.pageV2 = empty
+    const seeder = await kindedSeeder(t, { signer: assoc.kp, state })
+    const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { certify: true, notices })
+    const p1 = await web.request('post.create', { text: 'primeiro' })
+    const f = followRecord({ key: me, on: true, at: iso(now - HOUR) })
+    const Fo = await diary(t, [certOf(assoc), () => f])
+    const like = likeRecord({ to: { author: me, seq: p1.seq }, on: true, at: iso(now - 2 * HOUR) })
+    const K = await diary(t, [certOf(assoc), () => like])
+    state.cores = [Fo, K]
+    const items = [
+      { key: hex(Fo.key), seq: 1, at: f.at, kind: 'follow' },
+      { key: hex(K.key), seq: 1, at: like.at, kind: 'reply' } // a like block under a v2 kind
+    ]
+    if (v2) state.pageV2 = kindedPages(me, items)
+    else state.page = (target) => target === me ? { items: items.map(({ kind, ...it }) => it), next: null, incomplete: false } : empty()
+
+    const started = Date.now()
+    const r = await web.request('notices.list', {})
+    t.ok(Date.now() - started < 10000, 'the rejected channels were not waited for')
+    t.alike(withoutSeen(t, r), {
+      notices: [{ key: hex(Fo.key), seq: 1, at: f.at, kind: 'follow', name: null, avatar: null, username: null }],
+      next: null,
+      incomplete: false,
+      supported: true,
+      activity: v2
+    }, v2 ? 'v2: the like is dropped' : 'v1: follows only')
+    t.is(seeder.pagesV3.length, 0)
+    t.is(seeder.pagesV2.length, v2 ? 1 : 0)
+    t.is(seeder.pages.length, v2 ? 0 : 1)
+    t.alike(internal, [])
+  }
+})
+
+test('a silent v3 is waited for, then v2 is read', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty }
+  const seeder = await kindedSeeder(t, { signer: assoc.kp, state, v3Silent: true })
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { notices: { requestTimeoutMs: 1000 } })
+  const f = followRecord({ key: me, on: true, at: iso(now - HOUR) })
+  const Fo = await diary(t, [certOf(assoc), () => f])
+  state.cores = [Fo]
+  state.pageV2 = kindedPages(me, [{ key: hex(Fo.key), seq: 1, at: f.at, kind: 'follow' }])
+  const r = await web.request('notices.list', {})
+  t.alike(keysOf(r), [hex(Fo.key)])
+  t.is(r.activity, true)
+  t.is(seeder.pagesV2.length, 1)
+  t.alike(internal, [])
+})
+
+test('a v2 page carrying kind like is never delivered', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty }
+  const seeder = await kindedSeeder(t, { signer: assoc.kp, state })
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { certify: true, notices: { requestTimeoutMs: 1000 } })
+  const p1 = await web.request('post.create', { text: 'primeiro' })
+  const like = likeRecord({ to: { author: me, seq: p1.seq }, on: true, at: iso(now - HOUR) })
+  const K = await diary(t, [certOf(assoc), () => like])
+  state.cores = [K]
+  state.pageV2 = kindedPages(me, [{ key: hex(K.key), seq: 1, at: like.at, kind: 'like' }])
+  const r = await web.request('notices.list', {})
+  t.alike(r, { notices: [], next: null, incomplete: true, supported: true, activity: true })
+  t.is(seeder.pagesV2.length, 1, 'asked, never answered')
   t.alike(internal, [])
 })
