@@ -10,7 +10,7 @@ import { colors, fonts, layout, type } from './theme'
 
 const mark = require('../../assets/cadeira.png')
 
-export function TopBar ({ title, subtitle, right, onBack }) {
+export function TopBar ({ title, subtitle, right, onBack, leading, onTitlePress, titleLabel }) {
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
@@ -27,10 +27,26 @@ export function TopBar ({ title, subtitle, right, onBack }) {
           </Pressable>
           )
         : <Image source={mark} style={styles.mark} accessibilityLabel='Varanda' />}
-      <View style={styles.titles}>
-        <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
-        {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
-      </View>
+      {leading || null}
+      {typeof onTitlePress === 'function'
+        ? (
+          <Pressable
+            accessibilityRole='button'
+            accessibilityLabel={typeof title === 'string' ? title : undefined}
+            accessibilityHint={titleLabel || 'abrir'}
+            onPress={onTitlePress}
+            style={({ pressed }) => [styles.titles, pressed && styles.pressed]}
+          >
+            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
+            {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
+          </Pressable>
+          )
+        : (
+          <View style={styles.titles}>
+            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
+            {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
+          </View>
+          )}
       {right || null}
     </View>
   )

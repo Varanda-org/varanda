@@ -585,6 +585,9 @@ const SPECS = {
       before: opt(isGroupCursor)
     }
   },
+  // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
+  // never goes to peers; the client re-reads community.info.
+  'group.seen': { fields: { group: req(isKey) } },
   'group.list': {
     fields: {
       offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
@@ -627,7 +630,11 @@ const SPECS = {
   // ended (cwDemote) and who writes through a live CW: community.meta then
   // goes through that CW and community.removeGroup is open. dropped lists
   // the groups currently taken off C's catalogue (sorted keys, never Geral),
-  // which community.removeGroup with undo puts back.
+  // which community.removeGroup with undo puts back. Every groups row also
+  // has last: null | { name: string|null, username: string|null, preview:
+  // string, at: canonical ISO, mine: boolean, hidden: boolean } and unread:
+  // integer 0..99 (99 means 99 or more). preview is raw peer text cut to 140
+  // code points with Array.from (nothing appended), '' when hidden.
   'community.info': { fields: { community: req(isKey) } },
   'community.list': { fields: none },
   'community.admin': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },

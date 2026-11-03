@@ -32,6 +32,7 @@ const {
   formatRef,
   latestProfile,
   nowIso,
+  isCanonicalIso,
   MAX_LOG_BLOCKS,
   MAX_LOG_BYTES
 } = require('./records')
@@ -3146,6 +3147,104 @@ function countMembers (view) {
   return [...view.members.values()].filter((s) => s === 'member').length
 }
 
+// rpc.md 5.82: this device's seen mark per group, local only.
+const SEEN_FILE = 'group-seen.json'
+const MAX_SEEN_MARKS = 512
+const MAX_UNREAD = 99
+const PREVIEW_CODE_POINTS = 140
+const READER_ROLES = new Set(['creator', 'admin', 'member'])
+const LOWER_HEX64 = /^[0-9a-f]{64}$/
+
+function seenFile (dataDir) {
+  return path.join(dataDir, SEEN_FILE)
+}
+
+// A mark always carries at, writer and seq: orderKey parses `at`, and
+// compareOrder cannot order a NaN.
+function validSeenMark (m) {
+  return m !== null && typeof m === 'object' && typeof m.group === 'string' && LOWER_HEX64.test(m.group) &&
+    typeof m.at === 'string' && isCanonicalIso(m.at) && typeof m.writer === 'string' && LOWER_HEX64.test(m.writer) &&
+    Number.isSafeInteger(m.seq) && m.seq >= 1
+}
+
+function readSeenMarks (dataDir) {
+  let data
+  try {
+    data = storeLib.readJson(seenFile(dataDir), null)
+  } catch {
+    return []
+  }
+  if (data === null || typeof data !== 'object' || data.v !== 1 || !Array.isArray(data.marks)) return []
+  return data.marks.filter(validSeenMark).map(({ group, at, writer, seq }) => ({ group, at, writer, seq }))
+}
+
+// The posts group.read lists, oldest first.
+function readablePosts (loaded) {
+  return loaded.view.posts.filter((p) => loaded.profiles.has(p.diary))
+}
+
+function lastRow (loaded, posts, ownHex) {
+  if (posts.length === 0) return null
+  const p = posts[posts.length - 1]
+  const profile = loaded.profiles.get(p.diary)
+  const text = typeof p.text === 'string' ? p.text : ''
+  return {
+    name: typeof profile.name === 'string' ? profile.name : null,
+    username: typeof profile.username === 'string' ? profile.username : null,
+    preview: p.hidden ? '' : Array.from(text).slice(0, PREVIEW_CODE_POINTS).join(''),
+    at: p.at,
+    mine: p.diary === ownHex,
+    hidden: p.hidden === true
+  }
+}
+
+// Causal and group order can differ, so a mark still listed is found by
+// (writer, seq) first, as group.read's `before` does.
+function postsAfter (posts, mark) {
+  if (mark === null) return posts
+  const i = posts.findIndex((p) => p.writer === mark.writer && p.seq === mark.seq)
+  if (i >= 0) return posts.slice(i + 1)
+  const k = groups.orderKey(mark.at, mark.writer, mark.seq)
+  return posts.filter((p) => groups.compareOrder(groups.orderKey(p.at, p.writer, p.seq), k) > 0)
+}
+
+function unreadCount (posts, mark, ownHex) {
+  let n = 0
+  for (const p of postsAfter(posts, mark)) {
+    if (p.hidden || p.diary === ownHex) continue
+    if (++n === MAX_UNREAD) break
+  }
+  return n
+}
+
+// Whether the newest post moves the stored mark forward (rpc.md 5.82).
+function seenForward (posts, stored) {
+  const i = posts.findIndex((p) => p.writer === stored.writer && p.seq === stored.seq)
+  if (i >= 0) return i < posts.length - 1
+  const newest = posts[posts.length - 1]
+  return groups.compareOrder(groups.orderKey(newest.at, newest.writer, newest.seq), groups.orderKey(stored.at, stored.writer, stored.seq)) > 0
+}
+
+// rpc.md 5.82.
+async function groupSeen (ctx, { group }) {
+  return withGroupOrPending(ctx, group, async (loaded) => {
+    const posts = readablePosts(loaded)
+    if (posts.length === 0) return { ok: true }
+    const key = group.toLowerCase()
+    const newest = posts[posts.length - 1]
+    const marks = readSeenMarks(ctx.dataDir)
+    const stored = marks.filter((m) => m.group === key).pop() || null
+    if (stored !== null && !seenForward(posts, stored)) return { ok: true }
+    const next = marks.filter((m) => m.group !== key)
+    next.push({ group: key, at: newest.at, writer: newest.writer, seq: newest.seq })
+    storeLib.writeJsonAtomic(seenFile(ctx.dataDir), { v: 1, marks: next.slice(-MAX_SEEN_MARKS) }, 0o600)
+    return { ok: true }
+  }, (pending) => {
+    requirePendingLocal(pending)
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.59.
 async function communityInfo (ctx, { community }) {
   return withIdentity(ctx, async (identity) => {
@@ -3158,15 +3257,21 @@ async function communityInfo (ctx, { community }) {
     const c = await loadCommunity(ctx, identity, key)
     if (c === null) return { community: key, ...PENDING_COMMUNITY }
     const { view } = c
+    const seen = new Map(readSeenMarks(ctx.dataDir).map((m) => [m.group, m]))
     const rows = []
     for (const g of view.groups) {
-      const row = { group: g, name: null, visibility: null, join: null, role: null, general: g === view.general }
+      const row = { group: g, name: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
       try {
         const loaded = await loadGroup(ctx, identity, g)
         row.name = loaded.view.name
         row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
         row.join = loaded.view.join
         row.role = groupRole(loaded.view, identity.ownHex)
+        if (READER_ROLES.has(row.role)) {
+          const posts = readablePosts(loaded)
+          row.last = lastRow(loaded, posts, identity.ownHex)
+          row.unread = unreadCount(posts, seen.get(g) || null, identity.ownHex)
+        }
       } catch (err) {
         if (err.code !== 'NOT_FOUND') throw err
       }
@@ -3313,6 +3418,7 @@ module.exports = {
   communityMembers,
   communityRequests,
   communityInfo,
+  groupSeen,
   communityList,
   communityGroups
 }
