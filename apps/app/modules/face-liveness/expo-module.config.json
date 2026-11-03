@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "coreFeatures": ["compose"],
+  "apple": {
+    "modules": ["FaceLivenessModule"]
+  },
+  "android": {
+    "modules": ["app.varanda.faceliveness.FaceLivenessModule"]
+  }
+}

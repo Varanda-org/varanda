@@ -17,6 +17,19 @@ esac
 
 bash scripts/prepare-native.sh "$platform"
 
+# The AWS Face Liveness Swift package pulls in smithy-swift's code generator
+# plugin and Swift macros, which xcodebuild refuses to run until someone trusts
+# them in the Xcode UI. EAS takes no extra xcodebuild flags from this repo, so
+# these defaults are the build machine's equivalent of the
+# -skipPackagePluginValidation -skipMacroValidation flags native.yml passes;
+# the owner approved both on 2026-11-03. The packages are pinned by commit in
+# ios/Varanda.xcworkspace/xcshareddata/swiftpm/Package.resolved. The first key
+# is misspelled on Apple's side and must stay so.
+if [ "$platform" = ios ]; then
+  defaults write com.apple.dt.Xcode IDESkipPackagePluginFingerprintValidatation -bool YES
+  defaults write com.apple.dt.Xcode IDESkipMacroFingerprintValidation -bool YES
+fi
+
 if [ ! -f assets/worklet/main.bundle.js ]; then
   echo "eas-post-install: assets/worklet/main.bundle.js is missing after prepare-native.sh" >&2
   exit 1

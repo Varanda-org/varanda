@@ -158,9 +158,14 @@ jobs:
       # setup-node installed.
       - name: Point Xcode at this node
         run: echo "export NODE_BINARY=$(command -v node)" > apps/app/ios/.xcode.env.local
+      # No -sdk: it would also build smithy-swift's code generator, a macOS
+      # host tool, for the simulator. The AWS Face Liveness Swift packages run
+      # that plugin and Swift macros, which xcodebuild refuses until they are
+      # trusted in the Xcode UI; the owner approved skipping that check, and
+      # Package.resolved pins every package by commit.
       - name: Build for the simulator
         working-directory: apps/app/ios
-        run: xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+        run: xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath build ARCHS=arm64 CODE_SIGNING_ALLOWED=NO -skipPackagePluginValidation -skipMacroValidation build
       - name: Check the app exists
         run: test -d apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
 

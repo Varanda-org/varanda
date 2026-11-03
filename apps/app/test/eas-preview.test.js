@@ -70,13 +70,46 @@ test('.easignore keeps the build outputs and every secret out of the upload', (t
 test('the main manifest drops the overlay and write storage permissions', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.absent(manifest.includes('SYSTEM_ALERT_WINDOW'))
-  // A library may merge storage or camera permissions; the main manifest only
-  // ever names them to remove them.
-  for (const name of ['WRITE_EXTERNAL_STORAGE', 'READ_EXTERNAL_STORAGE', 'CAMERA']) {
+  // A library may merge storage permissions; the main manifest only ever
+  // names them to remove them.
+  for (const name of ['WRITE_EXTERNAL_STORAGE', 'READ_EXTERNAL_STORAGE']) {
     const lines = manifest.split('\n').filter((l) => l.includes('android.permission.' + name + '"'))
-    t.ok(lines.every((l) => l.includes('tools:node="remove"')), name + ' only as a removal')
+    t.ok(lines.length > 0 && lines.every((l) => l.includes('tools:node="remove"')), name + ' only as a removal')
   }
   t.ok(manifest.includes('android.permission.INTERNET'))
+})
+
+// The liveness selfie needs the camera; the prompt only comes from the
+// module's start(), never at app startup.
+test('the main manifest grants CAMERA for the selfie without requiring a camera', (t) => {
+  const manifest = read('android/app/src/main/AndroidManifest.xml')
+  const camera = manifest.split('\n').filter((l) => l.includes('android.permission.CAMERA"'))
+  t.is(camera.length, 1, 'CAMERA named once')
+  t.absent(camera[0].includes('tools:node'), 'CAMERA is not a removal')
+  // Play reads CAMERA as requiring camera and camera.autofocus unless each is
+  // declared not required; camera.any alone does not clear them. The liveness
+  // SDK declares camera.any with the default required true, and that wins the
+  // manifest merge unless the app replaces the attribute.
+  for (const feature of ['camera', 'camera.any', 'camera.autofocus', 'camera.front']) {
+    const name = 'android.hardware.' + feature + '"'
+    const lines = manifest.split('\n').filter((l) => l.includes('<uses-feature') && l.includes('android:name="' + name))
+    t.is(lines.length, 1, feature + ' declared once')
+    t.is(lines[0] && lines[0].trim(), '<uses-feature android:name="' + name + ' android:required="false" tools:replace="android:required"/>', feature + ' not required, over any library')
+  }
+  t.absent(/<uses-feature[^>]*android:required="true"/.test(manifest), 'no required hardware feature')
+  t.absent(/<uses-feature(?![^>]*android:required="false")[^>]*>/.test(manifest), 'every uses-feature says required false')
+  const permissions = [...manifest.matchAll(/<uses-permission android:name="android\.permission\.([A-Z_]+)"( tools:node="remove")?\/>/g)]
+    .map((m) => m[1] + (m[2] ? ':remove' : ''))
+  t.alike(permissions, ['INTERNET', 'VIBRATE', 'READ_EXTERNAL_STORAGE:remove', 'WRITE_EXTERNAL_STORAGE:remove', 'CAMERA'])
+  t.is((manifest.match(/<uses-permission\b/g) || []).length, permissions.length, 'every uses-permission is in the list')
+})
+
+test('Info.plist explains the camera use for the selfie', (t) => {
+  const plist = read('ios/Varanda/Info.plist')
+  const m = plist.match(/<key>NSCameraUsageDescription<\/key>\s*<string>([^<]*)<\/string>/)
+  t.ok(m, 'NSCameraUsageDescription present')
+  t.ok(m && m[1].trim().length > 0, 'non-empty description')
+  t.ok(m && m[1].includes('selfie'), 'names the selfie')
 })
 
 test('the iOS marketing version matches app.json', (t) => {

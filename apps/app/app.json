@@ -69,6 +69,7 @@
         {
           "android": {
             "minSdkVersion": 31,
+            "kotlinVersion": "2.3.0",
             "useLegacyPackaging": true
           }
         }

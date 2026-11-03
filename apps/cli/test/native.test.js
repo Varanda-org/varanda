@@ -109,7 +109,9 @@ test('native.yml: the builds the job names promise', (t) => {
   t.ok(/xcode-select -s \/Applications\/Xcode_26\.2\.app/.test(ios), 'the Xcode the app is checked with')
   t.ok(/prepare:native -w apps\/app -- ios/.test(ios))
   t.ok(/check-pods-lock\.js/.test(ios), 'the committed Podfile.lock is checked')
-  t.ok(/-sdk iphonesimulator/.test(ios) && /CODE_SIGNING_ALLOWED=NO/.test(ios), 'unsigned simulator build')
+  t.ok(/-destination 'generic\/platform=iOS Simulator'/.test(ios) && /CODE_SIGNING_ALLOWED=NO/.test(ios), 'unsigned simulator build')
+  t.absent(/-sdk /.test(ios), 'no -sdk: it would build the SPM host tools for the simulator')
+  t.ok(/ -skipPackagePluginValidation /.test(ios) && / -skipMacroValidation /.test(ios), 'the AWS packages run a plugin and macros')
 })
 
 test('native.yml: the gate', (t) => {

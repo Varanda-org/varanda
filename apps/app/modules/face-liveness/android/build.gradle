@@ -1,0 +1,42 @@
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    // The liveness SDK is a Compose UI. Kotlin 2 compiles Compose only with
+    // this plugin, at the same version as the app's Kotlin, applied here so
+    // the app's own Gradle files stay as prebuild writes them.
+    classpath("org.jetbrains.kotlin.plugin.compose:org.jetbrains.kotlin.plugin.compose.gradle.plugin:${kotlinVersion}")
+  }
+}
+
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.faceliveness"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  buildFeatures {
+    compose true
+  }
+}
+
+dependencies {
+  // The official AWS Face Liveness UI (Amplify UI for Android). Exact
+  // version: the capture is part of the KYC flow and must not move under us.
+  implementation "com.amplifyframework.ui:liveness:1.13.0"
+  // expo's activity-result launcher takes an androidx.activity callback; the
+  // same version as auth-session and expo-image-picker, so Gradle resolves one.
+  implementation "androidx.activity:activity-ktx:1.11.0"
+  implementation "androidx.activity:activity-compose:1.11.0"
+}

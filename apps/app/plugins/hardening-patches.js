@@ -46,11 +46,29 @@ const DEBUG_SUFFIX = `        debug {
             applicationIdSuffix '.debug'
         }`
 
+const DESUGARING_OPTIONS = `    // The AWS Face Liveness SDK (its Amplify core libraries) needs core
+    // library desugaring in the app module.
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+    }
+`
+
+const DESUGARING_LIBRARY = '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")\n\n'
+
 const ARCHITECTURES = 'arm64-v8a,x86_64'
 const ARCHITECTURES_COMMENT = [
   'Keep in sync with apps/app/scripts/link-addons.sh: bare-link only produces',
   '.so addons for arm64-v8a and x86_64; adding other ABIs here breaks the node.'
 ]
+
+const KOTLIN_PLUGIN = '    classpath(\'org.jetbrains.kotlin:kotlin-gradle-plugin\')\n'
+
+const KOTLIN_PLUGIN_PINNED = `    // Pinned to android.kotlinVersion (expoLibs reads it from
+    // gradle.properties): without a version the React Native Gradle plugin
+    // brings its own older Kotlin, which cannot read the metadata of the
+    // face liveness SDK's dependencies.
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:\${expoLibs.versions.kotlin.get()}")
+`
 
 function replaceOnce (source, anchor, replacement, marker, what) {
   if (source.includes(marker)) return source
@@ -72,7 +90,16 @@ function patchBuildGradle (source) {
   const caution = '            // Caution! In production, you need to generate your own keystore file.\n' +
     '            // see https://reactnative.dev/docs/signed-apk-android.\n' +
     '            signingConfig signingConfigs.debug\n'
-  return replaceOnce(source, caution, '            signingConfig signingConfigs.release\n', 'signingConfig signingConfigs.release', 'release build type signing')
+  source = replaceOnce(source, caution, '            signingConfig signingConfigs.release\n', 'signingConfig signingConfigs.release', 'release build type signing')
+  const compileSdk = '    compileSdk rootProject.ext.compileSdkVersion\n'
+  source = replaceOnce(source, compileSdk, compileSdk + DESUGARING_OPTIONS, 'coreLibraryDesugaringEnabled', 'core library desugaring option')
+  const hermes = '    if (hermesEnabled.toBoolean()) {\n'
+  return replaceOnce(source, hermes, DESUGARING_LIBRARY + hermes, 'desugar_jdk_libs', 'core library desugaring library')
+}
+
+// The project-level android/build.gradle.
+function patchProjectBuildGradle (source) {
+  return replaceOnce(source, KOTLIN_PLUGIN, KOTLIN_PLUGIN_PINNED, 'expoLibs.versions.kotlin', 'Kotlin Gradle plugin version')
 }
 
 // `items` is what expo parses gradle.properties into.
@@ -85,4 +112,4 @@ function patchGradleProperties (items) {
   return items
 }
 
-module.exports = { patchAppDelegate, patchBuildGradle, patchGradleProperties }
+module.exports = { patchAppDelegate, patchBuildGradle, patchProjectBuildGradle, patchGradleProperties }

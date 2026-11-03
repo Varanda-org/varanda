@@ -4,7 +4,7 @@
 // prebuild --clean drops (backup exclusion, release signing, .debug suffix,
 // ABI list). The last test runs a real `expo prebuild --clean --no-install`
 // in a temp copy of the app (never in apps/app: prebuild would overwrite
-// ios/ and android/) and compares the three patched files with the committed
+// ios/ and android/) and compares the four patched files with the committed
 // ones, and the generated privacy manifest with the committed one ignoring
 // the whitespace between tags.
 const fs = require('node:fs')
@@ -12,7 +12,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const test = require('brittle')
-const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('../plugins/hardening-patches')
+const { patchAppDelegate, patchBuildGradle, patchProjectBuildGradle, patchGradleProperties } = require('../plugins/hardening-patches')
 
 const root = path.join(__dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
@@ -20,12 +20,14 @@ const compact = (xml) => xml.replace(/>\s+</g, '><').trim()
 
 const APP_DELEGATE = 'ios/Varanda/AppDelegate.swift'
 const BUILD_GRADLE = 'android/app/build.gradle'
+const PROJECT_BUILD_GRADLE = 'android/build.gradle'
 const GRADLE_PROPERTIES = 'android/gradle.properties'
 const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
 
 test('the patches change nothing in the committed files', (t) => {
   t.is(patchAppDelegate(read(APP_DELEGATE)), read(APP_DELEGATE))
   t.is(patchBuildGradle(read(BUILD_GRADLE)), read(BUILD_GRADLE))
+  t.is(patchProjectBuildGradle(read(PROJECT_BUILD_GRADLE)), read(PROJECT_BUILD_GRADLE))
   const items = [
     { type: 'comment', value: 'Keep in sync with apps/app/scripts/link-addons.sh: bare-link only produces' },
     { type: 'comment', value: '.so addons for arm64-v8a and x86_64; adding other ABIs here breaks the node.' },
@@ -47,9 +49,17 @@ test('the patches restore the edits on a generated file', (t) => {
     .replace('            signingConfig signingConfigs.release\n', '            // Caution! In production, you need to generate your own keystore file.\n' +
       '            // see https://reactnative.dev/docs/signed-apk-android.\n' +
       '            signingConfig signingConfigs.debug\n')
+    .replace(/ {4}\/\/ The AWS Face Liveness SDK[\s\S]*?\n {4}compileOptions \{\n[^\n]*\n {4}}\n/, '')
+    .replace('    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")\n\n', '')
   t.absent(gradle.includes('VARANDA_RELEASE_STORE_FILE'))
+  t.absent(gradle.includes('desugar'))
   t.absent(gradle.includes('applicationIdSuffix'))
   t.is(patchBuildGradle(gradle), read(BUILD_GRADLE))
+
+  const project = read(PROJECT_BUILD_GRADLE)
+    .replace(/ {4}\/\/ Pinned to android\.kotlinVersion[\s\S]*?\n {4}classpath\("org\.jetbrains\.kotlin:kotlin-gradle-plugin:[^\n]*\n/, "    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')\n")
+  t.absent(project.includes('expoLibs'))
+  t.is(patchProjectBuildGradle(project), read(PROJECT_BUILD_GRADLE))
 
   const items = patchGradleProperties([{ type: 'property', key: 'reactNativeArchitectures', value: 'armeabi-v7a,arm64-v8a,x86,x86_64' }])
   t.is(items.length, 3)
@@ -59,6 +69,7 @@ test('the patches restore the edits on a generated file', (t) => {
 test('a changed template fails instead of dropping an edit', (t) => {
   t.exception(() => patchAppDelegate('class AppDelegate {}'), /AppDelegate|iCloud/)
   t.exception(() => patchBuildGradle('android {}'), /release signing config/)
+  t.exception(() => patchProjectBuildGradle('buildscript {}'), /Kotlin Gradle plugin/)
   t.exception(() => patchGradleProperties([]), /ABI list/)
 })
 
@@ -76,7 +87,7 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
     env: { ...process.env, CI: '1', EXPO_NO_TELEMETRY: '1' }
   })
   t.is(result.status, 0, result.stderr)
-  for (const file of [APP_DELEGATE, BUILD_GRADLE, GRADLE_PROPERTIES]) {
+  for (const file of [APP_DELEGATE, BUILD_GRADLE, PROJECT_BUILD_GRADLE, GRADLE_PROPERTIES]) {
     t.is(fs.readFileSync(path.join(dir, file), 'utf8'), read(file), file)
   }
   t.is(compact(fs.readFileSync(path.join(dir, PRIVACY_MANIFEST), 'utf8')), compact(read(PRIVACY_MANIFEST)), PRIVACY_MANIFEST)
