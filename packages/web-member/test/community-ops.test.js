@@ -103,7 +103,7 @@ async function enter (s, community, ...to) {
   return res
 }
 
-const COMMUNITY_OPS = ['communityAdmit', 'communityBan', 'communityCreate', 'communityGroups', 'communityInfo', 'communityJoin', 'communityLeave', 'communityList', 'communityMembers', 'communityMeta', 'communityRemoveGroup', 'communityRequests', 'communitySetAdmin']
+const COMMUNITY_OPS = ['communityAdmit', 'communityBan', 'communityCreate', 'communityGroups', 'communityInfo', 'communityInvitePolicy', 'communityJoin', 'communityLeave', 'communityList', 'communityMembers', 'communityMeta', 'communityRemoveGroup', 'communityRequests', 'communitySetAdmin']
 
 test('member-ops exports every community operation and no link', async (t) => {
   t.alike(Object.keys(ops).filter((k) => k.startsWith('community')).sort(), COMMUNITY_OPS)
@@ -130,9 +130,9 @@ test('community create writes the root and Geral; info shapes and refusals', asy
 
   const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
-    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: []
+    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false
   })
-  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public' })
+  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 }, 'a community is not listed as a group')
 
   const { group: horta } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval', community })
@@ -158,7 +158,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await t.exception(() => ops.groupCreate(b.ctx, { name: 'Feira', join: 'open', community }), /só quem criou a comunidade cria grupos/)
   await t.exception(() => ops.groupJoin(b.ctx, { group: general }), /entre na comunidade primeiro/)
   const pending = 'cd'.repeat(32)
-  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [] })
+  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false })
   await t.exception(() => ops.communityInfo(b.ctx, { community: general }), /comunidade não encontrada/, 'a group root is no community')
 })
 
@@ -1681,4 +1681,39 @@ test('a creator back in C drops a group, sees it in dropped and puts it back wit
   t.alike(info.dropped, [], 'no longer dropped')
   t.ok(info.groups.some((g) => g.group === horta), 'back in the catalogue')
   await t.exception(() => ops.communityRemoveGroup(a.ctx, { community, group: horta, undo: true }), /nada a alterar/)
+})
+
+test('invitePolicy: the creator toggles C, an admin sets C and a group through its CW, a member is refused', async (t) => {
+  const { a, members: [b, c], community } = await world(t, 2)
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open', community })
+  for (const s of [b, c]) await enter(s, community, a)
+  t.alike(await ops.communityInvitePolicy(a.ctx, { community, members: true }), { ok: true })
+  const on = await lastRecord(a, community)
+  t.alike([on.type, on.group, on.on], ['group-invites', null, true], 'on the root, group null')
+  t.is((await ops.communityInfo(a.ctx, { community })).memberInvite, true)
+  await t.exception(() => ops.communityInvitePolicy(a.ctx, { community, members: true }), /nada a alterar/)
+  t.alike(await ops.communityInvitePolicy(a.ctx, { community, members: false }), { ok: true })
+  t.is((await ops.communityInfo(a.ctx, { community })).memberInvite, false)
+
+  await share(a, b, [community])
+  const bcw = await ownWriter(b, community)
+  const length = await coreLength(b, bcw)
+  await t.exception(() => ops.communityInvitePolicy(b.ctx, { community, members: true }), new RegExp(FORBIDDEN))
+  t.is(await coreLength(b, bcw), length, 'nothing appended')
+
+  const ccw = await ownWriter(c, community)
+  await ops.communitySetAdmin(a.ctx, { community, member: c.key, on: true })
+  await share(a, c, [community, group])
+  t.alike(await ops.groupInvitePolicy(c.ctx, { group, members: true }), { ok: true })
+  const gFlag = await lastRecord(c, ccw)
+  t.alike([gFlag.type, gFlag.group, gFlag.on], ['group-invites', group, true], 'in the CW naming the group')
+  t.is((await ops.groupInfo(c.ctx, { group })).memberInvite, true)
+  t.is((await ops.communityInfo(c.ctx, { community })).memberInvite, false, 'a group flag leaves C alone')
+  await share(c, a, [ccw])
+  t.is((await ops.groupInfo(a.ctx, { group })).memberInvite, true, 'the creator folds it')
+
+  t.alike(await ops.communityInvitePolicy(c.ctx, { community, members: true }), { ok: true })
+  const cFlag = await lastRecord(c, ccw)
+  t.alike([cFlag.type, cFlag.group, cFlag.on], ['group-invites', null, true], 'an admin on its own CW')
+  t.is((await ops.communityInfo(c.ctx, { community })).memberInvite, true)
 })

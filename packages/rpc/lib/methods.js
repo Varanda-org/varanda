@@ -571,6 +571,8 @@ const SPECS = {
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT)
     }
   },
+  // Result adds memberInvite: boolean, whether plain members may invite
+  // (docs/rpc.md 5.71); false on pending objects.
   'group.info': { fields: { group: req(isKey) } },
   'group.members': {
     fields: {
@@ -597,7 +599,8 @@ const SPECS = {
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
   // Success: { community, name, join, creator, role, state, members, admins,
   // groups, general, incomplete, leavePending: boolean, repair: boolean,
-  // dropped: [group key] }.
+  // dropped: [group key], memberInvite: boolean }. memberInvite is whether
+  // plain members may invite (docs/rpc.md 5.72); false on pending objects.
   // leavePending is true only for C's creator whose own leave, noted by this
   // device, is written but not confirmed by the diary yet: community.leave
   // finishes it. repair is true only for C's creator whose root's powers
@@ -640,6 +643,10 @@ const SPECS = {
   // catalogue through its CW (docs/rpc.md 5.70). Geral never leaves. undo:
   // puts a group it dropped back. Success: { ok: true }.
   'community.removeGroup': { fields: { community: req(isKey), group: req(isKey), undo: opt(isBool, false) }, mutating: true },
+  // "Membros podem convidar" (docs/rpc.md 5.71, 5.72). Success: { ok: true }.
+  // The same-value check is the node's.
+  'group.invitePolicy': { fields: { group: req(isKey), members: req(isBool) }, mutating: true },
+  'community.invitePolicy': { fields: { community: req(isKey), members: req(isBool) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

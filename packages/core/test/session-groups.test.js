@@ -132,7 +132,7 @@ test('group create, idempotent join, list, info and members expose every field',
   const geral = { group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }
   t.alike(await m.call('group.list'), { groups: [geral, summary].sort((x, y) => x.name < y.name ? -1 : 1), total: 2 })
   t.alike(await m.call('group.list', { offset: 2, limit: 1 }), { groups: [], total: 2 })
-  t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public' })
+  t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await m.call('group.members', { group }), {
     members: [{ member: m.publicKey, name: 'Ana', username: 'ana', admin: true, banned: false, joinedAt: await headerTime(m, group) }],
     total: 1
@@ -247,14 +247,14 @@ test('group requests, admission, administration, bans, metadata and leave throug
   t.alike(await a.call('group.ban', { group, member: b.publicKey, on: false }), { ok: true })
   t.alike(await a.call('group.meta', { group, name: 'Jardim', join: 'open' }), { ok: true })
   t.alike(await a.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public'
+    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.alike(await b.call('group.leave', { group }), { state: 'left' })
   t.alike(await b.call('group.leave', { group }), { state: 'left' }, 'a repeated leave answers the state and writes nothing')
   t.alike(await failure(b.call('group.post', { group, text: 'depois' })), denied)
   t.alike(await b.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public'
+    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
   })
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
@@ -382,5 +382,20 @@ test('group.rekey: a private group rotates for its creator, a public one is refu
   const pub = await m.call('group.create', { name: 'Praça', join: 'open', community })
   t.alike(await failure(m.call('group.rekey', { group: pub.group })), { code: 'USAGE', message: 'grupo público não usa chave' })
   t.ok(m.events.some((e) => e.event === 'groups.changed' && e.data.group === group), 'groups.changed after rekey')
+  t.alike(m.session.internal, [])
+})
+
+test('group.invitePolicy and community.invitePolicy flip the flag and announce the key', async (t) => {
+  const m = await person(t)
+  const { community } = await m.call('community.create', { name: 'Bairro', join: 'open' })
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community })
+  m.events.splice(0)
+  t.alike(await m.call('group.invitePolicy', { group, members: true }), { ok: true })
+  t.alike(m.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group), [group])
+  t.is((await m.call('group.info', { group })).memberInvite, true)
+  t.alike(await failure(m.call('group.invitePolicy', { group, members: true })), { code: 'USAGE', message: 'nada a alterar' })
+  t.alike(await m.call('community.invitePolicy', { community, members: true }), { ok: true })
+  t.alike(m.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group), [community])
+  t.is((await m.call('community.info', { community })).memberInvite, true)
   t.alike(m.session.internal, [])
 })

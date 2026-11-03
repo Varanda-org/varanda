@@ -8,7 +8,7 @@ const {
   MAX_KEY_RECIPIENTS, MAX_KEY_BASIS,
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
-  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity
+  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites
 } = require('../lib/group')
 const { community } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
@@ -2238,4 +2238,25 @@ test('group-cut: a marked G root is never entitled again; the returning creator 
   t.ok(g.entitled.includes(wC3))
   g = buildGroup(pworld().input(null))
   t.ok(g.entitled.includes(G), 'control: with no creator leave the root is entitled')
+})
+
+test('memberInvite in a private group is plaintext and folds without the epoch key', (t) => {
+  const w = pworld()
+  t.is(buildGroup(w.input()).memberInvite, false, 'no record')
+  const r = groupInvites({ on: true, at: AT(6) })
+  t.is(validateGroupRecord(r, 1, { private: true }), null, 'not sealed-only')
+  w.push(wX, groupInvites({ on: true, at: AT(6) }))
+  t.is(buildGroup(w.input()).memberInvite, false, 'a member record is ignored')
+  w.push(wA, groupInvites({ on: true, at: AT(7) }))
+  const none = buildGroup(w.input())
+  t.is(none.memberInvite, true, 'an admin record counts with no key held')
+  t.is(none.name, null, 'while the sealed name stays unread')
+  t.is(buildGroup(w.input(w.reader(wY))).memberInvite, true, 'and the same with the key')
+  // A sealed copy is never an invites record: only posts, hides and metas
+  // open from an envelope.
+  w.seal(G, w.E1, groupInvites({ on: false, at: AT(8) }))
+  t.is(buildGroup(w.input(w.reader(wY))).memberInvite, true, 'a sealed record stays sealed')
+  // Community staff reach a private group through C's virtual log too.
+  w.comm.push(CM, communityInvites({ group: G, on: false, at: AT(9) }))
+  t.is(buildGroup(w.input()).memberInvite, false, 'C\'s creator clears it in G')
 })

@@ -1878,6 +1878,8 @@ function createBrowserSession ({
     'group.admin': groupWrite(member.groupAdmin),
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.meta': groupWrite(member.groupMeta),
+    // Through the caller's CW when it acts for the community, as group.admit.
+    'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
     'community.create': groupWrite(member.communityCreate, {
       // A resume (kv communityCreate) appends to the roots it already made.
@@ -1896,6 +1898,10 @@ function createBrowserSession ({
     'community.ban': groupWrite(member.communityBan, COMMUNITY_WIDE),
     'community.admin': groupWrite(member.communitySetAdmin, COMMUNITY_WIDE),
     'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.invitePolicy': groupWrite(member.communityInvitePolicy, {
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community]
     }),

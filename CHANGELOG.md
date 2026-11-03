@@ -18,6 +18,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Comunidades e grupos ganham "Quem pode convidar" (Só administradores ou Membros podem convidar), ajustado por quem criou ou pelos administradores e guardado num novo registro assinado, `group-invites` (versões antigas o ignoram). O convite por @nome em si vem a seguir.
+
 - App Links no Android para `/c/<chave>` e `/g/<chave>` de `bora.varanda.app` (o `assetlinks.json` já tinha `handle_all_urls`); um link desses que chega antes de a instalação carregar espera e é lido de novo quando ela carrega. Os links universais no iOS vêm depois, com a conta Apple Developer.
 - Captura da selfie da conta de pagamentos dentro do app web (Amazon Rekognition Face Liveness), com as ações assinadas `kyc-liveness-validate` e `kyc-liveness-retry` (`docs/rpc.md` 5.35). Ela só é usada quando a resposta da Hodle traz os quatro campos do detector (`sessionId`, `livenessRegion`, `livenessIdentityPoolId` e `validateLivenessToken`); sem eles, e no app instalado, a página da Sumsub segue como está. O roteiro de verificação manual está em `docs/verification.md` seção 48, ainda em aberto.
 - Celular primeiro: o app instalado é o alvo principal, a web e a PWA vêm depois. Um bloco "Celular primeiro" em `AGENTS.md` e `CONTRIBUTING.md`, o item Android no modelo de PR e `apps/app/test/platformGate.test.js`, que falha se uma tela compartilhada chamar o navegador. Sem mudança: o aviso do sistema (push) continua só na web, não há publicação nas lojas e não há App Links nem Universal Links (links https não abrem o app; depois, o Android passou a abrir `/c/` e `/g/` por App Links, veja acima).

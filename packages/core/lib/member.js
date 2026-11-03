@@ -2155,6 +2155,37 @@ async function groupMeta (ctx, { group, name, join }) {
   }, { secrets: true })
 }
 
+// rpc.md 5.71: the flag travels in the clear even in a private group, so a
+// member who cannot open the epoch still knows whether it may invite. The
+// group's creator or admin writes on its live writer (as admit and ban do),
+// and a community creator or admin without a writer in G through its CW.
+async function groupInvitePolicy (ctx, { group, members }, { affected = null } = {}) {
+  return withGroup(ctx, group, async (loaded, identity) => {
+    requireParent(loaded)
+    if (loaded.view.memberInvite === members) throw new UsageError('nada a alterar')
+    const { ownHex } = identity
+    const make = () => groups.groupInvites({ on: members, seen: loaded.view.last })
+    // The live writer, as admit and ban use: after a leave and rejoin the
+    // fold counts the creator only on its rejoin writer, never the old root.
+    if (liveOwnWriter(loaded, ownHex) !== null && holdsGroupAuthority(loaded, ownHex)) {
+      requireGroupAdmin(loaded, ownHex)
+      requireCounted(loaded, loaded.local.writer)
+      const writer = await ownGroupWriter(loaded, identity)
+      await appendGroupRecord(writer, group, buildRecord(make), loaded.private)
+      noteAffected(affected, [group])
+    } else if (communityActs(loaded)) {
+      const cw = await openOwnCw(identity, loaded.cw)
+      if (cw === null) throw groupPermission()
+      const C = loaded.header.community
+      await appendGroupRecord(cw, C, buildRecord(() => groups.communityInvites({ group, on: members, seen: loaded.view.last })), false, true)
+      noteAffected(affected, [group, C])
+    } else {
+      throw groupPermission()
+    }
+    return { ok: true }
+  })
+}
+
 // The posts older than `before`, in causal order. With the cursor post still
 // in the fold, every post before it in the causal order, even if `at`
 // differs. Without it (its diary was blocked between pages), each post whose
@@ -2219,10 +2250,11 @@ async function groupInfo (ctx, { group }) {
     state: view.members.get(ownHex) || 'left',
     community: header.community,
     orphan: view.orphan === true,
-    visibility: view.visibility === 'private' ? 'private' : 'public'
+    visibility: view.visibility === 'private' ? 'private' : 'public',
+    memberInvite: view.memberInvite === true
   }), (pending) => {
     requirePendingLocal(pending)
-    return { group: pending.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public' }
+    return { group: pending.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }
   })
 }
 
@@ -2281,7 +2313,7 @@ const DEMOTE_PENDING = 'sem permissão: a saída anterior ainda não foi confirm
 const GERAL_STAYS = 'o grupo Geral só sai com a comunidade'
 const CREATE_FILE = 'community-create.json'
 const LEAVE_FILE = 'community-leave.json'
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [] }
+const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
 
 function communityNotFound () {
   const err = new Error('comunidade não encontrada')
@@ -2991,6 +3023,29 @@ async function communityMeta (ctx, { community, name, join }, { affected = null 
   })
 }
 
+// rpc.md 5.72: as community.meta for the creator (root, or its live CW
+// once cwRepair), and a community admin through its own live CW.
+async function communityInvitePolicy (ctx, { community, members }, { affected = null } = {}) {
+  return withCommunity(ctx, community, async (c, identity) => {
+    const { ownHex } = identity
+    if (c.view.memberInvite === members) throw new UsageError('nada a alterar')
+    if (c.view.members.get(ownHex) !== 'member') throw communityPermission()
+    const record = () => groups.communityInvites({ group: null, on: members, seen: c.view.last })
+    if (c.view.creator === ownHex && !cwRepair(c, ownHex)) {
+      requireRootAuthority(c)
+      const writer = await ownGroupWriter(c, identity, { root: true }).catch(() => { throw communityPermission() })
+      await appendCommunityRecord(writer, c.group, buildRecord(record))
+    } else {
+      if (c.view.creator !== ownHex) requireCommunityAdmin(c)
+      else if (c.cw === null) throw communityPermission()
+      const cw = await ownGroupWriter(c, identity).catch(() => { throw communityPermission() })
+      await appendCommunityRecord(cw, c.group, buildRecord(record))
+    }
+    noteAffected(affected, [c.group])
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.70: C's creator, back after its root's powers ended, takes group
 // `group` off C's catalogue through its live CW, or with `undo` puts a
 // group it dropped back; the root itself keeps creating and listing while
@@ -3131,7 +3186,8 @@ async function communityInfo (ctx, { community }) {
       incomplete: view.incomplete,
       leavePending: await leavePending(ctx, identity, c),
       repair: cwRepair(c, identity.ownHex) && c.cw !== null,
-      dropped: [...view.dropped]
+      dropped: [...view.dropped],
+      memberInvite: view.memberInvite === true
     }
   })
 }
@@ -3243,6 +3299,7 @@ module.exports = {
   groupAdmin,
   groupHide,
   groupMeta,
+  groupInvitePolicy,
   groupRekey,
   communityCreate,
   communityJoin,
@@ -3250,6 +3307,7 @@ module.exports = {
   communityAdmit,
   communityBan,
   communityMeta,
+  communityInvitePolicy,
   communityRemoveGroup,
   communitySetAdmin,
   communityMembers,
