@@ -59,6 +59,16 @@
 //   fake.settleDeposit(externalId)
 //                 marks a deposit paid and credits its value minus the fee.
 //   fake.close()  closes the server and its connections.
+//   fake.livenessFields
+//                 true (default): a selfie answer carries the in-app liveness
+//                 quartet (sessionId, livenessRegion, livenessIdentityPoolId,
+//                 validateLivenessToken). false omits it, as production
+//                 answers today.
+//
+// The public liveness routes (POST /api/public/liveness/validate and
+// /api/public/liveness/hodle/session, script names livenessValidate and
+// livenessSession) answer 401 to any request that carries an authorization
+// header: the API key must never reach them.
 //
 // loopbackFetch(base) returns a fetch that throws for any URL not under base.
 
@@ -71,6 +81,9 @@ const DOCUMENT_RE = /^\/api\/kyc\/document\/([^/]+)$/
 const DEPOSIT_RE = /^\/api\/deposit\/([^/]+)$/
 const PAYOUT_RE = /^\/api\/wallet\/payout\/([^/]+)$/
 const PIX_KEY_TYPES = new Set(['PHONE', 'CPF', 'EMAIL', 'RANDOM', 'CNPJ'])
+// Past MAX_STRING on purpose: a decoder that checks it with validText drops it.
+const FAKE_LIVENESS_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.' + 'fakeLivenessPayload_'.repeat(15) + '.fake-signature'
+const FAKE_POOL_ID = 'eu-west-1:3f2b8c1e-7a4d-4e9b-9c2a-5d6e7f8a9b0c'
 const PER_TX_LIMIT_CENTS = 300000
 const PIN_ATTEMPTS = 3
 const KYC_RE = /^\/api\/kyc\/([^/]+)$/
@@ -109,6 +122,7 @@ function notFound (res, what) {
 }
 
 async function startFakeHodle () {
+  const fake = { livenessFields: true }
   const seen = []
   const state = {
     subaccounts: new Map(),
@@ -222,19 +236,15 @@ async function startFakeHodle () {
       const documentId = 'doc_' + hex(6)
       state.documents.set(documentId, { subAccountId, documentType, ready: false })
       if (documentType === 'SELFIE-FROM-LIVENESS') {
-        const sessionId = crypto.randomUUID()
-        return json(res, 201, {
-          success: true,
-          data: {
-            documentId,
-            sessionId,
-            // Production's selfie link is a Sumsub page (2026-11-02).
-            livenessUrl: 'https://in.sumsub.com/websdk/p/' + documentId,
-            validateLivenessToken: 'eyJfake',
-            livenessIdentityPoolId: 'eu-west-1:fake',
-            livenessRegion: 'eu-west-1'
-          }
-        })
+        // Production's selfie link is a Sumsub page (2026-11-02).
+        const data = { documentId, livenessUrl: 'https://in.sumsub.com/websdk/p/' + documentId }
+        if (fake.livenessFields) {
+          data.sessionId = crypto.randomUUID()
+          data.validateLivenessToken = FAKE_LIVENESS_TOKEN
+          data.livenessIdentityPoolId = FAKE_POOL_ID
+          data.livenessRegion = 'eu-west-1'
+        }
+        return json(res, 201, { success: true, data })
       }
       // As production answers (2026-11-02), not as the docs show it.
       const s3 = 'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com/'
@@ -626,6 +636,16 @@ async function startFakeHodle () {
       json(res, 200, { success: true, data })
     }
   }
+  defaults.livenessValidate = function (req, res) {
+    json(res, 200, { success: true, data: { alreadyCompleted: false } })
+  }
+  defaults.livenessSession = function (req, res) {
+    json(res, 200, { success: true, data: { sessionId: crypto.randomUUID() } })
+  }
+  const PUBLIC_ROUTES = Object.freeze({
+    '/api/public/liveness/validate': 'livenessValidate',
+    '/api/public/liveness/hodle/session': 'livenessSession'
+  })
   let routes = { ...defaults }
   let handler = null
 
@@ -668,6 +688,12 @@ async function startFakeHodle () {
       seen.push({ method: req.method, path, query: url.search, headers: req.headers, body })
       const ctx = { id: null, query: url.searchParams, body, json }
       if (handler) return handler(req, res, ctx)
+      if (req.method === 'POST' && Object.prototype.hasOwnProperty.call(PUBLIC_ROUTES, path)) {
+        if (req.headers.authorization !== undefined) {
+          return json(res, 401, { success: false, error: 'Unexpected authorization' })
+        }
+        return routes[PUBLIC_ROUTES[path]](req, res, ctx)
+      }
       if (!/^Bearer hodle_(live|test)_/.test(String(req.headers.authorization || ''))) {
         return json(res, 401, { success: false, error: 'Invalid API key' })
       }
@@ -717,7 +743,7 @@ async function startFakeHodle () {
     })
   }
 
-  return { base, seen, state, script, apply, settleDeposit, close }
+  return Object.assign(fake, { base, seen, state, script, apply, settleDeposit, close })
 }
 
 // A fetch that refuses any origin other than the fake, so a wrong default can
@@ -768,4 +794,4 @@ const FIXTURES = Object.freeze({
   }
 })
 
-module.exports = { startFakeHodle, loopbackFetch, FIXTURES, PROTECTED_KEY, KEYS_WINDOW_MS }
+module.exports = { startFakeHodle, loopbackFetch, FIXTURES, PROTECTED_KEY, KEYS_WINDOW_MS, FAKE_LIVENESS_TOKEN, FAKE_POOL_ID }

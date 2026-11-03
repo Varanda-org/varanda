@@ -49,7 +49,8 @@ test('constants', (t) => {
   t.is(PREFIX, 'varanda-wallet-v1')
   t.alike(ACTIONS, [
     'optin', 'kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit',
-    'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap'
+    'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap',
+    'kyc-liveness-validate', 'kyc-liveness-retry'
   ])
   t.ok(Object.isFrozen(ACTIONS))
   t.is(NONCE_RE.source, terms.NONCE_RE.source, 'same nonce rule as terms')
@@ -115,7 +116,7 @@ test('canonical op: reads every field once', (t) => {
 })
 
 test('canonical op: forbidden keys and bad shapes throw TypeError', (t) => {
-  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']) {
+  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf', 'validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken']) {
     t.exception.all(() => canonicalOp({ [key]: '1234' }), TypeError, 'forbidden ' + key)
     t.exception.all(() => opHash({ amount: 1, [key]: 1 }), TypeError, 'opHash forbidden ' + key)
   }
@@ -188,6 +189,18 @@ test('swap-quote and swap (receive USDC, convert to BRLA) sign over the operatio
   t.alike(verifyWallet(swapFields, sigSwap), { ok: true })
   t.alike(verifyWallet({ ...swapFields, action: 'swap-quote' }, sigSwap), { ok: false, reason: 'bad-signature' }, 'a swap is not a quote')
   t.alike(verifyWallet({ ...swapFields, opHash: opHash({ ...swap, amount: 2500001 }) }, sigSwap), { ok: false, reason: 'bad-signature' }, 'another amount')
+})
+
+test('kyc-liveness-validate and kyc-liveness-retry sign an empty op only', (t) => {
+  const empty = opHash({})
+  for (const action of ['kyc-liveness-validate', 'kyc-liveness-retry']) {
+    const fields = { ...FIELDS, action, opHash: empty }
+    const signature = signWallet(fields, MEMBER_KP)
+    t.alike(verifyWallet(fields, signature), { ok: true }, action)
+    t.alike(verifyWallet({ ...fields, action: 'kyc-submit' }, signature), { ok: false, reason: 'bad-signature' }, action + ' is not kyc-submit')
+  }
+  t.alike(verifyWallet({ ...FIELDS, action: 'kyc-liveness-validate', opHash: empty }, signWallet({ ...FIELDS, action: 'kyc-liveness-retry', opHash: empty }, MEMBER_KP)), { ok: false, reason: 'bad-signature' }, 'a retry is not a validation')
+  t.exception.all(() => opHash({ validateLivenessToken: 'tok' }), TypeError, 'the validation token never enters an op')
 })
 
 test('every field is bound by the signature', (t) => {

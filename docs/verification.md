@@ -2835,6 +2835,36 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 15. [ ] Enquanto a Hodle não confirmar por escrito o PIN por pessoa, o operador mantém `VARANDA_HODLE_MODE` em `cadastro` para deixar a criação de carteira na API real desligada. Isso é uma configuração do operador, não uma trava no código (não realizada ainda).
 16. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
 
+### Captura da selfie dentro da página (feat/in-app-liveness, 2026-11-03)
+
+Quando a resposta da Hodle traz os quatro campos do detector, a selfie é feita na página, com o Amazon Rekognition Face Liveness. Sem eles, tudo segue como antes (página da Sumsub). Termos e Política passam à versão 9. Nada abaixo foi exercitado contra a Hodle, a AWS ou um navegador real: os testes usam só o falso de loopback.
+
+Notas de ameaça:
+
+- O `validateLivenessToken` fica só na memória do serviço de conta (`apps/cli/lib/account/liveness-tokens.js`, 30 minutos). Não vai ao aparelho, a arquivo, a registro, a erro ou a resposta. O aparelho recebe só `{ sessionId, region, identityPoolId }`.
+- Validar e refazer são as ações assinadas `kyc-liveness-validate` e `kyc-liveness-retry`, com `op` vazio (`docs/rpc.md` 5.35). As duas dividem um `once()` por membro, então toques repetidos, ou validar e refazer ao mesmo tempo, viram uma só chamada à Hodle.
+- Uma validação cuja resposta se perdeu volta como incerta e nunca é reenviada sozinha, como as outras chamadas que mudam o estado na Hodle.
+- O serviço chama as rotas públicas de prova de vida da Hodle sem a chave de API.
+- O CSP lista os hosts exatos, sem curinga: `cdn.liveness.rekognition.amazonaws.com`, as oito regiões de streaming e o Cognito de cada uma. `media-src blob:` e `camera=(self)` valem só nesta origem. O estilo da AWS vem de `/liveness/amplify-ui.css`, no mesmo domínio.
+- O aparelho obtém as credenciais de convidado no Cognito (`apps/app/src/livenessCredentials.js`). A Varanda nunca as vê.
+- O vídeo vai do navegador à AWS. A Varanda e a Hodle não o recebem.
+
+Verificação manual no navegador hospedado (a fazer quando a Hodle ligar os campos, Pergunta 5):
+
+1. [ ] Chrome no desktop: a câmera só é pedida no passo da selfie, nunca antes (não realizada ainda).
+2. [ ] Chrome no Android: o mesmo (não realizada ainda).
+3. [ ] Safari no iPhone: o pedido de permissão da câmera só aparece depois do toque em "Começar a verificação", na tela inicial do próprio detector, nunca ao abrir o passo da selfie. Negar a permissão mantém o detector na tela, com o botão "Tentar de novo" (não realizada ainda).
+4. [ ] A aba Rede mostra `cognito-identity`, `cdn.liveness.rekognition` e o WebSocket de `streaming-rekognition`, e nenhum outro host novo (não realizada ainda).
+5. [ ] O console não mostra violação de CSP nem de Permissions-Policy (não realizada ainda).
+6. [ ] Ao terminar, o estado passa a `selfieReady` (não realizada ainda).
+7. [ ] `kyc-submit` segue normalmente depois da selfie (não realizada ainda).
+8. [ ] Sem os campos do detector na resposta, a página da Sumsub abre como antes (não realizada ainda).
+9. [ ] O app instalado continua abrindo a página da Sumsub (não realizada ainda).
+10. [ ] O termo de aceite da versão 9 aparece de novo para quem aceitou a versão 8 (não realizada ainda).
+11. [ ] Com o token da selfie vencido ou perdido (por exemplo, depois de reiniciar o serviço de conta ou passados 30 minutos), validar volta `selfie-ausente` e o app oferece uma selfie nova, em vez de travar no passo (não realizada ainda).
+12. [ ] `npm run web` copia o estilo para `apps/app/public/liveness/amplify-ui.css` (fora do git) e o detector abre estilizado no servidor de desenvolvimento, com um indicador de carregamento enquanto o estilo chega (não realizada ainda).
+13. [ ] Se a selfie termina enquanto outra ação da Carteira ainda está em andamento, o app mostra "Confirmar a selfie" e só valida depois desse toque; nada é enviado sozinho (não realizada ainda).
+
 ### Limites
 
 - O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.

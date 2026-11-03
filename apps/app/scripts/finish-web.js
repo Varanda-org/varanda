@@ -4,13 +4,15 @@
 // service worker template (scripts/sw.js) into dist/sw.js with this release's
 // id and precache list, and marks dist/index.html with the same release id
 // (<meta name="varanda-release">) so the worker can refuse an index.html
-// from another release while it installs.
+// from another release while it installs. It also copies the face liveness
+// stylesheet to dist/liveness/amplify-ui.css (scripts/copy-liveness-css.js).
 // Usage: node scripts/finish-web.js [dist] -> prints one summary line, exit 0/1.
 // Running it twice on the same dist yields byte-identical files.
 
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const { livenessSource, copyLivenessCss } = require('./copy-liveness-css')
 
 const VERSION_TOKEN = '__VARANDA_VERSION__'
 const PRECACHE_TOKEN = '__VARANDA_PRECACHE__'
@@ -68,8 +70,9 @@ function requireFiles (distDir) {
   }
 }
 
-function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
+function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js'), livenessCss = livenessSource()) {
   requireFiles(distDir)
+  copyLivenessCss(distDir, livenessCss)
   const template = fs.readFileSync(templateFile)
   const indexFile = path.join(distDir, 'index.html')
   // Without any previous release meta, so a second run hashes the same bytes.

@@ -141,6 +141,10 @@ const ERROR_STATUS = Object.freeze({
   'kyc-pendente': 409,
   'kyc-recusado': 403,
   'documentos-pendentes': 409,
+  // In-app liveness: no validation token for the current selfie, or Hodle
+  // refused the capture.
+  'selfie-ausente': 409,
+  'selfie-recusada': 400,
   'pin-invalido': 400,
   'pin-bloqueado': 429,
   'limite-carteira': 429,

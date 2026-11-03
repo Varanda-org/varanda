@@ -28,7 +28,7 @@ const { createClient, parseMessage, EVENTS, MAX_MESSAGE } = require('@varanda/rp
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { tmpDir } = require('./helpers/net')
-const { startFakeHodle, loopbackFetch } = require('./helpers/fake-hodle')
+const { startFakeHodle, loopbackFetch, FAKE_LIVENESS_TOKEN, FAKE_POOL_ID } = require('./helpers/fake-hodle')
 const { createGoogle } = require('../lib/account/google')
 const { createHodle } = require('../lib/account/hodle')
 const { openAccountStore } = require('../lib/account/store')
@@ -358,6 +358,16 @@ async function approve (t, h, c, dev) {
   const selfie = await c.wallet('kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
   t.is(selfie.status, 200, 'selfie: ' + selfie.text)
   t.ok(typeof selfie.body.livenessUrl === 'string', 'a liveness url for the member')
+  t.ok(selfie.body.capture && typeof selfie.body.capture.sessionId === 'string', 'the capture session reaches the client')
+  t.is(selfie.body.capture.region, 'eu-west-1')
+  t.is(selfie.body.capture.identityPoolId, FAKE_POOL_ID)
+  t.absent(selfie.text.includes(FAKE_LIVENESS_TOKEN), 'no liveness token in the answer')
+  t.absent(h.walletFile().includes(FAKE_LIVENESS_TOKEN), 'no liveness token in wallet.json')
+  const validates = h.seen('POST', '/api/public/liveness/validate').length
+  const validated = await c.wallet('kyc-liveness-validate', {})
+  t.is(validated.status, 200, 'liveness validate: ' + validated.text)
+  t.is(typeof validated.body.ready, 'boolean')
+  t.is(h.seen('POST', '/api/public/liveness/validate').length, validates + 1, 'validated once at Hodle')
   h.markReady()
 
   const sub = await c.wallet('kyc-submit', { kycHash: kycHash(KYC) }, { kyc: { ...KYC } })
@@ -398,6 +408,7 @@ function noSecrets (t, h, label) {
   const all = parts.join('\n')
   t.absent(PIN_ALONE.test(all), label + ': no PIN in a file, a response, a log line or an event')
   t.absent(all.includes(CPF), label + ': no CPF anywhere')
+  t.absent(all.includes(FAKE_LIVENESS_TOKEN), label + ': no liveness token anywhere')
   t.absent(all.includes(NAME), label + ': no name anywhere')
   t.absent(all.includes(KYC.streetAddress), label + ': no address anywhere')
   t.absent(all.includes(KYC.email), label + ': no KYC e-mail anywhere')
@@ -411,13 +422,15 @@ function bearerOnlyInAuthorization (t, h) {
   t.ok(h.fake.seen.length > 0, 'the fake was called')
   let ok = true
   for (const r of h.fake.seen) {
-    if (r.headers.authorization !== 'Bearer ' + API_KEY) ok = false
+    // The public liveness routes take the validate token alone, never the key.
+    const expected = r.path.startsWith('/api/public/liveness/') ? undefined : 'Bearer ' + API_KEY
+    if (r.headers.authorization !== expected) ok = false
     const rest = { ...r.headers }
     delete rest.authorization
     const text = JSON.stringify([r.path, r.query, rest, r.body])
     if (text.includes(API_KEY)) ok = false
   }
-  t.ok(ok, 'the api key rode only in the Authorization header of every request')
+  t.ok(ok, 'the api key rode only in the Authorization header of every keyed request')
 }
 
 test('wallet e2e 1: opt-in, KYC and wallet through wallet.sign; nothing personal stored; a restart keeps it; the social routes outlive Hodle', async (t) => {

@@ -37,7 +37,9 @@ const ACTIONS = Object.freeze([
   'transfer',
   'send-crypto',
   'swap-quote',
-  'swap'
+  'swap',
+  'kyc-liveness-validate',
+  'kyc-liveness-retry'
 ])
 // A base64url nonce of at least 32 bytes of entropy (same rule as terms.js).
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
@@ -52,7 +54,12 @@ const OP_STRING_MAX = 512
 // exception is payerCpf (deposit) and beneficiaryCpf (payout): they are
 // signed so the service can check them, removed from the op before anything
 // is stored or logged, and only an in-memory hash is kept for the quote check.
-const OP_FORBIDDEN = Object.freeze(['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf'])
+// The liveness validation token stays in the account service and the guest
+// AWS credentials stay on the device: neither ever enters a signed op.
+const OP_FORBIDDEN = Object.freeze([
+  'pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf',
+  'validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken'
+])
 
 function isPlainObject (o) {
   if (o === null || typeof o !== 'object') return false

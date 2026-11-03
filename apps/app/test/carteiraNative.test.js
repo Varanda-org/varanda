@@ -36,13 +36,106 @@ test('Carteira.js takes the platform pieces from their modules', async (t) => {
     [/import \{[^}]*\buploadDeps\b[^}]*\} from '\.\.\/uploadFetch'/, 'uploadDeps'],
     [/import \{[^}]*\bsha256Hex\b[^}]*\} from '\.\.\/sha256'/, 'sha256Hex'],
     [/import \{[^}]*\bshareNav\b[^}]*\} from '\.\.\/shareNav'/, 'shareNav'],
-    [/import \{[^}]*\bbase64url\b[^}]*\} from '\.\.\/appLinkSecret'/, 'base64url']
+    [/import \{[^}]*\bbase64url\b[^}]*\} from '\.\.\/appLinkSecret'/, 'base64url'],
+    [/import \{[^}]*\bisAvailable\b[^}]*\} from '\.\.\/livenessCapture'/, 'isAvailable'],
+    [/import \{[^}]*\bLivenessCapture\b[^}]*\} from '\.\.\/livenessCapture'/, 'LivenessCapture']
   ]
   for (const [re, name] of imports) t.ok(re.test(src), name)
   const uploads = src.match(/uploadDocument\(/g) || []
   const withDeps = src.match(/uploadDocument\([^)]*, uploadDeps\(\)\)/g) || []
   t.ok(uploads.length >= 2)
   t.is(withDeps.length, uploads.length, 'every upload passes uploadDeps()')
+})
+
+// The screen only ever holds { sessionId, region, identityPoolId }: the
+// validate token stays in the account service and the AWS credentials stay in
+// the capture module, which is also where the platform is chosen.
+test('Carteira.js never holds the liveness secrets nor picks the platform', async (t) => {
+  const src = read('screens/Carteira.js')
+  for (const s of ['validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken', '@aws-amplify',
+    'Platform.OS', 'fetch(']) {
+    t.absent(src.includes(s), s)
+  }
+  t.ok(/<LivenessCapture\b[^>]*\bkey=\{capture\.sessionId\}/.test(src), 'remounts on a new session')
+})
+
+// A hosted-only answer keeps today's flow, and an unknown validate outcome
+// never starts a retry on its own.
+test('Carteira.js keeps the hosted page and never retries after an unknown outcome', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(src.includes("label='Abrir a página da selfie' onPress={openLiveness}"), 'hosted button')
+  t.ok(/if \(capture && isAvailable\(\)\)/.test(src), 'capture only when available')
+  t.is((src.match(/'kyc-liveness-validate'/g) || []).length, 1, 'one validate call site')
+  t.is((src.match(/'kyc-liveness-retry'/g) || []).length, 1, 'one retry call site')
+  const done = src.slice(src.indexOf('const captureDone'), src.indexOf('const captureError'))
+  t.ok(done.includes("'kyc-liveness-validate'"), 'validate lives in captureDone')
+  t.absent(done.includes('kyc-liveness-retry'), 'validate never retries')
+  t.absent(done.includes('retrySelfie'), 'validate never calls the retry')
+  const retry = src.slice(src.indexOf('const retrySelfie'), src.indexOf('const openLiveness'))
+  t.ok(retry.includes("'kyc-liveness-retry'"), 'retry only from its own tap')
+})
+
+const slice = (src, from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)))
+
+// A completion that arrives while another action holds the screen is kept for
+// the person's own tap, and 'Já terminei' cannot start such an action mid-capture.
+test('Carteira.js keeps a busy completion for a confirm tap', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(/label='Já terminei, conferir'[^\n]*disabled=\{off \|\| selfieStage === 'capturing' \|\| selfieStage === 'validating'\}/.test(src),
+    'Já terminei off during capture and validation')
+  const done = slice(src, 'const captureDone', 'const captureError')
+  const busyAt = done.indexOf('if (busyRef.current)')
+  t.ok(busyAt > 0, 'busy check')
+  t.ok(busyAt < done.indexOf('dropCapture()'), 'checked before the capture is dropped')
+  t.ok(/if \(busyRef\.current\) \{[^}]*pendingRef\.current = c[^}]*setSelfieStage\('pending'\)[^}]*return/.test(done), 'kept as pending')
+  t.ok(/captureRef\.current !== c && !\(tapped && pendingRef\.current === c\)/.test(done), 'pending only answers a tap')
+  t.ok(src.includes("label='Confirmar a selfie' onPress={confirmSelfie}"), 'confirm button')
+  const confirm = slice(src, 'const confirmSelfie', 'const captureError')
+  t.ok(confirm.includes('captureDone(pendingRef.current, true)'), 'confirm goes through captureDone')
+  t.absent(/setTimeout|setInterval|useEffect/.test(confirm), 'never sent on its own')
+})
+
+// The retry stage waits for the answer; an already completed selfie is polled
+// like a validated one.
+test('Carteira.js keeps the retry until the service answers', async (t) => {
+  const src = read('screens/Carteira.js')
+  const retry = slice(src, 'const retrySelfie', 'const openLiveness')
+  const call = retry.indexOf("'kyc-liveness-retry'")
+  const before = retry.slice(0, call)
+  t.absent(before.includes('retryRef.current = null'), 'retry kept before the call')
+  t.absent(before.includes('setSelfieStage('), 'stage kept before the call')
+  t.absent(before.includes('dropCapture()'), 'capture kept before the call')
+  t.ok(/if \(err\?\.uncertain === true\) dropCapture\(\)/.test(retry), 'unknown outcome drops the retry')
+  t.ok(/err\?\.code === 'selfie-ausente'\) selfieGone\(\)/.test(retry), 'dead token starts over')
+  t.ok(/out\.alreadyCompleted === true\) \{[^}]*await awaitSelfie\(gen, out\.ready\)/.test(retry), 'already completed polls')
+  const done = slice(src, 'const captureDone', 'const captureError')
+  t.ok(done.includes('await awaitSelfie(gen, out.ready)'), 'validate polls the same way')
+  const poll = slice(src, 'const awaitSelfie', 'const captureDone')
+  t.ok(poll.includes('ready ? 1 : SELFIE_POLLS'), 'at most SELFIE_POLLS reads')
+  t.ok(poll.includes('await wait(SELFIE_POLL_MS)'), 'spaced by SELFIE_POLL_MS')
+  t.ok(poll.includes('accountRef.current?.selfieReady === true) break'), 'stops once ready')
+})
+
+// The detector's own 'Tentar de novo' asks for the camera again, so a denial
+// keeps it mounted.
+test('Carteira.js keeps the detector after a camera denial', async (t) => {
+  const src = read('screens/Carteira.js')
+  const err = slice(src, 'const captureError', 'const captureCancel')
+  t.ok(/if \(code === 'CAMERA_DENIED'\) \{\s*setCameraDenied\(true\)\s*return\s*\}/.test(err), 'denial returns before the drop')
+  t.ok(err.indexOf("'CAMERA_DENIED'") < err.lastIndexOf('dropCapture()'), 'other codes still drop')
+  t.ok(/\{cameraDenied \? <Notice>\{TEXTS\.LIVENESS_CAMERA_DENIED\}<\/Notice> : null\}\s*<LivenessCapture\b/.test(src), 'notice above the detector')
+})
+
+// A dead or expired token also kills the hosted link: the person starts a new
+// selfie document instead.
+test('Carteira.js starts over after selfie-ausente', async (t) => {
+  const src = read('screens/Carteira.js')
+  const gone = slice(src, 'const selfieGone', 'const awaitSelfie')
+  t.ok(gone.includes('dropCapture()'), 'capture cleared')
+  t.ok(gone.includes('setLivenessUrl(null)'), 'hosted link cleared')
+  const done = slice(src, 'const captureDone', 'const captureError')
+  t.ok(/err\?\.code === 'selfie-ausente'\) \{\s*selfieGone\(\)/.test(done), 'validate starts over')
+  t.ok(src.includes("livenessUrl === null\n                      ? <Btn label='Selfie com prova de vida' onPress={startSelfie}"), 'new selfie offered once the link is gone')
 })
 
 test('Carteira.js tells a failed photo pick apart from a cancel', async (t) => {

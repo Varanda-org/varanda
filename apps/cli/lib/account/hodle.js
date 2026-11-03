@@ -119,6 +119,15 @@ const UPLOAD_HOSTS = Object.freeze([
 // Production's selfie link is a Sumsub page (seen 2026-11-02).
 const LIVENESS_HOSTS = Object.freeze(['app.hodle.com.br', 'in.sumsub.com'])
 const DOCUMENT_TYPES = new Set(['ID', 'DRIVERS-LICENSE', 'PASSPORT', 'SELFIE-FROM-LIVENESS'])
+// Regions where Rekognition Face Liveness streaming runs. A selfie answer
+// naming any other region falls back to the hosted page.
+const STREAMING_REGIONS = Object.freeze([
+  'us-east-1', 'us-west-2', 'ap-south-1', 'ap-northeast-1',
+  'eu-west-1', 'sa-east-1', 'ap-southeast-5', 'ap-southeast-7'
+])
+// The validate token is longer than MAX_STRING, so validText cannot check it.
+const TOKEN_RE = /^[A-Za-z0-9_.-]{1,4096}$/
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 const KYC_OUTCOMES = Object.freeze({
   PENDING: 'pendente',
@@ -128,7 +137,10 @@ const KYC_OUTCOMES = Object.freeze({
 })
 
 // Fields that must never reach a log line, a stored record or a result.
-const SECRET_FIELDS = Object.freeze(['walletPin', 'protectedSymmetricKey', 'taxIdNumber'])
+const SECRET_FIELDS = Object.freeze([
+  'walletPin', 'protectedSymmetricKey', 'taxIdNumber',
+  'validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken'
+])
 
 const FAIL = Object.freeze({ ok: false, reason: 'entrada' })
 const BAD_FORMAT = Object.freeze({ ok: false, reason: 'formato' })
@@ -206,6 +218,18 @@ function retryAfterSeconds (res) {
   const raw = String(res.headers.get('retry-after') || '').trim()
   if (!/^[0-9]{1,6}$/.test(raw)) return undefined
   return Math.min(Number(raw), MAX_RETRY_AFTER)
+}
+
+// The in-app liveness quartet of a selfie answer, or null when any part is
+// missing or malformed: the caller then keeps only the hosted page.
+function livenessDetector (d) {
+  const { sessionId, livenessRegion, livenessIdentityPoolId, validateLivenessToken } = d
+  if (!validId(sessionId)) return null
+  if (typeof livenessRegion !== 'string' || !STREAMING_REGIONS.includes(livenessRegion)) return null
+  if (typeof livenessIdentityPoolId !== 'string' || !livenessIdentityPoolId.startsWith(livenessRegion + ':')) return null
+  if (!UUID_RE.test(livenessIdentityPoolId.slice(livenessRegion.length + 1))) return null
+  if (typeof validateLivenessToken !== 'string' || !TOKEN_RE.test(validateLivenessToken)) return null
+  return { sessionId, livenessRegion, livenessIdentityPoolId, validateLivenessToken }
 }
 
 function hodleUrl (url, hosts) {
@@ -391,7 +415,11 @@ function createHodle (opts = {}) {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), limit)
     try {
-      const headers = { authorization: auth, accept: 'application/json' }
+      // The public liveness routes authenticate by the validate token alone;
+      // the API key has no business reaching them.
+      const headers = opts && opts.publicCall
+        ? { accept: 'application/json' }
+        : { authorization: auth, accept: 'application/json' }
       const init = { method, headers, redirect: 'error', signal: ctrl.signal }
       if (payload !== undefined) {
         headers['content-type'] = 'application/json'
@@ -545,7 +573,8 @@ function createHodle (opts = {}) {
     return call(true, 'POST', '/api/kyc/document', payload, callOpts, (d) => {
       if (!validId(d.documentId)) return null
       if (selfie) {
-        return hodleUrl(d.livenessUrl, LIVENESS_HOSTS) ? { documentId: d.documentId, livenessUrl: d.livenessUrl } : null
+        if (!hodleUrl(d.livenessUrl, LIVENESS_HOSTS)) return null
+        return { documentId: d.documentId, livenessUrl: d.livenessUrl, ...livenessDetector(d) }
       }
       if (!hodleUrl(d.uploadUrlFront, UPLOAD_HOSTS)) return null
       const out = { documentId: d.documentId, uploadUrlFront: d.uploadUrlFront }
@@ -555,6 +584,24 @@ function createHodle (opts = {}) {
       }
       return out
     })
+  }
+
+  // Both public liveness calls change provider state, so a lost answer is
+  // uncertain and nothing here repeats them.
+  function livenessValidate ({ validateLivenessToken } = {}, callOpts) {
+    if (typeof validateLivenessToken !== 'string' || !TOKEN_RE.test(validateLivenessToken)) return Promise.resolve(FAIL)
+    return call(true, 'POST', '/api/public/liveness/validate', { validateLivenessToken }, callOpts, (d) => {
+      if (d.alreadyCompleted === undefined) return { alreadyCompleted: false }
+      return typeof d.alreadyCompleted === 'boolean' ? { alreadyCompleted: d.alreadyCompleted } : null
+    }, { publicCall: true })
+  }
+
+  function livenessSession ({ validateLivenessToken } = {}, callOpts) {
+    if (typeof validateLivenessToken !== 'string' || !TOKEN_RE.test(validateLivenessToken)) return Promise.resolve(FAIL)
+    return call(true, 'POST', '/api/public/liveness/hodle/session', { validateLivenessToken }, callOpts, (d) => {
+      if (d.alreadyCompleted === true) return { alreadyCompleted: true }
+      return validId(d.sessionId) ? { sessionId: d.sessionId } : null
+    }, { publicCall: true })
   }
 
   function kycDocumentReady ({ subAccountId, documentId } = {}, callOpts) {
@@ -1040,6 +1087,8 @@ function createHodle (opts = {}) {
     findSubaccounts,
     kycDocument,
     kycDocumentReady,
+    livenessValidate,
+    livenessSession,
     kycSubmit,
     kycStatus,
     kycLatest,
@@ -1062,6 +1111,7 @@ module.exports = {
   BASES,
   NETWORKS,
   SECRET_FIELDS,
+  STREAMING_REGIONS,
   MONEY_TIMEOUT_MS,
   MAX_TRANSFER_CENTS
 }

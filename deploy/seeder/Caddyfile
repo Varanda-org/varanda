@@ -34,11 +34,17 @@
 		# URLs de uso único, nunca pelo Varanda. Em produção, o Hodle entrega essas
 		# URLs no bucket S3 da BRLA, não em uploads.hodle.com.br (visto em
 		# 02/11/2026). O service worker ignora pedidos de outra origem.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+		# A prova de vida da conta de pagamentos roda no app: o vídeo da câmera
+		# vai direto do navegador ao Rekognition da AWS (WebSocket de streaming)
+		# com credenciais de convidado do Cognito, nunca pelo Varanda nem pelo
+		# Hodle. Por isso cada uma das oito regiões de streaming entra uma a
+		# uma, sem curinga, e o modelo do detector vem do CDN da AWS. media-src
+		# blob: deixa a prévia da câmera tocar. A câmera só vale nesta origem.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com https://cdn.liveness.rekognition.amazonaws.com wss://streaming-rekognition.us-east-1.amazonaws.com https://cognito-identity.us-east-1.amazonaws.com wss://streaming-rekognition.us-west-2.amazonaws.com https://cognito-identity.us-west-2.amazonaws.com wss://streaming-rekognition.ap-south-1.amazonaws.com https://cognito-identity.ap-south-1.amazonaws.com wss://streaming-rekognition.ap-northeast-1.amazonaws.com https://cognito-identity.ap-northeast-1.amazonaws.com wss://streaming-rekognition.eu-west-1.amazonaws.com https://cognito-identity.eu-west-1.amazonaws.com wss://streaming-rekognition.sa-east-1.amazonaws.com https://cognito-identity.sa-east-1.amazonaws.com wss://streaming-rekognition.ap-southeast-5.amazonaws.com https://cognito-identity.ap-southeast-5.amazonaws.com wss://streaming-rekognition.ap-southeast-7.amazonaws.com https://cognito-identity.ap-southeast-7.amazonaws.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"
-		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Permissions-Policy "camera=(self), microphone=(), geolocation=()"
 		-Server
 	}
 

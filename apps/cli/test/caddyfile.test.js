@@ -10,9 +10,33 @@ const CADDYFILE = path.join(repoRoot, 'deploy/seeder/Caddyfile')
 const lines = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
 const code = lines.join('\n')
 
+// Kept literal on purpose (not imported): apps/cli/lib/account/hodle.js
+// exports the same list as STREAMING_REGIONS, and a region added there must
+// also be added to the hosted CSP by hand.
+const STREAMING_REGIONS = ['us-east-1', 'us-west-2', 'ap-south-1', 'ap-northeast-1', 'eu-west-1', 'sa-east-1',
+  'ap-southeast-5', 'ap-southeast-7']
+
+// A region accepted by the service or the app but missing from the CSP would
+// fail only in a browser, at capture time.
+test('Caddyfile: the CSP regions are the ones the service and the app accept', async (t) => {
+  t.alike([...require('../lib/account/hodle').STREAMING_REGIONS], STREAMING_REGIONS, 'hodle.js')
+  const app = await import(path.join(repoRoot, 'apps/app/src/livenessCredentials.js'))
+  t.alike([...app.STREAMING_REGIONS], STREAMING_REGIONS, 'apps/app/src/livenessCredentials.js')
+})
+
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br " +
-  'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com; ' +
+  "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; " +
+  "connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br " +
+  'https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com ' +
+  'https://cdn.liveness.rekognition.amazonaws.com ' +
+  'wss://streaming-rekognition.us-east-1.amazonaws.com https://cognito-identity.us-east-1.amazonaws.com ' +
+  'wss://streaming-rekognition.us-west-2.amazonaws.com https://cognito-identity.us-west-2.amazonaws.com ' +
+  'wss://streaming-rekognition.ap-south-1.amazonaws.com https://cognito-identity.ap-south-1.amazonaws.com ' +
+  'wss://streaming-rekognition.ap-northeast-1.amazonaws.com https://cognito-identity.ap-northeast-1.amazonaws.com ' +
+  'wss://streaming-rekognition.eu-west-1.amazonaws.com https://cognito-identity.eu-west-1.amazonaws.com ' +
+  'wss://streaming-rekognition.sa-east-1.amazonaws.com https://cognito-identity.sa-east-1.amazonaws.com ' +
+  'wss://streaming-rekognition.ap-southeast-5.amazonaws.com https://cognito-identity.ap-southeast-5.amazonaws.com ' +
+  'wss://streaming-rekognition.ap-southeast-7.amazonaws.com https://cognito-identity.ap-southeast-7.amazonaws.com; ' +
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
@@ -37,6 +61,46 @@ test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   const scriptSrc = CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src'))
   t.ok(CSP.includes("script-src 'self' 'wasm-unsafe-eval'"), 'script-src self and wasm only')
   t.absent(scriptSrc.includes("'unsafe-inline'"), "no 'unsafe-inline' for scripts")
+})
+
+// The in-app face liveness check streams the camera straight from the browser
+// to AWS: every streaming region is listed one by one (a wildcard would open
+// every AWS endpoint to an injected script), and only this origin gets the camera.
+function livenessHostsOk (csp) {
+  const connect = csp.split(';').map((d) => d.trim()).find((d) => d.startsWith('connect-src '))
+  if (!connect) return false
+  const sources = connect.split(/\s+/).slice(1)
+  if (sources.some((s) => s.includes('*'))) return false
+  if (sources.some((s) => s.includes('hodle') && s !== 'https://uploads.hodle.com.br')) return false
+  if (!sources.includes('https://cdn.liveness.rekognition.amazonaws.com')) return false
+  for (const region of STREAMING_REGIONS) {
+    const wss = sources.filter((s) => s === 'wss://streaming-rekognition.' + region + '.amazonaws.com')
+    const cognito = sources.filter((s) => s === 'https://cognito-identity.' + region + '.amazonaws.com')
+    if (wss.length !== 1 || cognito.length !== 1) return false
+  }
+  const streaming = sources.filter((s) => /streaming-rekognition|cognito-identity/.test(s))
+  return streaming.length === STREAMING_REGIONS.length * 2
+}
+
+test('Caddyfile: liveness hosts per region, camera only for self', (t) => {
+  t.is(STREAMING_REGIONS.length, 8, 'eight streaming regions')
+  const csp = lines.find((l) => /^\s*Content-Security-Policy\s/.test(l))
+  t.ok(csp && livenessHostsOk(csp.trim().slice('Content-Security-Policy "'.length, -1)),
+    'one wss and one cognito-identity host per region, the CDN, no wildcard')
+  t.ok(CSP.includes("media-src 'self' blob:"), 'media-src self and blob for the camera preview')
+  t.ok(CSP.includes("worker-src 'self'"), 'worker-src still self only')
+
+  t.absent(livenessHostsOk(CSP.replace('wss://streaming-rekognition.us-east-1.amazonaws.com', 'wss://*.amazonaws.com')),
+    'a wildcard amazonaws host fails')
+  t.absent(livenessHostsOk(CSP.replace(' https://cognito-identity.ap-southeast-7.amazonaws.com', '')),
+    'a missing region fails')
+  t.absent(livenessHostsOk(CSP.replace('https://cdn.liveness', 'https://api.hodle.com.br https://cdn.liveness')),
+    'api.hodle.com.br fails')
+
+  t.is(count('camera=(self)'), 1, 'camera=(self) exactly once')
+  const pp = lines.filter((l) => /^\s*Permissions-Policy\s/.test(l))
+  t.is(pp.length, 1, 'one Permissions-Policy line')
+  t.is(pp[0].trim(), 'Permissions-Policy "camera=(self), microphone=(), geolocation=()"', 'Permissions-Policy string')
 })
 
 test('Caddyfile: existing blocks kept', (t) => {

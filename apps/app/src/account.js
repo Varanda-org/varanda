@@ -10,6 +10,7 @@ import { resolveUrl } from './installation.js'
 import { isAppClient } from './appClient.js'
 import { KYC_STATES, canonicalJson } from './wallet.js'
 import { sha256Hex } from './sha256.js'
+import { parseCapture, SESSION_ID_RE } from './livenessCredentials.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -59,6 +60,8 @@ const ERROR_MESSAGES = {
   'idade-minima': 'Por enquanto a conta de pagamentos só pode ser aberta por quem tem 18 anos ou mais.',
   'operacao-pendente': 'Uma operação anterior ainda não foi confirmada. Aguarde a confirmação antes de fazer outra.',
   'operacao-divergente': 'Esta operação já foi pedida com outros valores. Comece de novo.',
+  'selfie-ausente': 'A selfie não está mais disponível. Comece a selfie de novo.',
+  'selfie-recusada': 'A selfie não foi aceita. Tente de novo.',
   // Never sent by the service: the app's name for the 404 that wallet
   // creation answers while the operator keeps the 'cadastro' mode.
   'aguardando-carteira': 'Verificação aprovada. A carteira será liberada em breve.'
@@ -520,11 +523,13 @@ export const walletOptin = async ({ member, nonce, signature, op }) => {
 
 // The upload and liveness URLs are single-use capabilities: returned to the
 // caller, never kept. The call creates a provider document, so an unknown
-// outcome (or a success without usable URLs) is uncertain.
+// outcome (or a success without usable URLs) is uncertain. A missing or
+// malformed capture only means the hosted page, never an error; anything
+// else the body carries (a validation token, AWS keys) is dropped here.
 export const walletKycDocument = async ({ member, nonce, signature, op }) => {
   const data = await walletCall('/account/wallet/kyc-document', { member, nonce, action: 'kyc-document', op, signature }, { uncertain: true, definite: true })
   if (isObject(op) && op.documentType === 'SELFIE-FROM-LIVENESS') {
-    if (isHodleUrl(data.livenessUrl, LIVENESS_HOSTS)) return { livenessUrl: data.livenessUrl }
+    if (isHodleUrl(data.livenessUrl, LIVENESS_HOSTS)) return { livenessUrl: data.livenessUrl, capture: parseCapture(data.capture) }
     throw uncertainError()
   }
   if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOSTS)) throw uncertainError()
@@ -534,6 +539,24 @@ export const walletKycDocument = async ({ member, nonce, signature, op }) => {
     out.uploadUrlBack = data.uploadUrlBack
   }
   return out
+}
+
+// Both ask the provider to judge or restart the capture, so an unknown
+// outcome is uncertain. The service may wait on two provider calls before it
+// answers, hence the wallet read budget instead of the 8 s default.
+export const walletLivenessValidate = async ({ member, nonce, signature }) => {
+  const action = 'kyc-liveness-validate'
+  const data = await walletCall('/account/wallet/' + action, { member, nonce, action, op: {}, signature }, { uncertain: true, definite: true, timeoutMs: WALLET_TIMEOUT_MS })
+  if (typeof data.ready === 'boolean') return { ready: data.ready }
+  throw uncertainError()
+}
+
+export const walletLivenessRetry = async ({ member, nonce, signature }) => {
+  const action = 'kyc-liveness-retry'
+  const data = await walletCall('/account/wallet/' + action, { member, nonce, action, op: {}, signature }, { uncertain: true, definite: true, timeoutMs: WALLET_TIMEOUT_MS })
+  if (data.alreadyCompleted === true && typeof data.ready === 'boolean') return { alreadyCompleted: true, ready: data.ready }
+  if (data.alreadyCompleted === undefined && typeof data.sessionId === 'string' && SESSION_ID_RE.test(data.sessionId)) return { sessionId: data.sessionId }
+  throw uncertainError()
 }
 
 export const walletKycSubmit = async ({ member, nonce, signature, op, kyc }) => {

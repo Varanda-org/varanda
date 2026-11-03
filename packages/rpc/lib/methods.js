@@ -219,12 +219,16 @@ const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
 // has no dependencies.
 const WALLET_ACTIONS = [
   'optin', 'kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit',
-  'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap'
+  'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap',
+  'kyc-liveness-validate', 'kyc-liveness-retry'
 ]
 const WALLET_OP_KEY_RE = /^[a-z][a-zA-Z0-9]{0,31}$/
 const WALLET_OP_KEYS_MAX = 16
 const WALLET_OP_STRING_MAX = 512
-const WALLET_OP_FORBIDDEN = ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']
+const WALLET_OP_FORBIDDEN = [
+  'pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf',
+  'validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken'
+]
 
 const isWalletAction = (v) => typeof v === 'string' && WALLET_ACTIONS.includes(v)
 

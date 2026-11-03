@@ -24,7 +24,7 @@ const { createHodle, MAX_TRANSFER_CENTS } = require('../lib/account/hodle')
 const { advanceOp } = require('../lib/account/wallet-webhook')
 const { createAccountServer } = require('../lib/account/server')
 const { canonicalJson } = require('../lib/account/wallet-routes')
-const { startFakeHodle, loopbackFetch } = require('./helpers/fake-hodle')
+const { startFakeHodle, loopbackFetch, FAKE_LIVENESS_TOKEN, FAKE_POOL_ID } = require('./helpers/fake-hodle')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -346,6 +346,312 @@ test('wallet: kyc-document URLs go only to the prover', async (t) => {
   const logs = s.logs.join('\n')
   t.absent(logs.includes('hodle.com.br'), 'no URL in a log line')
   t.absent(s.file().includes('hodle.com.br'), 'no URL in wallet.json')
+})
+
+const VALIDATE = '/api/public/liveness/validate'
+const SESSION = '/api/public/liveness/hodle/session'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function tokenNowhere (t, s) {
+  for (const [where, text] of [['wallet.json', s.file()], ['logs', s.logs.join('\n')], ['answers', s.texts.join('\n')]]) {
+    t.absent(text.includes(FAKE_LIVENESS_TOKEN), 'no liveness token in ' + where)
+  }
+}
+
+test('wallet: a selfie with the detector fields hands out the capture, never the token', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  const selfie = await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(selfie.status, 200, selfie.text)
+  t.alike(Object.keys(selfie.body).sort(), ['capture', 'documentId', 'livenessUrl'])
+  t.ok(selfie.body.livenessUrl.startsWith('https://in.sumsub.com/'))
+  t.ok(UUID_RE.test(selfie.body.capture.sessionId))
+  t.alike(selfie.body.capture, { sessionId: selfie.body.capture.sessionId, region: 'eu-west-1', identityPoolId: FAKE_POOL_ID })
+  t.is(s.entry().kyc.selfieId, selfie.body.documentId)
+  tokenNowhere(t, s)
+  t.absent(s.file().includes(selfie.body.capture.sessionId), 'no session id in wallet.json')
+  t.absent(s.logs.join('\n').includes(selfie.body.capture.sessionId), 'no session id in a log line')
+})
+
+test('wallet: without the detector fields the selfie answer is today\'s and validate has no token', async (t) => {
+  const s = await setup(t)
+  s.fake.livenessFields = false
+  await s.step(s.m, 'optin', ADULT)
+  const selfie = await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(selfie.status, 200, selfie.text)
+  t.alike(selfie.body, { documentId: selfie.body.documentId, livenessUrl: selfie.body.livenessUrl })
+  t.alike(Object.keys(selfie.body).sort(), ['documentId', 'livenessUrl'])
+  for (const action of ['kyc-liveness-validate', 'kyc-liveness-retry']) {
+    const r = await s.step(s.m, action)
+    t.is(r.status, 409, r.text)
+    t.alike(r.body, { error: 'selfie-ausente' })
+  }
+  t.is(s.seen('POST', VALIDATE).length + s.seen('POST', SESSION).length, 0, 'no public liveness call')
+})
+
+test('wallet: kyc-liveness-validate before any selfie or with an op refuses without a call', async (t) => {
+  const s = await setup(t)
+  const none = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(none.body, { error: 'carteira-pendente' })
+  await s.step(s.m, 'optin', ADULT)
+  const noSelfie = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(noSelfie.status, 409)
+  t.alike(noSelfie.body, { error: 'selfie-ausente' })
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  const withOp = await s.step(s.m, 'kyc-liveness-validate', { sessionId: 'x' })
+  t.alike(withOp.body, { error: 'pedido-invalido' })
+  t.is(s.seen('POST', VALIDATE).length, 0)
+})
+
+test('wallet: kyc-liveness-validate runs once under concurrent calls, without the API key, and drops the token', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  const [a, b] = await Promise.all([s.step(s.m, 'kyc-liveness-validate'), s.step(s.m, 'kyc-liveness-validate')])
+  t.is(a.status, 200, a.text)
+  t.is(b.status, 200, b.text)
+  t.alike(a.body, { ready: false })
+  t.alike(b.body, a.body)
+  const calls = s.seen('POST', VALIDATE)
+  t.is(calls.length, 1, 'validated once')
+  t.is(calls[0].headers.authorization, undefined, 'no API key on the public route')
+  t.is(calls[0].body.validateLivenessToken, FAKE_LIVENESS_TOKEN)
+  const again = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(again.body, { error: 'selfie-ausente' })
+  t.is(s.seen('POST', VALIDATE).length, 1, 'no call after the token is gone')
+  tokenNowhere(t, s)
+})
+
+test('wallet: a status read right after a validate success is not served from a cached false', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await documents(t, s)
+  const before = await s.step(s.m, 'status')
+  t.is(before.body.account.selfieReady, false)
+  const v = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(v.body, { ready: false })
+  markReady(s)
+  const reads = s.seen('GET', /^\/api\/kyc\/document\//).length
+  const st = await s.step(s.m, 'status')
+  t.is(st.body.account.selfieReady, true, 'read again while the selfie is hot')
+  t.is(st.body.account.documentReady, false, 'the document keeps its 20 s cache')
+  t.is(s.seen('GET', /^\/api\/kyc\/document\//).length, reads + 1)
+})
+
+test('wallet: a validate success reads the selfie once and answers ready', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await documents(t, s)
+  await s.step(s.m, 'status')
+  markReady(s)
+  const reads = s.seen('GET', /^\/api\/kyc\/document\//).length
+  const v = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(v.body, { ready: true }, 'the cached false is dropped')
+  t.is(s.seen('GET', /^\/api\/kyc\/document\//).length, reads + 1)
+})
+
+test('wallet: a lost validate answer stops every later liveness call until a new selfie', async (t) => {
+  const s = await setup(t, { timeoutMs: 300 })
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  s.fake.script({ livenessValidate () {} })
+  const lost = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(lost.status, 503)
+  t.alike(lost.body, { error: 'resultado-incerto' })
+  s.fake.script({})
+  const again = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(again.status, 503)
+  t.alike(again.body, { error: 'resultado-incerto' })
+  const retry = await s.step(s.m, 'kyc-liveness-retry')
+  t.alike(retry.body, { error: 'resultado-incerto' })
+  t.is(s.seen('POST', VALIDATE).length, 1, 'never sent again on our own')
+  t.is(s.seen('POST', SESSION).length, 0)
+
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  const fresh = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(fresh.status, 200, fresh.text)
+  t.is(s.seen('POST', VALIDATE).length, 2)
+  tokenNowhere(t, s)
+})
+
+test('wallet: a refused validate keeps the token; a 429 is the member limit', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  s.fake.script({ livenessValidate (req, res, ctx) { ctx.json(res, 400, { success: false, error: 'Liveness failed' }) } })
+  const refused = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(refused.status, 400)
+  t.alike(refused.body, { error: 'selfie-recusada' })
+  t.ok(s.logs.includes(JSON.stringify({ event: 'carteira', reason: 'hodle-selfie-http-400' })))
+  s.fake.script({ livenessValidate (req, res, ctx) { ctx.json(res, 429, { success: false, error: 'Too many' }) } })
+  const limited = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(limited.status, 429)
+  t.alike(limited.body, { error: 'limite-carteira' })
+  s.fake.script({})
+  const ok = await s.step(s.m, 'kyc-liveness-validate')
+  t.is(ok.status, 200, ok.text)
+  t.is(s.seen('POST', VALIDATE).length, 3)
+  tokenNowhere(t, s)
+})
+
+test('wallet: kyc-liveness-retry hands out a new session and keeps the token; alreadyCompleted drops it', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  const r = await s.step(s.m, 'kyc-liveness-retry')
+  t.is(r.status, 200, r.text)
+  t.alike(Object.keys(r.body), ['sessionId'])
+  t.ok(UUID_RE.test(r.body.sessionId))
+  const calls = s.seen('POST', SESSION)
+  t.is(calls.length, 1)
+  t.is(calls[0].headers.authorization, undefined, 'no API key on the public route')
+
+  s.fake.script({ livenessSession (req, res, ctx) { ctx.json(res, 200, { success: true, data: { alreadyCompleted: true } }) } })
+  markReady(s)
+  const done = await s.step(s.m, 'kyc-liveness-retry')
+  t.is(done.status, 200, done.text)
+  t.alike(done.body, { alreadyCompleted: true, ready: true })
+  const gone = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(gone.body, { error: 'selfie-ausente' })
+  t.is(s.seen('POST', VALIDATE).length, 0)
+  tokenNowhere(t, s)
+})
+
+test('wallet: a lost retry answer marks the token uncertain', async (t) => {
+  const s = await setup(t, { timeoutMs: 300 })
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  s.fake.script({ livenessSession () {} })
+  const lost = await s.step(s.m, 'kyc-liveness-retry')
+  t.alike(lost.body, { error: 'resultado-incerto' })
+  s.fake.script({})
+  const v = await s.step(s.m, 'kyc-liveness-validate')
+  t.alike(v.body, { error: 'resultado-incerto' })
+  t.is(s.seen('POST', VALIDATE).length, 0)
+  t.is(s.seen('POST', SESSION).length, 1)
+})
+
+const LIVENESS_ROUTE = Object.freeze({ 'kyc-liveness-validate': 'livenessValidate', 'kyc-liveness-retry': 'livenessSession' })
+
+// [Hodle status, Hodle body, our answer, what is left of the token]
+const LIVENESS_ROWS = [
+  [404, { success: false, error: 'Session not found' }, 'selfie-ausente', 'dropped'],
+  [401, { success: false, error: 'Unauthorized' }, 'selfie-ausente', 'dropped'],
+  [403, { success: false, error: 'Forbidden' }, 'selfie-ausente', 'dropped'],
+  [410, { success: false, error: 'Gone' }, 'selfie-ausente', 'dropped'],
+  [400, { success: false, code: 'TOKEN_EXPIRED' }, 'selfie-ausente', 'dropped'],
+  [422, { success: false, errorCode: 'SESSION_NOT_FOUND' }, 'selfie-ausente', 'dropped'],
+  [400, { success: false, code: 'INVALID_TOKEN' }, 'selfie-ausente', 'dropped'],
+  [400, { success: false, error: 'Liveness failed' }, 'selfie-recusada', 'kept'],
+  [422, { success: false, code: 'FACE_MISMATCH' }, 'selfie-recusada', 'kept'],
+  [429, { success: false, error: 'Too many' }, 'limite-carteira', 'kept'],
+  [500, { success: false, error: 'Boom' }, 'resultado-incerto', 'uncertain']
+]
+const ERROR_STATUS = Object.freeze({ 'selfie-ausente': 409, 'selfie-recusada': 400, 'limite-carteira': 429, 'resultado-incerto': 503 })
+
+for (const action of Object.keys(LIVENESS_ROUTE)) {
+  test('wallet: ' + action + ' maps each Hodle refusal to a token and keeps or drops the liveness token', async (t) => {
+    for (const [code, body, error, left] of LIVENESS_ROWS) {
+      const label = code + ' ' + JSON.stringify(body) + ': '
+      const s = await setup(t)
+      await s.step(s.m, 'optin', ADULT)
+      await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+      s.fake.script({ [LIVENESS_ROUTE[action]] (req, res, ctx) { ctx.json(res, code, body) } })
+      const r = await s.step(s.m, action)
+      t.is(r.status, ERROR_STATUS[error], label + r.text)
+      t.alike(r.body, { error }, label + 'answer')
+      t.is(s.seen('POST', VALIDATE).length + s.seen('POST', SESSION).length, 1, label + 'one call')
+      s.fake.script({})
+      const next = await s.step(s.m, 'kyc-liveness-validate')
+      if (left === 'dropped') {
+        t.alike(next.body, { error: 'selfie-ausente' }, label + 'token dropped')
+        t.is(s.server.walletStats().livenessTokens, 0, label + 'store empty')
+      } else if (left === 'uncertain') {
+        t.alike(next.body, { error: 'resultado-incerto' }, label + 'token frozen')
+      } else {
+        t.is(next.status, 200, label + 'token kept: ' + next.text)
+      }
+      const calls = s.seen('POST', VALIDATE).length + s.seen('POST', SESSION).length
+      t.is(calls, left === 'kept' ? 2 : 1, label + 'calls')
+      tokenNowhere(t, s)
+    }
+  })
+}
+
+test('wallet: a selfie whose write did not apply gets no capture and no stored token', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  // A submit lands while Hodle answers the selfie: the entry moves past
+  // documentos, so the selfie write is stale.
+  s.fake.script({
+    async kycDocument (req, res, ctx) {
+      await s.wallets.setKyc({ member: s.m.hex, status: 'pendente', attempt: s.entry().kyc.attempt })
+      const out = s.fake.apply('kycDocument', ctx)
+      ctx.json(res, out.code, out.body)
+    }
+  })
+  const selfie = await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(selfie.status, 200, selfie.text)
+  t.alike(Object.keys(selfie.body).sort(), ['documentId', 'livenessUrl'])
+  t.ok(selfie.body.livenessUrl.startsWith('https://in.sumsub.com/'))
+  t.is(s.server.walletStats().livenessTokens, 0, 'no token kept')
+  t.is(s.entry().kyc.selfieId, null)
+  tokenNowhere(t, s)
+})
+
+for (const [label, code, body] of [['a success', 200, { success: true, data: { alreadyCompleted: false } }], ['a dead token', 404, { success: false, error: 'Session not found' }], ['a lost answer', 500, { success: false, error: 'Boom' }]]) {
+  test('wallet: ' + label + ' for an older selfie leaves a newer selfie stored meanwhile untouched', async (t) => {
+    const s = await setup(t)
+    await s.step(s.m, 'optin', ADULT)
+    await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+    let newer = null
+    s.fake.script({
+      async livenessValidate (req, res, ctx) {
+        newer = await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+        ctx.json(res, code, body)
+      }
+    })
+    await s.step(s.m, 'kyc-liveness-validate')
+    t.is(newer.status, 200, newer.text)
+    t.is(s.entry().kyc.selfieId, newer.body.documentId)
+    s.fake.script({})
+    const v = await s.step(s.m, 'kyc-liveness-validate')
+    t.is(v.status, 200, 'the newer token still works: ' + v.text)
+    t.is(s.seen('POST', VALIDATE).length, 2)
+    tokenNowhere(t, s)
+  })
+}
+
+test('wallet: validate and retry sent together reach Hodle once', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  const slow = (name) => (req, res, ctx) => {
+    setTimeout(() => {
+      const out = s.fake.apply(name, ctx)
+      ctx.json(res, out.code, out.body)
+    }, 300)
+  }
+  s.fake.script({ livenessValidate: slow('livenessValidate'), livenessSession: slow('livenessSession') })
+  const [a, b] = await Promise.all([s.step(s.m, 'kyc-liveness-validate'), s.step(s.m, 'kyc-liveness-retry')])
+  t.is(a.status, 200, a.text)
+  t.is(b.status, 200, b.text)
+  t.is(s.seen('POST', VALIDATE).length + s.seen('POST', SESSION).length, 1, 'one call for both')
+  tokenNowhere(t, s)
+})
+
+test('wallet: liveness calls have their own window of 10 a day', async (t) => {
+  const s = await setup(t)
+  await s.step(s.m, 'optin', ADULT)
+  await s.step(s.m, 'kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' })
+  for (let i = 0; i < 10; i++) {
+    const r = await s.step(s.m, 'kyc-liveness-retry')
+    t.is(r.status, 200, r.text)
+  }
+  const over = await s.step(s.m, 'kyc-liveness-retry')
+  t.is(over.status, 429)
+  t.alike(over.body, { error: 'limite-carteira' })
+  t.is(s.seen('POST', SESSION).length, 10)
 })
 
 test('wallet: kyc-submit needs ready documents and the signed hash; the CPF reaches only Hodle', async (t) => {

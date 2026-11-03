@@ -15,10 +15,11 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import {
   debitTerms, kycHash, uploadDocument, walletBalance, walletCreate, walletDeposit, walletKycDocument,
-  walletKycSubmit, walletOpStatus, walletOptin, walletPayout, walletPayoutQuote, walletPolicy, walletPreview,
-  walletStart, walletStatement, walletStatus
+  walletKycSubmit, walletLivenessRetry, walletLivenessValidate, walletOpStatus, walletOptin, walletPayout,
+  walletPayoutQuote, walletPolicy, walletPreview, walletStart, walletStatement, walletStatus
 } from '../account'
 import { HELP, carteiraHelp } from '../help'
+import { isAvailable, LivenessCapture } from '../livenessCapture'
 import { base64url } from '../appLinkSecret'
 import { openExternal, linkProps } from '../openExternal'
 import { pickPhoto } from '../pickPhoto'
@@ -38,6 +39,11 @@ import { Icon } from '../ui/Icon'
 import { colors, fonts } from '../ui/theme'
 
 const READ_EVERY_MS = 30 * 1000
+// Hodle may take a moment to record a validated selfie; five reads stay far
+// under the service's status limit (60 per 600 s).
+const SELFIE_POLLS = 5
+const SELFIE_POLL_MS = 4 * 1000
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const DOCUMENTS = Object.freeze([
   { type: 'ID', label: 'RG ou CIN', sides: 2 },
   { type: 'DRIVERS-LICENSE', label: 'CNH', sides: 2 },
@@ -269,6 +275,15 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   const [docSent, setDocSent] = useState(false)
   const [livenessUrl, setLivenessUrl] = useState(null)
   const [opened, setOpened] = useState(false)
+  // The in-page capture: { sessionId, region, identityPoolId } while the
+  // detector shows, and the last region and pool kept for one retry.
+  const captureRef = useRef(null)
+  const retryRef = useRef(null)
+  // A detector completion that arrived while another action held the screen:
+  // it waits for the person's own tap, never sent later on its own.
+  const pendingRef = useRef(null)
+  const [selfieStage, setSelfieStage] = useState('idle')
+  const [cameraDenied, setCameraDenied] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
   const [pin, setPin] = useState('')
   const [pin2, setPin2] = useState('')
@@ -283,6 +298,11 @@ export default function Carteira ({ open, active, member, node, onBack }) {
     setBack(null)
     setLivenessUrl(null)
     setOpened(false)
+    captureRef.current = null
+    retryRef.current = null
+    pendingRef.current = null
+    setSelfieStage('idle')
+    setCameraDenied(false)
   }, [])
 
   const forget = useCallback(() => {
@@ -313,11 +333,14 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   // Only the newest read applies: a slow poll answer must not overwrite a
   // newer state that a tap already read.
   const readSeqRef = useRef(0)
+  // The newest status read, for a loop that waits on it inside one run.
+  const accountRef = useRef(undefined)
   const readStatus = useCallback(async () => {
     const gen = genRef.current
     const seq = ++readSeqRef.current
     const { account: a } = await signed('status', {}, walletStatus)
     if (gen !== genRef.current || seq !== readSeqRef.current) return false
+    accountRef.current = a
     setAccount(a)
     return true
   }, [signed])
@@ -460,17 +483,153 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   }, { reread: true })
 
   const startSelfie = () => run(async (gen) => {
-    const { livenessUrl: url } = await signed('kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' }, walletKycDocument)
+    const { livenessUrl: url, capture } = await signed('kyc-document', { documentType: 'SELFIE-FROM-LIVENESS' }, walletKycDocument)
     if (gen !== genRef.current) return
     setOpened(false)
     setLivenessUrl(url)
+    retryRef.current = null
+    pendingRef.current = null
+    setCameraDenied(false)
+    if (capture && isAvailable()) {
+      captureRef.current = capture
+      setSelfieStage('capturing')
+    } else {
+      captureRef.current = null
+      setSelfieStage('idle')
+    }
   }, { reread: true })
+
+  const dropCapture = () => {
+    captureRef.current = null
+    retryRef.current = null
+    pendingRef.current = null
+    setSelfieStage('idle')
+    setCameraDenied(false)
+  }
+
+  // 'selfie-ausente': the service no longer holds a live selfie, so the old
+  // hosted link is dead too and only a new selfie document can start over.
+  const selfieGone = () => {
+    dropCapture()
+    setLivenessUrl(null)
+    setOpened(false)
+  }
+
+  // Hodle may take a moment to record the selfie: read the status until it
+  // says ready, at most SELFIE_POLLS times.
+  const awaitSelfie = async (gen, ready) => {
+    setSelfieStage('validating')
+    try {
+      const reads = ready ? 1 : SELFIE_POLLS
+      for (let i = 0; i < reads; i++) {
+        if (i > 0) await wait(SELFIE_POLL_MS)
+        if (gen !== genRef.current) return
+        if (await readStatus()) setMustRead(false)
+        if (accountRef.current?.selfieReady === true) break
+      }
+    } catch {}
+    if (gen === genRef.current) setSelfieStage('idle')
+  }
+
+  // Every detector callback names the capture it was mounted for: one that
+  // was dropped (cleared, replaced, or another member) is ignored. `tapped`:
+  // the person confirmed a completion kept while the screen was busy.
+  const captureDone = (c, tapped = false) => {
+    if (captureRef.current !== c && !(tapped && pendingRef.current === c)) return
+    if (busyRef.current) {
+      // run() would decline and the finished capture would be lost: keep it
+      // for 'Confirmar a selfie' instead of sending it later on its own.
+      captureRef.current = null
+      pendingRef.current = c
+      setSelfieStage('pending')
+      return
+    }
+    dropCapture()
+    run(async (gen) => {
+      setSelfieStage('validating')
+      let out
+      try {
+        out = await signed('kyc-liveness-validate', {}, walletLivenessValidate)
+      } catch (err) {
+        if (gen !== genRef.current) throw err
+        if (err?.uncertain !== true && err?.code === 'selfie-recusada') {
+          retryRef.current = { region: c.region, identityPoolId: c.identityPoolId }
+          setSelfieStage('retry')
+        } else if (err?.uncertain !== true && err?.code === 'selfie-ausente') {
+          selfieGone()
+        } else {
+          dropCapture()
+        }
+        throw err
+      }
+      if (gen !== genRef.current) return
+      await awaitSelfie(gen, out.ready)
+    })
+  }
+
+  const confirmSelfie = () => {
+    if (pendingRef.current) captureDone(pendingRef.current, true)
+  }
+
+  const captureError = (c, code) => {
+    if (captureRef.current !== c) return
+    if (code === 'SESSION_EXPIRED') {
+      captureRef.current = null
+      retryRef.current = { region: c.region, identityPoolId: c.identityPoolId }
+      setCameraDenied(false)
+      setSelfieStage('retry')
+      return
+    }
+    // The detector stays: its own 'Tentar de novo' asks for the camera again.
+    if (code === 'CAMERA_DENIED') {
+      setCameraDenied(true)
+      return
+    }
+    dropCapture()
+  }
+
+  const captureCancel = (c) => {
+    if (captureRef.current === c) dropCapture()
+  }
+
+  // The retry stage and its button stay until the service answers: a refused
+  // retry can be tapped again, an unknown outcome is never retried.
+  const retrySelfie = () => run(async (gen) => {
+    const base = retryRef.current
+    if (!base) return
+    let out
+    try {
+      out = await signed('kyc-liveness-retry', {}, walletLivenessRetry)
+    } catch (err) {
+      if (gen !== genRef.current) throw err
+      if (err?.uncertain === true) dropCapture()
+      else if (err?.code === 'selfie-ausente') selfieGone()
+      throw err
+    }
+    if (gen !== genRef.current) return
+    if (out.alreadyCompleted === true) {
+      dropCapture()
+      await awaitSelfie(gen, out.ready)
+      return
+    }
+    if (!isAvailable()) {
+      dropCapture()
+      return
+    }
+    retryRef.current = null
+    setCameraDenied(false)
+    captureRef.current = { ...base, sessionId: out.sessionId }
+    setSelfieStage('capturing')
+  })
 
   // Straight from the tap, with nothing awaited first, so the browser counts
   // it as the person's own action. Hodle's page has no return address and
   // cannot be framed, hence a new window and the 'Já terminei' button.
   const openLiveness = () => {
     if (typeof livenessUrl !== 'string') return
+    // Choosing the hosted page ends the in-page attempt: two at once could
+    // race at Hodle.
+    dropCapture()
     openExternal(livenessUrl)
     // With noopener the browser never says whether the window opened, so the
     // link stays as the way out of a blocked popup.
@@ -591,6 +750,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
   // During a retry the readiness still describes the refused attempt.
   const docReady = !retry && !!account && account.documentReady === true
   const selfieReady = !retry && !!account && account.selfieReady === true
+  const capture = captureRef.current
   let body = null
 
   if (step === 'loading') {
@@ -642,7 +802,39 @@ export default function Carteira ({ open, active, member, node, onBack }) {
                 ? <Soft>{SELFIE_READY_TEXT}</Soft>
                 : (
                   <>
-                    <Body>{TEXTS.LIVENESS_OPEN}</Body>
+                    {selfieStage === 'capturing' && capture
+                      ? (
+                        <>
+                          <Body>{TEXTS.LIVENESS_IN_APP}</Body>
+                          {cameraDenied ? <Notice>{TEXTS.LIVENESS_CAMERA_DENIED}</Notice> : null}
+                          <LivenessCapture
+                            key={capture.sessionId}
+                            sessionId={capture.sessionId}
+                            region={capture.region}
+                            identityPoolId={capture.identityPoolId}
+                            onComplete={() => captureDone(capture)}
+                            onError={(code) => captureError(capture, code)}
+                            onCancel={() => captureCancel(capture)}
+                          />
+                        </>
+                        )
+                      : selfieStage === 'validating'
+                        ? <><Body>{TEXTS.LIVENESS_IN_APP}</Body><Spinner /></>
+                        : selfieStage === 'pending'
+                          ? (
+                            <>
+                              <Body>{TEXTS.LIVENESS_PENDING}</Body>
+                              <Btn label='Confirmar a selfie' onPress={confirmSelfie} pending={busy} disabled={off} />
+                            </>
+                            )
+                          : selfieStage === 'retry'
+                            ? (
+                              <>
+                                <Body>{TEXTS.LIVENESS_RETRY}</Body>
+                                <Btn label='Tentar a selfie de novo' onPress={retrySelfie} pending={busy} disabled={off} />
+                              </>
+                              )
+                            : <Body>{TEXTS.LIVENESS_OPEN}</Body>}
                     {livenessUrl === null
                       ? <Btn label='Selfie com prova de vida' onPress={startSelfie} pending={busy} disabled={off} />
                       : <Btn label='Abrir a página da selfie' onPress={openLiveness} disabled={off} />}
@@ -662,7 +854,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
                       : null}
                   </>
                   )}
-              <Btn label='Já terminei, conferir' secondary onPress={finished} disabled={off} />
+              <Btn label='Já terminei, conferir' secondary onPress={finished} disabled={off || selfieStage === 'capturing' || selfieStage === 'validating'} />
             </Card>
             )
           : null}
