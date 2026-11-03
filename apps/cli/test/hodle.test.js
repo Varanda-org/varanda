@@ -15,9 +15,18 @@ const {
   centsToAmount,
   depositOutcome,
   BASES,
+  STREAMING_REGIONS,
   MONEY_TIMEOUT_MS
 } = require('../lib/account/hodle')
-const { startFakeHodle, loopbackFetch, FIXTURES, PROTECTED_KEY, KEYS_WINDOW_MS } = require('./helpers/fake-hodle')
+const {
+  startFakeHodle,
+  loopbackFetch,
+  FIXTURES,
+  PROTECTED_KEY,
+  KEYS_WINDOW_MS,
+  FAKE_LIVENESS_TOKEN,
+  FAKE_POOL_ID
+} = require('./helpers/fake-hodle')
 
 const API_KEY = 'hodle_test_SEGREDO-chave-de-teste'
 const PIN = '482915'
@@ -197,9 +206,170 @@ test('kycDocument: double-sided ID and liveness selfie', async (t) => {
 
   const selfie = await h.kycDocument({ subAccountId: sub, documentType: 'SELFIE-FROM-LIVENESS' })
   t.is(selfie.ok, true)
-  t.alike(Object.keys(selfie).sort(), ['documentId', 'livenessUrl', 'ok'])
+  t.alike(Object.keys(selfie).sort(), [
+    'documentId', 'livenessIdentityPoolId', 'livenessRegion', 'livenessUrl', 'ok', 'sessionId', 'validateLivenessToken'
+  ])
   t.ok(selfie.livenessUrl.startsWith('https://in.sumsub.com/'))
-  t.absent(JSON.stringify(selfie).includes('livenessIdentityPoolId'))
+  t.is(selfie.validateLivenessToken, FAKE_LIVENESS_TOKEN)
+  t.is(selfie.livenessIdentityPoolId, FAKE_POOL_ID)
+  t.is(selfie.livenessRegion, 'eu-west-1')
+  t.absent(JSON.stringify(redact(selfie)).includes(FAKE_LIVENESS_TOKEN), 'redact drops the token')
+})
+
+test('kycDocument: production selfie answer without the liveness quartet', async (t) => {
+  const fake = await fakeFor(t)
+  fake.livenessFields = false
+  const h = client(fake)
+  const sub = await onboarded(h)
+  const selfie = await h.kycDocument({ subAccountId: sub, documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(selfie.ok, true)
+  t.alike(Object.keys(selfie).sort(), ['documentId', 'livenessUrl', 'ok'])
+})
+
+test('kycDocument: a partial or malformed liveness quartet keeps only the hosted page', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const good = {
+    documentId: 'doc_1',
+    livenessUrl: 'https://in.sumsub.com/websdk/p/doc_1',
+    sessionId: '0b8f5c2e-1d3a-4f6b-8e9c-7a1b2c3d4e5f',
+    livenessRegion: 'eu-west-1',
+    livenessIdentityPoolId: FAKE_POOL_ID,
+    validateLivenessToken: FAKE_LIVENESS_TOKEN
+  }
+  const cases = [
+    { sessionId: undefined },
+    { livenessRegion: undefined },
+    { livenessIdentityPoolId: undefined },
+    { validateLivenessToken: undefined },
+    { sessionId: 'has space' },
+    { livenessRegion: 'eu-central-1', livenessIdentityPoolId: 'eu-central-1:3f2b8c1e-7a4d-4e9b-9c2a-5d6e7f8a9b0c' },
+    { livenessIdentityPoolId: 'us-east-1:3f2b8c1e-7a4d-4e9b-9c2a-5d6e7f8a9b0c' },
+    { livenessIdentityPoolId: 'eu-west-1:fake' },
+    { livenessIdentityPoolId: 'eu-west-1:3f2b8c1e-7a4d-4e9b-9c2a-5d6e7f8a9b0c-extra' },
+    { validateLivenessToken: 'eyJ with space' },
+    { validateLivenessToken: 'a'.repeat(5000) },
+    { validateLivenessToken: '' },
+    { validateLivenessToken: 42 },
+    { livenessRegion: ['eu-west-1'] }
+  ]
+  for (const change of cases) {
+    const data = { ...good, ...change }
+    fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data }) } })
+    const result = await h.kycDocument({ subAccountId: 'sub1', documentType: 'SELFIE-FROM-LIVENESS' })
+    t.alike(result, { ok: true, documentId: 'doc_1', livenessUrl: good.livenessUrl }, 'hosted page only')
+  }
+  for (const region of STREAMING_REGIONS) {
+    const data = { ...good, livenessRegion: region, livenessIdentityPoolId: region + ':3f2b8c1e-7a4d-4e9b-9c2a-5d6e7f8a9b0c' }
+    fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data }) } })
+    const result = await h.kycDocument({ subAccountId: 'sub1', documentType: 'SELFIE-FROM-LIVENESS' })
+    t.is(result.livenessRegion, region, 'streaming region accepted')
+  }
+  fake.script({ kycDocument (req, res, ctx) { ctx.json(res, 201, { success: true, data: { ...good, livenessUrl: 'https://evil.test/l' } }) } })
+  const bad = await h.kycDocument({ subAccountId: 'sub1', documentType: 'SELFIE-FROM-LIVENESS' })
+  t.is(bad.reason, 'formato', 'still fail-closed on the hosted link')
+})
+
+test('redact drops the liveness token and AWS credentials', (t) => {
+  const answer = {
+    validateLivenessToken: FAKE_LIVENESS_TOKEN,
+    nested: { accessKeyId: 'AKIAFAKE', secretAccessKey: 'SECRETFAKE', sessionToken: 'TOKENFAKE' },
+    sessionId: 's1'
+  }
+  const text = JSON.stringify(redact(answer))
+  for (const secret of [FAKE_LIVENESS_TOKEN, 'AKIAFAKE', 'SECRETFAKE', 'TOKENFAKE']) t.absent(text.includes(secret))
+  t.ok(text.includes('s1'))
+})
+
+test('livenessValidate and livenessSession call the public routes without the API key', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  const validated = await h.livenessValidate({ validateLivenessToken: FAKE_LIVENESS_TOKEN })
+  t.alike(validated, { ok: true, alreadyCompleted: false })
+  const session = await h.livenessSession({ validateLivenessToken: FAKE_LIVENESS_TOKEN })
+  t.is(session.ok, true)
+  t.alike(Object.keys(session).sort(), ['ok', 'sessionId'])
+  t.is(fake.seen.length, 2)
+  const paths = ['/api/public/liveness/validate', '/api/public/liveness/hodle/session']
+  for (let i = 0; i < 2; i++) {
+    const seen = fake.seen[i]
+    t.is(seen.method, 'POST')
+    t.is(seen.path + seen.query, paths[i])
+    t.is(seen.headers.authorization, undefined, 'no authorization header')
+    t.absent(JSON.stringify(seen.headers).includes(API_KEY), 'the API key never leaves')
+    t.is(seen.headers.accept, 'application/json')
+    t.is(seen.headers['content-type'], 'application/json')
+    t.alike(seen.body, { validateLivenessToken: FAKE_LIVENESS_TOKEN })
+  }
+})
+
+test('the fake refuses a public liveness call that carries authorization', async (t) => {
+  const fake = await fakeFor(t)
+  const res = await loopbackFetch(fake.base)(fake.base + '/api/public/liveness/validate', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ validateLivenessToken: FAKE_LIVENESS_TOKEN })
+  })
+  t.is(res.status, 401)
+  await res.body?.cancel()
+})
+
+test('livenessValidate and livenessSession decode alreadyCompleted', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake)
+  fake.script({
+    livenessValidate (req, res, ctx) { ctx.json(res, 200, { success: true, data: { alreadyCompleted: true } }) },
+    livenessSession (req, res, ctx) { ctx.json(res, 200, { success: true, data: { alreadyCompleted: true } }) }
+  })
+  const args = { validateLivenessToken: FAKE_LIVENESS_TOKEN }
+  t.alike(await h.livenessValidate(args), { ok: true, alreadyCompleted: true })
+  t.alike(await h.livenessSession(args), { ok: true, alreadyCompleted: true })
+
+  fake.script({
+    livenessValidate (req, res, ctx) { ctx.json(res, 200, { success: true, data: { alreadyCompleted: 'yes' } }) },
+    livenessSession (req, res, ctx) { ctx.json(res, 200, { success: true, data: { sessionId: '../x y' } }) }
+  })
+  t.alike(await h.livenessValidate(args), { ok: false, reason: 'formato', uncertain: true })
+  t.alike(await h.livenessSession(args), { ok: false, reason: 'formato', uncertain: true })
+
+  fake.script({
+    livenessValidate (req, res, ctx) { ctx.json(res, 200, { success: false, data: { alreadyCompleted: false } }) },
+    livenessSession (req, res, ctx) { ctx.json(res, 200, { success: true, data: { alreadyCompleted: false } }) }
+  })
+  t.alike(await h.livenessValidate(args), { ok: false, reason: 'formato', uncertain: true })
+  t.alike(await h.livenessSession(args), { ok: false, reason: 'formato', uncertain: true })
+})
+
+test('public liveness calls: input, 4xx, 5xx and timeout', async (t) => {
+  const fake = await fakeFor(t)
+  const h = client(fake, { timeoutMs: 100 })
+  for (const bad of [undefined, '', 'has space', 'a'.repeat(5000), 42]) {
+    t.alike(await h.livenessValidate({ validateLivenessToken: bad }), { ok: false, reason: 'entrada' })
+    t.alike(await h.livenessSession({ validateLivenessToken: bad }), { ok: false, reason: 'entrada' })
+  }
+  t.is(fake.seen.length, 0, 'no request for bad input')
+  const args = { validateLivenessToken: FAKE_LIVENESS_TOKEN }
+
+  fake.script({
+    livenessValidate (req, res, ctx) { ctx.json(res, 400, { success: false, errorCode: 'TOKEN_EXPIRED', error: FAKE_LIVENESS_TOKEN }) },
+    livenessSession (req, res, ctx) { ctx.json(res, 404, { success: false, error: 'Not found ' + FAKE_LIVENESS_TOKEN }) }
+  })
+  const expired = await h.livenessValidate(args)
+  t.alike(expired, { ok: false, reason: 'http-400', code: 'TOKEN_EXPIRED' })
+  t.alike(await h.livenessSession(args), { ok: false, reason: 'http-404' })
+
+  fake.script({
+    livenessValidate (req, res, ctx) { ctx.json(res, 503, { success: false, error: FAKE_LIVENESS_TOKEN }) },
+    livenessSession (req, res, ctx) { ctx.json(res, 500, { success: false }) }
+  })
+  t.alike(await h.livenessValidate(args), { ok: false, reason: 'http-503', uncertain: true })
+  t.alike(await h.livenessSession(args), { ok: false, reason: 'http-500', uncertain: true })
+
+  fake.script({ livenessValidate () {}, livenessSession () {} })
+  const late = await h.livenessValidate(args)
+  t.alike(late, { ok: false, reason: 'tempo', uncertain: true })
+  t.alike(await h.livenessSession(args), { ok: false, reason: 'tempo', uncertain: true })
+  t.absent(JSON.stringify([expired, late]).includes(FAKE_LIVENESS_TOKEN), 'no token in a result')
 })
 
 test('kycDocument: hosted urls outside the exact hodle hosts are refused', async (t) => {

@@ -169,9 +169,12 @@ test('wallet.sign', (t) => {
   const base = { action: 'optin', nonce: 'n'.repeat(43), op: {} }
   t.absent(isMutating('wallet.sign'))
   ok(t, 'wallet.sign', base, base)
-  for (const action of ['kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap']) {
+  for (const action of ['kyc-document', 'kyc-submit', 'status', 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status', 'transfer', 'send-crypto', 'swap-quote', 'swap', 'kyc-liveness-validate', 'kyc-liveness-retry']) {
     ok(t, 'wallet.sign', { ...base, action })
   }
+  ok(t, 'wallet.sign', { action: 'kyc-liveness-validate', nonce: base.nonce, op: {} })
+  ok(t, 'wallet.sign', { action: 'kyc-liveness-retry', nonce: base.nonce, op: {} })
+  bad(t, 'wallet.sign', { action: 'kyc-liveness-validate', nonce: base.nonce, op: { validateLivenessToken: 'tok' } }, 'liveness token in op')
   ok(t, 'wallet.sign', { ...base, nonce: 'A-_9'.repeat(32) })
   ok(t, 'wallet.sign', { action: 'swap', nonce: base.nonce, op: { quoteId: 'q-1', from: 'USDC', to: 'BRLA', amount: 2500000 } })
   ok(t, 'wallet.sign', { ...base, op: { s: 'x'.repeat(512), n: Number.MAX_SAFE_INTEGER, z: 0, e: '', u: 'ção 😀' } })
@@ -196,7 +199,7 @@ test('wallet.sign', (t) => {
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'wallet.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
-  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf']) {
+  for (const key of ['pin', 'walletPin', 'protectedSymmetricKey', 'taxId', 'taxIdNumber', 'cpf', 'validateLivenessToken', 'accessKeyId', 'secretAccessKey', 'sessionToken']) {
     bad(t, 'wallet.sign', { ...base, op: { amount: 1, [key]: '1234' } }, 'op key ' + key)
   }
   const tooMany = {}

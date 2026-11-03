@@ -742,7 +742,9 @@ test('walletOptin/walletKycDocument/walletKycSubmit/walletCreate: unknown outcom
     (x) => a.walletOptin(x),
     (x) => a.walletKycDocument({ ...x, op: { documentType: 'ID', isDoubleSided: 0 } }),
     (x) => a.walletKycSubmit({ ...x, op: { kycHash: 'c'.repeat(64) }, kyc: { fullName: 'Ana' } }),
-    (x) => a.walletCreate({ ...x, pin: '135790' })
+    (x) => a.walletCreate({ ...x, pin: '135790' }),
+    (x) => a.walletLivenessValidate(x),
+    (x) => a.walletLivenessRetry(x)
   ]
   for (const fn of calls) {
     stub(t, json(503, { error: 'indisponivel' }))
@@ -863,7 +865,7 @@ test('walletKycDocument: exact Hodle hosts only, the back URL when double sided'
   stub(t, json(200, { uploadUrlFront: UP_FRONT }))
   await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'ID', isDoubleSided: 1 } }), 'indisponivel', true, 'missing back')
   stub(t, json(200, { livenessUrl: LIVE }))
-  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), { livenessUrl: LIVE })
+  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), { livenessUrl: LIVE, capture: null })
   const badUploads = [
     'http://uploads.hodle.com.br/u', 'https://uploads.hodle.com.br.evil.test/u', 'https://evil.uploads.hodle.com.br/u',
     'https://user@uploads.hodle.com.br/u', 'https://uploads.hodle.com.br:8443/u', 'https://app.hodle.com.br/u', 5, null
@@ -884,7 +886,7 @@ test('wallet errors never echo the response body', async (t) => {
   const a = await load()
   const args = { member: M, nonce: NONCE, signature: SIG, op: {} }
   const secret = 'segredo-no-corpo'
-  for (const fn of [a.walletOptin, a.walletStatus, a.walletKycDocument, a.walletKycSubmit, a.walletCreate]) {
+  for (const fn of [a.walletOptin, a.walletStatus, a.walletKycDocument, a.walletKycSubmit, a.walletCreate, a.walletLivenessValidate, a.walletLivenessRetry]) {
     stub(t, json(500, { error: secret, detail: secret }))
     try { await fn(args); t.fail() } catch (e) {
       t.absent(e.message.includes(secret))
@@ -963,7 +965,7 @@ test('walletKycDocument: the production Sumsub selfie host, and only that host',
   const args = { member: M, nonce: NONCE, signature: SIG }
   const sumsub = 'https://in.sumsub.com/websdk/p/sbx_AbCdEf123456'
   stub(t, json(200, { documentId: 'd1', livenessUrl: sumsub }))
-  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), { livenessUrl: sumsub })
+  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'SELFIE-FROM-LIVENESS' } }), { livenessUrl: sumsub, capture: null })
   for (const url of ['https://sumsub.com/l', 'https://api.sumsub.com/l', 'https://evil.in.sumsub.com/l',
     'https://in.sumsub.com.evil.test/l', 'http://in.sumsub.com/l', 'https://in.sumsub.com:8443/l', 'https://u:p@in.sumsub.com/l']) {
     stub(t, json(200, { livenessUrl: url }))
@@ -973,6 +975,117 @@ test('walletKycDocument: the production Sumsub selfie host, and only that host',
   await expectError(t, a.walletKycDocument({ ...args, op: { documentType: 'PASSPORT' } }), 'indisponivel', true, 'not an upload host')
   const jpeg = new Blob([new Uint8Array([0xff])], { type: 'image/jpeg' })
   await t.exception(a.uploadDocument(sumsub, jpeg), 'never an upload target')
+})
+
+const POOL = 'us-east-1:0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'
+const CAPTURE = { sessionId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', region: 'us-east-1', identityPoolId: POOL }
+
+test('walletKycDocument: the in-app capture descriptor, null when absent or malformed, no secret kept', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: NONCE, signature: SIG, op: { documentType: 'SELFIE-FROM-LIVENESS' } }
+  stub(t, json(200, { documentId: 'd1', livenessUrl: LIVE, capture: CAPTURE }))
+  t.alike(await a.walletKycDocument(args), { livenessUrl: LIVE, capture: CAPTURE })
+  const leaky = {
+    documentId: 'd1',
+    livenessUrl: LIVE,
+    validateLivenessToken: 'tok-secreto',
+    accessKeyId: 'AKIA-secreto',
+    secretAccessKey: 'sak-secreto',
+    sessionToken: 'st-secreto',
+    capture: { ...CAPTURE, validateLivenessToken: 'tok-secreto', accessKeyId: 'AKIA-secreto', secretAccessKey: 'sak-secreto', sessionToken: 'st-secreto' }
+  }
+  stub(t, json(200, leaky))
+  const r = await a.walletKycDocument(args)
+  t.alike(r, { livenessUrl: LIVE, capture: CAPTURE }, 'only the three capture fields survive')
+  t.absent(JSON.stringify(r).includes('secreto'))
+  const bad = [
+    undefined,
+    null,
+    'x',
+    [],
+    { ...CAPTURE, region: 'eu-central-1', identityPoolId: 'eu-central-1:0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b' },
+    { ...CAPTURE, identityPoolId: 'eu-west-1:0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b' },
+    { ...CAPTURE, identityPoolId: 'us-east-1:not-a-uuid' },
+    { ...CAPTURE, sessionId: '..' },
+    { ...CAPTURE, sessionId: 'a/b' },
+    { ...CAPTURE, sessionId: 'x'.repeat(129) },
+    { ...CAPTURE, sessionId: 5 },
+    { region: 'us-east-1', identityPoolId: POOL }
+  ]
+  for (const capture of bad) {
+    stub(t, json(200, { documentId: 'd1', livenessUrl: LIVE, capture }))
+    t.alike(await a.walletKycDocument(args), { livenessUrl: LIVE, capture: null }, JSON.stringify(capture))
+  }
+  stub(t, json(200, { documentId: 'd1', livenessUrl: 'https://app.hodle.com.br.evil.test/l', capture: CAPTURE }))
+  await expectError(t, a.walletKycDocument(args), 'indisponivel', true, 'a capture never rescues a bad livenessUrl')
+  stub(t, json(200, { uploadUrlFront: UP_FRONT, capture: CAPTURE }))
+  t.alike(await a.walletKycDocument({ ...args, op: { documentType: 'ID' } }), { uploadUrlFront: UP_FRONT }, 'no capture on a document upload')
+})
+
+test('walletLivenessValidate and walletLivenessRetry: path, empty op, exact answers, anything else uncertain', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: NONCE, signature: SIG, op: { ignored: 1 } }
+  for (const [action, fn] of [['kyc-liveness-validate', a.walletLivenessValidate], ['kyc-liveness-retry', a.walletLivenessRetry]]) {
+    const calls = stub(t, json(200, action === 'kyc-liveness-validate' ? { ready: true } : { sessionId: CAPTURE.sessionId }))
+    await fn(args)
+    t.is(calls.length, 1, action)
+    t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/wallet/' + action)
+    t.is(calls[0].init.credentials, 'same-origin')
+    t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: NONCE, action, op: {}, signature: SIG }, action)
+  }
+  for (const ready of [true, false]) {
+    stub(t, json(200, { ready, extra: 'x' }))
+    t.alike(await a.walletLivenessValidate(args), { ready })
+  }
+  for (const body of [{}, { ready: 'true' }, { ready: 1 }, { ready: null }]) {
+    stub(t, json(200, body))
+    await expectError(t, a.walletLivenessValidate(args), 'indisponivel', true, JSON.stringify(body))
+  }
+  stub(t, json(200, { sessionId: CAPTURE.sessionId, extra: 'x' }))
+  t.alike(await a.walletLivenessRetry(args), { sessionId: CAPTURE.sessionId })
+  for (const ready of [true, false]) {
+    stub(t, json(200, { alreadyCompleted: true, ready, sessionId: CAPTURE.sessionId }))
+    t.alike(await a.walletLivenessRetry(args), { alreadyCompleted: true, ready })
+  }
+  for (const body of [{}, { sessionId: '..' }, { sessionId: 'a/b' }, { sessionId: 5 }, { alreadyCompleted: true }, { alreadyCompleted: true, ready: 'yes' },
+    { alreadyCompleted: false, sessionId: CAPTURE.sessionId }, { alreadyCompleted: 'true', ready: true }]) {
+    stub(t, json(200, body))
+    await expectError(t, a.walletLivenessRetry(args), 'indisponivel', true, JSON.stringify(body))
+  }
+  for (const [status, token] of [[409, 'selfie-ausente'], [400, 'selfie-recusada'], [429, 'limite-carteira'], [404, 'expirado']]) {
+    for (const fn of [a.walletLivenessValidate, a.walletLivenessRetry]) {
+      stub(t, json(status, { error: token }))
+      await expectError(t, fn(args), token, false, status + ' ' + token)
+    }
+  }
+  for (const fn of [a.walletLivenessValidate, a.walletLivenessRetry]) {
+    stub(t, json(503, { error: 'selfie-recusada' }))
+    await expectError(t, fn(args), 'selfie-recusada', false, 'a known token on a 5xx is a definite refusal')
+  }
+  const { toError } = a
+  t.is(toError('selfie-ausente').message, 'A selfie não está mais disponível. Comece a selfie de novo.')
+  t.is(toError('selfie-recusada').message, 'A selfie não foi aceita. Tente de novo.')
+})
+
+test('walletLivenessValidate and walletLivenessRetry: 20 s budget, a timeout is uncertain and never retried', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: NONCE, signature: SIG }
+  for (const fn of [a.walletLivenessValidate, a.walletLivenessRetry]) {
+    const delays = []
+    const real = globalThis.setTimeout
+    globalThis.setTimeout = (cb, ms, ...rest) => { delays.push(ms); return real(cb, ms === 20000 ? 0 : ms, ...rest) }
+    const sent = stub(t, () => new Promise((resolve, reject) => {
+      sent[sent.length - 1].init.signal.addEventListener('abort', () => reject(new Error('abortado')))
+    }))
+    try {
+      await expectError(t, fn(args), 'indisponivel', true, 'timed out')
+    } finally {
+      globalThis.setTimeout = real
+    }
+    t.ok(delays.includes(20000), 'the wallet read budget')
+    t.absent(delays.includes(8000), 'not the 8 s default')
+    t.is(sent.length, 1, 'never retried')
+  }
 })
 
 test('uploadDocument: refuses types, sizes and hosts without calling fetch; non-2xx fails', async (t) => {

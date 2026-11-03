@@ -880,7 +880,11 @@ test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
   t.is(csp.length, 1, 'one CSP line')
   // Byte-identical to the B2 tree (Caddyfile:20): the panel is written for it.
-  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  // Plus the in-app liveness hosts, one per streaming region (no wildcard).
+  const liveness = ['us-east-1', 'us-west-2', 'ap-south-1', 'ap-northeast-1', 'eu-west-1', 'sa-east-1', 'ap-southeast-5', 'ap-southeast-7']
+    .map((r) => ' wss://streaming-rekognition.' + r + '.amazonaws.com https://cognito-identity.' + r + '.amazonaws.com').join('')
+  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br https://brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com https://cdn.liveness.rekognition.amazonaws.com' + liveness + '; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  t.is(caddy.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('camera=(self)')).length, 1, 'camera=(self) once')
 })
 
 test('Caddyfile: /account/* drops the client address headers', (t) => {

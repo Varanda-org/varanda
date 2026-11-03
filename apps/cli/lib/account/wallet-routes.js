@@ -7,6 +7,7 @@ const feeMath = require('./fees')
 const { externalIdFor, OP_ID_RE } = require('./wallet-ops-store')
 const { advanceOp, normalHash, adoptableAttempt } = require('./wallet-webhook')
 const { MAX_TRANSFER_CENTS } = require('./hodle')
+const { createLivenessTokens } = require('./liveness-tokens')
 
 // The optional payments account with Hodle (mounted by ./server.js):
 //
@@ -55,6 +56,9 @@ const NONCE_DOMAIN = 'varanda-wallet-nonce-v1'
 const NONCE_BYTES = 32
 const DAY_MS = 24 * 3600 * 1000
 const READ_EVERY_MS = 20 * 1000
+// After a liveness answer the selfie's readiness may flip any moment, so a
+// cached false is not trusted for this long.
+const LIVENESS_HOT_MS = 60 * 1000
 // A submit intent younger than this may still have its call in flight
 // (the client deadline is seconds), so no lookup can tell it apart yet.
 const LATEST_AFTER_MS = 60 * 1000
@@ -71,7 +75,7 @@ function validPin (s) {
 }
 const NETWORKS = Object.freeze(['polygon', 'base'])
 const MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
-const BASE_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status'])
+const BASE_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
 const MONEY_ACTIONS = Object.freeze(['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
 const MONEY_MODES = Object.freeze(['pix', 'completo'])
 const MIN_DEPOSIT_CENTS = 100
@@ -138,6 +142,10 @@ const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff
 // Only a 4xx from the provider (it refused the request) or our own input check
 // proves nothing was created; the client marks every other failure of a
 // mutating call with `uncertain`.
+// Hodle answers that say the liveness token itself is gone or refused.
+const DEAD_TOKEN_REASONS = Object.freeze(['http-401', 'http-403', 'http-404', 'http-410'])
+const DEAD_TOKEN_CODE_RE = /EXPIRED|NOT_FOUND|INVALID_TOKEN/i
+
 function failureToken (r) {
   return r && r.uncertain === true ? 'resultado-incerto' : 'indisponivel'
 }
@@ -252,6 +260,7 @@ function createWalletRoutes ({
     document: keyedWindow(10, DAY_MS, now),
     submit: keyedWindow(3, DAY_MS, now),
     status: keyedWindow(60, 600 * 1000, now),
+    liveness: keyedWindow(10, DAY_MS, now),
     create: keyedWindow(3, DAY_MS, now),
     // Recovery reads after a lost create; they never create anything.
     recover: keyedWindow(6, 600 * 1000, now),
@@ -282,6 +291,10 @@ function createWalletRoutes ({
   const latestReads = new Map()
   // '<subAccountId>:<documentId>' -> { ready, at }.
   const readyCache = new Map()
+  // '<subAccountId>:<documentId>' -> time until a cached false is re-read.
+  const hotReady = new Map()
+  // member -> the selfie's validateLivenessToken, in memory only.
+  const tokens = createLivenessTokens({ now })
   // member -> walletId whose stored address Hodle confirmed.
   const verifiedWallets = new Map()
   // member -> the one quote of the payment being reviewed.
@@ -520,7 +533,10 @@ function createWalletRoutes ({
     if (documentId === null) return false
     const key = subAccountId + ':' + documentId
     const hit = readyCache.get(key)
-    if (hit !== undefined && now() - hit.at < READ_EVERY_MS && (hit.ready || !fresh)) return hit.ready
+    const until = hotReady.get(key)
+    if (until !== undefined && until <= now()) hotReady.delete(key)
+    const hot = until !== undefined && until > now()
+    if (hit !== undefined && now() - hit.at < READ_EVERY_MS && (hit.ready || !(fresh || hot))) return hit.ready
     const r = await hodle.kycDocumentReady({ subAccountId, documentId })
     if (!r.ok) {
       logProvider('documento', r)
@@ -659,11 +675,98 @@ function createWalletRoutes ({
       throw refuse(failureToken(r))
     }
     const ids = selfie ? { selfieId: r.documentId } : { documentId: r.documentId }
-    await writeAfter(() => wallets.setKyc({ member, status: 'documentos', attempt: e.kyc.attempt, ...ids }))
+    const stored = await writeAfter(() => wallets.setKyc({ member, status: 'documentos', attempt: e.kyc.attempt, ...ids }))
+    // A write that did not apply (a newer attempt or a submit landed while
+    // Hodle answered) leaves another selfie on file: a token kept for this
+    // one could validate a selfie the entry never names.
+    if (selfie && typeof r.sessionId === 'string' && stored && stored.changed === true) {
+      // The token stays here; the device gets only what its detector needs.
+      tokens.put(member, r.documentId, r.validateLivenessToken)
+      return {
+        documentId: r.documentId,
+        livenessUrl: r.livenessUrl,
+        capture: { sessionId: r.sessionId, region: r.livenessRegion, identityPoolId: r.livenessIdentityPoolId }
+      }
+    }
     if (selfie) return { documentId: r.documentId, livenessUrl: r.livenessUrl }
     const out = { documentId: r.documentId, uploadUrlFront: r.uploadUrlFront }
     if (r.uploadUrlBack !== undefined) out.uploadUrlBack = r.uploadUrlBack
     return out
+  }
+
+  function heat (key) {
+    while (hotReady.size >= MAX_CACHE) hotReady.delete(hotReady.keys().next().value)
+    hotReady.delete(key)
+    hotReady.set(key, now() + LIVENESS_HOT_MS)
+  }
+
+  // The guards both liveness actions share. Returns the entry and the token.
+  async function livenessToken (member, op) {
+    opKeys(op, [])
+    const e = await needAccount(member)
+    const s = e.kyc.status
+    if (s === 'pendente') throw refuse('kyc-pendente')
+    if (s !== 'documentos' && s !== 'nenhum') throw refuse('pedido-invalido')
+    const token = e.kyc.selfieId === null ? null : tokens.get(member, e.kyc.selfieId)
+    if (token === null) throw refuse('selfie-ausente')
+    // A call whose answer was lost may have changed Hodle's state: only a
+    // new selfie (a new token) starts over.
+    if (tokens.isUncertain(member)) throw refuse('resultado-incerto')
+    return { e, token }
+  }
+
+  // Every mutation names the selfie the call was about, so a newer selfie
+  // stored while the call ran keeps its own token and state.
+  function livenessFailed (member, selfieId, key, r) {
+    logProvider('selfie', r)
+    if (r.uncertain === true) {
+      tokens.markUncertain(member, selfieId)
+      heat(key)
+      throw refuse('resultado-incerto')
+    }
+    if (r.reason === 'http-429') throw refuse('limite-carteira')
+    // A dead token fails the same way on every retry: dropping it sends the
+    // app to a new selfie instead of burning the daily liveness window.
+    if (DEAD_TOKEN_REASONS.includes(r.reason) || (typeof r.code === 'string' && DEAD_TOKEN_CODE_RE.test(r.code))) {
+      tokens.drop(member, selfieId)
+      throw refuse('selfie-ausente')
+    }
+    throw refuse('selfie-recusada')
+  }
+
+  async function kycLivenessValidate (member, op) {
+    const { e, token } = await livenessToken(member, op)
+    const selfieId = e.kyc.selfieId
+    // One key for validate and retry: both spend the same token, so a client
+    // sending both at once reaches Hodle once.
+    return once('kyc-liveness:' + member, async () => {
+      if (!limits.liveness(member)) throw over()
+      const key = e.subAccountId + ':' + selfieId
+      const r = await hodle.livenessValidate({ validateLivenessToken: token })
+      if (!r.ok) livenessFailed(member, selfieId, key, r)
+      tokens.drop(member, selfieId)
+      readyCache.delete(key)
+      heat(key)
+      return { ready: await documentReady(e.subAccountId, selfieId, true) }
+    })
+  }
+
+  async function kycLivenessRetry (member, op) {
+    const { e, token } = await livenessToken(member, op)
+    const selfieId = e.kyc.selfieId
+    return once('kyc-liveness:' + member, async () => {
+      if (!limits.liveness(member)) throw over()
+      const key = e.subAccountId + ':' + selfieId
+      const r = await hodle.livenessSession({ validateLivenessToken: token })
+      if (!r.ok) livenessFailed(member, selfieId, key, r)
+      if (r.alreadyCompleted === true) {
+        tokens.drop(member, selfieId)
+        readyCache.delete(key)
+        heat(key)
+        return { alreadyCompleted: true, ready: await documentReady(e.subAccountId, selfieId, true) }
+      }
+      return { sessionId: r.sessionId }
+    })
   }
 
   // The personal fields, read once into a fresh object. Throws on any shape
@@ -1617,6 +1720,8 @@ function createWalletRoutes ({
     'kyc-document': (member, op) => kycDocument(member, op),
     'kyc-submit': (member, op, secret) => kycSubmit(member, op, secret.kyc),
     status: (member, op) => status(member, op),
+    'kyc-liveness-validate': (member, op) => kycLivenessValidate(member, op),
+    'kyc-liveness-retry': (member, op) => kycLivenessRetry(member, op),
     'wallet-create': (member, op, secret) => walletCreate(member, op, secret.pin),
     balance: (member, op) => balance(member, op),
     statement: (member, op) => statement(member, op),
@@ -1677,6 +1782,8 @@ function createWalletRoutes ({
       kycReads: kycReads.size,
       latestReads: latestReads.size,
       readyCache: readyCache.size,
+      hotReady: hotReady.size,
+      livenessTokens: tokens.size,
       quotes: quotes.size,
       opReads: opReads.size,
       verifiedWallets: verifiedWallets.size
