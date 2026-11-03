@@ -4,6 +4,8 @@
 // return (src/linkReturn.js).
 const test = require('brittle')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 
 const load = () => import('../src/linkReturn.js')
 const R = crypto.randomBytes(32).toString('base64url')
@@ -253,4 +255,76 @@ test('waitsForInstallation holds only a clean https link while no installation i
   t.is(waitsForInstallation('https://varanda.example/c/' + KEY), false)
   t.alike(parseAppLink('https://varanda.example/c/' + KEY), { kind: 'comunidade', key: KEY })
   t.is(parseAppLink('https://bora.varanda.app/c/' + KEY), null)
+})
+
+test('linkReturnTaker: a newcomer return belongs to the setup, never to Ajustes', async (t) => {
+  const { linkReturnTaker } = await load()
+  const base = { held: true, termsOk: true }
+  for (const step of ['recuperando', 'idade']) {
+    t.is(linkReturnTaker({ ...base, setupStep: true, step, certMissing: false }), 'wait', step)
+  }
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: true }), 'setup')
+  t.is(linkReturnTaker({ ...base, setupStep: false, step: 'vinculo', certMissing: true }), 'setup')
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: false }), 'wait')
+})
+
+test('linkReturnTaker: nothing is decided behind the terms gate', async (t) => {
+  const { linkReturnTaker } = await load()
+  t.is(linkReturnTaker({ held: true, termsOk: false, step: 'vinculo', certMissing: true }), 'wait')
+  t.is(linkReturnTaker({ held: true, termsOk: false, setupStep: false, step: 'pronto' }), 'wait')
+})
+
+test('linkReturnTaker: a member already certified gets Ajustes > Conta once the tabs show', async (t) => {
+  const { linkReturnTaker } = await load()
+  const base = { held: true, termsOk: true, certMissing: false }
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo' }), 'wait')
+  for (const step of ['pronto', 'perfil', 'carregando']) {
+    t.is(linkReturnTaker({ ...base, setupStep: false, step }), 'conta', step)
+  }
+})
+
+test('linkReturnTaker: nothing held is never taken', async (t) => {
+  const { linkReturnTaker } = await load()
+  for (const held of [false, undefined]) {
+    for (const step of ['vinculo', 'pronto', 'perfil']) {
+      t.is(linkReturnTaker({ held, termsOk: true, setupStep: false, step, certMissing: true }), 'none', String(held) + step)
+    }
+  }
+  t.is(linkReturnTaker({}), 'none')
+  t.is(linkReturnTaker(), 'none')
+  t.is(linkReturnTaker({ held: true }), 'wait')
+  t.is(linkReturnTaker({ held: true, termsOk: true }), 'wait')
+})
+
+test('the shell opens Ajustes > Conta only through linkReturnTaker', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const call = 'linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })'
+  t.ok(s.includes(call))
+  t.ok(s.includes("if (taker === 'conta') setAjustes('conta')"))
+  t.ok(s.includes("if (taker === 'none' || taker === 'wait') return"))
+  t.is(s.split("setAjustes('conta')").length - 1, 1)
+  const at = s.indexOf(call)
+  t.ok(at > s.indexOf('const certMissing = info !== null && info.memberCert !== true'))
+  t.ok(at < s.indexOf("if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true"))
+  t.absent(s.includes('if (!termsOk || setupStep || !linkReturnRef.current) return'))
+  t.ok(/import \{[^}]*linkReturnTaker[^}]*\} from '\.\/src\/linkReturn'/.test(s))
+  const m = fs.readFileSync(path.join(__dirname, '../src/linkReturn.js'), 'utf8')
+  t.absent(m.includes('Platform'))
+})
+
+test('the setup card drops the Google return when it lands the certificate', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(s.includes('const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])'))
+  const prop = 'onLinked={dropLinkReturn}'
+  t.is(s.split(prop).length - 1, 1)
+  const open = s.indexOf('<Identidade active={ready} embedded setup')
+  t.ok(s.slice(open, s.indexOf('/>', open)).includes(prop))
+  const id = fs.readFileSync(path.join(__dirname, '../src/screens/Identidade.js'), 'utf8')
+  t.ok(id.includes('onLinked={setup ? onLinked : undefined}'))
+  const call = "if (typeof onLinked === 'function') onLinked()"
+  const at = id.indexOf(call)
+  t.ok(at > id.indexOf("await node.request('cert.add', { cert })"))
+  t.ok(at < id.indexOf("await node.request('username.add', { record })", at))
+  const aj = fs.readFileSync(path.join(__dirname, '../src/screens/Ajustes.js'), 'utf8')
+  t.absent(aj.includes('onLinked'))
 })
