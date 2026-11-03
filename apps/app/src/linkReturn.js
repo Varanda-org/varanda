@@ -14,6 +14,8 @@
 //     an https link of this installation.
 // A link is never consent to follow or to join: the profile store records
 // 'new' only, and a group or community link only names what to open.
+// An https App Link that arrives before the installation loads is held, not
+// parsed (waitsForInstallation).
 
 import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
@@ -136,6 +138,14 @@ export function parseAppLink (url) {
     return community !== null ? { kind: 'comunidade', key: community } : null
   }
   return target.username ? { kind: 'perfil', username: target.username } : { kind: 'perfil', key: target.key }
+}
+
+// An App Link can start the app before the saved installation loads, so
+// linkPath cannot yet tell whether the URL belongs to this installation.
+// App.js holds it and parses it again once one loads; a URL of another host
+// is dropped then.
+export function waitsForInstallation (url) {
+  return clean(url) && url.startsWith('https://') && installationOrigin() === null
 }
 
 // What the person pasted in the invite field: the bare code or a full

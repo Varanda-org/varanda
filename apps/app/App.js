@@ -36,6 +36,8 @@
 // /?aviso=... at load or as a worker message: held in memory only, it opens
 // Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
 // for the key it names; nothing is written, followed or retried.
+// A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
+// opens the screen once the tabs show; it is never consent to join.
 // A splash holds a short minimum while the app loads and, on the web, covers
 // the node's connection; the intro cards (src/intro.js) follow once per device,
 // before the Termos.
@@ -60,7 +62,8 @@ import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureCommunityLink, captureGroupLink } from './src/groupLink'
+import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
+import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
 import { tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
@@ -105,7 +108,7 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn } from './src/linkReturn'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Publicar from './src/screens/Publicar'
@@ -178,16 +181,11 @@ const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.
 const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
-// A group link (/g/<hex>) is read and cleaned the same way, once, before any
-// render; it only lives in memory, so a reload never opens it again. The
-// native app has no page load: its varanda:///g/ link comes through Linking.
-const CAPTURED_GROUP = hostedPage === true
-  ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
-  : null
-// A community link (/c/<hex>) works the same way and opens the community.
-const CAPTURED_COMMUNITY = hostedPage === true
-  ? captureCommunityLink({ location: globalThis.location, history: globalThis.history })
-  : null
+// A group or community link (/g/<hex>, /c/<hex>) is read and cleaned the
+// same way, once, before any render. On the hosted page it is kept in tab
+// storage for 1 h so it survives the Google step's reload, and it is dropped
+// once opened. The native app has no page load: its links come through Linking.
+const CAPTURED_ENTRY = captureEntryLink()
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
@@ -761,9 +759,10 @@ function Member () {
   // A state, not a ref: a group or community link that arrives while the tabs
   // already show must run the effect that opens it. It carries the
   // installation it arrived on: a key never opens on another installation.
-  const [pendingLink, setPendingLink] = useState(() => CAPTURED_GROUP !== null
-    ? { kind: 'grupo', key: CAPTURED_GROUP, origin: ageOrigin }
-    : CAPTURED_COMMUNITY !== null ? { kind: 'comunidade', key: CAPTURED_COMMUNITY, origin: ageOrigin } : null)
+  const [pendingLink, setPendingLink] = useState(() => CAPTURED_ENTRY !== null
+    ? { kind: CAPTURED_ENTRY.kind, key: CAPTURED_ENTRY.key, origin: ageOrigin }
+    : null)
+  const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
@@ -773,7 +772,8 @@ function Member () {
       checkAge()
       return
     }
-    if (captureSignupInvite(url) !== null) {
+    const signup = captureSignupInvite(url)
+    if (signup !== null) {
       setAgeInviteRefused(false)
       setAgeInviteTick((n) => n + 1)
     }
@@ -792,8 +792,24 @@ function Member () {
     const link = parseAppLink(url)
     if (link !== null && (link.kind === 'grupo' || link.kind === 'comunidade')) {
       setPendingLink({ kind: link.kind, key: link.key, origin: ageOrigin })
+      return
+    }
+    if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
+      heldUrlRef.current = url
     }
   }
+  // A cold start from an App Link can arrive before the installation loads,
+  // when no https link can be told apart from another host's. Once one is
+  // known the held URL is parsed again: the replay also reaches the profile
+  // and convite captures, and a URL of another host is dropped (parseAppLink
+  // returns null then). It cannot be held twice: waitsForInstallation is
+  // false once an installation is known.
+  useEffect(() => {
+    if (ageOrigin === '' || heldUrlRef.current === null) return
+    const url = heldUrlRef.current
+    heldUrlRef.current = null
+    try { appUrlRef.current(url) } catch {}
+  }, [ageOrigin])
   useEffect(() => {
     if (Platform.OS === 'web') return
     const take = (url) => { try { appUrlRef.current(url) } catch {} }
@@ -1127,8 +1143,9 @@ function Member () {
   const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
   // A group or community link opens once the tabs are on screen and the node
-  // is hosted (only a hosted node has Comunidades). It waits, in memory only,
-  // through a reconnect, when the native node is briefly not hosted. A switch
+  // is hosted (only a hosted node has Comunidades). It waits through a
+  // reconnect, when the native node is briefly not hosted (on the hosted web
+  // it is also in tab storage, src/groupLinkStore). A switch
   // to another installation drops it. On a cold start the link can arrive
   // before the saved installation loads: it then belongs to the first one
   // that does, and while no installation is known it waits.
@@ -1139,10 +1156,12 @@ function Member () {
       return
     }
     if (pendingLink.origin !== ageOrigin) {
+      dropEntryLink()
       setPendingLink(null)
       return
     }
     if (!atTabs || mode !== 'hosted') return
+    dropEntryLink()
     pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
     setPendingLink(null)
   }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
@@ -1460,7 +1479,19 @@ function Member () {
             onDismiss: forgetInvite
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} invite={inviteProp} />
+      // A group or community link waiting for the sign-in: announced only,
+      // never joined. A pending profile invite wins even while its card waits
+      // (passkey status unknown, ceremony running), so the two never flash.
+      const entryProp = invite === null && pendingLink !== null && (pendingLink.origin === '' || pendingLink.origin === ageOrigin)
+        ? {
+            text: entryCardText(pendingLink.kind),
+            openText: ENTRY_OPEN_TEXT,
+            labels: ENTRY_LINK_LABELS,
+            link: ageOrigin !== '' && entryPath(pendingLink) !== null ? ageOrigin + entryPath(pendingLink) : null,
+            onDismiss: () => { dropEntryLink(); setPendingLink(null) }
+          }
+        : null
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} invite={inviteProp || entryProp} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>

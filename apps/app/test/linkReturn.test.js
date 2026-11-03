@@ -236,3 +236,21 @@ test('parseSessionReturn: nothing without an https installation', async (t) => {
   await withOrigin(t, 'http://127.0.0.1:8790')
   t.is(parseSessionReturn('http://127.0.0.1:8790/account/app/conta?conta=ok&codigo=' + R), null, 'loopback http')
 })
+
+test('waitsForInstallation holds only a clean https link while no installation is loaded', async (t) => {
+  const { waitsForInstallation, parseAppLink } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  setInstallation(null)
+  t.is(waitsForInstallation('https://bora.varanda.app/c/' + KEY), true)
+  for (const bad of [
+    'varanda:///c/' + KEY, 'http://bora.varanda.app/c/' + KEY, 'https://bora.varanda.app/c/ ' + KEY,
+    'https://bora.varanda.app/c/' + KEY + '\n', 'https://bora.varanda.app/' + 'a'.repeat(400), null, undefined, 42, {}
+  ]) {
+    t.is(waitsForInstallation(bad), false, String(bad))
+  }
+  await withOrigin(t, 'https://varanda.example')
+  t.is(waitsForInstallation('https://bora.varanda.app/c/' + KEY), false)
+  t.is(waitsForInstallation('https://varanda.example/c/' + KEY), false)
+  t.alike(parseAppLink('https://varanda.example/c/' + KEY), { kind: 'comunidade', key: KEY })
+  t.is(parseAppLink('https://bora.varanda.app/c/' + KEY), null)
+})

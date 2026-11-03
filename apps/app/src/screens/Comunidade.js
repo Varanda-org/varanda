@@ -1,12 +1,14 @@
 // Comunidade: one community (community.info, docs/rpc.md 5.59). Its header
-// (name, join label, members, role), Entrar or Pedir entrada for someone who
-// is not a member, Sair da comunidade for a member (Concluir saída for a
-// creator whose leave was interrupted), and the groups it holds
-// (Geral first; each opens its group). The creator and admins also see Novo
-// grupo, Pedidos and Membros; the creator also has Ajustes (rename, Entrada,
-// Administradores by @nome among the members) and Compartilhar. The link is
-// shared, never shown as text. A mutation that comes back uncertain is never
-// resent: the screen re-reads and only then lets the person try again.
+// (name, join label, members, role), an invite card with one Entrar or Pedir
+// entrada button for someone who is not a member (also from the seeder
+// index; a link is never consent, only the tap joins), Sair da comunidade for
+// a member (Concluir saída for a creator whose leave was interrupted), and
+// the groups it holds (Geral first; each opens its group). The creator and
+// admins also see Novo grupo, Pedidos and Membros; the creator also has
+// Ajustes (rename, Entrada, Administradores by @nome among the members).
+// Compartilhar is for everyone. The link is shared, never shown as text. A
+// mutation that comes back uncertain is never resent: the screen re-reads and
+// only then lets the person try again.
 // Props: community (hex64 root key), afterGroup (a group to open once the
 // person joined, from a /g/ link), onBack(), onOpenGroup(group),
 // onOpenMember(diary). The screen runs wherever the node is hosted (site and
@@ -27,7 +29,7 @@ import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
 import { shortKey } from '../format'
 import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, PRIVATE_LABEL, can, membersLabel, reconcile, roleLabel, visibilityLabel } from '../groups'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
+import { Body, Btn, Card, ErrorText, Field, SectionHeader, Soft, Title, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -43,6 +45,11 @@ const HEX64 = /^[0-9a-f]{64}$/
 const PAGE = 100
 const NOT_FOUND = '@nome não encontrado.'
 const NOT_MEMBER = 'Essa pessoa ainda não é membro da comunidade.'
+const JOIN_OPEN_TEXT = 'Entre para conversar nos grupos desta comunidade.'
+const JOIN_APPROVAL_TEXT = 'Peça entrada: um administrador aprova antes de você participar.'
+const JOIN_PUBLIC_TEXT = 'Participar é público: sua entrada fica registrada no seu diário.'
+const JOIN_PENDING_TEXT = 'Enviado. Aguardando a comunidade chegar a este aparelho.'
+const JOIN_OFFLINE_TEXT = 'Sem internet: conecte-se para entrar.'
 const LEAVE_TEXT = 'Sair da comunidade encerra sua participação em todos os grupos dela.'
 // The root loses its powers after the creator's first confirmed leave, even if they return.
 const CREATOR_LEAVE_TEXT = LEAVE_TEXT + ' Você criou esta comunidade: depois de sair, não poderá mais nomear administradores nem criar grupos, mesmo que volte. Ao voltar, ainda poderá mudar o nome e a entrada, tirar grupos da lista e tirar o cargo de administradores.'
@@ -76,6 +83,26 @@ function origin () {
 function adminsLabel (n) {
   if (!Number.isSafeInteger(n) || n < 0) return ''
   return n === 1 ? '1 administrador' : n + ' administradores'
+}
+
+// The invite card of someone outside the community: one button, and only the
+// tap joins.
+function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, error, note }) {
+  const approval = join === 'approval'
+  return (
+    <View style={styles.block}>
+      <Card>
+        <Title>{title}</Title>
+        {header ? <Soft>{header}</Soft> : null}
+        <Body>{approval ? JOIN_APPROVAL_TEXT : JOIN_OPEN_TEXT}</Body>
+        {showJoin ? <Btn label={approval ? 'Pedir entrada' : 'Entrar'} onPress={onJoin} pending={pending} disabled={offline} /> : null}
+        <Soft>{JOIN_PUBLIC_TEXT}</Soft>
+        {offline && showJoin ? <Soft>{JOIN_OFFLINE_TEXT}</Soft> : null}
+        <ErrorText>{error}</ErrorText>
+        {note ? <Soft>{note}</Soft> : null}
+      </Card>
+    </View>
+  )
 }
 
 function GroupRow ({ title, detail, onPress }) {
@@ -120,8 +147,8 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   const [shareNote, setShareNote] = useState('')
   const [joinNote, setJoinNote] = useState('')
   // The seeder index's view, for someone whose node holds nothing of this
-  // community yet: { status, name, groups, partial, error }.
-  const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, error: '' })
+  // community yet: { status, name, groups, partial, join, members, error }.
+  const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, join: null, members: null, error: '' })
   const idxGen = useRef(0)
   const [granting, setGranting] = useState(null)
   const [adminUncertain, setAdminUncertain] = useState(false)
@@ -171,11 +198,11 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
     const res = await fetchCommunity(community)
     if (mine !== idxGen.current) return
     if (!res || !res.ok) {
-      setIdx({ status: 'error', name: '', groups: [], partial: false, error: res && res.reason === 'not-found' ? 'O servidor ainda não conhece esta comunidade.' : 'Não foi possível consultar o índice agora.' })
+      setIdx({ status: 'error', name: '', groups: [], partial: false, join: null, members: null, error: res && res.reason === 'not-found' ? 'O servidor ainda não conhece esta comunidade.' : 'Não foi possível consultar o índice agora.' })
       return
     }
     const v = res.value
-    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, error: '' })
+    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, join: v.join, members: v.members, error: '' })
   }, [community])
   useEffect(() => {
     if (!needIndex) {
@@ -320,6 +347,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
       const v = res.value || {}
       if (v.group) setJoinNote('Você entrou no Geral.')
       else if (v.state === 'requested') setJoinNote('Pedido enviado: aguardando aprovação.')
+      else if (v.state === 'pending') setJoinNote(JOIN_PENDING_TEXT)
       load()
       return
     }
@@ -336,7 +364,8 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
 
   // Each "Sair mesmo assim" skips only the wait it answered: the next one
   // asks again, and a wait already accepted never prompts twice.
-  const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, null, (wait) => setConfirm({
+  // A join note from earlier in this visit would sit next to the card's Entrar after leaving.
+  const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, () => setJoinNote(''), (wait) => setConfirm({
     text: LEAVE_WAITS[wait][1],
     label: 'Sair mesmo assim',
     run: () => leaveWith([...accepted, wait])
@@ -492,14 +521,23 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   if (fromIndex) {
     body = (
       <View>
+        <JoinCard
+          title={title}
+          header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
+          join={idx.join}
+          showJoin={joinNote === ''}
+          onJoin={doJoin}
+          pending={join.pending}
+          offline={offline}
+          error={join.error}
+          note={joinNote}
+        />
+        {checkBox}
         <View style={styles.block}>
-          <Soft>Pelo índice do servidor; entre na comunidade para participar.</Soft>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
           <View style={styles.inline}>
-            <Btn label='Entrar' onPress={doJoin} pending={join.pending} disabled={offline} />
             <Btn label='Compartilhar' onPress={shareCommunity} secondary />
           </View>
-          <ErrorText>{join.error}</ErrorText>
           {shareNote ? <Soft>{shareNote}</Soft> : null}
         </View>
         <SectionHeader>Grupos</SectionHeader>
@@ -522,16 +560,28 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   } else if (info === null) {
     body = <Skeleton />
   } else {
-    const joinWord = info.join === 'approval' ? 'Pedir entrada' : 'Entrar'
+    const joinable = !isMember && role !== 'banned' && role !== 'requested' && !pending && info.leavePending !== true
     const header = [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins), roleLabel(role)].filter(Boolean).join(' · ')
     body = (
       <View>
+        {joinable
+          ? (
+            <JoinCard
+              title={title}
+              header={[COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins)].filter(Boolean).join(' · ')}
+              join={info.join}
+              showJoin={joinNote === ''}
+              onJoin={doJoin}
+              pending={join.pending}
+              offline={offline}
+              error={join.error}
+              note={joinNote}
+            />
+            )
+          : null}
         <View style={styles.block}>
-          {header ? <Soft>{header}</Soft> : null}
+          {header && !joinable ? <Soft>{header}</Soft> : null}
           <View style={styles.inline}>
-            {!isMember && role !== 'banned' && role !== 'requested' && !pending && info.leavePending !== true
-              ? <Btn label={joinWord} onPress={doJoin} pending={join.pending} disabled={offline} />
-              : null}
             {isMember || role === 'requested'
               ? <Btn label={isMember ? 'Sair da comunidade' : 'Desistir do pedido'} danger secondary pending={act.pending} onPress={() => setConfirm({ text: isMember ? (owner ? CREATOR_LEAVE_TEXT : LEAVE_TEXT) : WITHDRAW_TEXT, label: isMember ? 'Sair' : 'Desistir', run: leave })} />
               : null}
@@ -540,9 +590,9 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
               : null}
             <Btn label='Compartilhar' onPress={shareCommunity} secondary />
           </View>
-          <ErrorText>{join.error}</ErrorText>
+          {joinable ? null : <ErrorText>{join.error}</ErrorText>}
           <ErrorText>{act.error}</ErrorText>
-          {joinNote ? <Soft>{joinNote}</Soft> : null}
+          {joinNote && !joinable ? <Soft>{joinNote}</Soft> : null}
           {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
           {shareNote ? <Soft>{shareNote}</Soft> : null}
           {pending ? <Soft>Aguardando a sincronização desta comunidade.</Soft> : null}
