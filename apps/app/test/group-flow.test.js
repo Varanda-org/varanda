@@ -133,15 +133,12 @@ test('rekey-pending: posting refused with the label, rekey offered only to roles
 })
 
 test('group links: parse and build round trip, and the address-bar cleanup', async (t) => {
-  const { joinLink, parseJoinLink } = await groups()
+  const { joinLink } = await groups()
   const { parseGroupPath, isGroupPath, captureGroupLink } = await links()
   t.is(joinLink(G.toUpperCase()), '/g/' + G, 'built lowercase')
-  t.is(parseJoinLink(joinLink(G)), G, 'round trip')
-  t.is(parseJoinLink('https://varanda.app/g/' + G + '?x=1#y'), G, 'with an origin, query and hash')
-  t.is(parseGroupPath(joinLink(G)), G)
+  t.is(parseGroupPath(joinLink(G)), G, 'round trip')
   t.is(parseGroupPath('/g/' + G.toUpperCase()), null, 'the path form is lowercase only')
   for (const bad of ['/g/' + G.slice(1), '/g/' + G + 'a', '/g/zz', '/x/' + G, '/g/' + G + '/extra', '', null, 5]) {
-    t.is(parseJoinLink(bad), null, 'rejects ' + String(bad).slice(0, 20))
     t.is(parseGroupPath(bad), null)
   }
   t.ok(isGroupPath('/g/anything'))
@@ -188,9 +185,10 @@ test('create community: Geral is listed first and the creator may add groups', a
 })
 
 test('join through /c/: the community link parses and a joined role counts as landed', async (t) => {
-  const { parseCommunityJoinLink, reconcile, COMMUNITY_JOIN_LABELS } = await groups()
-  t.is(parseCommunityJoinLink('https://varanda.app/c/' + C), C)
-  t.is(parseCommunityJoinLink('/g/' + C), null, 'a group link is not a community link')
+  const { reconcile, COMMUNITY_JOIN_LABELS } = await groups()
+  const { parseCommunityPath, communityLink } = await links()
+  t.is(parseCommunityPath(communityLink(C)), C)
+  t.is(parseCommunityPath('/g/' + C), null, 'a group link is not a community link')
   t.is(reconcile({ action: 'community-join' }, { role: 'member' }), 'landed')
   t.is(reconcile({ action: 'community-join' }, { role: 'left' }), 'not-landed')
   t.is(reconcile({ action: 'community-join' }, {}), 'unknown')
@@ -281,7 +279,7 @@ test('each Sair mesmo assim adds its wait to force and a wait already accepted n
   t.ok(src.includes("if (!err || err.code !== 'USAGE' || err.uncertain === true) return null"), 'only a sure refusal is a wait')
   t.ok(src.includes('return Object.keys(LEAVE_WAITS).find((name) => LEAVE_WAITS[name][0] === err.message) || null'))
   t.ok(src.includes('if (wait === null || (Array.isArray(params.force) && params.force.includes(wait))) throw err'), 'an accepted wait answered again is an error, never a loop')
-  t.ok(src.includes("const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, null, (wait) => setConfirm({"), 'force carries the waits accepted so far')
+  t.ok(src.includes("const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, () => setJoinNote(''), (wait) => setConfirm({"), 'force carries the waits accepted so far; a left member loses the old join note')
   t.ok(src.includes('run: () => leaveWith([...accepted, wait])'), 'plus the one just accepted')
   t.ok(src.includes('const leave = () => leaveWith([])'), 'the first try forces nothing')
 })
@@ -361,4 +359,27 @@ test('no em dash in the group screens and modules', async (t) => {
   walk(path.join(__dirname, '../src/screens'))
   for (const f of ['groups.js', 'groupLink.js', 'indexClient.js', 'nav.js', 'tabs.js']) if (fs.readFileSync(path.join(__dirname, '../src', f), 'utf8').includes('\u2014')) bad.push(f)
   t.alike(bad, [])
+})
+
+test('the Comunidades tab has no paste field and the link parsers are gone', async (t) => {
+  const src = screen('Comunidades.js')
+  for (const gone of ['Entrar por link', 'parseEntry', 'parseJoinLink', 'parseCommunityJoinLink']) t.absent(src.includes(gone), gone)
+  t.ok(src.includes('Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'))
+  const g = await groups()
+  t.is(g.parseJoinLink, undefined)
+  t.is(g.parseCommunityJoinLink, undefined)
+})
+
+test('a non-member sees an invite card with one join button, from the index too', async (t) => {
+  const src = screen('Comunidade.js')
+  t.ok(src.includes("const JOIN_PUBLIC_TEXT = 'Participar é público: sua entrada fica registrada no seu diário.'"))
+  t.ok(src.includes("v.state === 'pending'") && src.includes('setJoinNote(JOIN_PENDING_TEXT)'))
+  const a = src.indexOf('if (fromIndex) {')
+  const fromIndex = src.slice(a, src.indexOf('} else if (info === null', a))
+  t.ok(fromIndex.includes('<JoinCard') && fromIndex.includes('note={joinNote}') && fromIndex.includes('{checkBox}'))
+  t.ok(fromIndex.includes("label='Compartilhar'"), 'Compartilhar stays for everyone')
+  t.absent(fromIndex.includes("label='Entrar'"), 'the only join button is in the card')
+  const held = src.slice(src.indexOf('const joinable ='))
+  t.ok(held.includes('<JoinCard') && held.includes("label='Compartilhar'"))
+  t.absent(held.includes('joinWord') || held.includes("label='Entrar'") || held.includes("'Pedir entrada'"), 'no second join button beside the card')
 })

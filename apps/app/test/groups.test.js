@@ -135,18 +135,14 @@ test('no em dash in any label', async (t) => {
   t.absent(all.some((s) => s.includes('\u2014')))
 })
 
-test('joinLink and parseJoinLink', async (t) => {
-  const { joinLink, parseJoinLink } = await load()
+test('joinLink builds the path; the paste parsers are gone', async (t) => {
+  const g = await load()
+  const { joinLink } = g
   t.is(joinLink(A), '/g/' + A)
   t.is(joinLink(A.toUpperCase()), '/g/' + A)
   for (const bad of [null, 7, 'ab', A + 'a', 'zz'.repeat(32)]) t.is(joinLink(bad), null)
-  t.is(parseJoinLink('/g/' + A), A)
-  t.is(parseJoinLink(' /g/' + A.toUpperCase() + '/ '), A)
-  t.is(parseJoinLink('https://varanda.example/g/' + A + '?x=1#y'), A)
-  t.is(parseJoinLink(joinLink(B)), B, 'round trip')
-  for (const bad of ['/g/' + A + 'a', '/g/ab', '/x/' + A, 'g/' + A, '/g/' + A + '/extra', '//evil.example/g/' + A, 'javascript:/g/' + A, '', null, 3]) {
-    t.is(parseJoinLink(bad), null, String(bad))
-  }
+  t.is(g.parseJoinLink, undefined)
+  t.is(g.parseCommunityJoinLink, undefined)
 })
 
 test('reconcile: join and leave', async (t) => {
@@ -287,17 +283,6 @@ test('groups.js stays pure: no React, react-native or Node built-ins', async (t)
   t.alike(imports.sort(), ['./format.js', '@varanda/rpc'])
   t.absent(/\b(require|process|Buffer)\b/.test(src.replace(/\/\/.*$/gm, '')))
   t.absent(src.includes('\u2014'))
-})
-
-test('parseCommunityJoinLink mirrors group links for community paths', async (t) => {
-  const { parseCommunityJoinLink, parseJoinLink } = await load()
-  for (const text of ['/c/' + A, ' /c/' + A.toUpperCase() + '/ ', 'https://varanda.example/c/' + A + '?x=1#y', 'http://example.test/c/' + A + '#x']) {
-    t.is(parseCommunityJoinLink(text), A, text)
-    t.is(parseJoinLink(text), null, 'a community link is not a group link')
-  }
-  for (const bad of ['/c/' + A + 'a', '/c/ab', '/g/' + A, 'c/' + A, '/c/' + A + '/extra', '//evil.example/c/' + A, 'javascript:/c/' + A, '/c/' + 'zz'.repeat(32), '', null, 3]) {
-    t.is(parseCommunityJoinLink(bad), null, String(bad))
-  }
 })
 
 test('reconcile: community join uses the role from community.info', async (t) => {

@@ -47,8 +47,9 @@ ler_associacoes() {
 # função retorna 1, para quem chamou falhar com a mensagem certa. O
 # handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
 # retorno https /account/app/conta depois de conferir esta declaração do
-# Digital Asset Links; o app não declara intent-filter https, então não
-# toma para si nenhum link do site. No iOS basta webcredentials: a Apple
+# Digital Asset Links; o app declara App Links (autoVerify) só para /c/ e
+# /g/ de bora.varanda.app: só esses links abrem no app instalado; o resto
+# do site continua no navegador. No iOS basta webcredentials: a Apple
 # exige que o host do retorno https do ASWebAuthenticationSession esteja
 # associado ao app pelos domínios de webcredentials.
 gravar_associacoes() {
