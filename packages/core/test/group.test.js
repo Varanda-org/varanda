@@ -5,7 +5,7 @@ const {
   MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, GROUP_TYPES, MAX_GROUPS_PER_COMMUNITY,
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
-  groupCreateRecord, communityAdmit, communityBan, communityHide,
+  groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, orderKey, compareOrder, isFuture, buildGroup, buildCommunity
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
@@ -183,7 +183,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -2061,4 +2061,87 @@ test('canon text is unchanged for ordinary values', (t) => {
   const reordered = entries.map((e) => ({ seq: e.seq, record: Object.fromEntries(Object.entries(e.record).reverse()) }))
   const g = buildGroup({ ...w.input(), writers: [{ key: wX, diary: X, entries }, { key: wX, diary: X, entries: reordered }] })
   t.ok(g.writers.has(wX), 'key order alone is no fork')
+})
+
+test('group-invites shapes', async (t) => {
+  const r = groupInvites({ on: true, seen: { writer: wA, seq: 1, x: 1 }, at: AT(1) })
+  t.alike(r, { type: 'group-invites', on: true, seen: { writer: wA, seq: 1 }, at: AT(1) })
+  t.is(validateGroupRecord(r, 1), null, 'a writer may carry one')
+  t.is(validateGroupRecord(r, 1, { root: true }), null)
+  t.is(validateGroupRecord(r, 1, { private: true }), null, 'plaintext in a private group')
+  t.is(validateGroupRecord({ ...r, extra: 1 }, 1), 'malformed', 'extra key')
+  t.is(validateGroupRecord({ type: 'group-invites', on: true, at: AT(1) }, 1), 'malformed', 'missing seen')
+  t.is(validateGroupRecord({ ...r, on: 1 }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, seen: { writer: wA } }, 1), 'seen-invalid')
+  t.is(validateGroupRecord({ ...r, at: 'x' }, 1), 'date-invalid')
+  t.is(validateGroupRecord({ ...r, group: null }, 1), 'malformed', 'the community shape on a group core')
+  t.is(validateGroupRecord({ ...r, group: G }, 1, { root: true }), 'malformed')
+  await t.exception.all(async () => groupInvites({ on: 'yes', at: AT(1) }), /malformed/)
+})
+
+test('memberInvite: false by default, the last counted record in causal order', (t) => {
+  t.is(buildGroup({}).memberInvite, false, 'the empty result')
+  const w = world().add(X, wX)
+  t.is(buildGroup(w.input()).memberInvite, false, 'no record')
+  const on = w.push(G, groupInvites({ on: true, at: AT(1) }))
+  t.is(buildGroup(w.input()).memberInvite, true)
+  // An earlier clock never moves the off before the on it saw.
+  w.push(G, groupInvites({ on: false, seen: on, at: AT(0) }))
+  t.is(buildGroup(w.input()).memberInvite, false)
+  w.push(G, groupInvites({ on: true, at: AT(3) }))
+  t.is(buildGroup(w.input()).memberInvite, true)
+})
+
+test('memberInvite: a group admin counts, a plain member never', (t) => {
+  const w = world().add(A, wA).add(X, wX)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  w.push(wX, groupInvites({ on: true, at: AT(2) }))
+  t.is(buildGroup(w.input()).memberInvite, false, 'a member record is ignored')
+  w.push(wA, groupInvites({ on: true, at: AT(3) }))
+  t.is(buildGroup(w.input()).memberInvite, true, 'an admin record counts')
+  w.push(wX, groupInvites({ on: false, at: AT(4) }))
+  t.is(buildGroup(w.input()).memberInvite, true, 'a member cannot turn it off')
+})
+
+test('memberInvite: a demoted admin record stops counting', (t) => {
+  const w = world().add(A, wA)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  w.push(wA, groupInvites({ on: true, at: AT(2) }))
+  t.is(buildGroup(w.input()).memberInvite, true)
+  // Demoted from wA's block 2 on: the record before the cut keeps counting,
+  // like the demoted admin's earlier admits and hides.
+  w.push(G, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 2 }], at: AT(3) }))
+  w.push(wA, groupInvites({ on: false, at: AT(4) }))
+  t.is(buildGroup(w.input()).memberInvite, true, 'the off after the demotion is ignored')
+
+  const v = world().add(A, wA)
+  v.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  v.push(G, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 1 }], at: AT(2) }))
+  v.push(wA, groupInvites({ on: true, at: AT(3) }))
+  t.is(buildGroup(v.input()).memberInvite, false, 'a demoted admin never sets it')
+})
+
+test('memberInvite: an admin record after its leave is withdrawn', (t) => {
+  const w = world().add(A, wA)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  const leave = w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: 1 }], at: AT(2) }))
+  w.push(wA, groupInvites({ on: true, seen: leave, at: AT(3) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(A), 'left')
+  t.is(g.memberInvite, false)
+})
+
+test('memberInvite: an invalid record is skipped and the rest still folds', (t) => {
+  const w = world().add(A, wA).add(X, wX)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  w.push(G, { type: 'group-invites', on: true, seen: null, at: AT(2), extra: 1 })
+  t.is(buildGroup(w.input()).memberInvite, false, 'an extra key is malformed')
+  w.push(wA, { type: 'group-invites', group: null, on: true, seen: null, at: AT(3) })
+  t.is(buildGroup(w.input()).memberInvite, false, 'the community shape is malformed here')
+  post(w, wX, 4)
+  w.push(wA, groupInvites({ on: true, at: AT(5) }))
+  const g = buildGroup(w.input())
+  t.is(g.memberInvite, true)
+  t.alike(visible(g), [wX + ':1'])
+  t.ok(g.admins.has(A))
 })

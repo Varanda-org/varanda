@@ -150,7 +150,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         setInfo(value)
         return reconcile(change, { state: value.state })
       }
-      if (change.action === 'meta') {
+      if (change.action === 'meta' || change.action === 'invite-policy') {
         const value = await request('group.info', { group })
         setInfo(value)
         return reconcile(change, { info: value })
@@ -210,6 +210,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const ban = (member, on) => mutate('group.ban', { group, member, on }, { action: 'ban', member, on })
   const admin = (member, on) => mutate('group.admin', { group, member, on }, { action: 'admin', member, on })
   const leave = () => mutate('group.leave', { group }, { action: 'leave' })
+  const setInvitePolicy = (members) => mutate('group.invitePolicy', { group, members }, { action: 'invite-policy', members })
   const rename = (name) => mutate('group.meta', { group, name }, { action: 'meta', name })
   const rekey = async () => {
     let epoch = null
@@ -327,6 +328,21 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
                 <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
                 {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
                 <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
+              </View>
+            </View>
+            )
+          : null}
+
+        {can('invitePolicy', role)
+          ? (
+            <View>
+              <SectionHeader>Quem pode convidar</SectionHeader>
+              <View style={styles.box}>
+                <View style={styles.inline}>
+                  <Pill label='Só administradores' filled={info.memberInvite !== true} onPress={() => setInvitePolicy(false)} disabled={!node.online || info.memberInvite !== true} />
+                  <Pill label='Membros podem convidar' filled={info.memberInvite === true} onPress={() => setInvitePolicy(true)} disabled={!node.online || info.memberInvite === true} />
+                </View>
+                <Soft>Um convite só avisa a pessoa. Quem recebe escolhe se entra.</Soft>
               </View>
             </View>
             )

@@ -46,7 +46,8 @@ test('create writes the community and Geral, info reads them, the group list sho
     incomplete: false,
     leavePending: false,
     repair: false,
-    dropped: []
+    dropped: [],
+    memberInvite: false
   })
   t.alike(await member.groupList(a), { groups: [{ group, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 })
   const info = await member.groupInfo(a, { group })
@@ -54,7 +55,7 @@ test('create writes the community and Geral, info reads them, the group list sho
   t.is(info.orphan, false)
   const unknown = 'ab'.repeat(32)
   t.alike(await member.communityInfo(a, { community: unknown }), {
-    community: unknown, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: []
+    community: unknown, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false
   })
   await rejects(t, member.communityInfo(a, { community: group }), 'comunidade não encontrada', 'NOT_FOUND')
   await rejects(t, member.communityInfo(a, { community: 'x' }), 'comunidade não encontrada', 'NOT_FOUND')
@@ -365,7 +366,7 @@ test('a pending join names the community and writes the own CW in the header', a
   const header = (await coreEntries(b, entryOf(b, group).writer))[0].record
   t.alike([header.group, header.member], [group, entryOf(b, community).writer])
   t.alike(await member.groupInfo(b, { group }), {
-    group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public'
+    group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member', 'the root arrives and the join counts')
@@ -588,4 +589,30 @@ test('authority comes from the writer: a grant listing only another device refus
   await sync(a, b, c)
   t.is((await member.groupInfo(b, { group: geral })).role, 'admin')
   await rejects(t, member.groupBan(b, { group: geral, member: c.key, on: true }), 'sem permissão no grupo')
+})
+
+test('the members invite flag: the creator on the root, an admin through its CW, a group flag through the CW', async (t) => {
+  const { a, others: [b, c], community } = await world(t)
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  t.is((await member.communityInfo(a, { community })).memberInvite, false)
+  t.alike(await member.communityInvitePolicy(a, { community, members: true }), { ok: true })
+  t.is((await member.communityInfo(a, { community })).memberInvite, true)
+  await rejects(t, member.communityInvitePolicy(a, { community, members: true }), 'nada a alterar')
+  await sync(a, b, c)
+  await rejects(t, member.communityInvitePolicy(c, { community, members: false }), 'sem permissão na comunidade')
+  await rejects(t, member.groupInvitePolicy(c, { group, members: true }), 'sem permissão no grupo')
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
+  await sync(a, b, c)
+  t.alike(await member.communityInvitePolicy(b, { community, members: false }), { ok: true })
+  const cw = entryOf(b, community).writer
+  const flag = (await coreEntries(b, cw)).pop().record
+  t.alike([flag.type, flag.group, flag.on], ['group-invites', null, false], 'written in the CW for the community')
+  t.is((await member.communityInfo(b, { community })).memberInvite, false)
+  t.alike(await member.groupInvitePolicy(b, { group, members: true }), { ok: true })
+  const gflag = (await coreEntries(b, cw)).pop().record
+  t.alike([gflag.type, gflag.group, gflag.on], ['group-invites', group, true], 'written in the CW naming the group')
+  t.is((await member.groupInfo(b, { group })).memberInvite, true)
+  await sync(a, b, c)
+  t.is((await member.groupInfo(a, { group })).memberInvite, true)
+  t.is((await member.communityInfo(a, { community })).memberInvite, false, 'the community flag is unchanged')
 })

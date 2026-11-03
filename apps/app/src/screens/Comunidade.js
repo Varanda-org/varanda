@@ -372,6 +372,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   }))
   const leave = () => leaveWith([])
   const rename = () => mutate('community.meta', { community, name: nameDraft.trim() }, () => setNameDraft(''))
+  const setInvitePolicy = (members) => mutate('community.invitePolicy', { community, members })
   const setJoinMode = (mode) => mutate('community.meta', { community, join: mode })
 
   if (!hosted) {
@@ -682,6 +683,20 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
               {panel && people.rows.length < people.total
                 ? <View style={styles.block}><Pill label={panel === 'members' ? 'mais membros' : 'mais pedidos'} onPress={() => loadPeople(panel, people.rows.length)} pending={people.loading} /></View>
                 : null}
+            </View>
+            )
+          : null}
+        {can('invitePolicy', role)
+          ? (
+            <View>
+              <SectionHeader>Quem pode convidar</SectionHeader>
+              <View style={styles.block}>
+                <View style={styles.inline}>
+                  <Pill label='Só administradores' filled={info.memberInvite !== true} onPress={() => setInvitePolicy(false)} disabled={offline || info.memberInvite !== true} />
+                  <Pill label='Membros podem convidar' filled={info.memberInvite === true} onPress={() => setInvitePolicy(true)} disabled={offline || info.memberInvite === true} />
+                </View>
+                <Soft>Um convite só avisa a pessoa. Quem recebe escolhe se entra.</Soft>
+              </View>
             </View>
             )
           : null}

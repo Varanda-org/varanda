@@ -47,7 +47,8 @@ const RECORD_KEYS = {
   'group-create': ['type', 'group', 'seen', 'at'],
   'group-drop': ['type', 'group', 'on', 'seen', 'at'],
   'group-key': ['type', 'kid', 'basis', 'keys', 'auth', 'at'],
-  'group-sealed': ['type', 'kid', 'nonce', 'box', 'at']
+  'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
+  'group-invites': ['type', 'on', 'seen', 'at']
 }
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
@@ -60,7 +61,8 @@ const ROOT_ONLY = new Set(['group-meta', 'group-admin'])
 const COMMUNITY_KEYS = {
   'group-admit': ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-ban': ['type', 'group', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'],
-  'group-hide': ['type', 'group', 'target', 'on', 'seen', 'at']
+  'group-hide': ['type', 'group', 'target', 'on', 'seen', 'at'],
+  'group-invites': ['type', 'group', 'on', 'seen', 'at']
 }
 const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // The repairs a returning creator writes on its CW once C's root lost its
@@ -270,6 +272,9 @@ function checkRecord (record, seq, root, community, priv) {
       if (reason) return reason
     }
     if (record.join !== 'open' && record.join !== 'approval') return 'malformed'
+  } else if (type === 'group-invites') {
+    if (community && record.group !== null && !isHex64(record.group)) return 'malformed'
+    if (typeof record.on !== 'boolean') return 'malformed'
   } else if (type === 'group-key') {
     if (record.kid !== null && !validRef(record.kid, 1)) return 'malformed'
     // `auth` cites the distributor's CW length (block 0 is its header, so
@@ -369,6 +374,11 @@ function groupLeave ({ seen = null, cuts = [], at = nowIso() } = {}) {
   return build({ type: 'group-leave', seen: copyRef(seen), cuts: copyCuts(cuts), at }, 1, false)
 }
 
+// Whether members may invite: written by the group's creator or an admin.
+function groupInvites ({ on, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-invites', on, seen: copyRef(seen), at }, 1, false)
+}
+
 // Community-core records; `group: null` acts on the community itself.
 function groupCreateRecord ({ group, seen = null, at = nowIso() } = {}) {
   // Written in C's root only.
@@ -398,6 +408,12 @@ function communityDemote ({ group = null, member, cuts = [], seen = null, at = n
 
 function communityBan ({ group = null, member, on, cuts = [], lifts = null, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-ban', group, member, on, cuts: copyCuts(cuts), lifts: copyRef(lifts), seen: copyRef(seen), at }, 1, false, true)
+}
+
+// Whether members may invite into C (`group: null`) or into its group
+// `group`, written by community staff.
+function communityInvites ({ group = null, on, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-invites', group, on, seen: copyRef(seen), at }, 1, false, true)
 }
 
 function communityHide ({ group, target, on, seen = null, at = nowIso() } = {}) {
@@ -741,6 +757,7 @@ function emptyGroup () {
     rekeyPending: false,
     entitled: [],
     removals: [],
+    memberInvite: false,
     incomplete: true
   }
 }
@@ -1347,7 +1364,7 @@ function communityLogs (cs, G, taken) {
     for (const x of log.records) {
       const r = x.record
       if (r.type === 'group-leave') records.push({ seq: x.seq, record: { type: 'community-leave', at: r.at } })
-      else if ((r.type === 'group-admit' || r.type === 'group-ban' || r.type === 'group-hide' || r.type === 'group-admin') && r.group === G) records.push(x)
+      else if ((r.type === 'group-admit' || r.type === 'group-ban' || r.type === 'group-hide' || r.type === 'group-admin' || r.type === 'group-invites') && r.group === G) records.push(x)
     }
     if (records.length > 0) out.push({ key: log.key, diary: log.diary, rejoin: null, at: null, records, virtual: true })
   }
@@ -1774,6 +1791,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // latest gated CW drop's `on` (true: out of the catalogue, false: back).
   let cwMeta = null
   const dropOn = new Map()
+  // Whether members may invite: the last counted `group-invites` in causal
+  // order (false without one).
+  let memberInvite = false
 
   // Sending uses the authority the fold counts (a grant a creator's leave
   // withdrew gives none); the raw and lenient layers below decide only what
@@ -2032,6 +2052,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
         break
       case 'group-drop':
         if (cwRepair(n)) dropOn.set(r.group, r.on)
+        break
+      case 'group-invites':
+        // Admin authority at the record's position, as for an admit (a
+        // virtual node: community authority inside G); in C a returning
+        // creator's repair on its live CW counts too, as for its CW meta.
+        if (elsewhere(r)) break
+        if (authorized(n) || (isC && cwRepair(n))) memberInvite = r.on
         break
     }
   }
@@ -2584,6 +2611,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       // The groups a counted CW drop takes out now, sorted: the ones an
       // undo (`on: false`) would list again.
       dropped: [...dropped],
+      memberInvite,
       incomplete: false
     }
     return { result, state }
@@ -2615,6 +2643,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // The writers the fold counted (root included when bound): a record in
     // any other core, even one bound by the diary, is not part of the group.
     writers: counted,
+    memberInvite,
     incomplete: false
   }
   return { result, state }
@@ -2906,6 +2935,7 @@ function emptyCommunity () {
     general: null,
     created: new Map(),
     dropped: [],
+    memberInvite: false,
     incomplete: true
   }
 }
@@ -2974,6 +3004,7 @@ module.exports = {
   groupMeta,
   groupAdmin,
   groupLeave,
+  groupInvites,
   groupCreateRecord,
   communityAdmit,
   communityBan,
@@ -2981,6 +3012,7 @@ module.exports = {
   communityMetaCw,
   communityDrop,
   communityHide,
+  communityInvites,
   groupKey,
   groupSealed,
   sealedInner,

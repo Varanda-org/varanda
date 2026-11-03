@@ -84,6 +84,27 @@ test('can: every action per role', async (t) => {
   t.absent(can('post', null))
 })
 
+test('can: invite and invitePolicy', async (t) => {
+  const { can, ROLES } = await load()
+  for (const role of ROLES) {
+    const staff = role === 'creator' || role === 'admin'
+    t.is(can('invitePolicy', role), staff, role + ' invitePolicy')
+    t.is(can('invite', role), staff, role + ' invite')
+    t.is(can('invite', role, { memberInvite: true }), staff || role === 'member', role + ' invite on')
+  }
+  t.absent(can('invite', null, { memberInvite: true }))
+})
+
+test('reconcile: invite-policy', async (t) => {
+  const { reconcile } = await load()
+  const c = { action: 'invite-policy', members: true }
+  t.is(reconcile(c, { info: { memberInvite: true } }), 'landed')
+  t.is(reconcile(c, { info: { memberInvite: false } }), 'not-landed')
+  t.is(reconcile(c, { info: {} }), 'unknown')
+  t.is(reconcile(c, {}), 'unknown')
+  t.is(reconcile({ action: 'invite-policy', members: false }, { info: { memberInvite: false } }), 'landed')
+})
+
 test('can: own messages and community admins', async (t) => {
   const { can } = await load()
   t.ok(can('hide', 'member', { own: true }), 'an author hides their own message')
