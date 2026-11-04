@@ -8,7 +8,8 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 
 export function PushNote ({
   text = 'Receber avisos neste aparelho',
@@ -17,6 +18,8 @@ export function PushNote ({
   onClose,
   inset = false
 }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.note, inset && { paddingTop: 6 + insets.top }]}>
@@ -48,7 +51,7 @@ export function PushNote ({
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   note: {
     flexDirection: 'row',
     alignItems: 'center',

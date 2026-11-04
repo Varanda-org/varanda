@@ -4,9 +4,12 @@
 import { Pressable, StyleSheet, View } from 'react-native'
 import { HelpButton } from './Help'
 import { Icon } from './Icon'
-import { colors } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
-export function BellButton ({ onPress, badged, active, color = colors.soft, style }) {
+export function BellButton ({ onPress, badged, active, color, style }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const tint = color === undefined ? colors.soft : color
   return (
     <Pressable
       accessibilityRole='button'
@@ -16,7 +19,7 @@ export function BellButton ({ onPress, badged, active, color = colors.soft, styl
       style={style}
     >
       <View style={styles.iconWrap}>
-        <Icon name='sino' size={22} color={active ? colors.accent : color} />
+        <Icon name='sino' size={22} color={active ? colors.accent : tint} />
         {badged ? <View style={styles.dot} /> : null}
       </View>
     </Pressable>
@@ -24,6 +27,7 @@ export function BellButton ({ onPress, badged, active, color = colors.soft, styl
 }
 
 export function TopActions ({ help, onAvisos, avisosNew, avisosActive }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.row}>
       {help ? <HelpButton doc={help} /> : null}
@@ -34,7 +38,7 @@ export function TopActions ({ help, onAvisos, avisosNew, avisosActive }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   // Anchors the dot to the icon's corner, as in the tab bar.
   iconWrap: { position: 'relative' },

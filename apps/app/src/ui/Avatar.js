@@ -25,7 +25,8 @@ import { createMediaCache, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
-import { colors, stripes } from './theme'
+import { stripes } from './theme'
+import { useTheme } from './ThemeProvider'
 
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
@@ -108,6 +109,7 @@ function initialsFromName (name) {
 }
 
 export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri }) {
+  const { colors } = useTheme()
   const fetched = useAvatarUrl(publicKey, picture, persist !== false)
   // The URL that failed to render; the initials stay for it.
   const [broken, setBroken] = useState(null)

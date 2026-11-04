@@ -3217,26 +3217,30 @@ function unreadCount (posts, mark, ownHex) {
   return n
 }
 
-// Whether the newest post moves the stored mark forward (rpc.md 5.82).
-function seenForward (posts, stored) {
+// Whether marking posts[target] moves the stored mark forward (rpc.md 5.82).
+function seenForward (posts, stored, target) {
   const i = posts.findIndex((p) => p.writer === stored.writer && p.seq === stored.seq)
-  if (i >= 0) return i < posts.length - 1
-  const newest = posts[posts.length - 1]
-  return groups.compareOrder(groups.orderKey(newest.at, newest.writer, newest.seq), groups.orderKey(stored.at, stored.writer, stored.seq)) > 0
+  if (i >= 0) return i < target
+  const p = posts[target]
+  return groups.compareOrder(groups.orderKey(p.at, p.writer, p.seq), groups.orderKey(stored.at, stored.writer, stored.seq)) > 0
 }
 
 // rpc.md 5.82.
-async function groupSeen (ctx, { group }) {
+async function groupSeen (ctx, { group, upTo = null }) {
   return withGroupOrPending(ctx, group, async (loaded) => {
     const posts = readablePosts(loaded)
     if (posts.length === 0) return { ok: true }
     const key = group.toLowerCase()
-    const newest = posts[posts.length - 1]
+    // An unlisted cut-off is never stored: a client must not move the mark past
+    // what this node holds, since a stored cursor ahead counts every later post as read.
+    const target = upTo === null ? posts.length - 1 : posts.findIndex((p) => p.writer === upTo.writer && p.seq === upTo.seq)
+    if (target < 0) return { ok: true }
+    const marked = posts[target]
     const marks = readSeenMarks(ctx.dataDir)
     const stored = marks.filter((m) => m.group === key).pop() || null
-    if (stored !== null && !seenForward(posts, stored)) return { ok: true }
+    if (stored !== null && !seenForward(posts, stored, target)) return { ok: true }
     const next = marks.filter((m) => m.group !== key)
-    next.push({ group: key, at: newest.at, writer: newest.writer, seq: newest.seq })
+    next.push({ group: key, at: marked.at, writer: marked.writer, seq: marked.seq })
     storeLib.writeJsonAtomic(seenFile(ctx.dataDir), { v: 1, marks: next.slice(-MAX_SEEN_MARKS) }, 0o600)
     return { ok: true }
   }, (pending) => {

@@ -8,12 +8,15 @@ import { Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
-import { colors, layout } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { layout } from './theme'
 import { TABS } from '../tabs'
 
 export { TABS, tabsFor } from '../tabs'
 
 export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TABS, me }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
@@ -57,7 +60,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   bar: {
     position: 'absolute',
     left: 0,

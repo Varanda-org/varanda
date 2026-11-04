@@ -44,7 +44,8 @@ import { useNode } from '../node'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
-import { colors, motion, type } from './theme'
+import { motion, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 const web = Platform.OS === 'web'
 const INDICATOR = 36
@@ -105,6 +106,8 @@ export function RefreshableList ({
   listRef,
   keepVisiblePosition = false
 }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const syncNow = node && node.syncNow
   const busy = useRef(false) // one refresh across web and native gestures
@@ -559,7 +562,7 @@ export function RefreshableList ({
         maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
         refreshControl={web
           ? undefined
-          : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} />}
+          : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       />
       {web && showIndicator
         ? (
@@ -587,7 +590,7 @@ export function RefreshableList ({
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   wrap: { flex: 1, backgroundColor: colors.bg },
   list: { flex: 1, backgroundColor: colors.bg },
   // Off screen and invisible, yet focusable and read by screen readers.

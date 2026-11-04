@@ -75,7 +75,8 @@ import { useTerms } from './src/useTerms'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
 import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
-import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
+import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
+import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
@@ -95,6 +96,8 @@ import { TopActions } from './src/ui/TopActions'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
+import { paletteFor, statusBarStyle } from './src/appearance.js'
+import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
 import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
@@ -127,6 +130,9 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
+// The native splash stays cream in both schemes (Splash.js), and so does what
+// wraps it: the side insets around it would otherwise show the dark bg.
+const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
 const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', busca: 'Busca', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
@@ -215,6 +221,8 @@ function setupComplete (info) {
 }
 
 function Member () {
+  const styles = useStyles(makeStyles)
+  const { scheme, colors } = useTheme()
   const node = useNode()
   const names = useNames()
   const insets = useSafeAreaInsets()
@@ -1554,17 +1562,30 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringBoot, step])
+  // Light over the Diário band (dark over the offline note above it) and over
+  // Membro's band, which stays on top while offline (its note sits below the
+  // band and the stack layer covers the shell's). The sheets leave the status
+  // bar over the (dimmed) screen behind, so they keep it light there too.
+  const light = step === 'pronto' && (
+    (topEntry !== null && topEntry.screen === 'membro') ||
+    (topEntry === null && tab === 'diario' && node.online !== false)
+  )
+  // Only the final return shows the band; the gates below never do.
+  const bandShown = light && !loadingGate && !holding && !showIntro && !showTerms && (ready || seen)
+  // Runs after ThemeProvider's layout effect, so the band colour wins and a
+  // band that goes away gives back the current scheme's bg.
+  useEffect(() => { applyBandMeta(bandShown, colors.bg) }, [bandShown, colors.bg])
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding) return <View style={[styles.root, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (loadingGate || holding) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
   if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
   if (showTerms) {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
-        <StatusBar style='dark' />
+        <StatusBar style={statusBarStyle(scheme)} />
       </SafeAreaView>
     )
   }
@@ -1573,12 +1594,12 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (connectingSplash) return <View style={[styles.root, { paddingHorizontal: sidePad }]}>{splash}</View>
+    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
-        <StatusBar style='dark' />
+        <StatusBar style={statusBarStyle(scheme)} />
       </SafeAreaView>
     )
   }
@@ -1945,14 +1966,6 @@ function Member () {
     username: ownProfile ? (ownProfile.username || null) : null,
     avatar: ownProfile ? ownProfile.avatar : undefined
   }
-  // Light over the Diário band (dark over the offline note above it) and over
-  // Membro's band, which stays on top while offline (its note sits below the
-  // band and the stack layer covers the shell's). The sheets leave the status
-  // bar over the (dimmed) screen behind, so they keep it light there too.
-  const light = step === 'pronto' && (
-    (topEntry !== null && topEntry.screen === 'membro') ||
-    (topEntry === null && tab === 'diario' && node.online !== false)
-  )
 
   // Set only past the early returns, so the intro, the terms and Conexão do
   // not count as the first screen; a patience expiry latches too.
@@ -1961,7 +1974,7 @@ function Member () {
   // Modal content (sheets, photo viewer) pads itself. The wrapper is
   // permanent: a conditional one would remount Identidade at the reveal.
   return (
-    <View style={[styles.root, { paddingHorizontal: sidePad }]}>
+    <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
       {coveringBoot ? splash : null}
       <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
@@ -2006,7 +2019,9 @@ function Member () {
         }}
       />
       <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
-      <StatusBar style={light ? 'light' : 'dark'} />
+      {/* Mounted after the splash, so it wins: while the boot cover shows it
+          follows the splash, which stays cream on native (Splash.js). */}
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />
     </View>
   )
 }
@@ -2023,24 +2038,28 @@ export default function App () {
     const GateScreen = require('./src/gate/GateScreen').default
     return (
       <SafeAreaProvider>
-        <GateScreen url={GATE_URL} />
+        <ThemeProvider>
+          <GateScreen url={GATE_URL} />
+        </ThemeProvider>
       </SafeAreaProvider>
     )
   }
   return (
     <SafeAreaProvider>
-      <NodeProvider>
-        <NamesProvider>
-          <OutboxProvider>
-            <Member />
-          </OutboxProvider>
-        </NamesProvider>
-      </NodeProvider>
+      <ThemeProvider>
+        <NodeProvider>
+          <NamesProvider>
+            <OutboxProvider>
+              <Member />
+            </OutboxProvider>
+          </NamesProvider>
+        </NodeProvider>
+      </ThemeProvider>
     </SafeAreaProvider>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
@@ -2054,10 +2073,10 @@ const styles = StyleSheet.create({
   toast: {
     position: 'absolute',
     alignSelf: 'center',
-    backgroundColor: colors.ink,
+    backgroundColor: colors.toastBg,
     borderRadius: 999,
     paddingVertical: 8,
     paddingHorizontal: 14
   },
-  toastText: { ...type.counter, color: '#ffffff' }
+  toastText: { ...type.counter, color: colors.toastInk }
 })

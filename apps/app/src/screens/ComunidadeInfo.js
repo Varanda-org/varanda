@@ -27,7 +27,7 @@ import {
   COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_RESERVE_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
   authorityHere, can, communityReserveReached, deviceStaffNote, membersLabel, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
+import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { InviteByName } from '../ui/InviteByName'
@@ -35,6 +35,7 @@ import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NAME_MAX, nameLength } from './NovoGrupo'
 import { WEB_ONLY_MESSAGE } from './Comunidades'
 
@@ -77,6 +78,8 @@ function personName (row) {
 
 // A row that opens or closes one panel in place.
 function PanelRow ({ label, open, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -92,6 +95,8 @@ function PanelRow ({ label, open, onPress }) {
 }
 
 export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
   const bottomPad = useBottomPad()
@@ -588,7 +593,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
-        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={() => { load(); if (panel) loadPeople(panel) }} tintColor={colors.accent} colors={[colors.accent]} />}
+        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={() => { load(); if (panel) loadPeople(panel) }} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
         {body}
       </ScrollView>
@@ -596,7 +601,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   head: { alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingTop: 20, paddingBottom: 6 },
   title: { ...type.barTitle, color: colors.ink, textAlign: 'center' },

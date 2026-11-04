@@ -419,7 +419,7 @@ test('lastLine: who said it and what, never a hidden preview', async (t) => {
   const hidden = lastLine({ hidden: true, preview: 'segredo', name: 'Ana', username: 'ana', mine: true })
   t.is(hidden, HIDDEN_LABEL)
   t.absent(hidden.includes('segredo') || hidden.includes('Ana') || hidden.includes('ana'))
-  t.is(lastLine({ preview: 'oi', mine: true, name: 'Ana' }), 'Você: oi')
+  t.is(lastLine({ preview: 'oi', mine: true, name: 'Ana' }), 'oi', 'the own message carries no author in the text')
   t.is(lastLine({ preview: 'oi', name: 'Ana', username: 'ana' }), 'Ana: oi')
   t.is(lastLine({ preview: 'oi', name: '  ', username: 'ana' }), '@ana: oi')
   t.is(lastLine({ preview: 'oi' }), 'oi')
@@ -428,6 +428,18 @@ test('lastLine: who said it and what, never a hidden preview', async (t) => {
   const flat = lastLine({ preview: 'a\nb\r\nc', name: 'Ana' })
   t.is(flat, 'Ana: a b c')
   t.absent(/[\n\r�]/.test(flat), 'a line break does not survive')
+})
+
+test('lastIsOwn: the own marker only for an own, visible message', async (t) => {
+  const { lastIsOwn, lastLine, OWN_LABEL } = await load()
+  t.is(OWN_LABEL, 'Você')
+  t.is(lastIsOwn({ preview: 'oi', mine: true }), true)
+  t.is(lastIsOwn({ preview: 'oi', mine: true, hidden: true }), false, 'a hidden message has no author')
+  const fake = { preview: 'oi', name: 'Você', mine: false }
+  t.is(lastLine(fake), 'Você: oi', 'a peer named Você stays in the text')
+  t.is(lastIsOwn(fake), false, 'and never gets the own marker')
+  t.is(lastIsOwn({ preview: 'oi', mine: 'true' }), false)
+  for (const v of [null, undefined, 'oi', 1, true]) t.is(lastIsOwn(v), false, String(v))
 })
 
 test('groups.js stays pure: no React, react-native or Node built-ins', async (t) => {

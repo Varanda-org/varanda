@@ -27,7 +27,8 @@ import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { isSeederDown, learnPeeked, peekAll } from './Conversa'
 
 const TABS = ['likes', 'reposts']
@@ -54,6 +55,7 @@ const emptyTab = () => ({
 // Peek-only names: a row shows what the engager's own diary says, never the
 // names cache, so it matches what was verified.
 function EngagerRow ({ row, onOpen }) {
+  const styles = useStyles(makeStyles)
   const profile = { name: row.name, username: row.username }
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -77,6 +79,7 @@ function EngagerRow ({ row, onOpen }) {
 }
 
 export default function Curtidas ({ entry, onBack, onOpenMember }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const bottomPad = useBottomPad()
@@ -288,7 +291,7 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
   tab: {

@@ -4,7 +4,7 @@
 
 import Feather from '@expo/vector-icons/Feather'
 import { View } from 'react-native'
-import { colors } from './theme'
+import { useTheme } from './ThemeProvider'
 
 const GLYPHS = {
   casa: 'home',
@@ -39,12 +39,14 @@ const GLYPHS = {
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
 // default line height adds about 10 %, which pushed the tab labels out).
-export function Icon ({ name, size = 24, color = colors.ink, style }) {
+export function Icon ({ name, size = 24, color, style }) {
+  const { colors } = useTheme()
+  const tint = color === undefined ? colors.ink : color
   // Feather has no chair: drawn on its 24-unit grid with the same 2-unit stroke.
   if (name === 'cadeira') {
     const unit = size / 24
-    const stroke = { position: 'absolute', borderColor: color, borderWidth: 2 * unit, borderRadius: 2 * unit }
-    const leg = { position: 'absolute', top: 15 * unit, width: 2 * unit, height: 6 * unit, borderRadius: unit, backgroundColor: color }
+    const stroke = { position: 'absolute', borderColor: tint, borderWidth: 2 * unit, borderRadius: 2 * unit }
+    const leg = { position: 'absolute', top: 15 * unit, width: 2 * unit, height: 6 * unit, borderRadius: unit, backgroundColor: tint }
     return (
       <View style={[{ width: size, height: size }, style]}>
         <View style={{ ...stroke, left: 7 * unit, top: 3 * unit, width: 10 * unit, height: 10 * unit }} />
@@ -59,7 +61,7 @@ export function Icon ({ name, size = 24, color = colors.ink, style }) {
   // dashed centre line). End points (3,20)-(10,6) and (21,20)-(14,6).
   if (name === 'rua') {
     const unit = size / 24
-    const bar = { position: 'absolute', backgroundColor: color, borderRadius: unit }
+    const bar = { position: 'absolute', backgroundColor: tint, borderRadius: unit }
     const edge = { ...bar, top: (13 - 15.65 / 2) * unit, width: 2 * unit, height: 15.65 * unit }
     const dash = { ...bar, left: 11 * unit, width: 2 * unit }
     return (
@@ -73,7 +75,7 @@ export function Icon ({ name, size = 24, color = colors.ink, style }) {
       </View>
     )
   }
-  return <Feather name={GLYPHS[name] || name} size={size} color={color} style={[{ lineHeight: size }, style]} />
+  return <Feather name={GLYPHS[name] || name} size={size} color={tint} style={[{ lineHeight: size }, style]} />
 }
 
 // Loads the icon font; resolves even when loading fails (glyphs then show

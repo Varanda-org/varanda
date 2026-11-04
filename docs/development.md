@@ -202,6 +202,10 @@ What the local loop cannot do: the debug build is `app.varanda.debug`, signed wi
 
 Phone first: `apps/app` is one codebase and a screen is checked on the phone before the web. `apps/app/test/platformGate.test.js` fails a shared screen that calls a browser API, and `.github/workflows/native.yml` builds the native app on every pull request that may touch it (it skips the builds only when every changed path is outside the app: `docs/`, `apps/site/`, `apps/cli/`, `deploy/`, top-level Markdown, the other workflows and the GitHub templates): the Android debug APK with the commands above (`ubuntu-24.04`, JDK 17, NDK 27.1.12297006, CMake 3.22.1), the iOS app for the simulator, unsigned (`macos-26`, Xcode 26.2, `check-pods-lock.js` against the committed lock), and the Android and iOS JavaScript bundles with `expo export`. A pull request that does not touch the app skips the builds; the `native` job reports both cases and is the name to make required. The builds prove the app compiles and its bundles resolve, not that a screen works on a device.
 
+## Tema claro e escuro
+
+`app.json` tem `userInterfaceStyle` automatic, e a chave `UIUserInterfaceStyle` do `Info.plist` foi removida, para o aparelho decidir o modo. A cor do splash nativo fica creme nos dois modos: `splashscreen_background` no Android e o colorset `SplashScreenBackground` no iOS não têm variante escura, e `android/app/src/main/res/values-night/colors.xml` fica vazio de propósito, para não trocar o splash. A barra de status do iOS começa com `UIStatusBarStyleDarkContent`, para os ícones ficarem escuros sobre o creme antes do JS. As duas paletas ficam em `apps/app/src/appearance.js`; para migrar uma tela ao tema, siga a receita no comentário do topo de `apps/app/src/ui/ThemeProvider.js` (`useStyles` e `useTheme`). Continua proibido rodar `expo prebuild` para aplicar isso: as edições ficam nos arquivos commitados.
+
 ## Builds de teste (EAS)
 
 Configuração em `apps/app/eas.json` (perfis `preview` e `preview-simulator`) e `.easignore` na raiz. Nenhum comando abaixo roda na CI nem num agente: quem tem a conta Expo roda, da pasta `apps/app`.

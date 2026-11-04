@@ -3,14 +3,16 @@
 // Android and web draw a backdrop and a rounded panel. Modal unmounts its
 // children when closed, so callers keep drafts outside the sheet. `background`
 // colours the body down to the bottom edge (home indicator included); it
-// defaults to white.
+// defaults to the card colour.
 
 import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { colors, layout, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { layout, type } from './theme'
 import { sideInset } from './sideInset'
 
 function TopRow ({ onClose, title, left, right }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.topRow}>
       {title
@@ -34,6 +36,7 @@ function TopRow ({ onClose, title, left, right }) {
 
 // Inside the iOS page sheet: its own safe-area insets.
 function IosContent ({ onClose, title, left, right, background, children }) {
+  const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   return (
     <View style={styles.iosRoot}>
@@ -43,7 +46,10 @@ function IosContent ({ onClose, title, left, right, background, children }) {
   )
 }
 
-export function Sheet ({ open, onClose, title, left, right, background = colors.card, children }) {
+export function Sheet ({ open, onClose, title, left, right, background, children }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const bodyBackground = background ?? colors.card
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   if (Platform.OS === 'ios') {
@@ -56,7 +62,7 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
         allowSwipeDismissal
       >
         <SafeAreaProvider>
-          <IosContent onClose={onClose} title={title} left={left} right={right} background={background}>{children}</IosContent>
+          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground}>{children}</IosContent>
         </SafeAreaProvider>
       </Modal>
     )
@@ -80,13 +86,13 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
         <View style={{ paddingLeft: padL, paddingRight: padR }}>
           <TopRow onClose={onClose} title={title} left={left} right={right} />
         </View>
-        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: background }]}>{children}</View>
+        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{children}</View>
       </View>
     </Modal>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   iosRoot: { flex: 1, backgroundColor: colors.card },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   panel: {

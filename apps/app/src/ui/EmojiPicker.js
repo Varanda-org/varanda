@@ -7,9 +7,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { EMOJI_GROUPS, filterEmoji } from '../emoji'
-import { colors } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 export function EmojiPicker ({ open, onPick }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const [group, setGroup] = useState(0)
   const [query, setQuery] = useState('')
   const searchFocused = useRef(false)
@@ -93,7 +95,7 @@ export function EmojiPicker ({ open, onPick }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   panel: {
     marginHorizontal: 16,
     marginBottom: 8,

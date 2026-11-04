@@ -14,9 +14,10 @@ import { LABELS } from '../dm'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { MentionText } from './MentionText'
 import { Pill } from './Pill'
-import { colors } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function DmMessageRow ({ item, onReply, onReport, onOpenInvite, origin = '', now = Date.now() }) {
+  const styles = useStyles(makeStyles)
   const [open, setOpen] = useState(false)
   const mine = item.mine === true
   const time = item.at ? relativeTime(item.at, now) : ''
@@ -68,7 +69,7 @@ export function DmMessageRow ({ item, onReply, onReport, onOpenInvite, origin = 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: { paddingHorizontal: 12, paddingVertical: 4, alignItems: 'flex-start', gap: 4 },
   mine: { alignItems: 'flex-end' },
   bubble: { maxWidth: '82%', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8, gap: 4 },

@@ -15,19 +15,22 @@ import { Btn, ErrorText, Field, Soft, errorText, useAction } from '../ui'
 import { Avatar } from './Avatar'
 import { Pill } from './Pill'
 import { Skeleton } from './States'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 const { displayText } = rpc
 const NOT_FOUND = '@nome não encontrado.'
 const NO_LINK = 'Não foi possível montar o link.'
 const INVITE_SELF = 'Você já está aqui.'
 const INVITE_MEMBER = 'Essa pessoa já é membro.'
+const sentTo = (label) => 'Convite enviado para ' + label + ' pelas Conversas.'
 
 // Exported for the group settings, which sends its own link text through
 // makeText. The send starts only from a tap: an uncertain answer keeps the
 // same { to, text } for one more tap on Tentar de novo (the node re-puts the
 // same drop, so there is no duplicate) and is never resent on its own.
 export function InviteByName ({ request, hosted, online, ownKey, isMember, makeText }) {
+  const styles = useStyles(makeStyles)
   const [input, setInput] = useState('')
   const [candidate, setCandidate] = useState(null)
   const [resolving, setResolving] = useState(false)
@@ -37,6 +40,7 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
   const send = useAction()
   const sendErr = useRef(null)
   const resolveGen = useRef(0)
+  const editGen = useRef(0)
   const search = useMemberSearch({ request, hosted, online, ownKey })
   const offline = !online
   const cls = classifyFollowInput(input)
@@ -44,6 +48,7 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
   const hits = search.hits.filter((h) => h.author !== ownKey)
 
   const typeInput = (t) => {
+    editGen.current++
     setInput(t)
     setCandidate(null)
     setLocalError('')
@@ -81,7 +86,8 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
   }
 
   // The one place dm.send runs, always from a tap.
-  const deliver = async (to, text, checkBox) => {
+  const deliver = async (to, text, checkBox, label) => {
+    const edit = editGen.current
     sendErr.current = null
     setHeld(null)
     setResult('')
@@ -109,31 +115,39 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
       }
     })
     const err = sendErr.current
-    if (r.ok && r.value === 'nodm') return setResult(INVITE_NO_DM)
-    if (r.ok && r.value === 'member') return setLocalError(INVITE_MEMBER)
+    // Typed while dm.send was in flight: every note of this send names who it
+    // was for, so none reads as being about the new draft.
+    const who = editGen.current !== edit && typeof label === 'string' && label !== '' ? label : null
+    if (r.ok && r.value === 'nodm') return setResult(who === null ? INVITE_NO_DM : who + ' ainda não usa as Conversas. Mande o link pelo Compartilhar.')
+    if (r.ok && r.value === 'member') return setLocalError(who === null ? INVITE_MEMBER : who + ' já é membro.')
     if (r.ok) {
-      resolveGen.current++
-      setResolving(false)
-      setResult(INVITE_SENT)
-      setInput('')
-      setCandidate(null)
-      search.clear()
+      // Keep what the person typed during the send.
+      if (editGen.current === edit) {
+        resolveGen.current++
+        setResolving(false)
+        setInput('')
+        setCandidate(null)
+        search.clear()
+        setResult(INVITE_SENT)
+      } else {
+        setResult(who === null ? INVITE_SENT : sentTo(who))
+      }
       return
     }
     if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHeld({ to, text })
-      setResult(INVITE_UNSURE)
+      setHeld({ to, text, label })
+      setResult(who === null ? INVITE_UNSURE : 'Não deu para confirmar se o convite para ' + who + ' foi enviado. Tente de novo: a mensagem não se repete.')
     }
   }
 
-  const invite = (member) => {
+  const invite = (member, label) => {
     if (offline || send.pending) return
     setLocalError('')
     if (typeof ownKey === 'string' && member === ownKey) return setLocalError(INVITE_SELF)
     let text = null
     try { text = makeText() } catch { text = null }
     if (typeof text !== 'string' || text === '') return setLocalError(NO_LINK)
-    deliver(member, text, true)
+    deliver(member, text, true, label)
   }
 
   return (
@@ -148,7 +162,7 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
         ? (
           <View style={styles.inline}>
             <Text style={styles.name} numberOfLines={1}>{candidate.label}</Text>
-            <Btn label='Convidar' onPress={() => invite(candidate.member)} pending={send.pending} disabled={offline} />
+            <Btn label='Convidar' onPress={() => invite(candidate.member, candidate.label)} pending={send.pending} disabled={offline} />
           </View>
           )
         : null}
@@ -169,19 +183,19 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
                 {who.subtitle ? <Text style={styles.handle} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
               </View>
             </View>
-            <Pill label='Convidar' onPress={() => invite(hit.author)} pending={send.pending} disabled={offline || send.pending} />
+            <Pill label='Convidar' onPress={() => invite(hit.author, label)} pending={send.pending} disabled={offline || send.pending} />
           </View>
         )
       })}
       {search.phase === 'ready' && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
-      {held ? <Btn label='Tentar de novo' onPress={() => deliver(held.to, held.text, false)} pending={send.pending} disabled={offline} secondary /> : null}
+      {held ? <Btn label='Tentar de novo' onPress={() => deliver(held.to, held.text, false, held.label)} pending={send.pending} disabled={offline} secondary /> : null}
       {held ? null : <ErrorText>{send.error}</ErrorText>}
       {result ? <Soft>{result}</Soft> : null}
     </View>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   name: { ...type.postName, color: colors.ink, flex: 1 },

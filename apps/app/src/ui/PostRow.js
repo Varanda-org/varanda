@@ -42,7 +42,8 @@ import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
 import { hasMention, MentionText } from './MentionText'
 import { QuoteCard } from './QuoteCard'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
 // A split toggle and its number never share touch area: a mis-tap on the
@@ -63,6 +64,7 @@ function countOf (counts, field) {
 // outline glyphs only). The text-presentation selector keeps it from turning
 // into a coloured emoji.
 function Heart ({ filled, color }) {
+  const styles = useStyles(makeStyles)
   if (!filled) return <Icon name='coracao' size={ICON} color={color} />
   return (
     <View style={styles.heart}>
@@ -73,6 +75,7 @@ function Heart ({ filled, color }) {
 }
 
 function Action ({ label, onPress, disabled, on, count, split, children }) {
+  const styles = useStyles(makeStyles)
   return (
     <Pressable
       accessibilityRole='button'
@@ -97,6 +100,8 @@ export function PostRow ({
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete
 }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
@@ -380,7 +385,7 @@ export function PostRow ({
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: {
     paddingTop: 12,
     paddingHorizontal: 16,

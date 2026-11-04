@@ -111,21 +111,33 @@ const DIDIT_DAILY_MAX = 100000
 // The client's own key shape (../account/hodle.js), so a key readEnv lets
 // through is never one createHodle refuses at start.
 const HODLE_KEY_RE = /^hodle_(live|test)_[\x21-\x7e]{8,200}$/
-// This release ships the first three modes of wallet-routes.js MODES:
-// cadastro (subaccount and KYC only), carteira (adds wallet-create with the
-// member's PIN), the latter only once Hodle confirmed in writing that
-// member-chosen PINs work on individual subaccounts, and pix (adds balance,
-// Pix deposits and Pix payouts).
-const HODLE_MODES = Object.freeze(['cadastro', 'carteira', 'pix'])
+// The modes of wallet-routes.js MODES: cadastro (subaccount and KYC only),
+// carteira (adds wallet-create with the member's PIN), the latter only once
+// Hodle confirmed in writing that member-chosen PINs work on individual
+// subaccounts, pix (adds balance, Pix deposits and Pix payouts) and completo
+// (adds BRLA transfers by @nome and sends to an outside address).
+const HODLE_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
 const HODLE_DAILY_DEFAULT = 100
 const HODLE_DAILY_MAX = 100000
 // wallet-routes.js refuses a cap below its minimum deposit (R$ 1,00).
 const HODLE_MAX_CENTS_MIN = 100
 const HODLE_MAX_CENTS_MAX = 100000000
 const HODLE_MAX_CENTS_DEFAULT = 300000
+// Whole USDC per send (fees included) or conversion. The top is Hodle's own
+// per-transfer limit (MAX_TRANSFER_MICROS in hodle.js).
+const HODLE_MAX_USDC_MIN = 1
+const HODLE_MAX_USDC_MAX = 10000
+const HODLE_MAX_USDC_DEFAULT = 500
+const MICROS_PER_USDC = 1000000
 // The fee kinds each mode can actually charge. A rate for any other kind
-// would never be collected, and the operator must not believe it is.
-const FEE_KINDS_BY_MODE = Object.freeze({ cadastro: [], carteira: [], pix: ['payout'] })
+// would never be collected, and the operator must not believe it is. Money
+// coming in (deposit) and a USDC to BRLA conversion (swap) are never charged.
+const FEE_KINDS_BY_MODE = Object.freeze({
+  cadastro: [],
+  carteira: [],
+  pix: ['payout'],
+  completo: ['payout', 'transfer', 'crypto']
+})
 // PINs belong to members, typed at the moment they sign; the service never
 // holds one, the treasury's included, so one in the environment is a mistake.
 const FORBIDDEN_PIN_VARS = Object.freeze(['VARANDA_HODLE_PIN', 'VARANDA_FEE_TREASURY_PIN'])
@@ -576,6 +588,15 @@ function readHodleEnv (env) {
     if (!(value >= HODLE_MAX_CENTS_MIN && value <= HODLE_MAX_CENTS_MAX)) throw new UsageError('VARANDA_HODLE_MAX_CENTS inválido')
     maxCents = value
   }
+  let maxUsdc = HODLE_MAX_USDC_DEFAULT
+  const rawUsdc = env.VARANDA_HODLE_MAX_USDC
+  const usdcText = typeof rawUsdc === 'string' ? rawUsdc.trim() : null
+  if (rawUsdc !== undefined && usdcText !== '') {
+    const value = usdcText !== null && CANONICAL_INT_RE.test(usdcText) ? Number(usdcText) : NaN
+    if (!(value >= HODLE_MAX_USDC_MIN && value <= HODLE_MAX_USDC_MAX)) throw new UsageError('VARANDA_HODLE_MAX_USDC inválido')
+    maxUsdc = value
+  }
+  const maxUsdcMicros = maxUsdc * MICROS_PER_USDC
   const fees = readFeesEnv(env, mode)
   let webhookSecrets
   try {
@@ -584,7 +605,7 @@ function readHodleEnv (env) {
   } catch {
     throw new UsageError('VARANDA_HODLE_WEBHOOK_SECRETS inválido')
   }
-  return { apiKey, network, mode, dailyLimit, maxCents, fees, webhookSecrets }
+  return { apiKey, network, mode, dailyLimit, maxCents, maxUsdcMicros, fees, webhookSecrets }
 }
 
 // parseFees (../account/fees.js) names only the variable in its RangeError.
@@ -864,7 +885,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, ops, fees: hodleConfig === null ? null : hodleConfig.fees, walletMaxCents: hodleConfig === null ? undefined : hodleConfig.maxCents, walletWebhookSecrets: hodleConfig === null ? null : hodleConfig.webhookSecrets, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, ops, fees: hodleConfig === null ? null : hodleConfig.fees, walletMaxCents: hodleConfig === null ? undefined : hodleConfig.maxCents, walletMaxUsdcMicros: hodleConfig === null ? undefined : hodleConfig.maxUsdcMicros, walletWebhookSecrets: hodleConfig === null ? null : hodleConfig.webhookSecrets, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
