@@ -113,11 +113,15 @@ function authorOf (item, names) {
 // `items` as group.read answers (newest first, hidden ones included with
 // empty text). Rows come oldest first, so the newest sits at the bottom of
 // the conversation. `names` maps a diary key to a name already verified.
+// `text` is escaped with its line breaks. `rawText` goes to MentionText, which
+// escapes each piece itself: a word holding a control or direction mark is
+// only kept unlinked while it still holds the mark, not its U+FFFD.
 export function rowsOf (items, names = {}) {
   const rows = []
   for (const item of mergePages([items])) {
     if (typeof item.writer !== 'string' || !Number.isSafeInteger(item.seq)) continue
     const hidden = item.hidden === true
+    const raw = hidden || typeof item.text !== 'string' ? '' : item.text
     const reply = item.replyTo && typeof item.replyTo.writer === 'string' && Number.isSafeInteger(item.replyTo.seq)
     rows.push({
       id: item.writer + ':' + item.seq,
@@ -127,7 +131,8 @@ export function rowsOf (items, names = {}) {
       at: typeof item.at === 'string' ? item.at : null,
       author: authorOf(item, names),
       hidden,
-      text: hidden ? HIDDEN_LABEL : displayText(typeof item.text === 'string' ? item.text : ''),
+      text: hidden ? HIDDEN_LABEL : displayText(raw, { multiline: true }),
+      rawText: raw,
       replyTo: reply ? item.replyTo.writer + ':' + item.replyTo.seq : null
     })
   }

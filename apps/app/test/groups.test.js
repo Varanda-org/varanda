@@ -3,6 +3,8 @@
 'use strict'
 
 const test = require('brittle')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 const load = () => import('../src/groups.js')
 
 const A = 'ab'.repeat(32)
@@ -47,6 +49,19 @@ test('rowsOf: newest at the bottom, names never raw keys, hidden placeholder', a
   t.is(rowsOf([{ writer: A, diary: A, seq: 1, text: 'a' }, { writer: A, diary: A, seq: 1, text: 'b' }]).length, 1, 'duplicates dropped')
   t.alike(rowsOf([{ text: 'no writer' }, null]), [])
   t.alike(rowsOf(null), [])
+})
+
+test('rowsOf keeps line breaks and hands MentionText the raw text', async (t) => {
+  const { rowsOf, HIDDEN_LABEL } = await load()
+  const at = '2026-10-31T10:00:00.000Z'
+  const [row] = rowsOf([{ writer: A, diary: A, seq: 1, at, text: 'oi\nhttps://a.com‮evil', hidden: false }])
+  t.is(row.text, 'oi\nhttps://a.com�evil', 'line feed kept, direction mark escaped')
+  t.is(row.rawText, 'oi\nhttps://a.com‮evil', 'the mark survives so links.js refuses the word')
+  const [hidden] = rowsOf([{ writer: A, diary: A, seq: 2, at, text: 'segredo', hidden: true }])
+  t.is(hidden.text, HIDDEN_LABEL)
+  t.is(hidden.rawText, '')
+  const source = readFileSync(join(__dirname, '../src/ui/GroupMessageRow.js'), 'utf8')
+  t.ok(source.includes('<MentionText text={item.rawText} style={styles.text} selectable />'))
 })
 
 test('roleOf: from info.role, pending state, creator or writers', async (t) => {

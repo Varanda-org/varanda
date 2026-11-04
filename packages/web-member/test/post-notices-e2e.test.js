@@ -149,6 +149,44 @@ test('post notices end to end: reply, quote, mention, follow, self and forged re
   const cList = await settledRead(C.web, 'C settled')
   t.alike(cList.notices, [], 'C cannot see A\'s notices')
 
+  // Likes and reposts ('varanda/notices/3') on a second post of A, so the
+  // reply rows above stay the only ones on the first. B's own like of B's own
+  // post never reaches A.
+  const second = await A.web.request('post.create', { text: 'outro post' })
+  const secondRef = A.key + ':' + second.seq
+  await push(t, A, 'A pushed the second post')
+  const bOwn = await B.web.request('post.create', { text: 'meu proprio' })
+  await B.web.request('like.set', { to: B.key + ':' + bOwn.seq, on: true })
+  await B.web.request('like.set', { to: secondRef, on: true })
+  await B.web.request('repost.set', { to: secondRef, on: true })
+  await push(t, B, 'B pushed the like and repost')
+  const engaged = await settledRead(A.web, 'A sees the like and repost', (r) => r.notices.some((n) => n.kind === 'like') && r.notices.some((n) => n.kind === 'repost'))
+  const likeRow = engaged.notices.find((n) => n.kind === 'like')
+  const repostRow = engaged.notices.find((n) => n.kind === 'repost')
+  for (const row of [likeRow, repostRow]) {
+    t.is(row.key, B.key, 'the engager')
+    t.is(row.post, secondRef, 'the engaged post')
+    t.is(row.name, 'Bia')
+    t.ok(HEX32.test(row.seen), 'a 32-hex seen token')
+  }
+  t.is(engaged.notices.filter((n) => n.kind === 'like').length, 1, 'one like row, B\'s self-like never shows')
+  t.is(engaged.notices.filter((n) => n.kind === 'repost').length, 1, 'one repost row')
+  t.alike(rowsOf(engaged).filter((r) => r[2] !== 'like' && r[2] !== 'repost'), expected, 'the reply, quote and mention rows stay')
+  t.absent(allKeys(engaged).some((key) => banned.includes(key) || key === 'size' || key === 'length'), 'no count in the result')
+  t.alike((await settledRead(C.web, 'C settled with engagement')).notices, [], 'C sees nothing')
+
+  // Unliking removes the like row (the on:false edge is not kept as a like).
+  await B.web.request('like.set', { to: secondRef, on: false })
+  await push(t, B, 'B pushed the unlike')
+  const unliked = await settledRead(A.web, 'the like row is gone', (r) => !r.notices.some((n) => n.kind === 'like'))
+  t.ok(unliked.notices.some((n) => n.kind === 'repost'), 'the repost row stays')
+
+  // Deleting the post removes the repost row.
+  await A.web.request('post.delete', { to: secondRef })
+  await push(t, A, 'A pushed the delete')
+  const deleted = await settledRead(A.web, 'the repost row is gone', (r) => !r.notices.some((n) => n.kind === 'repost'))
+  t.alike(rowsOf(deleted), expected, 'only the original rows remain')
+
   // B follows A: a follow row, its seen token the follows-only formula.
   await B.web.request('follow.add', { key: A.key })
   await push(t, B, 'B pushed the follow')

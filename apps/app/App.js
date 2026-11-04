@@ -74,7 +74,7 @@ import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } fro
 import { useTerms } from './src/useTerms'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, coverConnecting, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
 import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
@@ -224,6 +224,15 @@ function Member () {
   const bootAt = useRef(Date.now()).current
   const connectingAt = useRef(null)
   const released = useRef(false)
+  // Latched once the first real screen (A Rua, Entrar, Idade with its answer,
+  // Vinculo, Perfil) has shown in this page load, or once the patience ran
+  // out, like released and reachedTabs: a later lock, unlock, generation
+  // change or cleared cache never brings the splash back. released stays
+  // apart: it only ends the connect cover, and a slow native connection
+  // (Conexão after 10 s) still needs the cover over the age read afterwards.
+  const bootCoverAt = useRef(null)
+  const bootStepRef = useRef(null)
+  const bootSettled = useRef(false)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
   // slack makes the re-render see it passed, since nothing re-arms the timer.
@@ -1497,7 +1506,7 @@ function Member () {
   const sidePad = Math.max(insets.left, insets.right)
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
-  const splash = <Splash sidePad={sidePad} edges={sideEdges} />
+  const splash = <Splash edges={sideEdges} />
   // The intro cards come first, once per device (src/intro.js): presentation
   // only, so autosync, the outbox and the invite keep waiting for termsOk. A
   // Google return skips them for that page load without marking them seen.
@@ -1520,10 +1529,38 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
-  if (decision === 'loading' || introState === 'loading') return splash
-  if (holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })) return splash
-  if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
-  if (decision === 'needed' || decision === 'updated' || decision === 'account') {
+  const loadingGate = decision === 'loading' || introState === 'loading'
+  const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
+  const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
+  const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
+  const showConexao = !ready && !seen && !connectingSplash
+  const atShell = !loadingGate && !holding && !showIntro && !showTerms && !connectingSplash && !showConexao
+  // The boot patience is per step and counts only while the shell is what is
+  // on screen, like the connect patience: time on the intro, the terms or
+  // Conexão must not spend it. SLOW_LOOKUP_MS equals the patience, so
+  // 'carregando' needs this clock of its own to reach "Continuar mesmo assim".
+  // Render-time ref writes, as with released.current = true.
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow })
+  if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
+    bootStepRef.current = step
+    bootCoverAt.current = Date.now()
+  }
+  const bootElapsed = atShell && bootCoverAt.current !== null ? Date.now() - bootCoverAt.current : 0
+  const coveringBoot = atShell && holdBootCover({ cover, elapsedMs: bootElapsed, settled: bootSettled.current, step })
+  useEffect(() => {
+    if (!coveringBoot) return
+    const remaining = Math.max(0, bootPatienceMs(step) - (Date.now() - bootCoverAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [coveringBoot, step])
+  // The same root View with the Splash at child 0 is what React preserves
+  // across these returns and the final one, so the chair animation does not
+  // replay and, on the web, the Splash unmount that removes
+  // #varanda-pre-splash happens only when the real screen is ready.
+  if (loadingGate || holding) return <View style={[styles.root, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (showTerms) {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
@@ -1536,7 +1573,7 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })) return splash
+    if (connectingSplash) return <View style={[styles.root, { paddingHorizontal: sidePad }]}>{splash}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -1570,8 +1607,9 @@ function Member () {
     // tabs never render before a successful node.info confirms both.
     let body
     if (step === 'idade') {
-      // Unknown and not failed yet counts as busy: an already verified member
-      // sees the spinner, not the start button, while the result is read.
+      // The first wait for the result stays under the splash (coverBoot); the
+      // busy spinner remains for a recheck, or for a patience reveal, on an
+      // Idade already on screen.
       body = (
         <Idade
           state={ageState}
@@ -1916,11 +1954,16 @@ function Member () {
     (topEntry === null && tab === 'diario' && node.online !== false)
   )
 
+  // Set only past the early returns, so the intro, the terms and Conexão do
+  // not count as the first screen; a patience expiry latches too.
+  if (!coveringBoot) bootSettled.current = true
   // Side insets are applied once here (sidePad); top and bottom by each bar;
-  // Modal content (sheets, photo viewer) pads itself.
+  // Modal content (sheets, photo viewer) pads itself. The wrapper is
+  // permanent: a conditional one would remount Identidade at the reveal.
   return (
     <View style={[styles.root, { paddingHorizontal: sidePad }]}>
-      {content}
+      {coveringBoot ? splash : null}
+      <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
           Publicar is not mounted while locked (its draft and photo go) and
