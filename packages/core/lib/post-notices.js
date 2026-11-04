@@ -3,7 +3,9 @@
 // Post notices ("@b respondeu", "@b citou", "@b mencionou você"): the
 // in-memory index the seeder folds from the posts and username records of
 // the diaries it serves, paged on the varanda/notices/2 channel together with
-// the follow rows of notices.js.
+// the follow rows of notices.js. v3 pages (varanda/notices/3) add the
+// seeder engagement rows here; v2 pages never carry them, because an old
+// client rejects a whole page on a kind it does not know.
 //
 // Trust model: a row is only a candidate. The seeder names (key, seq) and the
 // browser re-reads that signed block from its own copy of the author's diary
@@ -65,6 +67,9 @@ const POST_NOTICES_MAX_AUTHORS = 4096
 const PRIORITY = { reply: 3, quote: 2, mention: 1 }
 const [, KIND_REPLY, KIND_QUOTE, KIND_MENTION] = NOTICE_KINDS
 const KIND_FOLLOW = NOTICE_KINDS[0]
+// Local copy, not notices-v3.js: this module stays browser-safe with the
+// dependencies listed above.
+const ENGAGEMENT_KINDS = Object.freeze(['like', 'repost'])
 
 function isPlainObject (x) {
   if (x === null || typeof x !== 'object' || Array.isArray(x)) return false
@@ -160,7 +165,7 @@ function createPostNoticeIndex ({
   // Exact number of stored rows over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, settle, removeAuthor, foldPost, foldUsername, removePost, pageV2 }
+  return { markPending, settle, removeAuthor, foldPost, foldUsername, removePost, pageV2, pageV3 }
 
   function admit (authorHex) {
     if (tracked.has(authorHex)) return true
@@ -439,7 +444,18 @@ function createPostNoticeIndex ({
   //   incomplete }. followRows are the follow index's rows for target
   // (notices.js rowsFor) and followIncomplete its flag.
   function pageV2 ({ target, followRows = [], isBlocked, issuerUsable, after = null, limit, now = Date.now(), followIncomplete = false } = {}) {
-    const incomplete = truncated.size > 0 || pending.size > 0 || refused.size > 0 || overflow || followIncomplete === true
+    return page({ target, followRows, isBlocked, issuerUsable, after, limit, now, followIncomplete }, null)
+  }
+
+  // pageV2 plus engagementRows ({ key, seq, at, kind: 'like' | 'repost' })
+  // and engagementIncomplete, sorted and sliced together with the rest so a
+  // cursor never skips a row of another kind.
+  function pageV3 ({ target, followRows = [], followIncomplete = false, engagementRows = [], engagementIncomplete = false, isBlocked, issuerUsable, after = null, limit, now = Date.now() } = {}) {
+    return page({ target, followRows, isBlocked, issuerUsable, after, limit, now, followIncomplete }, { rows: engagementRows, incomplete: engagementIncomplete === true })
+  }
+
+  function page ({ target, followRows, isBlocked, issuerUsable, after, limit, now, followIncomplete }, extra) {
+    const incomplete = truncated.size > 0 || pending.size > 0 || refused.size > 0 || overflow || followIncomplete === true || (extra !== null && extra.incomplete)
     const n = clampLimit(limit)
     if (!isHex64(target)) return { items: [], next: null, incomplete }
     const clock = typeof now === 'number' && Number.isFinite(now) ? now : Date.now()
@@ -498,6 +514,15 @@ function createPostNoticeIndex ({
         } catch {}
       }
     }
+    if (extra !== null && Array.isArray(extra.rows)) {
+      for (const r of extra.rows) {
+        try {
+          if (!isPlainObject(r) || !isHex64(r.key) || !isSeq(r.seq) || !isCanonicalIso(r.at)) continue
+          if (!ENGAGEMENT_KINDS.includes(r.kind)) continue
+          consider(r.key, r.seq, r.at, r.kind)
+        } catch {}
+      }
+    }
     rows.sort(compareRows)
     const page = rows.slice(0, n)
     const items = page.map((r) => ({ key: r.key, seq: r.seq, at: r.at, kind: r.kind }))
@@ -530,6 +555,7 @@ function skip (key, target, isBlocked) {
 }
 
 module.exports = {
+  ENGAGEMENT_KINDS,
   MAX_POST_NOTICES_PER_PAIR,
   MAX_POST_NOTICES_PER_AUTHOR,
   POST_NOTICES_MAX_EDGES,

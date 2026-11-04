@@ -2,13 +2,15 @@
 
 // Notices in the browser node (docs/rpc.md 5.28, docs/protocol.md
 // 'Notices link'): `notices.list` answers "who started following me and
-// whom I do not follow yet, and who replied to, quoted or mentioned me" HERE,
-// in the browser. One short-lived seeder link per read: the node proves on
-// 'varanda/notices/2' (or, when the seeder rejects it or leaves it
-// unanswered, 'varanda/notices/1', follows only: activity false) that it owns its diary key (@varanda/core
-// lib/notices-net.js, member role), reads the seeder's candidates
-// ({ key, seq, at, kind } pages, no kind on v1) and keeps only the rows it
-// VERIFIED against author-signed blocks fetched into MEMORY on the same link.
+// whom I do not follow yet, who replied to, quoted or mentioned me, and who
+// liked or reposted my posts" HERE, in the browser. One short-lived seeder
+// link per read: the node proves on 'varanda/notices/3' (or, when the seeder
+// rejects it or leaves it unanswered, 'varanda/notices/2', no likes or
+// reposts, or then 'varanda/notices/1', follows only: activity false) that it
+// owns its diary key (@varanda/core lib/notices-net.js, member role), reads
+// the seeder's candidates ({ key, seq, at, kind } pages, no kind on v1) and
+// keeps only the rows it VERIFIED against author-signed blocks fetched into
+// MEMORY on the same link.
 // The link, the block-0 gate and the budgeted fetch mirror ./peek.js (same
 // names where sensible; peek.js internals are not exported).
 //
@@ -26,8 +28,14 @@
 // diary (a reply to or a quote of one of its post blocks, else an '@nome' in
 // the text naming one of the usernames the own diary verifiably held, under
 // the current revoked issuers), never taken from the seeder's hint; a post
-// that earns none is dropped. The seeder only serves the notices
-// of the key the channel proved (an Ed25519 signature bound to this link's
+// that earns none is dropped. Nor can it forge a like or a repost: block
+// `seq` must be the author's signed like or repost with on: true, the
+// claimed `at` and a target in this node's diary, the target must be a post
+// the own diary still holds, a later signed toggle of the same target in the
+// tail drops the row (an unlike, or a newer like that is the row instead),
+// and one author's like (or repost) of one post is one row, the highest seq.
+// The kind is the signed block's type, never the hint, and only a v3 read
+// lists it. The seeder only serves the notices of the key the channel proved (an Ed25519 signature bound to this link's
 // Noise key), and no core is replicated nor any proof signed before its hello
 // verified (role 'seeder' and seederCertForKey on the Noise key, as
 // ./sync.js). The stored follows, blocklist and revoked issuers are
@@ -36,13 +44,13 @@
 // reveals to the seeder only what it already knows: this node's diary key,
 // which the sync link advertises on the same IP. Nothing is stored anywhere.
 // DATA FLOWS: browser memory only: no kv entry, no replica, nothing written;
-// the only storage core opened is the own diary, read (a v2 read only).
+// the only storage core opened is the own diary, read (a v2 or v3 read only).
 // A small cache keeps the retained evidence of verified rows (block 0,
 // profile and username records, the facts block `seq` signed) for
 // NOTICES_CACHE_TTL_MS, at most NOTICES_CACHE_MAX rows; every hit re-runs
 // the verdict and the kind with the current revoked issuers, own context
-// and clock (never a cached name, kind or verdict). A v2 read also reads the
-// own diary once (the session's ownContext, cached on its length).
+// and clock (never a cached name, kind or verdict). A v2 or v3 read also
+// reads the own diary once (the session's ownContext, cached on its length).
 // COST: one WebSocket + Noise + hello + proof + at most NOTICES_MAX_SEEDER_PAGES
 // pages, then per unverified row one memory core and at most
 // NOTICES_MAX_BLOCKS_PER_ROW block requests (block 0, `seq`, blocks 1..2 and
@@ -60,7 +68,7 @@ const { attachAdmission } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = require('@varanda/core/lib/peek')
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
-const { attachNotices, attachNoticesV2, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
+const { attachNotices, attachNoticesV2, attachNoticesV3, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
 const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
 const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
@@ -161,6 +169,10 @@ function postKind (facts, ctx) {
   return null
 }
 
+function isEngagement (type) {
+  return type === 'like' || type === 'repost'
+}
+
 // ownKey: () => Promise<lowercase hex64> (the session's requireOwnKey).
 // sign(payload, own): -> 64-byte Ed25519 signature by the identity key for
 // the diary key `own`; may throw (locked, mismatch), which rejects the read.
@@ -214,12 +226,12 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // ---- the notices link (mirrors peek.js openLink) ----
 
   // Dials the seeder with an ephemeral Noise key, attaches the muxer, the
-  // admission channel with an EMPTY inventory and both notices channels (on
+  // admission channel with an EMPTY inventory and every notices channel (on
   // the muxer before the hello, so protomux pairs the seeder's open), and
   // resolves once the hello verified exactly as ./sync.js does. The proof is
   // never signed before that: the admission channel opens first, so an
   // honest seeder's hello precedes its challenge. -> the link
-  // { noise, peer, notices, noticesV2, verified }; rejects Error('sem conexão com o semeador'),
+  // { noise, peer, notices, noticesV2, noticesV3, verified }; rejects Error('sem conexão com o semeador'),
   // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
   // text, never the seeder's). The link runs behind a frame guard
   // (./ws-stream.js guardedWsStream): a frame over maxFrame is cut at its
@@ -243,7 +255,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       })
       noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
-      const link = { noise, peer: null, notices: null, noticesV2: null, verified: false }
+      const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -293,8 +305,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
               if (ev && ev.event === 'peer-dropped') warn('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
             }
           })
-          // Both channels: the read uses v2 when the seeder pairs it and
-          // falls back to v1 (follows only) otherwise.
+          // Every channel: the read uses v3 when the seeder pairs it, else
+          // v2 (no likes or reposts), else v1 (follows only).
           const noticesOpts = {
             role: 'member',
             ownKey: own,
@@ -306,6 +318,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           }
           link.notices = attachNotices(noise, noticesOpts)
           link.noticesV2 = attachNoticesV2(noise, noticesOpts)
+          link.noticesV3 = attachNoticesV3(noise, noticesOpts)
         } catch {
           finish(new Error(NO_SEEDER))
         }
@@ -325,6 +338,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     if (link !== null) {
       try { if (link.notices !== null) link.notices.close() } catch {}
       try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
+      try { if (link.noticesV3 !== null) link.noticesV3.close() } catch {}
       link.noise.destroy()
     }
   }
@@ -363,8 +377,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
 
   // The signed evidence for one seeder item, fetched into a fresh memory
   // core on the read's link: block 0 alone first (the gate, fork and quota
-  // on the verified state), then block `seq` (a follow of this node, or a
-  // post, at the claimed `at`), then the head and the signed tail. -> { state: 'ok', evidence } | { state: 'dropped' } |
+  // on the verified state), then block `seq` (a follow of this node, a
+  // post, or an on: true like or repost of this node's post, at the claimed
+  // `at`), then the head and the signed tail. -> { state: 'ok', evidence } | { state: 'dropped' } |
   // { state: 'pending' } (cut: no verdict, the row is left for a later read).
   // A block that did not arrive or is oversized drops the row and marks the
   // read incomplete. Never throws. Items of one author run one after the
@@ -441,6 +456,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           quote: signed.quote === undefined ? null : { author: signed.quote.author, seq: signed.quote.seq },
           mentions: mentionTokens(signed.text)
         }
+      } else if (isEngagement(signed.type) && signed.on === true && signed.to.author === ctx.own) {
+        facts = { type: signed.type, to: { author: signed.to.author, seq: signed.to.seq } }
       } else {
         return DROPPED
       }
@@ -475,12 +492,14 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         seqs.add(seq)
         const record = decodeBlock(raw)
         entries.push({ seq, record })
-        const del = validRecordCopy(record, seq)
-        if (del !== null && del.type === 'delete' && del.seq >= 1 && del.seq < length) gone.add(del.seq)
-        if (facts.type === 'follow' && seq > item.seq) {
-          const copy = validRecordCopy(record, seq)
+        const copy = validRecordCopy(record, seq)
+        if (copy !== null && copy.type === 'delete' && copy.seq >= 1 && copy.seq < length) gone.add(copy.seq)
+        if (copy !== null && seq > item.seq) {
           // A later signed unfollow of this node: the seeder's edge is stale.
-          if (copy !== null && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
+          if (facts.type === 'follow' && copy.type === 'follow' && copy.key === ctx.own && copy.on === false) return DROPPED
+          // A later toggle of the same target: an unlike ends the row, and a
+          // later like is the row that stands for it.
+          if (copy.type === facts.type && isEngagement(copy.type) && copy.to.author === facts.to.author && copy.to.seq === facts.to.seq) return DROPPED
         }
       }
       // The signed length and byteLength advance on upgrade (peek.js).
@@ -507,7 +526,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return true
   }
 
-  // -> { state: 'accepted', row } | { state: 'dropped' } | { state: 'pending' }.
+  // -> { state: 'accepted', row, supersedes } | { state: 'dropped' } |
+  // { state: 'pending' }; supersedes is null or an earlier accepted row this
+  // one replaces (a like or repost of the same post by the same author at a
+  // lower seq), which the caller drops.
   // The seeder's kind is only a hint: a v1 item has none and means 'follow';
   // a 'follow' hint is filtered before any block is fetched, and whatever
   // the hint, the kind of the row is the one the signed block proves.
@@ -528,12 +550,19 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
     if (evidence.at !== item.at) return DROPPED
     let kind
-    if (evidence.facts.type === 'follow') {
+    const facts = evidence.facts
+    if (facts.type === 'follow') {
       kind = 'follow'
       if (!hintFollow && !claimFollow(item.key, ctx)) return DROPPED
+    } else if (isEngagement(facts.type)) {
+      // Only a v3 read lists likes and reposts, and only of a post the own
+      // diary still holds (a deleted block is not among ctx.posts).
+      if (!ctx.v3 || facts.to.author !== ctx.own || !ctx.posts.has(facts.to.seq)) return DROPPED
+      if (Date.parse(evidence.at) - Date.now() > MAX_FUTURE_MS) return DROPPED
+      kind = facts.type
     } else {
       // A follows-only (v1) read lists follows only.
-      kind = ctx.v2 ? postKind(evidence.facts, ctx) : null
+      kind = ctx.v2 ? postKind(facts, ctx) : null
       if (kind === null || Date.parse(evidence.at) - Date.now() > MAX_FUTURE_MS) return DROPPED
     }
     // The verdict, always fresh: certificate with the CURRENT revoked
@@ -549,7 +578,16 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       now: Date.now()
     })
     if (v.reason !== null) return DROPPED
-    return { state: 'accepted', row: { key: item.key, seq: item.seq, at: item.at, kind, name: v.name, avatar: v.avatar, username: v.username } }
+    const row = { key: item.key, seq: item.seq, at: item.at, kind, name: v.name, avatar: v.avatar, username: v.username }
+    if (!isEngagement(kind)) return { state: 'accepted', row, supersedes: null }
+    row.post = facts.to.author + ':' + facts.to.seq
+    // One row per (author, post, kind) however many on: true blocks the
+    // seeder names: the highest seq, the latest toggle, stands.
+    const ref = item.key + ':' + row.post + ':' + kind
+    const prior = ctx.claimedEngagements.get(ref)
+    if (prior !== undefined && prior.seq > item.seq) return DROPPED
+    ctx.claimedEngagements.set(ref, { seq: item.seq, row })
+    return { state: 'accepted', row, supersedes: prior === undefined ? null : prior.row }
   }
 
   // ---- read ----
@@ -562,7 +600,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
 
   // ownContext: () => Promise<{ names: Map username -> issuer, posts: Set of
   // seqs }>, the own diary's verified names and post blocks; called only on
-  // a v2 read, so a follows-only read opens no storage core.
+  // a v2 or v3 read, so a follows-only read opens no storage core.
   async function readWith (run, { limit, after }, ownContext) {
     const deadline = Date.now() + L.deadlineMs
     // Preparation: kv reads only, no core is opened.
@@ -574,25 +612,32 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
     const mod = await moderation(storage, association)
     checkAborted(run)
-    // activity is false only on a read that used v1 because the seeder did
-    // not take v2: every other result says nothing about the seeder's
+    // activity is false only on a read that used v1 because the seeder took
+    // neither v3 nor v2: every other result says nothing about the seeder's
     // channels and stays neutral (true, no "follows only" banner).
     if (mod.blocked.has(own)) return { notices: [], next: null, incomplete: false, supported: true, activity: true }
 
     const link = await openLink(run, own)
     checkAborted(run)
     const left = () => deadline - Date.now()
-    // v2 first: it carries the follows too. v1 is consulted when the seeder
-    // rejected v2 or left it unanswered, and the channel not used is closed.
-    const supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
+    // v3 first, then v2: each carries every older kind. A rejected open
+    // settles false at once, so only a channel the seeder leaves unanswered
+    // is waited for. v1 is consulted when the seeder took neither, and the
+    // channels not used are closed.
+    const supportedV3 = await within(link.noticesV3.supported, Math.min(L.requestTimeoutMs, left()))
     checkAborted(run)
+    const v3 = supportedV3 === true
+    let supportedV2 = true
+    if (!v3) supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
+    checkAborted(run)
+    // v2 here means the v2 shape (seq cursor, activity), which v3 shares.
     const v2 = supportedV2 === true
     let supported = true
     if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
     checkAborted(run)
-    // v2 unanswered and v1 not taken: nothing known yet, the seeder may
-    // answer later.
-    if (supportedV2 === TIMEOUT && supported !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
+    // v3 or v2 unanswered and v1 not taken: nothing known yet, the seeder
+    // may answer later.
+    if ((supportedV3 === TIMEOUT || supportedV2 === TIMEOUT) && supported !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
     if (supported === TIMEOUT) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
     if (supported !== true) {
       if (!warnedUnsupported) {
@@ -601,8 +646,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       return { notices: [], next: null, incomplete: false, supported: false, activity: true }
     }
-    const handle = v2 ? link.noticesV2 : link.notices
-    try { (v2 ? link.notices : link.noticesV2).close() } catch {}
+    const handle = v3 ? link.noticesV3 : v2 ? link.noticesV2 : link.notices
+    for (const unused of [link.notices, link.noticesV2, link.noticesV3]) {
+      if (unused !== handle) try { unused.close() } catch {}
+    }
     let proved
     try {
       proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
@@ -629,7 +676,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.budget >= L.budgetBytes || run.lost || run.aborted || run.link === null
-    const ctx = { own, follows, mod, deadline, cut, v2, names, posts, claimed: new Set(), claimedSeqs: new Set() }
+    const ctx = { own, follows, mod, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
     // Every seeder item in seeder order, with its outcome.
     const seen = []
     let accepted = 0
@@ -671,6 +718,12 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         if (r.state === 'accepted') {
           e.row = r.row
           accepted++
+          const old = r.supersedes === null ? undefined : seen.find((x) => x.row === r.supersedes)
+          if (old !== undefined) {
+            old.state = 'dropped'
+            old.row = null
+            accepted--
+          }
         } else if (r.state === 'pending') {
           run.incomplete = true
         }

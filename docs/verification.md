@@ -2652,6 +2652,19 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
+### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
+
+Antes, o splash saía cedo e deixava aparecer telas de espera (passkey "carregando…", "Buscando sua conta…", "Confirme sua idade" com o botão desativado e o "Um instante" do perfil). Agora o splash fica até a primeira tela real ser conhecida. Cada etapa tem 10 s de paciência: se uma leitura travar, a tela real aparece mesmo assim. "Buscando sua conta…" (recuperação da conta) continua coberto até o nó encerrar a busca (30 s, ou cerca de 60 s se ela recomeçar uma vez), com teto de 65 s caso o fim da busca nunca chegue. Depois que a primeira tela real aparece, o splash não volta nesta carga da página ou nesta execução do app. Cartões de introdução, Termos e Conexão não mudam; na web, "Entrar" com a passkey é a primeira tela real.
+
+1. [ ] App nativo com sessão retomada e idade já verificada: só o splash até A Rua, sem passar por "Confirme sua idade" com o botão desativado (não realizada ainda).
+2. [ ] Membro com a idade ainda não verificada: splash, depois "Confirme sua idade" com "Verificar minha idade" ativo (não realizada ainda).
+3. [ ] Leitura da idade que não responde: depois de 10 s nessa etapa, aparece "Confirme sua idade" com o indicador de carregamento (não realizada ainda).
+4. [ ] Perfil próprio lento: "Continuar mesmo assim" só aparece depois de 10 s em "Um instante" (não realizada ainda).
+5. [ ] Web: o splash em CSS some uma vez só, sem repetir a animação da cadeira (não realizada ainda).
+6. [ ] Web: "Entrar" com a passkey aparece como antes, e depois de entrar as telas seguem como antes (não realizada ainda).
+7. [ ] Cartões de introdução, Termos e Conexão sem mudança (não realizada ainda).
+8. [ ] Depois de A Rua, bloquear e desbloquear não traz o splash de volta (não realizada ainda).
+
 ## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
 
 ### O que mudou
@@ -4098,9 +4111,32 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Depois de seguir alguém, o "N seguidores" dessa pessoa só muda depois de puxar para atualizar, quando o semeador já leu o novo registro.
 - Limite aceito: um semeador mentiroso pode omitir linhas ou apontar para um registro de seguir autêntico mais velho (a conferência não prova que não existe um "deixar de seguir" posterior); não pode forjar um seguidor.
 
-## 75. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+## 75. Avisos de curtidas e republicações (PR feat/avisos-curtidas)
 
-As seções 1 a 74 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
+Avisos passa a mostrar quem curtiu e quem republicou uma publicação da própria pessoa, ao lado de seguir, resposta, citação e menção. Uma linha por curtida e uma por republicação: "<nome> curtiu sua publicação" e "<nome> republicou sua publicação". Tocar na linha abre essa publicação. O estado vazio usa o texto de `EMPTY_TEXT` em `apps/app/src/notices.js`. Mensagens privadas continuam em Conversas. O canal novo é `varanda/notices/3` (`docs/protocol.md`, "Notices channel v3" e "Notices link"). `varanda/notices/1` e `varanda/notices/2` não mudam: um tipo desconhecido numa página v2 invalida a mensagem `items` inteira, e um cliente antigo a recusa por completo.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum teste desta parte usa a DHT pública (DHT local em `helpers/net.js`, diretório temporário). As caixas abaixo ficam desmarcadas até alguém executar o passo. Dois membros hospedados, A e B, em dois navegadores, contra um semeador com esta mudança.
+
+- [ ] B publica. A curte essa publicação. B, com a página visível ou ao abrir Avisos, vê uma só linha "<A> curtiu sua publicação". Tocar na linha abre a publicação de B.
+- [ ] A republica a mesma publicação. B vê uma segunda linha, "<A> republicou sua publicação", e nada mais dessa ação. Tocar nela abre a mesma publicação.
+- [ ] A descurte. Na próxima leitura de B a linha da curtida some. A linha da republicação fica.
+- [ ] B apaga a publicação. As linhas de curtida e de republicação dessa publicação somem na próxima leitura.
+- [ ] Um semeador antigo, que abre `varanda/notices/2` e não abre `varanda/notices/3`, não mostra linha de curtida nem de republicação. Seguir, resposta, citação e menção continuam, e `activity` fica verdadeiro. Um semeador que só abre `varanda/notices/1` mostra só quem seguiu, com a linha "O semeador desta associação ainda só envia avisos de quem seguiu você."
+- [ ] Uma mensagem privada para B acende o ponto da aba Conversas. O ponto sai de `dm.list` em `apps/app/App.js` (`readDmDot`: pasta `inbox`, `inboxUnread` ou `requests`) e entra no selo da aba junto com o das comunidades (`badges.comunidades` = `groupsBadge || dmDot`). O ponto do sino (Avisos) não acende por essa mensagem, e a mensagem não vira linha em Avisos.
+- [ ] A curtida da própria publicação de A não cria linha para A. Em lugar nenhum Avisos mostra uma contagem de curtidas ou de republicações.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
+- A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
+- Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
+
+## 76. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+
+As seções 1 a 75 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
 
 ### O que mudou
 
