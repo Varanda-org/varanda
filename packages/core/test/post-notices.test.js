@@ -8,6 +8,7 @@ const {
   MAX_POST_NOTICES_PER_AUTHOR,
   POST_NOTICES_MAX_EDGES,
   MAX_UNRESOLVED_TOKENS_PER_AUTHOR,
+  ENGAGEMENT_KINDS,
   createPostNoticeIndex
 } = require('../lib/post-notices')
 const { MAX_FUTURE_MS } = require('../lib/feed')
@@ -42,6 +43,22 @@ function index (opts = {}) {
 
 function page (idx, opts = {}) {
   return idx.pageV2({ target: A, issuerUsable: ok, now: NOW, ...opts })
+}
+
+function page3 (idx, opts = {}) {
+  return idx.pageV3({ target: A, issuerUsable: ok, now: NOW, ...opts })
+}
+
+function walk (fn, opts) {
+  const seen = []
+  let after = null
+  for (;;) {
+    const p = fn({ ...opts, after, limit: 1 })
+    seen.push(...p.items)
+    if (p.next === null) break
+    after = p.next
+  }
+  return seen
 }
 
 // Every key of every object reachable from v.
@@ -279,7 +296,7 @@ test('a page carries no count, total, size or length', (t) => {
   idx.foldPost(B, 2, post('x', D(2), { replyTo: { author: A, seq: 1 } }))
   const keys = allKeys(page(idx, { limit: 1 }))
   for (const bad of ['count', 'total', 'size', 'length']) t.absent(keys.includes(bad), bad)
-  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'removeAuthor', 'removePost', 'settle'])
+  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'pageV3', 'removeAuthor', 'removePost', 'settle'])
 })
 
 test('per-pair rotation keeps working for an unresolved name already admitted', (t) => {
@@ -390,4 +407,95 @@ test('resolving names releases the unresolved quota', (t) => {
   idx.settle(E)
   t.alike(idx.pageV2({ target: E, issuerUsable: ok, now: NOW }).items, [{ key: B, seq: 100, at: D(2), kind: 'mention' }])
   t.is(page(idx, { limit: 64 }).items.length, MAX_UNRESOLVED_TOKENS_PER_AUTHOR)
+})
+
+test('engagement kinds are like and repost, frozen', (t) => {
+  t.alike(ENGAGEMENT_KINDS, ['like', 'repost'])
+  t.ok(Object.isFrozen(ENGAGEMENT_KINDS))
+})
+
+test('pageV2 never carries like or repost rows', (t) => {
+  const idx = index()
+  idx.foldPost(B, 1, post('x', D(1), { replyTo: { author: A, seq: 1 } }))
+  const engagementRows = [{ key: C, seq: 5, at: D(2), kind: 'like' }, { key: C, seq: 6, at: D(3), kind: 'repost' }]
+  const p = page(idx, { engagementRows, engagementIncomplete: true })
+  t.alike(p.items, [{ key: B, seq: 1, at: D(1), kind: 'reply' }])
+  t.is(p.incomplete, false)
+  t.is(p.next, null)
+})
+
+test('pageV3 interleaves likes and reposts with follow and post rows', (t) => {
+  const idx = index()
+  idx.foldPost(B, 2, post('x', D(2), { replyTo: { author: A, seq: 1 } }))
+  idx.foldPost(C, 4, post('x', D(4), { quote: { author: A, seq: 1 } }))
+  const followRows = [{ key: C, seq: 1, at: D(3) }]
+  const engagementRows = [{ key: B, seq: 7, at: D(5), kind: 'like' }, { key: C, seq: 9, at: D(1), kind: 'repost' }]
+  const want = [
+    { key: B, seq: 7, at: D(5), kind: 'like' },
+    { key: C, seq: 4, at: D(4), kind: 'quote' },
+    { key: C, seq: 1, at: D(3), kind: 'follow' },
+    { key: B, seq: 2, at: D(2), kind: 'reply' },
+    { key: C, seq: 9, at: D(1), kind: 'repost' }
+  ]
+  const p = page3(idx, { followRows, engagementRows })
+  t.alike(p.items, want)
+  t.is(p.next, null)
+  t.is(p.incomplete, false)
+  t.alike(Object.keys(p).sort(), ['incomplete', 'items', 'next'])
+  t.alike(walk((o) => page3(idx, o), { followRows, engagementRows }), want, 'cursor across kinds')
+})
+
+test('pageV3 limit 1 returns a newer like before an older reply', (t) => {
+  const idx = index()
+  idx.foldPost(B, 1, post('x', D(1), { replyTo: { author: A, seq: 1 } }))
+  const engagementRows = [{ key: C, seq: 3, at: D(2), kind: 'like' }]
+  const p1 = page3(idx, { engagementRows, limit: 1 })
+  t.alike(p1.items, [{ key: C, seq: 3, at: D(2), kind: 'like' }])
+  t.alike(p1.next, { at: D(2), key: C, seq: 3 })
+  const p2 = page3(idx, { engagementRows, limit: 1, after: p1.next })
+  t.alike(p2.items, [{ key: B, seq: 1, at: D(1), kind: 'reply' }])
+  t.is(p2.next, null)
+})
+
+test('pageV3 hides future likes and skips blocked engagers and the target', (t) => {
+  const idx = index()
+  const future = new Date(NOW + MAX_FUTURE_MS + 1000).toISOString()
+  const engagementRows = [
+    { key: B, seq: 1, at: future, kind: 'like' },
+    { key: C, seq: 2, at: D(3), kind: 'like' },
+    { key: A, seq: 3, at: D(2), kind: 'repost' },
+    { key: B, seq: 4, at: D(1), kind: 'repost' }
+  ]
+  const isBlocked = (key) => key === C
+  t.alike(page3(idx, { engagementRows, isBlocked }).items, [{ key: B, seq: 4, at: D(1), kind: 'repost' }])
+  const later = page3(idx, { engagementRows, isBlocked, now: NOW + 2 * MAX_FUTURE_MS })
+  t.ok(later.items.some((it) => it.seq === 1), 'hidden, not deleted')
+})
+
+test('pageV3 skips malformed engagement rows', (t) => {
+  const idx = index()
+  const good = { key: B, seq: 1, at: D(1), kind: 'like' }
+  const engagementRows = [
+    null,
+    [B, 1],
+    { key: 'zz', seq: 2, at: D(1), kind: 'like' },
+    { key: B, seq: 0, at: D(1), kind: 'like' },
+    { key: B, seq: 3, at: '2026-01-01', kind: 'like' },
+    { key: B, seq: 4, at: D(1), kind: 'follow' },
+    { key: B, seq: 5, at: D(1), kind: 'reply' },
+    { key: B, seq: 6, at: D(1) },
+    good
+  ]
+  t.alike(page3(idx, { engagementRows }).items, [good])
+  t.alike(page3(idx, { engagementRows: 'x' }).items, [])
+})
+
+test('pageV3 incomplete joins the engagement flag with the others', (t) => {
+  const idx = index()
+  t.is(page3(idx).incomplete, false)
+  t.is(page3(idx, { engagementIncomplete: true }).incomplete, true)
+  t.is(page3(idx, { engagementIncomplete: 'yes' }).incomplete, false)
+  t.is(page3(idx, { followIncomplete: true }).incomplete, true)
+  idx.markPending(B)
+  t.is(page3(idx).incomplete, true)
 })

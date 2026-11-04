@@ -1,8 +1,10 @@
-// Avisos: who followed you (and whom you do not follow yet), and who replied,
-// quoted or mentioned you, newest first. A follow row opens the person's
-// profile (the Seguir button is there) and leaves on the next read once you
-// follow back (App.js bumps `refresh` on any follow change). A reply, quote or
-// mention has no pill and opens that post. Private and quiet: no counts, a plain dot never
+// Avisos: who followed you (and whom you do not follow yet), who replied,
+// quoted or mentioned you, and who liked or reposted your posts, newest
+// first. A follow row opens the person's profile (the Seguir button is
+// there) and leaves on the next read once you follow back (App.js bumps `refresh` on any follow change). A
+// reply, quote or mention has no pill and opens that post. A like or repost
+// has no pill and opens the caller's post when the row has a ref, and stays
+// disabled when it does not. Private and quiet: no counts, a plain dot never
 // a number, and no push. Nothing is persisted except the notices already
 // seen, as the node's opaque `seen` tokens (keyed by the identity secret,
 // never a follower key or anything derivable from one; seenStore.*: browser
@@ -96,7 +98,8 @@ function prependNew (currentItems, pageItems) {
 }
 
 // A follow row opens the person's profile. A reply, quote or mention opens
-// the post.
+// the post. A like or repost opens the caller's post when noticeRef has one,
+// and stays disabled when it does not (not a profile, and no post to open).
 function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
   const who = whoOf({ name: item.name, username: item.username })
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
@@ -111,13 +114,14 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
     </View>
   )
   if (kind !== 'follow') {
-    const open = typeof onOpenThread === 'function' ? () => onOpenThread({ ref: noticeRef(item) }) : undefined
+    const ref = noticeRef(item)
+    const open = ref !== null && typeof onOpenThread === 'function' ? () => onOpenThread({ ref }) : undefined
     return (
       <Pressable
         style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
         accessibilityRole='link'
-        accessibilityLabel={line + ', abrir publicação'}
-        accessibilityHint='abre a conversa'
+        accessibilityLabel={ref === null ? line : line + ', abrir publicação'}
+        accessibilityHint={ref === null ? undefined : 'abre a conversa'}
         disabled={!open}
         onPress={open}
       >
