@@ -18,6 +18,8 @@ import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
 import { can, joinLink, reconcile, roleOf } from '../groups'
 import { installationOrigin } from '../installation'
+import { inviteText } from '../inviteMessage'
+import { InviteByName } from './Comunidade'
 import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -119,6 +121,19 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 
   useEffect(() => () => { seqRef.current += 1 }, [])
 
+  // The community name only words the invite; best effort, a miss sends the
+  // unnamed wording.
+  const communityKey = info && typeof info.community === 'string' ? info.community : null
+  const [communityName, setCommunityName] = useState('')
+  useEffect(() => {
+    if (!visible || communityKey === null) return
+    let live = true
+    request('community.info', { community: communityKey }).then((c) => {
+      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+    }).catch(() => {})
+    return () => { live = false }
+  }, [visible, request, communityKey])
+
   // App's web Escape handler pops the screen stack unless the event was
   // handled: while this sheet is open, Escape closes only the sheet.
   useEffect(() => {
@@ -204,6 +219,18 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     } else if (r.uncertain) {
       settle(change, () => mutate(method, params, change))
     }
+  }
+
+  // Pages group.members so the check does not depend on the open panel.
+  const isGroupMember = async (member) => {
+    for (let page = 0; page < 20; page++) {
+      const res = await request('group.members', { group, offset: page * PAGE, limit: PAGE })
+      const rows = Array.isArray(res && res.members) ? res.members : []
+      if (rows.some((r) => r && r.member === member && r.banned !== true)) return true
+      const total = Number.isSafeInteger(res && res.total) ? res.total : 0
+      if (rows.length === 0 || page * PAGE + rows.length >= total) return false
+    }
+    return false
   }
 
   const admit = (member, on) => mutate('group.admit', { group, member, on }, { action: 'admit', member, on })
@@ -329,6 +356,27 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
                 {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
                 <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
               </View>
+            </View>
+            )
+          : null}
+
+        {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
+          ? (
+            <View>
+              <SectionHeader>Convidar para o grupo</SectionHeader>
+              <InviteByName
+                request={request}
+                hosted={node.hosted === true}
+                online={node.online !== false}
+                ownKey={ownKey}
+                isMember={isGroupMember}
+                makeText={() => {
+                  const base = origin()
+                  return base === '' || !link0
+                    ? null
+                    : inviteText({ communityName, groupName: typeof info.name === 'string' ? info.name : '', link: base + link0, group: true })
+                }}
+              />
             </View>
             )
           : null}
