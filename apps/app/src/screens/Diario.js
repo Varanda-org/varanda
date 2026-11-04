@@ -35,7 +35,7 @@ import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
-import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
+import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -50,6 +50,7 @@ import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
 import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
@@ -136,6 +137,7 @@ function postOf (author, seq, record) {
 }
 
 export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -512,7 +514,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   )
 }
 
-const bandButton = {
+const bandButton = (colors) => ({
   position: 'absolute',
   bottom: 12,
   width: 34,
@@ -521,18 +523,18 @@ const bandButton = {
   backgroundColor: colors.dim,
   alignItems: 'center',
   justifyContent: 'center'
-}
+})
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
   plainBand: { backgroundColor: colors.bg },
   // The band buttons, right to left: bell (when there is one), gear, help.
-  bell: { ...bandButton, right: 16 },
-  gear: { ...bandButton, right: 16 },
-  gearShifted: { ...bandButton, right: 58 },
+  bell: { ...bandButton(colors), right: 16 },
+  gear: { ...bandButton(colors), right: 16 },
+  gearShifted: { ...bandButton(colors), right: 58 },
   countsNote: { marginTop: 4 },
-  info: { ...bandButton, right: 58 },
-  infoShifted: { ...bandButton, right: 100 },
+  info: { ...bandButton(colors), right: 58 },
+  infoShifted: { ...bandButton(colors), right: 100 },
   shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,

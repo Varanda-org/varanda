@@ -29,7 +29,8 @@ import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
 import { whoOf } from '../who'
-import { Soft, colors, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { useStyles } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
@@ -101,6 +102,7 @@ function prependNew (currentItems, pageItems) {
 // the post. A like or repost opens the caller's post when noticeRef has one,
 // and stays disabled when it does not (not a profile, and no post to open).
 function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
+  const styles = useStyles(makeStyles)
   const who = whoOf({ name: item.name, username: item.username })
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
   const time = relativeTime(item.at, now)
@@ -149,6 +151,7 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
 }
 
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onOpenThread, onOpenMember }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const now = useNow(60000)
   const bottomPad = useBottomPad()
@@ -521,7 +524,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',

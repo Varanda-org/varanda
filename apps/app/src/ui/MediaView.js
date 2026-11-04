@@ -23,7 +23,7 @@ import { createMediaCache, mediaKey, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
-import { colors } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
@@ -89,6 +89,8 @@ function useMedia (author, descriptor, persist) {
 }
 
 export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const { state, url, retry } = useMedia(author, descriptor, persist !== false)
   const failed = state === 'error'
   const press = failed ? retry : onPress
@@ -125,7 +127,7 @@ export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   tile: { overflow: 'hidden' },
   fill: { ...StyleSheet.absoluteFillObject },
   loading: { backgroundColor: colors.skeleton },

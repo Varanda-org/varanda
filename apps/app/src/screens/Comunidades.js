@@ -16,11 +16,12 @@ import { useNode } from '../node'
 import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
 import { queryPath } from '../search'
 import { COMMUNITY_JOIN_LABELS, PUBLIC_LABEL, membersLabel, roleLabel } from '../groups'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
+import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { Icon } from '../ui/Icon'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Choice, NAME_MAX, nameLength, useEscapeClose } from './NovoGrupo'
 import { Sheet } from '../ui/Sheet'
 
@@ -43,6 +44,8 @@ function communitySubtitle (row) {
 }
 
 function Row ({ title, subtitle, dot, hint, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -118,6 +121,7 @@ function useCommunityNames (groups) {
 // Geral group. An uncertain create is never resent: the list is re-read and
 // the person is told to check it; only closing the sheet lifts the lock.
 function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const [name, setName] = useState('')
   const [join, setJoin] = useState('open')
@@ -182,6 +186,7 @@ function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
 }
 
 export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true
   const bottomPad = useBottomPad()
@@ -333,7 +338,7 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   sheet: { padding: 16, gap: 12 },
@@ -350,6 +355,6 @@ const styles = StyleSheet.create({
   icon: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
   texts: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
-  meta: { ...type.postMeta, color: colors.dim },
+  meta: { ...type.postMeta, color: colors.soft },
   dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent }
 })

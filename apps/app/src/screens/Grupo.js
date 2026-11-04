@@ -32,7 +32,8 @@ import {
   EMPTY_PAGES, PRIVATE_LABEL, REKEY_PENDING_LABEL,
   applyPage, can, itemsOf, joinLabel, membersLabel, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
 } from '../groups'
-import { Btn, ErrorText, Notice, Soft, colors, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { GroupMessageRow } from '../ui/GroupMessageRow'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
@@ -61,6 +62,8 @@ const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
 export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport, onSeen, isTop = true }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const now = useNow(60000)
   const hosted = node.hosted === true
@@ -623,7 +626,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   gear: { paddingHorizontal: 6 },

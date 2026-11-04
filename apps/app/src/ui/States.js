@@ -8,12 +8,14 @@ import { ErrorText, Soft, Spinner } from './index'
 import { Icon } from './Icon'
 import { loopTiming } from './loopMotion'
 import { Pill } from './Pill'
-import { colors, layout, motion, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { layout, motion, type } from './theme'
 
 const native = Platform.OS !== 'web'
 
 // Post-shaped placeholders that pulse while the first page loads.
 export function Skeleton ({ rows = 3 }) {
+  const styles = useStyles(makeStyles)
   const pulse = useRef(new Animated.Value(0.5)).current
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
@@ -43,9 +45,11 @@ export function Skeleton ({ rows = 3 }) {
 }
 
 export function EmptyState ({ icon, title, body, actionLabel, onAction }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <View style={styles.empty}>
-      {icon ? <Icon name={icon} size={40} color={colors.dim} /> : null}
+      {icon ? <Icon name={icon} size={40} color={colors.soft} /> : null}
       <Text style={styles.emptyTitle} accessibilityRole='header'>{title}</Text>
       {body ? <Soft>{body}</Soft> : null}
       {actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}
@@ -54,6 +58,7 @@ export function EmptyState ({ icon, title, body, actionLabel, onAction }) {
 }
 
 export function ErrorState ({ message, onRetry, pending }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.empty}>
       <ErrorText>{message}</ErrorText>
@@ -65,6 +70,7 @@ export function ErrorState ({ message, onRetry, pending }) {
 // The end of a paged list: a spinner while loading, a closing line at the
 // end, or an error with a retry.
 export function ListFooter ({ loading, atEnd, endText = 'Isso é tudo por enquanto.', error, onRetry, pending }) {
+  const styles = useStyles(makeStyles)
   let content = null
   if (error) {
     content = (
@@ -84,6 +90,8 @@ export function ListFooter ({ loading, atEnd, endText = 'Isso é tudo por enquan
 // A pill over the top of a list ("novos posts"); fades and slides in and
 // out, and renders nothing once the exit animation has finished.
 export function NewItemsPill ({ label, visible, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const anim = useRef(new Animated.Value(visible ? 1 : 0)).current
   const [shown, setShown] = useState(visible)
   useEffect(() => {
@@ -108,7 +116,7 @@ export function NewItemsPill ({ label, visible, onPress }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   skRow: { flexDirection: 'row', gap: 12, paddingVertical: 12, paddingHorizontal: 16, width: '100%', maxWidth: layout.column, alignSelf: 'center' },
   skAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.skeleton },
   skLines: { flex: 1, gap: 10, justifyContent: 'center' },

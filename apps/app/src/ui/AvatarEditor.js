@@ -11,7 +11,8 @@ import { Image, PanResponder, Platform, StyleSheet, Text, useWindowDimensions, V
 import { ZOOM_STEP, cropRect, displayRect, initialCrop, limitsOf, nudge, panBy, zoomBy, zoomPercent } from '../media/crop'
 import { ErrorText, Row, Soft } from './index'
 import { Pill } from './Pill'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 const WEB = Platform.OS === 'web'
 const KEY_MOVES = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }
@@ -22,6 +23,7 @@ function isInitial (crop) {
 }
 
 function Framed ({ source, crop, side, style }) {
+  const styles = useStyles(makeStyles)
   const rect = displayRect(crop, source, side)
   return (
     <View style={[styles.round, { width: side, height: side, borderRadius: side / 2 }, style]} pointerEvents='none'>
@@ -35,6 +37,7 @@ function Framed ({ source, crop, side, style }) {
 }
 
 export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
+  const styles = useStyles(makeStyles)
   const { width } = useWindowDimensions()
   const view = Math.max(1, Math.min(280, width - 48))
   const [crop, setCrop] = useState(initialCrop)
@@ -159,7 +162,7 @@ export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   panel: { gap: 12 },
   header: { ...type.section, color: colors.ink },
   stage: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 16 },

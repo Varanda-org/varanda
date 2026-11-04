@@ -34,7 +34,8 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const PAGE = 50
 // Half the names cache's retry window (5 s): see the filter below.
@@ -45,6 +46,8 @@ const NAMES_RETRY_MS = 2500
 // for the whole account (the list never holds the own key: follow.add refuses
 // it). `profile` is undefined while it is being looked up.
 function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, disabled }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
@@ -102,6 +105,8 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
 // @nome the profile cache knows, or 'Alguém sem nome' with a short key
 // fragment so an unknown (possibly planted) entry stands out.
 function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = whoOf(profile)
   const named = profile != null && (who.title !== UNNAMED)
   const title = named ? displayText(who.title) : 'Alguém sem nome'
@@ -116,7 +121,7 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
       onPress={onToggle}
     >
       <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='check' size={14} color='#ffffff' /> : null}
+        {checked ? <Icon name='check' size={14} color={colors.accentInk} /> : null}
       </View>
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
@@ -136,6 +141,7 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
 // (default true): false while another screen is stacked above this one, which
 // stops the filter's automatic paging.
 export default function Seguindo ({ active = true, isTop = true, entry, ownKey, onBack, onReport, onFollowsChanged, onOpenMember, onToast, followsTick, scrollToTop }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   const mine = !entry || typeof entry.key !== 'string' || entry.key.toLowerCase() === own
@@ -454,7 +460,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   legacyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },

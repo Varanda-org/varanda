@@ -11,7 +11,8 @@ import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Sheet } from './Sheet'
 import { Icon } from './Icon'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 import { Body } from './index'
 
 let current = null
@@ -58,6 +59,7 @@ function useHelpTrigger () {
 
 // No Sheet title: it is centred with wide side padding and cuts long titles.
 export function HelpSheet ({ open, onClose, doc }) {
+  const styles = useStyles(makeStyles)
   if (!doc) return null
   return (
     <Sheet
@@ -77,7 +79,10 @@ export function HelpSheet ({ open, onClose, doc }) {
   )
 }
 
-export function HelpButton ({ doc, color = colors.soft, style, size = 22 }) {
+export function HelpButton ({ doc, color, style, size = 22 }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const tint = color === undefined ? colors.soft : color
   const help = useHelpTrigger()
   if (!doc) return null
   return (
@@ -89,7 +94,7 @@ export function HelpButton ({ doc, color = colors.soft, style, size = 22 }) {
         onPress={help.handleShow}
         style={({ pressed }) => [styles.button, style, pressed && styles.pressed]}
       >
-        <Icon name='info' size={size} color={color} />
+        <Icon name='info' size={size} color={tint} />
       </Pressable>
       <HelpSheet open={help.open} onClose={help.handleHide} doc={doc} />
     </>
@@ -97,6 +102,7 @@ export function HelpButton ({ doc, color = colors.soft, style, size = 22 }) {
 }
 
 export function HelpNote ({ doc, children }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.note}>
       <View style={styles.noteText}>{children}</View>
@@ -105,7 +111,7 @@ export function HelpNote ({ doc, children }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   close: { ...type.cancel, color: colors.ink },
   content: { padding: 16, gap: 12 },
   title: { ...type.sheetTitle, color: colors.ink },

@@ -43,7 +43,9 @@ import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
 import Conexao from './Conexao'
 import Carteira from './Carteira'
@@ -58,6 +60,7 @@ const TITLES = {
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
   termos: 'Termos e privacidade',
+  aparencia: 'Aparência',
   instalar: 'Instalar o app',
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
@@ -69,17 +72,32 @@ const TITLES = {
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const state = { disabled: disabled || pending }
   if (expanded !== undefined) state.expanded = expanded
+  if (checked !== undefined) state.checked = checked
+  const radio = checked !== undefined
+  // react-native-web drops accessibilityState (aria-checked carries it) and
+  // presses only buttons on Space, so a radio row handles Space itself.
+  const radioKeys = radio && !(disabled || pending)
+    ? (e) => {
+        if (e.key !== ' ' && e.key !== 'Spacebar') return
+        e.preventDefault()
+        onPress()
+      }
+    : undefined
   return (
     <Pressable
       style={[styles.row, !first && styles.rowDivider]}
-      accessibilityRole='button'
+      accessibilityRole={radio ? 'radio' : 'button'}
       accessibilityLabel={label}
       accessibilityState={state}
+      aria-checked={radio ? checked : undefined}
       disabled={disabled || pending}
       onPress={onPress}
+      onKeyDown={radioKeys}
     >
       <Icon name={icon} size={22} color={colors.soft} />
       <Text style={styles.label}>{pending ? label + '…' : label}</Text>
@@ -91,6 +109,8 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
 }
 
 export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset }) {
+  const styles = useStyles(makeStyles)
+  const { colors, mode, setMode } = useTheme()
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -273,6 +293,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {paying ? <Item icon='credit-card' label='Conta de pagamentos' onPress={() => onNavigate('carteira')} /> : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+              <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
                 ? (
                   <Item
@@ -416,6 +437,24 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             syncState={termsInfo ? termsInfo.syncState : null}
           />
         </View>
+        <View style={shown('aparencia')}>
+          <Page>
+            <View style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
+              {MODES.map((m, i) => (
+                <Item
+                  key={m}
+                  first={i === 0}
+                  icon={m === 'dark' ? 'moon' : m === 'light' ? 'sun' : 'smartphone'}
+                  label={MODE_LABELS[m]}
+                  checked={mode === m}
+                  trailing={mode === m ? 'ok' : null}
+                  onPress={() => setMode(m)}
+                />
+              ))}
+            </View>
+            <Soft>Sistema segue o modo claro ou escuro do aparelho.</Soft>
+          </Page>
+        </View>
         <View style={shown('instalar')}>
           <Page>
             {install.canPrompt ? <Btn label='Instalar' onPress={() => { install.promptInstall() }} /> : null}
@@ -441,7 +480,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   hidden: { display: 'none' },
   cancel: { ...type.cancel, color: colors.ink },

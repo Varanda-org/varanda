@@ -8,8 +8,10 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { INTRO_CARDS } from '../intro'
 import { Icon } from '../ui/Icon'
-import { Body, Btn, Title, colors } from '../ui'
+import { statusBarStyle } from '../appearance'
+import { Body, Btn, Title } from '../ui'
 import { layout } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const SKIP_LABEL = 'Pular'
 const BACK_LABEL = 'Voltar'
@@ -21,6 +23,8 @@ function announcement (index) {
 }
 
 export default function Introducao ({ onDone, sidePad = 0, edges }) {
+  const styles = useStyles(makeStyles)
+  const { colors, scheme } = useTheme()
   const [width, setWidth] = useState(0)
   const [index, setIndex] = useState(0)
   const [reduceMotion, setReduceMotion] = useState(false)
@@ -162,12 +166,12 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
           </View>
         </View>
       </View>
-      <StatusBar style='dark' />
+      <StatusBar style={statusBarStyle(scheme)} />
     </SafeAreaView>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
   top: { minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: 16 },

@@ -8,10 +8,13 @@ import { Platform, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useNode } from '../node'
 import { Icon } from './Icon'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 
 export function OfflineNote ({ inset = false }) {
   const { online } = useNode()
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   if (online !== false) return null
   return (
@@ -27,7 +30,7 @@ export function OfflineNote ({ inset = false }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   note: {
     flexDirection: 'row',
     alignItems: 'center',

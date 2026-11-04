@@ -21,12 +21,13 @@ import { relativeTime } from '../format'
 import { LABELS, requestsDot, sortConversations } from '../dm'
 import { previewLine } from '../dm-screen'
 import { useMemberSearch } from '../useMemberSearch'
-import { Btn, ErrorText, Soft, colors, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, Skeleton } from '../ui/States'
 import { layout, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
 const LOCKED_TEXT = 'Desbloqueie com a passkey para ler suas mensagens.'
@@ -38,6 +39,7 @@ function previewOf (row) {
 }
 
 function Row ({ row, name, avatar, now, onPress, onDecide, pending }) {
+  const styles = useStyles(makeStyles)
   const time = typeof row.at === 'string' ? relativeTime(row.at, now) : ''
   return (
     <View>
@@ -71,6 +73,8 @@ function Row ({ row, name, avatar, now, onPress, onDecide, pending }) {
 }
 
 function NewMessage ({ onPick, onClose }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const search = useMemberSearch({ request: node.request, hosted: node.hosted === true, online: node.online, ownKey })
@@ -105,6 +109,7 @@ function NewMessage ({ onPick, onClose }) {
 }
 
 export function Mensagens ({ onOpenThread }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const insets = useSafeAreaInsets()
   const now = useNow(60000)
@@ -331,7 +336,7 @@ export function Mensagens ({ onOpenThread }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
   pressed: { opacity: 0.6 },

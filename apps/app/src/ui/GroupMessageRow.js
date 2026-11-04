@@ -16,7 +16,8 @@ import { relativeTime } from '../format'
 import { Avatar } from './Avatar'
 import { MentionText } from './MentionText'
 import { Pill } from './Pill'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 function authorLine (item, name, username) {
   const n = typeof name === 'string' ? displayText(name).trim() : ''
@@ -25,6 +26,7 @@ function authorLine (item, name, username) {
 }
 
 export function GroupMessageRow ({ item, name, username, own, canHide, canBan, canReport, onHide, onBan, onReport, onOpenMember, now = Date.now() }) {
+  const styles = useStyles(makeStyles)
   const [open, setOpen] = useState(false)
   const who = authorLine(item, name, username)
   const time = item.at ? relativeTime(item.at, now) : null
@@ -82,7 +84,7 @@ export function GroupMessageRow ({ item, name, username, own, canHide, canBan, c
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: {
     flexDirection: 'row',
     gap: 10,

@@ -29,11 +29,12 @@ import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar
 import { revokeDeletedMedia } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { confirmSaved, planSave } from '../profileSave'
-import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
+import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Stepper } from '../ui/Stepper'
 
 // The own profile as the node shows it (profile.read, docs/rpc.md 5.21), or
@@ -69,6 +70,7 @@ const VERSION_PAGES = 10
 // (profile.delete once; the node deletes a compat pair as one version). After
 // an uncertain failure the list is re-read before the button is offered again.
 function ProfileVersions ({ node, ownKey, shown }) {
+  const styles = useStyles(makeStyles)
   const names = useNames()
   const action = useAction()
   const [versions, setVersions] = useState(null)
@@ -186,6 +188,8 @@ function ProfileVersions ({ node, ownKey, shown }) {
 }
 
 export default function Perfil ({ open, current, onClose, onSaved, ownKey, page = false, embedded = false, index, total, onSkip }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const action = useAction()
   const [name, setName] = useState('')
@@ -582,7 +586,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   fill: { flex: 1 },
   photo: { gap: 12, alignItems: 'flex-start' },
   versions: { gap: 8, marginTop: 8 },

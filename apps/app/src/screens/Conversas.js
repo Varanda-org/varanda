@@ -11,11 +11,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { selectorItems } from '../dm'
 import { initialSegment } from '../dm-open'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { Comunidades } from './Comunidades'
 import { Mensagens } from './Mensagens'
 
 export function Conversas ({ onOpenGroup, onOpenCommunity, onOpenThread, showMensagens = 0, onSegment }) {
+  const styles = useStyles(makeStyles)
   const items = selectorItems()
   const [segment, setSegment] = useState(() => initialSegment(items))
   const last = useRef(showMensagens)
@@ -54,7 +56,7 @@ export function Conversas ({ onOpenGroup, onOpenCommunity, onOpenThread, showMen
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
   selector: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
