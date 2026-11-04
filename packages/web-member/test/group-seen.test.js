@@ -182,6 +182,60 @@ test('group.seen: marks the newest post, forward only, write only on change', as
   t.is((await row(a, community, general)).unread, 0)
 })
 
+test('group.seen: a cut-off marks exactly that post, never past it, never an unlisted one', async (t) => {
+  const { a, b, community, general, bw } = await world(t)
+  for (const text of ['um', 'dois', 'tres']) await ops.groupPost(b.ctx, { group: general, text })
+  await share(b, a, [bw])
+  const read = await ops.groupRead(a.ctx, { group: general })
+  const mid = read.items[1]
+  const cut = (seq, at = '2026-01-01T00:00:00.000Z', writer = bw) => ({ at, writer, seq })
+  const seen = async () => store.readGroupSeen(a.storage)
+
+  let writes = spyWrites(a)
+  t.alike(await ops.groupSeen(a.ctx, { group: general, upTo: cut(2) }), { ok: true })
+  t.alike(await seen(), [{ group: general, at: mid.at, writer: bw, seq: 2 }], 'exactly the listed post, its own at')
+  const r = await row(a, community, general)
+  t.is(r.unread, 1, 'the newer post stays unread')
+  t.is(r.last.preview, 'tres')
+
+  writes = spyWrites(a)
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(2) })
+  t.alike(writes, [], 'a repeat writes nothing')
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(1) })
+  t.alike(writes, [], 'never moved backward')
+
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(2, undefined, 'ff'.repeat(32)) })
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(99) })
+  t.alike(writes, [], 'an unlisted cut-off writes nothing')
+  t.is((await row(a, community, general)).unread, 1)
+
+  await store.writeGroupSeen(a.storage, [{ group: general, at: '2999-01-01T00:00:00.000Z', writer: 'ee'.repeat(32), seq: 9 }])
+  writes = spyWrites(a)
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(3, '3999-01-01T00:00:00.000Z') })
+  t.alike(writes, [], 'an unlisted mark ahead of every post stays; the cut-off at is not compared')
+
+  await store.writeGroupSeen(a.storage, [{ group: general, at: '2000-01-01T00:00:00.000Z', writer: 'ee'.repeat(32), seq: 9 }])
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(2) })
+  t.alike(await seen(), [{ group: general, at: mid.at, writer: bw, seq: 2 }], 'an unlisted mark behind every post moves to the cut-off, not the newest')
+
+  await store.writeGroupSeen(a.storage, [])
+  await ops.groupHide(a.ctx, { group: general, target: { writer: bw, seq: 2 }, on: true })
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(2) })
+  t.alike((await seen()).map((m) => m.seq), [2], 'a hidden post can be the cut-off')
+  t.is((await row(a, community, general)).unread, 1)
+
+  await ops.groupPost(a.ctx, { group: general, text: 'minha' })
+  await ops.groupPost(b.ctx, { group: general, text: 'quatro' })
+  await share(b, a, [bw])
+  const own = (await ops.groupRead(a.ctx, { group: general })).items.find((x) => x.text === 'minha')
+  await ops.groupSeen(a.ctx, { group: general, upTo: cut(own.seq, undefined, own.writer) })
+  t.alike(await seen(), [{ group: general, at: own.at, writer: own.writer, seq: own.seq }], 'an own post as the cut-off')
+  t.is((await row(a, community, general)).unread, 1)
+
+  await ops.groupSeen(a.ctx, { group: general })
+  t.is((await row(a, community, general)).unread, 0, 'no cut-off: the newest')
+})
+
 test('group.seen: the cap drops the least recently marked, which then counts as never seen', async (t) => {
   const { a, b, community, general, bw } = await world(t)
   await ops.groupPost(b.ctx, { group: general, text: 'um' })
@@ -227,7 +281,10 @@ test('group.seen: pending, unknown and malformed roots', async (t) => {
   const writes = spyWrites(b)
   t.alike(await ops.groupSeen(b.ctx, { group: pending }), { ok: true }, 'a pending own root')
   t.alike(writes, [], 'nothing written')
+  t.alike(await ops.groupSeen(b.ctx, { group: pending, upTo: { at: '2026-01-01T00:00:00.000Z', writer: 'ab'.repeat(32), seq: 1 } }), { ok: true }, 'a pending own root with a cut-off')
+  t.alike(writes, [], 'nothing written with a cut-off')
   await t.exception(() => ops.groupSeen(b.ctx, { group: 'ef'.repeat(32) }), /grupo não encontrado/, 'unknown')
+  await t.exception(() => ops.groupSeen(b.ctx, { group: 'ef'.repeat(32), upTo: { at: '2026-01-01T00:00:00.000Z', writer: 'ab'.repeat(32), seq: 1 } }), /grupo não encontrado/, 'unknown with a cut-off')
   // As every group operation here: the rpc layer refuses a malformed key first.
   await t.exception(() => ops.groupSeen(b.ctx, { group: 'xyz' }), /chave inválida/, 'malformed')
 })

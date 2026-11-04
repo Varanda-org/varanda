@@ -95,3 +95,39 @@ test('group.seen through the session: ok, idempotent, no groups.changed, unread 
   t.ok(bad !== null, 'a malformed key is rejected: ' + (bad && bad.message))
   t.alike(a.session.internal, [])
 })
+
+test('group.seen with a cut-off through the session', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const { community, group } = await a.call('community.create', { name: 'Bairro', join: 'open' })
+  await exchange(a, b)
+  await b.call('community.join', { community })
+  await exchange(b, a)
+  await b.call('group.post', { group, text: 'primeira da Bia' })
+  await b.call('group.post', { group, text: 'segunda da Bia' })
+  await exchange(b, a)
+  const unread = async () => (await a.call('community.info', { community })).groups.find((g) => g.group === group).unread
+  t.is(await unread(), 2)
+
+  const { items } = await a.call('group.read', { group })
+  const older = items[1]
+  a.events.splice(0)
+  t.alike(await a.call('group.seen', { group, upTo: { at: older.at, writer: older.writer, seq: older.seq } }), { ok: true })
+  t.is(await unread(), 1, 'unread 1 after the cut-off')
+  t.alike(await a.call('group.seen', { group, upTo: { at: older.at, writer: 'ff'.repeat(32), seq: 7 } }), { ok: true })
+  t.is(await unread(), 1)
+
+  const malformed = await failure(a.call('group.seen', { group, upTo: { writer: older.writer, seq: older.seq } }))
+  t.ok(malformed !== null, 'a cut-off without at is rejected')
+  t.is(malformed && malformed.code, 'USAGE')
+  t.is(await unread(), 1)
+
+  const missing = { code: 'NOT_FOUND', message: 'grupo não encontrado' }
+  t.alike(await failure(a.call('group.seen', { group: 'ab'.repeat(32), upTo: { at: older.at, writer: older.writer, seq: older.seq } })), missing)
+
+  t.alike(await a.call('group.seen', { group }), { ok: true })
+  t.is(await unread(), 0)
+  t.absent(a.events.includes('groups.changed'), 'no groups.changed after a cut-off read mark')
+  t.alike(a.session.internal, [])
+})
