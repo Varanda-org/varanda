@@ -41,7 +41,7 @@ test('create writes the community and Geral, info reads them, the group list sho
     state: 'ready',
     members: 1,
     admins: 1,
-    groups: [{ group, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true }],
+    groups: [{ group, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }],
     general: group,
     incomplete: false,
     leavePending: false,
@@ -253,7 +253,7 @@ test('community info lists the catalogue, with null rows for roots not held', as
   const info = await member.communityInfo(b, { community })
   t.is(info.role, 'left')
   t.alike(info.groups.map((g) => g.group), [geral, group].sort())
-  t.alike(info.groups.find((g) => g.group === group), { group, name: null, visibility: null, join: null, role: null, general: false })
+  t.alike(info.groups.find((g) => g.group === group), { group, name: null, visibility: null, join: null, role: null, general: false, last: null, unread: 0 })
   t.is(info.groups.find((g) => g.group === geral).general, true)
 })
 
@@ -287,7 +287,7 @@ test('an admin is refused creating a group; the creator creates on the root devi
   t.alike([create.type, create.group], ['group-create', group], 'the create goes to the community root')
   await exchange(a, b)
   const row = (await member.communityInfo(b, { community })).groups.find((g) => g.group === group)
-  t.alike(row, { group, name: 'Feira', visibility: 'public', join: 'open', role: 'left', general: false })
+  t.alike(row, { group, name: 'Feira', visibility: 'public', join: 'open', role: 'left', general: false, last: null, unread: 0 })
   t.is((await member.groupInfo(b, { group })).orphan, false)
 })
 

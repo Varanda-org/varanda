@@ -110,6 +110,19 @@ test('espiadinha and avisos hold for the site and the app tied to the installati
   t.ok(HELP.seguindo.paragraphs.join(' ').includes('O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca.'))
 })
 
+test('follower counts and lists are public, avisos stay private', async (t) => {
+  const { HELP, SHORT } = await load()
+  const avisos = HELP.avisos.paragraphs.join(' ')
+  const diario = HELP.diario.paragraphs.join(' ')
+  t.ok(avisos.includes('Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.'))
+  t.ok(diario.includes('O número ao lado de seguidores é quantas pessoas seguem você.'))
+  t.ok(diario.includes('Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista.'))
+  t.ok(diario.includes('O campo da lista só filtra quem já está nela.'))
+  t.is(SHORT.followsPublic, 'Quem você segue e quem segue você é público.')
+  const all = Object.values(HELP).flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.absent(/não mostra contagem|Não há lista de quem segue/.test(all), 'no denial of a follower count or list')
+})
+
 test('help and short texts avoid jargon and em dashes', async (t) => {
   const { HELP, SHORT } = await load()
   const jargon = new Set([

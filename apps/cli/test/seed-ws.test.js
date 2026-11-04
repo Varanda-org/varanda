@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -1761,6 +1761,208 @@ test('startSeedWs /index/search and /index/topic: the same word reaches only its
   t.is((await mediaRequest(server.port, '/index/topic/ceu')).status, 200)
   t.is((await mediaRequest(server.port, '/index/search/ceu')).status, 200)
   t.alike(seeder.calls, [['indexTopic', 'ceu', null], ['indexSearch', 'ceu']])
+})
+
+// /index/follows: public follow counts and lists on the same serveIndex
+// discipline. The cursor reaches the seeder as the raw path segment.
+const FOLLOW_CURSOR = '1700000000000.' + B
+const UNKNOWN = 'e'.repeat(64)
+
+function followsSeeder () {
+  const stub = indexSeeder()
+  stub.indexFollowCounts = async (author) => {
+    stub.calls.push(['indexFollowCounts', author])
+    return author === A ? { seguindo: 2, seguidores: 5, indexing: false, complete: true } : null
+  }
+  stub.indexFollows = async (author, kind, cursor) => {
+    stub.calls.push(['indexFollows', author, kind, cursor])
+    return author === A ? followsOf(kind) : null
+  }
+  return stub
+}
+
+function followsOf (kind) {
+  return { author: A, kind, items: [{ key: B, seq: 3, at: 1700000000000 }], next: null, total: 1, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+}
+
+test('startSeedWs /index/follows: the regexes are exported and match exactly', async (t) => {
+  t.is(INDEX_FOLLOW_COUNTS_RE.source, '^\\/index\\/follows\\/([0-9a-f]{64})$')
+  t.is(INDEX_FOLLOWS_RE.source, '^\\/index\\/follows\\/([0-9a-f]{64})\\/(seguindo|seguidores)(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}))?$')
+  t.ok(INDEX_FOLLOW_COUNTS_RE.test('/index/follows/' + A), 'counts')
+  t.ok(INDEX_FOLLOWS_RE.test('/index/follows/' + A + '/seguindo'), 'seguindo')
+  t.ok(INDEX_FOLLOWS_RE.test('/index/follows/' + A + '/seguidores'), 'seguidores')
+  t.ok(INDEX_FOLLOWS_RE.test('/index/follows/' + A + '/seguidores/' + FOLLOW_CURSOR), 'with a cursor')
+  t.ok(INDEX_FOLLOWS_RE.test('/index/follows/' + A + '/seguindo/' + '9'.repeat(16) + '.' + B), 'a 16-digit atMs')
+  t.ok(INDEX_FOLLOWS_RE.test('/index/follows/' + A + '/seguindo/0.' + B), 'a zero atMs')
+  const bad = [
+    '/index/follows/' + A.toUpperCase(),
+    '/index/follows/' + A + '/',
+    '/index/follows/' + A + '?x=1',
+    '/index/follows/' + A.slice(1),
+    '/index/follows/' + A + '/seguidor',
+    '/index/follows/' + A + '/Seguindo',
+    '/index/follows/' + A + '/seguindo/',
+    '/index/follows/' + A + '/seguindo?x=1',
+    '/index/follows/' + A + '/seguindo/' + '9'.repeat(17) + '.' + B,
+    '/index/follows/' + A + '/seguindo/1700000000000' + B,
+    '/index/follows/' + A + '/seguindo/1700000000000.' + B.toUpperCase(),
+    '/index/follows/' + A + '/seguindo/1700000000000.' + B + '.7',
+    '/index/follows/' + A + '/seguindo/.' + B
+  ]
+  for (const url of bad) {
+    t.absent(INDEX_FOLLOW_COUNTS_RE.test(url), url.slice(15, 50) + ' (counts)')
+    t.absent(INDEX_FOLLOWS_RE.test(url), url.slice(15, 50) + ' (list)')
+  }
+})
+
+test('startSeedWs /index/follows: GET answers JSON with the parsed arguments, HEAD sends the headers only', async (t) => {
+  t.timeout(20000)
+  const seeder = followsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const counts = await mediaRequest(server.port, '/index/follows/' + A)
+  t.is(counts.status, 200)
+  jsonHeaders(t, counts)
+  t.is(counts.headers['content-length'], String(counts.body.byteLength))
+  t.alike(JSON.parse(counts.body.toString()), { seguindo: 2, seguidores: 5, indexing: false, complete: true })
+  t.alike(seeder.calls[0], ['indexFollowCounts', A])
+
+  const list = await mediaRequest(server.port, '/index/follows/' + A + '/seguidores')
+  t.is(list.status, 200)
+  jsonHeaders(t, list)
+  t.alike(JSON.parse(list.body.toString()), followsOf('seguidores'))
+  t.alike(seeder.calls[1], ['indexFollows', A, 'seguidores', null], 'no cursor -> null')
+
+  const paged = await mediaRequest(server.port, '/index/follows/' + A + '/seguindo/' + FOLLOW_CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[2], ['indexFollows', A, 'seguindo', FOLLOW_CURSOR], 'the cursor is passed as the raw string')
+
+  const head = await mediaRequest(server.port, '/index/follows/' + A, { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], counts.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+
+  const headList = await mediaRequest(server.port, '/index/follows/' + A + '/seguidores', { method: 'HEAD' })
+  t.is(headList.status, 200)
+  t.is(headList.headers['content-length'], list.headers['content-length'])
+  t.is(headList.body.byteLength, 0)
+  t.alike(seeder.calls.slice(3), [['indexFollowCounts', A], ['indexFollows', A, 'seguidores', null]])
+})
+
+test('startSeedWs /index/follows: malformed, uppercase, encoded or query paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = followsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/follows',
+    '/index/follows/',
+    '/index/follows/' + A.toUpperCase(),
+    '/index/follows/' + A + '/',
+    '/index/follows/' + A + '?x=1',
+    '/index/follows/' + A + '/seguidor',
+    '/index/follows/' + A + '/SEGUINDO',
+    '/index/follows/' + A + '/seguindo/',
+    '/index/follows/' + A + '/seguindo?x=1',
+    '/index/follows/' + A + '/segu%69ndo',
+    '/index/follows/' + A + '/seguindo/1700000000000%2E' + B,
+    '/index/follows/%63' + A.slice(1),
+    '/index/follows/' + A + '/seguindo/' + '9'.repeat(17) + '.' + B,
+    '/index/follows/' + A + '/seguindo/1700000000000' + B,
+    '/index/follows/' + A + '/seguindo/1700000000000.' + B.toUpperCase()
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(15, 50) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.absent(got.body.toString().includes('follows'), 'the path is not echoed')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/follows: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = followsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const host = await mediaRequest(server.port, '/index/follows/' + A, { host: 'evil.example:' + server.port })
+  t.is(host.status, 421)
+  const post = await mediaRequest(server.port, '/index/follows/' + A + '/seguindo', { method: 'POST' })
+  t.is(post.status, 405)
+  t.is(post.headers.allow, 'GET, HEAD')
+  t.is(seeder.calls.length, 0, 'neither reaches the seeder')
+})
+
+test('startSeedWs /index/follows: a null answer, a throw and a seeder without the methods are 404, nothing echoed', async (t) => {
+  t.timeout(20000)
+  const seeder = followsSeeder()
+  const s1 = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => s1.close(), { force: true })
+  const unknownCounts = await mediaRequest(s1.port, '/index/follows/' + UNKNOWN)
+  t.is(unknownCounts.status, 404, 'null counts -> 404')
+  t.is(unknownCounts.body.toString(), 'não encontrado\n')
+  const unknownList = await mediaRequest(s1.port, '/index/follows/' + UNKNOWN + '/seguindo')
+  t.is(unknownList.status, 404, 'null list -> 404')
+  t.is(unknownList.body.toString(), 'não encontrado\n')
+  t.alike(seeder.calls, [['indexFollowCounts', UNKNOWN], ['indexFollows', UNKNOWN, 'seguindo', null]], 'the seeder was asked')
+
+  const throwing = followsSeeder()
+  throwing.indexFollowCounts = () => { throw new Error('secret ' + A) }
+  throwing.indexFollows = async () => { throw new Error('secret ' + A) }
+  const s2 = await startSeedWs({ port: 0, seeder: throwing })
+  t.teardown(() => s2.close(), { force: true })
+  for (const url of ['/index/follows/' + A, '/index/follows/' + A + '/seguidores']) {
+    const got = await mediaRequest(s2.port, url)
+    t.is(got.status, 404, 'throw -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.absent(got.body.toString().includes('secret'), 'nothing of the error is echoed')
+  }
+
+  const old = await startSeedWs({ port: 0, seeder: indexSeeder() })
+  t.teardown(() => old.close(), { force: true })
+  for (const url of ['/index/follows/' + A, '/index/follows/' + A + '/seguidores']) {
+    const got = await mediaRequest(old.port, url)
+    t.is(got.status, 404, 'a seeder without the method -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+})
+
+test('startSeedWs /index/follows: shares the /index token bucket with the other routes', async (t) => {
+  t.timeout(20000)
+  const seeder = followsSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 2 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/follows/' + A)).status, 200, 'counts spend a token')
+  t.is((await mediaRequest(server.port, '/index/follows/' + A + '/seguidores')).status, 200, 'the list spends the last token')
+  const member = await mediaRequest(server.port, '/index/member/' + A)
+  t.is(member.status, 503, 'the next /index request finds the shared bucket empty')
+  t.is(member.headers['retry-after'], '1')
+  t.alike(seeder.calls, [['indexFollowCounts', A], ['indexFollows', A, 'seguidores', null]])
+})
+
+test('startSeedWs /index/follows: the worst-case page stays within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number('9'.repeat(15))
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 20; i++) {
+    items.push({ key: hex(i), seq: big, at: big })
+    authors[hex(i)] = { profileSeq: big, usernameSeq: big }
+  }
+  const worst = { author: A, kind: 'seguidores', items, next: { atMs: big, key: hex(19) }, total: big, authors, indexing: true, complete: false }
+  t.is(Object.keys(authors).length, 20, '20 distinct author hints')
+  const seeder = followsSeeder()
+  seeder.indexFollows = async () => worst
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/follows/' + A + '/seguidores/' + '9'.repeat(16) + '.' + B)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.alike(JSON.parse(got.body.toString()), worst)
 })
 
 // /index/group, /index/groups, /index/group-search: the seeder's group

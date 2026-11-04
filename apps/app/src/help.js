@@ -31,7 +31,7 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Seguindo é a lista de pessoas que você segue. Abra a lista tocando no número ao lado de seguindo, no Diário. Ela funciona em qualquer instalação.',
       'Siga pessoas para ver as publicações delas na Rua. Para encontrar alguém, use a Busca.',
-      'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
+      'Quem você segue é público: no site da associação e no app ligado à instalação, qualquer pessoa vê essa lista. Ela aparece igual em todos os seus aparelhos.',
       'O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
     ])
   }),
@@ -39,7 +39,7 @@ export const HELP = Object.freeze({
     title: 'Como funcionam os Avisos',
     paragraphs: Object.freeze([
       'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
-      'O Varanda não mostra contagem nem lista de seguidores.',
+      'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
       'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
     ])
@@ -48,7 +48,7 @@ export const HELP = Object.freeze({
     title: 'Como funciona o Diário',
     paragraphs: Object.freeze([
       'O Diário é o seu perfil e as suas publicações.',
-      'O número ao lado de seguindo é quantas pessoas você segue; toque nele para abrir a lista. Não há lista de quem segue você.',
+      'O número ao lado de seguindo é quantas pessoas você segue. O número ao lado de seguidores é quantas pessoas seguem você. Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista. O campo da lista só filtra quem já está nela.',
       'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
     ])
@@ -213,7 +213,7 @@ export function carteiraHelp (policy) {
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
   passkeyLoss: 'Se perder a passkey, perde a conta.',
-  followsPublic: 'Quem você segue é público.',
+  followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',
   termsDeviceOnly: 'Aceite registrado só neste aparelho.',

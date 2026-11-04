@@ -139,7 +139,7 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 16)
+  t.is(keys(core.handlers, 'group.').length, 17)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
   t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')
@@ -217,11 +217,34 @@ test('locked group writes fail, local reads stay available, and PRF bytes are co
   t.is((await s.web.request('group.info', { group })).state, 'member')
   t.is((await s.web.request('group.members', { group })).total, 1)
   t.is((await s.web.request('group.requests', { group })).total, 0)
+  const row = (await s.web.request('community.info', { community: C })).groups.find((g) => g.group === group)
+  t.alike([row.last, row.unread], [null, 0], 'community.info answers the private group while locked')
+  t.alike(await s.web.request('group.seen', { group }), { ok: true }, 'group.seen answers while locked')
   await s.node.setKeyPair(s.keyPair)
   t.is((await errorOf(s.web.request('group.post', { group, text: 'x' }))).message, LOCKED, 'identity without PRF cannot sign a group writer')
   await s.node.setKeyPair(s.keyPair, { prf: s.prf })
   t.alike(await s.web.request('group.post', { group, text: 'desbloqueado' }), { seq: 1 })
   t.alike(s.internal, [])
+})
+
+test('group.seen through request: ok twice, no groups.changed, unread cleared, unknown key', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community: C, group } = await community(a)
+  await a.web.request('group.post', { group, text: 'Olá' })
+  await share(a, b, C)
+  await share(a, b, group)
+  await b.web.request('community.join', { community: C })
+  const unread = async () => (await b.web.request('community.info', { community: C })).groups.find((g) => g.group === group).unread
+  t.is(await unread(), 1)
+  const before = b.web.events.filter((e) => e.name === 'groups.changed').length
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.is(b.web.events.filter((e) => e.name === 'groups.changed').length, before, 'no groups.changed')
+  t.is(await unread(), 0)
+  const err = await errorOf(b.web.request('group.seen', { group: KEY }))
+  t.alike([err.code, err.message], ['NOT_FOUND', 'grupo não encontrado'])
+  t.alike(a.internal.concat(b.internal), [])
 })
 
 test('group error mapping and report.sign v2 bind writer and group', async (t) => {
