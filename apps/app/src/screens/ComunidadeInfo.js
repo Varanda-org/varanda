@@ -5,7 +5,9 @@
 // that open the management panels: Membros and Pedidos for the creator and
 // admins, Quem pode convidar, and the creator's Ajustes (rename, Entrada,
 // Administradores by @nome among the members). Joining stays on the list
-// screen. A mutation that comes back uncertain is never resent: the screen
+// screen. A second device without its writer here has no Sair (it would
+// change nothing), and controls this device cannot sign for give way to one
+// note. A mutation that comes back uncertain is never resent: the screen
 // re-reads and only then lets the person try again.
 // Props: community (hex64 root key), onBack(), onOpenMember(diary).
 
@@ -21,7 +23,10 @@ import { origin, shareCommunity } from '../communityShare'
 import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
 import { shortKey } from '../format'
-import { COMMUNITY_JOIN_LABELS, can, membersLabel, roleLabel } from '../groups'
+import {
+  COMMUNITY_JOIN_LABELS, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
+  authorityHere, can, deviceStaffNote, membersLabel, rootAdminHere, roleLabel, writerOnDevice
+} from '../groups'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -167,6 +172,9 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
   const staff = isMember && (role === 'creator' || role === 'admin')
   const owner = role === 'creator'
+  const rootOk = rootAdminHere(info)
+  const authOk = authorityHere(info)
+  const staffNote = deviceStaffNote(info, { owner, staff })
 
   const loadPeople = useCallback(async (kind, offset = 0) => {
     const mine = ++peopleGen.current
@@ -402,7 +410,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
         <View style={styles.block}>
           <View style={styles.inline}>
             <Btn label='Compartilhar' onPress={share} secondary />
-            {isMember || role === 'requested'
+            {(isMember || role === 'requested') && writerOnDevice(info)
               ? <Btn label={isMember ? 'Sair da comunidade' : 'Desistir do pedido'} danger secondary pending={act.pending} onPress={() => setConfirm({ text: isMember ? (owner ? CREATOR_LEAVE_TEXT : LEAVE_TEXT) : WITHDRAW_TEXT, label: isMember ? 'Sair' : 'Desistir', run: leave })} />
               : null}
             {info.leavePending === true
@@ -437,7 +445,8 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
             </View>
             )
           : null}
-        {staff
+        {staffNote ? <View style={styles.block}><Soft>{staffNote === 'root' ? DEVICE_ROOT_TEXT : DEVICE_STAFF_TEXT}</Soft></View> : null}
+        {staff && authOk
           ? (
             <View>
               <SectionHeader>Administração</SectionHeader>
@@ -481,7 +490,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
             </View>
             )
           : null}
-        {can('invitePolicy', role)
+        {can('invitePolicy', role) && (owner ? rootOk : authOk)
           ? (
             <View>
               <PanelRow label='Quem pode convidar' open={section === 'policy'} onPress={() => openSection('policy')} />
@@ -499,7 +508,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
             </View>
             )
           : null}
-        {owner
+        {owner && rootOk
           ? (
             <View>
               <PanelRow label='Ajustes' open={section === 'settings'} onPress={() => openSection('settings')} />

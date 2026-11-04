@@ -81,7 +81,7 @@ const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
 const {
-  buildGroup, groupJoinHistory, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader,
+  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader,
   orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY
 } = grp
 
@@ -1513,6 +1513,27 @@ function roleOf (g, d) {
   return g.built.admins.has(d) ? 'admin' : 'member'
 }
 
+// A diary-bound root this device holds no writer for, while the fold still
+// says the diary is absent or left: the account's writer cores are not
+// stored yet. 'banned' and 'requested' are real answers and stay. Answering
+// 'left' would offer a newcomer join.
+// A leave the fold has seen (lastLeave) is a real leave, written on some
+// device of the diary: it stays 'left'. A diary blocked by moderation is not
+// arriving either.
+function writersStillArriving (fold, ownHex, mod) {
+  if (fold.own !== null) return false
+  if (mod.blocked.has(ownHex)) return false
+  const st = statusOf(fold, ownHex)
+  if (st === 'left' && fold.built.lastLeave instanceof Map && fold.built.lastLeave.has(ownHex)) return false
+  return st === null || st === 'left'
+}
+
+function roleHere (fold, ownHex, base) {
+  if (!writersStillArriving(fold, ownHex, base.mod)) return roleOf(fold, ownHex)
+  if (!diaryGroupKeys(base.ownEntries).includes(fold.group)) return roleOf(fold, ownHex)
+  return 'pending'
+}
+
 function isActingAdmin (g, d) {
   return statusOf(g, d) === 'member' && g.built.admins.has(d)
 }
@@ -1603,6 +1624,32 @@ function liveOwnWriter (g, ownHex) {
 // discarded by the fold.
 function requireCounted (g, key) {
   if (!g.built.writers.has(key)) throw new UsageError(store.GROUP_FULL)
+}
+
+// A record from this device counts only for a member whose live writer the
+// fold counted. liveOwnWriter also returns a bound writer past the cap, so
+// the write can name the cap; requireCounted then refuses it, and so does this.
+function countedLive (fold, ownHex) {
+  if (statusOf(fold, ownHex) !== 'member') return false
+  const own = liveOwnWriter(fold, ownHex)
+  return own !== null && fold.built.writers.has(own.key)
+}
+
+// sealForGroup's 'aguardando nova chave', without calling it. The lock
+// refusal is a different error. A public group never seals.
+function rekeyBlocksWrite (ctx, g) {
+  if (!g.private || boxHexOf(ctx) === null) return false
+  if (g.built.rekeyPending || g.built.epoch === null) return true
+  const h = holderOf(ctx)
+  const epoch = g.built.epoch
+  const opened = h !== null && g.epochs.some((e) => e.kid.writer === epoch.writer && e.kid.seq === epoch.seq)
+  return !opened || h.has(epoch) !== true
+}
+
+function groupCanWrite (ctx, g, ownHex) {
+  // Mirrors requireParent: a post fails while the parent community root is not
+  // held or folded here.
+  return countedLive(g, ownHex) && g.built.orphan !== true && g.built.community !== null && g.c !== null && !rekeyBlocksWrite(ctx, g)
 }
 
 function authorOf (g, d, association, mod) {
@@ -2239,26 +2286,38 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
       if (g.built.orphan) continue
       groups.push({ group: e.group, name: g.built.name, join: g.built.join, role: roleOf(g, ownHex), members: memberCount(g), community: g.community })
     }
+    // Roots the own diary binds (another device of the account wrote there)
+    // and this device holds: listed without a groupWriters entry.
+    const listed = new Set(groups.map((r) => r.group))
+    for (const e of await store.readGroupWriters(ctx.storage)) listed.add(e.group)
+    for (const key of diaryGroupKeys(base.ownEntries)) {
+      if (listed.has(key)) continue
+      const g = await loadGroup(ctx, base, key)
+      if (g === null || g.built.orphan) continue
+      groups.push({ group: key, name: g.built.name, join: g.built.join, role: writersStillArriving(g, ownHex, base.mod) ? 'pending' : roleOf(g, ownHex), members: memberCount(g), community: g.community })
+    }
     return { groups: groups.slice(offset, offset + limit), total: groups.length }
   })
 }
 
 async function groupInfo (ctx, { group }) {
-  return withGroup(ctx, group, false, ({ ownHex, g }) => ({
+  return withGroup(ctx, group, false, ({ ownHex, base, g }) => ({
     group: g.group,
     name: g.built.name,
     join: g.built.join,
     creator: g.built.creator,
-    role: roleOf(g, ownHex),
+    role: roleHere(g, ownHex, base),
     members: memberCount(g),
     state: stateOf(g, ownHex),
     community: g.community,
     orphan: g.built.orphan === true,
     visibility: g.private ? 'private' : 'public',
-    memberInvite: g.built.memberInvite === true
+    memberInvite: g.built.memberInvite === true,
+    writerHere: g.own !== null,
+    canWrite: groupCanWrite(ctx, g, ownHex)
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false }
   })
 }
 
@@ -3523,7 +3582,7 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
+const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -3533,13 +3592,22 @@ async function communityInfo (ctx, { community }) {
   // reads as pending (only community.create resumes it, through the write
   // path and its gate).
   const planned = await store.readCommunityCreate(ctx.storage)
-  if (planned !== null && planned.community === C) return { community: C, ...PENDING_COMMUNITY }
+  if (planned !== null && planned.community === C) {
+    const entry = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === C)
+    return {
+      community: C,
+      ...PENDING_COMMUNITY,
+      writerHere: entry !== undefined,
+      canWrite: false,
+      rootHere: entry !== undefined && entry.rootNonce !== null
+    }
+  }
   return withCommunity(ctx, C, false, async ({ ownHex, base, c }) => {
     const seen = await store.readGroupSeen(ctx.storage)
     const groups = []
     for (const key of c.built.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)) {
       const g = await loadGroup(ctx, base, key)
-      const role = g === null ? null : roleOf(g, ownHex)
+      const role = g === null ? null : roleHere(g, ownHex, base)
       groups.push({
         group: key,
         name: g === null ? null : g.built.name,
@@ -3555,7 +3623,7 @@ async function communityInfo (ctx, { community }) {
       name: c.built.name,
       join: c.built.join,
       creator: c.built.creator,
-      role: roleOf(c, ownHex),
+      role: roleHere(c, ownHex, base),
       state: 'ready',
       members: memberCount(c),
       admins: c.built.admins.size,
@@ -3565,9 +3633,13 @@ async function communityInfo (ctx, { community }) {
       leavePending: await notedLeavePending(ctx, c, ownHex, base.ownEntries),
       repair: cwRepair(c, ownHex) && statusOf(c, ownHex) === 'member' && liveOwnWriter(c, ownHex) !== null,
       dropped: [...c.built.dropped],
-      memberInvite: c.built.memberInvite === true
+      memberInvite: c.built.memberInvite === true,
+      writerHere: c.own !== null,
+      canWrite: countedLive(c, ownHex),
+      rootHere: c.own !== null && c.own.rootNonce !== null,
+      authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key)
     }
-  }, (p) => ({ community: p.group, ...PENDING_COMMUNITY }))
+  }, (p) => ({ community: p.group, ...PENDING_COMMUNITY, writerHere: p.own !== null }))
 }
 
 const ROLE_RANK = { creator: 0, admin: 1, member: 2 }
@@ -3604,6 +3676,23 @@ async function communityList (ctx) {
         join: c.built.join,
         state: 'ready',
         role: roleOf(c, ownHex),
+        general: c.built.general
+      })
+    }
+    const listed = new Set(list.map((r) => r.community))
+    for (const e of await store.readGroupWriters(ctx.storage)) listed.add(e.group)
+    for (const key of diaryGroupKeys(base.ownEntries)) {
+      if (listed.has(key) || base.mod.blocked.has(key)) continue
+      const c = await loadCommunity(ctx, base, key)
+      if (c === null) continue
+      // A held root folds: state stays 'ready' (the name shows); only the
+      // role says the account's writers are still arriving.
+      list.push({
+        community: key,
+        name: typeof c.built.name === 'string' ? c.built.name : null,
+        join: c.built.join,
+        state: 'ready',
+        role: writersStillArriving(c, ownHex, base.mod) ? 'pending' : roleOf(c, ownHex),
         general: c.built.general
       })
     }

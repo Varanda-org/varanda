@@ -130,9 +130,9 @@ test('community create writes the root and Geral; info shapes and refusals', asy
 
   const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
-    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false
+    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true
   })
-  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false })
+  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 }, 'a community is not listed as a group')
 
   const { group: horta } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval', community })
@@ -158,7 +158,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await t.exception(() => ops.groupCreate(b.ctx, { name: 'Feira', join: 'open', community }), /só quem criou a comunidade cria grupos/)
   await t.exception(() => ops.groupJoin(b.ctx, { group: general }), /entre na comunidade primeiro/)
   const pending = 'cd'.repeat(32)
-  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false })
+  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false })
   await t.exception(() => ops.communityInfo(b.ctx, { community: general }), /comunidade não encontrada/, 'a group root is no community')
 })
 

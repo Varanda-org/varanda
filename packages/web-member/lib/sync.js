@@ -189,7 +189,15 @@
 //   groups       the groups of kv 'groupWriters', plus each key of kv
 //                'groupReplicas' with nothing stored yet (a root asked for
 //                before a join: list it with store.addGroupReplica and the
-//                next run fetches it through the writer pages).
+//                next run fetches it through the writer pages). Besides
+//                those, every root the own diary binds with an on:true
+//                group-join (diaryGroupKeys, at most 64) is paged as a
+//                replica (writers gated, a catalogue child the diary joined
+//                not root-only), at run start from the stored diary and
+//                again whenever the own diary is caught up (a once run
+//                waits for that scan): a second device of the same passkey
+//                rebuilds its communities and groups from the diary.
+//                Nothing is appended, no writer created.
 //   communities  (protocol v2) the communities of kv 'groupWriters' (kind
 //                'community') and, parent paging, the community each held
 //                local group root names in its header (at most
@@ -295,7 +303,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, buildCommunity, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, buildCommunity, diaryGroupKeys, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -1341,6 +1349,9 @@ async function syncRun ({
   const ownCommunities = new Set() // kv groupWriters entries of kind 'community'
   const localGroups = new Set() // kv groupWriters entries of kind 'group'
   const parentCommunities = new Set() // communities paged because a held group root names them
+  const diaryRoots = new Set() // roots the own diary binds, adopted this run (adoptDiaryRoot)
+  const diaryCommunities = new Set() // those of them whose stored or verified root is a community
+  const droppedProbes = new Set() // keys the probe rule removed this run: never adopted again this run
   const childrenOf = new Map() // community -> Set of held group roots whose header names it
   const parentNamed = new Set() // groups whose root header was read for its parent
   const parentAnnounced = new Set() // communities a 'community-parent' was emitted for
@@ -1351,7 +1362,7 @@ async function syncRun ({
   const heldAtStart = new Set() // group cores stored when the run started
   const notCommunities = new Set() // parent keys whose root is a group header: never paged again this run
   let changedTimer = null
-  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false }
+  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false, joinEntries: [], joinCursor: 1, scanPending: false }
   let lastSettled = { settled: false, mediaPending: false } // last 'settled' verdict
   let holds = 0 // reader holds outstanding
   let drained = Promise.resolve() // resolves when holds reaches 0
@@ -1829,6 +1840,9 @@ async function syncRun ({
     // Groups (see the header): own pushes only for a once run, the settled
     // report counts them with the media.
     unmet.push(...unmetGroupGoals(once))
+    // A once run waits for the diary scan of the own length: the roots it
+    // adopts set page goals only once read.
+    if (once && fold.scanPending) unmet.push(ownHex + ':groups')
     return unmet
   }
 
@@ -2959,6 +2973,35 @@ async function syncRun ({
     if (!groups.has(group)) groups.set(group, { group, pagedOn: null, items: new Map() })
   }
 
+  // A root the own diary binds is paged as a replica, never listed in kv:
+  // another device of the same identity joined it. -> true when newly paged.
+  function adoptDiaryRoot (key) {
+    if (ending || isBlockedKey(key) || ownGroupKeys.has(key) || ownCommunities.has(key) || localGroups.has(key)) return false
+    if (droppedProbes.has(key)) return false
+    // Another root's header (peer data) made it a parent first: the diary's
+    // binding wins and its own header decides its kind. A root refused only
+    // as not-community is gated again.
+    parentCommunities.delete(key)
+    if (notCommunities.delete(key)) {
+      const ge = groupCores.get(key)
+      if (ge !== undefined && ge.state === 'failed' && ge.kept !== true && ge.reason === 'not-community') groupCores.delete(key)
+    }
+    diaryRoots.add(key)
+    const g = groups.get(key)
+    if (g !== undefined) {
+      if (g.replica === true) return false
+      // A catalogue child the diary joined must not stay root-only: its
+      // root-only pass no longer meets the goal, the next pass pages it all.
+      g.replica = true
+      g.pagedOn = null
+      return true
+    }
+    ensureGroup(key)
+    groups.get(key).replica = true
+    if (!rootHeld(key)) groups.get(key).probe = true
+    return true
+  }
+
   function newGroupEntry (key, group, diary, seq) {
     return {
       key,
@@ -3063,6 +3106,22 @@ async function syncRun ({
       heldAtStart.add(key)
       if (key === h.group) noteRootVisibility(key, h.visibility)
     }
+    // The roots the stored own diary binds (another device's joins), here
+    // only when a stored core may belong to one (kept live, its catalogue
+    // read): the startup scan adopts the rest (adoptDiaryGroups) without
+    // reading the diary twice. Before parent paging: a root header naming
+    // a diary-bound key never makes it a parent.
+    const bindings = new Map()
+    if (stored.length > 0) {
+      const entries = await bindingEntries(ownHex, bindings)
+      if (entries === null) log('aviso: falha ao ler os grupos do diário')
+      for (const key of diaryGroupKeys(entries || [])) adoptDiaryRoot(key)
+    }
+    for (const s of stored) {
+      if (s.key !== s.group || !diaryRoots.has(s.key) || !s.community) continue
+      diaryCommunities.add(s.key)
+      rootKind.set(s.key, 'community')
+    }
     // Parent paging: the community each held local group root names.
     for (const m of groupOwn) {
       if (m.key !== m.group) continue
@@ -3080,7 +3139,7 @@ async function syncRun ({
       if (!s.community) noteParent(s.group, s.parent)
     }
     // The catalogue of every community paged, from what is stored.
-    for (const c of [...ownCommunities, ...parentCommunities]) {
+    for (const c of [...ownCommunities, ...parentCommunities, ...diaryCommunities]) {
       const root = rootSource(c, stored)
       if (root === null) continue
       const ws = stored.filter((x) => x.group === c && x.key !== c).map((x) => ({ key: x.key, core: x.core, diary: x.diary }))
@@ -3116,7 +3175,6 @@ async function syncRun ({
         s.invalid = true
       }
     }
-    const bindings = new Map()
     const live = []
     for (const s of stored) {
       // A root goes with its header's diary only when that diary bound it
@@ -3679,7 +3737,7 @@ async function syncRun ({
   // A community key: in the own list, paged as a parent, or a key asked
   // for before a join whose verified root is a community.
   function isCommunityKey (key) {
-    return ownCommunities.has(key) || parentCommunities.has(key) || rootKind.get(key) === 'community'
+    return ownCommunities.has(key) || parentCommunities.has(key) || diaryCommunities.has(key) || rootKind.get(key) === 'community'
   }
 
   // A root named only by a community's catalogue: its root is paged, no
@@ -3733,7 +3791,7 @@ async function syncRun ({
       parentAnnounced.add(c)
       emit({ event: 'community-parent', key: c, group })
     }
-    if (notCommunities.has(c) || ownCommunities.has(c) || parentCommunities.has(c) || localGroups.has(c)) return
+    if (notCommunities.has(c) || ownCommunities.has(c) || parentCommunities.has(c) || localGroups.has(c) || diaryRoots.has(c)) return
     if (parentCommunities.size >= MAX_SYNCED_COMMUNITIES) return
     parentCommunities.add(c)
     const known = groups.has(c)
@@ -3888,6 +3946,10 @@ async function syncRun ({
         // A parent verified a community: its writers are paged now.
         const l = seederLink()
         if (h.community && parentCommunities.has(ge.key) && l !== null && l.groups !== null) pageGroups(l)
+        if (h.community && diaryRoots.has(ge.key)) {
+          diaryCommunities.add(ge.key)
+          if (l !== null && l.groups !== null) pageGroups(l)
+        }
       }
     }
     if (isCommunityKey(ge.group)) rescanCatalogue(ge.group)
@@ -4108,6 +4170,12 @@ async function syncRun ({
       for (const key of [...items.keys()]) if (key !== g.group) items.delete(key)
       if (items.has(g.group)) incomplete = true
     }
+    // The diary joined a root-only child during the pass: another pass
+    // pages its writers before the goal is met.
+    if (onlyRoot && !rootOnly(g.group)) {
+      incomplete = true
+      l.pageAgain = true
+    }
     if (incomplete) {
       // The seeder does not know the whole set yet: what came is gated, but
       // the pass neither completes the goal nor confirms an own core (an
@@ -4120,6 +4188,7 @@ async function syncRun ({
     }
     if (g.probe === true && !items.has(g.group)) {
       groups.delete(g.group)
+      droppedProbes.add(g.group)
       track(groupKv(() => store.removeGroupReplica(storage, forgetListed(listedAtStart, g.group))), noop, noop)
       evaluate()
       return
@@ -4534,9 +4603,43 @@ async function syncRun ({
     return length
   }
 
+  // The roots the own diary binds, from the cursor up to its present length,
+  // adopted as they appear (another device of the same identity joined
+  // them). Separate from the follow fold: it never sets fold.seen. Every
+  // group-join is kept, a later off one unbinds its writer.
+  async function adoptDiaryGroups () {
+    let deleted = new Set()
+    try {
+      const length = ownPresent()
+      if (ownTracker !== null) deleted = ownTracker.deleted()
+      for (let seq = fold.joinCursor; seq < length; seq = ++fold.joinCursor) {
+        if (deleted.has(seq) || !(await diary.has(seq))) continue
+        const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
+        if (record === null || record.type !== 'group-join') continue
+        fold.joinEntries.push({ seq, record })
+      }
+    } catch {
+      if (!ended) log('aviso: falha ao ler os grupos do diário')
+    }
+    // The joins read before a failing block are adopted all the same: the
+    // scan is marked done next, and the same length is not scanned again.
+    try {
+      let added = false
+      for (const key of diaryGroupKeys(fold.joinEntries.filter((e) => !deleted.has(e.seq)))) {
+        if (adoptDiaryRoot(key)) added = true
+      }
+      const l = seederLink()
+      if (added && l !== null && l.groups !== null) pageGroups(l)
+    } catch {
+      if (!ended) log('aviso: falha ao ler os grupos do diário')
+    }
+  }
+
   async function foldLoop () {
     do {
       fold.again = false
+      await adoptDiaryGroups()
+      if (!fold.again) endDiaryScan()
       const length = await replayFollows()
       if (!fold.seen) continue
       const derived = [...fold.ops].filter(([, on]) => on).map(([key]) => key)
@@ -4559,10 +4662,23 @@ async function syncRun ({
     }
     fold.seed = seed
     fold.cursor = Math.max(1, state.present)
+    for (const entry of state.raw) {
+      if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
+      const record = validRecordCopy(entry.record, entry.seq)
+      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq: entry.seq, record })
+    }
+    fold.joinCursor = Math.max(1, state.present)
+  }
+
+  function endDiaryScan () {
+    if (!fold.scanPending) return
+    fold.scanPending = false
+    evaluate()
   }
 
   function scheduleFold () {
     if (ending) return
+    fold.scanPending = true
     if (fold.running) {
       fold.again = true
       return
@@ -4570,10 +4686,23 @@ async function syncRun ({
     fold.running = true
     track(foldLoop(), () => {
       fold.running = false
+      foldDone()
     }, () => {
       fold.running = false
       if (!ended) log('aviso: falha ao atualizar os diários seguidos')
+      foldDone()
     })
+  }
+
+  // A fold asked for after foldLoop decided to exit, before running was
+  // cleared, runs now: its scan must not be marked done unread.
+  function foldDone () {
+    if (fold.again && !ending) {
+      fold.again = false
+      scheduleFold()
+      return
+    }
+    endDiaryScan()
   }
 
   try {

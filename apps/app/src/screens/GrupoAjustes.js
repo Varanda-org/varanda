@@ -16,7 +16,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
-import { can, joinLink, reconcile, roleOf } from '../groups'
+import { can, joinLink, reconcile, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
@@ -458,7 +458,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             )
           : null}
 
-        {can('leave', role)
+        {can('leave', role) && writerOnDevice(info)
           ? (
             <View style={styles.box}>
               <Btn
