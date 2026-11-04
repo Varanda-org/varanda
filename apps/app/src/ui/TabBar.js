@@ -44,6 +44,9 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
             accessibilityRole='tab'
             accessibilityState={{ selected }}
             accessibilityLabel={badged ? `${tab.label}, novidades` : tab.label}
+            // On touch down too: a finger held past the double tap window
+            // would otherwise let the post open under the tab.
+            onPressIn={() => pendingOpen.cancel()}
             onPress={() => {
               pendingOpen.cancel()
               if (selected) {
