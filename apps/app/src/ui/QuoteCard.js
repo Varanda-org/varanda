@@ -20,9 +20,11 @@ import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
 import { hasMention, MentionText } from './MentionText'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function QuoteCard ({ quote, now }) {
+  const styles = useStyles(makeStyles)
   const q = quote && typeof quote === 'object' ? quote : {}
   const open = typeof q.onOpen === 'function' ? q.onOpen : undefined
   const missing = q.missing === true
@@ -94,7 +96,7 @@ export function QuoteCard ({ quote, now }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   card: {
     marginTop: 8,
     paddingVertical: 8,

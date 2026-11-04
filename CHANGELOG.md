@@ -20,6 +20,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Aparência: Ajustes › Aparência com Sistema (padrão), Claro e Escuro, guardada neste aparelho, e um tema escuro quente (verde e creme, nunca preto) no app, na web e na barra de status.
 - Avisos mostram curtidas e republicações das suas publicações, uma linha por pessoa, canal `varanda/notices/3`; semeadores e clientes antigos continuam como antes.
 - Comunidades em lista, como no Telegram: a tela da comunidade mostra cada grupo com quem escreveu por último, o texto, a hora e as mensagens não lidas ("99+" a partir de 99). Tocar no nome ou no ⋯ abre Informações da comunidade, com Compartilhar, sair, convidar, membros, pedidos, quem pode convidar e Ajustes. As não lidas são por aparelho: abrir o grupo zera a contagem só aqui, sem avisar ninguém.
 - Convidar por @nome pelas Conversas: quem pode convidar vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo, digita @nome e a pessoa recebe o convite como mensagem privada (em Pedidos se não seguir quem convidou). Quem ainda não usa as Conversas recebe a orientação de mandar o link pelo Compartilhar. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite sem entrar. Envio incerto oferece **Tentar de novo**, nunca automático. "Quem pode convidar" controla só o botão.

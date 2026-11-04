@@ -30,7 +30,8 @@ import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 
 const PRIVATE_GROUP_NOTICE = 'Este grupo é privado. Ao enviar, a moderação da associação vai ler o texto acima, que sai do grupo como a citação do denunciante. A associação não consegue ler o grupo, só o que você enviar aqui.'
 const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da associação recebe o texto acima como citação do denunciante.'
@@ -38,6 +39,7 @@ const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da
 const NOT_HOSTED_MESSAGE = 'Nesta versão, denúncias só pela versão web no site da associação.'
 
 export default function Denunciar ({ open, target, onClose, onSent }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true && node.passkey !== null
   const member = hosted && node.passkey.status ? node.passkey.status.publicKey : null
@@ -192,7 +194,7 @@ function ChoicePill ({ label, selected, onPress }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   content: { padding: 16, gap: 12 },
   line: { ...type.postText, color: colors.ink },

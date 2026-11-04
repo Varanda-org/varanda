@@ -4,9 +4,11 @@
 
 import { StyleSheet, Text, View } from 'react-native'
 import { Soft } from './index'
-import { colors, fonts, layout, type } from './theme'
+import { useStyles } from './ThemeProvider'
+import { fonts, layout, type } from './theme'
 
 export function Stepper ({ index, total, title, hint, children }) {
+  const styles = useStyles(makeStyles)
   const dots = []
   for (let i = 0; i < total; i++) {
     dots.push(<View key={i} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />)
@@ -22,7 +24,7 @@ export function Stepper ({ index, total, title, hint, children }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', padding: 16, gap: 12 },
   step: { ...type.stepLabel, color: colors.soft },
   dots: { flexDirection: 'row', gap: 8 },

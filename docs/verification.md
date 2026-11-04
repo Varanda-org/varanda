@@ -4133,3 +4133,39 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum t
 - O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
 - A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
 - Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
+
+## 76. Modo escuro e Aparência (PR feat/tema-escuro)
+
+O app ganha modo escuro. Em Ajustes › Aparência a pessoa escolhe Sistema (o padrão), Claro ou Escuro, e a escolha fica guardada só neste aparelho (`localStorage` com a chave `varanda-aparencia` na web; `varanda-aparencia.json` na pasta de documentos no app). As duas paletas estão em `apps/app/src/appearance.js`, com as mesmas chaves; o escuro é quente e verde, nunca preto, e `dim` é sempre um véu escuro. O provedor e a receita de migração de uma tela ficam em `apps/app/src/ui/ThemeProvider.js`. A barra de status segue o tema. Mudanças nativas: `userInterfaceStyle` automatic em `app.json`, `UIUserInterfaceStyle` removido de `Info.plist`, `UIStatusBarStyle` em `UIStatusBarStyleDarkContent`. O splash nativo (iOS, Android e o React no nativo) continua creme nos dois modos, para não haver flash de creme para escuro. Na web, o splash do app segue a escolha, e o pré-splash de `index.html` segue o sistema até o JavaScript do app rodar. Detalhes em [app.md](app.md) ("Aparência") e [development.md](development.md) ("Tema claro e escuro").
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/appearance.test.js` (as duas paletas com as mesmas chaves, contraste de 4,5:1 nos pares de texto, a escolha guardada só se válida, `resolveScheme`, `statusBarStyle`, o armazenamento da web) e `apps/app/test/themeUsage.test.js` (nenhum arquivo importa a paleta fixa nem cria estilos com cores no carregamento do módulo). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (emulador ou aparelho):
+
+- [ ] Com o aparelho no modo escuro e Ajustes › Aparência em Sistema, o app abre escuro. No modo claro, abre claro. Trocar o modo do aparelho com o app aberto troca as cores sem reiniciar.
+- [ ] Claro e Escuro forçados, com o aparelho no modo oposto: o app segue a escolha, inclusive a barra de status e as folhas.
+- [ ] Fechar e abrir o app mantém a escolha (arquivo `varanda-aparencia.json`).
+- [ ] A abertura (splash) é creme nos dois modos.
+- [ ] No escuro: Ajustes, a folha de Publicar e o portão de entrada mostram texto legível e nenhum fundo branco sobrando.
+
+iOS (simulador ou aparelho):
+
+- [ ] Os mesmos quatro passos do Android, e os ícones da barra de status: escuros na abertura creme, claros no escuro.
+- [ ] No escuro, a cadeira da barra do topo fica sobre um disco creme, e as listras e a faixa do pôr do sol são iguais.
+
+Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
+
+- [ ] Sistema, Claro forçado e Escuro forçado: a cor da barra do navegador (`theme-color`) acompanha a escolha.
+- [ ] Escuro forçado com o sistema claro: a barra do navegador e o app ficam escuros; pode aparecer um quadro claro do pré-splash (limite conhecido, abaixo).
+- [ ] O splash no escuro: fundo `#1c2622`, palavra `#5dcaa0`, cadeira sobre disco creme.
+- [ ] Ajustes › Aparência, uma folha (Publicar) e o portão de entrada nos três modos.
+- [ ] Recarregar a página mantém a escolha (`localStorage`).
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação. Os valores de contraste em [app-design.md](../apps/site/artwork/app-design.md) foram medidos pela fórmula do teste, não num aparelho.
+- O pré-splash da web e a cor do navegador antes do JS seguem o sistema, não a escolha manual. Por isso, com uma escolha diferente do sistema, pode aparecer um quadro do modo do sistema.
+- O splash nativo não segue a escolha manual: fica creme nos dois modos.
+- `manifest.webmanifest` continua creme nos dois modos.

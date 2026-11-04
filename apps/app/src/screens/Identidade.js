@@ -51,7 +51,8 @@ import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
-import { colors, fonts, type } from '../ui/theme'
+import { fonts, type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { atName } from '../who'
 
 const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
@@ -88,6 +89,7 @@ function mismatchText (legacy) {
 // link before this step. `plain` (the setup) names the key a code and the
 // certificate what the association returns.
 export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, error, pending, plain = false }) {
+  const styles = useStyles(makeStyles)
   const [copyNote, setCopyNote] = useState('')
   const [manual, setManual] = useState(false)
   const manualRef = useRef(null)
@@ -771,6 +773,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 // onLinked (setup only): called once a certificate from the account link
 // lands in this diary, so the shell knows the setup took the Google return.
 export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
   const passkey = node.passkey
@@ -1248,7 +1251,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   ))
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   brand: { ...type.profileName, color: colors.accent, fontFamily: fonts.title },
   manual: {
     backgroundColor: colors.card,

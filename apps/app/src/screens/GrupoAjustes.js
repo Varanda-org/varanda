@@ -20,11 +20,12 @@ import { can, joinLink, reconcile, roleOf } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
-import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, colors, errorText, useAction } from '../ui'
+import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 
@@ -49,6 +50,7 @@ function origin () {
 }
 
 function PersonRow ({ row, label, onOpenMember, children }) {
+  const styles = useStyles(makeStyles)
   const name = nameOf(row)
   return (
     <View style={styles.person}>
@@ -64,6 +66,7 @@ function PersonRow ({ row, label, onOpenMember, children }) {
 }
 
 export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const { request } = node
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
@@ -482,7 +485,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   content: { gap: 4, paddingBottom: 24 },
   box: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },

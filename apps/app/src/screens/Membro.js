@@ -34,7 +34,7 @@ import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { colors } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { isSeederDown, knownAuthors, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
@@ -78,6 +78,7 @@ const INITIAL_POSTS = {
 }
 
 export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPeople, onToast }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -426,7 +427,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
   countsNote: { marginTop: 4 }

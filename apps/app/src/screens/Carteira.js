@@ -36,7 +36,8 @@ import {
 import { Body, Btn, Card, ErrorText, Field, Label, Notice, Page, Row, Soft, Spinner, UNCERTAIN, errorText, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
-import { colors, fonts } from '../ui/theme'
+import { fonts } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const READ_EVERY_MS = 30 * 1000
 // Hodle may take a moment to record a validated selfie; five reads stay far
@@ -136,6 +137,8 @@ const FAR_FUTURE = Date.UTC(2200, 0, 1)
 const isRealDate = (iso) => isBirthDate(iso, FAR_FUTURE)
 
 function Check ({ label, checked, onToggle, disabled }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={styles.check}
@@ -146,7 +149,7 @@ function Check ({ label, checked, onToggle, disabled }) {
       onPress={onToggle}
     >
       <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='ok' size={14} color='#ffffff' /> : null}
+        {checked ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}
       </View>
       <Text style={styles.checkText}>{label}</Text>
     </Pressable>
@@ -155,6 +158,7 @@ function Check ({ label, checked, onToggle, disabled }) {
 
 // The kit's Field has no secure entry; the PIN must not show on screen.
 function PinField ({ label, value, onChangeText, editable }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.field}>
       <Label>{label}</Label>
@@ -234,6 +238,7 @@ function Countdown ({ until, label, onExpire }) {
 }
 
 function Line ({ label, value }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.line}>
       <Text style={styles.lineLabel}>{label}</Text>
@@ -252,6 +257,7 @@ function feeSentence (fee, prefix) {
 // open: the screen is showing; active: open and the node ready (for calls).
 // member: the unlocked public key; node: from useNode (signs wallet.sign).
 export default function Carteira ({ open, active, member, node, onBack }) {
+  const styles = useStyles(makeStyles)
   const [policy, setPolicy] = useState(null)
   const [policyRead, setPolicyRead] = useState(false)
   // undefined: not read yet; null: no account; else the parsed status.
@@ -947,6 +953,7 @@ export default function Carteira ({ open, active, member, node, onBack }) {
 // deliberate tap sends that same opId again, which the service answers with
 // the stored outcome instead of a second charge or payout.
 function Dinheiro ({ active, policy, member, signed }) {
+  const styles = useStyles(makeStyles)
   const [view, setView] = useState('saldo')
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
@@ -1772,7 +1779,7 @@ function Dinheiro ({ active, policy, member, signed }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   check: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
   box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },

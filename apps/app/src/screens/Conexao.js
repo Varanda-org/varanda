@@ -20,7 +20,8 @@ import * as configStore from '../configStore'
 import { installationOrigin } from '../installation'
 import { connectProblem, DETAILS_LABEL, RETRY_LABEL } from '../connectText'
 import { useNode } from '../node'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useTheme } from '../ui/ThemeProvider'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
 
 const { canConfigure, hostedPage } = configStore
@@ -60,6 +61,7 @@ function useInfo (node, active, ready) {
 }
 
 function ConexaoNavegador ({ active = true, embedded = false }) {
+  const { colors } = useTheme()
   const node = useNode()
   const [form, setForm] = useState(() => webFormOf(node.config))
   const [localError, setLocalError] = useState('')

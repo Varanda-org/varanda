@@ -1,7 +1,9 @@
 /* global document, getComputedStyle */
 // Presentational splash while the app decides its first screen: the chair
 // rises and settles, the letters of the name enter one by one, then the hint
-// fades in and pulses. The cream background matches the native launch screens.
+// fades in and pulses. On native it stays cream in both schemes to match the
+// launch screens (their raster chair has an ink frame that vanishes on dark);
+// on the web it follows the scheme, like the pre-splash in index.html.
 // On the web, public/index.html paints its own opaque overlay with the same
 // composition before the bundle runs; this component then stays silent under
 // it and removes it on unmount, so it is neither cut short nor doubled.
@@ -10,7 +12,9 @@ import { useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Easing, Image, Platform, StyleSheet, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { colors, fonts, type } from './theme'
+import { light, statusBarStyle } from '../appearance'
+import { useStyles, useTheme } from './ThemeProvider'
+import { fonts, type } from './theme'
 import { loopTiming } from './loopMotion'
 import { SPLASH_HINT, SPLASH_LABEL, SPLASH_WORD, PULSE_MS, splashMotion } from './splashMotion'
 
@@ -26,6 +30,10 @@ const hiddenFromReaders = {
 }
 
 export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
+  const themed = useStyles(makeStyles)
+  const theme = useTheme()
+  const styles = nativeStyles || themed
+  const scheme = native ? 'light' : theme.scheme
   const full = useRef(null)
   if (full.current === null) full.current = splashMotion(false)
   const shellRef = useRef(undefined)
@@ -194,7 +202,7 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
       {...(underShell ? { 'aria-hidden': true } : null)}
     >
       <Animated.View
-        style={[styles.chair, {
+        style={[styles.chair, scheme === 'dark' && styles.chairDisc, {
           opacity: c.opacity,
           transform: [{ translateY: c.translateY }, { scale: c.scale }, { rotate }]
         }]}
@@ -218,12 +226,12 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
       <Animated.Text {...hiddenFromReaders} style={[styles.hint, { opacity: hintOpacity.current }]}>
         {hint}
       </Animated.Text>
-      <StatusBar style='dark' />
+      <StatusBar style={statusBarStyle(scheme)} />
     </SafeAreaView>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: {
     flex: 1,
     alignItems: 'center',
@@ -231,6 +239,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg
   },
   chair: { marginBottom: 12 },
+  // The ink frame of the chair art vanishes on the dark background, so it
+  // sits on the cream it was drawn for.
+  chairDisc: { backgroundColor: '#fbf8f3', borderRadius: 28, padding: 8 },
   mark: { width: 96, height: 96 },
   word: { flexDirection: 'row', marginBottom: 8 },
   letter: {
@@ -245,3 +256,6 @@ const styles = StyleSheet.create({
     textAlign: 'center'
   }
 })
+
+// Built once: native always paints the light splash (see the header).
+const nativeStyles = native ? makeStyles(light) : null

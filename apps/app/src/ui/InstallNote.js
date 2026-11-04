@@ -9,9 +9,12 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 
 export function InstallNote ({ kind, onInstall, onClose, inset = false }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   if (kind !== 'prompt' && kind !== 'ios') return null
   return (
@@ -50,7 +53,7 @@ export function InstallNote ({ kind, onInstall, onClose, inset = false }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   note: {
     flexDirection: 'row',
     alignItems: 'center',

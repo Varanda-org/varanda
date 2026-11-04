@@ -15,7 +15,8 @@ import { Btn, ErrorText, Field, Soft, errorText, useAction } from '../ui'
 import { Avatar } from './Avatar'
 import { Pill } from './Pill'
 import { Skeleton } from './States'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 const { displayText } = rpc
 const NOT_FOUND = '@nome não encontrado.'
@@ -28,6 +29,7 @@ const INVITE_MEMBER = 'Essa pessoa já é membro.'
 // same { to, text } for one more tap on Tentar de novo (the node re-puts the
 // same drop, so there is no duplicate) and is never resent on its own.
 export function InviteByName ({ request, hosted, online, ownKey, isMember, makeText }) {
+  const styles = useStyles(makeStyles)
   const [input, setInput] = useState('')
   const [candidate, setCandidate] = useState(null)
   const [resolving, setResolving] = useState(false)
@@ -181,7 +183,7 @@ export function InviteByName ({ request, hosted, online, ownKey, isMember, makeT
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   name: { ...type.postName, color: colors.ink, flex: 1 },

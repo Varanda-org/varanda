@@ -11,11 +11,12 @@ import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { reconcile } from '../groups'
-import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, colors, useAction } from '../ui'
+import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { useNode } from '../node'
 import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 
 // MAX_GROUP_NAME (rpc 5.36, also the community name limit) counts code points.
 export const NAME_MAX = rpc.MAX_GROUP_NAME
@@ -42,6 +43,7 @@ export function useEscapeClose (visible, onClose) {
 }
 
 export function Choice ({ label, options, value, onChange, disabled }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.choice}>
       <Label>{label}</Label>
@@ -69,6 +71,7 @@ async function communityView (request, community) {
 }
 
 export function NovoGrupo ({ community, visible, onClose, onCreated }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const [name, setName] = useState('')
   const [join, setJoin] = useState('open')
@@ -179,10 +182,10 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   body: { padding: 16, gap: 12 },
   choice: { gap: 6 },
   check: { gap: 8 },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  note: { ...type.postMeta, color: colors.dim }
+  note: { ...type.postMeta, color: colors.soft }
 })

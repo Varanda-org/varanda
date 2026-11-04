@@ -13,7 +13,7 @@ import { StyleSheet, Text } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { isHttpUrl, textSegments } from '../links'
 import { linkProps } from '../openExternal'
-import { colors } from './theme'
+import { useStyles } from './ThemeProvider'
 
 // Same segmentation as the renderer, so an @nome inside a link (not tappable
 // here) never pulls a quote or post out of its own Pressable.
@@ -22,6 +22,7 @@ export function hasMention (text) {
 }
 
 export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, style, selectable }) {
+  const styles = useStyles(makeStyles)
   const segments = textSegments(text, { mentions: typeof onOpenMention === 'function' })
   // A clamp can hide part of a URL, so the visible prefix would open another site.
   const links = typeof numberOfLines !== 'number'
@@ -90,7 +91,7 @@ export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   mention: { color: colors.accent },
   link: { color: colors.accent, textDecorationLine: 'underline' }
 })

@@ -23,13 +23,14 @@ import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
 import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, PRIVATE_LABEL, can, lastLine, membersLabel, reconcile, roleLabel, unreadLabel, visibilityLabel } from '../groups'
-import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
 import { NovoGrupo } from './NovoGrupo'
 import { WEB_ONLY_MESSAGE } from './Comunidades'
@@ -58,6 +59,7 @@ function adminsLabel (n) {
 // The invite card of someone outside the community: one button, and only the
 // tap joins.
 function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, error, note }) {
+  const styles = useStyles(makeStyles)
   const approval = join === 'approval'
   return (
     <View style={styles.block}>
@@ -76,6 +78,8 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
 }
 
 function GroupRow ({ title, detail, time, unread, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -104,6 +108,8 @@ function GroupRow ({ title, detail, time, unread, onPress }) {
 }
 
 export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
   const bottomPad = useBottomPad()
@@ -485,7 +491,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
-        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} />}
+        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
         {body}
       </ScrollView>
@@ -503,7 +509,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },

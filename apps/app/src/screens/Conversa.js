@@ -29,7 +29,8 @@ import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { revokeDeletedMedia } from '../media/cache'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
 export const ENGAGEMENT_MAX = 62
@@ -245,6 +246,7 @@ export function useDelete ({ request, onToast, onDeleted, recheck }) {
 }
 
 export function DeletePrompt ({ del }) {
+  const styles = useStyles(makeStyles)
   return (
     <Sheet open={del.target !== null} onClose={() => del.cancel()} title='Apagar publicação'>
       <View style={styles.prompt}>
@@ -470,6 +472,7 @@ const INITIAL = {
 }
 
 export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -729,7 +732,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },

@@ -11,7 +11,8 @@ import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
 import { HelpNote } from '../ui/Help'
-import { Body, Btn, Card, Label, Page, Soft, Title, colors } from '../ui'
+import { Body, Btn, Card, Label, Page, Soft, Title } from '../ui'
+import { useStyles } from '../ui/ThemeProvider'
 
 const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
@@ -43,6 +44,7 @@ function syncText (syncState) {
 // Collapsed until opened: both documents are long, and in the gate the
 // accept button stays within reach. Each one opens in place; the Page scrolls.
 function LegalDoc ({ doc, expanded, onToggle }) {
+  const styles = useStyles(makeStyles)
   return (
     <Card>
       <Pressable
@@ -89,7 +91,7 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
