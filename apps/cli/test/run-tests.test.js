@@ -16,7 +16,7 @@ const { tmpDir, until } = require('./helpers/net')
 // its own after IDLE_MS.
 const repoRoot = path.resolve(__dirname, '../../..')
 const RUNNER = path.join(repoRoot, 'scripts/run-tests.js')
-const RUNNER_VARS = ['VARANDA_TEST_SHARD', 'VARANDA_TEST_CONCURRENCY', 'VARANDA_TEST_SKIP_WORKSPACES', 'VARANDA_TEST_TIMEOUT_MS']
+const RUNNER_VARS = ['VARANDA_TEST_SHARD', 'VARANDA_TEST_CONCURRENCY', 'VARANDA_TEST_SKIP_WORKSPACES', 'VARANDA_TEST_TIMEOUT_MS', 'VARANDA_TEST_DURATIONS']
 
 const PRELUDE = `
 const fs = require('node:fs')
@@ -102,6 +102,8 @@ function runRunner (t, { cwd, logFile, args = [], env = {} }) {
   const childEnv = { ...process.env, RT_LOG: logFile, TMPDIR: path.dirname(logFile) }
   for (const name of RUNNER_VARS) delete childEnv[name]
   childEnv.VARANDA_TEST_TIMEOUT_MS = '20000'
+  // Never the real cache under node_modules: fixture paths would land in it.
+  childEnv.VARANDA_TEST_DURATIONS = path.join(path.dirname(logFile), 'durations.json')
   Object.assign(childEnv, env)
   const child = spawn(process.execPath, [RUNNER, ...args], {
     cwd,
@@ -387,6 +389,128 @@ test('the skip list skips a matching workspace and nothing else', async (t) => {
   t.is(res.code, 0)
   t.ok(readLog(logFile).some((e) => e.ev === 'end' && e.name === 'a'), 'non-matching list runs the file')
   t.is(lastLine(res.stdout), '# 1 arquivo(s) de teste, 0 falha(s)')
+})
+
+// A throwaway monorepo whose root lists pkgs/*; a null script means a
+// workspace without a test script.
+const COMMON = 'node ../../scripts/run-tests.js'
+
+function monorepo (dir, workspaces, patterns = ['pkgs/*']) {
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ private: true, workspaces: patterns }))
+  for (const [name, script] of Object.entries(workspaces)) {
+    const ws = path.join(dir, 'pkgs', name)
+    fs.mkdirSync(ws, { recursive: true })
+    fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ name, scripts: script ? { test: script } : {} }))
+  }
+}
+
+function wsHeader (ws, name) {
+  return '# pkgs/' + ws + '/test/' + fixtureName(name)
+}
+
+function durationKey (dir, name) {
+  return path.relative(repoRoot, path.join(fs.realpathSync(dir), 'test', fixtureName(name))).split(path.sep).join('/')
+}
+
+test('workspaces mode pools every workspace, each file in its own directory', async (t) => {
+  const { dir, logFile } = tree(t)
+  monorepo(dir, { one: COMMON, two: COMMON, three: null })
+  // a and b wait for each other from different workspaces, so both pass only
+  // when one pool spans the workspaces.
+  const logCwd = "log('cwd', { cwd: process.cwd() }); "
+  fixture(path.join(dir, 'pkgs/one'), 'a', logCwd + "touch('a-started'); done((await waitFor('b-started', 10000)) ? 0 : 1)")
+  fixture(path.join(dir, 'pkgs/two'), 'b', logCwd + "touch('b-started'); done((await waitFor('a-started', 10000)) ? 0 : 1)")
+  fixture(path.join(dir, 'pkgs/two'), 'c', logCwd + 'done()')
+  const res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces'], env: { VARANDA_TEST_CONCURRENCY: '2' } }).done
+  t.is(res.code, 0)
+  const wsHeaders = res.stdout.split('\n').filter((line) => line.startsWith('# pkgs/')).sort()
+  t.alike(wsHeaders, [wsHeader('one', 'a'), wsHeader('two', 'b'), wsHeader('two', 'c')])
+  const cwds = {}
+  for (const e of readLog(logFile)) if (e.ev === 'cwd') cwds[e.name] = fs.realpathSync(e.cwd)
+  const wsDir = (ws) => fs.realpathSync(path.join(dir, 'pkgs', ws))
+  t.alike(cwds, { a: wsDir('one'), b: wsDir('two'), c: wsDir('two') }, 'each file runs from its workspace')
+  t.is(lastLine(res.stdout), '# 3 arquivo(s) de teste, 0 falha(s)')
+})
+
+test('workspaces mode honours the skip list', async (t) => {
+  const { dir, logFile } = tree(t)
+  monorepo(dir, { one: COMMON, two: COMMON })
+  fixture(path.join(dir, 'pkgs/one'), 'a', 'done()')
+  fixture(path.join(dir, 'pkgs/two'), 'b', 'done()')
+  let res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces'], env: { VARANDA_TEST_SKIP_WORKSPACES: 'pkgs/two' } }).done
+  t.is(res.code, 0)
+  t.ok(res.stdout.startsWith('# workspace pkgs/two pulado (coberto por outro job)\n'), 'skip line first')
+  t.alike(readLog(logFile).filter((e) => e.ev === 'end').map((e) => e.name), ['a'], 'only the kept workspace ran')
+  t.is(lastLine(res.stdout), '# 1 arquivo(s) de teste, 0 falha(s)')
+  res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces'], env: { VARANDA_TEST_SKIP_WORKSPACES: 'pkgs/one,pkgs/two' } }).done
+  t.is(res.code, 0, 'every workspace skipped')
+  t.is(res.stdout, '# workspace pkgs/one pulado (coberto por outro job)\n# workspace pkgs/two pulado (coberto por outro job)\n')
+})
+
+test('workspaces mode refuses what it cannot pool, before any file runs', async (t) => {
+  const cases = [
+    [{ one: COMMON, two: 'jest' }, ['pkgs/*'], ['--workspaces'], '# workspace pkgs/two: o script de teste não é este executor (jest)\n'],
+    [{ one: COMMON, two: COMMON }, ['pkgs/*'], ['--workspaces'], '# workspace pkgs/two: nenhum arquivo de teste\n'],
+    [{ one: COMMON }, ['pkgs/**'], ['--workspaces'], '# padrão de workspace não suportado: pkgs/**\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', 'x.test.js'], '# --workspaces não aceita arquivos\n']
+  ]
+  for (const [workspaces, patterns, args, expected] of cases) {
+    const { dir, logFile } = tree(t)
+    monorepo(dir, workspaces, patterns)
+    fixture(path.join(dir, 'pkgs/one'), 'a', 'done()')
+    const res = await runRunner(t, { cwd: dir, logFile, args }).done
+    t.is(res.code, 1, expected.trim())
+    t.is(res.stdout, expected)
+    t.alike(readLog(logFile), [], 'nothing ran')
+  }
+})
+
+test('a pooled run starts unmeasured files first, then the slowest, and records every duration', async (t) => {
+  const { dir, logFile } = tree(t)
+  for (const name of ['a', 'b', 'c']) fixture(dir, name, 'done()')
+  const durations = path.join(dir, 'durations.json')
+  fs.writeFileSync(durations, JSON.stringify({ [durationKey(dir, 'a')]: 1, [durationKey(dir, 'c')]: 50 }))
+  const res = await runRunner(t, { cwd: dir, logFile, env: { VARANDA_TEST_CONCURRENCY: '2', VARANDA_TEST_DURATIONS: durations } }).done
+  t.is(res.code, 0)
+  const starts = readLog(logFile).filter((e) => e.ev === 'start').map((e) => e.name)
+  t.alike(starts.slice(0, 2).sort(), ['b', 'c'], 'b (never measured) and c (slowest) take the two slots')
+  t.is(starts[2], 'a', 'the fastest starts last')
+  const saved = JSON.parse(fs.readFileSync(durations, 'utf8'))
+  for (const name of ['a', 'b', 'c']) t.ok(Number.isFinite(saved[durationKey(dir, name)]), 'duration recorded: ' + name)
+  const seen = readLog(logFile).length
+  fs.writeFileSync(durations, JSON.stringify({ [durationKey(dir, 'a')]: 1, [durationKey(dir, 'c')]: 50 }))
+  const serial = await runRunner(t, { cwd: dir, logFile, env: { VARANDA_TEST_CONCURRENCY: '1', VARANDA_TEST_DURATIONS: durations } }).done
+  t.is(serial.code, 0)
+  const serialStarts = readLog(logFile).slice(seen).filter((e) => e.ev === 'start').map((e) => e.name)
+  t.alike(serialStarts, ['a', 'b', 'c'], 'a sequential run keeps list order')
+})
+
+test('an unreadable durations file means list order and is replaced', async (t) => {
+  const { dir, logFile } = tree(t)
+  // a and b pass only if they hold the two slots together, as list order gives.
+  fixture(dir, 'a', "touch('a-started'); done((await waitFor('b-started', 10000)) ? 0 : 1)")
+  fixture(dir, 'b', "touch('b-started'); done((await waitFor('a-started', 10000)) ? 0 : 1)")
+  fixture(dir, 'c', 'done()')
+  const durations = path.join(dir, 'durations.json')
+  fs.writeFileSync(durations, '{ not json')
+  const res = await runRunner(t, { cwd: dir, logFile, env: { VARANDA_TEST_CONCURRENCY: '2', VARANDA_TEST_DURATIONS: durations } }).done
+  t.is(res.code, 0)
+  let saved = null
+  try { saved = JSON.parse(fs.readFileSync(durations, 'utf8')) } catch {}
+  t.ok(saved && Object.keys(saved).length === 3, 'replaced by valid JSON')
+})
+
+test('the root npm test pools every workspace through this runner', (t) => {
+  const root = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'))
+  t.is(root.scripts.test, 'node scripts/run-tests.js --workspaces')
+  for (const parent of ['packages', 'apps']) {
+    for (const name of fs.readdirSync(path.join(repoRoot, parent))) {
+      const file = path.join(repoRoot, parent, name, 'package.json')
+      if (!fs.existsSync(file)) continue
+      const script = (JSON.parse(fs.readFileSync(file, 'utf8')).scripts || {}).test
+      if (script) t.is(script, COMMON, parent + '/' + name)
+    }
+  }
 })
 
 test('the runner has no em dash', (t) => {
