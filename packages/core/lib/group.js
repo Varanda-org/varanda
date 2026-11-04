@@ -558,6 +558,59 @@ function groupJoinHistory (entries, group) {
   return out.sort((a, b) => a.seq - b.seq || cmp(a.writer, b.writer))
 }
 
+// The roots a diary binds now, chosen like the seeder's liveGroupJoins (the
+// first MAX_GROUPS_PER_DIARY groups by live join seq, at most the
+// MAX_GROUP_WRITERS_PER_DIARY earliest writers per group),
+// so a second device of the same account opens exactly the roots the
+// seeders keep. Never throws.
+function diaryGroupKeys (entries, max = MAX_GROUPS_PER_DIARY) {
+  try {
+    if (!Array.isArray(entries)) return []
+    // group -> Map(writer -> earliest on:true seq), same as the seeder's
+    // groupFirst: a later leave does not free the writer's slot.
+    const first = new Map()
+    eachEntry(entries, (seq, record) => {
+      const copy = validRecordCopy(record, seq)
+      if (copy === null || copy.type !== 'group-join' || copy.on !== true) return
+      let writers = first.get(copy.group)
+      if (writers === undefined) {
+        writers = new Map()
+        first.set(copy.group, writers)
+      }
+      if (!writers.has(copy.writer) || seq < writers.get(copy.writer)) writers.set(copy.writer, seq)
+    })
+    const allowed = new Set()
+    for (const [group, writers] of first) {
+      const list = [...writers].sort((a, b) => a[1] - b[1] || cmp(a[0], b[0]))
+      let room = MAX_GROUP_WRITERS_PER_DIARY
+      // The root's own key always takes one slot, whatever its seq.
+      if (writers.has(group)) {
+        allowed.add(group + ':' + group)
+        room--
+      }
+      for (const [writer] of list) {
+        if (writer === group) continue
+        if (room <= 0) break
+        allowed.add(group + ':' + writer)
+        room--
+      }
+    }
+    const live = [...groupJoins(entries).values()].sort((a, b) => a.seq - b.seq)
+    const groups = new Set()
+    const out = []
+    for (const j of live) {
+      if (!allowed.has(j.group + ':' + j.writer)) continue
+      if (groups.has(j.group)) continue
+      if (groups.size >= max) continue
+      groups.add(j.group)
+      out.push(j.group)
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 function orderKey (at, writer, seq) {
   return { t: Date.parse(at), writer, seq }
 }
@@ -3018,6 +3071,7 @@ module.exports = {
   sealedInner,
   groupJoins,
   groupJoinHistory,
+  diaryGroupKeys,
   groupCutHistory,
   groupConfirmHistory,
   leaveDigest,

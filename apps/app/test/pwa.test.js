@@ -23,6 +23,12 @@ test('manifest has the members an installable app needs', (t) => {
   t.is(manifest.display, 'standalone')
   t.ok(manifest.background_color)
   t.ok(manifest.theme_color)
+  // The installed app's system navigation bar takes this one colour; on the
+  // web the tab bar above it is the same opaque dark bg in both schemes.
+  t.is(manifest.theme_color, '#1c2622', 'theme_color is the dark bg')
+  const tabBar = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
+  t.ok(tabBar.includes("const alwaysDark = Platform.OS === 'web'"), 'the tab bar is always dark on the web')
+  t.ok(tabBar.includes('makeStyles({ ...DARK, tabBar: DARK.bg })'), 'the web tab bar is opaque dark bg, not the translucent tabBar')
   const icon = (size, purpose) => manifest.icons.find((i) => i.sizes === size && i.purpose === purpose)
   t.ok(icon('192x192', 'any'), '192 any icon')
   t.ok(icon('512x512', 'any'), '512 any icon')

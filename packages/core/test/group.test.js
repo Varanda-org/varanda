@@ -2,11 +2,11 @@
 
 const test = require('brittle')
 const {
-  MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, GROUP_TYPES, MAX_GROUPS_PER_COMMUNITY,
+  MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_DIARY, GROUP_TYPES, MAX_GROUPS_PER_COMMUNITY,
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
-  groupJoins, groupJoinHistory, orderKey, compareOrder, isFuture, buildGroup, buildCommunity
+  groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
@@ -253,6 +253,95 @@ test('groupJoins and groupJoinHistory', (t) => {
   t.alike(groupJoinHistory(entries, G), [{ writer: wX, on: true, seq: 1, rejoin: null }, { writer: wX, on: false, seq: 3, rejoin: null }, { writer: wY, on: true, seq: 5, rejoin: { writer: wX, seq: 2 } }])
   t.alike([...groupJoins('x')], [])
   t.alike(groupJoinHistory(null, G), [])
+})
+
+test('diaryGroupKeys', (t) => {
+  const join = (seq, group, on, writer = wX) => ({ seq, record: groupJoinRecord({ group, writer, on, at: AT(seq) }) })
+  t.alike(diaryGroupKeys([]), [])
+  t.alike(diaryGroupKeys(null), [])
+  t.alike(diaryGroupKeys('x'), [])
+  t.alike(diaryGroupKeys([
+    { seq: 1, record: { type: 'group-join', group: G, writer: wX, on: true } },
+    { seq: 2, record: { type: 'member-cert' } },
+    null,
+    join(3, C, true, wY)
+  ]), [C], 'invalid and non-join records are ignored')
+  t.alike(diaryGroupKeys([join(1, G, false)]), [], 'only on:false is absent')
+  t.alike(diaryGroupKeys([join(1, G, true), join(2, G, false)]), [], 'on then off is absent')
+  t.alike(diaryGroupKeys([
+    join(1, G, true, wX),
+    join(2, G, false, wX),
+    join(3, G, true, wY)
+  ]), [G], 'one writer still on keeps the group')
+  // G joined at 1, left at 3, rejoined by a new writer at 10; C joined at 5.
+  t.alike(diaryGroupKeys([
+    join(10, G, true, wX2),
+    join(1, G, true, wX),
+    join(5, C, true, wY),
+    join(3, G, false, wX)
+  ]), [C, G], 'a leave and rejoin ranks by the live join seq')
+  const left = []
+  for (let i = 0; i < MAX_GROUPS_PER_DIARY; i++) {
+    const group = K(0x1000 + i)
+    const writer = K(0x2000 + i)
+    left.push(join(i * 2 + 1, group, true, writer))
+    left.push(join(i * 2 + 2, group, false, writer))
+  }
+  const still = K(0x1000 + MAX_GROUPS_PER_DIARY)
+  left.push(join(MAX_GROUPS_PER_DIARY * 2 + 1, still, true, K(0x2000 + MAX_GROUPS_PER_DIARY)))
+  t.alike(diaryGroupKeys(left.slice().reverse()), [still], 'groups already left do not fill the cap')
+  const live = []
+  for (let i = 0; i < MAX_GROUPS_PER_DIARY + 1; i++) {
+    live.push(join(i + 1, K(0x3000 + i), true, K(0x4000 + i)))
+  }
+  const first64 = []
+  for (let i = 0; i < MAX_GROUPS_PER_DIARY; i++) first64.push(K(0x3000 + i))
+  t.alike(diaryGroupKeys(live.slice().reverse()), first64, 'the first 64 live groups by seq')
+  t.alike(diaryGroupKeys(live, 1), [first64[0]], 'max keeps the earliest live group')
+  const held = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) held.push(join(i + 1, C, true, K(0x7000 + i)))
+  t.alike(diaryGroupKeys(held), [C], 'writers past the 8 do not drop the group')
+  // The only writer still on joined last by seq and first by key.
+  const crowded = [join(MAX_GROUP_WRITERS_PER_DIARY + 1, G, true, K(0x5000))]
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const writer = K(0x5100 + i)
+    crowded.push(join(i + 1, G, true, writer))
+    crowded.push(join(100 + i, G, false, writer))
+  }
+  t.alike(diaryGroupKeys(crowded), [], 'a group whose only live writer is the 9th earliest is absent')
+  const rooted = [join(40, G, true, G)]
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const writer = K(0x6000 + i)
+    rooted.push(join(i + 1, G, true, writer))
+    rooted.push(join(50 + i, G, false, writer))
+  }
+  t.alike(diaryGroupKeys(rooted), [G], 'the root key always counts')
+  // The root joined late and then left: it still spends one of the 8 slots,
+  // so the 8th other writer (the only one still on) does not count.
+  const displaced = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const writer = K(0x6100 + i)
+    displaced.push(join(i + 1, C, true, writer))
+    if (i < MAX_GROUP_WRITERS_PER_DIARY - 1) displaced.push(join(70 + i, C, false, writer))
+  }
+  displaced.push(join(30, C, true, C))
+  displaced.push(join(31, C, false, C))
+  t.alike(diaryGroupKeys(displaced), [], 'the root key takes one of the 8 writer slots')
+  const tie = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY - 1; i++) {
+    const writer = K(0x5200 + i)
+    tie.push(join(i + 1, B, true, writer))
+    tie.push(join(80 + i, B, false, writer))
+  }
+  const low = K(0x5210)
+  const high = K(0x5211)
+  tie.push(join(MAX_GROUP_WRITERS_PER_DIARY, B, true, high))
+  tie.push(join(MAX_GROUP_WRITERS_PER_DIARY, B, true, low))
+  tie.push(join(90, B, false, low))
+  t.alike(diaryGroupKeys(tie), [], 'the lower writer key wins a tied seq')
+  const boom = [join(1, G, true, wX)]
+  Object.defineProperty(boom, '1', { enumerable: true, get () { throw new Error('boom') } })
+  t.alike(diaryGroupKeys(boom), [], 'an entry that throws yields nothing')
 })
 
 test('orderKey and the future skip', (t) => {

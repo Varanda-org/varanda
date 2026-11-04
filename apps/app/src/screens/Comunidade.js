@@ -4,6 +4,8 @@
 // an invite card with one Entrar or Pedir entrada button (also from the
 // seeder index; a link is never consent, only the tap joins). The creator
 // also sees Novo grupo and, on repair, Tirar da lista and Devolver à lista.
+// A second device has the diary role but no writer here, so it gets a
+// Participar neste aparelho card above the groups instead.
 // The top bar (or its ⋯) opens Informações da comunidade, where sharing,
 // leaving, inviting and the management panels live. A mutation that comes
 // back uncertain is never resent: the screen re-reads and only then lets the
@@ -22,7 +24,10 @@ import { useNode } from '../node'
 import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
-import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, PRIVATE_LABEL, can, lastLine, membersLabel, reconcile, roleLabel, unreadLabel, visibilityLabel } from '../groups'
+import {
+  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+} from '../groups'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -77,7 +82,7 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
   )
 }
 
-function GroupRow ({ title, detail, time, unread, onPress }) {
+function GroupRow ({ title, detail, own, time, unread, onPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   return (
@@ -97,7 +102,10 @@ function GroupRow ({ title, detail, time, unread, onPress }) {
         {detail || unread
           ? (
             <View style={styles.line}>
-              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>{detail}</Text>
+              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>
+                {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
+                {detail}
+              </Text>
               {unread ? <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View> : null}
             </View>
             )
@@ -126,6 +134,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const [confirm, setConfirm] = useState(null)
   const [check, setCheck] = useState(null)
   const [newGroup, setNewGroup] = useState(false)
+  // Set once a device join was sent (answered or not): a second tap could bind another writer.
+  const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
   const [droppedNames, setDroppedNames] = useState({})
   const act = useAction()
   const join = useAction()
@@ -221,7 +232,11 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const role = info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
   const staff = isMember && (role === 'creator' || role === 'admin')
-  const canCreate = isMember && can('create', role)
+  const deviceJoin = needsDeviceJoin(info)
+  const writerNow = info ? info.writerHere : undefined
+  useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
+  const canCreate = isMember && can('create', role) && showNewGroup(info)
   const dropped = info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
 
@@ -296,6 +311,36 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     }
   }
 
+  // The role is already 'member' before a second device joins, so reconcile
+  // would always read landed: an uncertain answer just re-reads, then the card
+  // may come back and the person decides to tap again.
+  const doDeviceJoin = async () => {
+    setJoinNote('')
+    setCheck(null)
+    // At the reserve the first tap only shows the warning: the slot it would
+    // spend (community or Geral) never comes back. The counts are read fresh:
+    // the rendered ones may predate a writer that just landed.
+    let fresh = info
+    if (!reserveConfirm) {
+      try {
+        fresh = await requestRef.current('community.info', { community })
+      } catch {}
+    }
+    if (needsReserveConfirm([fresh && fresh.writersBound, fresh && fresh.generalWritersBound], reserveConfirm)) {
+      setReserveConfirm(true)
+      return
+    }
+    const res = await join.run(() => requestRef.current('community.join', { community }))
+    if (res.ok) {
+      setDeviceJoinSent(true)
+      load()
+    } else if (res.uncertain) {
+      setDeviceJoinSent(true)
+      await load()
+      setDeviceJoinSent(false)
+    }
+  }
+
   if (!hosted) {
     return (
       <View style={styles.root}>
@@ -307,9 +352,10 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   const offline = node.online === false
   const pending = info !== null && info.state === 'pending'
+  const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== '' ? displayText(idx.name) : ''
   const title = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
-    : (idx.status === 'done' && needIndex && idx.name !== '' ? displayText(idx.name) : 'Comunidade')
+    : (indexName || 'Comunidade')
 
   const share = async () => {
     setShareNote('')
@@ -385,7 +431,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   } else if (info === null) {
     body = <Skeleton />
   } else {
-    const joinable = !isMember && role !== 'banned' && role !== 'requested' && !pending && info.leavePending !== true
+    // Role 'pending' on a held root: the account is in by another device and
+    // its writers are still arriving here, so no newcomer join is offered.
+    const joinable = !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     body = (
       <View>
         {joinable
@@ -404,7 +452,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             )
           : null}
         <View style={styles.block}>
-          {joinable ? null : <ErrorText>{join.error}</ErrorText>}
+          {joinable || deviceJoin ? null : <ErrorText>{join.error}</ErrorText>}
           <ErrorText>{act.error}</ErrorText>
           {joinNote && !joinable ? <Soft>{joinNote}</Soft> : null}
           {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
@@ -414,6 +462,17 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         </View>
         {checkBox}
         {confirmBox}
+        {deviceJoin && deviceJoinSent ? <View style={styles.block}><Soft>{DEVICE_WAIT_TEXT}</Soft></View> : null}
+        {deviceJoin && !deviceJoinSent
+          ? (
+            <View style={styles.block}>
+              <Soft>{DEVICE_JOIN_TEXT}</Soft>
+              {reserveConfirm || communityReserveReached(info) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+              <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
+              <ErrorText>{join.error}</ErrorText>
+            </View>
+            )
+          : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
           ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
@@ -421,13 +480,14 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
+            const own = line !== '' && lastIsOwn(last)
             const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
-            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
             return (
               <View key={g.group}>
-                <GroupRow title={name} detail={detail} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+                <GroupRow title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
                 <View style={[styles.block, styles.inline]}>
                   <Pill label='Tirar da lista' danger pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: DROP_GROUP_TEXT, label: 'Tirar da lista', run: () => mutate('community.removeGroup', { community, group: g.group }) })} />
                 </View>
@@ -468,7 +528,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   return (
     <View style={styles.root}>
       <TopBar
-        title={pending ? 'Comunidade ainda chegando' : title}
+        title={pending ? (indexName || 'Comunidade ainda chegando') : title}
         subtitle={subtitle}
         onBack={onBack}
         leading={<Avatar name={title} publicKey={community} size={36} />}
@@ -527,6 +587,7 @@ const makeStyles = (colors) => StyleSheet.create({
   line: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   name: { ...type.postName, color: colors.ink, flex: 1 },
   handle: { ...type.postMeta, color: colors.soft },
+  own: { color: colors.accent, fontWeight: '600' },
   time: { fontSize: 12, color: colors.soft },
   grow: { flex: 1 },
   badge: { minWidth: 22, height: 22, borderRadius: 11, paddingHorizontal: 6, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
