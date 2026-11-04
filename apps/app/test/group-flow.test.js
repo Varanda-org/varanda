@@ -462,6 +462,21 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.absent(newest.includes('group.seen') || newest.includes('markSeen'), 'not from readNewest')
 })
 
+test('Grupo marks up to the newest painted row, never past it', async (t) => {
+  const src = screen('Grupo.js')
+  const mark = src.slice(src.indexOf('const markSeen = useCallback('), src.indexOf('const load = useCallback('))
+  t.ok(mark.includes("request('group.seen', { group, upTo })"), 'sends the cut-off')
+  const call = mark.indexOf("'group.seen'")
+  t.ok(mark.indexOf('const upTo = cutRef.current') !== -1 && mark.indexOf('const upTo = cutRef.current') < call, 'reads the cut-off first')
+  t.ok(mark.indexOf('if (upTo === null) return') !== -1 && mark.indexOf('if (upTo === null) return') < call, 'no cut-off: no request')
+  t.absent(mark.includes('{ group })'), 'never a bare mark')
+  const cut = src.slice(src.indexOf('const last = '), src.indexOf('const visible = node.visible !== false'))
+  t.ok(cut.includes('rows[rows.length - 1]'), 'newest painted row')
+  t.ok(cut.includes('cutRef.current = '), 'assigned every render')
+  t.ok(cut.includes('{ at: last.at, writer: last.writer, seq: last.seq }'), 'cut-off shape')
+  t.absent(cut.includes('rawItems') || cut.includes('hidden'), 'painted rows only, hidden ones kept')
+})
+
 test('Grupo marks only what shows: visible, on top, a reader, the latest read painted', async (t) => {
   const src = screen('Grupo.js')
   t.ok(src.includes('const visible = node.visible !== false'), 'follows the app visibility, as Mensagem')
