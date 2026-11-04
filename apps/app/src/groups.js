@@ -43,18 +43,26 @@ export function unreadLabel (n) {
   return n >= 99 ? '99+' : String(n)
 }
 
+export const OWN_LABEL = 'Você'
+
 // One line for a group row: who said it and what. A hidden message shows
-// only the fixed label, never its preview or its author.
+// only the fixed label, never its preview or its author. The own message
+// carries no author here: the screen draws OWN_LABEL apart (lastIsOwn), so
+// a peer whose display name is "Você" can never look like it.
 export function lastLine (last) {
   if (!last || typeof last !== 'object') return ''
   if (last.hidden === true) return HIDDEN_LABEL
   // A line break would show as U+FFFD.
   const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  if (last.mine === true) return text
   let who = ''
-  if (last.mine === true) who = 'Você'
-  else if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
+  if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
   else if (typeof last.username === 'string' && displayText(last.username).trim() !== '') who = '@' + displayText(last.username)
   return who === '' ? text : who + ': ' + text
+}
+
+export function lastIsOwn (last) {
+  return !!last && typeof last === 'object' && last.mine === true && last.hidden !== true
 }
 
 const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
