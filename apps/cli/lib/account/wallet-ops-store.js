@@ -191,6 +191,12 @@ function swapBacked (e) {
   return e.kind === 'swap' || (e.kind === 'crypto' && e.asset === 'USDC' && e.source === 'BRLA')
 }
 
+// Support is owed only for a swap Hodle registered (it gave a swapId): one
+// refused before that moved nothing and is an ordinary failure.
+function needsSupport (e) {
+  return swapBacked(e) && e.status === 'falhou' && e.providerId !== null
+}
+
 function isFinal (e) {
   if (e.status === 'falhou') return e.kind !== 'deposit'
   return e.status === 'concluido' || e.status === 'devolvido'
@@ -380,8 +386,10 @@ function mergeEntry (a, b) {
   out.providerId = firstNonNull(later.providerId, earlier.providerId)
   out.txHash = firstNonNull(later.txHash, earlier.txHash)
   out.createdAt = a.createdAt < b.createdAt ? a.createdAt : b.createdAt
-  const failedSide = a.status === 'falhou' && b.status === 'falhou' ? later : (a.status === 'falhou' ? a : b)
-  out.suporte = failedSide.suporte && swapBacked(out) && out.status === 'falhou'
+  // The flag follows the merged row, unless the operator cleared it on a
+  // failure already registered with a provider id.
+  const cleared = [a, b].some((e) => e.status === 'falhou' && e.providerId !== null && e.suporte === false)
+  out.suporte = needsSupport(out) && !cleared
   return out
 }
 
@@ -483,7 +491,7 @@ function entryFromInput (input, at) {
   }
   if (e.fee.asset === null) e.fee.asset = feeAsset(e)
   if (!FEE_ASSETS.includes(e.fee.asset)) throw new TypeError('fee.asset must be one of ' + FEE_ASSETS.join(', '))
-  if (swapBacked(e) && e.status === 'falhou') e.suporte = true
+  if (needsSupport(e)) e.suporte = true
   if (!validTo(kind, e.to)) throw new TypeError('to must be a masked destination')
   if (!validEntry(e)) throw new TypeError('entry is not valid')
   return e
@@ -589,10 +597,9 @@ function openWalletOpsStore (dataDir, { now = Date.now, guard = () => true, read
         if (fresh.hodleFeeCents !== cur.hodleFeeCents) out.hodleFeeCents = fresh.hodleFeeCents
         if (cur.providerId === null) out.providerId = fresh.providerId
         if (cur.txHash === null) out.txHash = fresh.txHash
-        // The support flag is set when a swap fails and cleared only by
-        // the operator (clearSupport), never by a later put.
-        out.suporte = swapBacked(out) && out.status === 'falhou' &&
-          (cur.suporte || cur.status !== 'falhou')
+        // The support flag is set when a registered swap fails and cleared
+        // only by the operator (clearSupport), never by a later put.
+        out.suporte = needsSupport(out) && (cur.suporte || cur.status !== 'falhou')
         if (JSON.stringify(out) === JSON.stringify(cur)) return { changed: false }
         out.updatedAt = stampAfter(cur.updatedAt)
         next.ops[id] = out
@@ -734,36 +741,46 @@ function openWalletOpsStore (dataDir, { now = Date.now, guard = () => true, read
   }
 
   // The fees this member still owes, oldest first: only where the principal
-  // was accepted and not undone.
-  function pendingFees (member) {
+  // was accepted and not undone. With `asset` ('BRL' or 'USDC') only that
+  // asset's fees count toward the cap, so one asset's backlog never hides
+  // the other's.
+  function pendingFees (member, asset) {
     checkMember(member)
+    if (asset !== undefined && !FEE_ASSETS.includes(asset)) throw new TypeError('asset must be one of ' + FEE_ASSETS.join(', '))
     usable()
     return Object.keys(state.ops)
       .filter((id) => {
         const e = state.ops[id]
         return e.member === member && (e.fee.status === 'pendente' || e.fee.status === 'incerta') &&
-          FEE_OWED.includes(e.status)
+          FEE_OWED.includes(e.status) && (asset === undefined || e.fee.asset === asset)
       })
       .sort((x, y) => byCreated(state.ops[x], state.ops[y], x, y))
       .slice(0, PENDING_FEES_MAX)
       .map(view)
   }
 
-  // Every BRL fee this member still owes or may still be paying, summed over
-  // all its rows with no cap: what a new debit must leave in the wallet.
+  // Every fee this member still owes or may still be paying, summed over all
+  // its rows with no cap: what a new debit must leave in the wallet. BRL fees
+  // go to cents and count; a USDC fee keeps its micros in fee.cents and goes
+  // to usdcMicros, since the two balances are reserved apart.
   // Memory holds every durably written row, so nothing is left out.
   function outstandingFees (member) {
     checkMember(member)
     usable()
     let cents = 0
     let count = 0
+    let usdcMicros = 0
     for (const e of Object.values(state.ops)) {
-      if (e.member !== member || e.fee.asset !== 'BRL' || !FEE_RESERVED.includes(e.status)) continue
+      if (e.member !== member || !FEE_RESERVED.includes(e.status)) continue
       if (!OUTSTANDING_FEE.includes(e.fee.status)) continue
+      if (e.fee.asset === 'USDC') {
+        usdcMicros += e.fee.cents
+        continue
+      }
       cents += e.fee.cents
       count++
     }
-    return { cents, count }
+    return { cents, count, usdcMicros }
   }
 
   // Every debit of this member whose outcome is still unknown, oldest first,

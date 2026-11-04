@@ -637,13 +637,18 @@ test('prune keeps non-final rows, outstanding fees, open disputes and the suppor
   await store.put({ ...d, status: 'concluido' })
   await store.setDispute(d.externalId, 'aberta')
   const swapId = externalIdFor(m, 'swap', opId())
-  await store.put({ externalId: swapId, member: m, kind: 'swap', status: 'falhou', cents: 0, amountMicros: 1, fee: { cents: 0, status: 'nenhuma' } })
+  await store.put({ externalId: swapId, member: m, kind: 'swap', status: 'falhou', cents: 0, amountMicros: 1, fee: { cents: 0, status: 'nenhuma' }, providerId: 'swap_1' })
+  // Refused before Hodle registered it: nothing moved, so no support is owed.
+  const refused = externalIdFor(m, 'swap', opId())
+  await store.put({ externalId: refused, member: m, kind: 'swap', status: 'falhou', cents: 0, amountMicros: 1, fee: { cents: 0, status: 'nenhuma' } })
+  t.is(store.get(refused).suporte, false, 'a refused swap is an ordinary failure')
 
   c.t += 89 * DAY
   t.alike(await store.prune(c.t), { changed: false, removed: 0 }, 'nothing under 90 days')
   c.t += 2 * DAY
-  t.alike(await store.prune(c.t), { changed: true, removed: 2 })
+  t.alike(await store.prune(c.t), { changed: true, removed: 3 })
   t.is(store.get(done), null)
+  t.is(store.get(refused), null, 'a refused swap is pruned')
   t.is(store.get(noFee), null, 'a failed principal owes no fee')
   for (const id of [owed, sent, open, unsure, pend, d.externalId, swapId]) t.ok(store.get(id), 'kept ' + id)
 })
@@ -848,7 +853,7 @@ test('outstandingFees: sums every pendente, enviada or incerta BRL fee whose pri
   const { store, c } = setup(t)
   const m = memberKey()
   const other = memberKey()
-  t.alike(store.outstandingFees(m), { cents: 0, count: 0 })
+  t.alike(store.outstandingFees(m), { cents: 0, count: 0, usdcMicros: 0 })
   const ids = []
   for (let i = 0; i < 25; i++) {
     c.t = T0 + (25 - i) * 1000
@@ -860,7 +865,7 @@ test('outstandingFees: sums every pendente, enviada or incerta BRL fee whose pri
     if (i % 5 === 0) await store.setFee(p.externalId, { status: 'incerta' })
   }
   t.ok(store.pendingFees(m).length <= 20, 'the display list stays capped')
-  t.alike(store.outstandingFees(m), { cents: 25 * 50, count: 25 }, 'all 25 summed')
+  t.alike(store.outstandingFees(m), { cents: 25 * 50, count: 25, usdcMicros: 0 }, 'all 25 summed')
   await store.setFee(ids[0], { status: 'cobrada' })
   const unsure = payout(m)
   await store.put(unsure)
@@ -874,7 +879,87 @@ test('outstandingFees: sums every pendente, enviada or incerta BRL fee whose pri
   const q = payout(other)
   await store.put(q)
   await store.put({ ...q, status: 'concluido' })
-  t.alike(store.outstandingFees(m), { cents: 25 * 50, count: 25 }, 'an enviado principal may still conclude; not cobrada, falhou, a refund or another member')
+  t.alike(store.outstandingFees(m), { cents: 25 * 50, count: 25, usdcMicros: 0 }, 'an enviado principal may still conclude; not cobrada, falhou, a refund or another member')
   store.fail()
   t.exception(() => store.outstandingFees(m), 'an unreadable store refuses')
+})
+
+test('outstandingFees: a USDC fee in micros reopens and sums apart from the BRL cents, with today\'s keys only', async (t) => {
+  const { store, open, c } = setup(t)
+  const m = memberKey()
+  const usdc = {
+    externalId: externalIdFor(m, 'crypto', opId()),
+    member: m,
+    kind: 'crypto',
+    status: 'enviado',
+    cents: 0,
+    asset: 'USDC',
+    source: 'USDC',
+    amountMicros: 2000000,
+    fee: { asset: 'USDC', cents: 150000, status: 'pendente' },
+    to: '0x..abcdef'
+  }
+  await store.put(usdc)
+  const p = payout(m)
+  await store.put(p)
+  await store.put({ ...p, status: 'concluido' })
+  const swapId = externalIdFor(m, 'swap', opId())
+  await store.put({ externalId: swapId, member: m, kind: 'swap', status: 'falhou', cents: 0, amountMicros: 1, fee: { cents: 0, status: 'nenhuma' }, providerId: 'swap_9' })
+  t.is(store.get(swapId).fee.asset, 'USDC', 'a swap keeps fee nenhuma in USDC')
+  t.is(store.get(swapId).suporte, true, 'a registered swap that failed needs support')
+  t.alike(store.outstandingFees(m), { cents: 50, count: 1, usdcMicros: 150000 })
+
+  const again = open()
+  t.ok(again.available(), 'a file with only the closed key list loads')
+  t.alike(again.get(usdc.externalId).fee, { asset: 'USDC', cents: 150000, status: 'pendente', txHash: null, reference: null })
+  t.alike(again.outstandingFees(m), { cents: 50, count: 1, usdcMicros: 150000 }, 'cents stays BRL-only')
+
+  await again.put({ ...usdc, status: 'falhou' })
+  t.alike(again.outstandingFees(m), { cents: 50, count: 1, usdcMicros: 0 }, 'a failed principal reserves no USDC fee')
+
+  c.t += 91 * DAY
+  await again.prune(c.t)
+  t.ok(again.get(swapId), 'prune keeps a falhou swap with suporte')
+})
+
+test('pendingFees with an asset caps that asset alone, so old USDC fees never hide a BRL one', async (t) => {
+  const { store, c } = setup(t)
+  const m = memberKey()
+  for (let i = 0; i < 21; i++) {
+    c.t = T0 + i * 1000
+    await store.put({ externalId: externalIdFor(m, 'crypto', opId()), member: m, kind: 'crypto', status: 'concluido', cents: 0, asset: 'USDC', source: 'USDC', amountMicros: 1000000, fee: { asset: 'USDC', cents: 15000, status: 'pendente' } })
+  }
+  c.t = T0 + 30 * 1000
+  const p = payout(m)
+  await store.put({ ...p, status: 'concluido' })
+  t.absent(store.pendingFees(m).some((e) => e.externalId === p.externalId), 'unfiltered, the cap is full of USDC fees')
+  t.alike(store.pendingFees(m, 'BRL').map((e) => e.externalId), [p.externalId])
+  t.is(store.pendingFees(m, 'USDC').length, 20)
+  t.ok(store.pendingFees(m, 'USDC').every((e) => e.fee.asset === 'USDC'))
+  t.exception.all(() => store.pendingFees(m, 'BRLA'), TypeError)
+})
+
+test('a lost-lock merge keeps the support flag unless the operator cleared a registered failure', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = memberKey()
+  const swap = { externalId: externalIdFor(m, 'swap', opId()), member: m, kind: 'swap', status: 'enviado', cents: 0, amountMicros: 2500000, fee: { cents: 0, status: 'nenhuma' } }
+  await store.put(swap)
+  c.t += 1000
+  await store.put({ ...swap, status: 'pendente', providerId: 'swap_1' })
+  // The other holder saw the swap fail before it ever stored the id.
+  const state = readFile(file)
+  const row = state.ops[swap.externalId]
+  Object.assign(row, { status: 'falhou', providerId: null, suporte: false, updatedAt: iso(c.t + 5000) })
+  fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 })
+  t.is(await store.heal(), true)
+  t.is(store.get(swap.externalId).status, 'falhou')
+  t.is(store.get(swap.externalId).providerId, 'swap_1')
+  t.is(store.get(swap.externalId).suporte, true, 'a registered failure goes to support')
+
+  // The operator cleared it on another copy; the merge never sets it again.
+  const cleared = readFile(file)
+  Object.assign(cleared.ops[swap.externalId], { suporte: false, updatedAt: iso(c.t + 10000) })
+  fs.writeFileSync(file, JSON.stringify(cleared), { mode: 0o600 })
+  await store.heal()
+  t.is(store.get(swap.externalId).suporte, false)
 })
