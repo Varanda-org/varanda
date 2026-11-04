@@ -4428,6 +4428,7 @@ iOS (simulador ou aparelho, depois do Android):
 
 - [ ] Os mesmos passos de toque duplo, toque simples, links e fotos, e de "Reduzir movimento" (Ajustes › Acessibilidade › Movimento).
 - [ ] Com VoiceOver ligado, a ativação de uma publicação abre a Conversa e nunca curte.
+- [ ] Com VoiceOver ligado, numa publicação com link ou menção no texto, ativar o texto duas vezes seguidas abre a Conversa e não curte (com leitor de tela ligado, o toque duplo para curtir fica desligado).
 - [ ] A vibração de curtir e de republicar acontece num aparelho com Taptic Engine (o simulador não vibra).
 - [ ] O fio, as pílulas e as abas, e o aviso "Republicado" com "Desfazer".
 

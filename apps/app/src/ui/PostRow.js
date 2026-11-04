@@ -66,6 +66,17 @@ function countOf (counts, field) {
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
 
+// Read at tap time, not per render: while VoiceOver or TalkBack runs, a tap
+// opens at once and never reaches the double tap. VoiceOver turns its own
+// activation of plain text into a synthetic touch, and two of them would like.
+let screenReaderOn = false
+if (Platform.OS !== 'web') {
+  try {
+    Promise.resolve(AccessibilityInfo.isScreenReaderEnabled()).then((on) => { screenReaderOn = on === true }, () => {})
+    AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on === true })
+  } catch {}
+}
+
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first
 // like gives the count that brings the split in).
@@ -188,6 +199,10 @@ export function PostRow ({
         const now = Date.now()
         const kind = tapKind(previousTap.current, now)
         cancelPendingOpen()
+        if (screenReaderOn) {
+          open()
+          return
+        }
         if (kind === 'double') {
           // Never unlikes, and never doubles a like already on its way.
           if (!liked) pressLike()
