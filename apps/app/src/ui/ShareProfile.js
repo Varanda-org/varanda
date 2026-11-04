@@ -5,7 +5,8 @@ import { canShare, copyText, shareUrl, visibleUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { Mono, Row, Soft } from './index'
 import { Pill } from './Pill'
-import { colors, fonts } from './theme'
+import { fonts } from './theme'
+import { useStyles } from './ThemeProvider'
 
 const PROFILE_LABELS = Object.freeze({
   field: 'link do perfil',
@@ -18,6 +19,7 @@ const PROFILE_LABELS = Object.freeze({
 // labels: other wording for another kind of link (missing keys keep the
 // profile's). showUrl: draw any link, not only a /@ profile URL.
 export function ShareProfile ({ url, labels, showUrl = false }) {
+  const styles = useStyles(makeStyles)
   const text = labels ? { ...PROFILE_LABELS, ...labels } : PROFILE_LABELS
   const [note, setNote] = useState('')
   const [manual, setManual] = useState(false)
@@ -96,7 +98,7 @@ export function ShareProfile ({ url, labels, showUrl = false }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   manual: {
     backgroundColor: colors.card,
     borderWidth: 1,

@@ -39,7 +39,8 @@ import { HelpNote } from '../ui/Help'
 import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
 import { EmptyState, Skeleton } from '../ui/States'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
 import Busca from './Busca'
 import { useFollowSet } from './Conversa'
@@ -51,6 +52,7 @@ const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
 // changed the follows, so the shell refreshes A Rua, Diário and the count.
 // `refresh`: the shell's bump after a follow or a sent post.
 export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest, onOpenMember, onFollowsChanged, onToast, onReply, onReport, onQuote, onOpenThread, onOpenMention, onOpenEngagers, refresh }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
@@ -427,7 +429,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
   top: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 },

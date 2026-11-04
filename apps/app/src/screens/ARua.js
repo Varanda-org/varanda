@@ -49,7 +49,8 @@ import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
@@ -660,6 +661,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
 // when counts were read from the index, i.e. on the hosted web).
 export function CountsNote ({ social }) {
+  const styles = useStyles(makeStyles)
   const f = social.social.flags
   if (f.indexing || f.complete !== false) return null
   return <View style={styles.footer}><Soft>{INCOMPLETE_NOTE}</Soft></View>
@@ -670,6 +672,8 @@ export function CountsNote ({ social }) {
 // `onFollowReposter` (optional, with `followPending`): a small 'seguir' on
 // the reposter's line. A Rua and Diário pass neither.
 export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, onOpenReposter, onFollowReposter, followPending }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = displayText(whoOf({ name: repostedBy.name, username: repostedBy.username }).title)
   const followReposter = typeof onFollowReposter === 'function' ? onFollowReposter : null
   return (
@@ -713,6 +717,7 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
 
 // The transient error line of a failed toggle (when the shell gives no toast).
 export function SocialToast ({ text }) {
+  const styles = useStyles(makeStyles)
   if (!text) return null
   return (
     <View style={styles.toast} pointerEvents='none'>
@@ -762,6 +767,7 @@ function pageNeeds (pageItems) {
 }
 
 export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -1189,7 +1195,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   footer: { padding: 16, gap: 8 },
   placeholder: {
@@ -1214,8 +1220,8 @@ const styles = StyleSheet.create({
   },
   toastText: {
     ...type.counter,
-    color: '#ffffff',
-    backgroundColor: colors.ink,
+    color: colors.toastInk,
+    backgroundColor: colors.toastBg,
     borderRadius: 18,
     paddingVertical: 8,
     paddingHorizontal: 14,

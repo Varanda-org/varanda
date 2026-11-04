@@ -826,9 +826,15 @@ test('group.info', (t) => {
   bad(t, 'group.info', { group: KEY, limit: 1 })
 })
 
-test('group.seen takes only the group and is not mutating', (t) => {
+test('group.seen takes the group and an optional upTo cursor, not mutating', (t) => {
   t.absent(isMutating('group.seen'))
   ok(t, 'group.seen', { group: KEY }, { group: KEY })
+  const cur = { at: '2026-10-28T12:00:00.000Z', writer: KEY, seq: 9 }
+  ok(t, 'group.seen', { group: KEY, upTo: cur }, { group: KEY, upTo: cur })
+  for (const upTo of [{ at: cur.at, writer: KEY }, { at: cur.at, seq: 1 }, { writer: KEY, seq: 1 }, { at: '2026-10-28', writer: KEY, seq: 1 },
+    { at: cur.at, writer: KEY, seq: 0 }, { at: cur.at, writer: 'x', seq: 1 }, { at: cur.at, writer: KEY, seq: 1, extra: 1 }, 5, null, []]) {
+    bad(t, 'group.seen', { group: KEY, upTo }, 'upTo ' + JSON.stringify(upTo))
+  }
   bad(t, 'group.seen', {})
   bad(t, 'group.seen', { group: KEY, id: 'cd'.repeat(16) }, 'no mark by id')
 })

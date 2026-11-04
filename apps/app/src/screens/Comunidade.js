@@ -25,16 +25,17 @@ import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
 import {
-  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, PRIVATE_LABEL,
-  can, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
+  can, lastIsOwn, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
 } from '../groups'
-import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, colors, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
 import { NovoGrupo } from './NovoGrupo'
 import { WEB_ONLY_MESSAGE } from './Comunidades'
@@ -63,6 +64,7 @@ function adminsLabel (n) {
 // The invite card of someone outside the community: one button, and only the
 // tap joins.
 function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, error, note }) {
+  const styles = useStyles(makeStyles)
   const approval = join === 'approval'
   return (
     <View style={styles.block}>
@@ -80,7 +82,9 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
   )
 }
 
-function GroupRow ({ title, detail, time, unread, onPress }) {
+function GroupRow ({ title, detail, own, time, unread, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -98,7 +102,10 @@ function GroupRow ({ title, detail, time, unread, onPress }) {
         {detail || unread
           ? (
             <View style={styles.line}>
-              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>{detail}</Text>
+              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>
+                {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
+                {detail}
+              </Text>
               {unread ? <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View> : null}
             </View>
             )
@@ -109,6 +116,8 @@ function GroupRow ({ title, detail, time, unread, onPress }) {
 }
 
 export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
   const bottomPad = useBottomPad()
@@ -329,9 +338,10 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   const offline = node.online === false
   const pending = info !== null && info.state === 'pending'
+  const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== '' ? displayText(idx.name) : ''
   const title = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
-    : (idx.status === 'done' && needIndex && idx.name !== '' ? displayText(idx.name) : 'Comunidade')
+    : (indexName || 'Comunidade')
 
   const share = async () => {
     setShareNote('')
@@ -455,13 +465,14 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
+            const own = line !== '' && lastIsOwn(last)
             const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
-            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
             return (
               <View key={g.group}>
-                <GroupRow title={name} detail={detail} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+                <GroupRow title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
                 <View style={[styles.block, styles.inline]}>
                   <Pill label='Tirar da lista' danger pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: DROP_GROUP_TEXT, label: 'Tirar da lista', run: () => mutate('community.removeGroup', { community, group: g.group }) })} />
                 </View>
@@ -502,7 +513,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   return (
     <View style={styles.root}>
       <TopBar
-        title={pending ? 'Comunidade ainda chegando' : title}
+        title={pending ? (indexName || 'Comunidade ainda chegando') : title}
         subtitle={subtitle}
         onBack={onBack}
         leading={<Avatar name={title} publicKey={community} size={36} />}
@@ -525,7 +536,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
-        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} />}
+        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
         {body}
       </ScrollView>
@@ -543,7 +554,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
@@ -561,6 +572,7 @@ const styles = StyleSheet.create({
   line: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   name: { ...type.postName, color: colors.ink, flex: 1 },
   handle: { ...type.postMeta, color: colors.soft },
+  own: { color: colors.accent, fontWeight: '600' },
   time: { fontSize: 12, color: colors.soft },
   grow: { flex: 1 },
   badge: { minWidth: 22, height: 22, borderRadius: 11, paddingHorizontal: 6, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },

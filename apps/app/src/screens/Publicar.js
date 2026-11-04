@@ -55,7 +55,8 @@ import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 // Clock slack when an uncertain send is matched by its `at` timestamp. The
 // node stamps `at` while it handles the request, from the same clock as the
@@ -110,6 +111,7 @@ const nextItemId = () => ++lastItemId
 // Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
 // borders are green; rotating the circle slides its half-circle arc into view.
 function Ring ({ progress }) {
+  const styles = useStyles(makeStyles)
   const deg = Math.max(0, Math.min(1, progress)) * 360
   const rightDeg = -135 + Math.min(deg, 180)
   const leftDeg = 45 + Math.max(0, deg - 180)
@@ -138,6 +140,8 @@ function Ring ({ progress }) {
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
 export default function Publicar ({ open, reply: replyProp, quote = null, me, onClose, onClearReply, onClearQuote, onPublished }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
@@ -656,6 +660,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
 // One attached item: the thumbnail of the encoded bytes, a remove button, a
 // progress bar while uploading and the retry line after a failure.
 function Thumb ({ item, index, count, busy, onRemove, onRetry }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const label = 'foto ' + (index + 1) + ' de ' + count
   const failed = item.status === 'failed'
   const invalid = item.status === 'invalid'
@@ -697,7 +703,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
   thumbWrap: { width: 80, gap: 4 },

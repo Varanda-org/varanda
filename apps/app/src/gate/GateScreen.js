@@ -5,11 +5,13 @@
 import { useEffect, useState } from 'react'
 import { ScrollView, StyleSheet, Text } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
+import { useStyles } from '../ui/ThemeProvider'
 import { runGate } from './harness'
 
 const KEY = '__varandaGate'
 
 export default function GateScreen ({ url }) {
+  const styles = useStyles(makeStyles)
   const [lines, setLines] = useState(() => (globalThis[KEY] ? globalThis[KEY].lines.slice() : []))
 
   useEffect(() => {
@@ -44,11 +46,11 @@ export default function GateScreen ({ url }) {
   )
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff', paddingHorizontal: 16 },
-  title: { fontSize: 20, fontWeight: '600', marginTop: 8 },
-  url: { fontSize: 12, color: '#666', marginBottom: 8 },
+const makeStyles = (colors) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.bg, paddingHorizontal: 16 },
+  title: { fontSize: 20, fontWeight: '600', marginTop: 8, color: colors.ink },
+  url: { fontSize: 12, color: colors.soft, marginBottom: 8 },
   log: { flex: 1 },
-  line: { fontFamily: 'Menlo', fontSize: 11, marginBottom: 4 },
-  fail: { fontFamily: 'Menlo', fontSize: 11, marginBottom: 4, color: '#b00020' }
+  line: { fontFamily: 'Menlo', fontSize: 11, marginBottom: 4, color: colors.ink },
+  fail: { fontFamily: 'Menlo', fontSize: 11, marginBottom: 4, color: colors.danger }
 })

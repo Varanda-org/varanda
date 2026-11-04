@@ -1,9 +1,11 @@
 // A pill-shaped button: filled (accent) or outlined (ink or danger).
 
 import { Pressable, StyleSheet, Text } from 'react-native'
-import { colors, type } from './theme'
+import { useStyles } from './ThemeProvider'
+import { type } from './theme'
 
 export function Pill ({ label, onPress, filled, danger, disabled, pending, accessibilityLabel }) {
+  const styles = useStyles(makeStyles)
   const off = disabled === true || pending === true
   return (
     <Pressable
@@ -27,7 +29,7 @@ export function Pill ({ label, onPress, filled, danger, disabled, pending, acces
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   pill: { borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   filled: { backgroundColor: colors.accent, paddingVertical: 9, paddingHorizontal: 17 },
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },

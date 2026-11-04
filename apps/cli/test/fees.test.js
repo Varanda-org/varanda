@@ -7,7 +7,7 @@ const test = require('brittle')
 const fees = require('../lib/account/fees')
 const {
   KINDS, FEE_VECTORS, AMOUNT_MAX, parseFees, parseTreasury, feeCents, swapFeeMicros, usdcFeeMicros,
-  cryptoFee, quote, debitTerms, checkDebit, isSelfTreasury, feeReference, isActive, describe, formatBrl
+  cryptoFee, quote, debitTerms, checkDebit, quoteMicros, debitTermsMicros, checkDebitMicros, isSelfTreasury, feeReference, isActive, describe, formatBrl
 } = fees
 
 const ADDR = '0x' + 'ab'.repeat(20)
@@ -56,7 +56,7 @@ test('fees: in-range values parse', (t) => {
     VARANDA_FEE_PAYOUT_CENTS: '100000',
     VARANDA_FEE_PAYOUT_BPS: '2000',
     VARANDA_FEE_CRYPTO_BPS: ' 150 ',
-    VARANDA_FEE_SWAP_BPS: '30',
+    VARANDA_FEE_SWAP_BPS: '0',
     VARANDA_FEE_SWAP_CENTS: '0',
     VARANDA_FEE_TREASURY: TREASURY
   })
@@ -64,7 +64,7 @@ test('fees: in-range values parse', (t) => {
   t.alike(rates.payout, { cents: 100000, bps: 2000 })
   t.alike(rates.crypto, { cents: 0, bps: 150 })
   t.alike(rates.deposit, { cents: 0, bps: 0 })
-  t.alike(rates.swap, { cents: 0, bps: 30 })
+  t.alike(rates.swap, { cents: 0, bps: 0 })
   t.alike(treasury, { kind: 'sub', id: 'treasury-1' })
   t.is(isActive(rates), true)
 })
@@ -97,17 +97,31 @@ test('fees: a deposit fee is refused', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_DEPOSIT_BPS: 'x' }), 'VARANDA_FEE_DEPOSIT_BPS inválido', 'deposit bad format')
 })
 
-test('fees: a fixed swap fee is refused, swap bps is fine', (t) => {
+test('fees: any swap fee is refused, zero is accepted', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_CENTS: '1', VARANDA_FEE_TREASURY: TREASURY }),
-    'VARANDA_FEE_SWAP_CENTS não suportado', 'swap cents')
+    'VARANDA_FEE_SWAP_* ainda não suportado', 'swap cents')
+  throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '30', VARANDA_FEE_TREASURY: TREASURY }),
+    'VARANDA_FEE_SWAP_* ainda não suportado', 'swap bps')
   throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '2001', VARANDA_FEE_TREASURY: TREASURY }),
     'VARANDA_FEE_SWAP_BPS inválido', 'swap bps out of range')
-  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '', VARANDA_FEE_SWAP_BPS: '2000', VARANDA_FEE_TREASURY: ADDR }).rates.swap, { cents: 0, bps: 2000 })
+  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '', VARANDA_FEE_SWAP_BPS: '0' }).rates.swap, { cents: 0, bps: 0 })
+  t.alike(parseFees({ VARANDA_FEE_SWAP_CENTS: '0', VARANDA_FEE_SWAP_BPS: '' }).rates.swap, { cents: 0, bps: 0 })
+})
+
+test('fees: a swap quote is refused even with an in-memory rate', (t) => {
+  const rates = zeroRates()
+  rates.swap = { cents: 50, bps: 30 }
+  const q = quote({ kind: 'swap', amountCents: 10000, rates })
+  t.is(q.ok, false)
+  t.is(q.reason, 'valor-invalido')
+  t.is(q.varandaFeeCents, 0)
+  t.is(q.totalDebitCents, 0)
+  t.is(quote({ kind: 'swap', amountCents: 10000, rates: zeroRates() }).ok, false, 'a zero rate is refused too')
 })
 
 test('fees: treasury required only with a nonzero rate', (t) => {
   throwsRange(t, () => parseFees({ VARANDA_FEE_TRANSFER_CENTS: '1' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'cents')
-  throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '1', VARANDA_FEE_TREASURY: '  ' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'blank')
+  throwsRange(t, () => parseFees({ VARANDA_FEE_CRYPTO_BPS: '1', VARANDA_FEE_TREASURY: '  ' }), 'VARANDA_FEE_TREASURY obrigatório com taxa', 'blank')
   t.is(parseFees({ VARANDA_FEE_TRANSFER_CENTS: '0' }).treasury, null, 'zero rates need none')
   t.alike(parseFees({ VARANDA_FEE_TREASURY: ADDR }).treasury, { kind: 'address', address: ADDR }, 'set without rates is kept')
   throwsRange(t, () => parseFees({ VARANDA_FEE_TREASURY: 'nope' }), 'VARANDA_FEE_TREASURY inválido', 'bad treasury')
@@ -416,4 +430,131 @@ test('fees: maxFeeCents caps the new fee alone (S5)', (t) => {
   for (const maxFeeCents of [null, NaN, -1, 1.5, '1000']) {
     t.is(quote({ kind: 'payout', amountCents: 100, rates, maxFeeCents }).ok, false, 'maxFeeCents ' + String(maxFeeCents))
   }
+})
+
+function allSafeMicros (t, q, label) {
+  for (const key of ['amountMicros', 'varandaFeeMicros', 'pendingFeeMicros', 'totalDebitMicros', 'netReceivedMicros']) {
+    t.ok(Number.isSafeInteger(q[key]), label + ': ' + key + ' is a safe integer')
+  }
+}
+
+function cryptoRates (cents, bps) {
+  return { ...zeroRates(), crypto: { cents, bps } }
+}
+
+test('fees: quoteMicros prices a USDC send half up, bps only', (t) => {
+  const q = quoteMicros({ kind: 'crypto', amountMicros: 333333, rates: cryptoRates(30, 150) })
+  t.alike(q, {
+    amountMicros: 333333,
+    varandaFeeMicros: 5000,
+    pendingFeeMicros: 0,
+    pendingFeeRef: '',
+    totalDebitMicros: 338333,
+    netReceivedMicros: 333333,
+    ok: true,
+    reason: null
+  }, 'the fixed cents part is ignored')
+  t.is(q.varandaFeeMicros, usdcFeeMicros(150, 333333))
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 333266, rates: cryptoRates(0, 150) }).varandaFeeMicros, 4999, 'below .5')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 5000, rates: cryptoRates(0, 1) }).varandaFeeMicros, 1, 'exactly .5')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 4999, rates: cryptoRates(0, 1) }).varandaFeeMicros, 0, 'tiny')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 1, rates: cryptoRates(0, 0) }).ok, true, 'zero rate')
+  allSafeMicros(t, q, 'ok quote')
+})
+
+test('fees: quoteMicros carries a pending fee inside the total (C10)', (t) => {
+  const rates = cryptoRates(0, 100)
+  const q = quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, pendingFeeMicros: 40000, pendingFeeRef: 'op-1:taxa', maxMicros: 1050000 })
+  t.is(q.varandaFeeMicros, 10000)
+  t.is(q.pendingFeeMicros, 40000)
+  t.is(q.pendingFeeRef, 'op-1:taxa')
+  t.is(q.totalDebitMicros, 1050000)
+  t.is(q.netReceivedMicros, 1000000)
+  t.is(q.ok, true, 'cap is inclusive')
+
+  const over = quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, pendingFeeMicros: 40001, pendingFeeRef: 'op-1:taxa', maxMicros: 1050000 })
+  t.is(over.ok, false, 'the cap includes the pending fee')
+  t.is(over.reason, 'valor-invalido')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, pendingFeeMicros: 40000 }).ok, false, 'a pending fee needs its reference')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, pendingFeeRef: 'stale' }).pendingFeeRef, '', 'no pending fee, no reference')
+
+  const terms = debitTermsMicros(q)
+  t.alike(terms, { feeMicros: 10000, pendingFeeMicros: 40000, pendingFeeRef: 'op-1:taxa', totalDebitMicros: 1050000 })
+  t.is(checkDebitMicros({ ...terms, opId: 'x' }, q), null, 'matching op')
+})
+
+test('fees: checkDebitMicros returns taxa-mudou on any mismatch', (t) => {
+  const q = quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates: cryptoRates(0, 100), pendingFeeMicros: 40000, pendingFeeRef: 'op-1:taxa' })
+  const terms = debitTermsMicros(q)
+  t.is(checkDebitMicros({ ...terms, feeMicros: 9999 }, q), 'taxa-mudou')
+  t.is(checkDebitMicros({ ...terms, pendingFeeMicros: 0 }, q), 'taxa-mudou')
+  t.is(checkDebitMicros({ ...terms, pendingFeeRef: '' }, q), 'taxa-mudou')
+  t.is(checkDebitMicros({ ...terms, totalDebitMicros: 1049999 }, q), 'taxa-mudou')
+  t.is(checkDebitMicros({ ...terms, feeMicros: '10000' }, q), 'taxa-mudou', 'strict types')
+  const { pendingFeeRef, ...missing } = terms
+  t.ok(pendingFeeRef)
+  t.is(checkDebitMicros(missing, q), 'taxa-mudou', 'missing field')
+  t.is(checkDebitMicros(debitTerms(quote({ kind: 'crypto', amountCents: 1000000, rates: cryptoRates(0, 100) })), q), 'taxa-mudou', 'centavos terms never match')
+  t.is(checkDebitMicros(null, q), 'taxa-mudou')
+  t.is(checkDebitMicros(terms, null), 'taxa-mudou')
+  t.is(checkDebitMicros(terms, { ...q, ok: 'yes' }), 'taxa-mudou', 'ok must be true')
+  const refused = quoteMicros({ kind: 'crypto', amountMicros: 0, rates: cryptoRates(0, 100) })
+  t.is(checkDebitMicros(debitTermsMicros(refused), refused), 'taxa-mudou', 'refused quote')
+})
+
+test('fees: quoteMicros refuses too big, never throws', (t) => {
+  const rates = cryptoRates(0, 2000)
+  // Each leg is its own transfer: a full 10000 USDC principal still fits with
+  // its fee and a pending fee beside it.
+  const atCap = quoteMicros({ kind: 'crypto', amountMicros: AMOUNT_MAX, rates: cryptoRates(0, 150), pendingFeeMicros: 1000000, pendingFeeRef: 'r' })
+  t.is(atCap.ok, true, 'a 10000 USDC principal with a fee')
+  t.is(atCap.totalDebitMicros, AMOUNT_MAX + 150000000 + 1000000)
+  const big = quoteMicros({ kind: 'crypto', amountMicros: AMOUNT_MAX + 1, rates })
+  t.is(big.ok, false, 'a principal above 10000 USDC')
+  t.is(big.reason, 'valor-invalido')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, maxMicros: 2e10 }).ok, true, 'a looser maxMicros is fine')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 9000000000, rates: cryptoRates(0, 0), maxMicros: 9500000000, pendingFeeMicros: 1000000001, pendingFeeRef: 'r' }).ok, false, 'maxMicros caps the total that leaves the balance')
+  const fee = quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, maxFeeMicros: 199999 })
+  t.is(fee.varandaFeeMicros, 200000)
+  t.is(fee.ok, false, 'maxFeeMicros caps the new fee alone')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 1000000, rates, maxFeeMicros: 200000 }).ok, true)
+
+  const junk = [NaN, Infinity, -1, 1.5, AMOUNT_MAX + 1, '100', null, undefined]
+  for (const amountMicros of junk) {
+    let q
+    try {
+      q = quoteMicros({ kind: 'crypto', amountMicros, rates })
+    } catch (err) {
+      t.fail('threw on ' + String(amountMicros))
+      continue
+    }
+    t.is(q.ok, false, String(amountMicros) + ' refused')
+    t.is(q.reason, 'valor-invalido')
+    allSafeMicros(t, q, String(amountMicros))
+  }
+  for (const maxMicros of [null, NaN, -1, 1.5, '1000']) {
+    t.is(quoteMicros({ kind: 'crypto', amountMicros: 100, rates, maxMicros }).ok, false, 'maxMicros ' + String(maxMicros))
+  }
+  for (const maxFeeMicros of [null, NaN, -1, 1.5, '1000']) {
+    t.is(quoteMicros({ kind: 'crypto', amountMicros: 100, rates, maxFeeMicros }).ok, false, 'maxFeeMicros ' + String(maxFeeMicros))
+  }
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 100, rates, pendingFeeMicros: -1, pendingFeeRef: 'r' }).ok, false, 'negative pending fee')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 100, rates: cryptoRates(0, 2001) }).ok, false, 'rate out of bounds')
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 100 }).ok, false, 'no rates')
+  t.is(quoteMicros().ok, false, 'no input')
+  allSafeMicros(t, quoteMicros({ kind: 'crypto', amountMicros: AMOUNT_MAX, rates, pendingFeeMicros: AMOUNT_MAX, pendingFeeRef: 'r' }), 'largest inputs')
+})
+
+test('fees: quoteMicros never charges a swap or a non crypto kind', (t) => {
+  const rates = { ...cryptoRates(0, 100), swap: { cents: 50, bps: 30 }, transfer: { cents: 0, bps: 100 } }
+  for (const kind of ['swap', 'transfer', 'payout', 'deposit', 'nope', undefined]) {
+    const q = quoteMicros({ kind, amountMicros: 1000000, rates })
+    t.is(q.ok, false, String(kind) + ' refused')
+    t.is(q.varandaFeeMicros, 0, String(kind) + ': no fee')
+    t.is(q.totalDebitMicros, 0)
+  }
+  throwsRange(t, () => parseFees({ VARANDA_FEE_SWAP_BPS: '30', VARANDA_FEE_CRYPTO_BPS: '150', VARANDA_FEE_TREASURY: TREASURY }),
+    'VARANDA_FEE_SWAP_* ainda não suportado', 'a swap rate is still refused from the environment')
+  const { rates: envRates } = parseFees({ VARANDA_FEE_CRYPTO_CENTS: '30', VARANDA_FEE_CRYPTO_BPS: '150', VARANDA_FEE_TREASURY: TREASURY })
+  t.is(quoteMicros({ kind: 'crypto', amountMicros: 10000000, rates: envRates }).varandaFeeMicros, 150000, 'parsed rates, cents ignored')
 })

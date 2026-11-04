@@ -27,7 +27,8 @@ import { whoOf } from '../who'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
 import { mergeMessages, newestOf, refreshThread, sendPlan, threadRows } from '../dm-screen'
-import { Btn, ErrorText, Soft, colors, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { DmMessageRow } from '../ui/DmMessageRow'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
@@ -39,6 +40,8 @@ import { TopBar } from '../ui/TopBar'
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 
 export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, onOpenInvite }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
   const now = useNow(60000)
@@ -392,7 +395,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },

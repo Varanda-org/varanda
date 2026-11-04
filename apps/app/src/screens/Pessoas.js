@@ -36,7 +36,8 @@ import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import { isSeederDown, learnPeeked, peekAll, useFollowSet } from './Conversa'
 
 // Half the names cache's retry window (5 s), as in Seguindo.js.
@@ -104,6 +105,7 @@ function decorate (rows, peeked) {
 
 // The own account on someone's list: no pill.
 function OwnRow ({ row, profile, onOpen }) {
+  const styles = useStyles(makeStyles)
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
@@ -131,6 +133,7 @@ function OwnRow ({ row, profile, onOpen }) {
 // follow change; `onOpenMember(key, { name, username })` opens a profile;
 // `onToast(text)` shows a confirmation (else the screen's own notice).
 export default function Pessoas ({ entry, ownKey, isTop = true, active = true, onBack, onOpenMember, onFollowsChanged, onToast }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const bottomPad = useBottomPad()
@@ -498,7 +501,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   head: { paddingHorizontal: 16, paddingVertical: 12, gap: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
   count: { ...type.postName, color: colors.ink },

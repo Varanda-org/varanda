@@ -10,9 +10,11 @@ import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
 import { SunsetBand } from './SunsetBand'
-import { colors, fonts, type } from './theme'
+import { fonts, type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions }) {
+  const styles = useStyles(makeStyles)
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
   const a = avatar || {}
@@ -81,7 +83,7 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   back: {
     position: 'absolute',
     left: 16,

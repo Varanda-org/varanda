@@ -21,6 +21,39 @@ O visual que o app vai ganhar, definido primeiro na página (varanda.app) e depo
 | listras | `#2576b0` `#e8805a` `#f2b705` `#c23528` `#1d6b4f` | avatares |
 | fim de tarde | `#f7b267 → #e8805a → #8a4e7a → #2b2a4a` | faixa do perfil (gradiente a 170°, como o herói da página) |
 
+### Escuro quente
+
+Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark` têm as mesmas chaves). Esta tabela copia os valores do escuro e diz para que cada um serve.
+
+| Nome | Hex | Uso |
+|---|---|---|
+| fundo | `#1c2622` | fundo das telas, barra do topo, barra de abas |
+| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes, Carteira) |
+| tinta | `#f4f0e6` | texto, nomes, ícones ativos |
+| texto suave | `#b7c4bb` | @nome, tempo, bio, abas inativas, contador |
+| fio | `rgba(244,240,230,0.14)` | divisórias de 1 pt |
+| verde | `#5dcaa0` | ação: aba ativa, nome em "respondendo a", cursor |
+| verde claro | `rgba(93,202,160,0.18)` | fundos verdes suaves (seleção de emoji, mensagens) |
+| texto sobre verde | `#10241c` | texto e ícone sobre o verde (botões cheios) |
+| morno | `#3a3328` | avisos de explicação (instalar, sem rede, notificações) |
+| contorno | `rgba(244,240,230,0.30)` | contorno das pílulas de contorno (Editar perfil, Compartilhar) e citações |
+| anel | `rgba(244,240,230,0.12)` | trilho em Publicar |
+| véu | `rgba(16,22,19,0.55)` | véu atrás de ícones brancos (faixa do pôr do sol, Diário); escuro nos dois modos |
+| fundo da barra de abas | `rgba(28,38,34,0.94)` | barra de abas, translúcida |
+| perigo | `#ff8f87` | erros e ações destrutivas (Denunciar, Publicar) |
+| aviso | `#e7c36a` | texto de aviso |
+| dica | `#9aaba2` | texto de dica em campos (placeholder) |
+| esqueleto | `rgba(244,240,230,0.10)` | blocos de carregamento |
+| pílula | `#5dcaa0` | fundo da pílula de estado (`pillBg`, Publicar) |
+| texto da pílula | `#10241c` | texto sobre a pílula (`pillInk`) |
+| campo desligado | `#17211d` | fundo de campo desligado; o texto é o texto suave |
+| balão | `#f4f0e6` | fundo do aviso rápido (creme sobre escuro, o inverso do claro) |
+| texto do balão | `#1c2622` | texto do aviso rápido (`toastInk`) |
+
+**Regra.** O app segue o modo do aparelho (Sistema) até a pessoa escolher. A escolha manual fica em Ajustes › Aparência (Sistema, Claro, Escuro) e vale neste aparelho. O escuro é quente e verde, nunca preto. `dim` é sempre um véu escuro, nos dois modos. Listras, faixa do pôr do sol e a cadeira são iguais nos dois modos; no escuro, a cadeira fica sobre um disco creme (barra do topo, splash do app e pré-splash da web), porque o contorno de tinta da arte some sobre o fundo escuro. O splash nativo (iOS, Android e o splash do `app.json`) fica creme nos dois modos, e o splash do app no celular também fica creme: assim a abertura inteira fica creme, sem piscar entre os dois, e o escuro começa na primeira tela do app. Na web, o splash do app e o pré-splash seguem o modo escolhido.
+
+**Contraste medido.** O teste `apps/app/test/appearance.test.js` exige 4,5:1 nos pares de texto dos dois modos. No escuro, os valores medidos são: tinta 13,7:1 no fundo e 12,0:1 no cartão; texto suave 8,6:1 e 7,6:1; verde 7,7:1 e 6,8:1; perigo 7,1:1 e 6,2:1; aviso 9,2:1 e 8,1:1; dica 6,5:1 e 5,7:1; texto sobre verde, texto da pílula e texto do balão entre 8:1 e 14:1; texto suave sobre o campo desligado 9,1:1.
+
 ## Tipografia
 
 Fonte do sistema (SF no iOS, Roboto no Android, `system-ui` na web). Títulos na variante arredondada quando houver (`ui-rounded`). Tamanhos em pt para 402 pt de largura:

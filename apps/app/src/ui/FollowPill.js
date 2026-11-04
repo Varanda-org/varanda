@@ -6,10 +6,12 @@ import { Text, View } from 'react-native'
 import { Sheet } from './Sheet'
 import { Btn, Soft } from './index'
 import { Pill } from './Pill'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useTheme } from './ThemeProvider'
 import { FOLLOW_LABEL, FOLLOWING_LABEL, UNFOLLOW_LABEL, UNFOLLOW_NOTE, unfollowQuestion } from '../follow'
 
 export function FollowPill ({ following, title, pending, disabled, onFollow, onUnfollow }) {
+  const { colors } = useTheme()
   const [open, setOpen] = useState(false)
 
   useEffect(() => {

@@ -2236,18 +2236,21 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
 }
 
 // rpc.md 5.82: marks the newest listed post seen here, moving only forward
-// and writing only on change.
-async function groupSeen (ctx, { group } = {}) {
+// and writing only on change. A cut-off bounds the mark to that listed post;
+// its at is never stored.
+async function groupSeen (ctx, { group, upTo = null } = {}) {
   return withGroup(ctx, group, false, async ({ g }) => {
     const posts = readablePosts(g)
     if (posts.length === 0) return { ok: true }
-    const p = posts[posts.length - 1]
+    const target = upTo === null ? posts.length - 1 : posts.findIndex((q) => q.writer === upTo.writer && q.seq === upTo.seq)
+    if (target < 0) return { ok: true }
+    const p = posts[target]
     const marks = await store.readGroupSeen(ctx.storage)
     const mark = marks.find((m) => m.group === g.group) || null
     if (mark !== null) {
       const i = posts.findIndex((q) => q.writer === mark.writer && q.seq === mark.seq)
       const ahead = i >= 0
-        ? i < posts.length - 1
+        ? i < target
         : compareOrder(orderKey(p.at, p.writer, p.seq), orderKey(mark.at, mark.writer, mark.seq)) > 0
       if (!ahead) return { ok: true }
     }

@@ -8,9 +8,11 @@ import { displayText } from '@varanda/rpc'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { FollowPill } from './FollowPill'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function MemberRow ({ hit, avatar, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+  const styles = useStyles(makeStyles)
   const profile = { name: hit.name, username: hit.username }
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -43,7 +45,7 @@ export function MemberRow ({ hit, avatar, following, onOpen, onFollow, onUnfollo
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',

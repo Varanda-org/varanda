@@ -4018,13 +4018,13 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 | Arquivo | O que cobre |
 |---|---|
 | `apps/app/test/groups.test.js` | `unreadLabel` (vazio abaixo de 1, número até 98, "99+" a partir de 99) e `lastLine` (quem escreveu e o texto; uma mensagem escondida só mostra o rótulo fixo) |
-| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
+| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo envia como corte (`upTo`) a linha mais nova que pintou, sem corte não envia nada; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
 | `apps/app/test/nav.test.js` | `comunidade-info` é uma tela da pilha, com chave hex64 como `grupo` e `comunidade` |
 | `apps/app/test/shareOrigin.test.js` | o link de compartilhar da comunidade usa a origem da instalação |
 | `apps/app/test/tabBar.test.js` | o botão publicar some na tela `comunidade-info`, como em grupo e comunidade |
-| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
-| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; `deleteGroupData` remove a marca |
-| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, só com `group`; `community.info` continua não mutante |
+| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova, ou a de corte (`upTo`), que nunca marca além dela nem uma mensagem não listada; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
+| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; com corte, grava a mensagem listada com o `at` do nó e não grava corte desconhecido ou pendente; `deleteGroupData` remove a marca |
+| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, com `group` e `upTo` opcional (forma de `before`, formas inválidas recusadas); `community.info` continua não mutante |
 | `packages/rpc/test/sizes.test.js` | `community.info` no pior caso (32 grupos com nomes máximos) cabe no limite de mensagem |
 
 ### Checagens humanas (a fazer)
@@ -4044,6 +4044,8 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - [ ] Na lista, o cartão de convite de quem não participa ainda entra com um toque, e Tirar da lista e Devolver à lista continuam no criador com o reparo ativo.
 - [ ] Um grupo privado ou bloqueado mostra a linha sem texto cifrado.
 - [ ] Uma mensagem escondida aparece como "mensagem escondida".
+- [ ] A sua última mensagem mostra "Você:" em verde; a de um par com o nome "Você" aparece em cinza, como qualquer outro nome.
+- [ ] Enquanto a comunidade ainda chega, a barra do topo mostra o nome que o índice já deu; sem ele, "Comunidade ainda chegando".
 
 #### iOS (simulador)
 
@@ -4061,7 +4063,7 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - A marca de lido é por aparelho: outro aparelho, ou outro navegador, conta de novo as não lidas.
 - A marca vale para no máximo 512 grupos; o grupo cuja marca foi descartada (a menos marcada recentemente) volta a contar como nunca lido.
 - A primeira visita pode mostrar não lidas antigas até cada grupo ser aberto.
-- `group.seen` marca a mensagem mais nova que o nó tem quando atende o pedido, não a que está na tela. Uma mensagem que chega nesse intervalo conta como lida mesmo que a pessoa saia antes de ela aparecer. Fechar isso pede um `group.seen` com a mensagem de corte, numa mudança seguinte.
+- A tela do grupo envia a mensagem mais nova que pintou como corte (`upTo`, seção 76), então uma mensagem que chega entre a pintura e a marca fica não lida até a tela pintá-la. Um cliente que ainda omite o corte continua marcando a mensagem mais nova que o nó tem quando atende o pedido, como antes.
 - Se a releitura do grupo falhar, nada é marcado até a próxima leitura que der certo: a contagem pode ficar, mas nunca some antes da hora.
 - A aba Comunidades e o ponto da aba não mudaram; não há número na aba.
 
@@ -4134,7 +4136,194 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum t
 - A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
 - Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
 
-## 76. Mesmas comunidades e grupos em todos os aparelhos da conta (PR fix/comunidades-em-todo-aparelho)
+## 76. Marca de lido até a mensagem pintada (PR fix/group-seen-corte)
+
+A tela do grupo marca como lido só até a mensagem mais nova que pintou. `group.seen` (rpc.md 5.82) aceita `upTo`, o corte no formato do `before` de `group.read` (`{ at, writer, seq }`), mas inclusivo. Com ele, o nó marca a mensagem que tem com esse autor e esse seq e copia o `at` dela, nunca o do pedido. A regra de avanço é a mesma de antes. Assim, uma mensagem que chega depois da pintura continua não lida até a tela pintá-la. Um corte que não bate com nenhuma mensagem legível (desconhecida, ainda não recebida, de autor bloqueado ou removido, ou com seq futuro) responde `{ ok: true }` e não grava nada, então um cliente nunca empurra a marca além do que o nó tem. Sem `upTo`, vale a mensagem mais nova, como na seção 73. O formato de `data/group-seen.json` e da kv `groupSeen` não mudou.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. O pacote core roda com um processo só: `VARANDA_TEST_CONCURRENCY=1 npm test -w packages/core`. Cada arquivo tocado roda sozinho (`node <arquivo>`; os de core com `VARANDA_TEST_CONCURRENCY=1`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/rpc/test/methods.test.js` | `group.seen` aceita `upTo` opcional na forma de `before`, não mutante; `at` fora do formato, `writer` fora de hex64, `seq` 0, chaves a mais ou a menos e `upTo` que não é objeto são recusados |
+| `packages/core/test/group-seen.test.js` | o corte marca exatamente a mensagem (própria e escondida também), nunca além dela, nunca uma não listada nem um corte mais velho; corte de grupo desconhecido ou ainda não recebido responde `{ ok: true }` sem gravar; sem corte, a mais nova |
+| `packages/core/test/group-seen-session.test.js` | `group.seen` com corte pela sessão: `{ ok: true }`, a marca vai para a mensagem de corte, corte não listado não move a marca, corte sem `at` é `USAGE` |
+| `packages/web-member/test/group-seen.test.js` | o corte no kv `groupSeen` marca só a mensagem listada, com o `at` do nó; corte não listado não grava; própria e escondida podem ser o corte; raiz pendente não grava |
+| `packages/web-member/test/session-groups.test.js` | `group.seen` com corte pelo `request`: `upTo` inclusivo, corte não listado ignorado, corte sem `at` é `USAGE`, grupo desconhecido é `NOT_FOUND`, sem `groups.changed` |
+| `apps/app/test/group-flow.test.js` | a tela do grupo envia `upTo` da linha mais nova pintada (escondidas inclusive), nunca além dela; sem corte não envia `group.seen`; a tela avisa a lista após cada tentativa |
+
+### Checagens humanas (a fazer)
+
+As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] Com o grupo aberto e pintado, uma mensagem de outro aparelho que chega logo depois da pintura fica não lida ao voltar à lista.
+- [ ] Uma mensagem que chega depois da pintura continua não lida até o grupo ser aberto e pintado de novo.
+- [ ] Sair do grupo antes de a tela pintar a leitura deixa o selo como estava.
+- [ ] Uma tela do grupo coberta por outra (Informações ou Membros por cima) não marca, mesmo com mensagens novas.
+- [ ] Abrir um grupo e voltar continua zerando só o selo dele, como na seção 73.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro do Android no navegador.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Sem `upTo`, a marca vai para a mensagem mais nova que o nó tem. Um cliente que ainda omite o corte mantém a lacuna descrita na seção 73.
+- Um corte que não bate com nenhuma mensagem legível não move a marca, e a contagem fica até uma mensagem listada ser pintada. É o lado seguro: a contagem nunca cai antes da hora.
+- Se a mensagem pintada sai da lista legível entre a pintura e a marca (autor bloqueado, autor removido), a marca não anda e a contagem fica até uma mensagem listada posterior ser pintada.
+- A marca continua por aparelho e vale para no máximo 512 grupos, como na seção 73.
+
+## 77. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+
+As seções 1 a 76 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
+
+### O que mudou
+
+- `VARANDA_HODLE_MODE` ganha `completo`, depois de `pix`. Ele acrescenta as ações `transfer` e `send-crypto`, e a política (`policy.actions`) as lista. O padrão continua `cadastro`. O USDC recebido no endereço aparece só para leitura: não há conversão nem envio de USDC.
+- Regras do envio: PIN por membro, repassado por pedido e nunca guardado; teto de cada envio igual ao menor entre `VARANDA_HODLE_MAX_CENTS` e R$ 10.000; 10 transferências e 10 envios a endereço por dia por membro, com a janela gasta também por um destino recusado; um destino recusado recebe sempre `destino-invalido`.
+- C9: um débito sem resolução bloqueia outro do mesmo membro. C10: a operação assinada liga o débito inteiro (valor, taxa nova, taxa pendente e total); divergência dá `taxa-mudou`.
+- Resultado do parceiro: um 202 é `pendente` e a taxa espera. `TRANSFER_IN_PROGRESS` é `incerto` e bloqueia novos débitos. `WALLET_BUSY` é uma recusa: a linha do registro vai a `falhou` e nenhum dinheiro sai. O envio concluído traz o `txHash` da rede.
+- Taxa da Varanda: `VARANDA_FEE_TRANSFER_*` e `VARANDA_FEE_CRYPTO_*` (centavos e pontos-base) só no `completo`, só cobrada depois que o envio concluiu. Nada sobre dinheiro que entra. `VARANDA_FEE_SWAP_*` diferente de zero recusa a partida em todos os modos.
+- Registros novos: `transferencia`, `envio-cripto`, `destino-invalido`, `pendente-202`, além dos passos `transferencia` e `envio-cripto` em `hodle-<passo>-<causa>`.
+- O teto diário e o saldo são conferidos antes do destino: sem saldo, qualquer @nome recebe o mesmo `saldo-insuficiente`, e a recusa não diz quem tem carteira.
+- O app recusa um endereço com letras maiúsculas e minúsculas cujo checksum EIP-55 não confere (`apps/app/src/evmAddress.js`, com o keccak-256 do `@noble/hashes` que o app já usa). Endereço todo em minúsculas ou maiúsculas não tem checksum e passa.
+- Termos de Uso e Política de Privacidade versão 13, com novo aceite.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela num aparelho nem o parecer.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js`
+- `node apps/cli/test/account.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/carteiraNative.test.js`
+- `node apps/app/test/evmAddress.test.js`
+- `node packages/core/test/terms.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
+
+1. [ ] No sandbox, com `completo` e a conta principal, transferir R$ 1,00 por @nome para outro membro: o app mostra valor, taxa e total em reais antes do PIN, o saldo cai pelo total e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
+2. [ ] Um envio que o Hodle aceita com 202: a linha fica `pendente`, o registro `pendente-202` aparece, a taxa da Varanda não é cobrada e só sai no envio seguinte que a pessoa confirma com o PIN, depois de o envio concluir (não realizada ainda).
+3. [ ] Enviar R$ 1,00 de BRLA a um endereço de carteira de teste: o resultado traz o `txHash` e ele confere na rede (não realizada ainda).
+4. [ ] Um @nome desconhecido, o próprio @nome e o endereço zero respondem o mesmo `destino-invalido`, e cada tentativa gasta uma das 10 da janela diária (não realizada ainda).
+5. [ ] Com um envio `incerto`, um segundo envio é recusado com `operacao-pendente`, e só `op-status` o resolve (não realizada ainda).
+6. [ ] Em `pix`, `transfer` e `send-crypto` respondem 404, e `VARANDA_FEE_TRANSFER_CENTS` diferente de zero recusa a partida; `VARANDA_FEE_SWAP_BPS` diferente de zero recusa a partida em todos os modos (não realizada ainda).
+7. [ ] O aceite dos Termos e da Política versão 13 aparece de novo para quem aceitou a versão 12 (não realizada ainda).
+8. [ ] O USDC recebido no endereço aparece só para leitura, sem botão de converter nem de enviar (não realizada ainda).
+
+### Limites
+
+- Só o falso de loopback foi exercitado. O sandbox da Hodle não roda fluxos de dinheiro de subconta, então ele não prova nada sobre subcontas.
+- A conversão de USDC para BRLA e qualquer envio de USDC ficam para o próximo PR.
+- Um envio `incerto` só se resolve pela leitura do extrato do parceiro por referência (`op-status`). Se o extrato nunca o mostrar, ele continua bloqueando os débitos do membro, e não há caminho para o operador.
+- Quando o `wallet.json` está indisponível, o serviço responde 503 depois de resolver um nome e 400 para um nome desconhecido: nessa janela, isso revela que um @nome está vinculado.
+- Um envio ao endereço da subconta da tesouraria não é recusado quando a tesouraria é `sub:<id>`; só uma tesouraria em endereço é comparada.
+- Um membro com saldo que manda um PIN errado de propósito recebe `destino-invalido` para um @nome sem carteira e `pin-invalido` para um com carteira, sem mover dinheiro: só o parceiro confere o PIN, e só ao enviar. Aceito pelo dono em 03/11/2026 (mandar R$ 0,01 revela o mesmo; cada tentativa gasta uma das três antes do bloqueio de 24 horas).
+- A ida ao ar do `completo` depende da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
+
+## 78. Conta de pagamentos: USDC e Converter (feat/hodle-usdc, 2026-11-03)
+
+As seções 1 a 77 não mudam; onde a 77 diz que a conversão de USDC e o envio de USDC ficam para o próximo PR, vale esta seção. Ela documenta o PR2 da etapa de transferências: o Converter (USDC para BRLA) e o envio de USDC, ambos no modo `completo`. Os Termos de Uso e a Política de Privacidade ficam na versão 13 (a versão 13 já descreve o USDC como função que o serviço pode oferecer), sem aceite novo.
+
+### O que mudou
+
+- A política em `completo` ganha `swap-quote` e `swap`. `swap-quote` não pede PIN, não grava linha e responde inteiros (`amountInMicros`, `hodleFeeMicros`, `brlaOutCents`, `rateCents`) com `indicative: true`; a taxa de câmbio aparece em centavos e é só indicativa.
+- `swap` recebe `{ opId, amountMicros }` com o PIN no corpo. A linha é gravada antes da chamada ao Hodle e a chamada nunca é reenviada. Uma resposta com `swapId` é lida pelo `op-status`: `RUNNING` é `pendente`, `COMPLETED` é `concluido`, `FAILED` ou `STRANDED` é `falhou` com o aviso de suporte. Uma resposta perdida sem `swapId` fica `incerto` e bloqueia todo débito do membro até uma linha do extrato com a referência aparecer. Um 502 com `swapId` é `incerto` com esse `providerId`.
+- Uma conversão recusada antes de o Hodle registrá-la (sem `swapId`, por exemplo `NOT_ENABLED` ou PIN errado) é um `falhou` comum, sem aviso de suporte, e sai da lista como qualquer linha. Uma resposta que já traz um `swapId`, mesmo de recusa, vira `incerto` com esse id e é lida pelo `op-status`.
+- Uma conversão `incerto` sem `swapId` só se resolve por uma linha do extrato do tipo conversão, em USDC, de saída, com a referência dela e o mesmo valor; outra perna da mesma referência é ignorada. Uma conversão que o extrato mostra como falha guarda o id dessa linha e vai para o suporte.
+- Nenhuma taxa da Varanda na conversão nem no que entra. Nunca há conversão automática.
+- Envio de USDC (`send-crypto`) sai só do saldo de USDC. A taxa da Varanda é o percentual de cripto, em USDC (a parte fixa em centavos não vale), cobrada só depois de o envio concluir e só por um envio de USDC seguinte. As taxas em reais e em USDC são reservadas e cobradas à parte. Um envio de USDC pago com BRLA em um passo é recusado.
+- Registros novos: `conversao`, `cotacao-conversao-formato`, e os passos `cotacao-conversao` e `conversao` em `hodle-<passo>-<causa>`.
+- O envio de USDC usa a mesma checagem de checksum EIP-55 da seção 77.
+- `VARANDA_HODLE_MAX_USDC` (USDC inteiros, de 1 a 10000, padrão 500; outro valor recusa a partida citando só o nome da variável) limita cada envio de USDC, com a taxa nova e a pendente incluídas, e cada conversão (`swap-quote` e `swap`). Acima dele a resposta é `valor-invalido` antes de qualquer linha ou chamada ao Hodle. A política do `completo` traz `maxUsdcMicros`, e o app recusa o valor acima do teto antes da prévia ou da cotação. Cada `swap-quote` passa a contar no teto diário `VARANDA_HODLE_DAILY_LIMIT` e na parte de cada membro, como `payout-quote`.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. O falso não é o Hodle: ele não prova nada sobre o preço, a idempotência nem o extrato de uma conversão real.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/wallet-ops-store.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/app/test/carteiraNative.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens são de produção e estão em aberto:
+
+1. [ ] Em produção, com o Converter habilitado pelo Hodle numa subconta de teste, cotar e converter uma quantia mínima de USDC em BRLA: o app mostra a cotação como indicativa, o PIN é pedido, o saldo de BRLA sobe, o de USDC cai e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
+2. [ ] Deixar uma conversão encalhada (`STRANDED` ou `FAILED`) para o suporte: o cartão mostra o texto de suporte com o código do Hodle, sem botão de repetir (só "Fechar"), e o suporte do Hodle consegue achá-la por esse código (não realizada ainda).
+3. [ ] Enviar uma quantia mínima de USDC a um endereço de teste: o BRLA não se mexe, o saldo de USDC cai e o `txHash` confere na rede (não realizada ainda).
+4. [ ] Com um envio de USDC e uma taxa de cripto diferente de zero, a taxa em USDC não sai nesse envio e só é cobrada por um envio de USDC seguinte depois de o primeiro concluir (não realizada ainda).
+5. [ ] Perguntar ao Hodle e anotar a resposta: a referência de uma conversão é idempotente? Ela aparece no extrato? (não realizada ainda).
+
+### Limites
+
+- O sandbox do Hodle não cota nem executa uma conversão. O Converter só foi exercitado no falso de loopback e precisa dos itens acima em produção. Nenhuma execução real do Converter foi feita.
+- O Hodle não respondeu se a referência de uma conversão é idempotente nem se ela aparece no extrato. Uma conversão `incerto` sem `swapId` pode precisar do suporte do Hodle e, até lá, bloqueia os débitos do membro.
+- Uma conversão que falhou não tem botão de repetir: o cartão mostra o texto de suporte com o código do Hodle e só "Fechar" (o Hodle pede para falar com o suporte antes de tentar de novo); uma nova conversão é outra ação, com outro pedido. O texto de suporte aparece em todo cartão de conversão que falhou.
+- Se o extrato do Hodle mostrar uma conversão com valor diferente do pedido (por exemplo, já sem a taxa), uma conversão `incerto` sem `swapId` não se resolve sozinha e fica para o suporte.
+- Uma conversão `pendente` não bloqueia outros débitos, como um Pix `pendente`.
+- A taxa de câmbio da cotação aparece em centavos e é indicativa: o Hodle refaz o preço ao executar.
+- A ida ao ar do `completo` continua dependendo da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
+
+## 79. Modo escuro e Aparência (PR feat/tema-escuro)
+
+O app ganha modo escuro. Em Ajustes › Aparência a pessoa escolhe Sistema (o padrão), Claro ou Escuro, e a escolha fica guardada só neste aparelho (`localStorage` com a chave `varanda-aparencia` na web; `varanda-aparencia.json` na pasta de documentos no app). As duas paletas estão em `apps/app/src/appearance.js`, com as mesmas chaves; o escuro é quente e verde, nunca preto, e `dim` é sempre um véu escuro. O provedor e a receita de migração de uma tela ficam em `apps/app/src/ui/ThemeProvider.js`. A barra de status segue o tema. Mudanças nativas: `userInterfaceStyle` automatic em `app.json`, `UIUserInterfaceStyle` removido de `Info.plist`, `UIStatusBarStyle` em `UIStatusBarStyleDarkContent`. O splash nativo (iOS, Android e o React no nativo) continua creme nos dois modos, para não haver flash de creme para escuro. Na web, o splash do app segue a escolha, e o pré-splash de `index.html` segue o sistema até o JavaScript do app rodar. Detalhes em [app.md](app.md) ("Aparência") e [development.md](development.md) ("Tema claro e escuro").
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/appearance.test.js` (as duas paletas com as mesmas chaves, contraste de 4,5:1 nos pares de texto, a escolha guardada só se válida, `resolveScheme`, `statusBarStyle`, o armazenamento da web) e `apps/app/test/themeUsage.test.js` (nenhum arquivo importa a paleta fixa nem cria estilos com cores no carregamento do módulo). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (emulador ou aparelho):
+
+- [ ] Com o aparelho no modo escuro e Ajustes › Aparência em Sistema, o app abre escuro. No modo claro, abre claro. Trocar o modo do aparelho com o app aberto troca as cores sem reiniciar.
+- [ ] Claro e Escuro forçados, com o aparelho no modo oposto: o app segue a escolha, inclusive a barra de status e as folhas.
+- [ ] Fechar e abrir o app mantém a escolha (arquivo `varanda-aparencia.json`).
+- [ ] A abertura (splash) é creme nos dois modos.
+- [ ] No escuro: Ajustes, a folha de Publicar e o portão de entrada mostram texto legível e nenhum fundo branco sobrando.
+
+iOS (simulador ou aparelho):
+
+- [ ] Os mesmos quatro passos do Android, e os ícones da barra de status: escuros na abertura creme, claros no escuro.
+- [ ] No escuro, a cadeira da barra do topo fica sobre um disco creme, e as listras e a faixa do pôr do sol são iguais.
+
+Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
+
+- [ ] Sistema, Claro forçado e Escuro forçado: a cor da barra do navegador (`theme-color`) acompanha a escolha.
+- [ ] Escuro forçado com o sistema claro: a barra do navegador e o app ficam escuros; pode aparecer um quadro claro do pré-splash (limite conhecido, abaixo).
+- [ ] O splash no escuro: fundo `#1c2622`, palavra `#5dcaa0`, cadeira sobre disco creme.
+- [ ] Ajustes › Aparência, uma folha (Publicar) e o portão de entrada nos três modos.
+- [ ] Recarregar a página mantém a escolha (`localStorage`).
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação. Os valores de contraste em [app-design.md](../apps/site/artwork/app-design.md) foram medidos pela fórmula do teste, não num aparelho.
+- O pré-splash da web e a cor do navegador antes do JS seguem o sistema, não a escolha manual. Por isso, com uma escolha diferente do sistema, pode aparecer um quadro do modo do sistema.
+- O splash nativo não segue a escolha manual: fica creme nos dois modos.
+- `manifest.webmanifest` continua creme nos dois modos.
+
+## 80. Mesmas comunidades e grupos em todos os aparelhos da conta (PR fix/comunidades-em-todo-aparelho)
 
 A comunidade criada no PWA do celular não aparecia no navegador do computador com a mesma passkey. A causa: as listas e a sincronização do navegador só olhavam os escritores deste aparelho (kv `groupWriters`). O que mudou: `diaryGroupKeys` em `packages/core/lib/group.js` devolve as raízes que o diário vincula agora, pela mesma regra do semeador (`liveGroupJoins`). `packages/web-member/lib/sync.js` adota essas raízes como réplicas na abertura da sincronização e de novo quando o próprio diário termina de baixar, sem gravar nada. `packages/web-member/lib/member-ops.js` une essas raízes em `community.list` e `group.list` e informa `writerHere`, `canWrite` e `rootHere` em `group.info` e `community.info`, e `authorityHere` em `community.info` (rpc 5.41, 5.42, 5.59 e 5.62), com papel "pending" enquanto os escritores da conta ainda chegam. O app (`apps/app/src/groups.js`, `screens/Comunidade.js`, `screens/Grupo.js` e `screens/GrupoAjustes.js`) mostra "Participar neste aparelho", esconde "Sair", "Novo grupo" e as ações de administração onde falhariam (com uma nota curta dizendo por quê) e não oferece entrada de novato enquanto a conta ainda chega.
 

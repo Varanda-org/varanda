@@ -3,28 +3,6 @@
 
 import { Platform } from 'react-native'
 
-export const colors = {
-  bg: '#fbf8f3',
-  card: '#ffffff',
-  ink: '#1f2a24',
-  soft: '#4a554e',
-  line: 'rgba(31,42,36,0.10)',
-  accent: '#1d6b4f',
-  accentSoft: 'rgba(29,107,79,0.10)',
-  accentInk: '#ffffff',
-  warm: '#fff4e0',
-  outline: 'rgba(31,42,36,0.30)',
-  ring: 'rgba(31,42,36,0.12)',
-  dim: 'rgba(31,42,36,0.35)',
-  tabBar: 'rgba(251,248,243,0.94)',
-  danger: '#a3201a',
-  warn: '#8a5a00',
-  placeholder: '#616c67',
-  skeleton: 'rgba(31,42,36,0.08)',
-  pillBg: '#1d6b4f',
-  pillInk: '#ffffff'
-}
-
 // Animation durations in milliseconds.
 export const motion = { fast: 150, normal: 250 }
 

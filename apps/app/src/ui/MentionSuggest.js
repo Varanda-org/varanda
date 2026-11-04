@@ -8,9 +8,11 @@ import { displayText } from '@varanda/rpc'
 import { whoOf } from '../who'
 import { Soft } from '../ui'
 import { Avatar } from './Avatar'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function MentionSuggest ({ rows, loading, onPick }) {
+  const styles = useStyles(makeStyles)
   if (rows.length === 0 && !loading) return null
   return (
     <View style={styles.box} accessibilityLabel='sugestões de menção'>
@@ -34,7 +36,7 @@ export function MentionSuggest ({ rows, loading, onPick }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   box: { paddingHorizontal: 16, paddingVertical: 4 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44, paddingVertical: 4 },
   pressed: { opacity: 0.6 },

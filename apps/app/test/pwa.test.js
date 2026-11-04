@@ -85,6 +85,18 @@ test('index.html paints the brand before the bundle runs', (t) => {
   const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
   const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
   t.ok(block.includes(spans), 'Varanda letter spans in order')
+  t.ok(html.includes('<meta name="color-scheme" content="light dark" />'), 'color-scheme meta')
+  t.ok(html.includes('<meta name="theme-color" content="#fbf8f3" />'), 'light theme-color meta')
+  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c2622" />'), 'dark theme-color meta')
+  // Browsers take the first matching theme-color: the unscoped light one
+  // would always win if it came first.
+  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#1c2622"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
+  t.ok(html.includes('html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }'), 'manual Claro repaints the overlay')
+  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #1c2622; }'), 'manual Escuro repaints the overlay')
+  const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(html)
+  t.ok(dark, 'dark media query exists')
+  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #1c2622; }'), 'dark pre-splash background')
+  t.ok(dark && /\.chair \{[^}]*background: #fbf8f3/.test(dark[1]), 'chair keeps a cream pad in dark')
   t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
   t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
   t.ok(html.includes('visibility: hidden'), 'expiry keyframe')
