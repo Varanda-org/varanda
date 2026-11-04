@@ -34,6 +34,12 @@ export const COMMUNITY_JOIN_LABELS = Object.freeze({ open: 'aberta a todos', app
 export const HIDDEN_LABEL = 'mensagem escondida'
 export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'entrada com aprovação' })
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
+export const DEVICE_JOIN_LABEL = 'Participar neste aparelho'
+export const DEVICE_JOIN_TEXT = 'Sua conta já participa, mas este aparelho ainda não escreve aqui. Para escrever por ele, participe também neste aparelho.'
+export const DEVICE_WAIT_TEXT = 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.'
+export const DEVICE_STAFF_TEXT = 'Algumas ações de administração só funcionam no aparelho que tem o cargo. Use aquele aparelho ou peça um novo cargo para este.'
+export const DEVICE_ROOT_TEXT = 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.'
+export const DEVICE_APPROVAL_TEXT = 'Este aparelho precisa da aprovação de um administrador para escrever.'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
@@ -150,6 +156,55 @@ export function can (action, role, opts = {}) {
     case 'leave': return role !== 'banned' && role !== 'left'
   }
   return false
+}
+
+// An older node omits writerHere, canWrite and rootHere. Only an explicit
+// false changes the screen, so today's mocks keep the buttons they have.
+const MEMBER_ROLES = Object.freeze(['creator', 'admin', 'member'])
+
+export function needsDeviceJoin (info) {
+  if (!info || typeof info !== 'object') return false
+  return MEMBER_ROLES.includes(info.role) && info.writerHere === false
+}
+
+export function writerOnDevice (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.writerHere !== false
+}
+
+export function canWriteHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.canWrite !== false
+}
+
+// Root-only writes (rename, Entrada, Administradores, invite policy) go
+// through the root, which only the creating device holds; staff writes need
+// this device's own writer to carry authority. A missing field is an older
+// node. Repair mode writes meta and invitePolicy through the creator's live
+// community writer, not the root, so those controls stay whatever rootHere says.
+export function rootAdminHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.rootHere !== false || info.repair === true
+}
+
+// Which note explains hidden staff controls: 'root' for the creator's second
+// device (a role never grants the root), 'staff' for a device without
+// authority. One reason at a time, root first for the creator.
+export function deviceStaffNote (info, { owner, staff }) {
+  if (!staff || !info || typeof info !== 'object' || needsDeviceJoin(info)) return null
+  if (owner && !rootAdminHere(info) && info.repair !== true) return 'root'
+  if (info.authorityHere === false) return 'staff'
+  return null
+}
+
+export function authorityHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.authorityHere !== false
+}
+
+export function showNewGroup (info) {
+  if (!info || typeof info !== 'object') return false
+  return info.role === 'creator' && info.rootHere !== false
 }
 
 // --- labels ---

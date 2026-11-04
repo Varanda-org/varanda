@@ -2,10 +2,12 @@
 // (name, join label, members, role), an invite card with one Entrar or Pedir
 // entrada button for someone who is not a member (also from the seeder
 // index; a link is never consent, only the tap joins), Sair da comunidade for
-// a member (Concluir saída for a creator whose leave was interrupted), and
-// the groups it holds (Geral first; each opens its group). The creator and
-// admins also see Novo grupo, Pedidos and Membros; the creator also has
-// Ajustes (rename, Entrada, Administradores by @nome among the members).
+// a member who already writes on this device (Concluir saída for a creator
+// whose leave was interrupted), and the groups it holds (Geral first; each
+// opens its group). A second device has the diary role but no writer here, so
+// Sair would fail and the screen offers Participar neste aparelho instead.
+// The creator and admins also see Novo grupo, Pedidos and Membros; the creator
+// also has Ajustes (rename, Entrada, Administradores by @nome among the members).
 // Compartilhar is for everyone. The link is shared, never shown as text. A
 // mutation that comes back uncertain is never resent: the screen re-reads and
 // only then lets the person try again.
@@ -28,7 +30,10 @@ import { fetchCommunity } from '../indexClient'
 import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
 import { shortKey } from '../format'
-import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, PRIVATE_LABEL, can, membersLabel, reconcile, roleLabel, visibilityLabel } from '../groups'
+import {
+  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, PRIVATE_LABEL,
+  authorityHere, can, deviceStaffNote, membersLabel, needsDeviceJoin, reconcile, rootAdminHere, roleLabel, showNewGroup, visibilityLabel, writerOnDevice
+} from '../groups'
 import { Body, Btn, Card, ErrorText, Field, SectionHeader, Soft, Title, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -155,6 +160,8 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   const [confirm, setConfirm] = useState(null)
   const [check, setCheck] = useState(null)
   const [newGroup, setNewGroup] = useState(false)
+  // Set once a device join was sent (answered or not): a second tap could bind another writer.
+  const [deviceJoinSent, setDeviceJoinSent] = useState(false)
   const [panel, setPanel] = useState(null)
   const [people, setPeople] = useState({ rows: [], total: 0, loading: false, error: '' })
   const [nameDraft, setNameDraft] = useState('')
@@ -234,8 +241,15 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   const role = info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
   const staff = isMember && (role === 'creator' || role === 'admin')
-  const canCreate = isMember && can('create', role)
+  const deviceJoin = needsDeviceJoin(info)
+  const writerNow = info ? info.writerHere : undefined
+  useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
+  useEffect(() => { setDeviceJoinSent(false) }, [community])
+  const canCreate = isMember && can('create', role) && showNewGroup(info)
   const owner = role === 'creator'
+  const rootOk = rootAdminHere(info)
+  const authOk = authorityHere(info)
+  const staffNote = deviceStaffNote(info, { owner, staff })
   const dropped = info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
 
@@ -359,6 +373,23 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
       } catch {
         setCheck(true)
       }
+    }
+  }
+
+  // The role is already 'member' before a second device joins, so reconcile
+  // would always read landed: an uncertain answer just re-reads, then the card
+  // may come back and the person decides to tap again.
+  const doDeviceJoin = async () => {
+    setJoinNote('')
+    setCheck(null)
+    const res = await join.run(() => requestRef.current('community.join', { community }))
+    if (res.ok) {
+      setDeviceJoinSent(true)
+      load()
+    } else if (res.uncertain) {
+      setDeviceJoinSent(true)
+      await load()
+      setDeviceJoinSent(false)
     }
   }
 
@@ -561,7 +592,9 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
   } else if (info === null) {
     body = <Skeleton />
   } else {
-    const joinable = !isMember && role !== 'banned' && role !== 'requested' && !pending && info.leavePending !== true
+    // Role 'pending' on a held root: the account is in by another device and
+    // its writers are still arriving here, so no newcomer join is offered.
+    const joinable = !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     const header = [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins), roleLabel(role)].filter(Boolean).join(' · ')
     body = (
       <View>
@@ -583,7 +616,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
         <View style={styles.block}>
           {header && !joinable ? <Soft>{header}</Soft> : null}
           <View style={styles.inline}>
-            {isMember || role === 'requested'
+            {(isMember || role === 'requested') && writerOnDevice(info)
               ? <Btn label={isMember ? 'Sair da comunidade' : 'Desistir do pedido'} danger secondary pending={act.pending} onPress={() => setConfirm({ text: isMember ? (owner ? CREATOR_LEAVE_TEXT : LEAVE_TEXT) : WITHDRAW_TEXT, label: isMember ? 'Sair' : 'Desistir', run: leave })} />
               : null}
             {info.leavePending === true
@@ -591,7 +624,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
               : null}
             <Btn label='Compartilhar' onPress={shareCommunity} secondary />
           </View>
-          {joinable ? null : <ErrorText>{join.error}</ErrorText>}
+          {joinable || deviceJoin ? null : <ErrorText>{join.error}</ErrorText>}
           <ErrorText>{act.error}</ErrorText>
           {joinNote && !joinable ? <Soft>{joinNote}</Soft> : null}
           {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
@@ -602,6 +635,16 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
         </View>
         {checkBox}
         {confirmBox}
+        {deviceJoin && deviceJoinSent ? <View style={styles.block}><Soft>{DEVICE_WAIT_TEXT}</Soft></View> : null}
+        {deviceJoin && !deviceJoinSent
+          ? (
+            <View style={styles.block}>
+              <Soft>{DEVICE_JOIN_TEXT}</Soft>
+              <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
+              <ErrorText>{join.error}</ErrorText>
+            </View>
+            )
+          : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
           ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
@@ -640,7 +683,8 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
             </View>
             )
           : null}
-        {staff
+        {staffNote ? <View style={styles.block}><Soft>{staffNote === 'root' ? DEVICE_ROOT_TEXT : DEVICE_STAFF_TEXT}</Soft></View> : null}
+        {staff && authOk
           ? (
             <View>
               <SectionHeader>Administração</SectionHeader>
@@ -686,7 +730,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
             </View>
             )
           : null}
-        {can('invitePolicy', role)
+        {can('invitePolicy', role) && (owner ? rootOk : authOk)
           ? (
             <View>
               <SectionHeader>Quem pode convidar</SectionHeader>
@@ -700,7 +744,7 @@ export function Comunidade ({ community, afterGroup, onBack, onOpenGroup, onOpen
             </View>
             )
           : null}
-        {owner
+        {owner && rootOk
           ? (
             <View>
               <SectionHeader>Ajustes</SectionHeader>

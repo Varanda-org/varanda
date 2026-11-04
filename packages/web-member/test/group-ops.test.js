@@ -265,7 +265,7 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false })
+  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
@@ -1055,8 +1055,8 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(b.derived.length, 3, 'still the three writers of the first join')
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
   t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }, 'reads work locked')
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false }, 'reads work locked')
   t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
