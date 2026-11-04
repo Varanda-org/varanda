@@ -390,7 +390,10 @@ export const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
 const WALLET_BASE_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
 const WALLET_MONEY_ACTIONS = Object.freeze(['balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
 const WALLET_SEND_ACTIONS = Object.freeze(['transfer', 'send-crypto'])
-const WALLET_ACTIONS = Object.freeze([...WALLET_BASE_ACTIONS, 'wallet-create', ...WALLET_MONEY_ACTIONS, ...WALLET_SEND_ACTIONS])
+// Known so a newer service's list stays readable, but never derived from a
+// mode: only a service that lists them offers Converter.
+const WALLET_SWAP_ACTIONS = Object.freeze(['swap-quote', 'swap'])
+const WALLET_ACTIONS = Object.freeze([...WALLET_BASE_ACTIONS, 'wallet-create', ...WALLET_MONEY_ACTIONS, ...WALLET_SEND_ACTIONS, ...WALLET_SWAP_ACTIONS])
 // The same exact hosts as apps/cli/lib/account/hodle.js; production's upload
 // URLs come from BRLA's S3 bucket and its selfie link is a Sumsub page, not
 // the documented hosts.
@@ -515,6 +518,11 @@ export const walletPolicy = async () => {
       if (!isCount(data.maxCents)) return null
       out.maxCents = data.maxCents
     }
+    // Absent below completo: then no USDC cap is checked here.
+    if (data.maxUsdcMicros !== undefined) {
+      if (!Number.isSafeInteger(data.maxUsdcMicros) || data.maxUsdcMicros < 1) return null
+      out.maxUsdcMicros = data.maxUsdcMicros
+    }
     if (data.fees !== undefined) {
       const fees = parseFeeTexts(data.fees)
       if (fees === null) return null
@@ -622,6 +630,8 @@ const EXTERNAL_ID_RE = /^var-[0-9a-f]{32}$/
 const FEE_REF_RE = /^[A-Za-z0-9_.:-]{1,64}$/
 const QR_RE = /^[\x20-\x7e]{1,1024}$/
 const QUOTE_ID_RE = /^(?!\.+$)[A-Za-z0-9_.:-]{1,128}$/
+// The provider id rule of hodle.js.
+const PROVIDER_ID_RE = QUOTE_ID_RE
 const E2E_RE = /^[A-Za-z0-9]{1,64}$/
 const CURSOR_RE = /^[\x21-\x7e]{1,512}$/
 const DIRECTION_RE = /^[a-z]{1,16}$/
@@ -707,6 +717,14 @@ function parseOp (o) {
     if (typeof o.txHash !== 'string' || !TX_HASH_RE.test(o.txHash)) return undefined
     out.txHash = o.txHash
   }
+  if (o.source !== undefined && o.source !== null) {
+    if (!OP_ASSETS.includes(o.source)) return undefined
+    out.source = o.source
+  }
+  if (o.providerId !== undefined && o.providerId !== null) {
+    if (typeof o.providerId !== 'string' || !PROVIDER_ID_RE.test(o.providerId)) return undefined
+    out.providerId = o.providerId
+  }
   return out
 }
 
@@ -716,12 +734,13 @@ export const walletBalance = async (args) => {
   const network = data.network ?? null
   // Absent from a service without USDC balances.
   const usdcMicros = data.usdcMicros ?? 0
-  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) || !isCount(usdcMicros) ||
+  const pendingUsdcMicros = data.pendingUsdcMicros ?? 0
+  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) || !isCount(usdcMicros) || !isCount(pendingUsdcMicros) ||
     (address !== null && (typeof address !== 'string' || !WALLET_ADDRESS_RE.test(address))) ||
     (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network)))) {
     throw toError('indisponivel')
   }
-  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents, usdcMicros }
+  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents, usdcMicros, pendingUsdcMicros }
 }
 
 // A malformed row refuses the whole page: dropping it could hide an
@@ -805,9 +824,43 @@ export const walletPreview = async (args) => {
   return out
 }
 
+// A USDC send's preview, in micros. Kept apart from walletPreview so a
+// micros amount is never read as centavos. No provider fee line: the
+// recipient gets exactly the amount and every fee is on top.
+export const walletCryptoPreview = async (args) => {
+  const data = await moneyCall('preview', signedBody(args))
+  const keys = ['amountMicros', 'varandaFeeMicros', 'pendingFeeMicros', 'totalDebitMicros', 'netReceivedMicros']
+  if (!keys.every((k) => isCount(data[k]))) throw toError('indisponivel')
+  const ref = data.pendingFeeRef ?? ''
+  const refOk = data.pendingFeeMicros === 0 ? ref === '' : (typeof ref === 'string' && FEE_REF_RE.test(ref))
+  const sum = data.amountMicros + data.varandaFeeMicros + data.pendingFeeMicros
+  const ok = data.ok ?? true
+  const reason = data.reason ?? null
+  if (!refOk || data.netReceivedMicros !== data.amountMicros || !Number.isSafeInteger(sum) || sum !== data.totalDebitMicros ||
+    typeof ok !== 'boolean' || (reason !== null && (typeof reason !== 'string' || !REASON_RE.test(reason)))) {
+    throw toError('indisponivel')
+  }
+  // The other pending USDC fees, held in the balance but not debited by this
+  // send, as walletPreview keeps reservedFeeCents.
+  const reserved = data.reservedFeeMicros
+  if (reserved !== undefined && reserved !== null && !isCount(reserved)) throw toError('indisponivel')
+  const out = { ok, reason, pendingFeeRef: ref }
+  for (const k of keys) out[k] = data[k]
+  if (isCount(reserved)) out.reservedFeeMicros = reserved
+  return out
+}
+
 // The debit fields a signed op carries (C10), exactly as the preview showed
 // them; the service recomputes each one and answers 'taxa-mudou' otherwise.
 export function debitTerms (preview) {
+  if (isObject(preview) && preview.totalDebitMicros !== undefined) {
+    return {
+      feeMicros: preview.varandaFeeMicros,
+      pendingFeeMicros: preview.pendingFeeMicros,
+      pendingFeeRef: preview.pendingFeeRef,
+      totalDebitMicros: preview.totalDebitMicros
+    }
+  }
   return {
     feeCents: preview.varandaFeeCents,
     pendingFeeCents: preview.pendingFeeCents,
@@ -857,8 +910,36 @@ async function sendMoney (action, { member, nonce, signature, op, pin }) {
 // op: { opId, cents, to, feeCents, pendingFeeCents, pendingFeeRef, totalDebitCents }
 export const walletTransfer = (args) => sendMoney('transfer', args)
 
-// op: { opId, cents, address, feeCents, pendingFeeCents, pendingFeeRef, totalDebitCents }
+// op: { opId, cents, address, asset, source, feeCents, pendingFeeCents, pendingFeeRef, totalDebitCents },
+// or for USDC amountMicros with feeMicros, pendingFeeMicros, pendingFeeRef, totalDebitMicros.
 export const walletSendCrypto = (args) => sendMoney('send-crypto', args)
+
+// Indicative only: the provider fixes the rate when the swap runs, so a quote
+// binds nothing and is never uncertain.
+export const walletSwapQuote = async (args) => {
+  const data = await moneyCall('swap-quote', signedBody(args))
+  const keys = ['amountInMicros', 'hodleFeeMicros', 'brlaOutCents', 'rateCents']
+  if (!keys.every((k) => isCount(data[k])) || data.indicative !== true || data.hodleFeeMicros > data.amountInMicros) {
+    throw toError('indisponivel')
+  }
+  const out = { indicative: true }
+  for (const k of keys) out[k] = data[k]
+  return out
+}
+
+// op: { opId, amountMicros }. Converts USDC the member holds into BRLA; an
+// unknown outcome is uncertain and settled by walletOpStatus under the same
+// opId, never retried and never converted again on its own. The PIN goes into
+// this one request body, never into the signed op.
+export const walletSwap = async ({ member, nonce, signature, op, pin }) => {
+  const data = await moneyCall('swap', { member, nonce, op, signature, pin }, { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
+  const providerId = data.providerId ?? null
+  if (typeof data.externalId !== 'string' || !EXTERNAL_ID_RE.test(data.externalId) || !OP_STATUSES.includes(data.status) ||
+    (providerId !== null && (typeof providerId !== 'string' || !PROVIDER_ID_RE.test(providerId)))) {
+    throw uncertainError()
+  }
+  return { externalId: data.externalId, status: data.status, providerId }
+}
 
 // One of the member's own operations; the service may poll the provider but
 // never sends anything for it.

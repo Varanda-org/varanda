@@ -15,10 +15,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import {
-  debitTerms, hasAction, kycHash, uploadDocument, walletBalance, walletCreate, walletDeposit, walletKycDocument,
-  walletKycSubmit, walletLivenessRetry, walletLivenessValidate, walletOpStatus, walletOptin, walletPayout,
-  walletPayoutQuote, walletPolicy, walletPreview, walletSendCrypto, walletStart, walletStatement, walletStatus,
-  walletTransfer
+  debitTerms, hasAction, kycHash, uploadDocument, walletBalance, walletCreate, walletCryptoPreview, walletDeposit,
+  walletKycDocument, walletKycSubmit, walletLivenessRetry, walletLivenessValidate, walletOpStatus, walletOptin,
+  walletPayout, walletPayoutQuote, walletPolicy, walletPreview, walletSendCrypto, walletStart, walletStatement,
+  walletStatus, walletSwap, walletSwapQuote, walletTransfer
 } from '../account'
 import { HELP, carteiraHelp } from '../help'
 import { isAvailable, LivenessCapture } from '../livenessCapture'
@@ -33,9 +33,10 @@ import { shareNav } from '../shareNav'
 import { uploadDeps } from '../uploadFetch'
 import {
   CRYPTO_TEXTS, DISPUTE_TEXTS, FEE_STATUS_TEXTS, MIN_DEPOSIT_CENTS, MIN_PAYOUT_CENTS, PAY_TEXTS, PIX_KEY_LABELS,
-  RECEIVE_TEXTS, TEXTS, TRANSFER_TEXTS, UNCERTAIN_MONEY, canonicalPixKey, cepDigits, cpfDigits, depositArrivalText,
-  feeLines, feeLinesFor, formatBrl, formatUsdc, isBirthDate, isCep, isCpf, isPin, maskPixKey, normalizeAddress,
-  opStatusText, parseBrl, pixKeyCandidates, targetKind, walletErrorText, walletStep
+  RECEIVE_TEXTS, TEXTS, TRANSFER_TEXTS, UNCERTAIN_MONEY, USDC_TEXTS, canonicalPixKey, cepDigits, cpfDigits,
+  depositArrivalText, feeLines, feeLinesFor, formatBrl, formatUsdc, isBirthDate, isCep, isCpf, isPin, maskPixKey,
+  normalizeAddress, opStatusText, parseBrl, parseUsdc, pixKeyCandidates, swapQuoteLines, targetKind, usdcFeeLines,
+  walletErrorText, walletStep
 } from '../wallet'
 import { Body, Btn, Card, ErrorText, Field, Label, Notice, Page, Row, Soft, Spinner, UNCERTAIN, errorText, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
@@ -140,8 +141,32 @@ const SEND_TEXTS = Object.freeze({
   inFlight: 'Um envio ainda está em andamento. Toque em Conferir para ver se ele foi confirmado.',
   copied: 'Endereço copiado.',
   copyFailed: 'Não deu para copiar. Toque e segure o endereço para copiar.',
-  noReceive: 'O endereço não está disponível agora.'
+  noReceive: 'O endereço não está disponível agora.',
+  usdcAddress: 'USDC só pode ser enviado para um endereço 0x.',
+  usdcCap (micros) {
+    return 'O limite por envio de USDC é ' + usdcText(micros) + ', taxas incluídas.'
+  },
+  usdcNetwork (network) {
+    return 'O USDC sai do seu saldo em USDC, na rede ' + network.charAt(0).toUpperCase() + network.slice(1) + '. Um envio na rede errada não pode ser desfeito.'
+  },
+  receiveNetwork (network) {
+    return 'Este endereço recebe BRLA e USDC só na rede ' + network.charAt(0).toUpperCase() + network.slice(1) + '. Outra moeda ou outra rede pode se perder.'
+  }
 })
+// Converter. A conversion is never sent again: its opId stays while it may
+// still settle, and a failed or stuck one goes to support, not to a new try.
+const SWAP_TEXTS = Object.freeze({
+  amount: 'Confira o valor em USDC.',
+  quoteRefused: 'Não dá para converter agora.',
+  cap (micros) {
+    return 'O limite por conversão é ' + usdcText(micros) + '.'
+  },
+  inFlight: 'Uma conversão ainda está em andamento. Toque em Conferir para ver se ela foi concluída.',
+  code: 'Código da conversão:',
+  providerCode: 'Código da Hodle:'
+})
+// Still open at the provider: no other conversion starts meanwhile.
+const SWAP_OPEN = Object.freeze(['enviado', 'pendente', 'incerto'])
 const EMPTY_FORM = Object.freeze({ fullName: '', cpf: '', birth: '', email: '', cep: '', uf: '', city: '', street: '' })
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const UF_RE = /^[A-Za-z]{2}$/
@@ -277,6 +302,21 @@ function feeSentence (fee, prefix) {
   const formatted = fee.asset === 'USDC' ? usdcText(fee.feeMicros) : formatBrl(fee.cents)
   const amount = formatted !== null ? ' (' + formatted + ')' : ''
   return prefix + amount + ': ' + FEE_STATUS_TEXTS[fee.status]
+}
+
+// A USDC send's confirmation, from the micros preview as the service gave it.
+function usdcSendLines (p) {
+  const fee = usdcFeeLines(p.varandaFeeMicros)
+  const amount = usdcText(p.amountMicros)
+  const pending = usdcText(p.pendingFeeMicros)
+  const total = usdcText(p.totalDebitMicros)
+  const net = usdcText(p.netReceivedMicros)
+  if (fee === null || amount === null || pending === null || total === null || net === null) return null
+  const lines = [{ label: 'Valor', value: amount }, ...fee]
+  if (p.pendingFeeMicros > 0) lines.push({ label: 'Taxas pendentes', value: pending })
+  lines.push({ label: 'Total debitado', value: total })
+  lines.push({ label: 'Quem recebe ganha', value: net })
+  return lines
 }
 
 // open: the screen is showing; active: open and the node ready (for calls).
@@ -984,6 +1024,7 @@ function Dinheiro ({ active, policy, member, signed }) {
   const [note, setNote] = useState('')
   const genRef = useRef(0)
   const maxCents = Number.isSafeInteger(policy.maxCents) ? policy.maxCents : null
+  const maxUsdcMicros = Number.isSafeInteger(policy.maxUsdcMicros) && policy.maxUsdcMicros >= 1 ? policy.maxUsdcMicros : null
 
   // Saldo
   const [bal, setBal] = useState(null)
@@ -1049,9 +1090,16 @@ function Dinheiro ({ active, policy, member, signed }) {
   const canCrypto = hasAction(policy, 'send-crypto')
   // An unexpected network label has no warning text, so no address send.
   const networkWarning = CRYPTO_TEXTS.onlyBrla(policy.network)
+  // USDC moves only from the USDC balance, never paid for with BRLA.
+  const usdcHeld = bal !== null && Number.isSafeInteger(bal.usdcMicros) && bal.usdcMicros > 0
+  const canSendUsdc = canCrypto && networkWarning !== null && usdcHeld
+  const canSwap = hasAction(policy, 'swap')
+  // BRLA | USDC
+  const [sendAsset, setSendAsset] = useState('BRLA')
+  const usdcSend = sendAsset === 'USDC' && canSendUsdc
   const [sendTarget, setSendTarget] = useState('')
   const [sendAmount, setSendAmount] = useState('')
-  // { kind, dest, cents, preview, until }
+  // { kind, dest, cents, preview, until }, or for USDC { kind, asset, dest, micros, preview, until }
   const [sendConfirm, setSendConfirm] = useState(null)
   const [sendChecked, setSendChecked] = useState(false)
   const [sendPin, setSendPin] = useState('')
@@ -1091,11 +1139,47 @@ function Dinheiro ({ active, policy, member, signed }) {
     setSendPhase('result')
   }, [setSendLock, setSendPhase])
 
+  // Converter: { micros, quote, until } of the quote on screen.
+  const [swapAmount, setSwapAmount] = useState('')
+  const [swapConfirm, setSwapConfirm] = useState(null)
+  const [swapPin, setSwapPin] = useState('')
+  const swapOpRef = useRef(null)
+  // form | confirm | progress
+  const [swapPhase, setSwapPhaseState] = useState('form')
+  const swapPhaseRef = useRef('form')
+  const setSwapPhase = useCallback((v) => {
+    swapPhaseRef.current = typeof v === 'function' ? v(swapPhaseRef.current) : v
+    setSwapPhaseState(swapPhaseRef.current)
+  }, [])
+  // { externalId, status } of the conversion sent; only an op-status answer moves it.
+  const [swapResult, setSwapResult] = useState(null)
+  // The conversion that may still settle: { opId, externalId }. Only a final
+  // op-status answer releases it, and while it is held no new opId is minted.
+  const [swapLock, setSwapLockState] = useState(null)
+  const swapLockRef = useRef(null)
+  const setSwapLock = useCallback((v) => {
+    swapLockRef.current = v
+    setSwapLockState(v)
+  }, [])
+  const settleSwap = useCallback((row) => {
+    const l = swapLockRef.current
+    if (!(l && row && l.externalId === row.externalId)) return
+    // The Hodle swap id is what Hodle support searches; a row without one
+    // never erases the id already known.
+    setSwapResult((r) => (r && r.externalId === row.externalId
+      ? { ...r, status: row.status, providerId: row.providerId || r.providerId || null }
+      : r))
+    if (SWAP_OPEN.includes(row.status)) return
+    setSwapLock(null)
+    swapOpRef.current = null
+  }, [setSwapLock])
+
   const clearSecrets = useCallback(() => {
     setPayerCpf('')
     setBeneficiaryCpf('')
     setPayPin('')
     setSendPin('')
+    setSwapPin('')
   }, [])
 
   // A confirmation is only good with the PIN typed right after it, so it
@@ -1108,7 +1192,22 @@ function Dinheiro ({ active, policy, member, signed }) {
     setSendConfirm(null)
     setSendChecked(false)
     setSendPhase((p) => (p === 'confirm' ? 'form' : p))
-  }, [setSendPhase])
+    setSwapConfirm(null)
+    setSwapPhase((p) => (p === 'confirm' ? 'form' : p))
+  }, [setSendPhase, setSwapPhase])
+
+  // A balance read that empties the USDC balance takes the USDC choice away;
+  // the typed micros must not stay in the form to be previewed as reais.
+  useEffect(() => {
+    if (canSendUsdc || sendAsset !== 'USDC') return
+    setSendAsset('BRLA')
+    setSendAmount('')
+    if (sendLockRef.current !== null || sendPhaseRef.current !== 'confirm') return
+    setSendConfirm(null)
+    setSendChecked(false)
+    setSendPin('')
+    setSendPhase('form')
+  }, [canSendUsdc, sendAsset, setSendPhase])
 
   useEffect(() => {
     if (!active) {
@@ -1519,16 +1618,20 @@ function Dinheiro ({ active, policy, member, signed }) {
     // Only on opening Extrato: readStatement changes every render.
   }, [active, view])
 
-  // Reads one unsettled row again (enviado or incerto); op-status is what
-  // moves the service's ledger, and it never resends the operation.
+  // Reads one unsettled row again (enviado or incerto, or a pendente
+  // conversion, which no other path polls once the Converter is left);
+  // op-status is what moves the service's ledger, and it never resends.
   const checkItem = (externalId) => run(async (gen) => {
     const row = await signed('op-status', { externalId }, walletOpStatus)
     settleLock(row)
     settleSend(row)
+    settleSwap(row)
     if (gen !== genRef.current) return
     setItems((list) => (list === null
       ? list
-      : list.map((i) => (i.externalId === row.externalId ? { ...i, status: row.status, fee: row.fee, dispute: row.dispute } : i))))
+      : list.map((i) => (i.externalId === row.externalId
+        ? { ...i, status: row.status, fee: row.fee, dispute: row.dispute, providerId: row.providerId || i.providerId }
+        : i))))
   })
 
   const resultId = result && result.externalId
@@ -1572,14 +1675,18 @@ function Dinheiro ({ active, policy, member, signed }) {
     : walletErrorText(err) || errorText(err))
 
   const conferirSend = () => run(async (gen) => {
+    // USDC chosen but no longer offered: never fall through to a BRLA preview.
+    if (sendAsset === 'USDC' && !canSendUsdc) return setError(SEND_TEXTS.previewRefused)
     if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
     if (payLockRef.current !== null) return setError(MONEY_TEXTS.inFlight)
     const target = targetKind(sendTarget)
     if (target === null) return setError(SEND_TEXTS.target)
+    if (usdcSend && target !== 'address') return setError(SEND_TEXTS.usdcAddress)
     if (target === 'nome' && !canTransfer) return setError(SEND_TEXTS.noNome)
     if (target === 'address' && (!canCrypto || networkWarning === null)) return setError(SEND_TEXTS.noAddress)
-    const cents = parseBrl(sendAmount)
-    if (cents === null || cents < 1) return setError(MONEY_TEXTS.amount)
+    const amount = usdcSend ? parseUsdc(sendAmount) : parseBrl(sendAmount)
+    if (amount === null || amount < 1) return setError(MONEY_TEXTS.amount)
+    if (usdcSend && maxUsdcMicros !== null && amount > maxUsdcMicros) return setError(SEND_TEXTS.usdcCap(maxUsdcMicros))
     const raw = sendTarget.trim().replace(/^@/, '')
     const kind = target === 'nome' ? 'transfer' : 'crypto'
     // A send to an outside address cannot be undone, so a mixed-case address
@@ -1589,6 +1696,20 @@ function Dinheiro ({ active, policy, member, signed }) {
     if (dest === null) return setError(SEND_TEXTS.target)
     if (sendOpRef.current === null) sendOpRef.current = mintOpId()
     if (sendOpRef.current === null) return setError(MONEY_TEXTS.noRandom)
+    if (usdcSend) {
+      const p = await signed('preview', { kind, asset: 'USDC', source: 'USDC', amountMicros: amount }, walletCryptoPreview)
+      if (gen !== genRef.current) return
+      if (p.ok !== true) return setError(walletErrorText({ code: p.reason }) || SEND_TEXTS.previewRefused)
+      if (usdcFeeLines(p.varandaFeeMicros) === null) return setError(SEND_TEXTS.previewRefused)
+      // The confirmation renders only with these lines: without them there
+      // would be neither the form nor the card.
+      if (usdcSendLines(p) === null) return setError(SEND_TEXTS.previewRefused)
+      setSendConfirm({ kind, asset: 'USDC', dest, micros: amount, preview: p, until: Date.now() + CONFIRM_MS })
+      setSendChecked(false)
+      setSendPhase('confirm')
+      return
+    }
+    const cents = amount
     const p = await signed('preview', { kind, cents }, walletPreview)
     if (gen !== genRef.current) return
     if (p.ok !== true) return setError(walletErrorText({ code: p.reason }) || SEND_TEXTS.previewRefused)
@@ -1605,6 +1726,7 @@ function Dinheiro ({ active, policy, member, signed }) {
     setSendChecked(false)
     setSendTarget('')
     setSendAmount('')
+    setSendAsset('BRLA')
     setSendRetryReady(false)
     setSendPin('')
     sendOpRef.current = null
@@ -1650,7 +1772,10 @@ function Dinheiro ({ active, policy, member, signed }) {
       }
       if (sendConfirm.kind === 'crypto' && !sendChecked) return setError(SEND_TEXTS.checkbox)
       kind = sendConfirm.kind
-      op = { opId: sendOpRef.current, cents: sendConfirm.cents }
+      // A USDC send is funded by the USDC balance only (source USDC).
+      op = sendConfirm.asset === 'USDC'
+        ? { opId: sendOpRef.current, amountMicros: sendConfirm.micros, asset: 'USDC', source: 'USDC' }
+        : { opId: sendOpRef.current, cents: sendConfirm.cents }
       if (kind === 'transfer') op.to = sendConfirm.dest
       else op.address = sendConfirm.dest
       Object.assign(op, debitTerms(sendConfirm.preview))
@@ -1758,6 +1883,116 @@ function Dinheiro ({ active, policy, member, signed }) {
     const address = bal && bal.address
     if (typeof address !== 'string') return
     setNote(await copyText(shareNav(), address) ? SEND_TEXTS.copied : SEND_TEXTS.copyFailed)
+  }
+
+  // Converter. The quote binds nothing (the provider prices the swap again),
+  // so it carries no opId; the amount is echoed back before the PIN.
+  const editSwap = (t) => {
+    setSwapAmount(t)
+    dropConfirm()
+    setSwapPin('')
+  }
+
+  const quoteSwap = () => run(async (gen) => {
+    if (swapLockRef.current !== null) return setError(SWAP_TEXTS.inFlight)
+    if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
+    if (payLockRef.current !== null) return setError(MONEY_TEXTS.inFlight)
+    const micros = parseUsdc(swapAmount)
+    if (micros === null || micros < 1) return setError(SWAP_TEXTS.amount)
+    if (maxUsdcMicros !== null && micros > maxUsdcMicros) return setError(SWAP_TEXTS.cap(maxUsdcMicros))
+    const q = await signed('swap-quote', { amountMicros: micros }, walletSwapQuote)
+    if (gen !== genRef.current) return
+    if (q.amountInMicros !== micros || swapQuoteLines(q) === null) return setError(SWAP_TEXTS.quoteRefused)
+    setSwapConfirm({ micros, quote: q, until: Date.now() + CONFIRM_MS })
+    setSwapPhase('confirm')
+  })
+
+  // One request under one opId. An unknown outcome is settled by op-status
+  // only: there is no retry, with this opId or a new one.
+  const swapPay = () => run(async () => {
+    const chosen = swapPin
+    setSwapPin('')
+    if (!isPin(chosen)) return setError('Digite a senha de 6 dígitos (PIN) da carteira.')
+    if (swapLockRef.current !== null) return setError(SWAP_TEXTS.inFlight)
+    if (sendLockRef.current !== null) return setError(SEND_TEXTS.inFlight)
+    if (payLockRef.current !== null) return setError(MONEY_TEXTS.inFlight)
+    if (swapConfirm === null || Date.now() >= swapConfirm.until) {
+      dropConfirm()
+      return setError(MONEY_TEXTS.confirmExpired)
+    }
+    if (swapOpRef.current === null) swapOpRef.current = mintOpId()
+    if (swapOpRef.current === null) return setError(MONEY_TEXTS.noRandom)
+    const op = { opId: swapOpRef.current, amountMicros: swapConfirm.micros }
+    const expected = await opExternalId(member, 'swap', op.opId)
+    if (expected === null) return setError(MONEY_TEXTS.noRandom)
+    setSwapLock({ opId: op.opId, externalId: expected })
+    let out
+    try {
+      out = await signed('swap', op, (a) => walletSwap({ ...a, pin: chosen }))
+    } catch (err) {
+      if (err && err.uncertain === true) {
+        setSwapConfirm(null)
+        setSwapResult({ externalId: expected, status: 'incerto', providerId: null })
+        setSwapPhase('progress')
+        return
+      }
+      // A definite refusal: nothing was converted under this opId, and the
+      // service keeps any row it wrote, so the next conversion needs a new one.
+      setSwapLock(null)
+      swapOpRef.current = null
+      setError(walletErrorText(err) || errorText(err))
+      if (!KEEP_CONFIRM_CODES.includes(err && err.code)) {
+        setSwapConfirm(null)
+        setSwapPhase('form')
+      }
+      return
+    }
+    setError('')
+    setSwapConfirm(null)
+    setSwapLock({ opId: op.opId, externalId: out.externalId })
+    setSwapResult({ externalId: out.externalId, status: out.status, providerId: out.providerId || null })
+    setSwapPhase('progress')
+    settleSwap(out)
+  })
+
+  const checkSwap = () => run(async () => {
+    const l = swapLockRef.current
+    if (l === null) return
+    const row = await signed('op-status', { externalId: l.externalId }, walletOpStatus)
+    settleSwap(row)
+  })
+
+  const swapId = swapResult && swapResult.externalId
+  const swapPolling = swapPhase === 'progress' && swapLock !== null
+  useEffect(() => {
+    if (!active || view !== 'cripto' || !swapId || !swapPolling) return
+    const timer = setInterval(async () => {
+      if (busyRef.current) return
+      try {
+        const row = await signed('op-status', { externalId: swapId }, walletOpStatus)
+        settleSwap(row)
+      } catch {}
+    }, POLL_EVERY_MS)
+    return () => clearInterval(timer)
+  }, [active, view, swapId, swapPolling, signed, settleSwap])
+
+  const onSwapExpired = useCallback(() => {
+    if (swapLockRef.current !== null || swapPhaseRef.current !== 'confirm') return
+    dropConfirm()
+    setSwapPin('')
+    setError(MONEY_TEXTS.confirmExpired)
+  }, [dropConfirm])
+
+  // Back to the form after a settled conversion. A new one is a deliberate
+  // new action: swapPay mints a new opId, since settleSwap dropped the old one.
+  const newSwap = () => {
+    if (swapLockRef.current !== null) return
+    setSwapResult(null)
+    setSwapAmount('')
+    setSwapConfirm(null)
+    setSwapPin('')
+    setSwapPhase('form')
+    readBalance()
   }
 
   const off = busy || !active
@@ -1912,24 +2147,67 @@ function Dinheiro ({ active, policy, member, signed }) {
         </>
         )
       : null
-    const sendLines = sendConfirm !== null ? feeLinesFor(sendConfirm.preview, sendConfirm.kind) : null
+    const usdcConfirm = sendConfirm !== null && sendConfirm.asset === 'USDC'
+    const sendLines = sendConfirm === null
+      ? null
+      : (usdcConfirm ? usdcSendLines(sendConfirm.preview) : feeLinesFor(sendConfirm.preview, sendConfirm.kind))
     const sendKind = lastSendRef.current !== null ? lastSendRef.current.kind : null
     if (sendPhase === 'form') {
       const typed = targetKind(sendTarget)
+      const typedUsdc = usdcSend ? parseUsdc(sendAmount) : null
       content = (
         <>
-          <Body>Enviar BRLA</Body>
-          <Soft>{canSendAddress ? 'Para um @nome da Varanda ou para um endereço 0x.' : 'Para um @nome da Varanda.'}</Soft>
+          {canSendUsdc
+            ? (
+              <>
+                <Label>O que enviar</Label>
+                <Row>
+                  {['BRLA', 'USDC'].map((a) => (
+                    <Btn
+                      key={a}
+                      label={a}
+                      secondary={sendAsset !== a}
+                      onPress={() => { setSendAsset(a); setSendAmount(''); dropConfirm() }}
+                      disabled={off}
+                    />
+                  ))}
+                </Row>
+              </>
+              )
+            : null}
+          {usdcSend
+            ? (
+              <>
+                <Body>Enviar USDC</Body>
+                <Soft>Para um endereço 0x. Sai do seu saldo em USDC: {usdcText(bal.usdcMicros)}.</Soft>
+              </>
+              )
+            : (
+              <>
+                <Body>Enviar BRLA</Body>
+                <Soft>{canSendAddress ? 'Para um @nome da Varanda ou para um endereço 0x.' : 'Para um @nome da Varanda.'}</Soft>
+              </>
+              )}
           <Field
-            label={canSendAddress ? 'Para (@nome ou endereço 0x)' : 'Para (@nome)'}
+            label={usdcSend ? 'Para (endereço 0x)' : (canSendAddress ? 'Para (@nome ou endereço 0x)' : 'Para (@nome)')}
             value={sendTarget}
             onChangeText={editSend(setSendTarget)}
             maxLength={64}
             editable={!off}
             mono
           />
-          {typed === 'address' && canSendAddress ? <Notice>{networkWarning}</Notice> : null}
-          <Field label='Valor (R$)' value={sendAmount} onChangeText={editSend(setSendAmount)} maxLength={16} editable={!off} mono />
+          {typed === 'address' && canSendAddress
+            ? <Notice>{usdcSend ? SEND_TEXTS.usdcNetwork(policy.network) : networkWarning}</Notice>
+            : null}
+          <Field
+            label={usdcSend ? 'Valor (USDC)' : 'Valor (R$)'}
+            value={sendAmount}
+            onChangeText={editSend(setSendAmount)}
+            maxLength={usdcSend ? 24 : 16}
+            editable={!off}
+            mono
+          />
+          {typedUsdc !== null ? <Soft>Você vai enviar {usdcText(typedUsdc)}.</Soft> : null}
           {payLock !== null ? <Notice>{MONEY_TEXTS.inFlight}</Notice> : null}
           {sendLockNote}
           <Btn label='Conferir' onPress={conferirSend} pending={busy} disabled={off || sendLocked} />
@@ -1937,8 +2215,11 @@ function Dinheiro ({ active, policy, member, signed }) {
       )
     } else if (sendPhase === 'confirm' && sendConfirm !== null && sendLines !== null) {
       const isAddress = sendConfirm.kind === 'crypto'
-      const reserved = Number.isSafeInteger(sendConfirm.preview.reservedFeeCents) && sendConfirm.preview.reservedFeeCents > 0
-        ? formatBrl(sendConfirm.preview.reservedFeeCents)
+      const totalText = usdcConfirm ? usdcText(sendConfirm.preview.totalDebitMicros) : formatBrl(sendConfirm.preview.totalDebitCents)
+      // Other pending fees held in the balance, in the send's own asset.
+      const reservedKey = usdcConfirm ? 'reservedFeeMicros' : 'reservedFeeCents'
+      const reserved = Number.isSafeInteger(sendConfirm.preview[reservedKey]) && sendConfirm.preview[reservedKey] > 0
+        ? (usdcConfirm ? usdcText(sendConfirm.preview.reservedFeeMicros) : formatBrl(sendConfirm.preview.reservedFeeCents))
         : null
       content = (
         <Card>
@@ -1948,7 +2229,7 @@ function Dinheiro ({ active, policy, member, signed }) {
               <>
                 <Text style={styles.code} selectable>{sendConfirm.dest}</Text>
                 <Soft>{CRYPTO_TEXTS.CONFIRM_ADDRESS}</Soft>
-                <Notice>{networkWarning}</Notice>
+                <Notice>{usdcConfirm ? SEND_TEXTS.usdcNetwork(policy.network) : networkWarning}</Notice>
               </>
               )
             : (
@@ -1969,7 +2250,7 @@ function Dinheiro ({ active, policy, member, signed }) {
           {sendLockNote}
           <Row>
             <Btn
-              label={'Enviar ' + formatBrl(sendConfirm.preview.totalDebitCents)}
+              label={'Enviar ' + totalText}
               onPress={() => sendPay(false)}
               pending={busy}
               disabled={off || sendLocked || (isAddress && !sendChecked)}
@@ -2014,35 +2295,113 @@ function Dinheiro ({ active, policy, member, signed }) {
     }
   }
 
-  // Receiving from another wallet. The USDC on the address is only shown:
-  // this version neither converts nor sends it.
+  // Receiving from another wallet, and Converter when the service offers the
+  // swap and there is USDC to convert. A conversion under way stays on screen
+  // even once the USDC balance is spent.
   if (view === 'cripto') {
-    const warning = bal !== null ? CRYPTO_TEXTS.onlyBrla(bal.network) : null
+    // onlyBrla vets the network label; once USDC can leave or be converted,
+    // "só enviamos BRLA" would be false, so the receive note names both.
+    const brlaOnly = bal !== null ? CRYPTO_TEXTS.onlyBrla(bal.network) : null
+    const warning = brlaOnly !== null && (canSwap || canSendUsdc) ? SEND_TEXTS.receiveNetwork(bal.network) : brlaOnly
     const usdc = bal !== null ? usdcText(bal.usdcMicros) : null
+    const showSwap = canSwap && (swapPhase !== 'form' || usdcHeld)
+    const swapLines = swapConfirm !== null ? swapQuoteLines(swapConfirm.quote) : null
+    const typedSwap = parseUsdc(swapAmount)
+    let swapCard = null
+    if (showSwap && swapPhase === 'form') {
+      swapCard = (
+        <Card>
+          <Label>{USDC_TEXTS.CONVERTER}</Label>
+          <Soft>{USDC_TEXTS.NO_VARANDA_FEE}</Soft>
+          <Field label='Valor (USDC)' value={swapAmount} onChangeText={editSwap} maxLength={24} editable={!off} mono />
+          {typedSwap !== null ? <Soft>Você vai converter {usdcText(typedSwap)}.</Soft> : null}
+          {swapLock !== null ? <Notice>{SWAP_TEXTS.inFlight}</Notice> : null}
+          <Btn label='Ver cotação' onPress={quoteSwap} pending={busy} disabled={off || swapLock !== null} />
+        </Card>
+      )
+    } else if (showSwap && swapPhase === 'confirm' && swapConfirm !== null && swapLines !== null) {
+      swapCard = (
+        <Card>
+          <Label>{USDC_TEXTS.CONVERTER}</Label>
+          {swapLines.map((l) => <Line key={l.label} label={l.label} value={l.value} />)}
+          <Notice>{USDC_TEXTS.QUOTE}</Notice>
+          <Soft>{USDC_TEXTS.NO_VARANDA_FEE}</Soft>
+          <Countdown key={swapConfirm.until} until={swapConfirm.until} label='A cotação vale por mais' onExpire={onSwapExpired} />
+          <PinField label='Senha de 6 dígitos (PIN)' value={swapPin} onChangeText={setSwapPin} editable={!off} />
+          <Row>
+            <Btn label={'Converter ' + usdcText(swapConfirm.micros)} onPress={swapPay} pending={busy} disabled={off || swapLock !== null} />
+            <Btn label='Alterar' secondary onPress={() => { dropConfirm(); setSwapPin('') }} disabled={busy} />
+          </Row>
+        </Card>
+      )
+    } else if (showSwap && swapPhase === 'progress' && swapResult !== null) {
+      const status = swapResult.status
+      // incerto and falhou go to support with the code: never a retry button.
+      const support = status === 'incerto' || status === 'falhou'
+      swapCard = (
+        <Card>
+          <Label>{USDC_TEXTS.CONVERTER}</Label>
+          {status === 'incerto'
+            ? <Notice>{UNCERTAIN_MONEY}</Notice>
+            : <Body>{opStatusText('swap', status)}</Body>}
+          {SWAP_OPEN.includes(status) && status !== 'incerto' ? <Soft>{USDC_TEXTS.PROGRESS}</Soft> : null}
+          {support
+            ? (
+              <>
+                <Notice>{USDC_TEXTS.SUPPORT}</Notice>
+                <Soft>{SWAP_TEXTS.code}</Soft>
+                <Text style={styles.code} selectable>{swapResult.externalId}</Text>
+                {swapResult.providerId
+                  ? (
+                    <>
+                      <Soft>{SWAP_TEXTS.providerCode}</Soft>
+                      <Text style={styles.code} selectable>{swapResult.providerId}</Text>
+                    </>
+                    )
+                  : null}
+              </>
+              )
+            : null}
+          {swapPolling ? <Spinner /> : null}
+          <Row>
+            {swapLock !== null
+              ? <Btn label='Conferir' secondary onPress={checkSwap} pending={busy} disabled={off} />
+              : null}
+            {swapLock === null && !SWAP_OPEN.includes(status)
+              ? <Btn label='Fechar' onPress={newSwap} disabled={off} />
+              : null}
+            <Btn label='Ver extrato' secondary onPress={() => go('extrato')} disabled={busy} />
+          </Row>
+        </Card>
+      )
+    }
     content = (
-      <Card>
-        <Label>Receber de outra carteira</Label>
-        {bal === null
-          ? (busy ? <Spinner /> : <Soft>Saldo ainda não carregado.</Soft>)
-          : (bal.address !== null && warning !== null
-              ? (
-                <>
-                  <Text style={styles.code} selectable>{bal.address}</Text>
-                  <Btn label='Copiar' onPress={copyAddress} disabled={!active} />
-                  <Notice>{warning}</Notice>
-                </>
-                )
-              : <Soft>{SEND_TEXTS.noReceive}</Soft>)}
-        {usdc !== null
-          ? (
-            <>
-              <Line label='USDC' value={usdc} />
-              <Soft>{CRYPTO_TEXTS.USDC_HERE}</Soft>
-            </>
-            )
-          : null}
-        <Btn label='Atualizar' secondary onPress={readBalance} pending={busy} disabled={off} />
-      </Card>
+      <>
+        <Card>
+          <Label>Receber de outra carteira</Label>
+          {bal === null
+            ? (busy ? <Spinner /> : <Soft>Saldo ainda não carregado.</Soft>)
+            : (bal.address !== null && warning !== null
+                ? (
+                  <>
+                    <Text style={styles.code} selectable>{bal.address}</Text>
+                    <Btn label='Copiar' onPress={copyAddress} disabled={!active} />
+                    <Notice>{warning}</Notice>
+                  </>
+                  )
+                : <Soft>{SEND_TEXTS.noReceive}</Soft>)}
+          {usdc !== null
+            ? (
+              <>
+                <Line label='USDC' value={usdc} />
+                <Soft>{showSwap ? USDC_TEXTS.OFFERED : CRYPTO_TEXTS.USDC_HERE}</Soft>
+              </>
+              )
+            : null}
+          <Btn label='Atualizar' secondary onPress={readBalance} pending={busy} disabled={off} />
+        </Card>
+        {swapCard}
+      </>
     )
   }
 
@@ -2186,7 +2545,10 @@ function Dinheiro ({ active, policy, member, signed }) {
                 : null}
               {feeText ? <Soft>{feeText}</Soft> : null}
               {item.at !== null ? <Soft>{dateText(item.at)}</Soft> : null}
-              {OPEN_STATUSES.includes(item.status) && item.externalId !== null
+              {item.kind === 'swap' && item.providerId
+                ? <Soft>{SWAP_TEXTS.providerCode} {item.providerId}</Soft>
+                : null}
+              {(OPEN_STATUSES.includes(item.status) || (item.kind === 'swap' && item.status === 'pendente')) && item.externalId !== null
                 ? <Btn label='Conferir' secondary onPress={() => checkItem(item.externalId)} disabled={off} />
                 : null}
             </Card>

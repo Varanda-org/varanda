@@ -4006,3 +4006,53 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Um envio ao endereço da subconta da tesouraria não é recusado quando a tesouraria é `sub:<id>`; só uma tesouraria em endereço é comparada.
 - Um membro com saldo que manda um PIN errado de propósito recebe `destino-invalido` para um @nome sem carteira e `pin-invalido` para um com carteira, sem mover dinheiro: só o parceiro confere o PIN, e só ao enviar. Aceito pelo dono em 03/11/2026 (mandar R$ 0,01 revela o mesmo; cada tentativa gasta uma das três antes do bloqueio de 24 horas).
 - A ida ao ar do `completo` depende da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
+
+## 73. Conta de pagamentos: USDC e Converter (feat/hodle-usdc, 2026-11-03)
+
+As seções 1 a 72 não mudam; onde a 72 diz que a conversão de USDC e o envio de USDC ficam para o próximo PR, vale esta seção. Ela documenta o PR2 da etapa de transferências: o Converter (USDC para BRLA) e o envio de USDC, ambos no modo `completo`. Os Termos de Uso e a Política de Privacidade ficam na versão 12 (a versão 12 já descreve o USDC como função que o serviço pode oferecer), sem aceite novo.
+
+### O que mudou
+
+- A política em `completo` ganha `swap-quote` e `swap`. `swap-quote` não pede PIN, não grava linha e responde inteiros (`amountInMicros`, `hodleFeeMicros`, `brlaOutCents`, `rateCents`) com `indicative: true`; a taxa de câmbio aparece em centavos e é só indicativa.
+- `swap` recebe `{ opId, amountMicros }` com o PIN no corpo. A linha é gravada antes da chamada ao Hodle e a chamada nunca é reenviada. Uma resposta com `swapId` é lida pelo `op-status`: `RUNNING` é `pendente`, `COMPLETED` é `concluido`, `FAILED` ou `STRANDED` é `falhou` com o aviso de suporte. Uma resposta perdida sem `swapId` fica `incerto` e bloqueia todo débito do membro até uma linha do extrato com a referência aparecer. Um 502 com `swapId` é `incerto` com esse `providerId`.
+- Uma conversão recusada antes de o Hodle registrá-la (sem `swapId`, por exemplo `NOT_ENABLED` ou PIN errado) é um `falhou` comum, sem aviso de suporte, e sai da lista como qualquer linha. Uma resposta que já traz um `swapId`, mesmo de recusa, vira `incerto` com esse id e é lida pelo `op-status`.
+- Uma conversão `incerto` sem `swapId` só se resolve por uma linha do extrato do tipo conversão, em USDC, de saída, com a referência dela e o mesmo valor; outra perna da mesma referência é ignorada. Uma conversão que o extrato mostra como falha guarda o id dessa linha e vai para o suporte.
+- Nenhuma taxa da Varanda na conversão nem no que entra. Nunca há conversão automática.
+- Envio de USDC (`send-crypto`) sai só do saldo de USDC. A taxa da Varanda é o percentual de cripto, em USDC (a parte fixa em centavos não vale), cobrada só depois de o envio concluir e só por um envio de USDC seguinte. As taxas em reais e em USDC são reservadas e cobradas à parte. Um envio de USDC pago com BRLA em um passo é recusado.
+- Registros novos: `conversao`, `cotacao-conversao-formato`, e os passos `cotacao-conversao` e `conversao` em `hodle-<passo>-<causa>`.
+- O envio de USDC usa a mesma checagem de checksum EIP-55 da seção 72.
+- `VARANDA_HODLE_MAX_USDC` (USDC inteiros, de 1 a 10000, padrão 500; outro valor recusa a partida citando só o nome da variável) limita cada envio de USDC, com a taxa nova e a pendente incluídas, e cada conversão (`swap-quote` e `swap`). Acima dele a resposta é `valor-invalido` antes de qualquer linha ou chamada ao Hodle. A política do `completo` traz `maxUsdcMicros`, e o app recusa o valor acima do teto antes da prévia ou da cotação. Cada `swap-quote` passa a contar no teto diário `VARANDA_HODLE_DAILY_LIMIT` e na parte de cada membro, como `payout-quote`.
+
+### Testes automatizados
+
+Todos usam o falso em `127.0.0.1` ou não abrem rede. O falso não é o Hodle: ele não prova nada sobre o preço, a idempotência nem o extrato de uma conversão real.
+
+- `node apps/cli/test/fees.test.js`
+- `node apps/cli/test/hodle.test.js`
+- `node apps/cli/test/wallet-ops-store.test.js`
+- `node apps/cli/test/account-wallet.test.js`
+- `node apps/cli/test/account-wallet-e2e.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/app/test/wallet.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/app/test/carteiraNative.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita ainda. Todos os itens são de produção e estão em aberto:
+
+1. [ ] Em produção, com o Converter habilitado pelo Hodle numa subconta de teste, cotar e converter uma quantia mínima de USDC em BRLA: o app mostra a cotação como indicativa, o PIN é pedido, o saldo de BRLA sobe, o de USDC cai e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
+2. [ ] Deixar uma conversão encalhada (`STRANDED` ou `FAILED`) para o suporte: o cartão mostra o texto de suporte com o código do Hodle, sem botão de repetir (só "Fechar"), e o suporte do Hodle consegue achá-la por esse código (não realizada ainda).
+3. [ ] Enviar uma quantia mínima de USDC a um endereço de teste: o BRLA não se mexe, o saldo de USDC cai e o `txHash` confere na rede (não realizada ainda).
+4. [ ] Com um envio de USDC e uma taxa de cripto diferente de zero, a taxa em USDC não sai nesse envio e só é cobrada por um envio de USDC seguinte depois de o primeiro concluir (não realizada ainda).
+5. [ ] Perguntar ao Hodle e anotar a resposta: a referência de uma conversão é idempotente? Ela aparece no extrato? (não realizada ainda).
+
+### Limites
+
+- O sandbox do Hodle não cota nem executa uma conversão. O Converter só foi exercitado no falso de loopback e precisa dos itens acima em produção. Nenhuma execução real do Converter foi feita.
+- O Hodle não respondeu se a referência de uma conversão é idempotente nem se ela aparece no extrato. Uma conversão `incerto` sem `swapId` pode precisar do suporte do Hodle e, até lá, bloqueia os débitos do membro.
+- Uma conversão que falhou não tem botão de repetir: o cartão mostra o texto de suporte com o código do Hodle e só "Fechar" (o Hodle pede para falar com o suporte antes de tentar de novo); uma nova conversão é outra ação, com outro pedido. O texto de suporte aparece em todo cartão de conversão que falhou.
+- Se o extrato do Hodle mostrar uma conversão com valor diferente do pedido (por exemplo, já sem a taxa), uma conversão `incerto` sem `swapId` não se resolve sozinha e fica para o suporte.
+- Uma conversão `pendente` não bloqueia outros débitos, como um Pix `pendente`.
+- A taxa de câmbio da cotação aparece em centavos e é indicativa: o Hodle refaz o preço ao executar.
+- A ida ao ar do `completo` continua dependendo da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.

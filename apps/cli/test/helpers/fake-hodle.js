@@ -33,9 +33,34 @@
 //                                    with 400 TRANSFER_FAILED and moves nothing
 //                   credited         Map lowercase address -> cents received by
 //                                    a transfer to an address (never a subaccount)
+//                   creditedUsdc     Map lowercase address -> USDC micro-units
+//                                    received by a USDC transfer to an address
 //                   usdc             Map subAccountId -> USDC amount string, shown
 //                                    by walletGet and as a statement deposit row
-//                                    without valueInBrl
+//                                    without valueInBrl; a USDC transfer (asset
+//                                    'USDC') debits it and credits the recipient,
+//                                    idempotent by reference like BRLA; a swap
+//                                    debits it at funding
+//                   swaps            Map swapId -> swap record (status RUNNING,
+//                                    COMPLETED, FAILED or STRANDED)
+//                   swapAnswer       how a new swap POST is answered: 'running'
+//                                    (default) funds it and answers 200 RUNNING;
+//                                    'fail502-with-id' funds it and answers 502
+//                                    FUNDING_LEG_FAILED with the swapId;
+//                                    'timeout' funds it and never answers;
+//                                    'notEnabled' answers 403 NOT_ENABLED, to the
+//                                    quote too, and moves nothing. A repeated
+//                                    reference is a NEW swap: the provider stores
+//                                    it without deduplicating
+//                   swapOutcome      what GET /api/wallet/swap/:id moves a RUNNING
+//                                    swap to: 'COMPLETED' (default, credits the
+//                                    BRLA), 'FAILED' (refunds the USDC),
+//                                    'STRANDED' (holds it) or null (stays RUNNING)
+//                   swapFeeBps       the provider's swap fee, in basis points
+//                   swapRateCents    BRLA cents per USDC of a swap
+//                   swapRows         planted statement rows of type 'swap':
+//                                    [{ subAccountId, reference, amount, status }],
+//                                    empty by default
 //                   pinFailures      Map walletId -> wrong PIN count (3 locks the wallet)
 //                   depositFeeCents  fee of a new deposit, in cents
 //                   payoutFeeCents   fee of a payout or quote, in cents
@@ -43,7 +68,8 @@
 //                                    stays PENDING) or the status a new payout
 //                                    answers and keeps, e.g. 'COMPLETED'
 //                   sends            counts of executed money calls: { deposit, payout, transfer }
-//                                    (a 409 replay or a 4xx refusal is not one)
+//                                    (a 409 replay or a 4xx refusal is not one),
+//                                    and { swap }: every POST /api/wallet/swap
 //                   posts            { transfer }: every POST /api/wallet/transfer,
 //                                    replays and refusals included
 //   fake.script(handlers)
@@ -65,6 +91,9 @@
 //                   payout           POST /api/wallet/payout
 //                   payoutStatus     GET  /api/wallet/payout/:id
 //                   transfer         POST /api/wallet/transfer
+//                   swapQuote        GET  /api/wallet/swap/quote
+//                   swap             POST /api/wallet/swap
+//                   swapStatus       GET  /api/wallet/swap/:id
 //                   statement        POST /api/account/statement
 //                 each called as (req, res, ctx) with ctx = { id, query, body, json }.
 //                 ctx.json(res, code, obj) writes a JSON response. A map only
@@ -78,6 +107,8 @@
 //   fake.settleTransfer(reference, status)
 //                 advances a stored PENDING transfer to 'COMPLETED' (credits the
 //                 recipient, adds a txHash) or 'FAILED' (refunds the sender).
+//   fake.settleSwap(swapId, status)
+//                 moves a RUNNING swap to 'COMPLETED', 'FAILED' or 'STRANDED'.
 //   fake.close()  closes the server and its connections.
 //   fake.livenessFields
 //                 true (default): a selfie answer carries the in-app liveness
@@ -100,6 +131,7 @@ const PROTECTED_KEY = 'psk-fake-hodle-protected-key'
 const DOCUMENT_RE = /^\/api\/kyc\/document\/([^/]+)$/
 const DEPOSIT_RE = /^\/api\/deposit\/([^/]+)$/
 const PAYOUT_RE = /^\/api\/wallet\/payout\/([^/]+)$/
+const SWAP_RE = /^\/api\/wallet\/swap\/([^/]+)$/
 const PIX_KEY_TYPES = new Set(['PHONE', 'CPF', 'EMAIL', 'RANDOM', 'CNPJ'])
 // Past MAX_STRING on purpose: a decoder that checks it with validText drops it.
 const FAKE_LIVENESS_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.' + 'fakeLivenessPayload_'.repeat(15) + '.fake-signature'
@@ -133,6 +165,18 @@ function amountCents (text) {
   return Number(m[1]) * 100 + Number((m[2] || '').slice(0, 2).padEnd(2, '0'))
 }
 
+// USDC amounts as micro-units, six decimals, extra digits floored.
+function usdcMicros (text) {
+  const m = /^([0-9]+)(?:\.([0-9]{1,30}))?$/.exec(String(text))
+  if (!m) return null
+  return Number(m[1]) * 1000000 + Number((m[2] || '').slice(0, 6).padEnd(6, '0'))
+}
+
+function microsText (micros) {
+  const s = String(micros).padStart(7, '0')
+  return s.slice(0, -6) + '.' + s.slice(-6)
+}
+
 function txHash () {
   return '0x' + hex(32)
 }
@@ -163,8 +207,15 @@ async function startFakeHodle () {
     payoutStatus: null,
     transferAnswer: 'done',
     credited: new Map(),
+    creditedUsdc: new Map(),
     usdc: new Map(),
-    sends: { deposit: 0, payout: 0, transfer: 0 },
+    swaps: new Map(),
+    swapAnswer: 'running',
+    swapOutcome: 'COMPLETED',
+    swapFeeBps: 70,
+    swapRateCents: 500,
+    swapRows: [],
+    sends: { deposit: 0, payout: 0, transfer: 0, swap: 0 },
     posts: { transfer: 0 }
   }
   let seq = 0
@@ -180,6 +231,28 @@ async function startFakeHodle () {
 
   function move (subAccountId, cents) {
     state.balances.set(subAccountId, balanceOf(subAccountId) + cents)
+  }
+
+  function usdcOf (subAccountId) {
+    return state.usdc.has(subAccountId) ? usdcMicros(state.usdc.get(subAccountId)) : 0
+  }
+
+  function moveUsdc (subAccountId, micros) {
+    state.usdc.set(subAccountId, microsText(usdcOf(subAccountId) + micros))
+  }
+
+  function swapFee (micros) {
+    return Math.floor(micros * state.swapFeeBps / 10000)
+  }
+
+  function swapOut (micros) {
+    return Math.floor((micros - swapFee(micros)) * state.swapRateCents / 1000000)
+  }
+
+  // The asset's own unit: cents for BRLA, micro-units for USDC.
+  function moveAsset (asset, subAccountId, units) {
+    if (asset === 'USDC') moveUsdc(subAccountId, units)
+    else move(subAccountId, units)
   }
 
   // Wrong PIN or protected key -> 400 with a bare message, as documented.
@@ -585,7 +658,7 @@ async function startFakeHodle () {
           reference: first.reference,
           transactionId: first.transactionId,
           status: first.status || 'COMPLETED',
-          amount: amountText(first.cents)
+          amount: first.asset === 'USDC' ? microsText(first.cents) : amountText(first.cents)
         }
         if (first.txHash) echo.txHash = first.txHash
         if (first.to !== undefined) echo.toSubAccountId = first.to
@@ -603,18 +676,21 @@ async function startFakeHodle () {
         }
         recipientAddress = target.address
       }
-      const cents = amountCents(b.amount)
-      if (b.asset !== 'BRLA' || cents === null || cents < 1) return json(res, 400, { success: false, error: 'Validation failed' })
+      // `cents` holds the asset's own unit: micro-units for USDC.
+      const usdc = b.asset === 'USDC'
+      const cents = usdc ? usdcMicros(b.amount) : amountCents(b.amount)
+      if ((b.asset !== 'BRLA' && !usdc) || cents === null || cents < 1) return json(res, 400, { success: false, error: 'Validation failed' })
       if (state.transferAnswer === 'fail') {
         return json(res, 400, { success: false, error: 'Transfer failed', errorCode: 'TRANSFER_FAILED' })
       }
-      if (balanceOf(from) < cents) return json(res, 400, { success: false, error: 'Insufficient balance', errorCode: 'INSUFFICIENT_BALANCE' })
+      if ((usdc ? usdcOf(from) : balanceOf(from)) < cents) return json(res, 400, { success: false, error: 'Insufficient balance', errorCode: 'INSUFFICIENT_BALANCE' })
       const pending = state.transferAnswer === 'pending202'
-      move(from, -cents)
+      moveAsset(b.asset, from, -cents)
       const record = {
         ...stamp(),
         transactionId: hex(12),
         reference: b.reference,
+        asset: b.asset,
         from,
         to: b.toSubAccountId,
         cents,
@@ -629,6 +705,81 @@ async function startFakeHodle () {
       if (state.transferAnswer === 'timeout') return
       if (pending) return json(res, 202, { success: true, data: { status: 'PENDING', transactionId: record.transactionId } })
       json(res, 200, { success: true, data: { txHash: record.txHash, recipientAddress, amount: b.amount } })
+    },
+    swapQuote (req, res, ctx) {
+      if (state.swapAnswer === 'notEnabled') return json(res, 403, { success: false, error: 'Not enabled', errorCode: 'NOT_ENABLED' })
+      const q = ctx.query
+      if (q.get('fromAsset') !== 'USDC' || q.get('toAsset') !== 'BRLA') {
+        return json(res, 400, { success: false, error: 'Unsupported pair', errorCode: 'UNSUPPORTED_PAIR' })
+      }
+      const micros = usdcMicros(q.get('amount'))
+      if (micros === null || micros < 1) return json(res, 400, { success: false, error: 'Invalid amount', errorCode: 'INVALID_AMOUNT' })
+      const fee = swapFee(micros)
+      json(res, 200, {
+        success: true,
+        fromAsset: 'USDC',
+        toAsset: 'BRLA',
+        amount: q.get('amount'),
+        destinationNetwork: q.get('destinationNetwork') || 'polygon',
+        fee: { bps: state.swapFeeBps, amount: microsText(fee), asset: 'USDC' },
+        conversion: { amountIn: microsText(micros - fee), rate: state.swapRateCents / 100, cost: '0.000000', costAsset: 'USDC' },
+        amountOut: amountText(swapOut(micros)) + '0000',
+        amountOutAsset: 'BRLA'
+      })
+    },
+    swap (req, res, ctx) {
+      state.sends.swap++
+      const b = ctx.body || {}
+      if (!state.subaccounts.has(b.subAccountId)) return notFound(res, 'Subaccount')
+      const wallet = findWallet(b.subAccountId)
+      if (!wallet) return notFound(res, 'Wallet')
+      if (!checkCredentials(res, wallet, b)) return
+      if (state.swapAnswer === 'notEnabled') return json(res, 403, { success: false, error: 'Not enabled', errorCode: 'NOT_ENABLED' })
+      if (b.fromAsset !== 'USDC' || b.toAsset !== 'BRLA') {
+        return json(res, 400, { success: false, error: 'Unsupported pair', errorCode: 'UNSUPPORTED_PAIR' })
+      }
+      const micros = usdcMicros(b.amount)
+      if (micros === null || micros < 1) return json(res, 400, { success: false, error: 'Invalid amount' })
+      if (usdcOf(b.subAccountId) < micros) {
+        return json(res, 400, { success: false, error: 'Insufficient balance', errorCode: 'INSUFFICIENT_BALANCE' })
+      }
+      moveUsdc(b.subAccountId, -micros)
+      const w = {
+        ...stamp(),
+        swapId: crypto.randomUUID(),
+        subAccountId: b.subAccountId,
+        reference: b.reference,
+        micros,
+        outCents: swapOut(micros),
+        network: b.destinationNetwork || 'polygon',
+        status: 'RUNNING'
+      }
+      state.swaps.set(w.swapId, w)
+      if (state.swapAnswer === 'timeout') return
+      if (state.swapAnswer === 'fail502-with-id') {
+        return json(res, 502, { success: false, error: 'Funding could not be confirmed', errorCode: 'FUNDING_LEG_FAILED', swapId: w.swapId })
+      }
+      json(res, 200, {
+        success: true,
+        swapId: w.swapId,
+        status: 'RUNNING',
+        destinationAddress: wallet.address,
+        destinationNetwork: w.network,
+        // Smallest unit of the fee asset: six decimals for USDC.
+        fee: { bps: state.swapFeeBps, amount: String(swapFee(micros)), asset: 'USDC' },
+        legs: [
+          { index: 0, fromAsset: 'USDC', toAsset: 'USDC', status: 'FULFILLED', originTxHash: txHash(), destinationTxHash: null },
+          { index: 1, fromAsset: 'USDC', toAsset: 'BRLA', status: 'PENDING', originTxHash: null, destinationTxHash: null }
+        ]
+      })
+    },
+    swapStatus (req, res, ctx) {
+      const w = state.swaps.get(ctx.id)
+      if (!w) return notFound(res, 'Swap')
+      if (w.status === 'RUNNING' && state.swapOutcome) settleSwap(w.swapId, state.swapOutcome)
+      const data = { swapId: w.swapId, status: w.status, destinationNetwork: w.network }
+      if (w.status === 'COMPLETED') data.amountOut = amountText(w.outCents) + '0000'
+      json(res, 200, { success: true, ...data })
     },
     statement (req, res, ctx) {
       const b = ctx.body || {}
@@ -666,8 +817,21 @@ async function startFakeHodle () {
         const ref = t.reference === undefined ? null : t.reference
         const status = t.status || 'COMPLETED'
         const hash = t.txHash || null
-        if (t.from === sub) ops.push({ ...base(t, 'transfer', 'out', t.cents, 0, status), reference: ref, txHash: hash })
-        if (t.to === sub) ops.push({ ...base(t, 'transfer', 'in', t.cents, 0, status), reference: ref, txHash: hash })
+        const row = (direction) => {
+          const r = { ...base(t, 'transfer', direction, t.cents, 0, status), reference: ref, txHash: hash }
+          if (t.asset !== 'USDC') return r
+          const { valueInBrl, ...u } = r
+          return { ...u, asset: 'USDC', amount: microsText(t.cents), fee: '0' }
+        }
+        if (t.from === sub) ops.push(row('out'))
+        if (t.to === sub) ops.push(row('in'))
+      }
+      for (const w of state.swapRows) {
+        if (w.subAccountId !== sub) continue
+        // Stamped once, so every read lists the same operation id and time.
+        if (w.stamp === undefined) w.stamp = stamp()
+        const { valueInBrl, ...row } = base(w.stamp, 'swap', 'out', 0, 0, w.status || 'COMPLETED')
+        ops.push({ ...row, asset: 'USDC', amount: w.amount, fee: '0', reference: w.reference })
       }
       if (state.usdc.has(sub)) {
         const amount = state.usdc.get(sub)
@@ -712,11 +876,15 @@ async function startFakeHodle () {
     if (method === 'POST' && path === '/api/wallet/payout/beneficiary') return ['payoutQuote', null]
     if (method === 'POST' && path === '/api/wallet/payout') return ['payout', null]
     if (method === 'POST' && path === '/api/wallet/transfer') return ['transfer', null]
+    if (method === 'GET' && path === '/api/wallet/swap/quote') return ['swapQuote', null]
+    if (method === 'POST' && path === '/api/wallet/swap') return ['swap', null]
     if (method === 'POST' && path === '/api/account/statement') return ['statement', null]
     let m = DEPOSIT_RE.exec(path)
     if (method === 'GET' && m) return ['depositStatus', decodeURIComponent(m[1])]
     m = PAYOUT_RE.exec(path)
     if (method === 'GET' && m) return ['payoutStatus', decodeURIComponent(m[1])]
+    m = SWAP_RE.exec(path)
+    if (method === 'GET' && m) return ['swapStatus', decodeURIComponent(m[1])]
     m = DOCUMENT_RE.exec(path)
     if (method === 'GET' && m) return ['documentReady', decodeURIComponent(m[1])]
     m = KYC_RE.exec(path)
@@ -785,8 +953,9 @@ async function startFakeHodle () {
   }
 
   function credit (record) {
-    if (record.to !== undefined) move(record.to, record.cents)
-    else state.credited.set(record.address, (state.credited.get(record.address) || 0) + record.cents)
+    const credited = record.asset === 'USDC' ? state.creditedUsdc : state.credited
+    if (record.to !== undefined) moveAsset(record.asset, record.to, record.cents)
+    else credited.set(record.address, (credited.get(record.address) || 0) + record.cents)
   }
 
   function settleTransfer (reference, status) {
@@ -798,7 +967,21 @@ async function startFakeHodle () {
       credit(record)
     } else if (status === 'FAILED') {
       record.status = 'FAILED'
-      move(record.from, record.cents)
+      moveAsset(record.asset, record.from, record.cents)
+    }
+  }
+
+  function settleSwap (swapId, status) {
+    const w = state.swaps.get(swapId)
+    if (!w || w.status !== 'RUNNING') return
+    if (status === 'COMPLETED') {
+      w.status = 'COMPLETED'
+      move(w.subAccountId, w.outCents)
+    } else if (status === 'FAILED') {
+      w.status = 'FAILED'
+      moveUsdc(w.subAccountId, w.micros)
+    } else if (status === 'STRANDED') {
+      w.status = 'STRANDED'
     }
   }
 
@@ -809,7 +992,7 @@ async function startFakeHodle () {
     })
   }
 
-  return Object.assign(fake, { base, seen, state, script, apply, settleDeposit, settleTransfer, close })
+  return Object.assign(fake, { base, seen, state, script, apply, settleDeposit, settleTransfer, settleSwap, close })
 }
 
 // A fetch that refuses any origin other than the fake, so a wrong default can

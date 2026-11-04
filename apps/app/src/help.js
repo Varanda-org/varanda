@@ -191,7 +191,15 @@ const FEE_LABELS = Object.freeze({
   crypto: 'Enviar para outra carteira'
 })
 
-const CARTEIRA_COMPLETO = 'Receber dinheiro, por Pix, em BRLA ou em USDC, não tem taxa da Varanda. A taxa de uma transferência ou de um envio para outra carteira só é cobrada depois que o envio é concluído: em geral no próprio envio, e num envio seguinte quando ele conclui mais tarde ou a taxa não pôde sair na hora. Se o envio falhar, a taxa dele nunca é cobrada. Nada é reenviado sozinho. USDC que aparecer no seu endereço não pode ser convertido nesta versão.'
+const CARTEIRA_COMPLETO = 'Receber dinheiro, por Pix, em BRLA ou em USDC, não tem taxa da Varanda. A taxa de uma transferência ou de um envio para outra carteira só é cobrada depois que o envio é concluído: em geral no próprio envio, e num envio seguinte quando ele conclui mais tarde ou a taxa não pôde sair na hora. Se o envio falhar, a taxa dele nunca é cobrada. Nada é reenviado sozinho.'
+
+const CARTEIRA_NO_CONVERT = 'USDC que aparecer no seu endereço não pode ser convertido nesta versão.'
+
+// Chosen by the policy's actions, never by mode alone, so a service that does
+// not list the conversion keeps the PR 1 sentence.
+const CARTEIRA_CONVERT = 'Converter USDC em BRLA tem a taxa da Hodle e não tem taxa da Varanda. Ao enviar USDC para outro endereço, a Varanda pode cobrar a parte percentual da taxa de envio, só depois que o envio concluir; a parte fixa em centavos não vale para USDC. Nada é convertido nem reenviado sozinho.'
+
+const canConvert = (policy) => Array.isArray(policy.actions) && policy.actions.includes('swap')
 
 export function carteiraHelp (policy) {
   const fees = policy && typeof policy.fees === 'object' && policy.fees !== null ? policy.fees : null
@@ -203,7 +211,10 @@ export function carteiraHelp (policy) {
       .map((k) => FEE_LABELS[k] + ': ' + fees[k] + '.')
     if (lines.length > 0) extra.push('Taxa da Varanda hoje. ' + lines.join(' ') + ' Receber por Pix: sem taxa da Varanda.')
   }
-  if (policy && policy.mode === 'completo') extra.push(CARTEIRA_COMPLETO)
+  if (policy && policy.mode === 'completo') {
+    extra.push(CARTEIRA_COMPLETO)
+    extra.push(canConvert(policy) ? CARTEIRA_CONVERT : CARTEIRA_NO_CONVERT)
+  }
   const cap = policy ? PAY_TEXTS.cap(policy.maxCents) : null
   if (cap !== null) extra.push(cap)
   if (extra.length === 0) return HELP.carteira

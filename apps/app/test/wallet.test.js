@@ -14,9 +14,9 @@ test('wallet: pure ES module loads in Node without imports', async (t) => {
   t.alike(Object.keys(wallet).sort(), [
     'CRYPTO_TEXTS', 'DISPUTE_TEXTS', 'FEE_STATUS_TEXTS', 'KYC_STATES', 'MIN_DEPOSIT_CENTS', 'MIN_PAYOUT_CENTS',
     'OP_ID_RE', 'OP_STATUS_TEXTS', 'PAY_TEXTS', 'PIX_KEY_LABELS', 'RECEIVE_TEXTS', 'TEXTS', 'TRANSFER_TEXTS',
-    'UNCERTAIN_MONEY', 'canonicalJson', 'canonicalPixKey', 'cepDigits', 'cpfDigits',
+    'UNCERTAIN_MONEY', 'USDC_TEXTS', 'canonicalJson', 'canonicalPixKey', 'cepDigits', 'cpfDigits',
     'depositArrivalText', 'feeLines', 'feeLinesFor', 'formatBrl', 'formatUsdc', 'isBirthDate', 'isCep', 'isCpf', 'isEvmAddress', 'isPin',
-    'maskPixKey', 'normalizeAddress', 'opStatusText', 'parseBrl', 'parseUsdc', 'pixKeyCandidates', 'pixKeyType', 'shortAddress', 'targetKind', 'walletErrorText', 'walletStep'
+    'maskPixKey', 'normalizeAddress', 'opStatusText', 'parseBrl', 'parseUsdc', 'pixKeyCandidates', 'pixKeyType', 'shortAddress', 'swapQuoteLines', 'targetKind', 'usdcFeeLines', 'walletErrorText', 'walletStep'
   ].sort())
   const source = readFileSync(join(__dirname, '../src/wallet.js'), 'utf8')
   t.absent(/\b(?:import|require)\s*(?:\(|[{*'"\w])/.test(source))
@@ -941,5 +941,139 @@ test('transfer and address-send texts confirm the target and do not offer USDC p
     t.absent(text.includes(String.fromCharCode(0x2014)))
     t.absent(/\brende\b|\bjuros\b|\brendimento\b/i.test(text))
     for (const phrase of banned) t.absent(text.toLowerCase().includes(phrase.toLowerCase()), phrase)
+  }
+})
+
+test('USDC texts: Converter, indicative quote, no Varanda fee and no retry', async (t) => {
+  const { USDC_TEXTS, CRYPTO_TEXTS } = await load()
+  t.ok(Object.isFrozen(USDC_TEXTS))
+  t.alike(Object.keys(USDC_TEXTS).sort(), ['CONVERTER', 'OFFERED', 'QUOTE', 'PROGRESS', 'SUPPORT', 'NO_VARANDA_FEE'].sort())
+  t.is(USDC_TEXTS.CONVERTER, 'Converter')
+  t.is(USDC_TEXTS.OFFERED, 'O USDC que aparece neste endereço pode ser convertido em BRLA.')
+  t.ok(USDC_TEXTS.OFFERED.includes('pode ser convertido'))
+  // The no-swap sentence stays, so a server without the action does not offer Converter.
+  t.is(CRYPTO_TEXTS.USDC_HERE, 'O USDC que aparece neste endereço não pode ser convertido nesta versão.')
+  t.not(USDC_TEXTS.OFFERED, CRYPTO_TEXTS.USDC_HERE)
+  t.ok(USDC_TEXTS.QUOTE.includes('indicativa'))
+  t.ok(USDC_TEXTS.QUOTE.includes('pode mudar'))
+  t.ok(USDC_TEXTS.QUOTE.includes('Hodle'))
+  t.ok(USDC_TEXTS.QUOTE.includes('sai do valor'))
+  t.is(USDC_TEXTS.PROGRESS, 'A conversão está em andamento. Nada é refeito sozinho.')
+  t.ok(USDC_TEXTS.PROGRESS.includes('em andamento'))
+  t.is(USDC_TEXTS.SUPPORT, 'A conversão falhou, ficou presa ou está incerta. Não tente de novo. Fale com o suporte e informe o código.')
+  t.ok(USDC_TEXTS.SUPPORT.includes('Não tente de novo'))
+  t.ok(USDC_TEXTS.SUPPORT.includes('suporte'))
+  t.ok(USDC_TEXTS.SUPPORT.includes('código'))
+  t.ok(USDC_TEXTS.SUPPORT.includes('incerta'))
+  t.is(USDC_TEXTS.NO_VARANDA_FEE, 'A conversão não tem taxa da Varanda.')
+  t.ok(USDC_TEXTS.NO_VARANDA_FEE.includes('não tem taxa da Varanda'))
+  const banned = ['pagar USDC', 'enviar USDC', 'USDC com BRLA', 'usando BRLA', 'a partir de BRLA', 'BRLA em USDC', 'converter BRLA']
+  for (const text of Object.values(USDC_TEXTS)) {
+    t.is(typeof text, 'string')
+    t.ok(text.length > 0)
+    t.absent(text.includes(String.fromCharCode(0x2014)))
+    t.absent(/\brende\b|\bjuros\b|\brendimento\b/i.test(text))
+    t.absent(/tente de novo/i.test(text) && text !== USDC_TEXTS.SUPPORT)
+    for (const phrase of banned) t.absent(text.toLowerCase().includes(phrase.toLowerCase()), phrase)
+  }
+  // Swap copy, taken together, names no Varanda fee and no retry.
+  const joined = Object.values(USDC_TEXTS).join('\n')
+  t.ok(joined.includes('não tem taxa da Varanda'))
+  t.ok(joined.includes('Não tente de novo'))
+  t.absent(joined.includes('taxa da Varanda de'))
+})
+
+test('swapQuoteLines: amount in, Hodle fee, estimated BRLA and the rate, as given', async (t) => {
+  const { swapQuoteLines, formatUsdc, formatBrl, USDC_TEXTS } = await load()
+  const quote = {
+    amountInMicros: 10000000,
+    hodleFeeMicros: 50000,
+    brlaOutCents: 5423,
+    rateCents: 544
+  }
+  const lines = swapQuoteLines(quote)
+  t.alike(lines, [
+    { label: 'Valor em USDC', value: '10,00 USDC' },
+    { label: 'Taxa da Hodle (sai do valor)', value: '0,05 USDC' },
+    { label: 'BRLA estimado', value: 'R$ 54,23' },
+    { label: 'Cotação', value: '1 USDC = R$ 5,44' }
+  ])
+  t.is(lines[0].value, formatUsdc(quote.amountInMicros) + ' USDC')
+  t.is(lines[1].value, formatUsdc(quote.hodleFeeMicros) + ' USDC')
+  t.is(lines[2].value, formatBrl(quote.brlaOutCents))
+  t.is(lines[3].value, '1 USDC = ' + formatBrl(quote.rateCents))
+  t.ok(Object.isFrozen(lines))
+  t.ok(Object.isFrozen(lines[0]))
+  await t.exception.all(() => { lines.push({ label: 'extra', value: 'x' }) }, TypeError)
+  await t.exception.all(() => { lines[1].value = 'outro' }, TypeError)
+  // A fee that does not match a local sum is still the server's figure.
+  const drifted = { ...quote, hodleFeeMicros: 1, brlaOutCents: 1, rateCents: 1 }
+  const driftedLines = swapQuoteLines(drifted)
+  t.is(driftedLines[1].value, formatUsdc(1) + ' USDC')
+  t.is(driftedLines[2].value, formatBrl(1))
+  t.is(driftedLines[3].value, '1 USDC = ' + formatBrl(1))
+  t.absent(driftedLines.some(line => /varanda/i.test(line.label + line.value)))
+  const before = JSON.stringify(quote)
+  swapQuoteLines(quote)
+  t.is(JSON.stringify(quote), before)
+  const cap = 10000 * 1000000
+  t.is(swapQuoteLines({ ...quote, amountInMicros: cap })[0].value, formatUsdc(cap) + ' USDC')
+  t.is(swapQuoteLines({ ...quote, hodleFeeMicros: 0 })[1].value, '0,00 USDC')
+  t.is(swapQuoteLines({ ...quote, amountInMicros: 1, hodleFeeMicros: 0 })[0].value, '0,000001 USDC')
+  // A quote nobody could confirm is refused rather than shown.
+  t.is(swapQuoteLines({ ...quote, amountInMicros: 0, hodleFeeMicros: 0 }), null, 'nothing in')
+  t.is(swapQuoteLines({ ...quote, hodleFeeMicros: quote.amountInMicros }), null, 'fee eats the amount')
+  t.is(swapQuoteLines({ ...quote, rateCents: 0 }), null, 'no rate')
+  const inherited = Object.create({ amountInMicros: 1000000, hodleFeeMicros: 0, brlaOutCents: 100, rateCents: 100 })
+  for (const bad of [undefined, null, {}, [], inherited, '10', 1000000,
+    { ...quote, amountInMicros: -1 }, { ...quote, amountInMicros: 1.5 }, { ...quote, amountInMicros: '1000000' },
+    { ...quote, hodleFeeMicros: cap + 1 }, { ...quote, brlaOutCents: -1 }, { ...quote, rateCents: 1.5 },
+    { ...quote, brlaOutCents: 1e10 + 1 }, { amountInMicros: 1, hodleFeeMicros: 0, brlaOutCents: 1 },
+    { ...quote, amountInMicros: cap + 1 }]) {
+    t.is(swapQuoteLines(bad), null, JSON.stringify(bad))
+  }
+  t.ok(USDC_TEXTS.QUOTE.includes('Hodle'))
+  t.ok(USDC_TEXTS.NO_VARANDA_FEE.includes('não tem taxa da Varanda'))
+})
+
+test('usdcFeeLines: later Varanda fee in USDC, and no fixed centavos', async (t) => {
+  const { usdcFeeLines, formatUsdc, feeLinesFor } = await load()
+  const later = 'Taxa da Varanda (cobrada depois que o envio for concluído)'
+  const note = 'A parte fixa em centavos não se aplica ao USDC.'
+  const charged = {
+    amountCents: 10000,
+    varandaFeeCents: 150,
+    hodleFeeCents: 0,
+    pendingFeeCents: 0,
+    totalDebitCents: 10150,
+    netReceivedCents: 10000
+  }
+  t.is(feeLinesFor(charged, 'crypto')[1].label, later)
+  const lines = usdcFeeLines(150000)
+  t.alike(lines, [
+    { label: later, value: '0,15 USDC' },
+    { label: 'Observação', value: note }
+  ])
+  t.is(lines[0].value, formatUsdc(150000) + ' USDC')
+  t.ok(lines[1].value.includes('centavos'))
+  t.ok(lines[1].value.includes('não se aplica ao USDC'))
+  t.absent(lines[0].value.includes('R$'))
+  t.ok(Object.isFrozen(lines))
+  t.ok(Object.isFrozen(lines[0]))
+  await t.exception.all(() => { lines.push({ label: 'extra', value: 'x' }) }, TypeError)
+  await t.exception.all(() => { lines[1].value = 'outro' }, TypeError)
+  t.alike(usdcFeeLines(0), [
+    { label: 'Taxa da Varanda', value: 'sem taxa' },
+    { label: 'Observação', value: note }
+  ])
+  t.is(usdcFeeLines(1)[0].value, '0,000001 USDC')
+  t.is(usdcFeeLines(1000000)[0].value, formatUsdc(1000000) + ' USDC')
+  const cap = 10000 * 1000000
+  t.is(usdcFeeLines(cap)[0].value, formatUsdc(cap) + ' USDC')
+  for (const bad of [undefined, null, -1, 1.5, NaN, Infinity, '150000', {}, [], cap + 1, 150000.5]) {
+    t.is(usdcFeeLines(bad), null, String(bad))
+  }
+  for (const text of [lines[0].label, lines[0].value, lines[1].value, usdcFeeLines(0)[0].value]) {
+    t.absent(text.includes(String.fromCharCode(0x2014)))
   }
 })

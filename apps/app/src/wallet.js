@@ -454,8 +454,9 @@ export const TRANSFER_TEXTS = Object.freeze({
 })
 
 // The policy network is a short token. Anything else is refused so the
-// warning cannot print provider text. A balance shown as USDC stays on the
-// address: this version does not convert it and does not send it.
+// warning cannot print provider text. USDC_HERE stays for a server whose
+// actions do not include the swap. The screen picks USDC_TEXTS when
+// Converter is offered (hasAction). Nothing here offers paying USDC with BRLA.
 const NETWORK_LABEL_RE = /^[a-z]{1,16}$/
 
 function networkLabel (network) {
@@ -473,3 +474,71 @@ export const CRYPTO_TEXTS = Object.freeze({
     return label === null ? null : 'Nesta versão só enviamos BRLA, e só na rede ' + label + '. Um envio na rede errada não pode ser desfeito.'
   }
 })
+
+// Converter copy. A conversion is the member's own USDC becoming BRLA: Hodle's
+// fee comes out of the amount and Varanda never adds one. FAILED, STRANDED
+// and incerto share SUPPORT, because a stranded swap is sorted by support and
+// the screen already shows the code. The member must not retry it.
+export const USDC_TEXTS = Object.freeze({
+  CONVERTER: 'Converter',
+  OFFERED: 'O USDC que aparece neste endereço pode ser convertido em BRLA.',
+  QUOTE: 'A cotação é indicativa e pode mudar. A taxa da Hodle sai do valor.',
+  PROGRESS: 'A conversão está em andamento. Nada é refeito sozinho.',
+  SUPPORT: 'A conversão falhou, ficou presa ou está incerta. Não tente de novo. Fale com o suporte e informe o código.',
+  NO_VARANDA_FEE: 'A conversão não tem taxa da Varanda.'
+})
+
+// The fixed centavos of a crypto rate never apply to a USDC debit: only the
+// basis points do. The number shown is the server preview, not a local rate.
+const USDC_FIXED_NOTE = 'A parte fixa em centavos não se aplica ao USDC.'
+
+function microsOf (obj, key) {
+  if (!obj || typeof obj !== 'object' || !Object.hasOwn(obj, key)) return null
+  const n = obj[key]
+  return Number.isSafeInteger(n) && n >= 0 && n <= MAX_USDC_MICROS ? n : null
+}
+
+function usdcAmount (micros) {
+  const formatted = formatUsdc(micros)
+  return formatted === null ? null : formatted + ' USDC'
+}
+
+// The four figures the server quoted. Not recomputed: a rate rounded to
+// centavos can disagree with the estimated out, and the member confirms both.
+export function swapQuoteLines (quote) {
+  const amountIn = microsOf(quote, 'amountInMicros')
+  const hodleFee = microsOf(quote, 'hodleFeeMicros')
+  const brlaOut = centsOf(quote, 'brlaOutCents')
+  const rate = centsOf(quote, 'rateCents')
+  if (amountIn === null || hodleFee === null || brlaOut === null || rate === null) return null
+  // A quote nobody could confirm: nothing in, a fee that eats it all, no rate.
+  if (amountIn === 0 || hodleFee >= amountIn || rate === 0) return null
+  const amountText = usdcAmount(amountIn)
+  const feeText = usdcAmount(hodleFee)
+  const outText = formatBrl(brlaOut)
+  const rateText = formatBrl(rate)
+  if (amountText === null || feeText === null || outText === null || rateText === null) return null
+  return Object.freeze([
+    feeLine('Valor em USDC', amountText),
+    // Inside the amount, same rule as USDC_TEXTS.QUOTE, so it cannot be read as an extra debit.
+    feeLine('Taxa da Hodle (sai do valor)', feeText),
+    feeLine('BRLA estimado', outText),
+    feeLine('Cotação', '1 USDC = ' + rateText)
+  ])
+}
+
+// previewMicros is the Varanda fee of a USDC send, in micro-units. A zero fee
+// is not "cobrada depois". The note stays either way: the fixed centavos were
+// not part of the charge.
+export function usdcFeeLines (previewMicros) {
+  if (!Number.isSafeInteger(previewMicros) || previewMicros < 0 || previewMicros > MAX_USDC_MICROS) return null
+  const formatted = formatUsdc(previewMicros)
+  if (formatted === null) return null
+  return Object.freeze([
+    feeLine(
+      previewMicros === 0 ? 'Taxa da Varanda' : VARANDA_FEE_LATER.crypto,
+      previewMicros === 0 ? 'sem taxa' : formatted + ' USDC'
+    ),
+    feeLine('Observação', USDC_FIXED_NOTE)
+  ])
+}

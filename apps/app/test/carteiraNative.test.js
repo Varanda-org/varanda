@@ -189,11 +189,174 @@ test('Carteira.js offers an address send only with the network warning', async (
   t.is(CRYPTO_TEXTS.onlyBrla('Polygon!'), null)
 })
 
-test('Carteira.js never looks a name up nor offers a conversion', async (t) => {
+test('Carteira.js never looks a name up nor picks the platform', async (t) => {
   const src = read('screens/Carteira.js')
-  for (const s of ['lookupUsername', 'Platform.OS', 'Converter', 'converter', "'swap'", 'walletSwap', 'Clipboard']) {
+  for (const s of ['lookupUsername', 'Platform.OS', 'Clipboard']) {
     t.absent(src.includes(s), s)
   }
+})
+
+// Converter and the USDC send exist only when the service lists their action
+// and there is USDC; otherwise the not-convertible sentence stays.
+test('Carteira.js gates Converter and the USDC send on the actions and the USDC balance', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(src.includes("const canSwap = hasAction(policy, 'swap')"), 'swap action')
+  t.ok(src.includes('const usdcHeld = bal !== null && Number.isSafeInteger(bal.usdcMicros) && bal.usdcMicros > 0'), 'USDC balance above zero')
+  t.ok(src.includes('const canSendUsdc = canCrypto && networkWarning !== null && usdcHeld'), 'USDC send gated')
+  t.ok(src.includes("const usdcSend = sendAsset === 'USDC' && canSendUsdc"), 'USDC send only while offered')
+  t.ok(src.includes("const showSwap = canSwap && (swapPhase !== 'form' || usdcHeld)"), 'Converter gated, a running one stays')
+  t.ok(src.includes('{showSwap ? USDC_TEXTS.OFFERED : CRYPTO_TEXTS.USDC_HERE}'), 'USDC_HERE without the swap')
+  t.ok(/\{canSendUsdc\n\s*\? \(\n\s*<>\n\s*<Label>O que enviar<\/Label>/.test(src), 'asset choice only with USDC')
+  t.is((src.match(/'swap-quote'/g) || []).length, 1, 'one quote call site')
+  t.is((src.match(/signed\('swap', /g) || []).length, 1, 'one swap call site')
+})
+
+// A USDC send is paid from the USDC balance only: the op names USDC as both
+// asset and source, the preview is in micros, and nothing offers BRLA for it.
+test('Carteira.js never funds a USDC send with BRLA', async (t) => {
+  const src = read('screens/Carteira.js')
+  const conferir = slice(src, 'const conferirSend', 'const resetSend')
+  t.ok(conferir.includes("signed('preview', { kind, asset: 'USDC', source: 'USDC', amountMicros: amount }, walletCryptoPreview)"), 'micros preview')
+  t.ok(conferir.includes("if (usdcSend && target !== 'address') return setError(SEND_TEXTS.usdcAddress)"), 'USDC only to an address')
+  t.ok(conferir.includes('usdcSend ? parseUsdc(sendAmount) : parseBrl(sendAmount)'), 'USDC amount parsed as USDC')
+  const pay = slice(src, 'const sendPay', 'const checkSend')
+  t.ok(pay.includes("{ opId: sendOpRef.current, amountMicros: sendConfirm.micros, asset: 'USDC', source: 'USDC' }"), 'USDC op from USDC')
+  t.ok(pay.includes('Object.assign(op, debitTerms(sendConfirm.preview))'), 'debit terms from the preview')
+  t.absent(/source: 'BRLA'|source: 'BRL'/.test(src), 'no BRLA source')
+  t.absent(/asset: 'USDC', source: (?!'USDC')/.test(src), 'USDC never with another source')
+  t.ok(src.includes('usdcSendLines(sendConfirm.preview)'), 'USDC confirm lines')
+  t.ok(slice(src, 'function usdcSendLines', 'export default').includes('usdcFeeLines(p.varandaFeeMicros)'), 'fee lines in USDC')
+  t.ok(src.includes('usdcText(sendConfirm.preview.reservedFeeMicros)'), 'reserved USDC fees in USDC')
+  t.absent(/formatBrl\([^)]*[Mm]icros/.test(src), 'no micros into formatBrl')
+  const { parseUsdc, formatUsdc } = await import('../src/wallet.js')
+  t.is(formatUsdc(parseUsdc('1.000')), '1.000,00', 'a typed 1.000 is echoed as one thousand')
+})
+
+// One opId per conversion. It stays while the conversion is enviado, pendente
+// or incerto, only a final op-status answer releases it, and nothing resends.
+test('Carteira.js never retries a conversion nor mints a new opId while it may settle', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(src.includes("const SWAP_OPEN = Object.freeze(['enviado', 'pendente', 'incerto'])"), 'open conversion statuses')
+  const pay = slice(src, 'const swapPay', 'const checkSwap')
+  t.ok(/const chosen = swapPin\s*setSwapPin\(''\)/.test(pay), 'PIN cleared first')
+  t.ok(pay.includes('walletSwap({ ...a, pin: chosen })'), 'PIN only in the request')
+  t.ok(pay.indexOf('if (swapLockRef.current !== null) return setError(SWAP_TEXTS.inFlight)') < pay.indexOf('mintOpId()'), 'held lock blocks a new opId')
+  t.is((pay.match(/mintOpId\(\)/g) || []).length, 1, 'one mint')
+  t.ok(pay.includes('if (swapOpRef.current === null) swapOpRef.current = mintOpId()'), 'mint only without an opId')
+  t.ok(pay.includes("await opExternalId(member, 'swap', op.opId)"), 'external id like the service')
+  const unknown = pay.slice(pay.indexOf('if (err && err.uncertain === true) {'), pay.indexOf('// A definite refusal'))
+  t.ok(unknown.includes("status: 'incerto'"), 'unknown outcome is incerto')
+  t.absent(unknown.includes('swapOpRef.current = null'), 'unknown outcome keeps the opId')
+  t.absent(unknown.includes('setSwapLock('), 'unknown outcome keeps the lock')
+  t.absent(/swapPay\(true\)|swapPay\(retry/.test(src), 'no retry entry')
+  t.absent(/label='Tentar de novo' onPress=\{swap/.test(src), 'no retry button')
+  const settle = slice(src, 'const settleSwap = useCallback', 'const clearSecrets')
+  t.ok(settle.indexOf('if (SWAP_OPEN.includes(row.status)) return') < settle.indexOf('swapOpRef.current = null'), 'opId kept while open')
+  t.ok(settle.indexOf('if (SWAP_OPEN.includes(row.status)) return') < settle.indexOf('setSwapLock(null)'), 'lock kept while open')
+  const poll = slice(src, 'const swapId', 'const onSwapExpired')
+  t.ok(poll.includes("signed('op-status', { externalId: swapId }, walletOpStatus)"), 'progress reads op-status')
+  t.ok(poll.includes('POLL_EVERY_MS'), 'every 10 s')
+  t.absent(poll.includes('walletSwap'), 'the poll never converts')
+  t.ok(src.includes('const POLL_EVERY_MS = 10 * 1000'))
+  const expired = slice(src, 'const onSwapExpired', 'const newSwap')
+  t.ok(expired.includes("if (swapLockRef.current !== null || swapPhaseRef.current !== 'confirm') return"), 'countdown guarded')
+  t.ok(slice(src, 'const newSwap', 'const off =').includes('if (swapLockRef.current !== null) return'), 'no new conversion while one is held')
+})
+
+// The three outcomes of a conversion: concluido offers a new one; falhou and
+// incerto show the support line with the code and no retry.
+test('Carteira.js shows the Converter outcomes', async (t) => {
+  const src = read('screens/Carteira.js')
+  const quote = slice(src, "} else if (showSwap && swapPhase === 'confirm'", "} else if (showSwap && swapPhase === 'progress'")
+  t.ok(quote.includes('swapLines.map('), 'quote lines')
+  t.ok(src.includes('const swapLines = swapConfirm !== null ? swapQuoteLines(swapConfirm.quote) : null'), 'lines from swapQuoteLines')
+  t.ok(quote.includes('<Notice>{USDC_TEXTS.QUOTE}</Notice>'), 'indicative warning')
+  t.ok(quote.indexOf('USDC_TEXTS.QUOTE') < quote.indexOf('<PinField'), 'warning before the PIN')
+  const form = slice(src, "if (showSwap && swapPhase === 'form')", "} else if (showSwap && swapPhase === 'confirm'")
+  t.ok(form.includes('Você vai converter {usdcText(typedSwap)}.'), 'amount echoed before the PIN')
+  const card = slice(src, "} else if (showSwap && swapPhase === 'progress'", 'content = (')
+  t.ok(card.includes("const support = status === 'incerto' || status === 'falhou'"), 'support on falhou and incerto')
+  t.ok(/\{status === 'incerto'\n\s*\? <Notice>\{UNCERTAIN_MONEY\}<\/Notice>/.test(card), 'uncertain copy')
+  t.ok(card.includes('<Notice>{USDC_TEXTS.SUPPORT}</Notice>'), 'support line')
+  t.ok(card.includes('{swapResult.externalId}</Text>'), 'external id shown')
+  t.ok(/\{swapLock === null && !SWAP_OPEN\.includes\(status\)\n\s*\? <Btn label='Fechar' onPress=\{newSwap\}/.test(card), 'Fechar once settled')
+  t.absent(card.includes('Tentar de novo'), 'no retry on any outcome')
+  t.absent(card.includes('swapPay'), 'the card never converts')
+  t.ok(card.includes('USDC_TEXTS.PROGRESS'), 'progress copy')
+  const { USDC_TEXTS } = await import('../src/wallet.js')
+  t.ok(USDC_TEXTS.SUPPORT.includes('Não tente de novo'))
+})
+
+// A settled conversion (concluido or falhou) closes back to the form; the
+// falhou card keeps the support text and code, and there is still no retry.
+test('Carteira.js closes a settled conversion back to the form', async (t) => {
+  const src = read('screens/Carteira.js')
+  const card = slice(src, "} else if (showSwap && swapPhase === 'progress'", 'content = (')
+  t.ok(card.includes("label='Fechar' onPress={newSwap}"), 'Fechar on the card')
+  t.ok(card.includes('USDC_TEXTS.SUPPORT') && card.includes('SWAP_TEXTS.code'), 'support text and code stay')
+  t.absent(card.includes('Nova conversão'), 'one way out')
+  const close = slice(src, 'const newSwap', 'const off =')
+  t.ok(close.indexOf('if (swapLockRef.current !== null) return') < close.indexOf('setSwapPhase('), 'never past an open lock')
+  for (const s of ['setSwapResult(null)', "setSwapAmount('')", 'setSwapConfirm(null)', "setSwapPhase('form')"]) {
+    t.ok(close.includes(s), s)
+  }
+  t.absent(close.includes('swapOpRef.current'), 'never reuses or touches the opId')
+  t.absent(close.includes('setSwapLock('), 'never touches the lock')
+  t.absent(close.includes('swapPay'), 'closing never converts')
+})
+
+// The USDC confirmation renders only with usdcSendLines, so a preview without
+// them stays on the form with the refusal.
+test('Carteira.js refuses a USDC preview whose lines cannot be built', async (t) => {
+  const src = read('screens/Carteira.js')
+  const conferir = slice(src, 'const conferirSend', 'const resetSend')
+  const usdc = conferir.slice(conferir.indexOf('if (usdcSend) {'), conferir.indexOf('const cents = amount'))
+  t.ok(usdc.includes('if (usdcSendLines(p) === null) return setError(SEND_TEXTS.previewRefused)'), 'refused without lines')
+  t.ok(usdc.indexOf('usdcSendLines(p)') < usdc.indexOf("setSendPhase('confirm')"), 'checked before the confirm phase')
+})
+
+// A USDC amount is never previewed as reais once USDC stops being offered.
+test('Carteira.js drops the USDC choice when USDC is no longer offered', async (t) => {
+  const src = read('screens/Carteira.js')
+  const reset = slice(src, "if (canSendUsdc || sendAsset !== 'USDC') return", '}, [canSendUsdc, sendAsset, setSendPhase])')
+  t.ok(reset.includes("setSendAsset('BRLA')"), 'back to BRLA')
+  t.ok(reset.includes("setSendAmount('')"), 'typed USDC digits cleared')
+  t.ok(reset.includes('setSendConfirm(null)'), 'USDC confirmation dropped')
+  t.ok(reset.indexOf('if (sendLockRef.current !== null') < reset.indexOf('setSendConfirm(null)'), 'never under a send in flight')
+  const conferir = slice(src, 'const conferirSend', 'const resetSend')
+  const guard = "if (sendAsset === 'USDC' && !canSendUsdc) return setError(SEND_TEXTS.previewRefused)"
+  t.ok(conferir.includes(guard), 'USDC without the offer is refused')
+  t.ok(conferir.indexOf(guard) < conferir.indexOf("signed('preview', { kind, cents }"), 'before the BRLA preview')
+})
+
+// Hodle support searches the Hodle swap id: it is kept from the swap answer
+// and from op-status rows, and shown next to the code on the support cards.
+test('Carteira.js keeps and shows the Hodle swap id', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(src.includes("providerCode: 'Código da Hodle:'"), 'labelled for support')
+  const pay = slice(src, 'const swapPay', 'const checkSwap')
+  t.ok(pay.includes('setSwapResult({ externalId: out.externalId, status: out.status, providerId: out.providerId || null })'), 'from the swap answer')
+  const settle = slice(src, 'const settleSwap = useCallback', 'const clearSecrets')
+  t.ok(settle.includes('providerId: row.providerId || r.providerId || null'), 'from op-status, never erased')
+  const card = slice(src, "} else if (showSwap && swapPhase === 'progress'", 'content = (')
+  const support = card.slice(card.indexOf('{support'), card.indexOf('{swapPolling'))
+  t.ok(support.includes('{swapResult.externalId}</Text>'), 'code always')
+  t.ok(/\{swapResult\.providerId\n\s*\? \(/.test(support), 'Hodle id only when present')
+  t.ok(support.includes('{swapResult.providerId}</Text>'), 'Hodle id shown')
+  t.ok(support.includes('<Soft>{SWAP_TEXTS.providerCode}</Soft>'), 'Hodle id labelled')
+})
+
+// A conversion left pendente is re-checked from the statement, by op-status.
+test('Carteira.js re-checks a pendente conversion from the statement', async (t) => {
+  const src = read('screens/Carteira.js')
+  const ext = slice(src, "if (view === 'extrato') {", 'Ver mais')
+  t.ok(ext.includes("(OPEN_STATUSES.includes(item.status) || (item.kind === 'swap' && item.status === 'pendente')) && item.externalId !== null"), 'Conferir on a pendente swap')
+  t.ok(ext.includes('onPress={() => checkItem(item.externalId)}'), 'same per-row check')
+  t.ok(ext.includes("{item.kind === 'swap' && item.providerId"), 'Hodle id on swap rows')
+  const check = slice(src, 'const checkItem', 'setItems(')
+  t.ok(check.includes("signed('op-status', { externalId }, walletOpStatus)"), 'op-status per row')
+  t.ok(check.includes('settleSwap(row)'), 'settles the Converter too')
+  t.absent(check.includes('walletSwap'), 'the check never converts')
 })
 
 // The PIN is copied into the one request and leaves the state before the
@@ -299,6 +462,17 @@ test('Carteira.js routes enviado and incerto answers to the incerto phase', asyn
   t.ok(src.includes('!OPEN_STATUSES.includes(row.status))) return\n    setSendLock(null)'), 'lock released only when settled')
 })
 
+test('Carteira.js refuses a USDC send or a conversion above the operator cap before the preview or the quote', async (t) => {
+  const src = read('screens/Carteira.js')
+  t.ok(/const maxUsdcMicros = Number\.isSafeInteger\(policy\.maxUsdcMicros\)/.test(src), 'the cap comes from the policy')
+  const send = slice(src, 'const conferirSend', "signed('preview', { kind, asset: 'USDC'")
+  t.ok(send.includes('if (usdcSend && maxUsdcMicros !== null && amount > maxUsdcMicros) return setError(SEND_TEXTS.usdcCap(maxUsdcMicros))'), 'a USDC send above the cap is refused before its preview')
+  const swap = slice(src, 'const quoteSwap', "signed('swap-quote'")
+  t.ok(swap.includes('if (maxUsdcMicros !== null && micros > maxUsdcMicros) return setError(SWAP_TEXTS.cap(maxUsdcMicros))'), 'a conversion above the cap is refused before its quote')
+  t.ok(/usdcCap \(micros\) \{\n {4}return 'O limite por envio de USDC é ' \+ usdcText\(micros\)/.test(src), 'the send message shows the cap in USDC')
+  t.ok(/cap \(micros\) \{\n {4}return 'O limite por conversão é ' \+ usdcText\(micros\)/.test(src), 'the conversion message shows the cap in USDC')
+})
+
 test('Carteira.js shows a USDC partner fee in USDC', async (t) => {
   const src = read('screens/Carteira.js')
   t.ok(src.includes("{item.asset === 'USDC' && item.feeMicros > 0\n                ? <Soft>Taxa do parceiro: {usdcText(item.feeMicros)}</Soft>"), 'feeMicros line')
@@ -331,7 +505,7 @@ test('Carteira.js copies the address through share.js and never formats USDC as 
   t.ok(src.includes("fee.asset === 'USDC' ? usdcText(fee.feeMicros) : formatBrl(fee.cents)"), 'USDC fees')
   t.ok(src.includes('usdcText(bal.usdcMicros)'), 'USDC balance')
   t.ok(src.includes("<Line label='USDC' value={usdc} />"), 'USDC label')
-  t.ok(src.includes('{CRYPTO_TEXTS.USDC_HERE}'), 'not convertible sentence')
+  t.ok(src.includes('CRYPTO_TEXTS.USDC_HERE}'), 'not convertible sentence')
   t.absent(/formatBrl\([^)]*[Mm]icros/.test(src), 'no micros into formatBrl')
   t.ok(src.includes("const sign = incoming ? '+ ' : (item.direction === 'out' ? '- ' : '')"), 'null direction is not money out')
 })
