@@ -18,8 +18,8 @@ export const LINK_MAX = 2048
 const BREAK_RANGES = [
   [0x09, 0x0d], [0x20, 0x20], [0xa0, 0xa0], [0x1680, 0x1680],
   [0x2000, 0x2005], [0x2007, 0x2007], [0x2028, 0x2029], [0x3000, 0x3000],
-  // Group text arrives with line breaks already turned into U+FFFD, a visible
-  // glyph that cannot hide a target.
+  // A visible glyph (displayText's mark for an unsafe character), so it
+  // cannot hide a target.
   [0xfffd, 0xfffd]
 ]
 

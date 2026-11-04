@@ -164,6 +164,13 @@ test('dm-screen stays pure', async (t) => {
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
 
+test('a private message links from its raw text, but not beside Abrir convite', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/DmMessageRow.js'), 'utf8')
+  t.ok(row.includes('<MentionText text={item.rawText} style={styles.text} selectable />'), 'MentionText escapes the raw text itself')
+  t.ok(row.includes("const linked = link === null && item.deleted !== true && typeof item.rawText === 'string'"))
+  t.absent(row.includes('onOpenMention'), 'mentions stay plain')
+})
+
 test('invite links in a conversation only open a screen, never join', (t) => {
   const read = (p) => readFileSync(join(__dirname, p), 'utf8')
   const row = read('../src/ui/DmMessageRow.js')
