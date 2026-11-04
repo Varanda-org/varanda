@@ -407,6 +407,238 @@ test('rowsFor reports incomplete while a follower is pending or truncated', (t) 
   t.is(pend.rowsFor(ME).incomplete, pend.page({ target: ME }).incomplete)
 })
 
+const ALL = () => true
+
+// Every row of followsPage, walking next to the end.
+function walk (idx, opts, limit) {
+  const seen = []
+  let after = null
+  for (let n = 0; n < 1000; n++) {
+    const p = idx.followsPage({ ...opts, after, limit })
+    seen.push(...p.items)
+    if (p.next === null) return seen
+    after = { t: p.next.atMs, key: p.next.key }
+  }
+  throw new Error('cursor never ended')
+}
+
+test('followsPage: both kinds, t desc then key asc, cursor to the end', (t) => {
+  const idx = createNoticeIndex()
+  const days = [1, 2, 2, 3, 1, 2]
+  days.forEach((day, i) => {
+    idx.foldFollow(k(i + 1), 1, follow(ME, true, D(day)))
+    idx.commit(k(i + 1))
+  })
+  idx.foldFollow(ME, 1, follow(k(10), true, D(5)))
+  idx.foldFollow(ME, 2, follow(k(12), true, D(4)))
+  idx.foldFollow(ME, 3, follow(k(11), true, D(4)))
+  idx.commit(ME)
+
+  const expected = [k(4), k(2), k(3), k(6), k(1), k(5)]
+  const p = idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL })
+  t.alike(p.items.map((i) => i.key), expected)
+  t.alike(p.items[0], { key: k(4), seq: 1, at: D(3) })
+  t.is(p.total, 6)
+  t.is(p.next, null)
+  t.is(p.incomplete, false)
+
+  const first = idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL, limit: 2 })
+  t.alike(first.next, { atMs: Date.parse(D(2)), key: k(2) })
+  t.is(first.total, 6, 'total counts every row, not the page')
+  const seen = walk(idx, { author: ME, kind: 'seguidores', visible: ALL }, 2)
+  t.alike(seen.map((i) => i.key), expected, 'every row exactly once')
+  t.alike(walk(idx, { author: ME, kind: 'seguidores', visible: ALL }, 1).map((i) => i.key), expected)
+
+  const g = idx.followsPage({ author: ME, kind: 'seguindo', visible: ALL })
+  t.alike(g.items, [
+    { key: k(10), seq: 1, at: D(5) },
+    { key: k(11), seq: 3, at: D(4) },
+    { key: k(12), seq: 2, at: D(4) }
+  ])
+  t.is(g.total, 3)
+  t.alike(walk(idx, { author: ME, kind: 'seguindo', visible: ALL }, 1).map((i) => i.key), [k(10), k(11), k(12)])
+  t.alike(idx.followsPage({ author: k(1), kind: 'seguindo', visible: ALL }).items.map((i) => i.key), [ME])
+})
+
+test('followsPage: pre-1970 rows clamp to 0 and paginate to the end', (t) => {
+  const idx = createNoticeIndex()
+  const NEG = '-000001-01-01T00:00:00.000Z'
+  const OLD = '1969-12-31T23:59:59.000Z'
+  const EPOCH = '1970-01-01T00:00:00.000Z'
+  const rows = [[k(5), NEG], [k(3), OLD], [k(4), EPOCH], [k(1), NEG], [k(2), D(1)]]
+  for (const [a, at] of rows) {
+    const rec = follow(ME, true, at)
+    t.ok(rec, 'valid record ' + at)
+    idx.foldFollow(a, 1, rec)
+    idx.commit(a)
+  }
+  const expected = [k(2), k(1), k(3), k(4), k(5)]
+  t.alike(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).items.map((i) => i.key), expected)
+  const p = idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL, limit: 2 })
+  t.alike(p.next, { atMs: 0, key: k(1) })
+  t.alike(walk(idx, { author: ME, kind: 'seguidores', visible: ALL }, 1).map((i) => i.key), expected)
+  t.alike(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL, after: { t: 0, key: k(5) } }).items, [])
+})
+
+test('followsPage: committed state only; unfollow removes the row after commit', (t) => {
+  const idx = createNoticeIndex()
+  const a = k(1)
+  idx.foldFollow(a, 1, follow(ME, true, D(1)))
+  t.alike(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).items, [], 'uncommitted follower')
+  t.alike(idx.followsPage({ author: a, kind: 'seguindo', visible: ALL }).items, [], 'uncommitted following')
+  t.alike(idx.followCounts(a, ALL), { seguindo: 0, seguidores: 0, incomplete: false })
+  idx.commit(a)
+  t.is(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).total, 1)
+  t.is(idx.followsPage({ author: a, kind: 'seguindo', visible: ALL }).total, 1)
+
+  idx.foldFollow(a, 2, follow(ME, false, D(2)))
+  t.is(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).total, 1, 'uncommitted unfollow not visible')
+  t.is(idx.followsPage({ author: a, kind: 'seguindo', visible: ALL }).total, 1)
+  idx.commit(a)
+  t.alike(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }), { items: [], next: null, total: 0, incomplete: false })
+  t.alike(idx.followsPage({ author: a, kind: 'seguindo', visible: ALL }), { items: [], next: null, total: 0, incomplete: false })
+})
+
+test('followsPage: visible false omits the row and lowers total; the author is never listed', (t) => {
+  const idx = createNoticeIndex()
+  for (let i = 1; i <= 5; i++) {
+    idx.foldFollow(k(i), 1, follow(ME, true, D(i)))
+    idx.commit(k(i))
+    idx.foldFollow(ME, i, follow(k(i), true, D(i)))
+  }
+  idx.foldFollow(ME, 6, follow(ME, true, D(9))) // self-follow
+  idx.commit(ME)
+  const hidden = new Set([k(2), k(4)])
+  const visible = (key) => !hidden.has(key)
+  const p = idx.followsPage({ author: ME, kind: 'seguidores', visible, limit: 2 })
+  t.alike(p.items.map((i) => i.key), [k(5), k(3)])
+  t.is(p.total, 3)
+  t.alike(walk(idx, { author: ME, kind: 'seguidores', visible }, 1).map((i) => i.key), [k(5), k(3), k(1)])
+  t.is(idx.followsPage({ author: ME, kind: 'seguindo', visible }).total, 3)
+  t.alike(idx.followCounts(ME, visible), { seguindo: 3, seguidores: 3, incomplete: false })
+  t.alike(idx.followCounts(ME, ALL), { seguindo: 5, seguidores: 5, incomplete: false })
+  // A visible that answers true for the author still never lists it.
+  t.absent(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).items.some((i) => i.key === ME))
+  t.absent(idx.followsPage({ author: ME, kind: 'seguindo', visible: ALL }).items.some((i) => i.key === ME))
+  // Only true keeps a row; a throwing visible hides it.
+  t.is(idx.followsPage({ author: ME, kind: 'seguidores', visible: () => 1 }).total, 0)
+  t.is(idx.followsPage({ author: ME, kind: 'seguidores', visible: () => { throw new Error('x') } }).total, 0)
+  t.is(idx.followCounts(ME, () => { throw new Error('x') }).seguidores, 0)
+})
+
+test('followsPage: seguindo incomplete while pending, truncated or capped for that author only', (t) => {
+  const idx = createNoticeIndex({ maxPerAuthor: 1, isMember })
+  const a = k(1)
+  const b = k(2)
+  idx.foldFollow(a, 1, follow(k(10), true, D(1)))
+  idx.commit(a)
+  const seguindo = (author) => idx.followsPage({ author, kind: 'seguindo', visible: ALL }).incomplete
+  t.is(seguindo(a), false)
+
+  idx.markPending(a)
+  t.is(seguindo(a), true, 'pending')
+  idx.commit(a)
+  t.is(seguindo(a), false)
+
+  idx.foldFollow(b, 1, follow(k(10), true, D(1)))
+  idx.foldFollow(b, 2, follow(k(11), true, D(1))) // over maxPerAuthor
+  idx.commit(b)
+  t.is(seguindo(b), true, 'truncated')
+  t.is(seguindo(a), false, 'another diary truncated does not matter')
+  t.is(idx.followCounts(b, ALL).incomplete, true)
+  t.is(idx.followCounts(a, ALL).incomplete, false)
+
+  // The non-member cap is per author and committed with the fold.
+  const big = createNoticeIndex({ isMember })
+  const c = k(3)
+  for (let i = 0; i < MAX_NONMEMBER_TARGETS_PER_AUTHOR + 1; i++) big.foldFollow(c, i + 1, follow(outsider(i), true, D(1)))
+  t.is(big.followsPage({ author: c, kind: 'seguindo', visible: ALL }).incomplete, false, 'not before commit')
+  big.commit(c)
+  t.is(big.followsPage({ author: c, kind: 'seguindo', visible: ALL }).incomplete, true, 'capped')
+  t.is(big.followsPage({ author: c, kind: 'seguindo', visible: ALL }).total, MAX_NONMEMBER_TARGETS_PER_AUTHOR)
+  t.is(big.followCounts(c, ALL).incomplete, true)
+  t.is(big.followsPage({ author: ME, kind: 'seguindo', visible: ALL }).incomplete, false)
+  t.is(big.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).incomplete, false)
+
+  // A rescan (removeAuthor, fold, commit) that no longer hits the cap clears it.
+  big.removeAuthor(c)
+  t.is(big.followsPage({ author: c, kind: 'seguindo', visible: ALL }).incomplete, false, 'removeAuthor clears it')
+  big.markPending(c)
+  for (let i = 0; i < 3; i++) big.foldFollow(c, i + 1, follow(outsider(i), true, D(1)))
+  big.commit(c)
+  const after = big.followsPage({ author: c, kind: 'seguindo', visible: ALL })
+  t.is(after.incomplete, false, 'rescan under the cap')
+  t.is(after.total, 3)
+
+  // An unfollow refused at the cap loses no follow, so it marks nothing.
+  const off = createNoticeIndex({ isMember })
+  const d = k(4)
+  for (let i = 0; i < MAX_NONMEMBER_TARGETS_PER_AUTHOR; i++) off.foldFollow(d, i + 1, follow(outsider(i), true, D(1)))
+  off.foldFollow(d, MAX_NONMEMBER_TARGETS_PER_AUTHOR + 1, follow(outsider(900), false, D(2)))
+  off.commit(d)
+  t.is(off.followsPage({ author: d, kind: 'seguindo', visible: ALL }).incomplete, false, 'unfollow past the cap')
+})
+
+test('followsPage: seguidores incomplete only while some diary is pending', (t) => {
+  const idx = createNoticeIndex({ maxPerAuthor: 1 })
+  idx.foldFollow(k(1), 1, follow(ME, true, D(1)))
+  idx.foldFollow(k(1), 2, follow(k(10), true, D(1))) // k(1) truncated
+  idx.commit(k(1))
+  const seguidores = () => idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).incomplete
+  t.is(seguidores(), false, 'a truncated diary does not keep followers incomplete')
+  idx.markPending(k(5))
+  t.is(seguidores(), true, 'pending')
+  t.is(idx.followCounts(ME, ALL).incomplete, true)
+  idx.commit(k(5))
+  t.is(seguidores(), false)
+  t.is(idx.followCounts(ME, ALL).incomplete, false)
+})
+
+test('followsPage and followCounts: bad inputs never throw', (t) => {
+  const idx = createNoticeIndex()
+  idx.foldFollow(k(1), 1, follow(ME, true, D(1)))
+  idx.commit(k(1))
+  const EMPTY = { items: [], next: null, total: 0, incomplete: false }
+  const hostile = new Proxy({}, { get () { throw new Error('boom') }, getPrototypeOf () { throw new Error('boom') } })
+  const base = { author: ME, kind: 'seguidores', visible: ALL }
+  const bad = [
+    { ...base, author: 'not-hex' },
+    { ...base, author: ME.toUpperCase() },
+    { ...base, author: undefined },
+    { ...base, kind: 'seguido' },
+    { ...base, kind: undefined },
+    { ...base, visible: undefined },
+    { ...base, visible: new Set() },
+    { ...base, after: { t: -1, key: k(1) } },
+    { ...base, after: { t: 1.5, key: k(1) } },
+    { ...base, after: { t: '0', key: k(1) } },
+    { ...base, after: { t: Number.MAX_SAFE_INTEGER + 1, key: k(1) } },
+    { ...base, after: { t: 0, key: 'AB'.repeat(32) } },
+    { ...base, after: { t: 0, key: k(1), x: 1 } },
+    { ...base, after: { atMs: 0, key: k(1) } },
+    { ...base, after: { at: D(1), key: k(1) } },
+    { ...base, after: [] },
+    { ...base, after: 'x' },
+    { ...base, after: hostile }
+  ]
+  for (const opts of bad) {
+    t.execution(() => idx.followsPage(opts))
+    t.alike(idx.followsPage(opts), EMPTY, 'bad input ' + JSON.stringify(Object.keys(opts).map((key) => typeof opts[key])))
+  }
+  t.alike(idx.followsPage(), EMPTY)
+  t.alike(idx.followsPage({ ...base, after: undefined }).total, 1, 'undefined after is the first page')
+  idx.markPending(k(9))
+  t.is(idx.followsPage({ ...base, visible: undefined }).incomplete, true, 'incomplete still computed for a valid author')
+  t.is(idx.followsPage({ ...base, author: 'bad' }).incomplete, false)
+  t.is(idx.followsPage({ ...base, kind: 'x' }).incomplete, false)
+
+  const ZERO = { seguindo: 0, seguidores: 0, incomplete: false }
+  t.alike(idx.followCounts('bad', ALL), ZERO)
+  t.alike(idx.followCounts(ME, null), ZERO)
+  t.alike(idx.followCounts(), ZERO)
+  t.alike(idx.followCounts(k(1), ALL), { seguindo: 1, seguidores: 0, incomplete: true })
+})
+
 test('proof sign and verify', (t) => {
   const kp = hcrypto.keyPair()
   const other = hcrypto.keyPair()

@@ -3924,7 +3924,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 ## 71. Barra de ícones, sino, Busca e perfis iguais (PR feat/app-ux-icones)
 
-A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Seguidores continuam privados: não há contagem nem lista em lugar nenhum. Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
+A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Neste PR a contagem e a lista de seguidores ainda não existem (elas chegam, públicas, na seção 74). Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
 
 ### Como verificar
 
@@ -3941,7 +3941,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 5. **Espiadinha.** Sem campo de pesquisa; carrega e atualiza como antes.
 6. **Seguindo.** "N seguindo" no Diário abre a lista. O campo "Filtrar nesta lista" ("nome ou @nome") reduz a lista no aparelho, com a dica "Para encontrar outra conta, use a Busca." e, sem correspondência, "Ninguém com esse nome nesta lista."; colar um código de 64 letras e números não segue ninguém; "Deixar de seguir" ainda pede confirmação; voltar retorna ao Diário. Sem internet, com nomes ainda não lidos, o filtro mostra "Carregando nomes…" e pede os nomes de novo enquanto a tela está no topo; ao voltar a conexão, eles aparecem.
 7. **Perfil de outra pessoa.** Tem o desenho do Diário: faixa atrás da barra de estado com a barra de estado clara, o círculo de voltar no canto esquerdo da faixa acessível (não coberto pelo avatar), avatar com anel à esquerda, nome, @nome, bio e as pílulas Seguir, Mensagem (hospedado) e denunciar a conta, todas funcionando.
-8. **Seguidores.** Não há contagem nem lista de seguidores em lugar nenhum.
+8. **Seguidores.** Avisos não mostra contagem nem lista de seguidores. (A contagem e a lista públicas de seguidores nos perfis chegam na seção 74.)
 
 ### Não verificado / limites conhecidos
 
@@ -4052,7 +4052,53 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - Se a releitura do grupo falhar, nada é marcado até a próxima leitura que der certo: a contagem pode ficar, mas nunca some antes da hora.
 - A aba Comunidades e o ponto da aba não mudaram; não há número na aba.
 
-## 74. Avisos de curtidas e republicações (PR feat/avisos-curtidas)
+## 74. Seguidores públicos (PR feat/seguidores-publicos)
+
+Por decisão dos donos do projeto, a contagem e a lista de seguidores são públicas: quem usa o site da associação ou o app ligado à instalação vê, em qualquer conta, "N seguindo" e "N seguidores", e cada número abre a lista (Seguindo, Seguidores) com o campo "Filtrar nesta lista", que só filtra essa lista. O Diário mantém o "N seguindo" do nó local (`node.info.followCount`) e ganha "N seguidores" do semeador; o perfil de outra pessoa mostra os dois do semeador. O semeador responde `GET /index/follows/<author>` e `GET /index/follows/<author>/(seguindo|seguidores)[/<cursor>]` (`Seeder#indexFollowCounts` e `Seeder#indexFollows`, `packages/core/lib/notices.js` `followCounts` e `followsPage`; protocol §5 "Seeder follow index" e §7). Cada linha é um registro de seguir assinado, conferido com `diary.peek` antes de aparecer. Avisos continua privado e com prova. Termos e Política vão à versão 12, com novo aceite.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes novos ou alterados: `packages/core/test/notices.test.js` (`followsPage`, `followCounts`, regra de omissão, tetos), `apps/cli/test/seeder-notices.test.js` e `apps/cli/test/seed-ws.test.js` (as duas rotas, 404, cursor, tamanho máximo), `apps/app/test/indexClient.test.js` (`followsUrl`, `validFollows`), `apps/app/test/pessoas.test.js` (conferência com `diary.peek`, textos), `apps/app/test/nav.test.js`, `apps/app/test/help.test.js`, `apps/app/test/legal.test.js` e `packages/core/test/terms.test.js` (versão 12).
+
+Contra o semeador da demo (`npm run demo` imprime a URL do semeador; `<hex64>` é a chave de um diário servido):
+
+```sh
+curl -s <url-do-semeador>/index/follows/<hex64>
+curl -s <url-do-semeador>/index/follows/<hex64>/seguidores
+```
+
+A primeira devolve `{ seguindo, seguidores, indexing, complete }`; a segunda, `{ author, kind, items, next, total, authors, indexing, complete }` com no máximo 20 itens. Uma chave desconhecida ou bloqueada dá 404 `não encontrado`.
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada), depois no iOS (simulador) e na web.
+
+1. **Diário.** Mostra "N seguindo" (do nó local) e "N seguidores" (do semeador). Tocar em cada um abre a lista Seguindo ou Seguidores, com o título certo e a seta de voltar.
+2. **Perfil de outra pessoa.** Mostra "N seguindo" e "N seguidores" do semeador; cada um abre a lista dessa pessoa.
+3. **Listas.** O cabeçalho mostra "N pessoas" ("1 pessoa"); as linhas têm avatar, nome e @nome e abrem o perfil; a lista pagina até o fim.
+4. **Filtro.** "Filtrar nesta lista" reduz só a lista aberta, no aparelho, sem pedir nada ao semeador.
+5. **Seguir.** Seguir alguém aumenta o "seguidores" dessa pessoa depois de puxar para atualizar (o semeador precisa ler o diário; até lá o número pode atrasar).
+6. **Deixar de seguir.** Cai o "seguidores" dela depois que o semeador relê o diário.
+7. **Bloqueado.** Um membro bloqueado não aparece em nenhuma lista nem entra em nenhuma contagem.
+8. **Configuração manual.** No Diário só aparece "N seguindo"; nos perfis não aparece nada; a lista aberta mostra "Disponível no site da associação ou no app ligado à instalação.".
+9. **Nota.** Enquanto o semeador ainda lê os diários (logo depois de reiniciar), os números do perfil mostram "A contagem pode estar incompleta." e a lista mostra "A lista pode estar incompleta.".
+10. **Termos.** Com os Termos e a Política já aceitos na versão 11, o app pede o aceite da versão 12 antes de qualquer tela.
+11. **Avisos.** Continua sem contagem nem lista de seguidores e só com prova.
+12. **curl.** Os dois comandos acima devolvem o formato descrito.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Limite aceito: a contagem do semeador inclui só membros admitidos e visíveis nesse semeador (contas de fora da associação nunca aparecem), então pode ser menor que o "N seguindo" do próprio Diário, que conta todo seguir do nó local; os tetos de 4096 seguidos e 64 contas de fora por diário só marcam a lista Seguindo como incompleta.
+- Limite aceito: enquanto o semeador lê os diários (`indexing`, ou um diário pendente), as contagens e as listas podem estar incompletas, e a nota "A contagem pode estar incompleta." (sob os números do perfil) ou "A lista pode estar incompleta." (na lista) aparece.
+- Limite aceito: o semeador fica sabendo de qual perfil a lista foi aberta.
+- Limite aceito: quem segue a partir de um diário que passou de um teto do semeador (4096 seguidos por diário, 262144 no total) pode faltar na lista Seguidores de quem foi seguido, sem a nota de incompleta, que só aparece enquanto o semeador lê os diários (decisão do mantenedor).
+- Limite aceito: a ordem usa a data `at` escrita por quem segue; um registro com data no futuro aparece no topo das listas Seguidores e Seguindo.
+- Limite aceito: a rota de contagens tem um só `complete` para os dois números, então, num diário que passou de um teto ao seguir, a nota "A contagem pode estar incompleta." pode ficar no Diário mesmo com "N seguidores" completo.
+- Depois de seguir alguém, o "N seguidores" dessa pessoa só muda depois de puxar para atualizar, quando o semeador já leu o novo registro.
+- Limite aceito: um semeador mentiroso pode omitir linhas ou apontar para um registro de seguir autêntico mais velho (a conferência não prova que não existe um "deixar de seguir" posterior); não pode forjar um seguidor.
+
+## 75. Avisos de curtidas e republicações (PR feat/avisos-curtidas)
 
 Avisos passa a mostrar quem curtiu e quem republicou uma publicação da própria pessoa, ao lado de seguir, resposta, citação e menção. Uma linha por curtida e uma por republicação: "<nome> curtiu sua publicação" e "<nome> republicou sua publicação". Tocar na linha abre essa publicação. O estado vazio usa o texto de `EMPTY_TEXT` em `apps/app/src/notices.js`. Mensagens privadas continuam em Conversas. O canal novo é `varanda/notices/3` (`docs/protocol.md`, "Notices channel v3" e "Notices link"). `varanda/notices/1` e `varanda/notices/2` não mudam: um tipo desconhecido numa página v2 invalida a mensagem `items` inteira, e um cliente antigo a recusa por completo.
 
