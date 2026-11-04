@@ -102,6 +102,7 @@ import { Conversas } from './src/screens/Conversas'
 import { Mensagem } from './src/screens/Mensagem'
 import { DEFAULT_SEGMENT, onDmOpen, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
+import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
@@ -1073,6 +1074,13 @@ function Member () {
   const openCommunity = useCallback((community, opts) => {
     pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
   }, [pushScreen])
+  const openCommunityInfo = useCallback((community) => {
+    pushScreen({ screen: 'comunidade-info', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  }, [pushScreen])
+  // group.seen emits no event: Grupo reports the mark so the community list
+  // under it re-reads its unread counts.
+  const [seenTick, setSeenTick] = useState(0)
+  const bumpSeen = useCallback(() => setSeenTick((n) => n + 1), [])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -1810,21 +1818,23 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
-                if (entry.screen === 'grupo' || entry.screen === 'comunidade') {
+                if (entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') {
                   // Keyed by the node epoch: a lock, unlock or identity change
                   // remounts the screen, so late answers from before are dropped.
                   return (
                     <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                       {entry.screen === 'grupo'
-                        ? <Grupo group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
-                        : <Comunidade community={entry.key} afterGroup={entry.params.group || null} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
+                        ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} onSeen={bumpSeen} />
+                        : entry.screen === 'comunidade-info'
+                          ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                          : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
                     </View>
                   )
                 }
                 if (entry.screen === 'mensagem') {
                   return (
                     <View key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
                     </View>
                   )
                 }

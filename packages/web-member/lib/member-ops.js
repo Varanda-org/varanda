@@ -2235,6 +2235,30 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
   })
 }
 
+// rpc.md 5.82: marks the newest listed post seen here, moving only forward
+// and writing only on change.
+async function groupSeen (ctx, { group } = {}) {
+  return withGroup(ctx, group, false, async ({ g }) => {
+    const posts = readablePosts(g)
+    if (posts.length === 0) return { ok: true }
+    const p = posts[posts.length - 1]
+    const marks = await store.readGroupSeen(ctx.storage)
+    const mark = marks.find((m) => m.group === g.group) || null
+    if (mark !== null) {
+      const i = posts.findIndex((q) => q.writer === mark.writer && q.seq === mark.seq)
+      const ahead = i >= 0
+        ? i < posts.length - 1
+        : compareOrder(orderKey(p.at, p.writer, p.seq), orderKey(mark.at, mark.writer, mark.seq)) > 0
+      if (!ahead) return { ok: true }
+    }
+    await store.writeGroupSeen(ctx.storage, [...marks.filter((m) => m.group !== g.group), { group: g.group, at: p.at, writer: p.writer, seq: p.seq }])
+    return { ok: true }
+  }, (p) => {
+    requirePendingOwn(p)
+    return { ok: true }
+  })
+}
+
 function memberCount (g) {
   let n = 0
   for (const st of g.built.members.values()) if (st === 'member') n++
@@ -3511,6 +3535,50 @@ async function communityRequests (ctx, { community, offset = 0, limit = GROUP_ME
   })
 }
 
+const PREVIEW_MAX = 140
+const READER_ROLES = new Set(['creator', 'admin', 'member'])
+const UNREAD_MAX = 99
+
+// The posts group.read lists, in causal order. A locked holder never opened
+// a sealed envelope (foldWithKeys), so no sealed post is among them.
+function readablePosts (g) {
+  return g.built.posts.filter((p) => g.diaries.get(p.diary))
+}
+
+// The listed posts after a seen mark: after the marked post while it is
+// still listed, else (gone after a sync) each post above it in group order,
+// as groupRead's cursor.
+function postsAfter (posts, mark) {
+  if (mark === null) return posts
+  const i = posts.findIndex((p) => p.writer === mark.writer && p.seq === mark.seq)
+  if (i >= 0) return posts.slice(i + 1)
+  const k = orderKey(mark.at, mark.writer, mark.seq)
+  return posts.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) > 0)
+}
+
+// rpc.md 5.59: a reader row's newest listed post and the others' posts after
+// this device's mark (own and hidden ones not counted).
+function lastAndUnread (g, base, mark) {
+  const posts = readablePosts(g)
+  if (posts.length === 0) return { last: null, unread: 0 }
+  const p = posts[posts.length - 1]
+  const { name, username } = authorOf(g, p.diary, base.association, base.mod)
+  const last = {
+    name,
+    username,
+    preview: p.hidden ? '' : Array.from(p.text).slice(0, PREVIEW_MAX).join(''),
+    at: p.at,
+    mine: p.diary === base.ownHex,
+    hidden: p.hidden
+  }
+  let unread = 0
+  for (const q of postsAfter(posts, mark)) {
+    if (q.diary === base.ownHex || q.hidden) continue
+    if (++unread >= UNREAD_MAX) break
+  }
+  return { last, unread }
+}
+
 const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
@@ -3532,16 +3600,19 @@ async function communityInfo (ctx, { community }) {
     }
   }
   return withCommunity(ctx, C, false, async ({ ownHex, base, c }) => {
+    const seen = await store.readGroupSeen(ctx.storage)
     const groups = []
     for (const key of c.built.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)) {
       const g = await loadGroup(ctx, base, key)
+      const role = g === null ? null : roleHere(g, ownHex, base)
       groups.push({
         group: key,
         name: g === null ? null : g.built.name,
         visibility: g === null ? null : (g.private ? 'private' : 'public'),
         join: g === null ? null : g.built.join,
-        role: g === null ? null : roleHere(g, ownHex, base),
-        general: key === c.built.general
+        role,
+        general: key === c.built.general,
+        ...(READER_ROLES.has(role) ? lastAndUnread(g, base, seen.find((m) => m.group === key) || null) : { last: null, unread: 0 })
       })
     }
     return {
@@ -3801,6 +3872,7 @@ module.exports = {
   groupRequests,
   communityCreate,
   communityInfo,
+  groupSeen,
   communityList,
   communitySetAdmin,
   communityJoin,

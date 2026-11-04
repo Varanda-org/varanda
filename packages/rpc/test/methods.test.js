@@ -20,7 +20,7 @@ test('method list and mutating set', (t) => {
     'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests',
+    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
     'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
@@ -824,6 +824,13 @@ test('group.info', (t) => {
   bad(t, 'group.info', {})
   bad(t, 'group.info', { group: 'x' })
   bad(t, 'group.info', { group: KEY, limit: 1 })
+})
+
+test('group.seen takes only the group and is not mutating', (t) => {
+  t.absent(isMutating('group.seen'))
+  ok(t, 'group.seen', { group: KEY }, { group: KEY })
+  bad(t, 'group.seen', {})
+  bad(t, 'group.seen', { group: KEY, id: 'cd'.repeat(16) }, 'no mark by id')
 })
 
 test('group.members and group.requests', (t) => {

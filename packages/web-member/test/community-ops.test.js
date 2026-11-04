@@ -128,7 +128,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   t.alike((await diaryJoins(a, general)).map((j) => [j.writer, j.on]), [[general, true]])
   t.is(await store.readCommunityCreate(a.storage), null, 'the plan is dropped')
 
-  const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true }
+  const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
     community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true
   })
@@ -146,7 +146,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await share(a, b, [community, general])
   const seen = await ops.communityInfo(b.ctx, { community })
   t.alike([seen.role, seen.creator, seen.members, seen.groups.find((g) => g.general).name], ['left', a.key, 1, 'Geral'], 'a non-member reads the community from replicas')
-  t.alike(seen.groups.find((g) => g.group === horta), { group: horta, name: null, visibility: null, join: null, role: null, general: false }, 'a group root not held is named by key only')
+  t.alike(seen.groups.find((g) => g.group === horta), { group: horta, name: null, visibility: null, join: null, role: null, general: false, last: null, unread: 0 }, 'a group root not held is named by key only')
   for (const [method, params] of [
     ['communityMeta', { community, name: 'Outro' }],
     ['communitySetAdmin', { community, member: b.key, on: true }],

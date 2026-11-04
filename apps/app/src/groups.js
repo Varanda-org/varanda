@@ -42,6 +42,27 @@ export const DEVICE_ROOT_TEXT = 'Novo grupo, Ajustes e Quem pode convidar só fu
 export const DEVICE_APPROVAL_TEXT = 'Este aparelho precisa da aprovação de um administrador para escrever.'
 
 const HEX64 = /^[0-9a-f]{64}$/
+
+// The unread count the node reports caps at 99, meaning 99 or more.
+export function unreadLabel (n) {
+  if (!Number.isInteger(n) || n < 1) return ''
+  return n >= 99 ? '99+' : String(n)
+}
+
+// One line for a group row: who said it and what. A hidden message shows
+// only the fixed label, never its preview or its author.
+export function lastLine (last) {
+  if (!last || typeof last !== 'object') return ''
+  if (last.hidden === true) return HIDDEN_LABEL
+  // A line break would show as U+FFFD.
+  const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  let who = ''
+  if (last.mine === true) who = 'Você'
+  else if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
+  else if (typeof last.username === 'string' && displayText(last.username).trim() !== '') who = '@' + displayText(last.username)
+  return who === '' ? text : who + ': ' + text
+}
+
 const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
 
 // --- merging ---
