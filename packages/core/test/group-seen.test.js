@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const test = require('brittle')
 const member = require('../lib/member')
+const store = require('../lib/store')
 const { exchange, entryOf, rejects, world } = require('./helpers/community-member')
 
 const seenFile = (ctx) => path.join(ctx.dataDir, 'group-seen.json')
@@ -120,4 +121,85 @@ test('group.seen: forward only, malformed files read as none, 512 marks at most'
   t.is(marks[marks.length - 1].group, geral, 'the updated group moves to the end')
   t.is(marks[0].group, others[1].group, 'the least recently marked is dropped')
   t.is((await rowOf(b, community, geral)).unread, 0)
+})
+
+test('group.seen: a cut-off marks exactly that post, never past it, never an unlisted one', async (t) => {
+  const { a, others: [b], community, geral } = await world(t, { names: ['Bia'] })
+  for (const text of ['um', 'dois', 'tres']) await member.groupPost(a, { group: geral, text })
+  await exchange(a, b)
+  const items = (await member.groupRead(b, { group: geral })).items
+  const mid = items[1]
+  const cut = (post, at = '2026-01-01T00:00:00.000Z') => ({ group: geral, upTo: { at, writer: post.writer, seq: post.seq } })
+  const markOf = () => JSON.parse(fs.readFileSync(seenFile(b), 'utf8')).marks.filter((m) => m.group === geral)
+  const bytes = () => fs.readFileSync(seenFile(b), 'utf8')
+
+  t.alike(await member.groupSeen(b, cut(mid)), { ok: true })
+  const row = await rowOf(b, community, geral)
+  t.is(row.unread, 1, 'only the post after the cut-off stays unread')
+  t.is(row.last.preview, 'tres', 'last is still the newest post')
+  const [mark] = markOf()
+  t.alike(Object.keys(mark).sort(), ['at', 'group', 'seq', 'writer'])
+  t.alike([mark.at, mark.writer, mark.seq], [mid.at, mid.writer, mid.seq], 'the listed post own at, not the passed one')
+  const stat = fs.statSync(seenFile(b))
+  t.is(stat.mode & 0o777, 0o600)
+  t.absent(bytes().includes('dois'), 'the file holds no post text')
+
+  t.alike(await member.groupSeen(b, cut(mid)), { ok: true })
+  const again = fs.statSync(seenFile(b))
+  t.alike([again.ino, again.mtimeMs], [stat.ino, stat.mtimeMs], 'the same cut-off is not written again')
+
+  const settled = bytes()
+  t.alike(await member.groupSeen(b, cut(items[2])), { ok: true })
+  t.is(bytes(), settled, 'an older cut-off does not move the mark back')
+
+  t.alike(await member.groupSeen(b, { group: geral, upTo: { at: mid.at, writer: 'ff'.repeat(32), seq: 7 } }), { ok: true })
+  t.alike(await member.groupSeen(b, { group: geral, upTo: { at: mid.at, writer: mid.writer, seq: 99 } }), { ok: true })
+  t.is(bytes(), settled, 'an unlisted cut-off writes nothing')
+  t.is((await rowOf(b, community, geral)).unread, 1)
+
+  writeMarks(b, [{ group: geral, at: '2099-01-01T00:00:00.000Z', writer: 'ff'.repeat(32), seq: 3 }])
+  const ahead = bytes()
+  await member.groupSeen(b, cut(items[0], '3999-01-01T00:00:00.000Z'))
+  t.is(bytes(), ahead, 'the listed at is compared, not the caller one')
+
+  writeMarks(b, [{ group: geral, at: '2000-01-01T00:00:00.000Z', writer: 'ee'.repeat(32), seq: 3 }])
+  await member.groupSeen(b, cut(mid))
+  t.alike(markOf().map((m) => [m.at, m.writer, m.seq]), [[mid.at, mid.writer, mid.seq]], 'an unlisted mark behind everything moves to the cut-off, not the newest')
+
+  const { seq } = await member.groupPost(b, { group: geral, text: 'escondida' })
+  await exchange(b, a)
+  await member.groupHide(a, { group: geral, target: { writer: entryOf(b, geral).writer, seq }, on: true })
+  await exchange(a, b)
+  const hiddenPost = (await member.groupRead(b, { group: geral })).items[0]
+  t.is(hiddenPost.seq, seq)
+  await member.groupSeen(b, cut(hiddenPost))
+  t.alike(markOf().map((m) => [m.writer, m.seq]), [[hiddenPost.writer, seq]], 'a hidden post can be the cut-off')
+
+  const own = await member.groupPost(b, { group: geral, text: 'de Bia' })
+  await exchange(b, a)
+  await member.groupPost(a, { group: geral, text: 'quatro' })
+  await exchange(a, b)
+  const ownItem = (await member.groupRead(b, { group: geral })).items.find((i) => i.writer === entryOf(b, geral).writer && i.seq === own.seq)
+  await member.groupSeen(b, cut(ownItem))
+  t.alike(markOf().map((m) => [m.writer, m.seq]), [[ownItem.writer, own.seq]], 'an own post can be the cut-off')
+  t.is((await rowOf(b, community, geral)).unread, 1, 'only quatro is unread')
+
+  t.alike(await member.groupSeen(b, { group: geral }), { ok: true })
+  t.is((await rowOf(b, community, geral)).unread, 0, 'no cut-off marks the newest')
+})
+
+test('group.seen: a cut-off for an unknown or not yet held group writes nothing', async (t) => {
+  const { a, others: [b], community } = await world(t, { names: ['Bia'] })
+  const upTo = { at: '2026-01-01T00:00:00.000Z', writer: 'cd'.repeat(32), seq: 1 }
+  await rejects(t, member.groupSeen(b, { group: 'ab'.repeat(32), upTo }), 'grupo não encontrado', 'NOT_FOUND')
+  t.absent(fs.existsSync(seenFile(b)), 'an unknown group creates no file')
+
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await exchange(a, b)
+  const s = await store.openStore(b.dataDir)
+  await store.purgeReplica(s, group)
+  await s.close()
+  t.alike(await member.groupJoin(b, { group, community }), { state: 'pending' })
+  t.alike(await member.groupSeen(b, { group, upTo }), { ok: true })
+  t.absent(fs.existsSync(seenFile(b)), 'a pending group writes no file')
 })

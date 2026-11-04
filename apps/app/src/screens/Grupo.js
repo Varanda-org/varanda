@@ -4,9 +4,9 @@
 // onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
 // { author, name, username, seq, text, group, writer, private }; onSeen runs
 // after every group.seen attempt, answered or not. Only what the person sees
-// is marked seen: the app visible, this screen on top (isTop false: buried
-// under another screen) and the latest read painted. Renders GrupoAjustes itself
-// as a sheet. The top bar names the group's community (a pill that opens it).
+// is marked seen, up to the newest painted row: the app visible, this screen
+// on top (isTop false: buried under another screen) and the latest read
+// painted. Renders GrupoAjustes itself as a sheet. The top bar names the group's community (a pill that opens it).
 // A group without a community (orphan) is read-only. Joining needs the
 // community first: a group opened from a /g/<hex> link this node does not
 // know is looked up in the seeder index, and its community opens first with
@@ -106,6 +106,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   storeRef.current = store
   const onSeenRef = useRef(onSeen)
   onSeenRef.current = onSeen
+  const cutRef = useRef(null)
   // The load whose newest read painted; equal to seqRef when none is in flight.
   const paintedRef = useRef(0)
   const listRef = useRef(null)
@@ -146,11 +147,15 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     return read
   }, [request, group, commitRead])
 
-  // group.seen emits nothing, and a lost answer may have written the mark, so
-  // the caller hears of every attempt, even after a quick back.
+  // The call carries the newest painted row, so the node marks that post and a
+  // message that lands after the paint stays unread. group.seen emits nothing,
+  // and a lost answer may have written it, so the caller hears of every
+  // attempt, even after a quick back. No cut-off: nothing is sent or told.
   const markSeen = useCallback(async () => {
+    const upTo = cutRef.current
+    if (upTo === null) return
     try {
-      await request('group.seen', { group })
+      await request('group.seen', { group, upTo })
     } catch {} finally {
       if (typeof onSeenRef.current === 'function') onSeenRef.current(group)
     }
@@ -343,7 +348,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
       setTimeout(() => list.scrollToEnd({ animated: false }), 0)
     }
   }
-  const lastId = rows.length > 0 ? rows[rows.length - 1].id : null
+  const last = rows.length > 0 ? rows[rows.length - 1] : null
+  const lastId = last === null ? null : last.id
+  cutRef.current = last !== null && typeof last.at === 'string' ? { at: last.at, writer: last.writer, seq: last.seq } : null
   useEffect(() => {
     if (lastId !== null) scrollToEnd()
   }, [lastId])

@@ -247,6 +247,35 @@ test('group.seen through request: ok twice, no groups.changed, unread cleared, u
   t.alike(a.internal.concat(b.internal), [])
 })
 
+test('group.seen with a cut-off through request: inclusive upTo, unlisted and invalid cursors', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community: C, group } = await community(a)
+  await a.web.request('group.post', { group, text: 'um' })
+  await a.web.request('group.post', { group, text: 'dois' })
+  await share(a, b, C)
+  await share(a, b, group)
+  await b.web.request('community.join', { community: C })
+  const unread = async () => (await b.web.request('community.info', { community: C })).groups.find((g) => g.group === group).unread
+  const items = (await b.web.request('group.read', { group })).items
+  const older = items[1]
+  t.is(await unread(), 2)
+  const before = b.web.events.filter((e) => e.name === 'groups.changed').length
+  t.alike(await b.web.request('group.seen', { group, upTo: { at: older.at, writer: older.writer, seq: older.seq } }), { ok: true })
+  t.is(await unread(), 1, 'the cut-off post is marked, the newer one stays unread')
+  t.is(b.web.events.filter((e) => e.name === 'groups.changed').length, before, 'no groups.changed')
+  t.alike(await b.web.request('group.seen', { group, upTo: { at: older.at, writer: 'ff'.repeat(32), seq: 7 } }), { ok: true }, 'an unlisted cursor is ignored')
+  t.is(await unread(), 1)
+  const malformed = await errorOf(b.web.request('group.seen', { group, upTo: { writer: older.writer, seq: older.seq } }))
+  t.is(malformed.code, 'USAGE', 'a cursor without at is refused')
+  t.is(await unread(), 1)
+  const unknown = await errorOf(b.web.request('group.seen', { group: KEY, upTo: { at: older.at, writer: older.writer, seq: older.seq } }))
+  t.alike([unknown.code, unknown.message], ['NOT_FOUND', 'grupo não encontrado'])
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.is(await unread(), 0)
+  t.alike(a.internal.concat(b.internal), [])
+})
+
 test('group error mapping and report.sign v2 bind writer and group', async (t) => {
   const s = await setup(t)
   const missing = await errorOf(s.web.request('group.read', { group: KEY }))
