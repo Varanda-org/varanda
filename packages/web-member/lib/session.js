@@ -124,6 +124,36 @@
 // the lease below learns the confirmation from the 'settled' report that
 // follows it.
 //
+// The device upkeep (docs/rpc.md 5.61 and 5.63): a device of an account
+// takes part by itself in the communities and groups its diary binds
+// (member-ops deviceUpkeepPlan / deviceUpkeep: a CW and the Geral writer
+// here, epoch keys handed by the creator's device to the account's new
+// writers). ONE serial pass at a time, never inside onEvent: it plans under
+// withStore (the fold opens group cores the borrowed path does not serve),
+// and only a non-empty plan writes, through the write gate, then pushes,
+// like a diary write. It is armed by a NEW own length on a user's
+// continuous run (another device appended, or a write here landed; the
+// pass's own write does not re-arm it, unless the write gate brought blocks
+// of another device; an unlock arms from the live run's last own length, a
+// reload or a new connection from the next own-synced), and once per
+// arming by a 'settled' report after the passes ran out; a failed pass or
+// a failed root queues another within the bound; a 'group-writer' (a writer
+// core stored for the first time, once per key and at most
+// MAX_UPKEEP_WRITERS keys per session) arms afresh, so the distributor
+// plans after the new device's writer arrived; while armed, a
+// 'groups-changed' (the root or writer a skipped root waited for) queues
+// another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
+// most MAX_UPKEEP_PASSES per arming, so a device with nothing to do stops
+// its continuous run a bounded number of times per new own length;
+// progress earns fresh passes for what the write unblocked, and a pass
+// that leaves nothing waiting (no failure, no skip a sync can resolve) and
+// saw no newer arming disarms. A step that threw after writing still sends
+// groups.changed and pushes. It defers while a user's once run
+// is alive (as the drain), is silent while locked, and a failure is the
+// warning 'aviso: participação automática neste aparelho não concluída',
+// never an RPC error: nothing is resent, the next pass plans again from
+// storage.
+//
 // The lease (web only, docs/rpc.md 6.1; off unless leaseHoldMs > 0, which
 // no shipped entry sets today, the browser entry keeps it off): a seeder link that has nothing left to do
 // is not held open. The sync reports 'settled { settled, mediaPending }'
@@ -276,6 +306,7 @@ const BAD_WALLET = 'operação de pagamento inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
+const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
@@ -298,6 +329,14 @@ const READER_WAIT_MS = 3000
 const NOT_READY = Symbol('not ready')
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
+// The device upkeep (see the header): passes per arming, and the delay that
+// coalesces a burst of triggers into one pass.
+const MAX_UPKEEP_PASSES = 3
+const UPKEEP_DELAY_MS = 1500
+// Per arming, whatever progress or a 'settled' report granted since.
+const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
+// Writer keys whose 'group-writer' armed the upkeep, per session.
+const MAX_UPKEEP_WRITERS = 512
 // The lease (see the header): the gap after an idle end, how long a run
 // waits for an unconfirmed media core, and the longest a borrow holds it.
 const LEASE_GAP_MS = 45000
@@ -466,6 +505,7 @@ function readyWithin (ready, ms) {
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
+// upkeepDelayMs: the device upkeep's coalescing delay (tests).
 function createBrowserSession ({
   storage,
   association,
@@ -481,7 +521,8 @@ function createBrowserSession ({
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
-  noClear = false
+  noClear = false,
+  upkeepDelayMs = UPKEEP_DELAY_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -553,6 +594,22 @@ function createBrowserSession ({
   let drainQueued = false
   let drainWanted = false
   let drainRetries = 0
+  // The device upkeep (header): a pass queued on the chain, one deferred by
+  // a user's once run, armed, the own length it was armed for, passes since
+  // the arming, whether a 'settled' report re-armed it already, the passes
+  // since the arming that nothing resets (the absolute bound), and the
+  // coalescing timer.
+  let upkeepQueued = false
+  let upkeepWanted = false
+  let upkeepArmed = false
+  let upkeepLength = null
+  let upkeepPasses = 0
+  let upkeepRearmed = false
+  let upkeepTotal = 0
+  let upkeepTimer = null
+  const upkeepWriters = new Set()
+  // Bumped by every arming: a pass disarms only the arming it ran for.
+  let upkeepArming = 0
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -739,6 +796,12 @@ function createBrowserSession ({
                   if (!once && !internal) dmTick()
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
+                if (!once && !internal && Number.isSafeInteger(ev.length)) {
+                  // Kept while locked too: the link reports each length once,
+                  // so the unlock arms from it (setKeyPair).
+                  r.ownLength = ev.length
+                  if (ev.length !== upkeepLength) armUpkeep(ev.length)
+                }
                 return
               case 'group-skipped':
                 // The legacy sweep at sync start (protocol v1 cores purged).
@@ -746,6 +809,17 @@ function createBrowserSession ({
                 return
               case 'groups-changed':
                 if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
+                // What a skipped root waited for may have arrived.
+                if (!once && !internal && upkeepRoom()) scheduleUpkeep()
+                return
+              case 'group-writer':
+                // A writer stored after the pass that planned on the own
+                // length its join made (or another diary's entitled
+                // writer): a fresh arming, once per writer key.
+                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
+                  upkeepWriters.add(ev.writer)
+                  armUpkeep(upkeepLength)
+                }
                 return
               case 'group-synced':
                 if (!Number.isSafeInteger(ev.length) || ev.length < 0) return
@@ -778,6 +852,16 @@ function createBrowserSession ({
               case 'settled':
                 // The run's readiness report (header, "The lease").
                 if (r.leased) noteSettled(r, ev)
+                // A run whose goals are met holds the roots a pass waited
+                // for: one more arming, once per run and per arming.
+                if (!once && !internal && ev.settled === true && !r.upkeepSettled) {
+                  r.upkeepSettled = true
+                  if (upkeepArmed && upkeepPasses >= MAX_UPKEEP_PASSES && !upkeepRearmed) {
+                    upkeepRearmed = true
+                    upkeepPasses = 0
+                    scheduleUpkeep()
+                  }
+                }
                 return
               case 'own-behind':
                 synced = false
@@ -817,6 +901,7 @@ function createBrowserSession ({
       clearLease(r)
       // A drain deferred by this user's once run is due now.
       if (once && !internal && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
+      if (once && !internal && upkeepWanted) scheduleUpkeep()
       if (error !== null) {
         if (!internal) syncIntent = null
         if (r.leased) leaseSettledSince = leaseMediaSince = null
@@ -1406,6 +1491,24 @@ function createBrowserSession ({
     }
   }
 
+  // Inside withStore, after a group write: the own cores of `roots` are due
+  // a push at their new lengths. A join can create a writer after the
+  // previous run took its snapshot; the next run opens every own writer
+  // from the updated kv list.
+  async function noteWrittenRoots (roots) {
+    for (const group of new Set(roots.filter((k) => typeof k === 'string'))) {
+      for (const key of await ownGroupKeys(group)) {
+        if (await refusedWriter(key)) continue
+        const core = await store.openGroupCoreReadOnly(storage, key)
+        if (core === null) continue
+        try {
+          groupUnpushed.set(key, core.length)
+          groupLengths.set(key, core.length)
+        } finally { await core.close() }
+      }
+    }
+  }
+
   function groupWrite (operation, { roots = GROUP_ROOTS, changed = GROUP_CHANGED } = {}) {
     return serial(async (params, epoch, generation) => {
       checkGroupOperation(epoch, generation)
@@ -1421,20 +1524,7 @@ function createBrowserSession ({
           checkGroupOperation(epoch, generation)
           const result = await operation(c, params)
           const groups = [...new Set(await changed(c, result, params))]
-          // A join can create a writer after the previous run took its snapshot.
-          // The next run opens every own writer from the updated kv list.
-          const written = new Set([...rootKeys, result.group, result.community].filter((k) => typeof k === 'string'))
-          for (const group of written) {
-            for (const key of await ownGroupKeys(group)) {
-              if (await refusedWriter(key)) continue
-              const core = await store.openGroupCoreReadOnly(storage, key)
-              if (core === null) continue
-              try {
-                groupUnpushed.set(key, core.length)
-                groupLengths.set(key, core.length)
-              } finally { await core.close() }
-            }
-          }
+          await noteWrittenRoots([...rootKeys, result.group, result.community])
           await member.withIdentity(c, async ({ diary }) => { wrote(diary.length - 1) })
           for (const group of groups) send('groups.changed', { group }, epoch)
           return result
@@ -1450,6 +1540,170 @@ function createBrowserSession ({
       }
     })
   }
+
+  // ---- the device upkeep (see the header) ----
+
+  // A new own length on a user's continuous run: fresh passes. While locked
+  // nothing is armed; the unlock arms from the live run's last length
+  // (setKeyPair), as does the next own-synced after a reload.
+  function armUpkeep (length) {
+    if (closed || keyPair === null || groupPrf === null) return
+    upkeepArmed = true
+    upkeepArming++
+    upkeepLength = length
+    upkeepPasses = 0
+    upkeepTotal = 0
+    upkeepRearmed = false
+    scheduleUpkeep()
+  }
+
+  // Whether this arming may still run a pass.
+  function upkeepRoom () {
+    return upkeepArmed && upkeepPasses < MAX_UPKEEP_PASSES && upkeepTotal < MAX_UPKEEP_TOTAL
+  }
+
+  // Inside withStore: the length of each own core of `roots`.
+  async function ownCoreLengths (roots) {
+    const out = new Map()
+    for (const group of new Set(roots)) {
+      for (const key of await ownGroupKeys(group)) {
+        const core = await store.openGroupCoreReadOnly(storage, key)
+        if (core === null) continue
+        try { out.set(key, core.length) } finally { await core.close() }
+      }
+    }
+    return out
+  }
+
+  // One pass per timer: the delay turns a burst of triggers into one stop of
+  // the continuous run.
+  function scheduleUpkeep () {
+    if (upkeepQueued || upkeepTimer !== null || closed || keyPair === null || groupPrf === null) return
+    upkeepTimer = setTimeout(() => {
+      upkeepTimer = null
+      if (closed || upkeepQueued) return
+      upkeepQueued = true
+      upkeep({}).catch(noop)
+    }, upkeepDelayMs)
+  }
+
+  function resetUpkeep () {
+    if (upkeepTimer !== null) clearTimeout(upkeepTimer)
+    upkeepTimer = null
+    upkeepArmed = false
+    upkeepLength = null
+    upkeepPasses = 0
+    upkeepTotal = 0
+    upkeepRearmed = false
+    upkeepWanted = false
+    upkeepWriters.clear()
+  }
+
+  // The pass never calls another serial handler and never runs inside
+  // onEvent: it stops a run only through withStore / ensureCaughtUp, like
+  // every write, and the chain's restartWhenIdle restarts it. It never
+  // throws to anyone: a failure is a warning, and nothing is retried here
+  // (a later pass of the same bounded arming plans again from storage, so
+  // nothing is resent).
+  const upkeep = serial(async (_, epoch, generation) => {
+    upkeepQueued = false
+    if (!upkeepRoom()) return
+    try { checkGroupOperation(epoch, generation) } catch { return }
+    if (!(await store.diaryExists(storage))) return
+    // The app's recovery run must not be preempted; its end queues the pass.
+    if (run !== null && run.once) {
+      upkeepWanted = true
+      return
+    }
+    upkeepWanted = false
+    const arming = upkeepArming
+    upkeepPasses++
+    upkeepTotal++
+    groupWriting = true
+    const ownLength = (c) => member.withIdentity(c, async ({ diary }) => diary.length)
+    const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
+    try {
+      const { plan, planLength } = await withStore(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      // Only what a later sync can bring keeps the arming: a root skipped
+      // for good (reserve, full, orphan, status) does not.
+      let waiting = plan.skipped.filter((x) => x.transient === true).map((x) => x.root)
+      let arrived = false
+      let failed = 0
+      if (plan.enrol.length > 0 || plan.share.length > 0) {
+        const keys = [...new Set(plan.share.map((s) => s.writer))]
+        const planned = [...plan.enrol.map((x) => x.root), ...plan.share.map((x) => x.group)]
+        checkGroupOperation(epoch, generation)
+        await ensureCaughtUp(epoch, keys, generation)
+        let before = null
+        let after = null
+        let grew = false
+        let failure = null
+        let result = null
+        try {
+          result = await withStore(async (c) => {
+            checkGroupOperation(epoch, generation)
+            before = await ownLength(c)
+            const lengths = await ownCoreLengths(planned)
+            let r = null
+            try {
+              r = await member.deviceUpkeep(c, { enrol: plan.enrol, share: plan.share })
+            } finally {
+              // A step that threw may have written first: its roots are
+              // pushed too, from the plan when the result is lost.
+              after = await ownLength(c)
+              if (after > before) wrote(after - 1)
+              const now = await ownCoreLengths(planned)
+              grew = after > before || [...now].some(([key, length]) => lengths.get(key) !== length)
+              await noteWrittenRoots(r === null ? planned : [...r.changed, ...r.failed.map((f) => f.root)])
+            }
+            return r
+          })
+        } catch (err) {
+          failure = err
+        }
+        const sent = result === null ? (grew ? planned : []) : result.changed
+        for (const group of new Set(sent)) send('groups.changed', { group }, epoch)
+        // The gate brought blocks of another device: roots this pass did
+        // not plan may be bound now, so that length is no echo and the
+        // arming stays.
+        arrived = before !== null && before > planLength
+        // The own-synced that echoes this write is no new length.
+        if (!arrived && after !== null && after > before) upkeepLength = after
+        if (failure !== null) {
+          // What the step wrote before it threw is pushed all the same.
+          if (grew && !stale()) {
+            try { await pushAfterWrite() } catch {}
+          }
+          throw failure
+        }
+        // Each progress is a write, so fresh passes cannot loop: they serve
+        // what it unblocked (a group after its community's writer), and
+        // upkeepTotal bounds them.
+        if (result.enrolled.length > 0 || result.shared.length > 0) upkeepPasses = 0
+        const changed = new Set(result.changed)
+        failed = result.failed.length
+        waiting = waiting.filter((root) => !changed.has(root)).concat(result.failed.map((f) => f.root))
+        if (failed > 0) warning(UPKEEP_WARNING, epoch)
+        checkGroupOperation(epoch, generation)
+        await pushAfterWrite()
+      }
+      if (arrived) scheduleUpkeep()
+      else if (failed > 0) {
+        // A root that failed is tried again within the bound.
+        if (upkeepRoom()) scheduleUpkeep()
+      } else if (waiting.length === 0 && arming === upkeepArming) upkeepArmed = false
+    } catch (err) {
+      if (!stale()) {
+        warning(UPKEEP_WARNING, epoch)
+        // Still armed: another pass of this bounded arming tries again.
+        if (upkeepRoom()) scheduleUpkeep()
+      }
+    } finally {
+      groupWriting = false
+      for (const pair of groupPairs) zeroPair(pair)
+      groupPairs.clear()
+    }
+  })
 
   // post.delete / profile.delete: the post.reply path around member-ops'
   // tombstone writer (a target already deleted writes nothing).
@@ -2170,6 +2424,8 @@ function createBrowserSession ({
     dmEngine.lock()
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
+    // The next own-synced after an unlock (or a reload) arms afresh.
+    resetUpkeep()
   }
 
   // A follow change happened: a drain is due, retries start afresh.
@@ -2235,6 +2491,9 @@ function createBrowserSession ({
         }
       }
       followChanged()
+      // A live continuous run reported its own length while locked and will
+      // not report it again.
+      if (run !== null && !run.once && !run.internal && Number.isSafeInteger(run.ownLength)) armUpkeep(run.ownLength)
     })(), { abort: true }).catch((err) => {
       zeroPair(copy)
       zeroPair(mediaCopy)
@@ -2397,6 +2656,8 @@ function createBrowserSession ({
     connection++
     emitter = null
     syncIntent = null
+    // The next connection's first own-synced arms afresh.
+    resetUpkeep()
     return stopRun('stopped').then(noop)
   }
 
@@ -2411,6 +2672,7 @@ function createBrowserSession ({
     if (closing !== null) return closing
     closed = true
     syncIntent = null
+    resetUpkeep()
     peeker.abort()
     peeking = null
     noticer.abort()

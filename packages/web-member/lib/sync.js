@@ -272,7 +272,10 @@
 //                each pass on a link: 'group-synced { key, length }' when the
 //                seeder's page lists an own core at no more than we hold (or
 //                not at all), else 'group-behind { key, length, theirs }';
-//                once per length per link.
+//                once per length per link; 'group-writer { group,
+//                writer }' once per run when a writer core (never a root)
+//                of `group` passed its local check and was listed (the
+//                session's device upkeep plans the key re-share after it).
 //   goals        every run: each group paged in full and each accepted
 //                foreign core at the length its page advertises (as the
 //                follows, G1); once runs also wait for every own group core
@@ -1355,6 +1358,7 @@ async function syncRun ({
   const childrenOf = new Map() // community -> Set of held group roots whose header names it
   const parentNamed = new Set() // groups whose root header was read for its parent
   const parentAnnounced = new Set() // communities a 'community-parent' was emitted for
+  const writersAnnounced = new Set() // writer cores a 'group-writer' was emitted for
   const catalogueOf = new Map() // root paged root-only -> Set of communities whose catalogue names it
   const catalogueScans = new Map() // community -> { running, again }
   const createsCache = new Map() // community core key -> { next, creates, grants } (scanCreates)
@@ -3991,6 +3995,10 @@ async function syncRun ({
       ensureGroupDiary(ge.diary, ge.seq + 1)
       noteAcceptedGroupCore(ge)
       markGroupChanged(ge.group)
+      if (ge.key !== ge.group && !writersAnnounced.has(ge.key)) {
+        writersAnnounced.add(ge.key)
+        emit({ event: 'group-writer', group: ge.group, writer: ge.key })
+      }
       evaluate()
     }, () => {
       ge.gating = false

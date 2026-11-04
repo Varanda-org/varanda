@@ -35,7 +35,10 @@ export const HIDDEN_LABEL = 'mensagem escondida'
 export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'entrada com aprovação' })
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
 export const DEVICE_JOIN_LABEL = 'Participar neste aparelho'
-export const DEVICE_JOIN_TEXT = 'Sua conta já participa, mas este aparelho ainda não escreve aqui. Para escrever por ele, participe também neste aparelho.'
+export const DEVICE_JOIN_TEXT = 'Sua conta já participa. Este aparelho costuma entrar sozinho depois da sincronização; se ainda não entrou, toque para participar por ele.'
+export const DEVICE_RESERVE_TEXT = 'Sua conta já usa quase todos os aparelhos permitidos aqui. Entrar por este aparelho gasta uma das últimas vagas, que não voltam.'
+export const DEVICE_RESERVE_JOIN_TEXT = 'Este aparelho ainda não participa desta comunidade, e a conta já usa quase todos os aparelhos permitidos aqui. Para participar por ele, toque em Participar neste aparelho na lista de grupos; a vaga não volta.'
+export const DEVICE_PENDING_JOIN_TEXT = 'Este aparelho ainda não participa desta comunidade. Ele entra sozinho depois da sincronização; se não entrar, toque em Participar neste aparelho na lista de grupos.'
 export const DEVICE_WAIT_TEXT = 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.'
 export const DEVICE_STAFF_TEXT = 'Algumas ações de administração só funcionam no aparelho que tem o cargo. Use aquele aparelho ou peça um novo cargo para este.'
 export const DEVICE_ROOT_TEXT = 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.'
@@ -193,6 +196,31 @@ export function needsDeviceJoin (info) {
   return MEMBER_ROLES.includes(info.role) && info.writerHere === false
 }
 
+// The seeder never frees a device slot (8 per root); the app stops entering by
+// itself at 6 and leaves the last two to the person.
+export function reserveReachedAny (counts) {
+  if (!Array.isArray(counts)) return false
+  return counts.some((n) => Number.isSafeInteger(n) && n >= 6)
+}
+
+// At the reserve the first tap only shows the warning; the person confirms
+// with a second tap, because the slot is never given back.
+export function needsReserveConfirm (counts, confirmed) {
+  return confirmed !== true && reserveReachedAny(counts)
+}
+
+export function deviceReserveReached (info) {
+  if (!info || typeof info !== 'object') return false
+  return reserveReachedAny([info.writersBound])
+}
+
+// community.join spends a slot in the community and in Geral, so either count
+// can be the one that hits the reserve.
+export function communityReserveReached (info) {
+  if (!info || typeof info !== 'object') return false
+  return reserveReachedAny([info.writersBound, info.generalWritersBound])
+}
+
 export function writerOnDevice (info) {
   if (!info || typeof info !== 'object') return true
   return info.writerHere !== false
@@ -215,9 +243,11 @@ export function rootAdminHere (info) {
 
 // Which note explains hidden staff controls: 'root' for the creator's second
 // device (a role never grants the root), 'staff' for a device without
-// authority. One reason at a time, root first for the creator.
+// authority, 'join' when this device does not participate yet (the controls
+// are hidden until it does). One reason at a time, root first for the creator.
 export function deviceStaffNote (info, { owner, staff }) {
-  if (!staff || !info || typeof info !== 'object' || needsDeviceJoin(info)) return null
+  if (!staff || !info || typeof info !== 'object') return null
+  if (needsDeviceJoin(info)) return 'join'
   if (owner && !rootAdminHere(info) && info.repair !== true) return 'root'
   if (info.authorityHere === false) return 'staff'
   return null
