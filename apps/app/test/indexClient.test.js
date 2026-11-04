@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -878,6 +878,219 @@ test('fetchEngagers: request options, contract, a fresh copy and transport', asy
   const limited = await fetchEngagers('reposts', REF, null, { fetch: async () => response(text, { status: 429 }) })
   t.is(limited.reason, 'rate-limited')
   t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+})
+
+const AT1 = '2026-10-20T10:00:00.000Z'
+const AT2 = '2026-10-19T09:30:00.000Z'
+// Newer than AT1, so the fixture's rows come after it in the index order.
+const FCURSOR = { atMs: 1800000000000, key: C }
+
+function followsBody (over = {}) {
+  return {
+    author: A,
+    kind: 'seguidores',
+    items: [{ key: B, seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }],
+    next: { atMs: Date.parse(AT2), key: C },
+    total: 7,
+    authors: {
+      [B]: { profileSeq: 1, usernameSeq: null },
+      [C]: { profileSeq: null, usernameSeq: null }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+const countsBody = (over = {}) => ({ seguindo: 3, seguidores: 12, indexing: false, complete: true, ...over })
+
+test('followCountsUrl and followsUrl: exact paths, an invalid cursor is null', async (t) => {
+  const { followCountsUrl, followsUrl, fetchFollows, fetchFollowCounts, FOLLOWS_MAX } = await load()
+  t.is(FOLLOWS_MAX, 20)
+  t.is(followCountsUrl(A), '/index/follows/' + A)
+  t.is(followCountsUrl(A.toUpperCase()), '/index/follows/' + A, 'author lowercased')
+  t.is(followsUrl(A, 'seguindo'), '/index/follows/' + A + '/seguindo')
+  t.is(followsUrl(A, 'seguidores'), '/index/follows/' + A + '/seguidores')
+  t.is(followsUrl(A, 'seguidores', FCURSOR), '/index/follows/' + A + '/seguidores/1800000000000.' + C)
+  t.is(followsUrl(A, 'seguindo', { atMs: 0, key: B }), '/index/follows/' + A + '/seguindo/0.' + B, 'atMs 0')
+  for (const author of [A + 'a', 'zz'.repeat(32), A + '/x', '', null, 7]) {
+    t.is(followCountsUrl(author), null, 'author ' + String(author))
+    t.is(followsUrl(author, 'seguindo'), null, 'author ' + String(author))
+  }
+  for (const kind of ['Seguindo', 'seguidor', '', ' seguindo', 'likes', null, undefined, 7]) {
+    t.is(followsUrl(A, kind), null, 'kind ' + String(kind))
+  }
+  const badCursors = [
+    'x',
+    '1760000000000.' + C,
+    { atMs: -1, key: C },
+    { atMs: 1.5, key: C },
+    { atMs: Number.MAX_SAFE_INTEGER + 1, key: C },
+    { atMs: '1', key: C },
+    { atMs: 1, key: C.toUpperCase() },
+    { atMs: 1, key: C + '/x' },
+    { atMs: 1, key: C, extra: 1 },
+    { atMs: 1 },
+    [],
+    7
+  ]
+  for (const cursor of badCursors) t.is(followsUrl(A, 'seguindo', cursor), null, 'cursor ' + JSON.stringify(cursor))
+  let called = false
+  const fetch = async () => { called = true }
+  t.alike(await fetchFollowCounts('nope', { fetch }), { ok: false, reason: 'invalid-input' })
+  for (const [author, kind, cursor] of [[A, 'Seguindo', null], ['nope', 'seguindo', null], [A, 'seguindo', { atMs: -1, key: C }], [A, 'seguidores', 'x']]) {
+    t.alike(await fetchFollows(author, kind, cursor, { fetch }), { ok: false, reason: 'invalid-input' }, author + ' ' + kind + ' ' + JSON.stringify(cursor))
+  }
+  t.absent(called, 'no request for bad input')
+})
+
+test('validFollowCounts: exact keys, counts and flags', async (t) => {
+  const { validFollowCounts } = await load()
+  t.alike(validFollowCounts(countsBody()), countsBody())
+  t.alike(validFollowCounts(countsBody({ seguindo: 0, seguidores: 0, indexing: true, complete: false })), countsBody({ seguindo: 0, seguidores: 0, indexing: true, complete: false }))
+  const missing = countsBody()
+  delete missing.seguindo
+  const bad = [
+    countsBody({ extra: 1 }),
+    missing,
+    countsBody({ seguindo: -1 }),
+    countsBody({ seguidores: 2.5 }),
+    countsBody({ seguidores: '3' }),
+    countsBody({ seguindo: Number.MAX_SAFE_INTEGER + 1 }),
+    countsBody({ indexing: 'no' }),
+    countsBody({ complete: null }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validFollowCounts(body), null, JSON.stringify(body))
+})
+
+test('validFollows: exact shape, distinct items, hints for exactly the item keys', async (t) => {
+  const { validFollows } = await load()
+  t.alike(validFollows(followsBody(), A, 'seguidores'), followsBody())
+  t.alike(validFollows(followsBody({ kind: 'seguindo' }), A, 'seguindo'), followsBody({ kind: 'seguindo' }))
+  const empty = { author: A, kind: 'seguindo', items: [], next: null, total: 0, authors: {}, indexing: false, complete: true }
+  t.alike(validFollows(empty, A, 'seguindo'), empty, 'empty page')
+  const moon = { items: [{ key: B, seq: 9, at: '1969-07-20T20:17:40.000Z' }], authors: { [B]: { profileSeq: 1, usernameSeq: null } }, total: 3, next: { atMs: 0, key: B } }
+  t.alike(validFollows(followsBody(moon), A, 'seguidores').next, { atMs: 0, key: B }, 'a pre-1970 row clamps to atMs 0')
+  t.alike(validFollows(followsBody(), A, 'seguidores', FCURSOR), followsBody(), 'rows after the request cursor')
+  const keyOf = (i) => (i + 16).toString(16).padStart(2, '0').repeat(32)
+  const page = (n) => {
+    const items = Array.from({ length: n }, (_, i) => ({ key: keyOf(i), seq: 1, at: AT1 }))
+    const authors = Object.fromEntries(items.map((it) => [it.key, { profileSeq: null, usernameSeq: 1 }]))
+    return followsBody({ items, authors, total: n, next: null })
+  }
+  t.is(validFollows(page(20), A, 'seguidores').items.length, 20, '20 items')
+  const missingKey = followsBody()
+  delete missingKey.total
+  const hintsBC = { [B]: { profileSeq: 1, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null } }
+  const bad = [
+    followsBody({ extra: 1 }),
+    missingKey,
+    followsBody({ author: B }),
+    followsBody({ author: A.toUpperCase() }),
+    followsBody({ kind: 'seguindo' }),
+    followsBody({ kind: 'Seguidores' }),
+    page(21),
+    followsBody({ items: [{ key: B, seq: 9, at: AT1 }, { key: B, seq: 3, at: AT2 }], authors: { [B]: hintsBC[B] } }),
+    followsBody({ items: [{ key: A, seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { [A]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: B.toUpperCase(), seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { [B.toUpperCase()]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: 'zz'.repeat(32), seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { ['zz'.repeat(32)]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: B, seq: 0, at: AT1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 1.5, at: AT1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: '2026-10-20T10:00:00Z' }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: 'x' }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: AT1, extra: 1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [B + ':9', C + ':4'] }),
+    followsBody({ items: 'x' }),
+    followsBody({ next: 'x' }),
+    followsBody({ next: { atMs: -1, key: C } }),
+    followsBody({ next: { atMs: 1.5, key: C } }),
+    followsBody({ next: { atMs: 1, key: 'zz'.repeat(32) } }),
+    followsBody({ next: { atMs: 1, key: C, extra: 1 } }),
+    followsBody({ total: -1 }),
+    followsBody({ total: 2.5 }),
+    followsBody({ total: '7' }),
+    followsBody({ total: 1 }),
+    followsBody({ indexing: 'no' }),
+    followsBody({ complete: null }),
+    followsBody({ authors: { [B]: hintsBC[B] } }),
+    followsBody({ authors: { ...hintsBC, [A]: { profileSeq: 1, usernameSeq: 1 } } }),
+    followsBody({ authors: { [B]: { profileSeq: 1, usernameSeq: null, extra: 1 }, [C]: hintsBC[C] } }),
+    followsBody({ authors: { [B]: { profileSeq: 0, usernameSeq: null }, [C]: hintsBC[C] } }),
+    followsBody({ authors: [] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validFollows(body, A, 'seguidores'), null, JSON.stringify(body).slice(0, 100))
+
+  // A seeder cannot make the reader page backwards or forever.
+  const backwards = [
+    followsBody({ next: { atMs: Date.parse(AT1), key: B } }),
+    followsBody({ next: { atMs: Date.parse(AT2) + 1, key: C } }),
+    followsBody({ items: [], authors: {}, total: 7 }),
+    followsBody({ items: [{ key: C, seq: 4, at: AT2 }, { key: B, seq: 9, at: AT1 }], next: { atMs: Date.parse(AT1), key: B } }),
+    followsBody({ items: [{ key: C, seq: 4, at: AT1 }, { key: B, seq: 9, at: AT1 }], next: { atMs: Date.parse(AT1), key: B } })
+  ]
+  for (const body of backwards) t.is(validFollows(body, A, 'seguidores'), null, 'order ' + JSON.stringify(body.items.map((i) => i.key.slice(0, 2))) + ' next ' + JSON.stringify(body.next))
+  t.is(validFollows(followsBody(), A, 'seguidores', { atMs: Date.parse(AT2), key: A }), null, 'rows before the request cursor')
+  t.is(validFollows(followsBody(), A, 'seguidores', { atMs: Date.parse(AT1), key: B }), null, 'the cursor row itself again')
+})
+
+test('fetchFollowCounts and fetchFollows: request options, contract, a fresh copy and transport', async (t) => {
+  const { fetchFollowCounts, fetchFollows, validFollows } = await load()
+  const calls = []
+  const counts = await fetchFollowCounts(A.toUpperCase(), {
+    fetch: async (url, opts) => {
+      calls.push({ url, opts })
+      return response(JSON.stringify(countsBody()))
+    }
+  })
+  t.alike(counts, { ok: true, value: countsBody() })
+  t.is(calls[0].url, '/index/follows/' + A)
+  const parsed = followsBody()
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(parsed))
+  }
+  const res = await fetchFollows(A.toUpperCase(), 'seguidores', FCURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, followsBody())
+  t.is(calls[1].url, '/index/follows/' + A + '/seguidores/1800000000000.' + C)
+  for (const c of calls) {
+    t.is(c.opts.method, 'GET')
+    t.is(c.opts.credentials, 'omit')
+    t.is(c.opts.redirect, 'error')
+    t.is(c.opts.cache, 'no-store')
+    t.ok(c.opts.signal, 'abortable')
+  }
+  const own = followsBody()
+  const copy = validFollows(own, A, 'seguidores')
+  copy.items[0].seq = 99
+  copy.next.atMs = 1
+  copy.authors[B].profileSeq = 99
+  t.is(own.items[0].seq, 9, 'items copied')
+  t.is(own.next.atMs, Date.parse(AT2), 'cursor copied')
+  t.is(own.authors[B].profileSeq, 1, 'hints copied')
+  for (const body of [followsBody({ extra: 1 }), followsBody({ author: B }), followsBody({ kind: 'seguindo' }), followsBody({ total: 1 })]) {
+    t.alike(await fetchFollows(A, 'seguidores', null, { fetch: json(body) }), { ok: false, reason: 'malformed' }, JSON.stringify(body).slice(0, 80))
+  }
+  t.alike(await fetchFollowCounts(A, { fetch: json(countsBody({ extra: 1 })) }), { ok: false, reason: 'malformed' })
+  const text = JSON.stringify(followsBody())
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(followsBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
+  const bigCounts = response(JSON.stringify(countsBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchFollowCounts(A, { fetch: async () => bigCounts })).reason, 'too-large')
+  // Last: the cooldown a 429 sets outlives the remaining calls.
+  const limited = await fetchFollows(A, 'seguindo', null, { fetch: async () => response(text, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+  const limitedCounts = await fetchFollowCounts(A, { fetch: async () => response('', { status: 429 }) })
+  t.is(limitedCounts.reason, 'rate-limited', 'counts share the cooldown')
 })
 
 test('with an installation set, every index URL is absolute on that origin only', async (t) => {

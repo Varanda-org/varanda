@@ -36,6 +36,27 @@ export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'en
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
 
 const HEX64 = /^[0-9a-f]{64}$/
+
+// The unread count the node reports caps at 99, meaning 99 or more.
+export function unreadLabel (n) {
+  if (!Number.isInteger(n) || n < 1) return ''
+  return n >= 99 ? '99+' : String(n)
+}
+
+// One line for a group row: who said it and what. A hidden message shows
+// only the fixed label, never its preview or its author.
+export function lastLine (last) {
+  if (!last || typeof last !== 'object') return ''
+  if (last.hidden === true) return HIDDEN_LABEL
+  // A line break would show as U+FFFD.
+  const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  let who = ''
+  if (last.mine === true) who = 'Você'
+  else if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
+  else if (typeof last.username === 'string' && displayText(last.username).trim() !== '') who = '@' + displayText(last.username)
+  return who === '' ? text : who + ': ' + text
+}
+
 const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
 
 // --- merging ---
@@ -84,11 +105,15 @@ function authorOf (item, names) {
 // `items` as group.read answers (newest first, hidden ones included with
 // empty text). Rows come oldest first, so the newest sits at the bottom of
 // the conversation. `names` maps a diary key to a name already verified.
+// `text` is escaped with its line breaks. `rawText` goes to MentionText, which
+// escapes each piece itself: a word holding a control or direction mark is
+// only kept unlinked while it still holds the mark, not its U+FFFD.
 export function rowsOf (items, names = {}) {
   const rows = []
   for (const item of mergePages([items])) {
     if (typeof item.writer !== 'string' || !Number.isSafeInteger(item.seq)) continue
     const hidden = item.hidden === true
+    const raw = hidden || typeof item.text !== 'string' ? '' : item.text
     const reply = item.replyTo && typeof item.replyTo.writer === 'string' && Number.isSafeInteger(item.replyTo.seq)
     rows.push({
       id: item.writer + ':' + item.seq,
@@ -98,7 +123,8 @@ export function rowsOf (items, names = {}) {
       at: typeof item.at === 'string' ? item.at : null,
       author: authorOf(item, names),
       hidden,
-      text: hidden ? HIDDEN_LABEL : displayText(typeof item.text === 'string' ? item.text : ''),
+      text: hidden ? HIDDEN_LABEL : displayText(raw, { multiline: true }),
+      rawText: raw,
       replyTo: reply ? item.replyTo.writer + ':' + item.replyTo.seq : null
     })
   }

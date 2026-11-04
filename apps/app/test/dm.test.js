@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'requestsDot', 'selectorItems', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'requestsDot', 'selectorItems', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')

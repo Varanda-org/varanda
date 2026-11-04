@@ -195,10 +195,10 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'mensagem', 'seguindo'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
-  for (const screen of ['grupo', 'comunidade']) {
+  for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
     t.ok(validEntry({ screen, key: A }))
     const stack = push(EMPTY, { screen, key: A })
     t.alike(top(stack), { screen, key: A, params: {} })
@@ -241,4 +241,20 @@ test('seguindo is keyed by a lowercase hex64 key and refuses uppercase or post r
   t.absent(validEntry({ screen: 'seguindo', key: A + ':1' }))
   t.is(push(EMPTY, { screen: 'seguindo', key: A + ':1' }), EMPTY)
   t.ok(validEntry({ screen: 'mensagem', key: A }), 'mensagem is still valid')
+})
+
+test('seguidores is keyed by a lowercase hex64 key and refuses uppercase or post refs', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('seguidores'))
+  t.ok(validEntry({ screen: 'seguidores', key: A }))
+  const stack = push(EMPTY, { screen: 'seguidores', key: A })
+  t.alike(top(stack), { screen: 'seguidores', key: A, params: {} })
+  t.is(push(stack, { screen: 'seguidores', key: A }), stack, 'same top is a no-op')
+  t.absent(validEntry({ screen: 'seguidores', key: A.toUpperCase() }))
+  t.is(push(EMPTY, { screen: 'seguidores', key: A.toUpperCase() }), EMPTY)
+  t.absent(validEntry({ screen: 'seguidores', key: A + ':1' }))
+  t.is(push(EMPTY, { screen: 'seguidores', key: A + ':1' }), EMPTY)
+  const onFollowing = push(push(EMPTY, { screen: 'seguindo', key: A }), { screen: 'seguidores', key: A })
+  t.is(onFollowing.length, 2, 'same key on seguindo is a new entry')
+  t.alike(top(onFollowing), { screen: 'seguidores', key: A, params: {} })
 })

@@ -222,7 +222,8 @@
 	# GET|HEAD /index/post/..., /index/counts/..., /index/member/...,
 	# /index/search/... (a busca de contas por nome ou @nome),
 	# /index/topic/... (a pesquisa por assunto da Espiadinha),
-	# /index/likes/... e /index/reposts/... (quem curtiu e quem republicou). Nas duas
+	# /index/likes/... e /index/reposts/... (quem curtiu e quem republicou),
+	# /index/follows/... (contagens e listas públicas de seguidores). Nas duas
 	# buscas o caminho leva o texto já normalizado: o semeador não o registra
 	# e o Caddy não tem log de acesso, mas o log de erros do Caddy pode
 	# guardar o caminho e o endereço do cliente quando o proxy para o

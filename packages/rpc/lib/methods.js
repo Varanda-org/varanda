@@ -534,26 +534,32 @@ const SPECS = {
     }
   },
   // People who follow the caller and whom the caller does not follow yet, plus
-  // the replies, quotes and mentions that name the caller.
-  // Success: { notices: [{ kind: 'follow' | 'reply' | 'quote' | 'mention',
+  // the replies, quotes and mentions that name the caller and the likes and
+  // reposts of the caller's posts.
+  // Success: { notices: [{ kind: 'follow' | 'reply' | 'quote' | 'mention' | 'like' | 'repost',
   // key: hex64, seq: integer >= 1, at: ISO, name: string|null,
-  // username: string|null, seen: hex32, avatar: AvatarDescriptor|null }],
+  // username: string|null, seen: hex32, avatar: AvatarDescriptor|null,
+  // post?: '<hex64>:<seq>' }],
   // next: null | { at, key } | { at, key, seq }, incomplete: boolean,
   // supported: boolean, activity: boolean }.
   // No count or total.
   // kind is absent on a notice of a node that predates it, and means 'follow'.
   // name and avatar come from the author's profile and username is their
   // verified username, for every kind;
-  // seq is the block of their signed follow record; for a non-follow kind,
-  // key:seq is the author's signed POST block that replied to, quoted or
-  // mentioned the caller. seen is an opaque token, stable per identity, keyed
-  // by the identity secret and unlinkable to the follower without it (what the
-  // app stores as seen); one row per block. next is the next-page cursor; it
-  // carries seq whenever the read went over the notices channel v2.
+  // seq is the block of their signed follow record; for a reply, quote or
+  // mention, key:seq is the author's signed POST block that replied to, quoted
+  // or mentioned the caller; for a like or repost, key:seq is the engager's
+  // signed on:true like or repost block, at is its at, and post names the
+  // caller's post it targets. post is absent on every other kind.
+  // seen is an opaque token, stable per identity, keyed by the identity secret
+  // and unlinkable to the follower without it (what the app stores as seen);
+  // one row per block. next is the next-page cursor; it
+  // carries seq whenever the read went over the notices channel v3 or v2.
   // incomplete means the seeder's index or the read's budget was not complete;
-  // supported is false when the seeder does not speak the notices channel;
+  // supported is false when the seeder speaks none of the notices channels;
   // activity is false only when the rows came over the follows-only channel
-  // v1 because the seeder does not speak v2; every other result says true.
+  // v1 because the seeder speaks neither v3 nor v2; every other result says
+  // true. Likes and reposts come only over v3.
   // Hosted web only: the core node answers USAGE 'avisos disponíveis só no navegador'
   // (docs/rpc.md 5.28).
   'notices.list': {
@@ -585,6 +591,9 @@ const SPECS = {
       before: opt(isGroupCursor)
     }
   },
+  // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
+  // never goes to peers; the client re-reads community.info.
+  'group.seen': { fields: { group: req(isKey) } },
   'group.list': {
     fields: {
       offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
@@ -627,7 +636,11 @@ const SPECS = {
   // ended (cwDemote) and who writes through a live CW: community.meta then
   // goes through that CW and community.removeGroup is open. dropped lists
   // the groups currently taken off C's catalogue (sorted keys, never Geral),
-  // which community.removeGroup with undo puts back.
+  // which community.removeGroup with undo puts back. Every groups row also
+  // has last: null | { name: string|null, username: string|null, preview:
+  // string, at: canonical ISO, mine: boolean, hidden: boolean } and unread:
+  // integer 0..99 (99 means 99 or more). preview is raw peer text cut to 140
+  // code points with Array.from (nothing appended), '' when hidden.
   'community.info': { fields: { community: req(isKey) } },
   'community.list': { fields: none },
   'community.admin': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },

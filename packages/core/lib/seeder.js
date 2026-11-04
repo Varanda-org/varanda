@@ -150,7 +150,7 @@ const { createDmPool } = require('./dm-pool')
 const { attachDm } = require('./dm-net')
 const { attachDmStamp } = require('./dm-stamp-net')
 const dmPostage = require('./dm-postage')
-const { attachNotices, attachNoticesV2 } = require('./notices-net')
+const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
 const { pushCandidate, pushName } = require('./push-events')
 const {
@@ -1126,7 +1126,10 @@ class Seeder {
     // Post notices (post-notices.js: replies, quotes, @nome mentions) follow
     // the same lifecycle in their own index, so a mention spammer never
     // touches the follow index's budget; both are paged on
-    // varanda/notices/2, and _noticeHandles holds the v1 and v2 channels.
+    // varanda/notices/2. varanda/notices/3 adds likes and reposts read from
+    // the engagement index (noticeRows), on its own channel because an old
+    // client rejects a whole v2 page on an unknown kind; _noticeHandles holds
+    // the v1, v2 and v3 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
     this._postNotices = this._createPostNoticeIndex()
     this._noticeHandles = new Set()
@@ -4944,6 +4947,75 @@ class Seeder {
     }
   }
 
+  // The follow edges are public: who follows an author and whom it follows,
+  // under the same read gate as indexEngagers. A held author answers null; a
+  // held person is left out and the answer says complete false.
+  _followsVisible () {
+    const state = { held: false }
+    state.visible = (hex) => {
+      if (!this._indexVisible(hex)) return false
+      if (this._searchHeld(hex)) {
+        state.held = true
+        return false
+      }
+      return true
+    }
+    return state
+  }
+
+  // GET /index/follows/<author>: both counts, or null for an author the
+  // index may not show.
+  indexFollowCounts (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const v = this._followsVisible()
+      const counts = this._notices.followCounts(authorHex, v.visible)
+      const flags = this._indexFlags()
+      return { seguindo: counts.seguindo, seguidores: counts.seguidores, indexing: flags.indexing, complete: flags.complete && !v.held && !counts.incomplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/follows/<author>/<kind>[/<atMs>.<key>]: one page of
+  // followers or followed accounts, newest first, with a hint per listed
+  // key; null for an unknown kind, an author not shown or a malformed cursor.
+  // The cursor stays in integer milliseconds (no Date round trip).
+  indexFollows (authorHex, kind, cursor = null) {
+    try {
+      if (kind !== 'seguindo' && kind !== 'seguidores') return null
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { t, key: m[2] }
+      }
+      const v = this._followsVisible()
+      const page = this._notices.followsPage({ author: authorHex, kind, after, limit: 20, visible: v.visible })
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return {
+        author: authorHex,
+        kind,
+        items: page.items.map((it) => ({ key: it.key, seq: it.seq, at: it.at })),
+        next: page.next,
+        total: page.total,
+        authors,
+        indexing: flags.indexing,
+        complete: flags.complete && !v.held && !page.incomplete
+      }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/counts/<ref,...>: counts for the refs that are indexed (an
   // unknown ref, or one of an author not visible, is omitted).
   indexCounts (refs) {
@@ -5842,6 +5914,56 @@ class Seeder {
     }
     this._noticeHandles.add(noticesV2)
     release.push(() => this._noticeHandles.delete(noticesV2))
+    // v2 plus likes and reposts of the target's posts. Engagers go through
+    // the likers list's visibility (indexEngagers) before noticeRows' caps,
+    // so a hidden or blocked engager never takes a newer row's place.
+    let noticesV3 = null
+    try {
+      noticesV3 = attachNoticesV3(socket, {
+        role: 'seeder',
+        page: ({ target, after, limit }) => {
+          if (this._isBlocked(target)) return { items: [], next: null, incomplete: false }
+          const isBlocked = (k) => this._isBlocked(k)
+          const f = this._notices.rowsFor(target, isBlocked)
+          const opts = this._certOpts()
+          const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+          let held = false
+          const visible = (hex) => {
+            if (!this._indexVisible(hex) || isBlocked(hex)) return false
+            if (this._searchHeld(hex)) {
+              held = true
+              return false
+            }
+            return true
+          }
+          const engagementRows = this._index.noticeRows(target, Date.now(), visible)
+          const result = this._postNotices.pageV3({
+            target,
+            followRows: f.rows,
+            followIncomplete: f.incomplete,
+            engagementRows,
+            // Not stats().saturated: it turns true at the cap before anything
+            // is refused and stays on; a refused block pauses that diary's
+            // cursor, which _indexFlags already reports (as indexEngagers).
+            engagementIncomplete: held || !this._indexFlags().complete,
+            isBlocked,
+            issuerUsable: (i) => !revoked.has(i),
+            after,
+            limit,
+            now: Date.now()
+          })
+          const e = this._served.get(target)
+          if (this._closing || !e || !e.gated) result.incomplete = true
+          return result
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._noticeHandles.add(noticesV3)
+    release.push(() => this._noticeHandles.delete(noticesV3))
     // Direct messages: the anonymous drop channel now, the stamp channel
     // once the peer opens it (the postage key is loaded then, never before).
     // A peer from before them never opens either and stays connected.

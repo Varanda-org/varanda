@@ -2652,6 +2652,19 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
+### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
+
+Antes, o splash saía cedo e deixava aparecer telas de espera (passkey "carregando…", "Buscando sua conta…", "Confirme sua idade" com o botão desativado e o "Um instante" do perfil). Agora o splash fica até a primeira tela real ser conhecida. Cada etapa tem 10 s de paciência: se uma leitura travar, a tela real aparece mesmo assim. "Buscando sua conta…" (recuperação da conta) continua coberto até o nó encerrar a busca (30 s, ou cerca de 60 s se ela recomeçar uma vez), com teto de 65 s caso o fim da busca nunca chegue. Depois que a primeira tela real aparece, o splash não volta nesta carga da página ou nesta execução do app. Cartões de introdução, Termos e Conexão não mudam; na web, "Entrar" com a passkey é a primeira tela real.
+
+1. [ ] App nativo com sessão retomada e idade já verificada: só o splash até A Rua, sem passar por "Confirme sua idade" com o botão desativado (não realizada ainda).
+2. [ ] Membro com a idade ainda não verificada: splash, depois "Confirme sua idade" com "Verificar minha idade" ativo (não realizada ainda).
+3. [ ] Leitura da idade que não responde: depois de 10 s nessa etapa, aparece "Confirme sua idade" com o indicador de carregamento (não realizada ainda).
+4. [ ] Perfil próprio lento: "Continuar mesmo assim" só aparece depois de 10 s em "Um instante" (não realizada ainda).
+5. [ ] Web: o splash em CSS some uma vez só, sem repetir a animação da cadeira (não realizada ainda).
+6. [ ] Web: "Entrar" com a passkey aparece como antes, e depois de entrar as telas seguem como antes (não realizada ainda).
+7. [ ] Cartões de introdução, Termos e Conexão sem mudança (não realizada ainda).
+8. [ ] Depois de A Rua, bloquear e desbloquear não traz o splash de volta (não realizada ainda).
+
 ## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
 
 ### O que mudou
@@ -3924,7 +3937,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 ## 71. Barra de ícones, sino, Busca e perfis iguais (PR feat/app-ux-icones)
 
-A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Seguidores continuam privados: não há contagem nem lista em lugar nenhum. Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
+A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Neste PR a contagem e a lista de seguidores ainda não existem (elas chegam, públicas, na seção 74). Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
 
 ### Como verificar
 
@@ -3941,7 +3954,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 5. **Espiadinha.** Sem campo de pesquisa; carrega e atualiza como antes.
 6. **Seguindo.** "N seguindo" no Diário abre a lista. O campo "Filtrar nesta lista" ("nome ou @nome") reduz a lista no aparelho, com a dica "Para encontrar outra conta, use a Busca." e, sem correspondência, "Ninguém com esse nome nesta lista."; colar um código de 64 letras e números não segue ninguém; "Deixar de seguir" ainda pede confirmação; voltar retorna ao Diário. Sem internet, com nomes ainda não lidos, o filtro mostra "Carregando nomes…" e pede os nomes de novo enquanto a tela está no topo; ao voltar a conexão, eles aparecem.
 7. **Perfil de outra pessoa.** Tem o desenho do Diário: faixa atrás da barra de estado com a barra de estado clara, o círculo de voltar no canto esquerdo da faixa acessível (não coberto pelo avatar), avatar com anel à esquerda, nome, @nome, bio e as pílulas Seguir, Mensagem (hospedado) e denunciar a conta, todas funcionando.
-8. **Seguidores.** Não há contagem nem lista de seguidores em lugar nenhum.
+8. **Seguidores.** Avisos não mostra contagem nem lista de seguidores. (A contagem e a lista públicas de seguidores nos perfis chegam na seção 74.)
 
 ### Não verificado / limites conhecidos
 
@@ -3951,9 +3964,179 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Limite aceito: no perfil de outra pessoa, como no Diário, a barra de estado fica clara mesmo depois que a faixa sai da tela ao rolar.
 - Com o filtro de Seguindo, a lista lê mais páginas sozinha pela regra de todas as listas (pausa depois de 3 páginas sem linha nova, com "Nada novo nas últimas páginas." e "carregar mais"), e só com a tela no topo, porque cada leitura interrompe a sincronização. Sem resultado entre as linhas já lidas, mostra "Ninguém com esse nome entre os já carregados.".
 
-## 72. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+## 72. Convidar por @nome pelas Conversas (PR feat/convidar-por-nome)
 
-As seções 1 a 71 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
+Quem pode convidar (criação, administradores e, com "Membros podem convidar", os membros) vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo. Digita @nome ou escolhe na busca, vê a pessoa e toca em Convidar. O app confere `dm.lookup`; sem Conversas, mostra "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."; com Conversas, manda uma mensagem privada (`dm.send`) "Convite para a comunidade X na Varanda: <link>" (ou a forma de grupo). Envio incerto mostra "Não deu para confirmar se o convite foi enviado. Tente de novo: a mensagem não se repete." e **Tentar de novo**, que reenvia o mesmo texto, nunca sozinho. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite; abrir nunca entra. Links de outros endereços são ignorados.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `apps/app/test/inviteMessage.test.js` | 12 testes: texto do convite (também de grupo sem nome), corte dos nomes, reconhecimento estrito do link (só no começo do texto ou depois de espaço, o último link vale) |
+| `apps/app/test/group-flow.test.js` | dois testes novos: seção Convidar e Convidar para o grupo, consulta ao nó antes do envio, membro conferido no nó, Tentar de novo com o mesmo texto e nenhum envio dentro de um efeito |
+| `apps/app/test/conversas.test.js` | o teste novo da linha de mensagem com Abrir convite |
+
+### Checagens humanas (a fazer)
+
+Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local. As caixas ficam desmarcadas até alguém executar o passo.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] Um administrador convida @nome na comunidade. A pessoa recebe a mensagem nas Conversas; em Pedidos de mensagem se não seguir quem convidou.
+- [ ] **Abrir convite** abre a comunidade no cartão de convite.
+- [ ] Abrir o convite não entra: só o toque em **Entrar** (ou **Pedir entrada**) grava a entrada.
+- [ ] Repetir em Ajustes do grupo, com **Convidar para o grupo**.
+- [ ] Um membro só vê **Convidar** quando a regra é "Membros podem convidar".
+- [ ] Uma pessoa sem Conversas faz aparecer "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."
+- [ ] Com o envio incerto (rede cortada logo após tocar), aparece o texto de incerteza e **Tentar de novo**; a pessoa convidada recebe uma só mensagem.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro: convite por @nome, Pedidos, Abrir convite, Entrar ainda necessário, regra Membros podem convidar, pessoa sem Conversas e Tentar de novo.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- A pessoa convidada precisa usar as Conversas; sem elas, só o link pelo Compartilhar.
+- "Quem pode convidar" controla só o botão: qualquer pessoa ainda pode mandar o link pelo Compartilhar ou colá-lo numa mensagem.
+- O convite não aprova a entrada. Os administradores não veem "convidado por".
+
+## 73. Comunidade estilo Telegram: lista de grupos, Informações e não lidas (PR feat/comunidade-lista-grupos)
+
+A tela da comunidade virou a lista dos grupos. A barra do topo mostra o avatar, o nome e só o número de membros; tocar no nome ou no **⋯** abre **Informações da comunidade**, também enquanto a comunidade ainda chega ("Aguardando a sincronização desta comunidade.", só com **Compartilhar**). Cada grupo mostra quem escreveu por último, o texto, a hora e o selo de não lidas ("99+" a partir de 99). Abrir um grupo zera o selo só neste aparelho. A marca de lido só é gravada pela tela do grupo que está no topo; uma tela coberta relê, mas não marca, e marca ao voltar ao topo. Em Informações ficam Compartilhar, Sair ou Desistir, Concluir saída, Sair mesmo assim, Convidar, Membros, Pedidos, Quem pode convidar e Ajustes. Entrar, o cartão de convite, o índice do semeador como alternativa, Novo grupo, Tirar da lista e Devolver à lista continuam na lista. A aba Comunidades e o ponto da aba não mudaram.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `apps/app/test/groups.test.js` | `unreadLabel` (vazio abaixo de 1, número até 98, "99+" a partir de 99) e `lastLine` (quem escreveu e o texto; uma mensagem escondida só mostra o rótulo fixo) |
+| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
+| `apps/app/test/nav.test.js` | `comunidade-info` é uma tela da pilha, com chave hex64 como `grupo` e `comunidade` |
+| `apps/app/test/shareOrigin.test.js` | o link de compartilhar da comunidade usa a origem da instalação |
+| `apps/app/test/tabBar.test.js` | o botão publicar some na tela `comunidade-info`, como em grupo e comunidade |
+| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
+| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; `deleteGroupData` remove a marca |
+| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, só com `group`; `community.info` continua não mutante |
+| `packages/rpc/test/sizes.test.js` | `community.info` no pior caso (32 grupos com nomes máximos) cabe no limite de mensagem |
+
+### Checagens humanas (a fazer)
+
+As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] A lista mostra, em cada grupo, quem escreveu por último, o texto, a hora e o selo de não lidas.
+- [ ] Abrir um grupo e voltar zera só o selo dele; os outros grupos mantêm o deles.
+- [ ] Com 99 ou mais mensagens não lidas, o selo mostra "99+".
+- [ ] Depois de fechar e abrir o app, as contagens continuam como estavam.
+- [ ] Tocar no nome da comunidade ou no ⋯ abre Informações; voltar leva à lista.
+- [ ] Numa comunidade ainda chegando, Informações mostra o título "Comunidade ainda chegando", só **Compartilhar** e "Aguardando a sincronização desta comunidade.".
+- [ ] Em Informações: Compartilhar, Sair da comunidade, Concluir saída e Sair mesmo assim funcionam como antes, cada um conforme o papel.
+- [ ] Convidar por @nome, Membros, Pedidos, Quem pode convidar (Só administradores e Membros podem convidar) e Ajustes (renomear, entrada e administradores) continuam funcionando.
+- [ ] Na lista, o cartão de convite de quem não participa ainda entra com um toque, e Tirar da lista e Devolver à lista continuam no criador com o reparo ativo.
+- [ ] Um grupo privado ou bloqueado mostra a linha sem texto cifrado.
+- [ ] Uma mensagem escondida aparece como "mensagem escondida".
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro do Android no navegador.
+- [ ] Recarregar a página mantém as contagens de não lidas.
+- [ ] Sem a comunidade neste aparelho, a lista do índice mostra o cartão, **Compartilhar** e os grupos, sem última mensagem nem selo.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- A marca de lido é por aparelho: outro aparelho, ou outro navegador, conta de novo as não lidas.
+- A marca vale para no máximo 512 grupos; o grupo cuja marca foi descartada (a menos marcada recentemente) volta a contar como nunca lido.
+- A primeira visita pode mostrar não lidas antigas até cada grupo ser aberto.
+- `group.seen` marca a mensagem mais nova que o nó tem quando atende o pedido, não a que está na tela. Uma mensagem que chega nesse intervalo conta como lida mesmo que a pessoa saia antes de ela aparecer. Fechar isso pede um `group.seen` com a mensagem de corte, numa mudança seguinte.
+- Se a releitura do grupo falhar, nada é marcado até a próxima leitura que der certo: a contagem pode ficar, mas nunca some antes da hora.
+- A aba Comunidades e o ponto da aba não mudaram; não há número na aba.
+
+## 74. Seguidores públicos (PR feat/seguidores-publicos)
+
+Por decisão dos donos do projeto, a contagem e a lista de seguidores são públicas: quem usa o site da associação ou o app ligado à instalação vê, em qualquer conta, "N seguindo" e "N seguidores", e cada número abre a lista (Seguindo, Seguidores) com o campo "Filtrar nesta lista", que só filtra essa lista. O Diário mantém o "N seguindo" do nó local (`node.info.followCount`) e ganha "N seguidores" do semeador; o perfil de outra pessoa mostra os dois do semeador. O semeador responde `GET /index/follows/<author>` e `GET /index/follows/<author>/(seguindo|seguidores)[/<cursor>]` (`Seeder#indexFollowCounts` e `Seeder#indexFollows`, `packages/core/lib/notices.js` `followCounts` e `followsPage`; protocol §5 "Seeder follow index" e §7). Cada linha é um registro de seguir assinado, conferido com `diary.peek` antes de aparecer. Avisos continua privado e com prova. Termos e Política vão à versão 12, com novo aceite.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes novos ou alterados: `packages/core/test/notices.test.js` (`followsPage`, `followCounts`, regra de omissão, tetos), `apps/cli/test/seeder-notices.test.js` e `apps/cli/test/seed-ws.test.js` (as duas rotas, 404, cursor, tamanho máximo), `apps/app/test/indexClient.test.js` (`followsUrl`, `validFollows`), `apps/app/test/pessoas.test.js` (conferência com `diary.peek`, textos), `apps/app/test/nav.test.js`, `apps/app/test/help.test.js`, `apps/app/test/legal.test.js` e `packages/core/test/terms.test.js` (versão 12).
+
+Contra o semeador da demo (`npm run demo` imprime a URL do semeador; `<hex64>` é a chave de um diário servido):
+
+```sh
+curl -s <url-do-semeador>/index/follows/<hex64>
+curl -s <url-do-semeador>/index/follows/<hex64>/seguidores
+```
+
+A primeira devolve `{ seguindo, seguidores, indexing, complete }`; a segunda, `{ author, kind, items, next, total, authors, indexing, complete }` com no máximo 20 itens. Uma chave desconhecida ou bloqueada dá 404 `não encontrado`.
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada), depois no iOS (simulador) e na web.
+
+1. **Diário.** Mostra "N seguindo" (do nó local) e "N seguidores" (do semeador). Tocar em cada um abre a lista Seguindo ou Seguidores, com o título certo e a seta de voltar.
+2. **Perfil de outra pessoa.** Mostra "N seguindo" e "N seguidores" do semeador; cada um abre a lista dessa pessoa.
+3. **Listas.** O cabeçalho mostra "N pessoas" ("1 pessoa"); as linhas têm avatar, nome e @nome e abrem o perfil; a lista pagina até o fim.
+4. **Filtro.** "Filtrar nesta lista" reduz só a lista aberta, no aparelho, sem pedir nada ao semeador.
+5. **Seguir.** Seguir alguém aumenta o "seguidores" dessa pessoa depois de puxar para atualizar (o semeador precisa ler o diário; até lá o número pode atrasar).
+6. **Deixar de seguir.** Cai o "seguidores" dela depois que o semeador relê o diário.
+7. **Bloqueado.** Um membro bloqueado não aparece em nenhuma lista nem entra em nenhuma contagem.
+8. **Configuração manual.** No Diário só aparece "N seguindo"; nos perfis não aparece nada; a lista aberta mostra "Disponível no site da associação ou no app ligado à instalação.".
+9. **Nota.** Enquanto o semeador ainda lê os diários (logo depois de reiniciar), os números do perfil mostram "A contagem pode estar incompleta." e a lista mostra "A lista pode estar incompleta.".
+10. **Termos.** Com os Termos e a Política já aceitos na versão 11, o app pede o aceite da versão 12 antes de qualquer tela.
+11. **Avisos.** Continua sem contagem nem lista de seguidores e só com prova.
+12. **curl.** Os dois comandos acima devolvem o formato descrito.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Limite aceito: a contagem do semeador inclui só membros admitidos e visíveis nesse semeador (contas de fora da associação nunca aparecem), então pode ser menor que o "N seguindo" do próprio Diário, que conta todo seguir do nó local; os tetos de 4096 seguidos e 64 contas de fora por diário só marcam a lista Seguindo como incompleta.
+- Limite aceito: enquanto o semeador lê os diários (`indexing`, ou um diário pendente), as contagens e as listas podem estar incompletas, e a nota "A contagem pode estar incompleta." (sob os números do perfil) ou "A lista pode estar incompleta." (na lista) aparece.
+- Limite aceito: o semeador fica sabendo de qual perfil a lista foi aberta.
+- Limite aceito: quem segue a partir de um diário que passou de um teto do semeador (4096 seguidos por diário, 262144 no total) pode faltar na lista Seguidores de quem foi seguido, sem a nota de incompleta, que só aparece enquanto o semeador lê os diários (decisão do mantenedor).
+- Limite aceito: a ordem usa a data `at` escrita por quem segue; um registro com data no futuro aparece no topo das listas Seguidores e Seguindo.
+- Limite aceito: a rota de contagens tem um só `complete` para os dois números, então, num diário que passou de um teto ao seguir, a nota "A contagem pode estar incompleta." pode ficar no Diário mesmo com "N seguidores" completo.
+- Depois de seguir alguém, o "N seguidores" dessa pessoa só muda depois de puxar para atualizar, quando o semeador já leu o novo registro.
+- Limite aceito: um semeador mentiroso pode omitir linhas ou apontar para um registro de seguir autêntico mais velho (a conferência não prova que não existe um "deixar de seguir" posterior); não pode forjar um seguidor.
+
+## 75. Avisos de curtidas e republicações (PR feat/avisos-curtidas)
+
+Avisos passa a mostrar quem curtiu e quem republicou uma publicação da própria pessoa, ao lado de seguir, resposta, citação e menção. Uma linha por curtida e uma por republicação: "<nome> curtiu sua publicação" e "<nome> republicou sua publicação". Tocar na linha abre essa publicação. O estado vazio usa o texto de `EMPTY_TEXT` em `apps/app/src/notices.js`. Mensagens privadas continuam em Conversas. O canal novo é `varanda/notices/3` (`docs/protocol.md`, "Notices channel v3" e "Notices link"). `varanda/notices/1` e `varanda/notices/2` não mudam: um tipo desconhecido numa página v2 invalida a mensagem `items` inteira, e um cliente antigo a recusa por completo.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum teste desta parte usa a DHT pública (DHT local em `helpers/net.js`, diretório temporário). As caixas abaixo ficam desmarcadas até alguém executar o passo. Dois membros hospedados, A e B, em dois navegadores, contra um semeador com esta mudança.
+
+- [ ] B publica. A curte essa publicação. B, com a página visível ou ao abrir Avisos, vê uma só linha "<A> curtiu sua publicação". Tocar na linha abre a publicação de B.
+- [ ] A republica a mesma publicação. B vê uma segunda linha, "<A> republicou sua publicação", e nada mais dessa ação. Tocar nela abre a mesma publicação.
+- [ ] A descurte. Na próxima leitura de B a linha da curtida some. A linha da republicação fica.
+- [ ] B apaga a publicação. As linhas de curtida e de republicação dessa publicação somem na próxima leitura.
+- [ ] Um semeador antigo, que abre `varanda/notices/2` e não abre `varanda/notices/3`, não mostra linha de curtida nem de republicação. Seguir, resposta, citação e menção continuam, e `activity` fica verdadeiro. Um semeador que só abre `varanda/notices/1` mostra só quem seguiu, com a linha "O semeador desta associação ainda só envia avisos de quem seguiu você."
+- [ ] Uma mensagem privada para B acende o ponto da aba Conversas. O ponto sai de `dm.list` em `apps/app/App.js` (`readDmDot`: pasta `inbox`, `inboxUnread` ou `requests`) e entra no selo da aba junto com o das comunidades (`badges.comunidades` = `groupsBadge || dmDot`). O ponto do sino (Avisos) não acende por essa mensagem, e a mensagem não vira linha em Avisos.
+- [ ] A curtida da própria publicação de A não cria linha para A. Em lugar nenhum Avisos mostra uma contagem de curtidas ou de republicações.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
+- A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
+- Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
+
+## 76. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
+
+As seções 1 a 75 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
 
 ### O que mudou
 
@@ -3965,7 +4148,7 @@ As seções 1 a 71 não mudam; onde a 53 diz que o modo `completo` vem no próxi
 - Registros novos: `transferencia`, `envio-cripto`, `destino-invalido`, `pendente-202`, além dos passos `transferencia` e `envio-cripto` em `hodle-<passo>-<causa>`.
 - O teto diário e o saldo são conferidos antes do destino: sem saldo, qualquer @nome recebe o mesmo `saldo-insuficiente`, e a recusa não diz quem tem carteira.
 - O app recusa um endereço com letras maiúsculas e minúsculas cujo checksum EIP-55 não confere (`apps/app/src/evmAddress.js`, com o keccak-256 do `@noble/hashes` que o app já usa). Endereço todo em minúsculas ou maiúsculas não tem checksum e passa.
-- Termos de Uso e Política de Privacidade versão 12, com novo aceite.
+- Termos de Uso e Política de Privacidade versão 13, com novo aceite.
 
 ### Testes automatizados
 
@@ -3994,7 +4177,7 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 4. [ ] Um @nome desconhecido, o próprio @nome e o endereço zero respondem o mesmo `destino-invalido`, e cada tentativa gasta uma das 10 da janela diária (não realizada ainda).
 5. [ ] Com um envio `incerto`, um segundo envio é recusado com `operacao-pendente`, e só `op-status` o resolve (não realizada ainda).
 6. [ ] Em `pix`, `transfer` e `send-crypto` respondem 404, e `VARANDA_FEE_TRANSFER_CENTS` diferente de zero recusa a partida; `VARANDA_FEE_SWAP_BPS` diferente de zero recusa a partida em todos os modos (não realizada ainda).
-7. [ ] O aceite dos Termos e da Política versão 12 aparece de novo para quem aceitou a versão 11 (não realizada ainda).
+7. [ ] O aceite dos Termos e da Política versão 13 aparece de novo para quem aceitou a versão 12 (não realizada ainda).
 8. [ ] O USDC recebido no endereço aparece só para leitura, sem botão de converter nem de enviar (não realizada ainda).
 
 ### Limites
@@ -4007,9 +4190,9 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - Um membro com saldo que manda um PIN errado de propósito recebe `destino-invalido` para um @nome sem carteira e `pin-invalido` para um com carteira, sem mover dinheiro: só o parceiro confere o PIN, e só ao enviar. Aceito pelo dono em 03/11/2026 (mandar R$ 0,01 revela o mesmo; cada tentativa gasta uma das três antes do bloqueio de 24 horas).
 - A ida ao ar do `completo` depende da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
 
-## 73. Conta de pagamentos: USDC e Converter (feat/hodle-usdc, 2026-11-03)
+## 77. Conta de pagamentos: USDC e Converter (feat/hodle-usdc, 2026-11-03)
 
-As seções 1 a 72 não mudam; onde a 72 diz que a conversão de USDC e o envio de USDC ficam para o próximo PR, vale esta seção. Ela documenta o PR2 da etapa de transferências: o Converter (USDC para BRLA) e o envio de USDC, ambos no modo `completo`. Os Termos de Uso e a Política de Privacidade ficam na versão 12 (a versão 12 já descreve o USDC como função que o serviço pode oferecer), sem aceite novo.
+As seções 1 a 76 não mudam; onde a 76 diz que a conversão de USDC e o envio de USDC ficam para o próximo PR, vale esta seção. Ela documenta o PR2 da etapa de transferências: o Converter (USDC para BRLA) e o envio de USDC, ambos no modo `completo`. Os Termos de Uso e a Política de Privacidade ficam na versão 13 (a versão 13 já descreve o USDC como função que o serviço pode oferecer), sem aceite novo.
 
 ### O que mudou
 
@@ -4020,7 +4203,7 @@ As seções 1 a 72 não mudam; onde a 72 diz que a conversão de USDC e o envio 
 - Nenhuma taxa da Varanda na conversão nem no que entra. Nunca há conversão automática.
 - Envio de USDC (`send-crypto`) sai só do saldo de USDC. A taxa da Varanda é o percentual de cripto, em USDC (a parte fixa em centavos não vale), cobrada só depois de o envio concluir e só por um envio de USDC seguinte. As taxas em reais e em USDC são reservadas e cobradas à parte. Um envio de USDC pago com BRLA em um passo é recusado.
 - Registros novos: `conversao`, `cotacao-conversao-formato`, e os passos `cotacao-conversao` e `conversao` em `hodle-<passo>-<causa>`.
-- O envio de USDC usa a mesma checagem de checksum EIP-55 da seção 72.
+- O envio de USDC usa a mesma checagem de checksum EIP-55 da seção 76.
 - `VARANDA_HODLE_MAX_USDC` (USDC inteiros, de 1 a 10000, padrão 500; outro valor recusa a partida citando só o nome da variável) limita cada envio de USDC, com a taxa nova e a pendente incluídas, e cada conversão (`swap-quote` e `swap`). Acima dele a resposta é `valor-invalido` antes de qualquer linha ou chamada ao Hodle. A política do `completo` traz `maxUsdcMicros`, e o app recusa o valor acima do teto antes da prévia ou da cotação. Cada `swap-quote` passa a contar no teto diário `VARANDA_HODLE_DAILY_LIMIT` e na parte de cada membro, como `payout-quote`.
 
 ### Testes automatizados

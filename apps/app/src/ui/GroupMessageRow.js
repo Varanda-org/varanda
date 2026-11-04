@@ -1,7 +1,8 @@
 // One message of a group. Props: { item, name, username, own, canHide,
 // canBan, canReport, onHide(on), onBan(), onReport(), onOpenMember(), now }.
 // `item` is a row of groups.js rowsOf (text already through displayText,
-// HIDDEN_LABEL when hidden). `name` / `username` are the RAW peer strings the
+// HIDDEN_LABEL when hidden; rawText the author's own text, which MentionText
+// escapes itself). `name` / `username` are the RAW peer strings the
 // screen knows for the author; without them the row shows the 8-hex short key
 // rowsOf already computed. A group message is addressed by { writer, seq },
 // never by PostRow's diary ref. The actions sit behind a "mais" button so a
@@ -52,7 +53,7 @@ export function GroupMessageRow ({ item, name, username, own, canHide, canBan, c
         </View>
         {item.hidden
           ? <Text style={[styles.text, styles.hidden]}>{item.text}</Text>
-          : <MentionText text={item.text} style={styles.text} selectable />}
+          : <MentionText text={item.rawText} style={styles.text} selectable />}
         {open
           ? (
             <View style={styles.actions}>

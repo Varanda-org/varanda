@@ -528,3 +528,99 @@ test('notices: a diary following many non-member keys neither fills the index no
   t.is(stored, MAX_NONMEMBER_TARGETS_PER_AUTHOR, 'only the capped number of non-member targets is indexed')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
+
+// Polls the seeder's public follow counts until pred holds on a complete
+// answer (the scan committed every served diary).
+function countsUntil (seeder, key, pred, name) {
+  return until(() => {
+    const r = seeder.indexFollowCounts(key)
+    return r && r.complete && pred(r) ? r : null
+  }, { name, intervalMs: 100, timeoutMs: 30000 })
+}
+
+test('follows index: public counts and pages from both sides, cursor, unfollow, blocks, bad input', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const A = await plainMember(t, bootstrap, assoc)
+  const B = await plainMember(t, bootstrap, assoc)
+  const C = await plainMember(t, bootstrap, assoc)
+  const D = await plainMember(t, bootstrap, assoc)
+  const E = await plainMember(t, bootstrap, assoc)
+  for (const m of [A, B, C, D, E]) await admit(m, assoc)
+
+  // A visible author with nothing: the full answer shape, empty.
+  const none = await countsUntil(seeder, E.key, () => true, 'E indexado')
+  t.alike(none, { seguindo: 0, seguidores: 0, indexing: false, complete: true })
+  t.alike(seeder.indexFollows(E.key, 'seguidores'), { author: E.key, kind: 'seguidores', items: [], next: null, total: 0, authors: {}, indexing: false, complete: true })
+  t.alike(seeder.indexFollows(E.key, 'seguindo').items, [])
+
+  // A and C follow B (A's follow is older), D follows B too.
+  const followAB = followRecord({ key: B.key, on: true, at: '2026-10-01T00:00:00.000Z' })
+  const seqAB = await grown(A, followAB)
+  const followCB = followRecord({ key: B.key, on: true, at: '2026-10-02T00:00:00.000Z' })
+  const seqCB = await grown(C, followCB)
+  const followDB = followRecord({ key: B.key, on: true, at: '2026-10-03T00:00:00.000Z' })
+  const seqDB = await grown(D, followDB)
+  t.alike(await countsUntil(seeder, B.key, (r) => r.seguidores === 3, 'B com 3 seguidores'), { seguindo: 0, seguidores: 3, indexing: false, complete: true })
+  t.alike(seeder.indexFollowCounts(A.key), { seguindo: 1, seguidores: 0, indexing: false, complete: true })
+
+  // B's followers list each follower at the follower's own follow block.
+  const pB = seeder.indexFollows(B.key, 'seguidores')
+  t.alike(pB.items, [
+    { key: D.key, seq: seqDB, at: followDB.at },
+    { key: C.key, seq: seqCB, at: followCB.at },
+    { key: A.key, seq: seqAB, at: followAB.at }
+  ], 'newest first, each at its own block')
+  t.is(pB.total, 3)
+  t.is(pB.next, null)
+  t.is(pB.complete, true)
+  t.alike(Object.keys(pB.authors).sort(), [A.key, C.key, D.key].sort())
+  t.alike(pB.authors[A.key], seeder._index.hints(A.key))
+  // A's following list names B at A's own follow block.
+  const pA = seeder.indexFollows(A.key, 'seguindo')
+  t.alike(pA.items, [{ key: B.key, seq: seqAB, at: followAB.at }])
+  t.is(pA.total, 1)
+
+  // A cursor continues after the row it names, in integer milliseconds.
+  const afterD = Date.parse(followDB.at) + '.' + D.key
+  const p2 = seeder.indexFollows(B.key, 'seguidores', afterD)
+  t.alike(p2.items.map((it) => it.key), [C.key, A.key], 'the page after D')
+  t.is(p2.total, 3)
+  const afterC = Date.parse(followCB.at) + '.' + C.key
+  t.alike(seeder.indexFollows(B.key, 'seguidores', afterC).items.map((it) => it.key), [A.key])
+
+  // Unfollow drops the row once the rescan commits.
+  await grown(C, followRecord({ key: B.key, on: false }))
+  t.is((await countsUntil(seeder, B.key, (r) => r.seguidores === 2, 'B sem C')).seguidores, 2)
+  t.alike(seeder.indexFollows(B.key, 'seguidores').items.map((it) => it.key), [D.key, A.key])
+  t.is(seeder.indexFollowCounts(C.key).seguindo, 0)
+
+  // A blocked member is neither listed nor counted, and its own answers are null.
+  const mod = makeModerator(assoc)
+  await pushBlocklist(t, bootstrap, publicKey, createSnapshot({ seq: 1, blocked: [D.key], revokedIssuers: [] }, mod.kp, mod.cert))
+  await until(() => seeder._isBlocked(D.key) && !seeder._served.has(D.key), { name: 'D bloqueado' })
+  t.is((await countsUntil(seeder, B.key, (r) => r.seguidores === 1, 'B sem D')).seguidores, 1)
+  const pBlocked = seeder.indexFollows(B.key, 'seguidores')
+  t.alike(pBlocked.items.map((it) => it.key), [A.key])
+  t.is(pBlocked.total, 1)
+  t.absent(D.key in pBlocked.authors)
+  t.is(seeder.indexFollowCounts(D.key), null)
+  t.is(seeder.indexFollows(D.key, 'seguindo'), null)
+
+  // Bad input answers null.
+  t.is(seeder.indexFollows(B.key, 'likes'), null, 'unknown kind')
+  t.is(seeder.indexFollows(B.key, 'seguidores', 'x'), null, 'cursor without a dot')
+  t.is(seeder.indexFollows(B.key, 'seguidores', '1.' + A.key.toUpperCase()), null, 'uppercase key')
+  t.is(seeder.indexFollows(B.key, 'seguidores', '12345678901234567.' + A.key), null, '17-digit atMs')
+  t.is(seeder.indexFollows(B.key, 'seguidores', '-1.' + A.key), null, 'negative atMs')
+  t.is(seeder.indexFollows(B.key, 'seguidores', '9007199254740993.' + A.key), null, 'unsafe atMs')
+  t.is(seeder.indexFollows(B.key, 'seguidores', 1), null, 'non-string cursor')
+  t.is(seeder.indexFollows('nope', 'seguidores'), null, 'malformed author')
+  t.is(seeder.indexFollowCounts(B.key.toUpperCase()), null, 'uppercase author')
+  t.is(seeder.indexFollowCounts(hex(randomBytes(32))), null, 'author not served')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})

@@ -163,3 +163,27 @@ test('dm-screen stays pure', async (t) => {
   t.alike(imports, ["import { threadOf } from './dm.js'"])
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
+
+test('a private message links from its raw text, but not beside Abrir convite', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/DmMessageRow.js'), 'utf8')
+  t.ok(row.includes('<MentionText text={item.rawText} style={styles.text} selectable />'), 'MentionText escapes the raw text itself')
+  t.ok(row.includes("const linked = link === null && item.deleted !== true && typeof item.rawText === 'string'"))
+  t.absent(row.includes('onOpenMention'), 'mentions stay plain')
+})
+
+test('invite links in a conversation only open a screen, never join', (t) => {
+  const read = (p) => readFileSync(join(__dirname, p), 'utf8')
+  const row = read('../src/ui/DmMessageRow.js')
+  t.ok(row.includes('inviteLinkOf(') && row.includes('OPEN_INVITE'))
+  t.ok(row.includes("link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade'"), 'label follows the link kind')
+  t.absent(/join/i.test(row))
+  const screen = read('../src/screens/Mensagem.js')
+  t.ok(screen.includes('onOpenInvite={onOpenInvite}') && screen.includes('origin={origin}'))
+  t.absent(/join/i.test(screen))
+  const app = read('../App.js')
+  const at = app.indexOf('onOpenInvite={(link)')
+  t.ok(at > 0)
+  const line = app.slice(at, app.indexOf('\n', at))
+  t.ok(line.includes('openGroup(link.key)') && line.includes('openCommunity(link.key)'))
+  t.absent(line.includes('community.join'))
+})
