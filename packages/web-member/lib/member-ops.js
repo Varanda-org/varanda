@@ -1253,6 +1253,21 @@ async function openOwnGroupCore (ctx, entry) {
   return store.openGroupWriter(ctx.storage, kp)
 }
 
+// Whether this device derives the key pair of a kv groupWriters entry from
+// its nonce, as openOwnGroupCore requires. The kv store is local state that
+// nothing signs, so a listed writer is reused for a signed join only when
+// this check holds.
+async function ownWriterDerived (ctx, entry) {
+  if (entry === null || entry === undefined || typeof entry.nonce !== 'string' || typeof entry.key !== 'string') return false
+  if (groupKeyPairOf(ctx) === null) return false
+  try {
+    const kp = await ctx.groupKeyPair(new Uint8Array(b4a.from(entry.nonce, 'hex')))
+    return !!kp && kp.publicKey instanceof Uint8Array && hex(kp.publicKey) === entry.key
+  } catch {
+    return false
+  }
+}
+
 async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
   const core = await openOwnGroupCore(ctx, entry)
   try {
@@ -1528,10 +1543,19 @@ function writersStillArriving (fold, ownHex, mod) {
   return st === null || st === 'left'
 }
 
-function roleHere (fold, ownHex, base) {
+// `keys`: diaryGroupKeys(base.ownEntries) when the caller already has it
+// (it reads the whole own diary, once per call rather than once per row).
+function roleHere (fold, ownHex, base, keys = null) {
   if (!writersStillArriving(fold, ownHex, base.mod)) return roleOf(fold, ownHex)
-  if (!diaryGroupKeys(base.ownEntries).includes(fold.group)) return roleOf(fold, ownHex)
+  if (!(keys === null ? diaryGroupKeys(base.ownEntries) : keys).includes(fold.group)) return roleOf(fold, ownHex)
   return 'pending'
+}
+
+// How many writers the own diary ever bound in this root (on:true joins):
+// the seeder never releases those slots, a later leave included.
+function diaryBound (fold, ownHex) {
+  const history = fold.joins.get(ownHex) || []
+  return new Set(history.filter((j) => j.on === true).map((j) => j.writer)).size
 }
 
 function isActingAdmin (g, d) {
@@ -1795,7 +1819,10 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
 // community writer (`community: true`) names none.
 async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { member = null, community = false } = {}) {
   const core = own === null ? null : await readGroupCore(ctx.storage, own.key)
-  const written = core !== null && core.length > 0
+  // A listed writer the diary has not bound yet is reused (and named by a
+  // new join below) only when this device derives it.
+  const ownBound = core !== null && groupJoinHistory(base.ownEntries, group).some((j) => j.on && j.writer === own.key)
+  const written = core !== null && core.length > 0 && (ownBound || await ownWriterDerived(ctx, own))
   if (written && hasLeave(core.entries)) throw new UsageError('o grupo ainda não chegou: entre de novo depois da sincronização')
   let writer = written ? own.key : null
   // A reused CW's first on-join signs its header's rejoin, as communityJoin
@@ -1877,7 +1904,7 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   // A listed writer naming another community writer than the live one
   // would not count: a new writer takes its place.
   const sameMember = current !== undefined && (g.own.key === g.group || current.entries[0].record.member === member)
-  let writer = !left && sameMember && ownPending(g, ownHex) && usable(g.own.key) ? g.own.key : null
+  let writer = !left && sameMember && ownPending(g, ownHex) && usable(g.own.key) && await ownWriterDerived(ctx, g.own) ? g.own.key : null
   if (writer === null) {
     if (groupWritersFull(g)) throw new UsageError(store.GROUP_FULL)
     // The fold counts at most MAX_GROUP_WRITERS_PER_DIARY writers per diary
@@ -2314,10 +2341,11 @@ async function groupInfo (ctx, { group }) {
     visibility: g.private ? 'private' : 'public',
     memberInvite: g.built.memberInvite === true,
     writerHere: g.own !== null,
-    canWrite: groupCanWrite(ctx, g, ownHex)
+    canWrite: groupCanWrite(ctx, g, ownHex),
+    writersBound: diaryBound(g, ownHex)
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, writersBound: 0 }
   })
 }
 
@@ -2623,9 +2651,17 @@ async function rotateGroup (ctx, g, ownHex) {
 // A rotation is written whole or not at all: refused before the first block
 // when its blocks would not fit the writer's remaining log budget.
 async function checkRotationRoom (ctx, wk, records) {
+  const fits = await rotationFits(ctx, wk, records)
+  if (fits === null) throw new Error(GROUP_NOT_FOUND)
+  if (!fits) throw new UsageError(ROTATION_TOO_BIG)
+}
+
+// Whether `records` fit writer `wk`'s remaining log budget; null when the
+// core is not held.
+async function rotationFits (ctx, wk, records) {
   const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
   const core = await store.openGroupCoreReadOnly(ctx.storage, wk)
-  if (core === null) throw new Error(GROUP_NOT_FOUND)
+  if (core === null) return null
   let length, bytes
   try {
     length = core.length
@@ -2634,20 +2670,20 @@ async function checkRotationRoom (ctx, wk, records) {
     await core.close()
   }
   for (const r of records) bytes += b4a.byteLength(JSON.stringify(r.record))
-  if (length + records.length > limits.maxLogBlocks || bytes > limits.maxLogBytes) throw new UsageError(ROTATION_TOO_BIG)
+  return length + records.length <= limits.maxLogBlocks && bytes <= limits.maxLogBytes
 }
 
 // History ("History on admit"): continuation blocks handing every epoch
 // key the fold gave this device to every entitled writer its recipients do
 // not list yet, so a delivery that failed earlier is made up for too.
-// Planned whole first: a hand-off that would not fit the log (a rogue
-// distributor opening thousands of epochs) writes nothing.
-async function shareHistory (ctx, g, ownHex) {
+// -> the planned blocks, or null when there is nothing to hand (no
+// distributor here, the holder locked, no target or no key missing).
+function historyPlan (ctx, g, ownHex) {
   const own = distributorOf(g, ownHex)
   const h = holderOf(ctx)
-  if (own === null || h === null || !h.unlocked) return
+  if (own === null || h === null || !h.unlocked) return null
   const targets = [...entitledOf(g)].filter((w) => w !== own.key && canSealTo(boxOfWriter(g, w))).sort()
-  if (targets.length === 0) return
+  if (targets.length === 0) return null
   const records = []
   const auth = authOf(g, ownHex)
   for (const e of g.epochs) {
@@ -2662,7 +2698,16 @@ async function shareHistory (ctx, g, ownHex) {
       records.push({ kid: e.kid, record: buildRecord(() => grp.groupKey({ kid: e.kid, basis: [], keys, auth })) })
     }
   }
-  if (records.length === 0) return
+  return records.length === 0 ? null : records
+}
+
+// Planned whole first: a hand-off that would not fit the log (a rogue
+// distributor opening thousands of epochs) writes nothing.
+async function shareHistory (ctx, g, ownHex) {
+  const records = historyPlan(ctx, g, ownHex)
+  if (records === null) return
+  const own = distributorOf(g, ownHex)
+  const h = holderOf(ctx)
   await checkRotationRoom(ctx, own.key, records)
   for (const r of records) {
     // Asked again before every append: a lock in between wipes the keys
@@ -2981,8 +3026,10 @@ function headerRejoin (core) {
 
 // -> { state, group }: rpc.md 5.63. A live own community writer answers its
 // state without a new one; else a new CW (naming the leave ownRejoinLeave
-// picks when it left), the diary join, then the Geral step.
-async function communityJoin (ctx, { community }) {
+// picks when it left), the diary join, then the Geral step. `general:
+// false` (the device upkeep only, never an RPC param) skips the Geral step:
+// the upkeep plans Geral as a group, with its own checks.
+async function communityJoin (ctx, { community }, { general: withGeneral = true } = {}) {
   return withCommunity(ctx, community, true, async ({ diary, ownHex, base, c }) => {
     // A root its creator's diary has not bound here yet folds empty: the
     // join waits for the sync like a root not held (the own CW is reused).
@@ -3008,11 +3055,13 @@ async function communityJoin (ctx, { community }) {
     if (cw === null) {
       const current = c.own === null ? undefined : c.cores.get(c.own.key)
       const left = statusOf(c, ownHex) === 'left'
-      let writer = !left && current !== undefined && ownPending(c, ownHex) ? c.own.key : null
+      let writer = !left && current !== undefined && ownPending(c, ownHex) && await ownWriterDerived(ctx, c.own) ? c.own.key : null
       let rejoin = writer === null ? null : headerRejoin(current)
       if (writer === null) {
         if (groupWritersFull(c) || boundWriters(c, ownHex).length >= MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(COMMUNITY_FULL)
-        await makeGroupRoom(ctx, base, c.key, general === null ? [] : [general])
+        // Geral's slot only when this call joins it: the upkeep's room
+        // check must not refuse, or evict a left entry, for a slot unused.
+        await makeGroupRoom(ctx, base, c.key, general === null || !withGeneral ? [] : [general])
         // A leave of this device's own (owner decision, cycle 10), else the
         // diary's latest leave even while another device keeps it a member:
         // a CW bound after a leave without naming it is cut by it.
@@ -3029,7 +3078,8 @@ async function communityJoin (ctx, { community }) {
         if (c.own !== null) await store.addGroupReplica(ctx.storage, c.own.key)
         await store.putGroupWriter(ctx.storage, { group: c.key, key: created.key, nonce: created.nonce, rootNonce: c.own === null ? null : c.own.rootNonce, kind: 'community' })
         writer = created.key
-      } else if (general !== null) {
+      } else if (general !== null && withGeneral) {
+        // The listed writer is reused: only Geral may need a new slot.
         await makeGroupRoom(ctx, base, c.key, [general])
       }
       // The first on-join signs the header's rejoin: without it the fold
@@ -3040,7 +3090,7 @@ async function communityJoin (ctx, { community }) {
       cw = c.own
     }
     const state = communityJoinState(c, ownHex, cw.key)
-    const group = general === null ? null : await joinGeneral(ctx, diary, ownHex, base, general, cw.key)
+    const group = general === null || !withGeneral ? null : await joinGeneral(ctx, diary, ownHex, base, general, cw.key)
     return { state, group }
   }, async (p, ids) => {
     await pendingJoin(ctx, p, ids, { community: true })
@@ -3582,7 +3632,7 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false }
+const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, generalWritersBound: 0 }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -3604,10 +3654,11 @@ async function communityInfo (ctx, { community }) {
   }
   return withCommunity(ctx, C, false, async ({ ownHex, base, c }) => {
     const seen = await store.readGroupSeen(ctx.storage)
+    const keys = diaryGroupKeys(base.ownEntries)
     const groups = []
     for (const key of c.built.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)) {
       const g = await loadGroup(ctx, base, key)
-      const role = g === null ? null : roleHere(g, ownHex, base)
+      const role = g === null ? null : roleHere(g, ownHex, base, keys)
       groups.push({
         group: key,
         name: g === null ? null : g.built.name,
@@ -3618,12 +3669,17 @@ async function communityInfo (ctx, { community }) {
         ...(READER_ROLES.has(role) ? lastAndUnread(g, base, seen.find((m) => m.group === key) || null) : { last: null, unread: 0 })
       })
     }
+    // Geral's slots are spent by the same tap (community.join also joins it),
+    // so the app's reserve warning needs its count too.
+    // From the own diary's joins, as diaryBound counts them: Geral's root
+    // need not be here for the slots the account already spent in it.
+    const generalBound = c.built.general ? new Set(groupJoinHistory(base.ownEntries, c.built.general).filter((j) => j.on === true).map((j) => j.writer)).size : 0
     return {
       community: C,
       name: c.built.name,
       join: c.built.join,
       creator: c.built.creator,
-      role: roleHere(c, ownHex, base),
+      role: roleHere(c, ownHex, base, keys),
       state: 'ready',
       members: memberCount(c),
       admins: c.built.admins.size,
@@ -3637,7 +3693,9 @@ async function communityInfo (ctx, { community }) {
       writerHere: c.own !== null,
       canWrite: countedLive(c, ownHex),
       rootHere: c.own !== null && c.own.rootNonce !== null,
-      authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key)
+      authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key),
+      writersBound: diaryBound(c, ownHex),
+      generalWritersBound: generalBound
     }
   }, (p) => ({ community: p.group, ...PENDING_COMMUNITY, writerHere: p.own !== null }))
 }
@@ -3716,6 +3774,237 @@ async function communityGroups (ctx, { community }) {
   } catch {
     return []
   }
+}
+
+// ---- device upkeep (docs/rpc.md 5.61 and 5.63, browser node only) ----
+
+// The automatic enrolment of a second device stops while the diary binds
+// MAX_GROUP_WRITERS_PER_DIARY - AUTO_ENROL_RESERVE writers in a root: the
+// seeder never releases a bound slot, so the last two are spent only by an
+// explicit tap (owner decision).
+const AUTO_ENROL_RESERVE = 2
+
+function autoEnrolRoom (fold, ownHex) {
+  if (groupWritersFull(fold)) return 'full'
+  if (diaryBound(fold, ownHex) >= MAX_GROUP_WRITERS_PER_DIARY - AUTO_ENROL_RESERVE) return 'reserve'
+  return null
+}
+
+// A diary the fold counts as a member here and whose writers bind in it:
+// writers still arriving, left, banned, requested or a blocked own diary
+// all wait for an explicit join.
+function autoEnrolStatus (fold, ownHex) {
+  return statusOf(fold, ownHex) === 'member' && !fold.built.bans.has(ownHex) && fold.diaries.get(ownHex) !== null
+}
+
+// A group writer counts only when its community writer is admitted
+// (admittedCws): a CW waiting for an admin would leave a new group writer
+// that counts only if an admin ever admits it, a slot spent meanwhile. A
+// community this plan enrols first gets a CW the fold admits at once only
+// when it is open or the diary created it. Geral follows the same rule: the
+// upkeep joins it as a group, never through community.join's Geral step.
+function parentAdmits (c, ownHex, planned) {
+  const admitted = c.built.admittedCws instanceof Set ? c.built.admittedCws : new Set()
+  if (planned) return c.built.join === 'open' || c.built.creator === ownHex
+  const cw = liveOwnWriter(c, ownHex)
+  return cw !== null && statusOf(c, ownHex) === 'member' && admitted.has(cw.key)
+}
+
+// Skip reasons a later sync can resolve (the root, its parent, the
+// creator's binding or the unlock arrives); the others need a change by
+// a person (an explicit tap, an admin) or never resolve.
+const TRANSIENT_SKIPS = new Set(['community-first', 'unheld', 'creator-unbound', 'locked'])
+
+function skip (root, reason) {
+  return { root, reason, transient: TRANSIENT_SKIPS.has(reason) }
+}
+
+// Whether the own diary ever bound `writer` in `root` (an on:true join).
+function diaryBinds (ownEntries, root, writer) {
+  return groupJoinHistory(ownEntries, root).some((j) => j.on === true && j.writer === writer)
+}
+
+// -> { enrol: [{ root, kind, community, repair? }], share: [{ group,
+// writer }], skipped: [{ root, reason, transient }] }, read-only. A
+// hand-off the write step would refuse (an orphan, a parent not held or
+// blocked, blocks that would not fit the log) is skipped, not planned. Candidates are only
+// the roots the own diary binds now (a held key with no join of the diary,
+// from an opened link or a catalogue probe, never is) that this device has
+// no kv entry for: a device that wrote a writer there once is never
+// enrolled again, so an approval community never gets a second CW while
+// the first waits for an admin. The one exception is a repair: a listed
+// writer the own diary never bound (the diary append of an earlier join
+// failed after the kv entry was written). The join reuses that writer
+// (ownPending) only when this device derives its key ('foreign'
+// otherwise), and binding it spends a slot like a new writer would (the
+// seeder never saw it), so the reserve applies the same way.
+async function deviceUpkeepPlan (ctx) {
+  return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
+    const entries = await store.readGroupWriters(ctx.storage)
+    const listed = new Map(entries.map((e) => [e.group, e]))
+    const enrol = []
+    const skipped = []
+    const groups = []
+    const repairs = new Set()
+    for (const key of diaryGroupKeys(base.ownEntries)) {
+      if (base.mod.blocked.has(key)) continue
+      const entry = listed.get(key)
+      if (entry !== undefined) {
+        if (diaryBinds(base.ownEntries, key, entry.key)) continue
+        // Only a writer this device derives is reused by the join.
+        if (groupKeyPairOf(ctx) === null) {
+          skipped.push(skip(key, 'locked'))
+          continue
+        }
+        if (!(await ownWriterDerived(ctx, entry))) {
+          skipped.push(skip(key, 'foreign'))
+          continue
+        }
+        repairs.add(key)
+      }
+      const c = await loadCommunity(ctx, base, key)
+      if (c === null) {
+        groups.push(key)
+        continue
+      }
+      // communityJoin would take the pendingJoin branch for an unbound
+      // creator: a generation 0 CW any earlier leave retires.
+      let reason = c.built.creator === null ? 'creator-unbound' : null
+      if (reason === null && (!autoEnrolStatus(c, ownHex) || liveOwnWriter(c, ownHex) !== null)) reason = 'status'
+      if (reason === null) reason = autoEnrolRoom(c, ownHex)
+      if (reason === null) enrol.push({ root: key, kind: 'community', community: null, ...(repairs.has(key) ? { repair: true } : {}) })
+      else skipped.push(skip(key, reason))
+    }
+    // Groups after every community: the write pass enrols communities first.
+    const planned = new Set(enrol.map((x) => x.root))
+    for (const key of groups) {
+      const g = await loadGroup(ctx, base, key)
+      let reason = null
+      if (g === null) reason = 'unheld'
+      else if (g.built.orphan) reason = 'orphan'
+      else if (g.community === null || g.c === null) reason = 'community-first'
+      else if (!autoEnrolStatus(g, ownHex) || liveOwnWriter(g, ownHex) !== null) reason = 'status'
+      if (reason === null) reason = autoEnrolRoom(g, ownHex)
+      if (reason === null && g.private && boxHexOf(ctx) === null) reason = 'locked'
+      if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community))) reason = 'community-first'
+      if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, ...(repairs.has(key) ? { repair: true } : {}) })
+      else skipped.push(skip(key, reason))
+    }
+    const share = []
+    for (const e of entries) {
+      if (e.kind === 'community') continue
+      const g = await loadGroup(ctx, base, e.group)
+      if (g === null || !g.private) continue
+      const own = distributorOf(g, ownHex)
+      const records = own === null ? null : historyPlan(ctx, g, ownHex)
+      if (records === null) continue
+      // The refusals of the write step (withGroup's requireParent, then
+      // shareHistory's checkRotationRoom).
+      let reason = null
+      if (g.built.orphan) reason = 'orphan'
+      else if (g.built.community === null || g.c === null) reason = 'community-first'
+      else {
+        const fits = await rotationFits(ctx, own.key, records)
+        if (fits === null) continue
+        if (!fits) reason = 'full'
+      }
+      if (reason === null) share.push({ group: e.group, writer: own.key })
+      else skipped.push(skip(e.group, reason))
+    }
+    return { enrol, share, skipped }
+  })
+}
+
+function upkeepKeys (list, field) {
+  const out = new Set()
+  for (const x of Array.isArray(list) ? list : []) {
+    const k = typeof x === 'string' ? x : (x !== null && typeof x === 'object' ? x[field] : null)
+    if (typeof k === 'string') out.add(k.toLowerCase())
+  }
+  return out
+}
+
+function isLocked (err) {
+  return !!err && err.message === store.LOCKED
+}
+
+async function coreLength (storage, key) {
+  if (typeof key !== 'string') return null
+  const core = await store.openGroupCoreReadOnly(storage, key)
+  if (core === null) return null
+  try { return core.length } finally { await core.close() }
+}
+
+// What a step on `root` can leave behind when it throws half way: the own
+// diary's length, this device's kv writer for the root and the length of
+// `writer` (default: that kv writer).
+async function upkeepFootprint (ctx, root, writer = null) {
+  const length = await withIdentity(ctx, async ({ diary }) => diary.length)
+  const entry = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === root)
+  const own = entry === undefined ? null : entry.key
+  const key = writer === null ? own : writer
+  return [length, own, key, await coreLength(ctx.storage, key)].join(':')
+}
+
+// -> { enrolled: [{ root, kind, state, group }], shared, failed: [{ root,
+// message }], changed }. The plan is computed again first: a sync may have
+// run since the caller's plan, so only the keys both name are acted on.
+// One root's failure goes to `failed` (and to `changed` when it wrote
+// something first); a group whose community failed in this call is not
+// tried. Only a missing or locked identity, or NEEDS_EXCLUSIVE, throws.
+// Nothing is retried here: the caller plans again after the next change.
+async function deviceUpkeep (ctx, { enrol = [], share = [] } = {}) {
+  needGroupKeys(ctx)
+  const wanted = upkeepKeys(enrol, 'root')
+  const wantedShare = upkeepKeys(share, 'group')
+  const plan = await deviceUpkeepPlan(ctx)
+  const enrolled = []
+  const shared = []
+  const failed = []
+  const changed = new Set()
+  const attempt = async (root, fn, writer = null) => {
+    const before = await upkeepFootprint(ctx, root, writer)
+    try {
+      await fn()
+      return true
+    } catch (err) {
+      if (isNeedsExclusive(err) || isLocked(err)) throw err
+      failed.push({ root, message: err && typeof err.message === 'string' ? err.message : String(err) })
+      if (await upkeepFootprint(ctx, root, writer) !== before) changed.add(root)
+      return false
+    }
+  }
+  const todo = plan.enrol.filter((x) => wanted.has(x.root))
+  const failedCommunities = new Set()
+  for (const x of todo.filter((x) => x.kind === 'community')) {
+    const ok = await attempt(x.root, async () => {
+      const r = await communityJoin(ctx, { community: x.root }, { general: false })
+      enrolled.push({ root: x.root, kind: 'community', state: r.state, group: null })
+      changed.add(x.root)
+    })
+    if (!ok) failedCommunities.add(x.root)
+  }
+  for (const x of todo.filter((x) => x.kind === 'group' && !failedCommunities.has(x.community))) {
+    await attempt(x.root, async () => {
+      const r = await groupJoin(ctx, { group: x.root, community: x.community })
+      enrolled.push({ root: x.root, kind: 'group', state: r.state, group: null })
+      changed.add(x.root)
+    })
+  }
+  for (const x of plan.share.filter((x) => wantedShare.has(x.group))) {
+    await attempt(x.group, async () => {
+      const had = await withGroup(ctx, x.group, true, async ({ ownHex, g }) => {
+        const before = historyPlan(ctx, g, ownHex) !== null
+        await shareHistory(ctx, g, ownHex)
+        return before
+      })
+      if (had) {
+        shared.push(x.group)
+        changed.add(x.group)
+      }
+    }, x.writer)
+  }
+  return { enrolled, shared, failed, changed: [...changed] }
 }
 
 // ---- direct messages (docs/protocol.md section 11) ----
@@ -3889,5 +4178,8 @@ module.exports = {
   communityRemoveGroup,
   communityGroups,
   groupCommunityOf,
+  deviceUpkeepPlan,
+  deviceUpkeep,
+  AUTO_ENROL_RESERVE,
   isNeedsExclusive
 }

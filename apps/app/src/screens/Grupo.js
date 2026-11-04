@@ -31,9 +31,9 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import {
-  DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
+  DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, itemsOf, joinLabel, membersLabel, needsDeviceJoin, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, joinLabel, membersLabel, needsDeviceJoin, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -97,9 +97,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // null until community.info answers. Only writerHere false changes the join.
   const [communityJoin, setCommunityJoin] = useState(null)
   const [communityWriterHere, setCommunityWriterHere] = useState(null)
+  // The community's and Geral's bound writers: the tap spends slots there too when it calls community.join.
+  const [communityBound, setCommunityBound] = useState([])
   const [needCommunity, setNeedCommunity] = useState(false)
   // Set once a device join was sent (answered or not): a second tap could bind another writer.
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
   const [lookupTick, setLookupTick] = useState(0)
   // The text of a post whose outcome is not known: no second send until the
@@ -128,7 +131,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const deviceJoin = needsDeviceJoin(info)
   const writerNow = info ? info.writerHere : undefined
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
-  useEffect(() => { setDeviceJoinSent(false) }, [group])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [group])
   const isPrivate = info !== null && info.visibility === 'private'
 
   const loadInfo = useCallback(async () => {
@@ -403,6 +406,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
       if (typeof c.name === 'string') setCommunityName(c.name)
       setCommunityJoin(typeof c.join === 'string' ? c.join : null)
       setCommunityWriterHere(typeof c.writerHere === 'boolean' ? c.writerHere : null)
+      setCommunityBound([c.writersBound, c.generalWritersBound])
     }, () => {})
     return () => { live = false }
   }, [hosted, heldCommunity, request, version])
@@ -443,6 +447,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // uncertain answer re-reads the group before the card is offered again.
   const enterHere = async () => {
     setCheck(null)
+    // Set when the fresh counts reach the reserve and the person has not
+    // confirmed yet: nothing is sent and the warning is shown.
+    let held = false
+    const own = infoRef.current && infoRef.current.writersBound
     const r = await join.run(async () => {
       if (communityWriterHere !== true && communityKey !== null) {
         // Read fresh: an unanswered or stale value would send group.join alone
@@ -453,14 +461,28 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
           // A community.join on a root not held here only stores a pending
           // writer that may never count and still spends a writer slot.
           if (c.state === 'pending') throw new Error(COMMUNITY_WAIT_TEXT)
+          // The cached counts can be unanswered or stale, so judge the reserve
+          // on the ones just read.
+          if (needsReserveConfirm([own, c.writersBound, c.generalWritersBound], reserveConfirm)) {
+            held = true
+            return null
+          }
           const joined = await request('community.join', { community: communityKey })
           // Landed: a later tap must not send community.join again.
           setCommunityWriterHere(true)
           if (joined && joined.group === group) return joined
         }
       }
+      if (needsReserveConfirm([own], reserveConfirm)) {
+        held = true
+        return null
+      }
       return await request('group.join', { group })
     })
+    if (held) {
+      setReserveConfirm(true)
+      return
+    }
     if (r.ok) {
       setDeviceJoinSent(true)
       loadRef.current()
@@ -628,6 +650,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     composer = (
       <View style={styles.composer}>
         <Soft>{DEVICE_JOIN_TEXT}</Soft>
+        {reserveConfirm || reserveReachedAny([info && info.writersBound, ...(communityWriterHere === false ? communityBound : [])]) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
         <Btn label={DEVICE_JOIN_LABEL} onPress={enterHere} pending={join.pending} disabled={!node.online} />
         <ErrorText>{join.error}</ErrorText>
       </View>

@@ -25,8 +25,8 @@ import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
 import {
-  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
-  can, lastIsOwn, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
 } from '../groups'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -136,6 +136,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const [newGroup, setNewGroup] = useState(false)
   // Set once a device join was sent (answered or not): a second tap could bind another writer.
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
   const [droppedNames, setDroppedNames] = useState({})
   const act = useAction()
   const join = useAction()
@@ -234,7 +235,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const deviceJoin = needsDeviceJoin(info)
   const writerNow = info ? info.writerHere : undefined
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
-  useEffect(() => { setDeviceJoinSent(false) }, [community])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
   const canCreate = isMember && can('create', role) && showNewGroup(info)
   const dropped = info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
@@ -316,6 +317,19 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const doDeviceJoin = async () => {
     setJoinNote('')
     setCheck(null)
+    // At the reserve the first tap only shows the warning: the slot it would
+    // spend (community or Geral) never comes back. The counts are read fresh:
+    // the rendered ones may predate a writer that just landed.
+    let fresh = info
+    if (!reserveConfirm) {
+      try {
+        fresh = await requestRef.current('community.info', { community })
+      } catch {}
+    }
+    if (needsReserveConfirm([fresh && fresh.writersBound, fresh && fresh.generalWritersBound], reserveConfirm)) {
+      setReserveConfirm(true)
+      return
+    }
     const res = await join.run(() => requestRef.current('community.join', { community }))
     if (res.ok) {
       setDeviceJoinSent(true)
@@ -453,6 +467,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           ? (
             <View style={styles.block}>
               <Soft>{DEVICE_JOIN_TEXT}</Soft>
+              {reserveConfirm || communityReserveReached(info) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
               <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
               <ErrorText>{join.error}</ErrorText>
             </View>
