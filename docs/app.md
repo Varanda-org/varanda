@@ -323,7 +323,7 @@ Tocar no nome da comunidade ou no **⋯** da lista abre a tela de informações.
 
 ### Grupo
 
-A tela de um grupo mostra o selo da comunidade, a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa. O texto das mensagens tem os mesmos links sublinhados das publicações; uma mensagem oculta não tem link.
+A tela de um grupo mostra o selo da comunidade, a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa. O texto das mensagens mantém as quebras de linha e tem os mesmos links sublinhados das publicações; uma mensagem oculta não tem link.
 
 - **Ocultar e banir** aparecem conforme o papel de quem olha. A autora de uma mensagem e quem modera podem ocultá-la; o banimento é feito na comunidade e vale para todos os grupos dela. Ocultar tira a mensagem da conversa e não apaga as cópias que outros aparelhos já têm.
 - **Denunciar.** Cada mensagem de outra pessoa que não está escondida tem "denunciar", que leva o grupo e a posição da mensagem; num grupo privado, a citação é o texto aberto neste aparelho.
