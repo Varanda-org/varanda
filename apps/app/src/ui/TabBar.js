@@ -3,20 +3,32 @@
 // the tab that is already current calls onReselect (scroll to top / refresh),
 // not onSelect. `badges` maps a tab id to true to show a plain dot on its icon
 // (never a count). Screen readers still read each tab's name.
+//
+// On the web the bar is dark and opaque in both schemes: under it, the
+// installed web app shows the system navigation bar in the manifest's single
+// theme_color (#1c2622; a manifest has no light and dark pair), so the two
+// match. The native app draws behind the system bar itself and sets its
+// buttons for the scheme, so there the bar follows the scheme.
 
-import { Pressable, StyleSheet, View } from 'react-native'
+import { Platform, Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout } from './theme'
+import { paletteFor } from '../appearance'
 import { TABS } from '../tabs'
 
 export { TABS, tabsFor } from '../tabs'
 
+const alwaysDark = Platform.OS === 'web'
+const DARK = paletteFor('dark')
+
 export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TABS, me }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
+  const themed = useStyles(makeStyles)
+  const theme = useTheme()
+  const styles = alwaysDark ? webStyles : themed
+  const colors = alwaysDark ? DARK : theme.colors
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.bar, { height: layout.tabBar + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole='tablist'>
@@ -90,3 +102,5 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: colors.accent
   }
 })
+
+const webStyles = alwaysDark ? makeStyles({ ...DARK, tabBar: DARK.bg }) : null

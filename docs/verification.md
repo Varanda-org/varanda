@@ -4302,6 +4302,7 @@ Android (emulador ou aparelho):
 - [ ] Fechar e abrir o app mantém a escolha (arquivo `varanda-aparencia.json`).
 - [ ] A abertura (splash) é creme nos dois modos.
 - [ ] No escuro: Ajustes, a folha de Publicar e o portão de entrada mostram texto legível e nenhum fundo branco sobrando.
+- [ ] A barra de abas segue o modo e passa por trás da área de navegação do sistema sem faixa de outra cor, no claro e no escuro.
 
 iOS (simulador ou aparelho):
 
@@ -4315,10 +4316,11 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 - [ ] O splash no escuro: fundo `#1c2622`, palavra `#5dcaa0`, cadeira sobre disco creme.
 - [ ] Ajustes › Aparência, uma folha (Publicar) e o portão de entrada nos três modos.
 - [ ] Recarregar a página mantém a escolha (`localStorage`).
+- [ ] App instalado pelo Chrome no Android (reinstalar ou esperar o Chrome atualizar o app depois do deploy): a barra de abas é escura e opaca nos dois modos, e a faixa da barra de navegação do sistema embaixo dela é da mesma cor, no modo claro e no escuro.
 
 ### Não verificado / limites conhecidos
 
 - Nenhuma caixa acima foi executada nesta documentação. Os valores de contraste em [app-design.md](../apps/site/artwork/app-design.md) foram medidos pela fórmula do teste, não num aparelho.
 - O pré-splash da web e a cor do navegador antes do JS seguem o sistema, não a escolha manual. Por isso, com uma escolha diferente do sistema, pode aparecer um quadro do modo do sistema.
 - O splash nativo não segue a escolha manual: fica creme nos dois modos.
-- `manifest.webmanifest` continua creme nos dois modos.
+- `manifest.webmanifest`: `background_color` creme e `theme_color` escuro (`#1c2622`) nos dois modos; na web, a barra de abas é escura e opaca nos dois modos para combinar com a barra de navegação do sistema no app instalado (no nativo ela segue o modo).
