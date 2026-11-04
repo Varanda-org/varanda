@@ -2652,6 +2652,19 @@ Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
 - No nativo, o primeiro quadro do splash é transparente (a entrada parte da opacidade 0), como no splash anterior; com "reduzir movimento", a marca aparece de uma vez.
 - Uma queda da conexão logo depois de `ready`, ainda dentro do 1,5 s, segue o caminho de antes: o app já marcou a conexão como vista e não volta para Conectar.
 
+### Splash até a primeira tela (fix/boot-splash-first-screen, 2026-11-03)
+
+Antes, o splash saía cedo e deixava aparecer telas de espera (passkey "carregando…", "Buscando sua conta…", "Confirme sua idade" com o botão desativado e o "Um instante" do perfil). Agora o splash fica até a primeira tela real ser conhecida. Cada etapa tem 10 s de paciência: se uma leitura travar, a tela real aparece mesmo assim. "Buscando sua conta…" (recuperação da conta) continua coberto até o nó encerrar a busca (30 s, ou cerca de 60 s se ela recomeçar uma vez), com teto de 65 s caso o fim da busca nunca chegue. Depois que a primeira tela real aparece, o splash não volta nesta carga da página ou nesta execução do app. Cartões de introdução, Termos e Conexão não mudam; na web, "Entrar" com a passkey é a primeira tela real.
+
+1. [ ] App nativo com sessão retomada e idade já verificada: só o splash até A Rua, sem passar por "Confirme sua idade" com o botão desativado (não realizada ainda).
+2. [ ] Membro com a idade ainda não verificada: splash, depois "Confirme sua idade" com "Verificar minha idade" ativo (não realizada ainda).
+3. [ ] Leitura da idade que não responde: depois de 10 s nessa etapa, aparece "Confirme sua idade" com o indicador de carregamento (não realizada ainda).
+4. [ ] Perfil próprio lento: "Continuar mesmo assim" só aparece depois de 10 s em "Um instante" (não realizada ainda).
+5. [ ] Web: o splash em CSS some uma vez só, sem repetir a animação da cadeira (não realizada ainda).
+6. [ ] Web: "Entrar" com a passkey aparece como antes, e depois de entrar as telas seguem como antes (não realizada ainda).
+7. [ ] Cartões de introdução, Termos e Conexão sem mudança (não realizada ainda).
+8. [ ] Depois de A Rua, bloquear e desbloquear não traz o splash de volta (não realizada ainda).
+
 ## 45. Passkey sem PRF: cartão Entrar com passos e "tentar de novo" (PR fix/passkey-no-prf-ux, 2026-10-30)
 
 ### O que mudou

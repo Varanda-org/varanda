@@ -232,3 +232,4 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 - DHT pública com endereço local de loopback: o app e a sessão do nó recusam a combinação, que só terminava em tempo esgotado.
   Avisos de tela somem quando o nó encerra, quando a sincronização termina ou quando a resposta muda. ([#10](https://github.com/Varanda-org/varanda/issues/10))
 - Abertura na web hospedada: a tela "Conectar", com a chave de associação e o endereço do semeador, não pisca mais durante uma conexão normal. O splash cobre a conexão por até 10 s, e uma falha abre "Conectar" na hora. Ver `docs/verification.md` seção 44.
+- Abertura do app: o splash fica na tela até A Rua ou até um passo de integração que precisa da pessoa, em vez de piscar "Confirme sua idade" com o botão desativado ou "carregando…". Cada etapa tem 10 s de paciência (65 s na busca da conta): se uma leitura travar, a tela real aparece.
