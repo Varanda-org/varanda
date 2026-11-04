@@ -4324,3 +4324,72 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 - O pré-splash da web e a cor do navegador antes do JS seguem o sistema, não a escolha manual. Por isso, com uma escolha diferente do sistema, pode aparecer um quadro do modo do sistema.
 - O splash nativo não segue a escolha manual: fica creme nos dois modos.
 - `manifest.webmanifest`: `background_color` creme e `theme_color` escuro (`#1c2622`) nos dois modos; na web, a barra de abas é escura e opaca nos dois modos para combinar com a barra de navegação do sistema no app instalado (no nativo ela segue o modo).
+
+## 80. Mesmas comunidades e grupos em todos os aparelhos da conta (PR fix/comunidades-em-todo-aparelho)
+
+A comunidade criada no PWA do celular não aparecia no navegador do computador com a mesma passkey. A causa: as listas e a sincronização do navegador só olhavam os escritores deste aparelho (kv `groupWriters`). O que mudou: `diaryGroupKeys` em `packages/core/lib/group.js` devolve as raízes que o diário vincula agora, pela mesma regra do semeador (`liveGroupJoins`). `packages/web-member/lib/sync.js` adota essas raízes como réplicas na abertura da sincronização e de novo quando o próprio diário termina de baixar, sem gravar nada. `packages/web-member/lib/member-ops.js` une essas raízes em `community.list` e `group.list` e informa `writerHere`, `canWrite` e `rootHere` em `group.info` e `community.info`, e `authorityHere` em `community.info` (rpc 5.41, 5.42, 5.59 e 5.62), com papel "pending" enquanto os escritores da conta ainda chegam. O app (`apps/app/src/groups.js`, `screens/Comunidade.js`, `screens/Grupo.js` e `screens/GrupoAjustes.js`) mostra "Participar neste aparelho", esconde "Sair", "Novo grupo" e as ações de administração onde falhariam (com uma nota curta dizendo por quê) e não oferece entrada de novato enquanto a conta ainda chega.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes (número de `test(` e de asserções antes -> depois; "novo" é arquivo criado neste PR; "ver CI" é contagem que não foi conferida localmente):
+
+| Arquivo | Testes antes -> depois | Asserções antes -> depois | O que cobre |
+|---|---|---|---|
+| `packages/core/test/group.test.js` | 109 -> 110 | ver CI | `diaryGroupKeys` (raízes que o diário vincula, pela regra do `liveGroupJoins`) |
+| `packages/web-member/test/sync-diary-roots.test.js` | novo, 3 testes | novo, ver CI | adoção das raízes do diário como réplicas numa só passada da sincronização, sem gravar nada no diário; filho do catálogo paginado só pela raiz passa a ser paginado inteiro quando o diário entra nele; um grupo que outra raiz nomeia como comunidade continua aceito |
+| `packages/web-member/test/community-devices.test.js` | novo, 10 testes | novo, 47 asserções | `community.list`, `community.info` e `group.info` (`writerHere`, `canWrite`, `rootHere`, `authorityHere`, papel "pending" enquanto os escritores da conta chegam, saída real continua "left") |
+| `packages/web-member/test/devices-e2e.test.js` | novo, 1 teste | novo, 20 asserções | fluxo de dois aparelhos com a mesma conta: a comunidade criada num aparelho aparece no outro |
+| `apps/app/test/groups.test.js` | ver CI | ver CI | helpers do cartão e das ações por aparelho: `needsDeviceJoin`, `writerOnDevice`, `canWriteHere`, `showNewGroup`, `rootAdminHere`, `authorityHere`, `deviceStaffNote` |
+
+### Checagens humanas (a fazer)
+
+1. **Web, mesma passkey.** Criar uma comunidade no PWA do celular; abrir o site no computador com a mesma passkey. Depois da sincronização, a comunidade aparece em Minhas comunidades com o papel de quem criou, a leitura funciona, "Novo grupo" não aparece e a caixa de escrever dá lugar a "Participar neste aparelho". Tocar e escrever no Geral; a mensagem chega no celular.
+2. **Comunidade com aprovação.** Membro comum, segundo aparelho: depois do toque, a caixa avisa que precisa da aprovação de um administrador. O administrador aceita em Pedidos.
+3. **Grupo privado.** O segundo aparelho mostra "aguardando nova chave" até um administrador atualizar o acesso.
+4. **Durante a sincronização.** Enquanto os dados da conta chegam, a comunidade aparece como "aguardando sincronização" e não oferece "Entrar".
+5. **Quem criou, no segundo aparelho.** Depois de "Participar neste aparelho", Pedidos e Membros funcionam; "Novo grupo", "Ajustes" e "Quem pode convidar" não aparecem e a nota diz que só funcionam no aparelho que criou a comunidade.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Instalação com configuração manual (nó core) tem o próprio diário e não recebe nada de outro aparelho.
+- Uma raiz que o semeador ainda não tem não aparece até chegar.
+- Cada aparelho que participa usa uma das 8 vagas da conta em cada comunidade ou grupo, e o semeador nunca devolve essa vaga.
+- Uma comunidade de que todos os aparelhos saíram não aparece num aparelho novo.
+- A participação automática e o reenvio de chaves ficam para o PR seguinte (`feat/aparelho-entra-sozinho`).
+- Revisão cruzada deixou para depois (o próximo ciclo de sincronização resolve): um buraco ou uma leitura que falha no diário pode pular uma entrada numa passada; um escritor novo numa raiz já réplica espera a próxima paginação (30 s numa sincronização contínua); uma raiz do diário descartada como sonda sem resposta volta na passada seguinte; um núcleo de escritor com `member` do tipo errado pode ficar guardado, mas o fold o ignora.
+- Numa comunidade com aprovação, um segundo `community.join` do mesmo aparelho ainda cria outro escritor no Geral (comportamento anterior de `joinGeneral`); o app não oferece mais esse segundo toque.
+- `packages/web-member/test/sync-groups.test.js` ("more than one page of writers is paged in full") falha às vezes sob carga também na `main`.
+
+## 81. Aparelho novo entra sozinho e recebe as chaves (PR feat/aparelho-entra-sozinho)
+
+Um aparelho novo da mesma passkey precisava de um toque em "Participar neste aparelho" em cada comunidade e grupo. Agora ele participa sozinho, depois da sincronização, das comunidades e grupos em que a conta já está. O que mudou: `deviceUpkeepPlan` e `deviceUpkeep` em `packages/web-member/lib/member-ops.js` fazem a entrada automática com reserva de 2 das 8 vagas de cada comunidade ou grupo (acima de 6 usadas, a entrada deixa de ser automática e o cartão decide); o Geral é avaliado como grupo; um reparo de escritor listado sem entrada no diário não grava nada. As mesmas funções reenviam as chaves de época já guardadas aos escritores que têm direito, sem rotação de chave, pelo `historyPlan`. A passada limitada `upkeep` em `packages/web-member/lib/session.js` é armada por um comprimento novo do diário, pelo evento `group-writer` da sincronização e pelo desbloqueio; no máximo 3 passadas por armação e 9 no total; ela adia durante uma sincronização única do usuário; uma falha vira aviso, e nunca repete um pedido do cliente. O evento `group-writer` sai de `packages/web-member/lib/sync.js`. As respostas de info ganham `writersBound` e `generalWritersBound`. No app, o cartão vira o caminho para a reserva, com aviso e segundo toque. A exceção ao "nunca repetir pedido" e à entrada automática está registrada no `AGENTS.md`.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes (número de `test(` e de asserções antes -> depois; "novo" é arquivo criado neste PR; "ver CI" é contagem que não foi conferida localmente):
+
+| Arquivo | Testes antes -> depois | Asserções antes -> depois | O que cobre |
+|---|---|---|---|
+| `packages/web-member/test/device-upkeep-ops.test.js` | novo, 19 testes | novo, ver CI | `deviceUpkeepPlan` e `deviceUpkeep`: entrada automática com reserva de 2 das 8 vagas, Geral avaliado como grupo, reparo de escritor listado sem entrada no diário, reenvio das chaves de época a escritores com direito, sem rotação (`historyPlan`) |
+| `packages/web-member/test/session-upkeep.test.js` | novo, 14 testes | novo, ver CI | passada `upkeep` na sessão: armação pelo comprimento do diário, pelo `group-writer` e pelo desbloqueio; limite de 3 por armação e 9 no total; adiamento durante uma sincronização do usuário; falha vira aviso |
+| `packages/web-member/test/devices-auto-e2e.test.js` | novo, ver CI | novo, ver CI | dois aparelhos com a mesma passkey: o aparelho novo entra sozinho na comunidade aberta e no Geral e consegue escrever |
+| `packages/web-member/test/devices-private-e2e.test.js` | novo, ver CI | novo, ver CI | grupo privado: o segundo aparelho espera a nova chave e abre o histórico depois que o primeiro sincroniza |
+| `apps/app/test/groups.test.js` | ver CI | ver CI | helpers da reserva: `deviceReserveReached`, `communityReserveReached`, `reserveReachedAny` e `needsReserveConfirm` |
+
+### Checagens humanas (a fazer)
+
+1. **Aparelho novo, comunidade aberta.** Mesma passkey; abrir o site no computador. Sem tocar em nada, depois da sincronização o computador participa da comunidade e do Geral e consegue escrever.
+2. **Grupo privado de quem criou.** O segundo aparelho mostra "aguardando nova chave" até o primeiro aparelho sincronizar; depois o histórico abre sozinho.
+3. **Comunidade com aprovação, membro comum.** O aparelho novo entra na comunidade; os grupos esperam um administrador aceitar em Pedidos.
+4. **Reserva.** Com 6 aparelhos já usados na comunidade, o aparelho novo não entra sozinho; o cartão mostra o aviso e só o segundo toque participa.
+5. **Informações.** Quem modera e ainda não participa por este aparelho vê a nota explicando.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Cada escrita local (uma publicação) arma uma passada, que para a sincronização contínua por um instante, cerca de 1,5 s depois.
+- O evento `group-writer` dispara para todo escritor novo guardado; num grupo grande, cada um custa uma parada curta da sincronização (no máximo 512 por sessão).
+- `generalWritersBound` é 0 enquanto o Geral ainda não chegou ao aparelho, então o aviso da reserva pode não aparecer nesse intervalo.
+- Um membro comum precisa de um administrador para o aparelho novo nos grupos de uma comunidade com aprovação e para ler um grupo privado.
+- O nó core (configuração manual) não muda.

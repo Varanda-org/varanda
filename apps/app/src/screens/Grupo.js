@@ -16,7 +16,9 @@
 // node's version of the group moves (groups.changed) and on pull to refresh.
 // Someone who has not joined (opened from a /g/<hex> link) sees what
 // group.info knows and an "Entrar no grupo" button; a private group never
-// shows a message to them. The draft lives only in this component's state:
+// shows a message to them. A member whose writer is not on this device
+// reads the same way, but the composer is replaced until this device joins:
+// a post without that writer is refused. The draft lives only in this component's state:
 // never queued, never persisted (for a private group that would leak the
 // plaintext). A mutation answered UNCERTAIN is never resent: the screen
 // re-reads, asks groups.js reconcile and only then offers "tentar de novo".
@@ -29,8 +31,9 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import {
+  DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, itemsOf, joinLabel, membersLabel, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, joinLabel, membersLabel, needsDeviceJoin, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -54,6 +57,8 @@ const OFFLINE_POST_TEXT = 'Sem conexão: a mensagem só pode ser enviada com int
 const WAITING_TEXT = 'Pedido enviado: aguardando aprovação de um administrador.'
 const BANNED_TEXT = 'Você não pode mais participar deste grupo.'
 const PENDING_TEXT = 'Aguardando sincronização deste grupo.'
+// The node's own wording, so errorText shows the same plain sentence.
+const COMMUNITY_WAIT_TEXT = 'aguarde a sincronização da comunidade'
 const PRIVATE_OUTSIDE_TEXT = 'As mensagens deste grupo são cifradas de ponta a ponta. Só quem entra consegue ler.'
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
 const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
@@ -89,7 +94,15 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // the community's name, and whether a join was refused for lack of one.
   const [indexCommunity, setIndexCommunity] = useState(null)
   const [communityName, setCommunityName] = useState('')
+  // null until community.info answers. Only writerHere false changes the join.
+  const [communityJoin, setCommunityJoin] = useState(null)
+  const [communityWriterHere, setCommunityWriterHere] = useState(null)
+  // The community's and Geral's bound writers: the tap spends slots there too when it calls community.join.
+  const [communityBound, setCommunityBound] = useState([])
   const [needCommunity, setNeedCommunity] = useState(false)
+  // Set once a device join was sent (answered or not): a second tap could bind another writer.
+  const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
   const [lookupTick, setLookupTick] = useState(0)
   // The text of a post whose outcome is not known: no second send until the
@@ -115,6 +128,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   infoRef.current = info
   const role = roleOf(info, ownKey)
   const reader = READERS.includes(role)
+  const deviceJoin = needsDeviceJoin(info)
+  const writerNow = info ? info.writerHere : undefined
+  useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [group])
   const isPrivate = info !== null && info.visibility === 'private'
 
   const loadInfo = useCallback(async () => {
@@ -375,14 +392,21 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
   const communityKey = heldCommunity || indexCommunity
   const orphan = info !== null && info.orphan === true
-  const joinable = loadedAt !== null && !READERS.includes(role) && JOINABLE.includes(role)
+  // Role 'pending' on a held root: the account is in by another device and
+  // its writers are still arriving here, so nothing is joined from this screen.
+  const arriving = role === 'pending' && info !== null && info.state !== 'pending'
+  const joinable = loadedAt !== null && !READERS.includes(role) && JOINABLE.includes(role) && !arriving
 
   // The community's name for the pill; the key alone never reaches the screen.
   useEffect(() => {
     if (!hosted || heldCommunity === null) return
     let live = true
     request('community.info', { community: heldCommunity }).then((c) => {
-      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+      if (!live || !c) return
+      if (typeof c.name === 'string') setCommunityName(c.name)
+      setCommunityJoin(typeof c.join === 'string' ? c.join : null)
+      setCommunityWriterHere(typeof c.writerHere === 'boolean' ? c.writerHere : null)
+      setCommunityBound([c.writersBound, c.generalWritersBound])
     }, () => {})
     return () => { live = false }
   }, [hosted, heldCommunity, request, version])
@@ -416,6 +440,59 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     redirected.current = true
     onOpenCommunity(key, { group })
   }, [communityKey, indexRole, needCommunity, heldCommunity, joinable, role, group, onOpenCommunity])
+
+  // community.join creates this device's community writer and joins Geral.
+  // Skip group.join when that result is the group already on screen.
+  // A failure is shown once: this handler does not resend a mutation, and an
+  // uncertain answer re-reads the group before the card is offered again.
+  const enterHere = async () => {
+    setCheck(null)
+    // Set when the fresh counts reach the reserve and the person has not
+    // confirmed yet: nothing is sent and the warning is shown.
+    let held = false
+    const own = infoRef.current && infoRef.current.writersBound
+    const r = await join.run(async () => {
+      if (communityWriterHere !== true && communityKey !== null) {
+        // Read fresh: an unanswered or stale value would send group.join alone
+        // (refused) or community.join for a root this device does not hold.
+        const c = await request('community.info', { community: communityKey })
+        setCommunityWriterHere(typeof (c && c.writerHere) === 'boolean' ? c.writerHere : null)
+        if (c && c.writerHere === false) {
+          // A community.join on a root not held here only stores a pending
+          // writer that may never count and still spends a writer slot.
+          if (c.state === 'pending') throw new Error(COMMUNITY_WAIT_TEXT)
+          // The cached counts can be unanswered or stale, so judge the reserve
+          // on the ones just read.
+          if (needsReserveConfirm([own, c.writersBound, c.generalWritersBound], reserveConfirm)) {
+            held = true
+            return null
+          }
+          const joined = await request('community.join', { community: communityKey })
+          // Landed: a later tap must not send community.join again.
+          setCommunityWriterHere(true)
+          if (joined && joined.group === group) return joined
+        }
+      }
+      if (needsReserveConfirm([own], reserveConfirm)) {
+        held = true
+        return null
+      }
+      return await request('group.join', { group })
+    })
+    if (held) {
+      setReserveConfirm(true)
+      return
+    }
+    if (r.ok) {
+      setDeviceJoinSent(true)
+      loadRef.current()
+    } else if (r.uncertain) {
+      // Re-read before any retry; the card returns if the writer is still missing.
+      setDeviceJoinSent(true)
+      await loadRef.current()
+      setDeviceJoinSent(false)
+    }
+  }
 
   if (!hosted) {
     return (
@@ -490,7 +567,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
           {needCommunity && communityKey !== null && typeof onOpenCommunity === 'function'
             ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(communityKey, { group })} />
             : null}
-          <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online || orphan} />
+          {arriving ? null : <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online || orphan} />}
           {!node.online ? <Soft>Sem conexão agora.</Soft> : null}
           <ErrorText>{join.error}</ErrorText>
         </View>
@@ -536,7 +613,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   if (loadError && rows.length === 0) empty = <ErrorState message={loadError} onRetry={() => load()} pending={loading} />
   else if (loadedAt === null) empty = <Skeleton />
   else if (outside) empty = outside
-  else if (reader) empty = <EmptyState icon='cadeira' title='Nenhuma mensagem ainda' body='Escreva a primeira.' />
+  else if (reader) empty = <EmptyState icon='cadeira' title='Nenhuma mensagem ainda' body={deviceJoin ? undefined : 'Escreva a primeira.'} />
   else empty = infoError ? <ErrorState message={infoError} onRetry={() => load()} pending={loading} /> : null
 
   const renderItem = ({ item }) => {
@@ -560,8 +637,54 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     )
   }
 
-  const canPost = reader && can('post', role) && meta.state === 'ok' && !orphan
+  const canPost = reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
   const left = MAX_TEXT - countChars(draft)
+  // A writer is here but a post would still be refused. rekey-pending already
+  // says so in the placeholder, so it gets no second note.
+  const showJoinCard = deviceJoin && !deviceJoinSent
+  // Private, writer here, but no epoch key yet: the same words as rekey-pending.
+  const awaitingKey = isPrivate && !canWriteHere(info) && !deviceJoin && meta.state !== 'rekey-pending' && info !== null && info.writerHere !== false
+  const waitToWrite = !showJoinCard && !orphan && !canWriteHere(info) && (role === 'creator' || role === 'admin' || role === 'member') && meta.state !== 'rekey-pending'
+  let composer = null
+  if (reader && showJoinCard && !orphan) {
+    composer = (
+      <View style={styles.composer}>
+        <Soft>{DEVICE_JOIN_TEXT}</Soft>
+        {reserveConfirm || reserveReachedAny([info && info.writersBound, ...(communityWriterHere === false ? communityBound : [])]) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+        <Btn label={DEVICE_JOIN_LABEL} onPress={enterHere} pending={join.pending} disabled={!node.online} />
+        <ErrorText>{join.error}</ErrorText>
+      </View>
+    )
+  } else if (reader) {
+    composer = (
+      <View style={styles.composer}>
+        {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
+        {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
+        {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
+        <ErrorText>{post.error}</ErrorText>
+        <View style={styles.composeRow}>
+          <TextInput
+            style={styles.input}
+            value={draft}
+            onChangeText={(t) => { setDraft(t); setPostHold(null) }}
+            multiline
+            maxLength={MAX_TEXT * 2}
+            editable={canPost}
+            placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
+            placeholderTextColor={colors.placeholder}
+            accessibilityLabel='mensagem para o grupo'
+          />
+          <Btn
+            label='Enviar'
+            onPress={() => sendPost(draft)}
+            pending={post.pending}
+            disabled={!canPost || !node.online || draft.trim() === '' || left < 0 || postHold !== null}
+          />
+        </View>
+        {left < 50 ? <Soft>{left} caracteres restantes</Soft> : null}
+      </View>
+    )
+  }
 
   // On iOS the keyboard opens over the bottom composer unless the screen
   // shrinks for it (Android resizes the window itself: adjustResize).
@@ -582,35 +705,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
         refreshing={refreshing}
         keepVisiblePosition
       />
-      {reader
-        ? (
-          <View style={styles.composer}>
-            {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
-            {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
-            <ErrorText>{post.error}</ErrorText>
-            <View style={styles.composeRow}>
-              <TextInput
-                style={styles.input}
-                value={draft}
-                onChangeText={(t) => { setDraft(t); setPostHold(null) }}
-                multiline
-                maxLength={MAX_TEXT * 2}
-                editable={canPost}
-                placeholder={meta.state === 'rekey-pending' ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
-                placeholderTextColor={colors.placeholder}
-                accessibilityLabel='mensagem para o grupo'
-              />
-              <Btn
-                label='Enviar'
-                onPress={() => sendPost(draft)}
-                pending={post.pending}
-                disabled={!canPost || !node.online || draft.trim() === '' || left < 0 || postHold !== null}
-              />
-            </View>
-            {left < 50 ? <Soft>{left} caracteres restantes</Soft> : null}
-          </View>
-          )
-        : null}
+      {composer}
       {info
         ? (
           <GrupoAjustes

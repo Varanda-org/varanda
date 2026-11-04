@@ -4,6 +4,8 @@
 // an invite card with one Entrar or Pedir entrada button (also from the
 // seeder index; a link is never consent, only the tap joins). The creator
 // also sees Novo grupo and, on repair, Tirar da lista and Devolver à lista.
+// A second device has the diary role but no writer here, so it gets a
+// Participar neste aparelho card above the groups instead.
 // The top bar (or its ⋯) opens Informações da comunidade, where sharing,
 // leaving, inviting and the management panels live. A mutation that comes
 // back uncertain is never resent: the screen re-reads and only then lets the
@@ -22,7 +24,10 @@ import { useNode } from '../node'
 import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
-import { COMMUNITY_JOIN_LABELS, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL, can, lastIsOwn, lastLine, membersLabel, reconcile, roleLabel, unreadLabel, visibilityLabel } from '../groups'
+import {
+  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+} from '../groups'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -129,6 +134,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const [confirm, setConfirm] = useState(null)
   const [check, setCheck] = useState(null)
   const [newGroup, setNewGroup] = useState(false)
+  // Set once a device join was sent (answered or not): a second tap could bind another writer.
+  const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
   const [droppedNames, setDroppedNames] = useState({})
   const act = useAction()
   const join = useAction()
@@ -224,7 +232,11 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const role = info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
   const staff = isMember && (role === 'creator' || role === 'admin')
-  const canCreate = isMember && can('create', role)
+  const deviceJoin = needsDeviceJoin(info)
+  const writerNow = info ? info.writerHere : undefined
+  useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
+  const canCreate = isMember && can('create', role) && showNewGroup(info)
   const dropped = info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
 
@@ -296,6 +308,36 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       } catch {
         setCheck(true)
       }
+    }
+  }
+
+  // The role is already 'member' before a second device joins, so reconcile
+  // would always read landed: an uncertain answer just re-reads, then the card
+  // may come back and the person decides to tap again.
+  const doDeviceJoin = async () => {
+    setJoinNote('')
+    setCheck(null)
+    // At the reserve the first tap only shows the warning: the slot it would
+    // spend (community or Geral) never comes back. The counts are read fresh:
+    // the rendered ones may predate a writer that just landed.
+    let fresh = info
+    if (!reserveConfirm) {
+      try {
+        fresh = await requestRef.current('community.info', { community })
+      } catch {}
+    }
+    if (needsReserveConfirm([fresh && fresh.writersBound, fresh && fresh.generalWritersBound], reserveConfirm)) {
+      setReserveConfirm(true)
+      return
+    }
+    const res = await join.run(() => requestRef.current('community.join', { community }))
+    if (res.ok) {
+      setDeviceJoinSent(true)
+      load()
+    } else if (res.uncertain) {
+      setDeviceJoinSent(true)
+      await load()
+      setDeviceJoinSent(false)
     }
   }
 
@@ -389,7 +431,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   } else if (info === null) {
     body = <Skeleton />
   } else {
-    const joinable = !isMember && role !== 'banned' && role !== 'requested' && !pending && info.leavePending !== true
+    // Role 'pending' on a held root: the account is in by another device and
+    // its writers are still arriving here, so no newcomer join is offered.
+    const joinable = !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     body = (
       <View>
         {joinable
@@ -408,7 +452,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             )
           : null}
         <View style={styles.block}>
-          {joinable ? null : <ErrorText>{join.error}</ErrorText>}
+          {joinable || deviceJoin ? null : <ErrorText>{join.error}</ErrorText>}
           <ErrorText>{act.error}</ErrorText>
           {joinNote && !joinable ? <Soft>{joinNote}</Soft> : null}
           {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
@@ -418,6 +462,17 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         </View>
         {checkBox}
         {confirmBox}
+        {deviceJoin && deviceJoinSent ? <View style={styles.block}><Soft>{DEVICE_WAIT_TEXT}</Soft></View> : null}
+        {deviceJoin && !deviceJoinSent
+          ? (
+            <View style={styles.block}>
+              <Soft>{DEVICE_JOIN_TEXT}</Soft>
+              {reserveConfirm || communityReserveReached(info) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+              <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
+              <ErrorText>{join.error}</ErrorText>
+            </View>
+            )
+          : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
           ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>

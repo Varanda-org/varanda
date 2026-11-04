@@ -167,8 +167,99 @@ test('labels in pt-BR', async (t) => {
 
 test('no em dash in any label', async (t) => {
   const g = await load()
-  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL]
+  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL, g.DEVICE_JOIN_LABEL, g.DEVICE_JOIN_TEXT, g.DEVICE_WAIT_TEXT, g.DEVICE_APPROVAL_TEXT, g.DEVICE_RESERVE_TEXT, g.DEVICE_PENDING_JOIN_TEXT]
   t.absent(all.some((s) => s.includes('\u2014')))
+})
+
+test('device join: this device writes, or the account still has to join here', async (t) => {
+  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
+  for (const role of ['member', 'admin', 'creator']) {
+    t.ok(needsDeviceJoin({ role, writerHere: false }), role)
+    t.absent(needsDeviceJoin({ role, writerHere: true }), role + ' already writes here')
+    t.absent(needsDeviceJoin({ role }), role + ' field missing')
+  }
+  for (const role of ['requested', 'banned', 'left', 'pending']) {
+    t.absent(needsDeviceJoin({ role, writerHere: false }), role)
+  }
+  t.absent(needsDeviceJoin(null))
+  t.absent(needsDeviceJoin(undefined))
+
+  t.absent(writerOnDevice({ role: 'member', writerHere: false }))
+  t.ok(writerOnDevice({ writerHere: true }))
+  t.ok(writerOnDevice({}))
+  t.ok(writerOnDevice(null))
+  t.ok(writerOnDevice({ writerHere: null }))
+
+  t.absent(canWriteHere({ canWrite: false }))
+  t.ok(canWriteHere({ canWrite: true }))
+  t.ok(canWriteHere({ writerHere: false }))
+  t.ok(canWriteHere({}))
+  t.ok(canWriteHere(null))
+  t.ok(canWriteHere({ canWrite: null }))
+
+  t.ok(showNewGroup({ role: 'creator' }), 'rootHere missing')
+  t.ok(showNewGroup({ role: 'creator', rootHere: true }))
+  t.absent(showNewGroup({ role: 'creator', rootHere: false }))
+  t.absent(showNewGroup({ role: 'admin' }))
+  t.absent(showNewGroup({ role: 'admin', rootHere: true }))
+  t.absent(showNewGroup({ role: 'member', rootHere: true }))
+  t.absent(showNewGroup(null))
+
+  t.ok(authorityHere({}), 'authorityHere missing')
+  t.ok(authorityHere({ authorityHere: true }))
+  t.absent(authorityHere({ authorityHere: false }))
+  t.ok(authorityHere(null))
+  t.absent(DEVICE_STAFF_TEXT.includes('\u2014'))
+  t.absent(DEVICE_ROOT_TEXT.includes('\u2014'))
+  t.is(DEVICE_ROOT_TEXT, 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.')
+
+  t.ok(rootAdminHere({}))
+  t.ok(rootAdminHere(null))
+  t.absent(rootAdminHere({ rootHere: false }))
+  t.ok(rootAdminHere({ rootHere: false, repair: true }), 'repair writes through the live community writer')
+  t.ok(rootAdminHere({ rootHere: true }))
+
+  const creator = { owner: true, staff: true }
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false }, creator), 'root')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, authorityHere: false }, creator), 'root', 'one reason at a time')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: true, authorityHere: false }, creator), 'staff')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, repair: true }, creator), null)
+  t.is(deviceStaffNote({ role: 'creator', rootHere: true }, creator), null)
+  t.is(deviceStaffNote({ role: 'creator' }, creator), null, 'older node')
+  t.is(deviceStaffNote({ role: 'admin', authorityHere: false }, { owner: false, staff: true }), 'staff')
+  t.is(deviceStaffNote({ role: 'admin', rootHere: false }, { owner: false, staff: true }), null)
+  t.is(deviceStaffNote({ role: 'admin', authorityHere: false, writerHere: false }, { owner: false, staff: true }), 'join', 'not participating yet beats the other notes')
+  t.is(deviceStaffNote({ role: 'creator', writerHere: false, rootHere: false }, creator), 'join')
+  t.is(deviceStaffNote({ role: 'member', writerHere: false }, { owner: false, staff: false }), null)
+  t.is(deviceStaffNote({ role: 'member', authorityHere: false }, { owner: false, staff: false }), null)
+  t.is(deviceStaffNote(null, creator), null)
+
+  t.is(DEVICE_JOIN_LABEL, 'Participar neste aparelho')
+  t.is(DEVICE_JOIN_TEXT, 'Sua conta já participa. Este aparelho costuma entrar sozinho depois da sincronização; se ainda não entrou, toque para participar por ele.')
+  t.is(DEVICE_RESERVE_TEXT, 'Sua conta já usa quase todos os aparelhos permitidos aqui. Entrar por este aparelho gasta uma das últimas vagas, que não voltam.')
+  t.absent(DEVICE_PENDING_JOIN_TEXT.includes('\u2014'))
+  t.absent(deviceReserveReached({ writersBound: 5 }))
+  t.ok(deviceReserveReached({ writersBound: 6 }))
+  t.ok(deviceReserveReached({ writersBound: 8 }))
+  t.absent(deviceReserveReached({}))
+  t.absent(deviceReserveReached(null))
+  t.absent(deviceReserveReached({ writersBound: 6.5 }))
+  t.absent(deviceReserveReached({ writersBound: '6' }))
+  t.ok(reserveReachedAny([0, 6]))
+  t.absent(reserveReachedAny([5, undefined, '6', 5.5]))
+  t.ok(needsReserveConfirm([2, 6], false))
+  t.ok(needsReserveConfirm([6], undefined))
+  t.absent(needsReserveConfirm([6], true))
+  t.absent(needsReserveConfirm([5, undefined], false))
+  t.absent(reserveReachedAny(null))
+  t.ok(communityReserveReached({ writersBound: 2, generalWritersBound: 6 }))
+  t.ok(communityReserveReached({ writersBound: 7 }))
+  t.absent(communityReserveReached({ writersBound: 5, generalWritersBound: 5 }))
+  t.absent(communityReserveReached(null))
+  t.absent(DEVICE_RESERVE_JOIN_TEXT.includes('\u2014'))
+  t.ok(DEVICE_RESERVE_JOIN_TEXT.includes('Participar neste aparelho'))
+  t.is(DEVICE_WAIT_TEXT, 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.')
+  t.is(DEVICE_APPROVAL_TEXT, 'Este aparelho precisa da aprovação de um administrador para escrever.')
 })
 
 test('joinLink builds the path; the paste parsers are gone', async (t) => {
