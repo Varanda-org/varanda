@@ -117,6 +117,7 @@ import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
+import Pessoas from './src/screens/Pessoas'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
@@ -1090,10 +1091,9 @@ function Member () {
     }
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
-  // Only the own following list opens in this version; other kinds wait.
   const openPeople = useCallback((key, kind) => {
-    if (kind !== 'seguindo' || typeof key !== 'string') return
-    pushScreen({ screen: 'seguindo', key: key.toLowerCase(), params: {} })
+    if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
+    pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
   }, [pushScreen])
   const enterAvisos = useCallback(() => {
     if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
@@ -1690,7 +1690,8 @@ function Member () {
       onToast: showToast,
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
-      onDeletedPost: deletedPost
+      onDeletedPost: deletedPost,
+      onOpenPeople: openPeople
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
@@ -1838,7 +1839,9 @@ function Member () {
                     </View>
                   )
                 }
-                if (entry.screen === 'seguindo') {
+                // The own following list keeps unfollow and the legacy local
+                // follows card; every other list is the public read-only one.
+                if (entry.screen === 'seguindo' && entry.key === ownKey) {
                   return (
                     <View key={i + ':seguindo:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                       <Seguindo
@@ -1852,6 +1855,22 @@ function Member () {
                         onToast={showToast}
                         followsTick={version}
                         isTop={i === stack.length - 1}
+                      />
+                    </View>
+                  )
+                }
+                if (entry.screen === 'seguindo' || entry.screen === 'seguidores') {
+                  return (
+                    <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                      <Pessoas
+                        entry={entry}
+                        ownKey={ownKey}
+                        isTop={i === stack.length - 1}
+                        active={ready}
+                        onBack={goBack}
+                        onOpenMember={openMember}
+                        onFollowsChanged={followsChanged}
+                        onToast={showToast}
                       />
                     </View>
                   )

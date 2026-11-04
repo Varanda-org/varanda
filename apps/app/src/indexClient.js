@@ -48,6 +48,13 @@ import { resolveUrl } from './installation.js'
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
 // the account search). Same transport, scheduler and budget; never cached.
 //
+// Follows (public): /index/follows/<author> (the two counts) and
+// /index/follows/<author>/(seguindo|seguidores)[/<atMs>.<key>]. A
+// 'seguidores' item points at the follower's follow block (key = follower),
+// a 'seguindo' item at the author's own follow block (key = the followed
+// target, seq in the author's diary); the node still verifies each one
+// (diary.peek). Never cached: a follow can be undone at any time.
+//
 // Account search, GET /index/search/<segment>: the segment arrives already
 // folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
 // characters in all); it is checked here, never folded, lowercased or
@@ -63,6 +70,7 @@ export const SEARCH_MAX = 20
 export const TOPIC_MAX = 30
 // Must equal ENGAGER_PAGE in packages/core/lib/engagement-index.js.
 export const ENGAGERS_MAX = 20
+export const FOLLOWS_MAX = 20
 export const GROUP_WRITERS_MAX = 64
 export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
@@ -105,6 +113,10 @@ const COMMUNITY_KEYS = ['complete', 'creator', 'groups', 'indexing', 'join', 'me
 const COMMUNITY_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'next']
 const COMMUNITY_ROW_KEYS = ['group', 'join', 'name', 'visibility', 'writerCount']
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
+const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
+const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
+const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
+const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -124,6 +136,17 @@ const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isHint = (n) => n === null || isSeq(n)
+const isFollowKind = (k) => k === 'seguindo' || k === 'seguidores'
+
+function isCanonicalIso (s) {
+  if (typeof s !== 'string') return false
+  const d = new Date(s)
+  return !Number.isNaN(d.getTime()) && d.toISOString() === s
+}
+
+function isFollowCursor (c) {
+  return hasExactKeys(c, FOLLOW_CURSOR_KEYS) && isCount(c.atMs) && isHex64(c.key)
+}
 
 function isPlain (o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return false
@@ -215,6 +238,20 @@ export function engagersUrl (kind, ref, cursor = null) {
   if (seq.length > 15) return null
   if (cursor !== null && !isCursor(cursor)) return null
   return resolveUrl('/index/' + kind + '/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
+}
+
+export function followCountsUrl (author) {
+  const a = inputAuthor(author)
+  return a === null ? null : resolveUrl('/index/follows/' + a)
+}
+
+// An invalid cursor is null, never dropped: dropping it would silently
+// restart the list from the top.
+export function followsUrl (author, kind, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || !isFollowKind(kind)) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/follows/' + a + '/' + kind + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -712,6 +749,63 @@ export function validEngagers (body, ref, kind) {
   }
 }
 
+export function validFollowCounts (body) {
+  if (!hasExactKeys(body, FOLLOW_COUNTS_KEYS) || !isFlags(body)) return null
+  if (!isCount(body.seguindo) || !isCount(body.seguidores)) return null
+  return { seguindo: body.seguindo, seguidores: body.seguidores, indexing: body.indexing, complete: body.complete }
+}
+
+// The follow index order: the time clamped at 0, newest first, then key.
+function followT (at) {
+  const t = Date.parse(at)
+  return t > 0 ? t : 0
+}
+
+// Items: <= 20, one per distinct key, never the author itself, each strictly
+// after the previous one (or the request cursor) in the index order. `next`
+// must name the last row: a cursor that pointed anywhere else could send the
+// reader backwards and page forever. Authors: exactly one hint per item key,
+// as in validTopic.
+export function validFollows (body, author, kind, cursor = null) {
+  if (!hasExactKeys(body, FOLLOWS_KEYS) || !isFlags(body)) return null
+  if (!isHex64(body.author) || (author !== undefined && body.author !== author)) return null
+  if (!isFollowKind(body.kind) || (kind !== undefined && body.kind !== kind)) return null
+  const list = body.items
+  if (!Array.isArray(list) || list.length > FOLLOWS_MAX) return null
+  const seen = new Set()
+  const items = []
+  let prev = isFollowCursor(cursor) ? cursor : null
+  for (const it of list) {
+    if (!hasExactKeys(it, FOLLOW_ITEM_KEYS) || !isHex64(it.key) || it.key === body.author) return null
+    if (!isSeq(it.seq) || !isCanonicalIso(it.at) || seen.has(it.key)) return null
+    const t = followT(it.at)
+    if (prev !== null && !(t < prev.atMs || (t === prev.atMs && it.key > prev.key))) return null
+    prev = { atMs: t, key: it.key }
+    seen.add(it.key)
+    items.push({ key: it.key, seq: it.seq, at: it.at })
+  }
+  if (body.next !== null) {
+    if (!isFollowCursor(body.next) || items.length === 0) return null
+    const last = items[items.length - 1]
+    if (body.next.key !== last.key || body.next.atMs !== followT(last.at)) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== seen.size || !got.every((k) => seen.has(k))) return null
+  return {
+    author: body.author,
+    kind: body.kind,
+    items,
+    next: body.next === null ? null : { atMs: body.next.atMs, key: body.next.key },
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
 // Members: <= 20 distinct authors with exact keys, order kept (the seeder's
 // ranking), never both hints null.
 export function validSearch (body) {
@@ -940,6 +1034,16 @@ export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
   const url = engagersUrl(kind, ref, cursor)
   const r = url === null ? null : inputRef(ref)
   return run(url, (body) => validEngagers(body, r, kind), deps)
+}
+
+export function fetchFollowCounts (author, deps = {}) {
+  return run(followCountsUrl(author), validFollowCounts, deps)
+}
+
+export function fetchFollows (author, kind, cursor = null, deps = {}) {
+  const url = followsUrl(author, kind, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFollows(body, a, kind, cursor), deps)
 }
 
 // Never cached: membership and writers change with every join or leave.

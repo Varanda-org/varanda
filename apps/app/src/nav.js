@@ -1,8 +1,9 @@
 // Pure screen stack for the screens that open above the tabs: 'conversa'
 // (a post and its replies, keyed by the post ref '<author hex64>:<seq>'),
 // 'membro' (a member's profile), 'mensagem' (a private conversation) and
-// 'seguindo' (the list of people someone follows), keyed by a lowercase hex64
-// key (for 'seguindo', that person's key), 'curtidas' (who liked or reposted a
+// 'seguindo' (the list of people someone follows) and 'seguidores' (the people
+// who follow someone), keyed by a lowercase hex64 key (the key of the person whose
+// list it is, own or another member's), 'curtidas' (who liked or reposted a
 // post, keyed by the post ref, params { kind } with kind 'likes' or
 // 'reposts'), 'grupo' (a group), 'comunidade' (a community) and
 // 'comunidade-info' (its information page), all keyed by the lowercase
@@ -13,7 +14,7 @@
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -37,7 +38,7 @@ export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.screen === 'conversa') return isRef(entry.key)
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores') return isAuthorKey(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false

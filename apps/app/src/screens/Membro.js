@@ -29,6 +29,8 @@ import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { LABELS } from '../dm'
+import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
+import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
@@ -75,7 +77,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPeople, onToast }) {
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -101,6 +103,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
+  const [tick, setTick] = useState(0)
+  const c = useFollowCounts(author, tick)
 
   const commitHeader = useCallback((h) => {
     headerRef.current = h
@@ -283,6 +287,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       await loadFollows()
     } finally {
       setFollowing(false)
+      setTick((n) => n + 1)
     }
   }
 
@@ -301,7 +306,19 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       title={displayText(who.title)}
       subtitle={who.subtitle ? displayText(who.subtitle) : null}
       bio={header.bio || null}
-      counts={[]}
+      counts={[
+        {
+          label: 'seguindo',
+          value: c.seguindo === null ? null : displayText(String(c.seguindo)),
+          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguindo') : undefined
+        },
+        {
+          label: 'seguidores',
+          value: c.seguidores === null ? null : displayText(String(c.seguidores)),
+          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
+        }
+      ]}
+      note={c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
       actions={[
         !own
           ? (
@@ -359,7 +376,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   let empty = null
   if (phase === 'loading') empty = <Skeleton />
-  else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => load(false)} pending={refreshing} />
+  else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
@@ -397,7 +414,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               )
             : null}
           contentContainerStyle={{ paddingBottom: bottomPad }}
-          onRefresh={() => load(true)}
+          onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
           onLoadMore={phase === 'ready' && !atEnd && !moreError ? loadMore : undefined}
           loadingMore={loadingMore}
@@ -411,5 +428,6 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 }
+  note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
+  countsNote: { marginTop: 4 }
 })

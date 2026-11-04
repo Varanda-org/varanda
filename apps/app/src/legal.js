@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 11
+export const LEGAL_VERSION = 12
 export const LEGAL_DATE = '03/11/2026'
-export const REVIEW_NOTE = 'Versão 11, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 12, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -108,7 +108,7 @@ export const PRIVACY = {
     {
       heading: 'Diário, perfil e fotos',
       paragraphs: [
-        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário. A foto do perfil é pública, como o nome e a bio. Antes do envio, o app recorta a foto em quadrado, reduz para 512 por 512 pixels e grava de novo, o que remove dados como a localização (GPS) e o modelo da câmera.',
+        'Publicações, perfil, lista de quem você segue e fotos ficam no seu aparelho, nos aparelhos de quem segue você e nos semeadores no Brasil. A lista de quem você segue e as fotos são públicas para quem tem o diário. Além disso, no site da associação e no app ligado à instalação da associação, qualquer pessoa vê o número e a lista de quem cada pessoa segue e de quem segue cada pessoa, montados a partir desses registros públicos. A foto do perfil é pública, como o nome e a bio. Antes do envio, o app recorta a foto em quadrado, reduz para 512 por 512 pixels e grava de novo, o que remove dados como a localização (GPS) e o modelo da câmera.',
         'Na Espiadinha, os diários espiados ficam só na memória do navegador. Recarregar descarta essas cópias. No nó, a cópia guardada vale por até 5 minutos. As fotos de perfil de quem você não segue também ficam só na memória do navegador, sem cópia guardada.',
         'Seu nome e seu @nome podem aparecer na busca do semeador. O índice guarda só tokens dobrados, ou seja, partes dos nomes normalizadas para a busca, em memória. O índice some ao reiniciar o semeador. Ainda não há opção de sair dessa busca.'
       ]
