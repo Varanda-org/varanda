@@ -4018,13 +4018,13 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 | Arquivo | O que cobre |
 |---|---|
 | `apps/app/test/groups.test.js` | `unreadLabel` (vazio abaixo de 1, número até 98, "99+" a partir de 99) e `lastLine` (quem escreveu e o texto; uma mensagem escondida só mostra o rótulo fixo) |
-| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
+| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo envia como corte (`upTo`) a linha mais nova que pintou, sem corte não envia nada; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
 | `apps/app/test/nav.test.js` | `comunidade-info` é uma tela da pilha, com chave hex64 como `grupo` e `comunidade` |
 | `apps/app/test/shareOrigin.test.js` | o link de compartilhar da comunidade usa a origem da instalação |
 | `apps/app/test/tabBar.test.js` | o botão publicar some na tela `comunidade-info`, como em grupo e comunidade |
-| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
-| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; `deleteGroupData` remove a marca |
-| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, só com `group`; `community.info` continua não mutante |
+| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova, ou a de corte (`upTo`), que nunca marca além dela nem uma mensagem não listada; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
+| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; com corte, grava a mensagem listada com o `at` do nó e não grava corte desconhecido ou pendente; `deleteGroupData` remove a marca |
+| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, com `group` e `upTo` opcional (forma de `before`, formas inválidas recusadas); `community.info` continua não mutante |
 | `packages/rpc/test/sizes.test.js` | `community.info` no pior caso (32 grupos com nomes máximos) cabe no limite de mensagem |
 
 ### Checagens humanas (a fazer)
@@ -4063,7 +4063,7 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - A marca de lido é por aparelho: outro aparelho, ou outro navegador, conta de novo as não lidas.
 - A marca vale para no máximo 512 grupos; o grupo cuja marca foi descartada (a menos marcada recentemente) volta a contar como nunca lido.
 - A primeira visita pode mostrar não lidas antigas até cada grupo ser aberto.
-- `group.seen` marca a mensagem mais nova que o nó tem quando atende o pedido, não a que está na tela. Uma mensagem que chega nesse intervalo conta como lida mesmo que a pessoa saia antes de ela aparecer. Fechar isso pede um `group.seen` com a mensagem de corte, numa mudança seguinte.
+- A tela do grupo envia a mensagem mais nova que pintou como corte (`upTo`, seção 76), então uma mensagem que chega entre a pintura e a marca fica não lida até a tela pintá-la. Um cliente que ainda omite o corte continua marcando a mensagem mais nova que o nó tem quando atende o pedido, como antes.
 - Se a releitura do grupo falhar, nada é marcado até a próxima leitura que der certo: a contagem pode ficar, mas nunca some antes da hora.
 - A aba Comunidades e o ponto da aba não mudaram; não há número na aba.
 
@@ -4135,3 +4135,48 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum t
 - O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
 - A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
 - Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
+
+## 76. Marca de lido até a mensagem pintada (PR fix/group-seen-corte)
+
+A tela do grupo marca como lido só até a mensagem mais nova que pintou. `group.seen` (rpc.md 5.82) aceita `upTo`, o corte no formato do `before` de `group.read` (`{ at, writer, seq }`), mas inclusivo. Com ele, o nó marca a mensagem que tem com esse autor e esse seq e copia o `at` dela, nunca o do pedido. A regra de avanço é a mesma de antes. Assim, uma mensagem que chega depois da pintura continua não lida até a tela pintá-la. Um corte que não bate com nenhuma mensagem legível (desconhecida, ainda não recebida, de autor bloqueado ou removido, ou com seq futuro) responde `{ ok: true }` e não grava nada, então um cliente nunca empurra a marca além do que o nó tem. Sem `upTo`, vale a mensagem mais nova, como na seção 73. O formato de `data/group-seen.json` e da kv `groupSeen` não mudou.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. O pacote core roda com um processo só: `VARANDA_TEST_CONCURRENCY=1 npm test -w packages/core`. Cada arquivo tocado roda sozinho (`node <arquivo>`; os de core com `VARANDA_TEST_CONCURRENCY=1`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `packages/rpc/test/methods.test.js` | `group.seen` aceita `upTo` opcional na forma de `before`, não mutante; `at` fora do formato, `writer` fora de hex64, `seq` 0, chaves a mais ou a menos e `upTo` que não é objeto são recusados |
+| `packages/core/test/group-seen.test.js` | o corte marca exatamente a mensagem (própria e escondida também), nunca além dela, nunca uma não listada nem um corte mais velho; corte de grupo desconhecido ou ainda não recebido responde `{ ok: true }` sem gravar; sem corte, a mais nova |
+| `packages/core/test/group-seen-session.test.js` | `group.seen` com corte pela sessão: `{ ok: true }`, a marca vai para a mensagem de corte, corte não listado não move a marca, corte sem `at` é `USAGE` |
+| `packages/web-member/test/group-seen.test.js` | o corte no kv `groupSeen` marca só a mensagem listada, com o `at` do nó; corte não listado não grava; própria e escondida podem ser o corte; raiz pendente não grava |
+| `packages/web-member/test/session-groups.test.js` | `group.seen` com corte pelo `request`: `upTo` inclusivo, corte não listado ignorado, corte sem `at` é `USAGE`, grupo desconhecido é `NOT_FOUND`, sem `groups.changed` |
+| `apps/app/test/group-flow.test.js` | a tela do grupo envia `upTo` da linha mais nova pintada (escondidas inclusive), nunca além dela; sem corte não envia `group.seen`; a tela avisa a lista após cada tentativa |
+
+### Checagens humanas (a fazer)
+
+As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] Com o grupo aberto e pintado, uma mensagem de outro aparelho que chega logo depois da pintura fica não lida ao voltar à lista.
+- [ ] Uma mensagem que chega depois da pintura continua não lida até o grupo ser aberto e pintado de novo.
+- [ ] Sair do grupo antes de a tela pintar a leitura deixa o selo como estava.
+- [ ] Uma tela do grupo coberta por outra (Informações ou Membros por cima) não marca, mesmo com mensagens novas.
+- [ ] Abrir um grupo e voltar continua zerando só o selo dele, como na seção 73.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro do Android no navegador.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Sem `upTo`, a marca vai para a mensagem mais nova que o nó tem. Um cliente que ainda omite o corte mantém a lacuna descrita na seção 73.
+- Um corte que não bate com nenhuma mensagem legível não move a marca, e a contagem fica até uma mensagem listada ser pintada. É o lado seguro: a contagem nunca cai antes da hora.
+- Se a mensagem pintada sai da lista legível entre a pintura e a marca (autor bloqueado, autor removido), a marca não anda e a contagem fica até uma mensagem listada posterior ser pintada.
+- A marca continua por aparelho e vale para no máximo 512 grupos, como na seção 73.

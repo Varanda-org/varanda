@@ -592,8 +592,11 @@ const SPECS = {
     }
   },
   // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
-  // never goes to peers; the client re-reads community.info.
-  'group.seen': { fields: { group: req(isKey) } },
+  // never goes to peers; the client re-reads community.info. upTo is optional,
+  // the shape of group.read's before (5.40) but inclusive: the newest post the
+  // screen painted, and the mark is that post. Absent, the node marks the newest
+  // readable post. Not named before because group.read's before is exclusive.
+  'group.seen': { fields: { group: req(isKey), upTo: opt(isGroupCursor) } },
   'group.list': {
     fields: {
       offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
