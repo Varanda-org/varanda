@@ -4111,3 +4111,25 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Depois de seguir alguém, o "N seguidores" dessa pessoa só muda depois de puxar para atualizar, quando o semeador já leu o novo registro.
 - Limite aceito: um semeador mentiroso pode omitir linhas ou apontar para um registro de seguir autêntico mais velho (a conferência não prova que não existe um "deixar de seguir" posterior); não pode forjar um seguidor.
 
+## 75. Avisos de curtidas e republicações (PR feat/avisos-curtidas)
+
+Avisos passa a mostrar quem curtiu e quem republicou uma publicação da própria pessoa, ao lado de seguir, resposta, citação e menção. Uma linha por curtida e uma por republicação: "<nome> curtiu sua publicação" e "<nome> republicou sua publicação". Tocar na linha abre essa publicação. O estado vazio usa o texto de `EMPTY_TEXT` em `apps/app/src/notices.js`. Mensagens privadas continuam em Conversas. O canal novo é `varanda/notices/3` (`docs/protocol.md`, "Notices channel v3" e "Notices link"). `varanda/notices/1` e `varanda/notices/2` não mudam: um tipo desconhecido numa página v2 invalida a mensagem `items` inteira, e um cliente antigo a recusa por completo.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum teste desta parte usa a DHT pública (DHT local em `helpers/net.js`, diretório temporário). As caixas abaixo ficam desmarcadas até alguém executar o passo. Dois membros hospedados, A e B, em dois navegadores, contra um semeador com esta mudança.
+
+- [ ] B publica. A curte essa publicação. B, com a página visível ou ao abrir Avisos, vê uma só linha "<A> curtiu sua publicação". Tocar na linha abre a publicação de B.
+- [ ] A republica a mesma publicação. B vê uma segunda linha, "<A> republicou sua publicação", e nada mais dessa ação. Tocar nela abre a mesma publicação.
+- [ ] A descurte. Na próxima leitura de B a linha da curtida some. A linha da republicação fica.
+- [ ] B apaga a publicação. As linhas de curtida e de republicação dessa publicação somem na próxima leitura.
+- [ ] Um semeador antigo, que abre `varanda/notices/2` e não abre `varanda/notices/3`, não mostra linha de curtida nem de republicação. Seguir, resposta, citação e menção continuam, e `activity` fica verdadeiro. Um semeador que só abre `varanda/notices/1` mostra só quem seguiu, com a linha "O semeador desta associação ainda só envia avisos de quem seguiu você."
+- [ ] Uma mensagem privada para B acende o ponto da aba Conversas. O ponto sai de `dm.list` em `apps/app/App.js` (`readDmDot`: pasta `inbox`, `inboxUnread` ou `requests`) e entra no selo da aba junto com o das comunidades (`badges.comunidades` = `groupsBadge || dmDot`). O ponto do sino (Avisos) não acende por essa mensagem, e a mensagem não vira linha em Avisos.
+- [ ] A curtida da própria publicação de A não cria linha para A. Em lugar nenhum Avisos mostra uma contagem de curtidas ou de republicações.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
+- A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
+- Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
