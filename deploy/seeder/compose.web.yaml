@@ -149,6 +149,7 @@ services:
       VARANDA_DIDIT_API_KEY: "${VARANDA_DIDIT_API_KEY:-}"
       VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
       VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
+      VARANDA_AGE_SINCE: "${VARANDA_AGE_SINCE:-}"
       # Conta de pagamentos (Hodle), opcional. A chave vazia mantém o recurso
       # desligado. O modo vazio é cadastro (só subconta e verificação); mudar
       # a imagem nunca liga movimento de dinheiro. Só o account recebe estas

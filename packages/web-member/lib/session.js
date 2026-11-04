@@ -279,6 +279,7 @@ const { signAge } = require('@varanda/core/lib/age')
 const { signWallet, opHash } = require('@varanda/core/lib/wallet-proof')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
+const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
@@ -298,6 +299,7 @@ const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
+const BAD_AGE_PROOF = 'comprovante de idade inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
@@ -563,9 +565,33 @@ function createBrowserSession ({
   let borrows = 0
   let borrowedSince = null
   // Own identity, cached once known (the key never changes; block 0 is
-  // append-only, so only `memberCert: true` is cached).
+  // append-only, so only `memberCert: true` is cached). certDate is the
+  // verified certificate's date; null while certKnown came from a path that
+  // did not see the certificate (own-recovered), so identity() reads once.
   let ownKey = null
   let certKnown = false
+  let certDate = null
+  // The cached certificate's issuer (null for a v1 certificate): node.info
+  // checks it against the current revoked issuers on every call.
+  let certIssuer = null
+  // The stored age attestations (kv ageVerified / ageSince), re-verified
+  // from storage once per identity (kv is device-owner writable) and then
+  // cached like certDate: the age-verified date for the own key and the
+  // age-since `since` and `date`, each null when absent or not verifying.
+  // The age-since vouches only for certificates dated in [since, date] and
+  // signed by its own issuer, so its issuer is cached beside them.
+  let ageVerifiedDate = null
+  let ageSinceDate = null
+  let ageSinceUntil = null
+  let ageSinceIssuer = null
+  let ageChecked = false
+  // The revoked issuers both attestations are checked against (as member
+  // certificates and username records are), cached per stored blocklist
+  // snapshot: a snapshot a sync run adopted after the first read drops the
+  // age cache too, so a revoked issuer's attestation reads as null on the
+  // next node.info.
+  let ageSnapshotKey = null
+  let ageRevoked = new Set()
   // Identity changes (reset, setKeyPair, clearKeyPair) called and not yet
   // settled: counted synchronously on the call, before they queue, so a
   // peek.read / notices.list arriving while one waits on the chain (ownKey
@@ -1360,10 +1386,17 @@ function createBrowserSession ({
   // ---- identity ----
 
   async function identity () {
-    if (ownKey !== null && certKnown) return { publicKey: ownKey, memberCert: true }
-    const r = await withStore((c) => member.identityState(c))
+    if (ownKey !== null && certKnown && certDate !== null) return { publicKey: ownKey, memberCert: true, memberCertDate: certDate, memberCertIssuer: certIssuer }
+    // Only the date is missing (own-recovered saw no certificate): a read on
+    // the live run's cores, so node.info never stops a sync for it.
+    const read = ownKey !== null && certKnown ? withCores : withStore
+    const r = await read((c) => member.identityState(c))
     if (r.publicKey !== null) ownKey = r.publicKey
-    if (r.memberCert) certKnown = true
+    if (r.memberCert) {
+      certKnown = true
+      certDate = r.memberCertDate
+      certIssuer = r.memberCertIssuer
+    }
     return r
   }
 
@@ -1402,6 +1435,46 @@ function createBrowserSession ({
       noticing = null
     }
     return p().finally(() => { identityPending-- })
+  }
+
+  // -> { ageVerifiedDate, ageSince, ageSinceUntil } for the own key `own`
+  // (null: no identity, nothing cached). Kv reads only: never opens a store,
+  // so it never preempts a sync. An object that does not verify reads as null.
+  async function ageState (own) {
+    if (own === null) return { ageVerifiedDate: null, ageSince: null, ageSinceUntil: null }
+    const revokedIssuers = await ageRevokedIssuers()
+    if (!ageChecked) {
+      const verified = await store.readAgeVerified(storage)
+      const since = await store.readAgeSince(storage)
+      ageVerifiedDate = verified !== null && verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok ? verified.date : null
+      const sinceOk = since !== null && verifyAgeSince(since, cfg.association, { revokedIssuers }).ok
+      ageSinceDate = sinceOk ? since.since : null
+      ageSinceUntil = sinceOk ? since.date : null
+      ageSinceIssuer = sinceOk ? since.issuer.toLowerCase() : null
+      ageChecked = true
+    }
+    // An issuer vouches only for its own certificates: the age-since counts
+    // for the cached block-0 v2 certificate of the same issuer, never for one
+    // of another issuer or a v1 certificate (certIssuer null).
+    const bound = ageSinceIssuer !== null && certKnown && typeof certIssuer === 'string' && certIssuer.toLowerCase() === ageSinceIssuer
+    return { ageVerifiedDate, ageSince: bound ? ageSinceDate : null, ageSinceUntil: bound ? ageSinceUntil : null }
+  }
+
+  // -> the stored snapshot's revoked issuers (empty when none verifies). The
+  // cache key is the snapshot's identity (moderator, moderatorDate, seq and
+  // signature: every adopted snapshot differs in one of them), so a large
+  // snapshot is neither serialized nor verified on every read; a change
+  // re-verifies the attestations on the next read.
+  async function ageRevokedIssuers () {
+    const data = await store.readBlocklist(storage)
+    const sn = data === null ? null : data.snapshot
+    const key = sn === null ? '' : [sn.moderator, sn.moderatorDate, sn.seq, sn.signature].map(String).join('|')
+    if (key !== ageSnapshotKey) {
+      ageRevoked = (await member.moderation(storage, cfg.association)).revokedIssuers
+      ageSnapshotKey = key
+      ageChecked = false
+    }
+    return ageRevoked
   }
 
   async function requireOwnKey () {
@@ -1781,11 +1854,16 @@ function createBrowserSession ({
 
   const handlers = {
     'node.info': serial(async () => {
-      const { publicKey, memberCert } = await identity()
+      const { publicKey, memberCert, memberCertDate, memberCertIssuer } = await identity()
       restartWhenIdle(1)
+      // The date vouches for the age policy, so a certificate whose issuer
+      // was revoked after it was cached answers null (memberCert unchanged).
+      const revoked = memberCertDate !== null && memberCertIssuer !== null && (await ageRevokedIssuers()).has(memberCertIssuer.toLowerCase())
       return {
         publicKey,
         memberCert,
+        memberCertDate: revoked ? null : memberCertDate,
+        ...(await ageState(publicKey)),
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
@@ -1816,6 +1894,9 @@ function createBrowserSession ({
       await ensureCaughtUp(epoch)
       const r = await withStore((c) => member.certAdd(c, cert))
       certKnown = true
+      // certAdd verified this certificate and block 0 now equals it.
+      certDate = cert.date
+      certIssuer = typeof cert.issuer === 'string' ? cert.issuer : null
       if (r.appended) wrote(r.seq)
       await pushAfterWrite()
       // Block 0 exists now: follows queued before it can reach the diary.
@@ -1928,6 +2009,38 @@ function createBrowserSession ({
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signAge({ action, nonce, member: own, association: cfg.association }, keyPair)
       return { signature }
+    }),
+
+    // Stores the account service's signed age attestations (docs/rpc.md
+    // 5.83) after verifying them against the own key and the association.
+    // Nothing is signed, so no unlock and no certificate (the age step runs
+    // before the link). Both objects are verified before anything is
+    // written, so a bad pair stores nothing.
+    'age.proof': serial(async ({ verified, since }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      const revokedIssuers = await ageRevokedIssuers()
+      if (verified !== undefined && !verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+      if (since !== undefined && since !== null) {
+        if (!verifyAgeSince(since, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+        // Monotonic: a replayed older age-since never replaces a newer one
+        // that still verifies, or certificates issued while the check was
+        // off would vouch again.
+        const stored = await store.readAgeSince(storage)
+        if (stored !== null && verifyAgeSince(stored, cfg.association, { revokedIssuers }).ok && Date.parse(since.date) < Date.parse(stored.date)) throw new UsageError(BAD_AGE_PROOF)
+      }
+      // Dropped first (a failed write leaves no stale cache), then re-read
+      // and re-verified against the snapshot stored now, which a sync may
+      // have replaced since the check above.
+      ageChecked = false
+      if (verified !== undefined) await store.writeAgeVerified(storage, verified)
+      if (since !== undefined) await store.writeAgeSince(storage, since)
+      return await ageState(own)
     }),
 
     // Signs the wallet statement with the in-memory key (docs/rpc.md 5.35),
@@ -2470,6 +2583,13 @@ function createBrowserSession ({
       synced = false
       ownKey = null
       certKnown = false
+      certDate = null
+      certIssuer = null
+      ageVerifiedDate = null
+      ageSinceDate = null
+      ageSinceUntil = null
+      ageSinceIssuer = null
+      ageChecked = false
       if (prfCopy !== null) {
         // Without the box pair private groups read as locked; the identity
         // itself is unlocked either way.
@@ -2614,6 +2734,16 @@ function createBrowserSession ({
     syncIntent = null
     kickLease()
     await stopRun('stopped')
+    // Dropped before any delete, so a failed reset never serves a cached
+    // certificate date or age attestation for data it deleted.
+    certKnown = false
+    certDate = null
+    certIssuer = null
+    ageVerifiedDate = null
+    ageSinceDate = null
+    ageSinceUntil = null
+    ageSinceIssuer = null
+    ageChecked = false
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
     await store.deleteMediaCores(storage)
@@ -2624,8 +2754,8 @@ function createBrowserSession ({
     // A pull, send or top-up still unwinding must not see its store go.
     await dmEngine.idle()
     await store.deleteDmData(storage)
+    await store.deleteAgeProofs(storage)
     ownKey = null
-    certKnown = false
     diaryInfo = null
     synced = false
     unpushed = true

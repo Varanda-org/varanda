@@ -569,6 +569,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // The age attestations are kept only by the browser node (docs/rpc.md 5.83).
+    'age.proof': serial(async () => {
+      throw new UsageError('disponível só no navegador')
+    }),
+
     // And for the wallet statement (docs/rpc.md 5.35).
     'wallet.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')

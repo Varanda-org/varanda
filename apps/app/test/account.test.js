@@ -387,6 +387,69 @@ test('agePolicy: { required } or null on any failure', async (t) => {
   }
 })
 
+// Opaque to the app: the node verifies the signatures (age.proof).
+const SINCE_PROOF = {
+  type: 'age-since',
+  since: '2026-11-01T00:00:00.000Z',
+  date: '2026-11-04T10:00:00.000Z',
+  association: 'cd'.repeat(32),
+  issuer: 'ef'.repeat(32),
+  issuerDate: '2026-01-01T00:00:00.000Z',
+  issuerSignature: '12'.repeat(64),
+  signature: '34'.repeat(64)
+}
+const VERIFIED_PROOF = { ...SINCE_PROOF, type: 'age-verified', member: M, date: '2026-10-30T12:00:00.000Z' }
+delete VERIFIED_PROOF.since
+const OVERSIZE = { ...VERIFIED_PROOF, pad: 'x'.repeat(1024) }
+
+test('ageSince: a bounded signed object, null, or undefined on any failure', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { since: SINCE_PROOF }))
+  t.alike(await a.ageSince(), SINCE_PROOF)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/age/since')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { since: null }))
+  t.is(await a.ageSince(), null)
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.ageSince(), undefined, 'network')
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.ageSince(), undefined, '404')
+  stub(t, json(200, { since: SINCE_PROOF }, 'text/html'))
+  t.is(await a.ageSince(), undefined, 'not JSON')
+  t.is(a.MAX_AGE_PROOF_BYTES, 1024)
+  const bad = [
+    { since: SINCE_PROOF, x: 1 }, {}, [], { since: 5 }, { since: 'ontem' }, { since: '2026-11-01T00:00:00.000Z' },
+    { since: [] }, { since: true }, { since: OVERSIZE }, { since: undefined }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    t.is(await a.ageSince(), undefined, JSON.stringify(body).slice(0, 80))
+  }
+})
+
+test('ageResult / ageSession: a verificado carries a bounded proof object, else none', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const call of [a.ageResult, a.ageSession]) {
+    stub(t, json(200, { state: 'verificado', proof: VERIFIED_PROOF }))
+    t.alike(await call(args), { state: 'verificado', proof: VERIFIED_PROOF })
+    for (const proof of [undefined, null, 'assinado', 5, [], [VERIFIED_PROOF], OVERSIZE]) {
+      stub(t, json(200, proof === undefined ? { state: 'verificado' } : { state: 'verificado', proof }))
+      t.alike(await call(args), { state: 'verificado' }, 'proof ' + JSON.stringify(proof)?.slice(0, 40))
+    }
+  }
+  stub(t, json(200, { state: 'recusado', proof: VERIFIED_PROOF }))
+  t.alike(await a.ageResult(args), { state: 'recusado' }, 'a proof only with verificado')
+  const fits = { ...VERIFIED_PROOF, pad: 'x'.repeat(1024 - JSON.stringify({ ...VERIFIED_PROOF, pad: '' }).length) }
+  t.is(JSON.stringify(fits).length, 1024)
+  stub(t, json(200, { state: 'verificado', proof: fits }))
+  t.alike(await a.ageResult(args), { state: 'verificado', proof: fits }, 'exactly 1024 bytes is accepted')
+  const multi = { ...VERIFIED_PROOF, pad: 'é'.repeat(Math.ceil((1025 - JSON.stringify({ ...VERIFIED_PROOF, pad: '' }).length) / 2)) }
+  t.ok(JSON.stringify(multi).length <= 1024, 'fits in characters')
+  stub(t, json(200, { state: 'verificado', proof: multi }))
+  t.alike(await a.ageResult(args), { state: 'verificado' }, 'counted in UTF-8 bytes')
+})
+
 test('ageStart: nonce, refusals', async (t) => {
   const a = await load()
   const calls = stub(t, json(200, { nonce: 'n1' }))
