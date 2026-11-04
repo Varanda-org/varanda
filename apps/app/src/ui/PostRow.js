@@ -35,7 +35,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { createPendingOpen, tapKind } from '../doubleTap'
+import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
 import { whoOf } from '../who'
@@ -65,9 +65,6 @@ function countOf (counts, field) {
 
 const NATIVE_DRIVER = Platform.OS !== 'web'
 const BURST_MS = 600
-// Shared by every row: a tap anywhere else must cancel the open still
-// waiting out the double tap window.
-const pendingOpen = createPendingOpen()
 
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first

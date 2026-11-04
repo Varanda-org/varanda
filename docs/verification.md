@@ -4444,4 +4444,4 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 - Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
-- Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa.
+- Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.

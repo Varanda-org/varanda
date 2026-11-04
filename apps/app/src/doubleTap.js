@@ -45,3 +45,8 @@ export function createPendingOpen ({ setTimer = setTimeout, clearTimer = clearTi
     }
   }
 }
+
+// The one pending single-tap open of the whole app: post rows arm it, and
+// any other touch (another row, a tab) cancels it, so a late open never lands
+// on a screen the person already left.
+export const pendingOpen = createPendingOpen()

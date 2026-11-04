@@ -18,6 +18,7 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout } from './theme'
 import { paletteFor } from '../appearance'
 import { TABS } from '../tabs'
+import { pendingOpen } from '../doubleTap'
 
 export { TABS, tabsFor } from '../tabs'
 
@@ -44,6 +45,7 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
             accessibilityState={{ selected }}
             accessibilityLabel={badged ? `${tab.label}, novidades` : tab.label}
             onPress={() => {
+              pendingOpen.cancel()
               if (selected) {
                 if (onReselect) onReselect(tab.id)
               } else {
