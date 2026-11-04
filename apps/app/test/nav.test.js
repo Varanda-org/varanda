@@ -195,10 +195,10 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'mensagem', 'seguindo', 'seguidores'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
-  for (const screen of ['grupo', 'comunidade']) {
+  for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
     t.ok(validEntry({ screen, key: A }))
     const stack = push(EMPTY, { screen, key: A })
     t.alike(top(stack), { screen, key: A, params: {} })

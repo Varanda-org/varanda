@@ -6,6 +6,10 @@ import rpc from '@varanda/rpc'
 
 const { displayText } = rpc
 
+// dm.send's answer when the put was written but no ack came back: the
+// uncertain signal (rpc 5.75), shared by every screen that sends.
+export const UNSURE_SEND = 'não deu para confirmar o envio'
+
 export const LABELS = Object.freeze({
   accept: 'Aceitar',
   decline: 'Recusar',

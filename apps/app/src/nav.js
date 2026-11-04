@@ -5,15 +5,16 @@
 // who follow someone), keyed by a lowercase hex64 key (the key of the person whose
 // list it is, own or another member's), 'curtidas' (who liked or reposted a
 // post, keyed by the post ref, params { kind } with kind 'likes' or
-// 'reposts'), 'grupo' (a group) and 'comunidade' (a community), both keyed
-// by the lowercase hex64 root key. 'conversa' stays the post thread. The
+// 'reposts'), 'grupo' (a group), 'comunidade' (a community) and
+// 'comunidade-info' (its information page), all keyed by the lowercase
+// hex64 root key. 'conversa' stays the post thread. The
 // stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'mensagem', 'seguindo', 'seguidores'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -36,7 +37,7 @@ export function isAuthorKey (s) {
 export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.screen === 'conversa') return isRef(entry.key)
-  if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade') return isAuthorKey(entry.key)
+  if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
   if (entry.screen === 'seguindo' || entry.screen === 'seguidores') return isAuthorKey(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params

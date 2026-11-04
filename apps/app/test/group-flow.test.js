@@ -175,6 +175,8 @@ const C = '12'.repeat(32)
 const fs = require('fs')
 const path = require('path')
 const screen = (name) => fs.readFileSync(path.join(__dirname, '../src/screens', name), 'utf8')
+const ui = (name) => fs.readFileSync(path.join(__dirname, '../src/ui', name), 'utf8')
+const appSrc = (name) => fs.readFileSync(path.join(__dirname, '../src', name), 'utf8')
 
 test('create community: Geral is listed first and the creator may add groups', async (t) => {
   const { can, GENERAL_LABEL, reconcile } = await groups()
@@ -221,17 +223,17 @@ test('/g/ for a group this node lacks: the index names the community first', asy
 })
 
 test('admin by @nome refuses a non-member before any request', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes('Essa pessoa ainda não é membro da comunidade.'))
   t.ok(src.indexOf('isCommunityMember(member)') < src.indexOf("'community.admin'"), 'membership is checked first')
   t.absent(src.includes('community.link'))
 })
 
 test('share never renders the URL as text', async (t) => {
-  for (const f of ['Comunidade.js', 'GrupoAjustes.js']) {
+  for (const f of ['ComunidadeInfo.js', 'GrupoAjustes.js']) {
     const src = screen(f)
     t.absent(/<Soft>\{(url|link0|path)\}/.test(src), f + ' does not print the link')
-    t.ok(src.includes('Link copiado.'), f)
+    t.ok((f === 'ComunidadeInfo.js' ? appSrc('communityShare.js') : src).includes('Link copiado.'), f)
   }
 })
 
@@ -245,11 +247,11 @@ test('uncertain create: reconcile asks the community, never a blind retry', asyn
 })
 
 test('leaving a community asks for the confirm text', async (t) => {
-  t.ok(screen('Comunidade.js').includes('Sair da comunidade encerra sua participação em todos os grupos dela.'))
+  t.ok(screen('ComunidadeInfo.js').includes('Sair da comunidade encerra sua participação em todos os grupos dela.'))
 })
 
 test('a creator leave that waits for group roots asks to leave anyway, skipping only that wait', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes("const GROUPS_WAIT = 'aguarde a sincronização dos grupos da comunidade para sair'"))
   t.ok(src.includes('Alguns grupos desta comunidade ainda não chegaram a este aparelho. Sair mesmo assim?'))
   t.ok(src.includes('groups: [GROUPS_WAIT, FORCE_LEAVE_TEXT]'), 'the groups wait has its own text')
@@ -260,7 +262,7 @@ test('a creator leave that waits for group roots asks to leave anyway, skipping 
 })
 
 test('a creator leave that waits for the community data asks to leave anyway, skipping only that wait', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes("const ROOT_WAIT = 'este aparelho ainda não baixou tudo da comunidade: aguarde para sair'"))
   t.absent(src.includes("'aguarde a sincronização da comunidade para sair'"), 'the pending-path refusal is no wait: forcing it would fail the same way')
   t.ok(src.includes("const ROOT_FORCE_LEAVE_TEXT = 'Este aparelho ainda não baixou tudo desta comunidade. Sair mesmo assim? O que ainda não chegou aqui não vai contar.'"))
@@ -268,18 +270,19 @@ test('a creator leave that waits for the community data asks to leave anyway, sk
 })
 
 test('a creator leave that waits for its other devices asks to leave anyway, skipping only that wait', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes("const DEVICES_WAIT = 'aguarde a sincronização dos seus aparelhos nesta comunidade para sair'"))
   t.ok(src.includes("const DEVICES_FORCE_LEAVE_TEXT = 'Outro aparelho seu ainda não terminou de sincronizar esta comunidade. Sair mesmo assim? O que ele fez e ainda não chegou aqui pode deixar de valer.'"))
   t.ok(src.includes('devices: [DEVICES_WAIT, DEVICES_FORCE_LEAVE_TEXT]'), 'the devices wait has its own text')
 })
 
 test('each Sair mesmo assim adds its wait to force and a wait already accepted never prompts again', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes("if (!err || err.code !== 'USAGE' || err.uncertain === true) return null"), 'only a sure refusal is a wait')
   t.ok(src.includes('return Object.keys(LEAVE_WAITS).find((name) => LEAVE_WAITS[name][0] === err.message) || null'))
   t.ok(src.includes('if (wait === null || (Array.isArray(params.force) && params.force.includes(wait))) throw err'), 'an accepted wait answered again is an error, never a loop')
-  t.ok(src.includes("const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, () => setJoinNote(''), (wait) => setConfirm({"), 'force carries the waits accepted so far; a left member loses the old join note')
+  t.ok(src.includes("const leaveWith = (accepted) => mutate('community.leave', accepted.length > 0 ? { community, force: accepted } : { community }, () => { setInviting(false); setSection(null); setPanel(null) }, (wait) => setConfirm({"), 'force carries the waits accepted so far; a left member loses the invite form and panels')
+  t.ok(screen('Comunidade.js').includes("if (inside(lastRole.current) && role !== null && !inside(role)) setJoinNote('')"), 'the list drops an old join note once the person left')
   t.ok(src.includes('run: () => leaveWith([...accepted, wait])'), 'plus the one just accepted')
   t.ok(src.includes('const leave = () => leaveWith([])'), 'the first try forces nothing')
 })
@@ -322,7 +325,7 @@ test('an uncertain post blocks a second send until the draft changes or the pers
 })
 
 test('the open Pedidos and Membros panel reloads with the community version and on refresh', async (t) => {
-  const src = screen('Comunidade.js')
+  const src = screen('ComunidadeInfo.js')
   t.ok(src.includes('loadPeopleRef.current(panelRef.current)'))
   t.ok(src.includes('if (panel) loadPeople(panel) }}'))
   const grupo = screen('Grupo.js')
@@ -380,6 +383,123 @@ test('a non-member sees an invite card with one join button, from the index too'
   t.ok(fromIndex.includes("label='Compartilhar'"), 'Compartilhar stays for everyone')
   t.absent(fromIndex.includes("label='Entrar'"), 'the only join button is in the card')
   const held = src.slice(src.indexOf('const joinable ='))
-  t.ok(held.includes('<JoinCard') && held.includes("label='Compartilhar'"))
+  t.ok(held.includes('<JoinCard'), 'the held path keeps the invite card')
+  const info = screen('ComunidadeInfo.js')
+  t.ok(info.includes("label='Compartilhar'") && !info.includes('<JoinCard'), 'Compartilhar moved to the info screen, which never joins')
   t.absent(held.includes('joinWord') || held.includes("label='Entrar'") || held.includes("'Pedir entrada'"), 'no second join button beside the card')
+})
+
+test('invite by @nome: lookup before send, inviteText, the can gate, and no send from an effect', async (t) => {
+  const com = screen('ComunidadeInfo.js')
+  const inv = ui('InviteByName.js')
+  const set = screen('GrupoAjustes.js')
+  t.ok(inv.indexOf("'dm.lookup'") !== -1 && inv.indexOf("'dm.lookup'") < inv.indexOf("'dm.send'"), 'lookup comes before send')
+  t.ok(inv.includes('INVITE_NO_DM') && inv.includes('INVITE_UNSURE') && inv.includes('INVITE_SENT'))
+  t.ok(com.includes('inviteText({') && com.includes('<SectionHeader>Convidar</SectionHeader>'))
+  t.ok(com.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
+  t.ok(set.includes('inviteText({') && set.includes('<InviteByName') && set.includes('<SectionHeader>Convidar para o grupo</SectionHeader>'))
+  t.ok(set.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
+  t.ok(set.includes("request('community.info'"))
+  t.ok(inv.includes("label='Tentar de novo'") && inv.includes('deliver(held.to, held.text, false)'), 'retry resends the same text, once, on a tap')
+  for (const [name, src] of [['Comunidade.js', screen('Comunidade.js')], ['ComunidadeInfo.js', com], ['GrupoAjustes.js', set], ['ui/InviteByName.js', inv]]) {
+    let at = src.indexOf('useEffect(')
+    while (at !== -1) {
+      const end = src.indexOf('\n  }, [', at)
+      t.absent(src.slice(at, end === -1 ? at + 400 : end).includes("'dm.send'"), name + ': dm.send never runs in an effect')
+      at = src.indexOf('useEffect(', at + 1)
+    }
+  }
+})
+
+test('invite by @nome: membership asked of the node, and a send cancels pending lookups', async (t) => {
+  const com = screen('ComunidadeInfo.js')
+  const set = screen('GrupoAjustes.js')
+  const byName = ui('InviteByName.js')
+  const inv = byName.slice(byName.indexOf('export function InviteByName'), byName.indexOf('return (', byName.indexOf('const invite = (member)')))
+  t.ok(inv.includes('isMember') && inv.indexOf('await isMember(to)') !== -1 && inv.indexOf('await isMember(to)') < inv.indexOf("'dm.lookup'"), 'isMember is awaited before dm.lookup')
+  t.absent(inv.includes('isKnownMember'), 'no panel-bound member check')
+  t.ok(com.includes('isMember={(m) => isCommunityMember(m)}'), 'Comunidade reuses isCommunityMember')
+  t.ok(set.includes('isMember={isGroupMember}') && set.includes("request('group.members', { group, offset: page * PAGE, limit: PAGE })") && set.includes('page < 20'), 'GrupoAjustes pages group.members')
+  const deliver = inv.slice(inv.indexOf('const deliver ='), inv.indexOf('const invite ='))
+  t.ok(deliver.indexOf('resolveGen.current++') !== -1 && deliver.indexOf('resolveGen.current++') < deliver.indexOf('send.run('), 'a send starts by invalidating lookups')
+  const sent = deliver.indexOf('setResult(INVITE_SENT)')
+  t.ok(deliver.lastIndexOf('resolveGen.current++', sent) > deliver.indexOf('send.run('), 'success invalidates lookups too')
+})
+
+test('the community list opens the info screen and shows the newest line and unread count', async (t) => {
+  const src = screen('Comunidade.js')
+  t.ok(src.includes('onOpenInfo(community)'), 'the top bar opens Informações')
+  t.ok(src.includes('lastLine(last)'), 'the newest message line')
+  t.ok(src.includes('unreadLabel(g.unread)'), 'the unread count')
+  t.ok(src.includes("' não lidas'"), 'the row reads the count aloud')
+  t.absent(src.includes('Sair mesmo assim'), 'leaving lives on the info screen')
+  for (const gone of ['<InviteByName', "'community.admin'", "'community.leave'", "'community.invitePolicy'", "'community.members'"]) t.absent(src.includes(gone), gone)
+  t.ok(src.includes('const lastSeen = useRef(seenTick)') && src.includes('was === false && isTop === true'), 'returning from a group re-reads the counts')
+})
+
+test('the info screen holds the leave path and never joins', async (t) => {
+  const src = screen('ComunidadeInfo.js')
+  t.ok(src.includes('Sair mesmo assim'))
+  t.ok(src.includes('Concluir saída'))
+  t.absent(src.includes('<JoinCard'))
+  t.absent(src.includes("'community.join'"))
+  t.ok(src.includes("import { InviteByName } from '../ui/InviteByName'"))
+  t.ok(screen('GrupoAjustes.js').includes("import { InviteByName } from '../ui/InviteByName'"))
+})
+
+test('Grupo marks the group seen from one place, never from load, loadOlder or readNewest', async (t) => {
+  const src = screen('Grupo.js')
+  const first = src.indexOf("'group.seen'")
+  t.ok(first !== -1 && src.indexOf("'group.seen'", first + 1) === -1, 'exactly once')
+  const mark = src.slice(src.indexOf('const markSeen = useCallback('), src.indexOf('const load = useCallback('))
+  t.ok(mark.includes("'group.seen'"), 'only markSeen calls it')
+  const load = src.slice(src.indexOf('const load = useCallback('), src.indexOf('const loadRef = useRef(load)'))
+  t.absent(load.includes('markSeen') || load.includes('group.seen'), 'a reload never marks by itself')
+  t.ok(load.indexOf('paintedRef.current = mine') > load.indexOf('await readNewest()'), 'load records the read that painted')
+  const older = src.slice(src.indexOf('const loadOlder = useCallback('), src.indexOf('}, [request, group, loadingMore, readNewest])'))
+  t.absent(older.includes('group.seen') || older.includes('markSeen'), 'not from loadOlder')
+  const newest = src.slice(src.indexOf('const readNewest = useCallback('), src.indexOf('}, [request, group, commitRead])'))
+  t.absent(newest.includes('group.seen') || newest.includes('markSeen'), 'not from readNewest')
+})
+
+test('Grupo marks only what shows: visible, on top, a reader, the latest read painted', async (t) => {
+  const src = screen('Grupo.js')
+  t.ok(src.includes('const visible = node.visible !== false'), 'follows the app visibility, as Mensagem')
+  const effect = src.slice(src.indexOf('const visible = node.visible !== false'), src.indexOf('}, [visible, isTop, reader, lastId, loadedAt, loadError, markSeen])'))
+  t.ok(effect.includes("if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return"), 'hidden, buried, non-reader, empty, unloaded or failed: no mark')
+  t.ok(src.indexOf('const lastId = ') < src.indexOf('const visible = node.visible !== false'), 'keyed on the newest message on screen, so any paint marks')
+  t.ok(effect.includes('if (paintedRef.current !== seqRef.current) return'), 'a read in flight: no mark')
+  t.ok(effect.indexOf('markSeen()') > effect.indexOf('if (paintedRef.current !== seqRef.current) return'), 'marks after both gates')
+  t.absent(effect.includes('loadRef.current()'), 'no reload on uncover: the older pages stay')
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(/<Grupo group=\{entry\.key\} isTop=\{i === stack\.length - 1\}/.test(app), 'App passes isTop to Grupo')
+})
+
+test('Grupo tells the caller after every group.seen attempt, failed ones too', async (t) => {
+  const src = screen('Grupo.js')
+  const mark = src.slice(src.indexOf('const markSeen = useCallback('), src.indexOf('const load = useCallback('))
+  const seen = mark.slice(mark.indexOf("'group.seen'"))
+  const fin = seen.indexOf('} finally {')
+  t.ok(fin !== -1 && seen.indexOf('onSeenRef.current(group)') > fin, 'onSeen runs in finally')
+  t.absent(seen.slice(0, fin).includes('onSeenRef.current(group)'), 'not only on success')
+})
+
+test('Comunidade re-reads on any group version change, even when the list changed too', async (t) => {
+  const src = screen('Comunidade.js')
+  t.ok(src.includes("g.group + ':' + node.getGroupVersion(g.group)"), 'key:version pairs')
+  t.ok(src.includes('if (lastGroupVersions.current === groupVersions) return'), 'returns only when nothing moved')
+  t.absent(src.includes('was.keys !== groupKeys'), 'no early return on a key-set change')
+})
+
+test('a pending community still opens Informações, which shares it without member actions', async (t) => {
+  const src = screen('Comunidade.js')
+  const line = src.split('\n').find((l) => l.includes('const canInfo ='))
+  t.ok(line && !line.includes("'pending'"), 'onOpenInfo is not gated on state')
+  const info = screen('ComunidadeInfo.js')
+  t.ok(info.includes("const header = pending ? '' :"), 'no meta for a pending answer')
+  t.ok(info.includes('Aguardando a sincronização desta comunidade.'))
+  t.ok(info.includes(": 'Comunidade'"), 'title fallback')
+  const { can } = await groups()
+  for (const action of ['invite', 'invitePolicy', 'admin', 'meta']) t.absent(can(action, 'pending', { memberInvite: true }), action + ' not for pending')
+  t.ok(info.includes("const isMember = role === 'creator' || role === 'admin' || role === 'member'"), 'leave only for members')
 })

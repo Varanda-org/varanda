@@ -296,6 +296,34 @@ test('read pages: a stale cursor or a changed version drops older pages', async 
   t.alike(itemsOf(again).map((i) => i.seq), [6])
 })
 
+test('unreadLabel: empty below 1, the count up to 98, 99+ from 99', async (t) => {
+  const { unreadLabel } = await load()
+  for (const n of [0, -1, 1.5, NaN, null, undefined, '3']) t.is(unreadLabel(n), '', String(n))
+  t.is(unreadLabel(1), '1')
+  t.is(unreadLabel(98), '98')
+  t.is(unreadLabel(99), '99+')
+  t.is(unreadLabel(250), '99+')
+})
+
+test('lastLine: who said it and what, never a hidden preview', async (t) => {
+  const { lastLine, HIDDEN_LABEL } = await load()
+  t.is(lastLine(null), '')
+  t.is(lastLine('oi'), '')
+  t.is(lastLine(undefined), '')
+  const hidden = lastLine({ hidden: true, preview: 'segredo', name: 'Ana', username: 'ana', mine: true })
+  t.is(hidden, HIDDEN_LABEL)
+  t.absent(hidden.includes('segredo') || hidden.includes('Ana') || hidden.includes('ana'))
+  t.is(lastLine({ preview: 'oi', mine: true, name: 'Ana' }), 'Você: oi')
+  t.is(lastLine({ preview: 'oi', name: 'Ana', username: 'ana' }), 'Ana: oi')
+  t.is(lastLine({ preview: 'oi', name: '  ', username: 'ana' }), '@ana: oi')
+  t.is(lastLine({ preview: 'oi' }), 'oi')
+  t.is(lastLine({ preview: 'oi', name: '', username: '' }), 'oi')
+  t.is(lastLine({ name: 'Ana' }), 'Ana: ')
+  const flat = lastLine({ preview: 'a\nb\r\nc', name: 'Ana' })
+  t.is(flat, 'Ana: a b c')
+  t.absent(/[\n\r�]/.test(flat), 'a line break does not survive')
+})
+
 test('groups.js stays pure: no React, react-native or Node built-ins', async (t) => {
   const fs = require('fs')
   const path = require('path')

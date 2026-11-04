@@ -3924,7 +3924,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 ## 71. Barra de ícones, sino, Busca e perfis iguais (PR feat/app-ux-icones)
 
-A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Neste PR a contagem e a lista de seguidores ainda não existem (elas chegam, públicas, na seção 72). Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
+A barra de baixo passa a mostrar só ícones (A Rua com a estrada, Espiadinha, Conversas no nó hospedado, Busca com a lupa e Diário com a foto da própria pessoa), de 49 pt como antes. Avisos sai da barra e abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca e pelo sino branco da faixa do Diário. Seguindo vira uma lista aberta por "N seguindo" no Diário, com o campo "Filtrar nesta lista". A nova aba Busca tem as categorias Contas e Publicações. A Espiadinha perde o campo de pesquisa por assunto. Membro ganha o desenho do Diário. Neste PR a contagem e a lista de seguidores ainda não existem (elas chegam, públicas, na seção 74). Os textos estão em `apps/app/src/buscaGlobal.js`, `apps/app/src/peopleFilter.js`, `apps/app/src/tabs.js` e `apps/app/src/help.js`.
 
 ### Como verificar
 
@@ -3941,7 +3941,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 5. **Espiadinha.** Sem campo de pesquisa; carrega e atualiza como antes.
 6. **Seguindo.** "N seguindo" no Diário abre a lista. O campo "Filtrar nesta lista" ("nome ou @nome") reduz a lista no aparelho, com a dica "Para encontrar outra conta, use a Busca." e, sem correspondência, "Ninguém com esse nome nesta lista."; colar um código de 64 letras e números não segue ninguém; "Deixar de seguir" ainda pede confirmação; voltar retorna ao Diário. Sem internet, com nomes ainda não lidos, o filtro mostra "Carregando nomes…" e pede os nomes de novo enquanto a tela está no topo; ao voltar a conexão, eles aparecem.
 7. **Perfil de outra pessoa.** Tem o desenho do Diário: faixa atrás da barra de estado com a barra de estado clara, o círculo de voltar no canto esquerdo da faixa acessível (não coberto pelo avatar), avatar com anel à esquerda, nome, @nome, bio e as pílulas Seguir, Mensagem (hospedado) e denunciar a conta, todas funcionando.
-8. **Seguidores.** Avisos não mostra contagem nem lista de seguidores. (A contagem e a lista públicas de seguidores nos perfis chegam na seção 72.)
+8. **Seguidores.** Avisos não mostra contagem nem lista de seguidores. (A contagem e a lista públicas de seguidores nos perfis chegam na seção 74.)
 
 ### Não verificado / limites conhecidos
 
@@ -3951,7 +3951,108 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Limite aceito: no perfil de outra pessoa, como no Diário, a barra de estado fica clara mesmo depois que a faixa sai da tela ao rolar.
 - Com o filtro de Seguindo, a lista lê mais páginas sozinha pela regra de todas as listas (pausa depois de 3 páginas sem linha nova, com "Nada novo nas últimas páginas." e "carregar mais"), e só com a tela no topo, porque cada leitura interrompe a sincronização. Sem resultado entre as linhas já lidas, mostra "Ninguém com esse nome entre os já carregados.".
 
-## 72. Seguidores públicos (PR feat/seguidores-publicos)
+## 72. Convidar por @nome pelas Conversas (PR feat/convidar-por-nome)
+
+Quem pode convidar (criação, administradores e, com "Membros podem convidar", os membros) vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo. Digita @nome ou escolhe na busca, vê a pessoa e toca em Convidar. O app confere `dm.lookup`; sem Conversas, mostra "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."; com Conversas, manda uma mensagem privada (`dm.send`) "Convite para a comunidade X na Varanda: <link>" (ou a forma de grupo). Envio incerto mostra "Não deu para confirmar se o convite foi enviado. Tente de novo: a mensagem não se repete." e **Tentar de novo**, que reenvia o mesmo texto, nunca sozinho. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite; abrir nunca entra. Links de outros endereços são ignorados.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `apps/app/test/inviteMessage.test.js` | 12 testes: texto do convite (também de grupo sem nome), corte dos nomes, reconhecimento estrito do link (só no começo do texto ou depois de espaço, o último link vale) |
+| `apps/app/test/group-flow.test.js` | dois testes novos: seção Convidar e Convidar para o grupo, consulta ao nó antes do envio, membro conferido no nó, Tentar de novo com o mesmo texto e nenhum envio dentro de um efeito |
+| `apps/app/test/conversas.test.js` | o teste novo da linha de mensagem com Abrir convite |
+
+### Checagens humanas (a fazer)
+
+Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local. As caixas ficam desmarcadas até alguém executar o passo.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] Um administrador convida @nome na comunidade. A pessoa recebe a mensagem nas Conversas; em Pedidos de mensagem se não seguir quem convidou.
+- [ ] **Abrir convite** abre a comunidade no cartão de convite.
+- [ ] Abrir o convite não entra: só o toque em **Entrar** (ou **Pedir entrada**) grava a entrada.
+- [ ] Repetir em Ajustes do grupo, com **Convidar para o grupo**.
+- [ ] Um membro só vê **Convidar** quando a regra é "Membros podem convidar".
+- [ ] Uma pessoa sem Conversas faz aparecer "Essa pessoa ainda não usa as Conversas. Mande o link pelo Compartilhar."
+- [ ] Com o envio incerto (rede cortada logo após tocar), aparece o texto de incerteza e **Tentar de novo**; a pessoa convidada recebe uma só mensagem.
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro: convite por @nome, Pedidos, Abrir convite, Entrar ainda necessário, regra Membros podem convidar, pessoa sem Conversas e Tentar de novo.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- A pessoa convidada precisa usar as Conversas; sem elas, só o link pelo Compartilhar.
+- "Quem pode convidar" controla só o botão: qualquer pessoa ainda pode mandar o link pelo Compartilhar ou colá-lo numa mensagem.
+- O convite não aprova a entrada. Os administradores não veem "convidado por".
+
+## 73. Comunidade estilo Telegram: lista de grupos, Informações e não lidas (PR feat/comunidade-lista-grupos)
+
+A tela da comunidade virou a lista dos grupos. A barra do topo mostra o avatar, o nome e só o número de membros; tocar no nome ou no **⋯** abre **Informações da comunidade**, também enquanto a comunidade ainda chega ("Aguardando a sincronização desta comunidade.", só com **Compartilhar**). Cada grupo mostra quem escreveu por último, o texto, a hora e o selo de não lidas ("99+" a partir de 99). Abrir um grupo zera o selo só neste aparelho. A marca de lido só é gravada pela tela do grupo que está no topo; uma tela coberta relê, mas não marca, e marca ao voltar ao topo. Em Informações ficam Compartilhar, Sair ou Desistir, Concluir saída, Sair mesmo assim, Convidar, Membros, Pedidos, Quem pode convidar e Ajustes. Entrar, o cartão de convite, o índice do semeador como alternativa, Novo grupo, Tirar da lista e Devolver à lista continuam na lista. A aba Comunidades e o ponto da aba não mudaram.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Cada arquivo roda sozinho (`node <arquivo>`).
+
+| Arquivo | O que cobre |
+|---|---|
+| `apps/app/test/groups.test.js` | `unreadLabel` (vazio abaixo de 1, número até 98, "99+" a partir de 99) e `lastLine` (quem escreveu e o texto; uma mensagem escondida só mostra o rótulo fixo) |
+| `apps/app/test/group-flow.test.js` | a lista abre Informações e mostra a última linha e a contagem; Informações tem o caminho de sair e nunca entra (sem cartão de convite, sem `community.join`); a tela do grupo marca como lido uma vez, depois da leitura mais nova, e não marca quando está coberta; a tela do grupo avisa a lista após cada tentativa de `group.seen`, mesmo quando falha |
+| `apps/app/test/nav.test.js` | `comunidade-info` é uma tela da pilha, com chave hex64 como `grupo` e `comunidade` |
+| `apps/app/test/shareOrigin.test.js` | o link de compartilhar da comunidade usa a origem da instalação |
+| `apps/app/test/tabBar.test.js` | o botão publicar some na tela `comunidade-info`, como em grupo e comunidade |
+| `packages/core/test/group-seen.test.js` | `community.info` com `last` e `unread` por grupo; `group.seen` marca a mensagem mais nova; quem não lê não recebe texto cifrado; contagem para em 99; a marca só avança e fica no máximo em 512 grupos |
+| `packages/web-member/test/group-seen.test.js` | a marca no kv `groupSeen` (uma por grupo, a mais nova no fim, até 512); as linhas de `community.info` no navegador (própria e escondida não contam); `group.seen` só grava quando muda; `deleteGroupData` remove a marca |
+| `packages/rpc/test/methods.test.js` | `group.seen` na lista de métodos, não mutante, só com `group`; `community.info` continua não mutante |
+| `packages/rpc/test/sizes.test.js` | `community.info` no pior caso (32 grupos com nomes máximos) cabe no limite de mensagem |
+
+### Checagens humanas (a fazer)
+
+As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, depois no simulador iOS, por último na web contra um semeador local.
+
+#### Android (APK de preview do EAS, com contas)
+
+- [ ] A lista mostra, em cada grupo, quem escreveu por último, o texto, a hora e o selo de não lidas.
+- [ ] Abrir um grupo e voltar zera só o selo dele; os outros grupos mantêm o deles.
+- [ ] Com 99 ou mais mensagens não lidas, o selo mostra "99+".
+- [ ] Depois de fechar e abrir o app, as contagens continuam como estavam.
+- [ ] Tocar no nome da comunidade ou no ⋯ abre Informações; voltar leva à lista.
+- [ ] Numa comunidade ainda chegando, Informações mostra o título "Comunidade ainda chegando", só **Compartilhar** e "Aguardando a sincronização desta comunidade.".
+- [ ] Em Informações: Compartilhar, Sair da comunidade, Concluir saída e Sair mesmo assim funcionam como antes, cada um conforme o papel.
+- [ ] Convidar por @nome, Membros, Pedidos, Quem pode convidar (Só administradores e Membros podem convidar) e Ajustes (renomear, entrada e administradores) continuam funcionando.
+- [ ] Na lista, o cartão de convite de quem não participa ainda entra com um toque, e Tirar da lista e Devolver à lista continuam no criador com o reparo ativo.
+- [ ] Um grupo privado ou bloqueado mostra a linha sem texto cifrado.
+- [ ] Uma mensagem escondida aparece como "mensagem escondida".
+
+#### iOS (simulador)
+
+- [ ] Repetir o roteiro do Android no simulador iOS.
+
+#### Web (semeador local)
+
+- [ ] Repetir o roteiro do Android no navegador.
+- [ ] Recarregar a página mantém as contagens de não lidas.
+- [ ] Sem a comunidade neste aparelho, a lista do índice mostra o cartão, **Compartilhar** e os grupos, sem última mensagem nem selo.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- A marca de lido é por aparelho: outro aparelho, ou outro navegador, conta de novo as não lidas.
+- A marca vale para no máximo 512 grupos; o grupo cuja marca foi descartada (a menos marcada recentemente) volta a contar como nunca lido.
+- A primeira visita pode mostrar não lidas antigas até cada grupo ser aberto.
+- `group.seen` marca a mensagem mais nova que o nó tem quando atende o pedido, não a que está na tela. Uma mensagem que chega nesse intervalo conta como lida mesmo que a pessoa saia antes de ela aparecer. Fechar isso pede um `group.seen` com a mensagem de corte, numa mudança seguinte.
+- Se a releitura do grupo falhar, nada é marcado até a próxima leitura que der certo: a contagem pode ficar, mas nunca some antes da hora.
+- A aba Comunidades e o ponto da aba não mudaram; não há número na aba.
+
+## 74. Seguidores públicos (PR feat/seguidores-publicos)
 
 Por decisão dos donos do projeto, a contagem e a lista de seguidores são públicas: quem usa o site da associação ou o app ligado à instalação vê, em qualquer conta, "N seguindo" e "N seguidores", e cada número abre a lista (Seguindo, Seguidores) com o campo "Filtrar nesta lista", que só filtra essa lista. O Diário mantém o "N seguindo" do nó local (`node.info.followCount`) e ganha "N seguidores" do semeador; o perfil de outra pessoa mostra os dois do semeador. O semeador responde `GET /index/follows/<author>` e `GET /index/follows/<author>/(seguindo|seguidores)[/<cursor>]` (`Seeder#indexFollowCounts` e `Seeder#indexFollows`, `packages/core/lib/notices.js` `followCounts` e `followsPage`; protocol §5 "Seeder follow index" e §7). Cada linha é um registro de seguir assinado, conferido com `diary.peek` antes de aparecer. Avisos continua privado e com prova. Termos e Política vão à versão 12, com novo aceite.
 
